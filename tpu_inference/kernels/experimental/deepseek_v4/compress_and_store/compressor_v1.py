@@ -13,11 +13,113 @@
 # limitations under the License.
 """DeepSeek V4 Compressor Layer forward pass implementation."""
 
+# import os  # (debug) only used by the disabled probes below
+
 import jax
 import jax.numpy as jnp
 
+import tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.config as config
 import tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.kernel as compress_kernel
 import tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.proj_and_save_state as proj_kernel
+
+# # --- temporary state-probe (TPU_DSV4_STATE_PROBE=1) -------------------------
+# _STATE_PROBE = os.environ.get("TPU_DSV4_STATE_PROBE", "0") == "1"
+# # Capture the real proj_and_save_state operands for offline replay.
+# _PROJ_DUMP = os.environ.get("TPU_DSV4_PROJ_DUMP", "")
+# _PROJ_DUMPED = []
+#
+#
+# def _dump_proj_operands(hidden_states, wkv_wgate, ape, positions, slot_mapping,
+#                         head_dim, compress_ratio, cache_shape):
+#     """Saves the first invocation that has real slots, for offline replay."""
+#
+#     def _cb(h, w, a, p, s, hd=head_dim, cr=compress_ratio, cs=cache_shape):
+#         import numpy as _np
+#         if _PROJ_DUMPED:
+#             return
+#         s = _np.asarray(s)
+#         if not (s >= 0).any():
+#             return  # warmup / no real tokens
+#         _PROJ_DUMPED.append(1)
+#         out = {
+#             "hidden_u16": _np.asarray(h).view(_np.uint16),
+#             "wkv_u16": _np.asarray(w).view(_np.uint16),
+#             "ape": _np.asarray(a, _np.float32),
+#             "positions": _np.asarray(p, _np.int32),
+#             "slot_mapping": s.astype(_np.int32),
+#             "meta": _np.array([hd, cr, *cs], _np.int64),
+#         }
+#         _np.savez(_PROJ_DUMP, **out)
+#         print(f"[PROJDUMP] wrote {_PROJ_DUMP}.npz hd={hd} cr={cr} "
+#               f"cache_shape={cs} slots[:6]={s[:6].tolist()}", flush=True)
+#
+#     jax.debug.callback(_cb, hidden_states, wkv_wgate, ape, positions,
+#                        slot_mapping)
+#
+#
+# def _probe_state(cache, slots, head_dim, compress_ratio, state_rows_per_token):
+#     """Decodes the f32 state `proj_and_save_state` wrote for the first token.
+#
+#     The state is stored byte-transposed (u8[s, l] == byte s of f32 l), so one
+#     (4, lanes) row holds `lanes` floats; transposing before the f32 view undoes
+#     it.
+#     """
+#     rows = cache.reshape(-1, cache.shape[-2], cache.shape[-1])
+#     first = jnp.argmax(slots >= 0)
+#     base = jnp.maximum(slots[first], 0)
+#     blk = jax.lax.dynamic_slice(
+#         rows, (base, 0, 0), (state_rows_per_token, ) + rows.shape[1:])
+#
+#     def _cb(b, base, sl, hd=head_dim, cr=compress_ratio):
+#         import numpy as _np
+#         b = _np.asarray(b)
+#         f = b.transpose(0, 2, 1).copy().view(_np.float32).reshape(b.shape[0], -1)
+#         bad = ~_np.isfinite(f)
+#         rowbad = bad.sum(axis=1).tolist()
+#         print(
+#             f"[STATEPROBE] hd={hd} cr={cr} base_row={int(base)}"
+#             f" slots[:6]={_np.asarray(sl)[:6].tolist()}\n"
+#             f"    state shape={f.shape} nan={int(_np.isnan(f).sum())}"
+#             f" inf={int(_np.isinf(f).sum())} per_row={rowbad}\n"
+#             f"    finite absmax={float(_np.abs(f[_np.isfinite(f)]).max()) if _np.isfinite(f).any() else float('nan')}"
+#             f" first8={f[0, :8].tolist()}",
+#             flush=True)
+#
+#     jax.debug.callback(_cb, blk, base, slots[:8])
+#
+#
+# def _probe_proj_reference(hidden_states, wkv_wgate, ape, positions,
+#                           slot_mapping, head_dim, compress_ratio):
+#     """Recomputes the projection in plain JAX beside the kernel.
+#
+#     Same values, same shard, same jit context, so this isolates the kernel
+#     from its inputs: if this reference is finite while the kernel's stored
+#     state is NaN, the kernel is at fault; if both are NaN, the operand
+#     magnitudes overflow f32 during accumulation.
+#     """
+#     ref = jnp.einsum("nk,km->nm", hidden_states, wkv_wgate,
+#                      preferred_element_type=jnp.float32)
+#     first = jnp.argmax(slot_mapping >= 0)
+#
+#     def _cb(h, w, a, r, f, hd=head_dim, cr=compress_ratio):
+#         import numpy as _np
+#         f = int(f)
+#         out = [f"[PROJREF] hd={hd} cr={cr} first_real_token={f}"]
+#         for nm, v in (("hidden", h), ("wkv_wgate", w), ("ape", a),
+#                       ("ref=h@w", r)):
+#             v = _np.asarray(v, _np.float32)
+#             fin = v[_np.isfinite(v)]
+#             out.append(
+#                 f"    {nm:10s} nan={int(_np.isnan(v).sum()):8d}"
+#                 f" inf={int(_np.isinf(v).sum()):8d}"
+#                 f" absmax={(_np.abs(fin).max() if fin.size else float('nan')):.6g}"
+#                 f" absmean={(_np.abs(fin).mean() if fin.size else float('nan')):.6g}")
+#         r = _np.asarray(r, _np.float32)
+#         if f < r.shape[0]:
+#             out.append(f"    ref[first_real, :6] = {r[f, :6].round(4).tolist()}")
+#         print("\n".join(out), flush=True)
+#
+#     jax.debug.callback(_cb, hidden_states, wkv_wgate, ape, ref, first)
 
 
 def derive_metadata(
@@ -25,6 +127,7 @@ def derive_metadata(
     block_table: jax.Array,
     query_start_loc: jax.Array,
     kv_block_table: jax.Array,
+    cache: jax.Array,
     compress_ratio: int,
     state_block_size: int,
     head_dim: int,
@@ -32,44 +135,59 @@ def derive_metadata(
     cos_sin_cache: jax.Array | None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Derives token_to_req_indices, slot_mapping_slots, and kv_slot_mapping.
+
+  The page geometry is taken from ``config.Configs`` keyed on
+  ``cache.shape[1]``, which is the same derivation ``compress_norm_rope_store``
+  and ``proj_and_save_state`` use. It must not be recomputed from a separate
+  model here: the three only agree for CSA, and diverge by 2x (HCA) and 4x
+  (indexer) otherwise, which silently scatters state and compressed-KV writes
+  across the wrong pages.
+
   Args:
     positions: [num_tokens]. Logical position of each token in its request.
     block_table: [num_reqs, max_blocks]. Page table for the state cache.
     query_start_loc: [num_reqs + 1]. Cumulative sum of query lengths.
     kv_block_table: [num_reqs, max_kv_blocks]. Page table for the compressed KV
       cache.
+    cache: [num_pages, physical_page_size, 4, lanes] uint8. The shared
+      state + compressed-KV buffer; only its shape is read here.
     compress_ratio: Compression ratio (e.g. 4 for CSA, 128 for HCA).
-    state_block_size: Block size of the state cache.
+    state_block_size: Block size vLLM used to build ``block_table``. Must match
+      the geometry of ``cache``; asserted below.
     head_dim: Dimensionality of attention heads.
     overlap: Whether to use overlap (CSA path).
     cos_sin_cache: [max_pos, rope_head_dim] or None. RoPE cos/sin cache.
   Returns:
     token_to_req_indices: [num_tokens]. Request index for each token.
-    slot_mapping_slots: [num_tokens]. Physical slot index in state cache.
-    kv_slot_mapping: [num_tokens]. Physical slot index in compressed KV cache.
+    slot_mapping_slots: [num_tokens]. Physical row index in the state cache.
+    kv_slot_mapping: [num_tokens]. Sub-slot index in the compressed KV cache
+      (``// tokens_in_second_minor`` gives the physical row).
   """
     num_tokens = positions.shape[0]
     rope_head_dim = cos_sin_cache.shape[1] if cos_sin_cache is not None else 0
 
-    # 1. Inline Layout Calculations (Derived from geometry)
-    coff = 1 + int(overlap)
-    state_width = coff * head_dim
-    state_dim = 2 * state_width
+    cfgs = config.Configs.make(
+        config.select_mode(head_dim, overlap),
+        size_n=num_tokens,
+        physical_page_size=cache.shape[1],
+        head_dim=head_dim,
+        rope_head_dim=rope_head_dim,
+        compress_ratio=compress_ratio,
+    )
+    # Rows per page, rows per token's state, and the KV sub-slot packing.
+    page_size = cfgs.physical_page_size
+    state_rows_per_token = cfgs.state_rows_per_token
+    kv_block_size = cfgs.kv_block_size
+    kv_stride = cfgs.kv_stride
+    kv_page_stride = kv_block_size * kv_stride
 
-    # Determine if quantized (CSA/Indexer use FP8, HCA uses BF16)
-    is_quantized = (rope_head_dim > 0 and overlap) or (rope_head_dim == 0)
-    if not is_quantized:
-        total_bytes_out = head_dim * 2  # HCA (bf16)
-    else:
-        total_bytes_out = 256 if head_dim == 128 else 512  # CSA (fp8)
-
-    total_sub_slots = total_bytes_out // 128
-    slots_per_part_hbm = min(total_sub_slots, 4)
-    slots_per_part_out = (total_sub_slots + 3) // 4
-
-    # Calculate slots per token and page size in slots
-    slots_per_token = (state_dim * 4) // (slots_per_part_hbm * 128)
-    page_size = state_block_size * slots_per_token
+    # The block tables are paged at vLLM's state-cache block size, so it has to
+    # be the number of token states that actually fit in one physical page.
+    assert state_block_size == cfgs.state_block_size, (
+        f"state cache block_size {state_block_size} does not match the "
+        f"{cfgs.dims.mode.value} cache geometry {cache.shape}, which holds "
+        f"{cfgs.state_block_size} token states per page "
+    )
 
     # 2. Map tokens to request indices (Handles Ragged Batch)
     query_lens = jnp.diff(query_start_loc)
@@ -84,18 +202,17 @@ def derive_metadata(
     state_page_offset = positions % state_block_size
     state_page_numbers = block_table[req, state_page_idx]
     slot_mapping_slots = (state_page_numbers * page_size +
-                          state_page_offset * slots_per_token)
+                          state_page_offset * state_rows_per_token)
 
     # 4. Compressed KV Cache Slot Mapping (Virtual -> Physical)
     kv_idx = positions // compress_ratio
-    kv_page_size = page_size // slots_per_part_out
-    kv_page_idx = kv_idx // kv_page_size
-    kv_page_offset = kv_idx % kv_page_size
+    kv_page_idx = kv_idx // kv_block_size
+    kv_page_offset = kv_idx % kv_block_size
 
     kv_page_number = kv_block_table[req, kv_page_idx]
 
-    kv_slot_mapping = (kv_page_number * page_size +
-                       kv_page_offset * slots_per_part_out)
+    kv_slot_mapping = (kv_page_number * kv_page_stride +
+                       kv_page_offset * kv_stride)
 
     is_boundary = ((positions + 1) % compress_ratio) == 0
     kv_slot_mapping = jnp.where(is_boundary, kv_slot_mapping, -1)
@@ -210,6 +327,7 @@ def compressor_forward(
         block_table=block_table,
         query_start_loc=query_start_loc,
         kv_block_table=kv_block_table,
+        cache=cache,
         compress_ratio=compress_ratio,
         state_block_size=state_block_size,
         head_dim=head_dim,
@@ -221,6 +339,15 @@ def compressor_forward(
     is_real_token = token_index < query_start_loc[distribution[2]]
     slot_mapping_slots = jnp.where(is_real_token, slot_mapping_slots, -1)
 
+    # if _STATE_PROBE:
+    #     _probe_proj_reference(hidden_states, wkv_wgate, ape, positions,
+    #                           slot_mapping_slots, head_dim, compress_ratio)
+    #
+    # if _PROJ_DUMP and head_dim == 512 and compress_ratio == 4:
+    #     _dump_proj_operands(hidden_states, wkv_wgate, ape, positions,
+    #                         slot_mapping_slots, head_dim, compress_ratio,
+    #                         tuple(cache.shape))
+
     cache = proj_kernel.proj_and_save_state(
         hidden_states=hidden_states,
         wkv_wgate=wkv_wgate,
@@ -230,6 +357,19 @@ def compressor_forward(
         cache=cache,
         compress_ratio=compress_ratio,
     )
+
+    # if _STATE_PROBE:
+    #     _cfgs = config.Configs.make(
+    #         config.select_mode(head_dim, overlap),
+    #         size_n=num_tokens,
+    #         physical_page_size=cache.shape[1],
+    #         head_dim=head_dim,
+    #         rope_head_dim=cos_sin_cache.shape[1] if cos_sin_cache is not None
+    #         else 0,
+    #         compress_ratio=compress_ratio,
+    #     )
+    #     _probe_state(cache, slot_mapping_slots, head_dim, compress_ratio,
+    #                  _cfgs.state_rows_per_token)
 
     is_decode_token = token_index < query_start_loc[distribution[0]]
     is_boundary = (kv_slot_mapping >= 0) & is_real_token

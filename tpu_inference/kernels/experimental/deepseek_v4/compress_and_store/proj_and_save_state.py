@@ -354,18 +354,29 @@ def proj_and_save_state(
 
     token_page_size = cache.shape[1]
 
+    state_width = state_dim // 2
+    tile_m = state_width
+    tile_k = min(3584, hidden_size)
+    tile_k = max(128, (tile_k // 128) * 128)
+
+    # The token dimension must be an exact multiple of `tile_n`.
+    sublane_tile = 8
+    tile_n = min(
+        128, pl.cdiv(num_tokens, sublane_tile) * sublane_tile)
+    padded_num_tokens = pl.cdiv(num_tokens, tile_n) * tile_n
+    if padded_num_tokens != num_tokens:
+        pad = padded_num_tokens - num_tokens
+        hidden_states = jnp.pad(hidden_states, ((0, pad), (0, 0)))
+        positions = jnp.pad(positions, (0, pad))
+        slot_mapping = jnp.pad(slot_mapping, (0, pad), constant_values=-1)
+        num_tokens = padded_num_tokens
+
     dims = Dimensions(
         size_m=state_dim,
         size_k=hidden_size,
         size_n=num_tokens,
         compress_ratio=compress_ratio,
     )
-
-    state_width = state_dim // 2
-    tile_m = state_width
-    tile_k = min(3584, hidden_size)
-    tile_k = max(128, (tile_k // 128) * 128)
-    tile_n = 128
 
     tile_sizes = TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
 

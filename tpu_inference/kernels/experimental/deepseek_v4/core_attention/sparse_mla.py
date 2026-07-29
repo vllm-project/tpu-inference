@@ -2,6 +2,7 @@
 
 from enum import Enum
 import functools
+# import os  # (debug) only used by the disabled CSA probe below
 
 import jax
 from jax import lax
@@ -13,6 +14,40 @@ from tpu_inference.kernels.experimental.deepseek_v4.core_attention import \
     csa_gather
 
 DEFAULT_VMEM_LIMIT_BYTES = 100 * 1024 * 1024
+
+# --- temporary NaN localisation probe (TPU_DSV4_CSA_PROBE=1) -----------------
+# Disabled. Re-enable together with the `if _CSA_PROBE:` block in
+# `sparse_ragged_paged_attention` to inspect the gathered CSA KV.
+# _CSA_PROBE = os.environ.get("TPU_DSV4_CSA_PROBE", "0") == "1"
+#
+#
+# def _csa_probe(tag, x, rows=None):
+#   """Prints only when `x` has NaN/Inf. No-op unless the env var is set."""
+#   if not _CSA_PROBE or x is None:
+#     return
+#
+#   def _cb(v, r, tag=tag):
+#     import numpy as _np
+#
+#     v = _np.asarray(v, dtype=_np.float32)
+#     bad = ~_np.isfinite(v)
+#     if not bad.any():
+#       return
+#     ax = tuple(range(1, v.ndim))
+#     bad_rows = _np.nonzero(bad.any(axis=ax))[0] if v.ndim > 1 else _np.nonzero(
+#         bad)[0]
+#     extra = ""
+#     if r is not None:
+#       r = _np.asarray(r).reshape(-1)
+#       extra = f" kv_lens@rows={r[bad_rows[:8]].tolist()}"
+#     print(
+#         f"[CSAPROBE] {tag}: nan={int(_np.isnan(v).sum())}"
+#         f" inf={int(_np.isinf(v).sum())} shape={v.shape}"
+#         f" rows({len(bad_rows)})={bad_rows[:8].tolist()}{extra}",
+#         flush=True,
+#     )
+#
+#   jax.debug.callback(_cb, x, rows)
 
 
 def cdiv(a, b):
@@ -834,6 +869,46 @@ def sparse_ragged_paged_attention(
     gathered_rope_buffer = gathered_rope_buffer.reshape(
         gather_and_attention_chunk_size, topk, -1
     )
+    # (debug) Dump the RAW bytes the gather returned for the first valid CSA
+    # entry (topk slot 0) of each query row, plus the address it was read from.
+    # Re-enable with the `_CSA_PROBE` block near the top of this file.
+    # if _CSA_PROBE:
+    #   _kl = kv_lens[start_pos:end_pos]
+    #   _idx2d = indices.reshape(end_pos - start_pos, topk)
+    #
+    #   def _raw_cb(nope0, rope0, idx0, kl, tag=f"chunk{i}"):
+    #     import numpy as _np
+    #
+    #     kl = _np.asarray(kl).reshape(-1)
+    #     live = _np.nonzero(kl > 0)[0]
+    #     if live.size == 0:
+    #       return
+    #     r = int(live[0])
+    #     n = _np.asarray(nope0)[r].view(_np.uint8)
+    #     rp = _np.asarray(rope0)[r].view(_np.uint16)
+    #     print(
+    #         f"[CSARAW] {tag} row={r} kv_len={int(kl[r])}"
+    #         f" flat_index={int(_np.asarray(idx0)[r])}\n"
+    #         f"    nope data[0:8]      = {n[:8].tolist()}\n"
+    #         f"    nope scale[448:455] = {n[448:455].tolist()}\n"
+    #         f"    nope[455:460]       = {n[455:460].tolist()}\n"
+    #         f"    rope u16[0:6]       = {[hex(v) for v in rp[:6].tolist()]}\n"
+    #         f"    nope all_0xFF={bool((n == 255).all())}"
+    #         f" all_0x00={bool((n == 0).all())}"
+    #         f" uniq={_np.unique(n)[:8].tolist()}"
+    #         f" nonzero={int((n != 0).sum())}/512",
+    #         flush=True,
+    #     )
+    #
+    #   jax.debug.callback(
+    #       _raw_cb,
+    #       gathered_nope_buffer[:, 0, :],
+    #       jax.lax.bitcast_convert_type(
+    #           gathered_rope_buffer[:, 0, :], jnp.uint16
+    #       ),
+    #       _idx2d[:, 0],
+    #       _kl,
+    #   )
     # We treat each query token as a one independent sequence, attend to their
     # respective gathered kv tokens in the `gathered_kv_buffer`.
     # -1 in topk_indices is padded elements at the end of each row.

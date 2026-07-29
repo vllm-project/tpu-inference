@@ -1,3 +1,16 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Correctness test for Kernel 2 (compress_norm_rope_store)."""
 
 from absl.testing import absltest
@@ -7,11 +20,29 @@ from jax._src import test_util as jtu
 import jax.numpy as jnp
 import numpy as np
 
-from google3.experimental.tpu_perf_showcase.vllm.kernels.deepseek_v4.compressor import benchmark_util
-from google3.experimental.tpu_perf_showcase.vllm.kernels.deepseek_v4.compressor.compress_store import ref as compress_store_ref
-from google3.experimental.tpu_perf_showcase.vllm.kernels.deepseek_v4.compressor.compress_store.tc import config
-from google3.experimental.tpu_perf_showcase.vllm.kernels.deepseek_v4.compressor.compress_store.tc import kernel as compress_store
-from google3.experimental.tpu_perf_showcase.vllm.kernels.deepseek_v4.compressor.proj_and_save_state import ref as proj_and_save_state_ref
+from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store import compress_store_ref
+from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store import config
+from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store import kernel as compress_store
+from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store import project_and_save_state_ref as proj_and_save_state_ref
+
+
+def generate_kv_slot_mapping(
+    num_boundary_tokens: int,
+    num_pages: int,
+    page_size: int,
+    slots_per_part_out: int,
+) -> jax.Array:
+  """Generates kv_slot_mapping for boundary tokens."""
+  kv_slot_mapping_np = np.full((num_boundary_tokens,), -1, dtype=np.int32)
+  boundary_count = 0
+  total_slots_needed = num_boundary_tokens * slots_per_part_out
+  pages_needed = (total_slots_needed + page_size - 1) // page_size
+  start_page = max(0, num_pages - pages_needed)
+
+  for t in range(num_boundary_tokens):
+    kv_slot_mapping_np[t] = start_page * page_size + boundary_count
+    boundary_count += slots_per_part_out
+  return jnp.array(kv_slot_mapping_np, dtype=jnp.int32)
 
 
 def normalize_fp8_zero_sign(arr):
@@ -102,7 +133,11 @@ class CompressStoreTest(jtu.JaxTestCase):
     ape = jax.random.normal(k3, (compress_ratio, state_width))
     run_1_positions = jnp.arange(run_1_tokens, dtype=jnp.int32)
 
-    slots_per_token = (state_dim * 4) // 128
+    # slot_mapping is in physical cache-row units: both the projection kernel
+    # (p = slot // cache.shape[1]) and its reference (slot // (page_size //
+    # state_block_size)) read it that way, so one token advances by the number
+    # of rows its state occupies -- not by the number of 128B sub-slots.
+    slots_per_token = physical_page_size // state_block_size
     run_1_slot_mapping = np.arange(run_1_tokens) * slots_per_token
     run_1_slot_mapping = jnp.array(run_1_slot_mapping, dtype=jnp.int32)
 
@@ -134,10 +169,11 @@ class CompressStoreTest(jtu.JaxTestCase):
       token_to_req_indices_filtered = token_to_req_indices_np[boundary_mask]
 
     if kv_slot_mapping is None:
-      kv_slot_mapping_filtered = benchmark_util.generate_kv_slot_mapping(
+      kv_slot_mapping_filtered = generate_kv_slot_mapping(
           num_boundary,
           num_pages,
-          cfgs.kv_block_size,
+          # Slots per page: kv_block_size records/page x kv_stride slots/record.
+          cfgs.kv_block_size * cfgs.kv_stride,
           cfgs.kv_stride,
       )
     else:

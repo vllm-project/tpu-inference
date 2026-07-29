@@ -29,6 +29,7 @@ rebinds it on ``amd.model`` directly. It is invoked from
 ``_maybe_patch_for_deepseek_v4`` in ``vllm_model_wrapper`` while ``is_rocm`` is
 forced True and the package has been reloaded onto the AMD implementation.
 """
+# import os  # (debug) only used by the disabled NaN probe below
 from unittest.mock import patch
 
 import jax
@@ -70,6 +71,49 @@ def cdiv(a, b):
 
 def align_to(x, a):
     return cdiv(x, a) * a
+
+
+# --- temporary NaN localisation probe (TPU_DSV4_NAN_PROBE=1) -----------------
+# Disabled. Re-enable together with the `_probe(...)` call sites below when
+# localising a NaN; it prints only for tensors that contain NaN/Inf.
+# _NAN_PROBE = os.environ.get("TPU_DSV4_NAN_PROBE", "0") == "1"
+#
+#
+# def _probe(tag: str, x) -> None:
+#     """Prints a message only when `x` contains NaN/Inf. No-op unless enabled."""
+#     if not _NAN_PROBE or x is None:
+#         return
+#     arr = jax_view(x)
+#     if not jnp.issubdtype(arr.dtype, jnp.floating):
+#         return
+#
+#     def _cb(v, tag=tag):
+#         import numpy as _np
+#         v = _np.asarray(v, dtype=_np.float32)
+#         n_nan = int(_np.isnan(v).sum())
+#         n_inf = int(_np.isinf(v).sum())
+#         if n_nan or n_inf:
+#             bad = ~_np.isfinite(v)
+#             detail = ""
+#             if v.ndim == 3:  # [tokens, heads, dim]
+#                 rows = _np.nonzero(bad.any(axis=(1, 2)))[0]
+#                 heads = _np.nonzero(bad.any(axis=(0, 2)))[0]
+#                 dims = _np.nonzero(bad.any(axis=(0, 1)))[0]
+#                 detail = (f" rows({len(rows)})={rows[:16].tolist()}"
+#                           f" heads({len(heads)})={heads[:16].tolist()}"
+#                           f" dims({len(dims)})={dims[:16].tolist()}"
+#                           f" per_row={bad.sum(axis=(1, 2))[rows[:8]].tolist()}")
+#             elif v.ndim == 2:
+#                 rows = _np.nonzero(bad.any(axis=1))[0]
+#                 cols = _np.nonzero(bad.any(axis=0))[0]
+#                 detail = (f" rows({len(rows)})={rows[:16].tolist()}"
+#                           f" cols({len(cols)})={cols[:16].tolist()}")
+#             print(
+#                 f"[NANPROBE] {tag}: nan={n_nan} inf={n_inf} "
+#                 f"shape={v.shape}{detail}",
+#                 flush=True)
+#
+#     jax.debug.callback(_cb, arr)
 
 
 def _largest_divisor(x: int, cap: int) -> int:
@@ -292,9 +336,14 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         # downstream reads q on default). Indexer/compressor go on aux for
         # overlap with default's GEMM + cache write.
 
+        # _probe(f"{self.prefix}[cr={self.compress_ratio}].in_hidden",
+        #        hidden_states)
+
         q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
         q = self.qnorm_rope(q, positions)
         kv = self.kv_rope(kv, positions)
+        # _probe(f"{self.prefix}[cr={self.compress_ratio}].q", q)
+        # _probe(f"{self.prefix}[cr={self.compress_ratio}].kv", kv)
 
         # The TPU compressor fuses its own ``fused_wkv_wgate`` projection, so it
         # consumes ``hidden_states``.
@@ -339,6 +388,8 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             swa_layer_name]
         sw_cache = wrapper_ctx.kv_caches[swa_cache_index]
         attention_sinks = jax_view(self.attn_sink)
+        # _probe(f"{self.prefix}[cr={self.compress_ratio}].attn_sink",
+        #        self.attn_sink)
 
         if is_csa:
             assert topk_indices is not None

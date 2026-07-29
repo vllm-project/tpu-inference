@@ -239,9 +239,7 @@ def kernel_fn(
 
 
 def _select_mode(head_dim: int, overlap: bool) -> config.Mode:
-    if head_dim == 128:
-        return config.Mode.CSA_INDEXER
-    return config.Mode.CSA if overlap else config.Mode.HCA
+    return config.select_mode(head_dim, overlap)
 
 
 def derive_aliases(has_rope: bool, has_rope_cache: bool,

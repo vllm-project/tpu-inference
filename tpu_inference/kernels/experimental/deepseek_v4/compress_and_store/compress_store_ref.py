@@ -1,3 +1,18 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Golden JAX reference for the DeepSeek-V4 compress + store kernel."""
+
 import jax
 import jax.numpy as jnp
 
@@ -208,45 +223,22 @@ def ref_compress_norm_rope_store(
   assert rope_page_size_unpacked == rope_page_size
   assert rope_d1 == 1 and rope_d2 == 128
 
-  # 2. Unpack state cache inline (generalized)
-  if is_indexer_mode:
-    cache_reshaped = cache_for_unpack.reshape(
-        num_pages, state_block_size, slots_per_token, d2
-    )
-    cache_fields = cache_reshaped.reshape(
-        num_pages, state_block_size, 4, 2, 256
-    )
-    slot0 = cache_fields[..., 0, :]
-    slot1 = cache_fields[..., 1, :]
-    slot0_bytes = slot0.reshape(num_pages, state_block_size, 4, 2, 128)
-    slot1_bytes = slot1.reshape(num_pages, state_block_size, 4, 2, 128)
-    field_bytes_t = jnp.concatenate([slot0_bytes, slot1_bytes], axis=-2)
-    field_bytes = field_bytes_t.transpose(0, 1, 2, 4, 3)
-    f32_fields = jax.lax.bitcast_convert_type(field_bytes, jnp.float32)
-    state_view = f32_fields.reshape(num_pages, state_block_size, state_dim)
-  else:
-    slots_per_token_head = state_dim // 128
-    hbm_sub_slot_size = slots_per_part_hbm
-    hbm_slot_offset_size = slots_per_token // slots_per_token_head
-
-    cache_split = cache.reshape(
-        num_pages,
-        state_block_size,
-        slots_per_token_head,
-        hbm_slot_offset_size,
-        hbm_sub_slot_size,
-        128,
-    )
-    u8_t_recon = cache_split.reshape(
-        num_pages,
-        state_block_size,
-        slots_per_token_head,
-        hbm_slot_offset_size * hbm_sub_slot_size,
-        128,
-    )
-    u8_recon = u8_t_recon.transpose(0, 1, 2, 4, 3)
-    f32_recon = jax.lax.bitcast_convert_type(u8_recon, jnp.float32)
-    state_view = f32_recon.reshape(num_pages, state_block_size, state_dim)
+  # 2. Unpack state cache inline.
+  # The state is read from the *physical* cache, whatever the trailing dims are:
+  # one token owns ``state_rows`` rows of ``(hbm_pack, last_dim)`` bytes, and
+  # within a row the ``hbm_pack`` sub-slots hold the four bytes of an f32, so a
+  # single byte-transpose inverts the packing for every mode. This is the exact
+  # inverse of the pack in ``ref_wkv_proj_and_save_state``.
+  phys_pages, phys_page_size, hbm_pack, last_dim = cache.shape
+  assert hbm_pack == 4, f"expected 4 bytes per f32 in a slot row, got {hbm_pack}"
+  state_rows = phys_page_size // state_block_size
+  assert state_rows * hbm_pack * last_dim == state_dim * 4
+  state_bytes_t = cache.reshape(
+      phys_pages, state_block_size, state_rows, hbm_pack, last_dim
+  ).transpose(0, 1, 2, 4, 3)
+  state_view = jax.lax.bitcast_convert_type(
+      state_bytes_t, jnp.float32
+  ).reshape(phys_pages, state_block_size, state_dim)
 
   # 3. Gather state windows
   kv_window, score_window, valid_mask = gather_state_windows(

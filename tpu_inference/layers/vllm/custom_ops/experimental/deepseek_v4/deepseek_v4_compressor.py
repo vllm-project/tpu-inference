@@ -14,7 +14,10 @@
 # limitations under the License.
 """TPU-compatible DeepSeek-V4 KV/score compressor."""
 
+# import os  # (debug) only used by the disabled compressor probe below
+
 import jax
+# import jax.numpy as jnp  # (debug) only used by the disabled probe below
 import torch
 from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view
@@ -25,6 +28,8 @@ from vllm.models.deepseek_v4.compressor import (CompressorStateCache,
                                                 DeepseekCompressor)
 from vllm.v1.kv_cache_interface import SlidingWindowMLASpec
 
+from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store import \
+    config as compressor_config
 from tpu_inference.kernels.experimental.deepseek_v4.compress_and_store.compressor_v1 import \
     compressor_forward
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -33,6 +38,55 @@ from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
 
 logger = init_logger(__name__)
+
+# --- temporary NaN localisation probe (TPU_DSV4_COMP_PROBE=1) ----------------
+# Disabled. Re-enable together with the `if _COMP_PROBE:` block in `forward`
+# to log the compressor operands' dtype/shape/magnitude and flag NaN/Inf.
+# _COMP_PROBE = os.environ.get("TPU_DSV4_COMP_PROBE", "0") == "1"
+#
+#
+# _COMP_SEEN = set()
+#
+#
+# def _comp_probe(tag, x):
+#     """Prints only when `x` contains NaN/Inf. No-op unless enabled."""
+#     if not _COMP_PROBE or x is None:
+#         return
+#     # Log dtype/shape once per tag: a non-float operand (e.g. a quantized
+#     # weight) would otherwise be skipped silently by the NaN check below.
+#     if tag not in _COMP_SEEN:
+#         _COMP_SEEN.add(tag)
+#
+#         def _info(v, tag=tag, dt=x.dtype, sh=x.shape):
+#             import numpy as _np
+#             v = _np.asarray(v, dtype=_np.float32)
+#             fin = v[_np.isfinite(v)]
+#             print(
+#                 f"[COMPINFO] {tag}: dtype={dt} shape={sh}"
+#                 f" absmax={_np.abs(fin).max() if fin.size else float('nan'):.6g}"
+#                 f" absmean={_np.abs(fin).mean() if fin.size else float('nan'):.6g}"
+#                 f" p99={_np.percentile(_np.abs(fin), 99) if fin.size else float('nan'):.6g}",
+#                 flush=True)
+#
+#         if jnp.issubdtype(x.dtype, jnp.floating):
+#             jax.debug.callback(_info, x)
+#     if not jnp.issubdtype(x.dtype, jnp.floating):
+#         print(f"[COMPINFO] {tag}: NON-FLOAT dtype={x.dtype} -- NaN check "
+#               f"skipped", flush=True)
+#         return
+#
+#     def _cb(v, tag=tag):
+#         import numpy as _np
+#         v = _np.asarray(v, dtype=_np.float32)
+#         n_nan = int(_np.isnan(v).sum())
+#         n_inf = int(_np.isinf(v).sum())
+#         if n_nan or n_inf:
+#             print(
+#                 f"[COMPPROBE] {tag}: nan={n_nan} inf={n_inf} "
+#                 f"shape={v.shape} size={v.size}",
+#                 flush=True)
+#
+#     jax.debug.callback(_cb, x)
 
 
 class VllmCompressorStateCache(CompressorStateCache):
@@ -62,12 +116,27 @@ class VllmCompressorStateCache(CompressorStateCache):
         # CSA's state cache overlay with CSA's compressed cache for now.
         # TODO: we may better let HCA's state cache overlay on CSA's compressed cache,
         # whose page size is bigger, for better performance.
-        compressed_kv_cache_bz = get_current_vllm_config(
-        ).cache_config.block_size // compress_ratio
-        assert compressed_kv_cache_bz > 0
-        # 4 due to 4 bytes per f32
-        # 2 due to kv-dim + score-dim
-        self.block_size = compressed_kv_cache_bz // 4 // 2 // coff
+        #
+        # This block_size is the granularity of the block table the compressor
+        # kernel indexes with, so it must be the number of token states that
+        # physically fit in one page of the array `KVCacheManager` allocates --
+        # which is *not* the same across modes: HCA stores raw bf16 (two rows
+        # per record) and the indexer array is 256 lanes wide. Derive it from
+        # the kernel's own layout model instead of a closed-form guess.
+        kv_cache_block_size = get_current_vllm_config().cache_config.block_size
+        assert kv_cache_block_size // compress_ratio > 0
+        mode = compressor_config.select_mode(self.head_dim,
+                                             compress_ratio == 4)
+        cfgs = compressor_config.Configs.make(
+            mode,
+            size_n=0,
+            physical_page_size=compressor_config.physical_page_size(
+                mode, kv_cache_block_size, compress_ratio),
+            head_dim=self.head_dim,
+            compress_ratio=compress_ratio,
+        )
+        self.block_size = cfgs.state_block_size
+        assert self.block_size > 0
 
     # pylint: disable=unused-argument
     def get_kv_cache_spec(self, vllm_config):
@@ -207,6 +276,16 @@ class VllmDeepseekCompressor(DeepseekCompressor):
             if has_rope_cache:
                 return new_cache, new_rope_cache
             return new_cache
+
+        # if _COMP_PROBE:
+        #     p = f"{self.k_cache_prefix}[hd={self.head_dim}]"
+        #     _comp_probe(f"{p}.hidden_states", jax_view(hidden_states))
+        #     _comp_probe(f"{p}.wkv_wgate",
+        #                 jax_view(self.fused_wkv_wgate.weight))
+        #     _comp_probe(f"{p}.ape", jax_view(self.ape))
+        #     _comp_probe(f"{p}.norm_weight", jax_view(self.norm.weight))
+        #     _comp_probe(f"{p}.cos_sin_cache",
+        #                 jax_view(rotary_emb.cos_sin_cache))
 
         operands = (
             jax_view(hidden_states),

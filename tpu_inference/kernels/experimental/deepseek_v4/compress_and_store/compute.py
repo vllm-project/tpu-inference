@@ -174,7 +174,6 @@ def pack_nope_tiled(q,
 def pack_rope_tiled(rope_slot_ropped, rope_head_dim_actual, rope_width=128):
     # rope_slot_ropped: (tile_n, 1, 128)
     # TODO: make this a config value rather than inferred
-    tile_n = rope_slot_ropped.shape[0]
     start = 128 - rope_head_dim_actual
     rope_val = rope_slot_ropped[:, :, start:]  # (tile_n, 1, rope_head_dim)
 
@@ -291,21 +290,28 @@ def gather_from_page_buffer(
                     row_score = page_buffer[n, p,
                                             score_row][...]  # shape (4, 256)
 
+                    # `proj_and_save_state` stores the f32 state byte-transposed
+                    # (u8[s, l] == byte s of f32 l), so one (4, 256) row holds
+                    # 256 floats across its LANES, not its sublanes. The
+                    # prev/curr halves of the overlapping state are therefore
+                    # lanes 0:128 and 128:256 -- slicing sublanes here would
+                    # hand back bytes 0..1 of all 256 floats, i.e. garbage that
+                    # is NaN often enough to poison every compressed record.
                     if overlap:
                         is_prev = w < (window // 2)
                         val_kv = jax.lax.select(
                             is_prev,
-                            row_kv[0:2, :].reshape(4, 128),
-                            row_kv[2:4, :].reshape(4, 128),
+                            row_kv[:, 0:128],
+                            row_kv[:, 128:256],
                         )
                         val_score = jax.lax.select(
                             is_prev,
-                            row_score[0:2, :].reshape(4, 128),
-                            row_score[2:4, :].reshape(4, 128),
+                            row_score[:, 0:128],
+                            row_score[:, 128:256],
                         )
                     else:
-                        val_kv = row_kv[0:2, :].reshape(4, 128)
-                        val_score = row_score[0:2, :].reshape(4, 128)
+                        val_kv = row_kv[:, 0:128]
+                        val_score = row_score[:, 0:128]
 
                     kv_window_u8[n, w, 0, :, :] = val_kv
                     score_window_u8[n, w, 0, :, :] = val_score
