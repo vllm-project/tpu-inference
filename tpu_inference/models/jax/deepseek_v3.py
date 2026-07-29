@@ -500,6 +500,9 @@ class DeepSeekV3Router(JaxEinsum):
             quant_config=None,
             param_dtype=self.dtype,
             kernel_init=nnx.with_partitioning(weight_init, self.ed_sharding),
+            # The gate matmul runs in fp32 (see __call__); HIGHEST keeps it
+            # there on TPU instead of letting XLA drop to a bf16 pass.
+            precision=jax.lax.Precision.HIGHEST,
         )
         self.e_score_correction_bias = create_param(
             rngs,
@@ -558,7 +561,17 @@ class DeepSeekV3Router(JaxEinsum):
 
         # Expert assignments are accumulated in high precision to preserve accuracy.
         # See: https://github.com/vllm-project/vllm/blob/e89a91d9275cd8ac086fe04476b41675a9ebbd5c/vllm/model_executor/layers/fused_moe/cpu_fused_moe.py#L59
-        logits_TE = super().__call__(x_TD).astype(jnp.float32)
+        #
+        # The reference implementations run the gate itself in fp32 --
+        # `DeepseekV3TopkRouter` / `KimiMoEGate` both do
+        # `F.linear(hidden_states.type(torch.float32), self.weight.type(torch.float32))`
+        # -- so casting only the *output* is not enough: on TPU the fp32 einsum
+        # is otherwise lowered to bf16 multiplies, and experts whose scores are
+        # within bf16 rounding of each other swap places in the top-k. Cast the
+        # activations up front and rely on `precision=HIGHEST` (set in __init__)
+        # for the multiply. The gate is [hidden, num_experts], so this costs
+        # nothing next to the expert matmuls.
+        logits_TE = super().__call__(x_TD.astype(jnp.float32))
 
         # TODO(gpolovets): add back support for DeepSeek routing.
         if self.moe_backend in MoEBackend.fused_moe_backends():

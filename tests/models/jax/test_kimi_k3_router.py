@@ -39,6 +39,7 @@ from jax.sharding import PartitionSpec as P
 
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3Router
 
 CKPT = os.environ.get("K3_TINY_CKPT", "")
@@ -155,6 +156,40 @@ def test_router_matches_reference_gate_random_inputs(mesh):
     idx_ref, w_ref = reference_gate(x, weight, bias)
     idx_jax, w_jax = _run_router(mesh, router, x)
     _assert_matches(idx_jax, w_jax, idx_ref, w_ref, "random")
+
+
+def test_gate_logits_are_computed_in_full_precision(mesh):
+    """The gate matmul itself must run in fp32, not a bf16 pass.
+
+    The reference casts both operands to fp32 before the linear. On TPU an
+    fp32 einsum at XLA's default precision is lowered to a single bf16
+    multiply, which costs ~4 decimal digits on the logits -- enough to
+    reorder experts whose scores are within that of each other, which shows
+    up as an expert-set mismatch in the parity tests above. Assert the
+    logits directly so the cause is readable when it regresses.
+    """
+    rng = np.random.default_rng(2)
+    router = _build_router(mesh)
+    weight = rng.standard_normal(
+        (NUM_EXPERTS, HIDDEN), dtype=np.float32) * 0.05
+    with jax.set_mesh(mesh):
+        router.weight.value = jnp.asarray(weight.T)
+    x = rng.standard_normal((64, HIDDEN), dtype=np.float32) * 0.1
+
+    with jax.set_mesh(mesh):
+        x_dev = jax.device_put(jnp.asarray(x, jnp.float32),
+                               NamedSharding(mesh, P()))
+        # The gate matmul on its own, before sigmoid/top-k.
+        logits = np.asarray(JaxEinsum.__call__(router, x_dev))
+    # fp64 reference for the same contraction.
+    ref = x.astype(np.float64) @ weight.astype(np.float64).T
+    err = np.abs(logits - ref).max()
+    print(f"[observed] gate logit max_abs vs fp64: {err:.3e}")
+    # A bf16-rounded contraction over 1024 terms lands around 1e-3 here;
+    # fp32 lands near 1e-6. The gate sits between them by a wide margin.
+    assert err < 1e-5, (
+        f"router gate logits are off by {err:.3e} -- the gate matmul is not "
+        "running in fp32 (check `precision` on DeepSeekV3Router)")
 
 
 def test_ignoring_the_bias_would_fail_this_test(mesh):
