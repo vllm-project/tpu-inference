@@ -31,6 +31,12 @@ RANDOM_SEED=${RANDOM_SEED:=10}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
 TEST_MODE=${TEST_MODE:=1} # 1: benchmark, 2: correctness, 3: both
 
+# The TPU logprobs precompile path currently runs top_k while the vocabulary
+# dimension is still tensor-parallel sharded. This disagg test does not request
+# logprobs, so skip the eager all-shape precompile and let used paths compile on
+# demand. Keep this externally overridable for debugging the precompile path.
+SKIP_JAX_PRECOMPILE=${SKIP_JAX_PRECOMPILE:=1}
+
 
 # Log directory setup
 LOG_DIR=$HOME/logs
@@ -165,6 +171,7 @@ COMMON_TPU_ENV_ARGS=(
   -e JAX_NUM_PROCESSES=2
   -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   -e RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
+  -e SKIP_JAX_PRECOMPILE="${SKIP_JAX_PRECOMPILE}"
 )
 PREFILL_TPU_ENV_ARGS=("${COMMON_TPU_ENV_ARGS[@]}")
 DECODE_TPU_ENV_ARGS=("${COMMON_TPU_ENV_ARGS[@]}")
