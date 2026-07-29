@@ -318,6 +318,27 @@ def kernel(
             pl.semaphore_wait(sem_ref.at[b], count)
 
 
+def _select_tile_k(size_k: int, cap: int = 3584, align: int = 128) -> int:
+    """Largest 128-aligned k tile that *divides* ``size_k``.
+
+    ``emit_pipeline`` runs a ``cdiv(size_k, tile_k)`` grid with
+    ``disable_bounds_checks=True``, so a ``tile_k`` that merely aligns to 128
+    without dividing ``size_k`` makes the final k block read past the end of
+    ``hidden_states`` / ``wkv_wgate``. Because the matmul contracts over k,
+    that garbage poisons every output element -- at DSv4-Flash's
+    ``hidden_size=4096`` the old ``min(3584, ...)`` rounding gave
+    ``tile_k=3584``, ``num_k=2``, covering 7168 of 4096 columns, and the whole
+    projected state came back NaN.
+    """
+    cap = max(align, (min(cap, size_k) // align) * align)
+    for cand in range(cap, 0, -align):
+        if size_k % cand == 0:
+            return cand
+    # ``size_k`` is not a multiple of ``align``; a single full-width tile is
+    # the only exact cover.
+    return size_k
+
+
 @functools.partial(
     jax.jit,
     static_argnames=[
@@ -354,18 +375,28 @@ def proj_and_save_state(
 
     token_page_size = cache.shape[1]
 
+    state_width = state_dim // 2
+    tile_m = state_width
+    tile_k = _select_tile_k(hidden_size)
+
+    # The token dimension must be an exact multiple of `tile_n`.
+    sublane_tile = 8
+    tile_n = min(
+        128, pl.cdiv(num_tokens, sublane_tile) * sublane_tile)
+    padded_num_tokens = pl.cdiv(num_tokens, tile_n) * tile_n
+    if padded_num_tokens != num_tokens:
+        pad = padded_num_tokens - num_tokens
+        hidden_states = jnp.pad(hidden_states, ((0, pad), (0, 0)))
+        positions = jnp.pad(positions, (0, pad))
+        slot_mapping = jnp.pad(slot_mapping, (0, pad), constant_values=-1)
+        num_tokens = padded_num_tokens
+
     dims = Dimensions(
         size_m=state_dim,
         size_k=hidden_size,
         size_n=num_tokens,
         compress_ratio=compress_ratio,
     )
-
-    state_width = state_dim // 2
-    tile_m = state_width
-    tile_k = min(3584, hidden_size)
-    tile_k = max(128, (tile_k // 128) * 128)
-    tile_n = 128
 
     tile_sizes = TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
 

@@ -84,6 +84,35 @@ _MODE_DEFAULTS = {
 }
 
 
+def select_mode(head_dim: int, overlap: bool) -> Mode:
+    """Picks the storage mode from the compressor's head_dim / overlap flag."""
+    if head_dim == LANE:
+        return Mode.CSA_INDEXER
+    return Mode.CSA if overlap else Mode.HCA
+
+
+def physical_page_size(mode: Mode, kv_cache_block_size: int,
+                       compress_ratio: int) -> int:
+    """Rows per page of the uint8 cache array allocated for `mode`.
+
+    This must mirror the shapes ``KVCacheManager._create_dsv4_kv_caches``
+    allocates, because ``compress_norm_rope_store`` re-derives the whole page
+    geometry from ``cache.shape[1]``. Anything that computes slot indices for
+    that array (the compressor wrapper's state-cache ``block_size``, and
+    ``derive_metadata``) has to agree with it or writes land on the wrong page.
+    """
+    # Compressed KV tokens per page (vLLM's ``spec.storage_block_size``).
+    storage_block_size = kv_cache_block_size // compress_ratio
+    if mode is Mode.CSA_INDEXER:
+        # (N, T // 4, 4, 256) u8
+        return storage_block_size // SLOT_PACK
+    if mode is Mode.CSA:
+        # (N, T, 4, 128) u8
+        return storage_block_size
+    # HCA (N, T * 2, 4, 128) u8
+    return storage_block_size * 2
+
+
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class TileSizes:

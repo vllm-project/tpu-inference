@@ -35,6 +35,15 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
     VllmDeepseekV4MLAAttention
+from tpu_inference.models.vllm.experimental import dsv4_stat_tpu as _dstat
+
+
+def _stat_layer_id(prefix: str):
+    """``model.layers.17.attn`` -> 17."""
+    for part in str(prefix).split("."):
+        if part.isdigit():
+            return int(part)
+    return None
 
 
 class DeepseekV4MLP(nn.Module):
@@ -299,6 +308,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
 
+        # Identity for the GPU-vs-TPU intermediate probe. ``compress_ratio``
+        # selects the core-attention kernel (<=1 SWA-only, 4 CSA/sparse_mla,
+        # 128 dense MLA), so bucketing per-layer error by it names the kernel.
+        self._stat_lid = _stat_layer_id(prefix)
+        self._stat_cr = getattr(self.attn, "compress_ratio", None)
+
     def hc_pre(
         self,
         x: torch.Tensor,
@@ -390,19 +405,30 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None,
                torch.Tensor | None]:
+        lid, cr = self._stat_lid, self._stat_cr
+        _dstat.emit("layer_in", x, layer=lid, cr=cr, bump=(lid == 0))
+
         residual = x
         x, post, comb = self.hc_pre(x, self.hc_attn_fn, self.hc_attn_scale,
                                     self.hc_attn_base)
         x = self.attn_norm(x)
+        # attn_in: post-norm hidden states entering attention. The GPU fuses
+        # attn_norm into mhc_pre, so its attn input is normed too -- the two
+        # sides are comparable here.
+        _dstat.emit("attn_in", x, layer=lid, cr=cr)
         x = self.attn(positions, x, None)
+        _dstat.emit("attn_out", x, layer=lid, cr=cr)
         x = self.hc_post(x, residual, post, comb)
 
         residual = x
         x, post, comb = self.hc_pre(x, self.hc_ffn_fn, self.hc_ffn_scale,
                                     self.hc_ffn_base)
         x = self.ffn_norm(x)
+        _dstat.emit("ffn_in", x, layer=lid, cr=cr)
         x = self.ffn(x, input_ids)
+        _dstat.emit("ffn_out", x, layer=lid, cr=cr)
         x = self.hc_post(x, residual, post, comb)
+        _dstat.emit("layer_out", x, layer=lid, cr=cr)
         return x, None, None, None
 
     def forward(

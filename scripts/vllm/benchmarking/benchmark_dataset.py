@@ -192,7 +192,10 @@ class MMLUDataset(BenchmarkDataset):
         assert dataset_path != ""
         dataset = []
         prompts_per_subject = dict()
-        for cvs_file in os.listdir(dataset_path):
+        # Sort so that the dataset (and hence the request order) is
+        # deterministic across machines and runs; os.listdir() order is
+        # filesystem-dependent.
+        for cvs_file in sorted(os.listdir(dataset_path)):
             if cvs_file.endswith(".csv"):
                 subject = " ".join(cvs_file.split("_")[:-1])
                 if subject not in prompts_per_subject:
