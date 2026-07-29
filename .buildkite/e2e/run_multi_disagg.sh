@@ -510,7 +510,7 @@ discover_tpu_device_ids() {
   local prefill_log=/tmp/prefill_tpu_probe.log
   local decode_log=/tmp/decode_tpu_probe.log
   local -a decode_device_ids
-  probe_code='import jax; print("TPU_LOCAL_DEVICE_IDS=" + ",".join(str(device.id) for device in jax.local_devices()), flush=True)'
+  probe_code='import jax; print("TPU_LOCAL_DEVICE_IDS=" + ",".join(str(device.id) for device in jax.local_devices(backend="tpu")), flush=True)'
 
   rm -f "$prefill_log" "$decode_log"
   printf -v remote_probe_cmd '%q ' docker exec "$DECODE_CONTAINER_NAME" \
@@ -683,7 +683,7 @@ launch_cluster_node() {
     "${runtime_env_args[@]}"
     -e HF_TOKEN="${HF_TOKEN:-}"
     -e TPU_MULTIHOST_BACKEND=ray
-    -e JAX_PLATFORMS=tpu
+    -e JAX_PLATFORMS=''
     -e TPU_BACKEND_TYPE=jax
     -e MODEL_IMPL_TYPE=vllm
     "$DOCKER_IMAGE" -c "$ray_start_cmd"
