@@ -119,7 +119,6 @@ fi
 readonly HOSTS_PER_ROLE=1
 readonly CHIPS_PER_HOST=4
 readonly CORES_PER_CHIP=2
-readonly DEVICES_PER_HOST=$(( CHIPS_PER_HOST * CORES_PER_CHIP ))
 ALL_SLICE_HOSTS=("${ORDERED_SLICE_HOSTS[@]}")
 PREFILL_HEAD_IP="$HEAD_INTERNAL_IP"
 DECODE_HEAD_IP="$REMOTE_HOST"
@@ -137,27 +136,12 @@ echo "Tensor parallel size per role: ${PREFILL_TENSOR_PARALLEL_SIZE}"
 
 # TPU7x-16 is one indivisible 2x2x2 topology. Prefill and Decode keep separate
 # Ray control planes, but their TPU workers join one two-process PJRT runtime.
-# Each role is then restricted to the eight global devices on its physical VM.
+# Each role then builds its mesh from the eight devices local to its physical
+# VM, without assuming anything about TPU7x device ID numbering.
 readonly TPU_CHIPS_PER_PROCESS_BOUNDS_VALUE="2,2,1"
 readonly TPU_VISIBLE_CHIPS_VALUE="0,1,2,3"
 readonly TPU_PROCESS_PORT_VALUE=8476
 TPU_PROCESS_ADDRESSES="${ORDERED_SLICE_HOSTS[0]}:${TPU_PROCESS_PORT_VALUE},${ORDERED_SLICE_HOSTS[1]}:${TPU_PROCESS_PORT_VALUE}"
-
-build_device_indexes() {
-  local process_id=$1
-  local first=$(( process_id * DEVICES_PER_HOST ))
-  local last=$(( first + DEVICES_PER_HOST - 1 ))
-  local result=""
-  local device_index
-  for ((device_index = first; device_index <= last; device_index++)); do
-    [[ -z "$result" ]] || result+=","
-    result+="$device_index"
-  done
-  echo "$result"
-}
-
-PREFILL_DEVICE_INDEXES="$(build_device_indexes "$LOCAL_PROCESS_ID")"
-DECODE_DEVICE_INDEXES="$(build_device_indexes "$REMOTE_PROCESS_ID")"
 
 # Populates PROCESS_IDENTITY_ENV_ARGS with the physical TPU process identity.
 # The two roles must use distinct IDs because they share one PJRT runtime.
@@ -195,8 +179,7 @@ echo "Decode Ray head: ${DECODE_HEAD_IP}:${DECODE_RAY_PORT}"
 echo "Prefill actor host: ${PREFILL_HEAD_IP}"
 echo "Decode actor host: ${DECODE_HEAD_IP}"
 echo "Shared PJRT process addresses: ${TPU_PROCESS_ADDRESSES}"
-echo "Prefill global devices: ${PREFILL_DEVICE_INDEXES}"
-echo "Decode global devices: ${DECODE_DEVICE_INDEXES}"
+echo "Each role uses its eight local JAX devices."
 
 run_host_script() {
   local host=$1
@@ -253,11 +236,13 @@ CLEANUP_HOST
 cleanup_start_scripts() {
   local status=0
 
-  if ! rm -f /tmp/start_prefill.sh /tmp/start_decode.sh; then
+  if ! rm -f /tmp/start_prefill.sh /tmp/start_decode.sh \
+    /tmp/prefill_tpu_probe.log /tmp/decode_tpu_probe.log; then
     echo "ERROR: failed to remove local vLLM start scripts." >&2
     status=1
   fi
-  if [[ -e /tmp/start_prefill.sh || -e /tmp/start_decode.sh ]]; then
+  if [[ -e /tmp/start_prefill.sh || -e /tmp/start_decode.sh || \
+    -e /tmp/prefill_tpu_probe.log || -e /tmp/decode_tpu_probe.log ]]; then
     echo "ERROR: local vLLM start scripts still exist after cleanup." >&2
     status=1
   fi
@@ -499,6 +484,78 @@ dump_tpu_process_env() {
   fi
 }
 
+validate_tpu_device_ids() {
+  local role=$1
+  local value=$2
+  local -a device_ids
+  local device_id
+  IFS=, read -r -a device_ids <<< "$value"
+  if (( ${#device_ids[@]} != PREFILL_TENSOR_PARALLEL_SIZE )); then
+    echo "ERROR: ${role} probe returned ${#device_ids[@]} device IDs; expected ${PREFILL_TENSOR_PARALLEL_SIZE}: ${value:-none}" >&2
+    return 1
+  fi
+  for device_id in "${device_ids[@]}"; do
+    if [[ ! "$device_id" =~ ^[0-9]+$ ]]; then
+      echo "ERROR: ${role} probe returned an invalid device ID: ${device_id}" >&2
+      return 1
+    fi
+  done
+}
+
+discover_tpu_device_ids() {
+  local probe_code
+  local remote_probe_cmd
+  local prefill_probe_pid decode_probe_pid
+  local prefill_status=0 decode_status=0
+  local prefill_log=/tmp/prefill_tpu_probe.log
+  local decode_log=/tmp/decode_tpu_probe.log
+  local -a decode_device_ids
+  probe_code='import jax; print("TPU_LOCAL_DEVICE_IDS=" + ",".join(str(device.id) for device in jax.local_devices()), flush=True)'
+
+  rm -f "$prefill_log" "$decode_log"
+  printf -v remote_probe_cmd '%q ' docker exec "$DECODE_CONTAINER_NAME" \
+    python3 -c "$probe_code"
+
+  echo "--- Discovering physical JAX device IDs on both hosts"
+  docker exec "$PREFILL_CONTAINER_NAME" python3 -c "$probe_code" \
+    > "$prefill_log" 2>&1 &
+  prefill_probe_pid=$!
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" "$remote_probe_cmd" \
+    > "$decode_log" 2>&1 &
+  decode_probe_pid=$!
+
+  wait "$prefill_probe_pid" || prefill_status=$?
+  wait "$decode_probe_pid" || decode_status=$?
+  if (( prefill_status != 0 || decode_status != 0 )); then
+    echo "ERROR: JAX device probe failed: prefill=${prefill_status}, decode=${decode_status}" >&2
+    echo "--- Prefill JAX device probe log" >&2
+    cat "$prefill_log" >&2 || true
+    echo "--- Decode JAX device probe log" >&2
+    cat "$decode_log" >&2 || true
+    return 1
+  fi
+
+  PREFILL_DEVICE_INDEXES="$(sed -n 's/^TPU_LOCAL_DEVICE_IDS=//p' "$prefill_log" | tail -n 1)"
+  DECODE_DEVICE_INDEXES="$(sed -n 's/^TPU_LOCAL_DEVICE_IDS=//p' "$decode_log" | tail -n 1)"
+  validate_tpu_device_ids Prefill "$PREFILL_DEVICE_INDEXES"
+  validate_tpu_device_ids Decode "$DECODE_DEVICE_INDEXES"
+
+  local combined=",${PREFILL_DEVICE_INDEXES},"
+  local decode_device_id
+  IFS=, read -r -a decode_device_ids <<< "$DECODE_DEVICE_INDEXES"
+  for decode_device_id in "${decode_device_ids[@]}"; do
+    if [[ "$combined" == *",${decode_device_id},"* ]]; then
+      echo "ERROR: Prefill and Decode device IDs overlap at ${decode_device_id}." >&2
+      return 1
+    fi
+  done
+
+  echo "Prefill local JAX device IDs: ${PREFILL_DEVICE_INDEXES}"
+  echo "Decode local JAX device IDs: ${DECODE_DEVICE_INDEXES}"
+  rm -f "$prefill_log" "$decode_log"
+  sleep "${TPU_PROBE_SETTLE_SECONDS:-5}"
+}
+
 
 PROJECT="$(gcloud config get-value project)"
 GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
@@ -660,6 +717,12 @@ dump_ray_resources "$DECODE_HEAD_IP" Decode "$DECODE_CONTAINER_NAME"
 echo "--- TPU process environment on Prefill and Decode nodes"
 dump_tpu_process_env "$PREFILL_HEAD_IP" prefill "$PREFILL_CONTAINER_NAME"
 dump_tpu_process_env "$DECODE_HEAD_IP" decode "$DECODE_CONTAINER_NAME"
+
+# device_indexes is interpreted as the actual jax.Device.id, not as an offset
+# into jax.devices(). Probe both hosts together so the values match this slice.
+PREFILL_DEVICE_INDEXES=""
+DECODE_DEVICE_INDEXES=""
+discover_tpu_device_ids
 
 # -----------------------------------------------------------------
 # 3. Start vLLM Prefill & Decode Servers
