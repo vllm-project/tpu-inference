@@ -238,6 +238,7 @@ PREFILL_TPU_ENV_ARGS=(
   -e VLLM_TPU_RAY_NODE_IPS="${PREFILL_NODE_IPS}"
   -e VLLM_TPU_RAY_PROCESS_MAP="${PREFILL_PROCESS_MAP}"
   -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+  -e RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
 )
 DECODE_TPU_ENV_ARGS=(
   -e TPU_PROCESS_BOUNDS="1,1,${DECODE_HOSTS_COUNT}"
@@ -249,6 +250,7 @@ DECODE_TPU_ENV_ARGS=(
   -e VLLM_TPU_RAY_NODE_IPS="${DECODE_NODE_IPS}"
   -e VLLM_TPU_RAY_PROCESS_MAP="${DECODE_PROCESS_MAP}"
   -e VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+  -e RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
 )
 
 echo "Shared Ray head: ${SHARED_RAY_HEAD_IP}"
@@ -258,6 +260,19 @@ echo "Decode actor hosts: ${DECODE_NODE_IPS}; process map: ${DECODE_PROCESS_MAP}
 PREFILL_LOG_TAIL_PID=""
 DECODE_LOG_TAIL_PID=""
 CLUSTER_LAUNCHER_PIDS=()
+readonly PROXY_CONTAINER_NAME="disagg-proxy-benchmark"
+
+print_logs() {
+  local log_file
+  for log_file in prefill.txt decode.txt proxy.txt correctness.txt benchmark.txt; do
+    echo "--- ${log_file} ---"
+    if [[ -f "${LOG_DIR}/${log_file}" ]]; then
+      cat "${LOG_DIR}/${log_file}"
+    else
+      echo "(not found)"
+    fi
+  done
+}
 
 stop_vllm_log_streaming() {
   if [[ -n "${PREFILL_LOG_TAIL_PID:-}" ]]; then
@@ -305,9 +320,13 @@ stop_tpu_runtime() {
   run_host_script "$host" "$grace_seconds" "$host" <<'EOF'
 grace_seconds=$1
 host=$2
-if docker inspect node >/dev/null 2>&1; then
-  echo "[cleanup] gracefully stopping TPU runtime on ${host}"
-  if ! docker exec -i node bash -s -- "$grace_seconds" <<'INNER_EOF'
+for runtime_container in node prefill-node decode-node; do
+  if ! docker inspect "$runtime_container" >/dev/null 2>&1; then
+    continue
+  fi
+
+  echo "[cleanup] gracefully stopping TPU runtime ${runtime_container} on ${host}"
+  if ! docker exec -i "$runtime_container" bash -s -- "$grace_seconds" <<'INNER_EOF'
 grace_seconds=$1
 pkill -TERM -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
 end_time=$((SECONDS + grace_seconds))
@@ -323,20 +342,28 @@ fi
 ray stop >/dev/null 2>&1 || true
 INNER_EOF
   then
-    echo "[cleanup] graceful TPU process shutdown timed out or failed on ${host}; proceeding with force cleanup..." >&2
+    echo "[cleanup] graceful TPU process shutdown timed out or failed in ${runtime_container} on ${host}; proceeding with force cleanup..." >&2
   fi
 
-  # Stop and remove node container, as well as disagg proxy benchmark container
-  if ! docker stop --time "$grace_seconds" node >/dev/null 2>&1; then
-    echo "[cleanup] container node did not stop cleanly on ${host}; force removing..." >&2
-    docker stop -t 0 node >/dev/null 2>&1 || true
+  if ! docker stop --time "$grace_seconds" "$runtime_container" >/dev/null 2>&1; then
+    echo "[cleanup] container ${runtime_container} did not stop cleanly on ${host}; force removing..." >&2
+    docker stop -t 0 "$runtime_container" >/dev/null 2>&1 || true
   fi
-  if docker inspect node >/dev/null 2>&1; then
-    docker rm -f node >/dev/null 2>&1 || true
+  if docker inspect "$runtime_container" >/dev/null 2>&1; then
+    docker rm -f "$runtime_container" >/dev/null 2>&1 || true
   fi
-  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
-fi
-! docker inspect node >/dev/null 2>&1
+done
+
+docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
+
+status=0
+for container in node prefill-node decode-node disagg-proxy-benchmark; do
+  if docker inspect "$container" >/dev/null 2>&1; then
+    echo "[cleanup] container ${container} still exists on ${host}" >&2
+    status=1
+  fi
+done
+exit "$status"
 EOF
 }
 
@@ -375,23 +402,29 @@ fi
 
 while (( SECONDS < deadline )); do
   device_busy=0
+  containers_clean=1
   for device in /dev/accel* /dev/vfio/[0-9]*; do
     [[ -e "$device" ]] || continue
     "${fuser_cmd[@]}" "$device" >/dev/null 2>&1 && device_busy=1
   done
+  for container in node prefill-node decode-node disagg-proxy-benchmark; do
+    if docker inspect "$container" >/dev/null 2>&1; then
+      containers_clean=0
+    fi
+  done
 
-  if ! docker inspect node >/dev/null 2>&1 \
+  if (( containers_clean == 1 )) \
     && ! pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 \
     && (( device_busy == 0 )) \
     && [[ ! -e /tmp/libtpu_lockfile ]] \
-    && { ! command -v ss >/dev/null 2>&1 || ! ss -ltnH | awk '$4 ~ /:(6379|8400|8476|9400)$/ { found=1 } END { exit !found }'; }; then
+    && { ! command -v ss >/dev/null 2>&1 || ! ss -ltnH | awk '$4 ~ /:(6379|8000|8400|8476|9400)$/ { found=1 } END { exit !found }'; }; then
     exit 0
   fi
   sleep 2
 done
 
 echo "[cleanup] host ${host} is not clean; attempting force cleanup..." >&2
-docker rm -f node disagg-proxy-benchmark >/dev/null 2>&1 || true
+docker rm -f node prefill-node decode-node disagg-proxy-benchmark >/dev/null 2>&1 || true
 pkill -KILL -f '[v]llm serve|[A]PIServer|[E]ngineCore|[p]ython|[r]ay' >/dev/null 2>&1 || true
 if [[ -e /tmp/libtpu_lockfile ]]; then
   echo "[cleanup] removing stale /tmp/libtpu_lockfile on ${host}" >&2
@@ -401,12 +434,18 @@ sleep 1
 
 # Re-check after force cleanup
 device_busy=0
+containers_clean=1
 for device in /dev/accel* /dev/vfio/[0-9]*; do
   [[ -e "$device" ]] || continue
   "${fuser_cmd[@]}" "$device" >/dev/null 2>&1 && device_busy=1
 done
+for container in node prefill-node decode-node disagg-proxy-benchmark; do
+  if docker inspect "$container" >/dev/null 2>&1; then
+    containers_clean=0
+  fi
+done
 
-if ! docker inspect node >/dev/null 2>&1 \
+if (( containers_clean == 1 )) \
   && ! pgrep -f '[v]llm serve|[A]PIServer|[E]ngineCore' >/dev/null 2>&1 \
   && (( device_busy == 0 )) \
   && [[ ! -e /tmp/libtpu_lockfile ]]; then
@@ -415,7 +454,9 @@ if ! docker inspect node >/dev/null 2>&1 \
 fi
 
 echo "[cleanup] host ${host} still not clean after force cleanup" >&2
-docker ps --filter name='^/node$' --format 'container={{.Names}} status={{.Status}}' >&2 || true
+docker ps --filter name='^/node$' --filter name='^/prefill-node$' \
+  --filter name='^/decode-node$' --filter name='^/disagg-proxy-benchmark$' \
+  --format 'container={{.Names}} status={{.Status}}' >&2 || true
 pgrep -af '[v]llm serve|[A]PIServer|[E]ngineCore' >&2 || true
 for device in /dev/accel* /dev/vfio/[0-9]*; do
   [[ -e "$device" ]] || continue
@@ -425,8 +466,41 @@ exit 1
 EOF
 }
 
+cleanup_generated_files() {
+  local status=0
+  local host
+
+  if ! rm -f /tmp/start_prefill.sh /tmp/start_decode.sh; then
+    echo "[cleanup] failed to remove local vLLM start scripts" >&2
+    status=1
+  fi
+  if [[ -e /tmp/start_prefill.sh || -e /tmp/start_decode.sh ]]; then
+    echo "[cleanup] local vLLM start scripts still exist" >&2
+    status=1
+  fi
+
+  if [[ -n "${DECODE_HEAD_IP:-}" && "$DECODE_HEAD_IP" != "$HEAD_INTERNAL_IP" ]]; then
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
+      'rm -f "$HOME/tpu-inference/scripts/start_decode.sh" /tmp/vllm_serve_decode.log && test ! -e "$HOME/tpu-inference/scripts/start_decode.sh" && test ! -e /tmp/vllm_serve_decode.log'; then
+      echo "[cleanup] failed to remove or verify Decode head temporary files on ${DECODE_HEAD_IP}" >&2
+      status=1
+    fi
+  fi
+
+  for host in "${SHARED_CLUSTER_HOSTS[@]:1}"; do
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
+      'rm -f "$HOME/tpu-inference/scripts/multihost/run_cluster.sh" && test ! -e "$HOME/tpu-inference/scripts/multihost/run_cluster.sh"'; then
+      echo "[cleanup] failed to remove or verify copied run_cluster.sh on ${host}" >&2
+      status=1
+    fi
+  done
+
+  return "$status"
+}
+
 cleanup() {
   local exit_code=${1:-0}
+  local dump_logs=${2:-true}
   local grace_seconds="${TPU_CLEANUP_GRACE_SECONDS:-120}"
   local verify_seconds="${TPU_CLEANUP_VERIFY_SECONDS:-120}"
   local settle_seconds="${TPU_RUNTIME_SETTLE_SECONDS:-30}"
@@ -442,10 +516,12 @@ cleanup() {
 
   echo "[cleanup] stopping disaggregated TPU runtimes"
   stop_vllm_log_streaming
-  docker rm -f disagg-proxy-benchmark >/dev/null 2>&1 || true
+  docker rm -f "$PROXY_CONTAINER_NAME" >/dev/null 2>&1 || true
 
-  docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
-  if [[ -n "${DECODE_HEAD_IP:-}" ]]; then
+  if [[ "$dump_logs" == "true" ]]; then
+    docker cp node:/root/vllm_serve_prefill.log "$LOG_DIR/prefill.txt" >/dev/null 2>&1 || true
+  fi
+  if [[ "$dump_logs" == "true" && -n "${DECODE_HEAD_IP:-}" ]]; then
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}" \
       "rm -f /tmp/vllm_serve_decode.log; docker cp node:/root/vllm_serve_decode.log /tmp/vllm_serve_decode.log >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
     scp "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HEAD_IP}:/tmp/vllm_serve_decode.log" \
@@ -471,6 +547,8 @@ cleanup() {
 
   wait_for_cluster_launchers "$grace_seconds" || failed=1
 
+  cleanup_generated_files || failed=1
+
   cleanup_pids=()
   verify_tpu_clean "$HEAD_INTERNAL_IP" "$verify_seconds" &
   cleanup_pids+=("$!")
@@ -486,14 +564,11 @@ cleanup() {
     sleep "$settle_seconds"
   fi
 
-  if (( exit_code != 0 )); then
-    echo "[cleanup] run failed with exit code ${exit_code}; recent logs follow" >&2
-    for log_file in prefill.txt decode.txt proxy.txt correctness.txt benchmark.txt; do
-      if [[ -s "$LOG_DIR/$log_file" ]]; then
-        echo "--- ${log_file} (last 30 lines)" >&2
-        tail -n 30 "$LOG_DIR/$log_file" >&2
-      fi
-    done
+  if [[ "$dump_logs" == "true" ]]; then
+    if (( exit_code != 0 )); then
+      echo "[cleanup] run failed with exit code ${exit_code}; complete logs follow" >&2
+    fi
+    print_logs
   fi
 
   if (( failed != 0 )); then
@@ -659,7 +734,7 @@ dump_tpu_process_env() {
   local host=$1
   local role=$2
   local dump_cmd
-  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nTPU_WORKER_ID=%s\nJAX_PROCESS_ID=%s\nJAX_NUM_PROCESSES=%s\nTPU_PROCESS_BOUNDS=%s\nTPU_CHIPS_PER_PROCESS_BOUNDS=%s\nTPU_PROCESS_ADDRESSES=%s\nTPU_VISIBLE_CHIPS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${TPU_WORKER_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${JAX_NUM_PROCESSES-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}" "${TPU_CHIPS_PER_PROCESS_BOUNDS-<unset>}" "${TPU_PROCESS_ADDRESSES-<unset>}" "${TPU_VISIBLE_CHIPS-<unset>}"'
+  dump_cmd='printf "CLOUD_TPU_TASK_ID=%s\nTPU_WORKER_ID=%s\nJAX_PROCESS_ID=%s\nJAX_NUM_PROCESSES=%s\nJAX_PLATFORMS=%s\nTPU_PROCESS_BOUNDS=%s\nTPU_CHIPS_PER_PROCESS_BOUNDS=%s\nTPU_PROCESS_ADDRESSES=%s\nTPU_VISIBLE_CHIPS=%s\nRAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=%s\n" "${CLOUD_TPU_TASK_ID-<unset>}" "${TPU_WORKER_ID-<unset>}" "${JAX_PROCESS_ID-<unset>}" "${JAX_NUM_PROCESSES-<unset>}" "${JAX_PLATFORMS-<unset>}" "${TPU_PROCESS_BOUNDS-<unset>}" "${TPU_CHIPS_PER_PROCESS_BOUNDS-<unset>}" "${TPU_PROCESS_ADDRESSES-<unset>}" "${TPU_VISIBLE_CHIPS-<unset>}" "${RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS-<unset>}"'
 
   echo "--- TPU process environment: ${role} (${host})"
   if [[ "$host" == "$HEAD_INTERNAL_IP" ]]; then
@@ -667,6 +742,77 @@ dump_tpu_process_env() {
   else
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" \
       "docker exec node bash -c '$dump_cmd'"
+  fi
+}
+
+probe_role_tpu_runtime() {
+  local role=$1
+  local expected_global_devices=$2
+  shift 2
+  local -a hosts=("$@")
+  local -a probe_pids=()
+  local expected_local_devices=$(( CHIPS_PER_HOST * CORES_PER_CHIP ))
+  local host
+  local pid
+  local failed=0
+
+  echo "--- Probing ${role} PJRT runtime on hosts: ${hosts[*]}"
+  for host in "${hosts[@]}"; do
+    run_host_script "$host" "$role" "$host" "$expected_local_devices" \
+      "$expected_global_devices" <<'PROBE_TPU' &
+set -euo pipefail
+role=$1
+host=$2
+expected_local=$3
+expected_global=$4
+
+if ! docker inspect node >/dev/null 2>&1; then
+  echo "ERROR: ${role} host ${host} has no node container" >&2
+  exit 1
+fi
+
+if ! docker exec node bash -c 'compgen -G "/dev/accel*" >/dev/null || compgen -G "/dev/vfio/[0-9]*" >/dev/null'; then
+  echo "ERROR: ${role} host ${host} exposes no TPU device files inside container node" >&2
+  exit 1
+fi
+
+docker exec -e JAX_PLATFORMS=tpu node python3 -c '
+import jax
+import sys
+
+role, host = sys.argv[1:3]
+expected_local, expected_global = map(int, sys.argv[3:5])
+local_devices = jax.local_devices(backend="tpu")
+global_devices = jax.devices(backend="tpu")
+if len(local_devices) != expected_local:
+    raise RuntimeError(
+        f"{role} host {host}: expected {expected_local} local TPU devices, "
+        f"got {len(local_devices)}: {local_devices}")
+if len(global_devices) != expected_global:
+    raise RuntimeError(
+        f"{role} host {host}: expected {expected_global} global TPU devices, "
+        f"got {len(global_devices)}: {global_devices}")
+missing_coords = [device for device in local_devices
+                  if not hasattr(device, "coords")]
+if missing_coords:
+    raise RuntimeError(
+        f"{role} host {host}: non-TPU devices returned by JAX: "
+        f"{missing_coords}")
+print(f"TPU_PROBE_OK role={role} host={host} "
+      f"local={len(local_devices)} global={len(global_devices)} "
+      f"platforms={sorted({device.platform for device in global_devices})}",
+      flush=True)
+' "$role" "$host" "$expected_local" "$expected_global"
+PROBE_TPU
+    probe_pids+=("$!")
+  done
+
+  for pid in "${probe_pids[@]}"; do
+    wait "$pid" || failed=1
+  done
+  if (( failed != 0 )); then
+    echo "ERROR: ${role} PJRT probe failed; refusing to start vLLM with CPU fallback" >&2
+    return 1
   fi
 }
 
@@ -691,7 +837,7 @@ DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
-cleanup 0
+cleanup 0 false
 
 # -----------------------------------------------------------------
 # 1. Start one shared Ray cluster for Prefill and Decode actors
@@ -708,7 +854,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e JAX_PROCESS_ID=0 \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS=tpu \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
@@ -768,7 +914,7 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${SHARE
   -e JAX_PROCESS_ID='${worker_process_id}' \
   -e HF_TOKEN='${HF_TOKEN:-}' \
   -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
+  -e JAX_PLATFORMS=tpu \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE=vllm \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
@@ -786,6 +932,15 @@ echo "--- Waiting for the shared Ray cluster to fully form..."
 wait_for_ray_cluster_members "$TOTAL_HOSTS_USED" "${RAY_CLUSTER_TIMEOUT:-900}"
 
 dump_ray_resources "$SHARED_RAY_HEAD_IP" "Shared Prefill/Decode"
+
+# Probe each role as a complete PJRT group. JAX_PLATFORMS=tpu turns missing
+# libtpu/device access into an immediate error instead of silently returning CPU
+# devices, which would later fail in get_device_topology_order_id().
+probe_role_tpu_runtime prefill "$PREFILL_TENSOR_PARALLEL_SIZE" \
+  "${PREFILL_HOSTS[@]}"
+probe_role_tpu_runtime decode "$DECODE_TENSOR_PARALLEL_SIZE" \
+  "${DECODE_HOSTS[@]}"
+sleep "${TPU_PROBE_SETTLE_SECONDS:-5}"
 
 echo "--- TPU process environment on all Prefill and Decode nodes"
 for host in "${PREFILL_HOSTS[@]}"; do

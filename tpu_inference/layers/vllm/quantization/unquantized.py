@@ -166,6 +166,17 @@ class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
     def __init__(self, mesh):
         self.mesh = mesh
 
+    def embedding(self, layer: torch.nn.Module,
+                  input_: torch.Tensor) -> torch.Tensor:
+        weight = jax_view(layer.weight)
+        token_ids = jax_view(input_)
+        output_sharding = NamedSharding(
+            self.mesh,
+            P(ShardingAxisName.ATTN_DATA, *([None] * token_ids.ndim)),
+        )
+        return torch_view(
+            weight.at[token_ids].get(out_sharding=output_sharding))
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_sharding = NamedSharding(self.mesh,
                                         P(ShardingAxisName.MLP_TENSOR, None))
