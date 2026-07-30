@@ -21,6 +21,7 @@ to the existing JAX fp8 quant methods.
 from types import MappingProxyType
 from typing import Optional
 
+from safetensors import safe_open
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import \
     CompressedTensorsConfig as VllmUpstreamCTConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -36,8 +37,13 @@ from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
 from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
     Fp8TensorwiseMergedLinearMethod)
+from tpu_inference.layers.jax.quantization.mxfp4 import (
+    MXFP4_PACK_QUANTIZED_FORMAT, CompressedTensorsMxfp4MoEMethod)
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class _Fp8BlockConfigShim:
@@ -57,10 +63,51 @@ def _weight_block_size(weight_quant) -> Optional[list[int]]:
     return list(block) if block is not None else None
 
 
+def _packed_module_paths(model_name_or_path: Optional[str],
+                         download_dir: Optional[str]) -> Optional[set[str]]:
+    """Module paths that own a ``weight_packed`` tensor in the checkpoint.
+
+    Returns ``None`` when the checkpoint cannot be inspected, which callers
+    read as "no information, trust the config".
+    """
+    if not model_name_or_path:
+        return None
+    # Imported here: weight_utils pulls in the model stack, and this module is
+    # imported from the quantization package that stack itself imports.
+    from tpu_inference.models.jax.utils.weight_utils import \
+        get_model_weights_files
+    try:
+        weights_files = get_model_weights_files(model_name_or_path,
+                                                download_dir)
+        packed = set()
+        for path in weights_files:
+            with safe_open(path, framework="numpy") as f:
+                for name in f.keys():
+                    if name.endswith(".weight_packed"):
+                        packed.add(name[:-len(".weight_packed")])
+    except Exception as e:
+        logger.warning(
+            "[compressed-tensors] could not read the checkpoint tensor names "
+            "for %s (%s: %s); falling back to the config's target/ignore lists "
+            "to decide which layers are compressed. If the checkpoint leaves "
+            "some targeted modules uncompressed, loading them will fail.",
+            model_name_or_path,
+            type(e).__name__, e)
+        return None
+    logger.info(
+        "[compressed-tensors] checkpoint %s stores %d modules compressed; "
+        "using that (not the config ignore list) to select quant methods.",
+        model_name_or_path, len(packed))
+    return packed
+
+
 class CompressedTensorsConfig(QuantizationConfig):
     """JAX-native ``compressed-tensors`` config; registered in the quant map."""
 
-    def __init__(self, hf_quant_config: dict):
+    def __init__(self,
+                 hf_quant_config: dict,
+                 model_name_or_path: str | None = None,
+                 download_dir: str | None = None):
         # Reuse upstream parsing of config_groups -> target_scheme_map + ignore.
         self._ct = VllmUpstreamCTConfig.from_config(hf_quant_config)
         self._target_scheme_map = self._ct.target_scheme_map
@@ -69,6 +116,32 @@ class CompressedTensorsConfig(QuantizationConfig):
         # semantics; not yet wired for the JAX path, so match on plain names.
         self._fused_mapping = getattr(self._ct, "packed_modules_mapping",
                                       MappingProxyType({}))
+        self._format = hf_quant_config.get("format")
+        # The config's ignore list is not a reliable statement of what is
+        # actually compressed: a checkpoint can leave a target module
+        # uncompressed without listing it (Kimi-K3 stores the MoE latent
+        # down/up projections and the attention-residual projections as plain
+        # bf16 while its ignore list only covers self_attn / shared_experts /
+        # mlp / lm_head). The checkpoint's own tensor names are authoritative,
+        # so record which module paths carry a `weight_packed` tensor.
+        self._packed_modules = _packed_module_paths(model_name_or_path,
+                                                    download_dir)
+
+    def _is_packed_in_checkpoint(self, prefix: str) -> bool:
+        """Whether the checkpoint actually stores ``prefix`` compressed.
+
+        Falls back to trusting the config when the checkpoint could not be
+        inspected (``None``), so behaviour is unchanged for callers that do not
+        pass a model path.
+        """
+        if self._packed_modules is None:
+            return True
+        if prefix in self._packed_modules:
+            return True
+        # MoE layers own a subtree of per-expert modules
+        # (`<prefix>.<expert_id>.<proj>`), so match on the subtree.
+        subtree = prefix + "."
+        return any(p.startswith(subtree) for p in self._packed_modules)
 
     def _match_target(self, layer: JaxModule, prefix: str) -> Optional[dict]:
         """Return the config-group scheme for ``layer``, or None if unmatched.
@@ -96,10 +169,12 @@ class CompressedTensorsConfig(QuantizationConfig):
                                    fused_mapping=self._fused_mapping):
                 return UnquantizedFusedMoEMethod(layer)
             scheme = self._match_target(layer, prefix)
-            if scheme is None:
+            if scheme is None or not self._is_packed_in_checkpoint(prefix):
                 return UnquantizedFusedMoEMethod(layer)
             weight_quant = scheme.get("weights")
             input_quant = scheme.get("input_activations")
+            if self._format == MXFP4_PACK_QUANTIZED_FORMAT:
+                return CompressedTensorsMxfp4MoEMethod(layer, weight_quant)
             if self._ct._is_fp8_w8a8(weight_quant, input_quant):
                 return Fp8FusedMoEMethod(_weight_block_size(weight_quant))
             return UnquantizedFusedMoEMethod(layer)
@@ -111,6 +186,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         if should_ignore_layer(prefix,
                                ignore=self._ignore,
                                fused_mapping=self._fused_mapping):
+            return UnquantizedLinearMethod(linear_config)
+
+        if not self._is_packed_in_checkpoint(prefix):
+            # Targeted by the config groups, but stored uncompressed.
             return UnquantizedLinearMethod(linear_config)
 
         scheme = self._match_target(layer, prefix)

@@ -22,8 +22,44 @@ from jaxtyping import Float
 
 from tpu_inference.layers.common.process_weights.moe_weights import \
     UnfusedMoEWeights
+from tpu_inference.layers.common.quantization import dequantize_tensor
 from tpu_inference.layers.jax.activation import (SITU_BETA, SITU_LINEAR_BETA,
                                                  apply_gated_activation)
+
+
+def dequantize_unfused_moe_weights(weights: UnfusedMoEWeights,
+                                   cast_dtype: jnp.dtype) -> UnfusedMoEWeights:
+    """Materialize block-quantized expert kernels at `cast_dtype`.
+
+    DENSE_MAT is the reference/testing backend and multiplies the expert
+    kernels with plain einsums, so quantized weights (e.g. MXFP4 experts held
+    as `float4_e2m1fn` plus per-group scales) are expanded here rather than
+    inside the matmul. Weights whose scale is None are passed through.
+
+    Each kernel is `(E, K, N)` with the contracting axis blocked, so its scale
+    is `(E, K // block, N)` and dequantization runs along axis 1.
+    """
+    if all(s is None
+           for s in (weights.w1_weight_scale, weights.w2_weight_scale,
+                     weights.w3_weight_scale)):
+        return weights
+
+    def expand(weight, scale):
+        if scale is None:
+            return weight
+        return dequantize_tensor(weight, scale, axis=1, out_dtype=cast_dtype)
+
+    return UnfusedMoEWeights(
+        w1_weight=expand(weights.w1_weight, weights.w1_weight_scale),
+        w1_weight_scale=None,
+        w1_bias=weights.w1_bias,
+        w2_weight=expand(weights.w2_weight, weights.w2_weight_scale),
+        w2_weight_scale=None,
+        w2_bias=weights.w2_bias,
+        w3_weight=expand(weights.w3_weight, weights.w3_weight_scale),
+        w3_weight_scale=None,
+        w3_bias=weights.w3_bias,
+    )
 
 
 def dense_moe_fwd(
@@ -137,7 +173,9 @@ def dense_moe_func(
     Forward pass of the dense MoE layer.  This is a naive implementation
     and thus should not be used in production.
 
-    TODO (jacobplatin): we probably want to support quantization at some point.
+    Block-quantized expert kernels are dequantized to `cast_dtype` up front
+    (see `dequantize_unfused_moe_weights`); the einsums below always run on
+    unquantized weights.
 
     Args:
         weights: The weights of the dense Moe layer.
@@ -161,6 +199,7 @@ def dense_moe_func(
     assert isinstance(
         weights,
         UnfusedMoEWeights), "Expected unfused weights for DENSE_MAT backend"
+    weights = dequantize_unfused_moe_weights(weights, cast_dtype)
 
     weights_TX, indices_TX = gating_output
     one_hot_indices_TXE = jax.nn.one_hot(indices_TX,

@@ -20,12 +20,14 @@ import torch
 from flax import nnx
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.layers.common.moe import MoEBackend, moe_apply
+from tpu_inference.layers.common.moe import (FusedMoEMethodBase, MoEBackend,
+                                             moe_apply)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+    FusedMoEWeights, UnfusedMoEWeights, process_moe_weights,
+    quantize_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quantization import (
-    MXFP4_REQUANTIZED_BLOCK_SIZE, dequantize_tensor_from_mxfp4_packed)
+    MXFP4_BLOCK_SIZE, MXFP4_REQUANTIZED_BLOCK_SIZE,
+    dequantize_tensor_from_mxfp4_packed, e8m0_to_fp32, u8_unpack_e2m1)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
@@ -254,6 +256,208 @@ class Mxfp4FusedMoEMethod(QuantizeMethodBase):
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {MXFP4_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
             )
 
+        return moe_apply(layer, x_TD, router_logits, weights,
+                         layer.moe_backend, layer.mesh,
+                         self.extra_backend_kwargs)
+
+
+MXFP4_PACK_QUANTIZED_FORMAT = "mxfp4-pack-quantized"
+
+# compressed-tensors names each expert projection separately, and checkpoints
+# use either the HF `wN` spelling or the expanded one. `w1`/`gate_proj` is the
+# gate branch, `w3`/`up_proj` the up branch, `w2`/`down_proj` the down branch.
+_CT_EXPERT_PROJECTIONS = {
+    "w1": "gating",
+    "gate_proj": "gating",
+    "w3": "up_proj",
+    "up_proj": "up_proj",
+    "w2": "down_proj",
+    "down_proj": "down_proj",
+}
+
+# Staging attribute names, keyed by the projection above.
+_CT_STAGED_ATTRS = {
+    "gating": ("gate_packed", "gate_scale"),
+    "up_proj": ("up_packed", "up_scale"),
+    "down_proj": ("down_packed", "down_scale"),
+}
+
+# Final parameter names, keyed by the projection above.
+_CT_FINAL_ATTRS = {
+    "gating": "kernel_gating_EDF",
+    "up_proj": "kernel_up_proj_EDF",
+    "down_proj": "kernel_down_proj_EFD",
+}
+
+
+class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
+    """MXFP4 routed experts stored in compressed-tensors `mxfp4-pack-quantized`.
+
+    Unlike the GPT-OSS MXFP4 path above, this decode is **lossless**: the
+    checkpoint's fp4 codes and E8M0 group scales are carried through unchanged
+    (nibbles bitcast to `float4_e2m1fn`, exponents expanded to the exact
+    powers of two they denote) instead of being dequantized to fp32 and
+    re-quantized at a larger block size. Kimi-K3's experts are
+    quantization-aware-trained, so recomputing the scales would move the
+    weights away from the values training converged on.
+
+    Layout differences from GPT-OSS handled here:
+      * one tensor per expert per projection (`experts.<i>.w1.weight_packed`)
+        rather than one stacked `gate_up_proj_blocks` per layer, so the expert
+        axis is built by concatenation while loading;
+      * the checkpoint stores `[out, in]` with the *input* axis packed, while
+        the expert kernels are `(E, in, out)`, so the decoded values and their
+        scales are transposed once at the end of loading.
+    """
+
+    def __init__(self, layer: JaxMoE, weight_quant=None):
+        FusedMoEMethodBase.__init__(self, layer.moe_backend, "model")
+        self.group_size = getattr(weight_quant, "group_size",
+                                  None) or MXFP4_BLOCK_SIZE
+        num_bits = getattr(weight_quant, "num_bits", 4)
+        strategy = getattr(weight_quant, "strategy", "group")
+        if num_bits != 4 or str(strategy).endswith("tensor"):
+            raise NotImplementedError(
+                f"[mxfp4-ct] {layer.prefix}: only 4-bit group-wise MXFP4 is "
+                f"supported, got num_bits={num_bits} strategy={strategy}.")
+        if layer.moe_backend in MoEBackend.fused_moe_backends():
+            # The fused GMM backends pick experts from the raw router logits
+            # themselves, which drops the router's expert-score correction
+            # bias, and they have no `situ` activation branch -- both of which
+            # the Kimi models need. Fail loudly rather than serve wrong tokens.
+            raise NotImplementedError(
+                f"[mxfp4-ct] {layer.prefix}: compressed-tensors MXFP4 experts "
+                f"are wired for the unfused MoE backends (DENSE_MAT, "
+                f"MEGABLX_GMM), got {layer.moe_backend}.")
+
+    def create_weights_jax(self, layer: JaxMoE, *weight_args, rngs,
+                           **extra_weight_attrs) -> None:
+        """Replace the bf16 expert kernels with packed MXFP4 staging tensors."""
+        E = layer.num_local_experts
+        D = layer.hidden_size
+        F = layer.intermediate_size_moe
+        gs = self.group_size
+        for dim, name in ((D, "hidden_size"), (F, "intermediate_size_moe")):
+            if dim % gs:
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: {name}={dim} is not a "
+                    f"multiple of the MXFP4 group size {gs}.")
+
+        for param_name in _CT_FINAL_ATTRS.values():
+            delattr(layer, param_name)
+
+        # Checkpoint orientation, expert axis prepended: [E, out, in].
+        for projection, (out, in_) in (("gating", (F, D)), ("up_proj", (F, D)),
+                                       ("down_proj", (D, F))):
+            packed_attr, scale_attr = _CT_STAGED_ATTRS[projection]
+            for attr, shape in ((packed_attr, (E, out, in_ // 2)),
+                                (scale_attr, (E, out, in_ // gs))):
+                param = nnx.Param(jnp.zeros(shape, dtype=jnp.uint8),
+                                  eager_sharding=False)
+                param.set_metadata('mesh', cpu_mesh())
+                param.set_metadata('_weights_to_load', [None] * E)
+                setattr(layer, attr, param)
+
+    def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
+                     weights: Iterable[tuple[str, torch.Tensor]]) -> set:
+        """Stage per-expert `weight_packed` / `weight_scale` tensors."""
+        loaded_names = set()
+        for torch_name, torch_weight in weights:
+            parts = torch_name.split(".")
+            if len(parts) < 3:
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: cannot parse expert tensor "
+                    f"name '{torch_name}'; expected "
+                    f"<...>.<expert_id>.<projection>.<weight_packed|weight_scale>."
+                )
+            kind, projection_name, expert_id = parts[-1], parts[-2], parts[-3]
+            projection = _CT_EXPERT_PROJECTIONS.get(projection_name)
+            if projection is None or kind not in ("weight_packed",
+                                                  "weight_scale"):
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: unexpected checkpoint tensor "
+                    f"'{torch_name}'. Expected one of "
+                    f"{sorted(_CT_EXPERT_PROJECTIONS)} carrying weight_packed "
+                    f"or weight_scale.")
+            packed_attr, scale_attr = _CT_STAGED_ATTRS[projection]
+            attr = packed_attr if kind == "weight_packed" else scale_attr
+            jax_param = getattr(layer, attr)
+            slot = int(expert_id)
+            # `[None] + shape` so the expert axis exists for concatenation.
+            jax_param._weights_to_load[slot] = jax_array_from_reshaped_torch(
+                torch_weight, reshape_dims=(1, ) + tuple(torch_weight.shape))
+            loaded_names.add(attr)
+
+        logger.debug(f"Staged {len(loaded_names)} MXFP4 tensor groups for "
+                     f"{layer.prefix} MoE layer.")
+        return loaded_names
+
+    def process_weights_after_loading(self, layer: JaxMoE) -> bool:
+        """Decode the staged tensors into device-resident fp4 + fp32 scales."""
+        staged_attrs = [a for pair in _CT_STAGED_ATTRS.values() for a in pair]
+        if not all(
+                all(w is not None
+                    for w in getattr(layer, attr)._weights_to_load)
+                for attr in staged_attrs):
+            # Expert weights can be split across safetensors files, so this is
+            # called more than once; wait until every expert has arrived.
+            return False
+
+        mesh = layer.mesh
+        decoded = {}
+        # Keep the decode off device until the sharding is applied.
+        with cpu_mesh_context():
+            for projection, (packed_attr,
+                             scale_attr) in _CT_STAGED_ATTRS.items():
+                packed = jnp.concatenate(getattr(layer,
+                                                 packed_attr)._weights_to_load,
+                                         axis=0)
+                scale_u8 = jnp.concatenate(getattr(
+                    layer, scale_attr)._weights_to_load,
+                                           axis=0)
+                # [E, out, in//2] uint8 -> [E, out, in] fp4 -> [E, in, out].
+                values = jnp.swapaxes(u8_unpack_e2m1(packed), 1, 2)
+                # [E, out, in//group] E8M0 -> exact fp32 powers of two, then
+                # [E, in//group, out] to match the kernel's (E, K, N) weights.
+                scale = jnp.swapaxes(e8m0_to_fp32(scale_u8), 1, 2)
+                decoded[projection] = (values, scale)
+                delattr(layer, packed_attr)
+                delattr(layer, scale_attr)
+
+        for projection, (values, scale) in decoded.items():
+            final_attr = _CT_FINAL_ATTRS[projection]
+            sharding = (layer.efd_sharding
+                        if projection == "down_proj" else layer.edf_sharding)
+            named = jax.sharding.NamedSharding(mesh, P(*sharding))
+            setattr(layer, final_attr, nnx.Param(jax.device_put(values,
+                                                                named)))
+            setattr(layer, f"{final_attr}_weight_scale",
+                    nnx.Param(jax.device_put(scale, named)))
+
+        logger.info(
+            "[mxfp4-ct] %s: decoded %d MXFP4 expert projections losslessly "
+            "(group size %d, checkpoint scales passed through).", layer.prefix,
+            len(decoded), self.group_size)
+        return True
+
+    def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
+                  router_logits) -> jax.Array:
+        x_TD = jnp.asarray(x, layer.dtype)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD,
+            jax.sharding.NamedSharding(layer.mesh,
+                                       P(*layer.activation_ffw_td)))
+        weights = UnfusedMoEWeights(
+            w1_weight=layer.kernel_gating_EDF.value,
+            w1_weight_scale=layer.kernel_gating_EDF_weight_scale.value,
+            w1_bias=None,
+            w2_weight=layer.kernel_up_proj_EDF.value,
+            w2_weight_scale=layer.kernel_up_proj_EDF_weight_scale.value,
+            w2_bias=None,
+            w3_weight=layer.kernel_down_proj_EFD.value,
+            w3_weight_scale=layer.kernel_down_proj_EFD_weight_scale.value,
+            w3_bias=None,
+        )
         return moe_apply(layer, x_TD, router_logits, weights,
                          layer.moe_backend, layer.mesh,
                          self.extra_backend_kwargs)
