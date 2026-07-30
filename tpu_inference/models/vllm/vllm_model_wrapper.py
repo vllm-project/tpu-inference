@@ -250,6 +250,18 @@ class VllmModelWrapper:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
 
+        # Dynamically register any standard Tensor attributes named 'per_layer_embeddings'
+        # as non-persistent buffers so they are sharded to TPU and wrapped by torchax.
+        for name, submodule in vllm_model.named_modules():
+            if hasattr(submodule, "per_layer_embeddings"):
+                tensor = getattr(submodule, "per_layer_embeddings")
+                if isinstance(tensor, torch.Tensor) and not any(
+                        tensor is b for b in submodule.buffers(recurse=False)):
+                    delattr(submodule, "per_layer_embeddings")
+                    submodule.register_buffer("per_layer_embeddings",
+                                              tensor,
+                                              persistent=False)
+
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
