@@ -1,0 +1,120 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/* Interactive UI Components Styles */
+
+/* Base styles for the Command Generator (PyTorch/SGLang style matrix) */
+.command-generator-container {
+    margin-top: 1.5rem;
+    margin-bottom: 1.5rem;
+    border: 1px solid var(--md-default-fg-color--lightest);
+    border-radius: 8px;
+    background-color: var(--md-default-bg-color);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+    overflow: hidden;
+    font-family: var(--md-text-font), sans-serif;
+}
+
+.cg-options-group {
+    display: flex;
+    align-items: stretch;
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+    padding: 12px 24px;
+    gap: 0.5rem;
+}
+
+.cg-label {
+    font-weight: 600;
+    width: 110px;
+    flex-shrink: 0;
+    color: var(--md-default-fg-color);
+    display: flex;
+    align-items: center;
+    font-size: 16px;
+}
+
+.cg-btn {
+    flex: 1;
+    padding: 8px 16px;
+    border: 1px solid var(--md-default-fg-color--lightest);
+    border-radius: 4px;
+    background-color: var(--md-default-bg-color);
+    color: var(--md-default-fg-color);
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: 500;
+    text-align: center;
+    transition: all 0.2s ease;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+}
+
+.cg-btn:hover {
+    background-color: rgba(0, 0, 0, 0.03);
+}
+
+/* Vibrant PyTorch / SGLang orange-red color for active */
+.cg-btn.active {
+    background-color: var(--md-typeset-a-color); 
+    color: white;
+    border-color: var(--md-typeset-a-color);
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+}
+
+body[data-md-color-scheme="slate"] .cg-btn.active {
+    background-color: var(--md-typeset-a-color);
+    color: white;
+    border-color: var(--md-typeset-a-color);
+}
+
+body[data-md-color-scheme="slate"] .cg-btn:hover:not(.active) {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
+.cg-instructions {
+    padding: 1.5rem 1.5rem 0.5rem;
+    font-size: 0.9rem;
+    color: var(--md-default-fg-color);
+}
+
+.cg-output-container {
+    padding: 0.5rem 1.5rem 1.5rem;
+}
+
+.cg-output-container pre {
+    margin: 0 !important;
+    border-radius: 6px !important;
+    background-color: rgba(0, 0, 0, 0.03) !important;
+    border: 1px solid var(--md-default-fg-color--lightest) !important;
+}
+
+body[data-md-color-scheme="slate"] .cg-output-container pre {
+    background-color: rgba(0, 0, 0, 0.2) !important;
+}
+
+@media screen and (max-width: 60em) {
+    .cg-options-group {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .cg-label {
+        width: auto;
+        margin-bottom: 0.5rem;
+    }
+    .cg-btn {
+        flex: none;
+        width: 100%;
+    }
+}
