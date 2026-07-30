@@ -259,8 +259,14 @@ def test_real_layer_forward_matches_a_cpu_dequant_reference(
     )
     with jax.set_mesh(mesh):
         expanded = dequantize_unfused_moe_weights(weights, jnp.float32)
+        # HIGHEST precision so the tolerance below is testing the loaded
+        # weights, not XLA:TPU's default bf16-passes fp32 matmul (which alone
+        # costs ~2e-3 relative over this 3584-long contraction).
         gate = np.asarray(
-            jnp.einsum("TD,EDF->TEF", jnp.asarray(x), expanded.w1_weight))
+            jnp.einsum("TD,EDF->TEF",
+                       jnp.asarray(x),
+                       expanded.w1_weight,
+                       precision=jax.lax.Precision.HIGHEST))
 
     reference = np.empty_like(gate, dtype=np.float64)
     for expert_id in range(n):
