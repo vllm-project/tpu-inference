@@ -128,8 +128,6 @@ steps:
         commands:
           - rm -f .coverage.part2.${TPU_VERSION:-tpu6e}
           - |
-            # Exports K3_TINY_* for the Kimi suites; no-op off tpu7x.
-            source .buildkite/scripts/fetch_k3_tiny_fixtures.sh
             .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_multi_request_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py --ignore=/workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py --ignore=/workspace/tpu_inference/tests/runner/test_async_logprobs.py --ignore=/workspace/tpu_inference/tests/runner/test_processed_logprobs.py --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference; if [ -f .coverage ]; then cp .coverage /tmp/hf_home/.coverage.part2.${TPU_VERSION:-tpu6e}; else exit 1; fi"
           - cp /mnt/disks/persist/models/.coverage.part2.${TPU_VERSION:-tpu6e} ./
 
@@ -157,6 +155,35 @@ steps:
             EXIT_CODE=$?
             rm -f .coverage.part* .coveragerc pex coverage.pex .coverage
             exit $EXIT_CODE
+
+      # Kimi-K3 runs in its own step rather than in part2. Its suites each
+      # build a model, so they add ~15 minutes that the JAX compilation cache
+      # does not pay back on a second run, and part2 is already the longest
+      # step in this pipeline. They stay collected-and-skipped in part2 --
+      # nothing there exports K3_TINY_* -- so they run exactly once.
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests - Kimi-K3"
+        key: ${TPU_VERSION:-tpu6e}_test_7_4
+        soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        agents:
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        # Kimi-K3 needs the MLA and KDA kernels, so every suite below skips
+        # off tpu7x and the step would provision a TPU to report skips.
+        if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+        commands:
+          - |
+            # Exports K3_TINY_* for the Kimi suites; without it they skip.
+            source .buildkite/scripts/fetch_k3_tiny_fixtures.sh
+            .buildkite/scripts/run_in_docker.sh \
+              python3 -m pytest -s -v -x \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_router.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4_real_layer.py \
+              /workspace/tpu_inference/tests/layers/common/test_kda_attention.py \
+              /workspace/tpu_inference/tests/layers/common/test_kda_attention_dp.py
 
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
