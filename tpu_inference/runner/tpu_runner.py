@@ -913,6 +913,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_idx] = start_idx + num_sampled_tokens
             self.input_batch.num_tokens[
                 req_idx] = start_idx + num_sampled_tokens
+            # Repetition-penalty seen-mask fix (async scheduling): the mask for
+            # this step was scattered in _prepare_inputs BEFORE this backfill, so
+            # for [start_idx : end_idx) it saw the placeholder token (0) instead of
+            # the real sampled ids and advanced its monotonic high-water mark past
+            # them. Rewind the mark to start_idx so the next mask build re-scatters
+            # the now-real ids. Without this, every generated token is permanently
+            # missing from the seen-mask under async scheduling, so
+            # repetition_penalty never penalizes the output and the model loops.
+            # min() so a not-yet-drained prefill backlog is never skipped.
+            if self.input_batch.seen_token_ids_mask is not None:
+                self.input_batch.seen_scattered_upto[req_idx] = min(
+                    int(self.input_batch.seen_scattered_upto[req_idx]),
+                    int(start_idx))
             # Replace previous placeholder
             for j in range(pre_num_placeholder_tokens):
                 req_state.output_token_ids.pop()
