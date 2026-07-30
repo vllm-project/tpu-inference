@@ -34,6 +34,7 @@ from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
 from tpu_inference.models.common import model_loader
 from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
+from tpu_inference.models.jax.utils.weight_utils import LoadableWithIterator
 
 
 class MockModelA:
@@ -540,3 +541,97 @@ class TestGetModel:
         mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
                                               None)
         assert result == "vllm_model_sentinel"
+
+
+class TestResolveModelArchitectureWithRunaiStreamer:
+    """`--load-format runai_streamer` must not silently change implementation.
+
+    Under `MODEL_IMPL_TYPE=auto` the streamer check decides whether a model is
+    served by its flax_nnx implementation or by vLLM's. Getting it wrong is not
+    an error, it is a different model implementation running than the one the
+    architecture registers, so each capability the loader actually supports is
+    pinned here.
+    """
+
+    @staticmethod
+    def _config(architecture: str, load_format: str) -> MagicMock:
+        config = MagicMock(spec=VllmConfig)
+        config.model_config = MagicMock()
+        config.model_config.hf_config = PretrainedConfig(
+            architectures=[architecture])
+        config.load_config = MagicMock()
+        config.load_config.load_format = load_format
+        return config
+
+    @pytest.mark.parametrize("architecture", [
+        "DeepseekV3ForCausalLM",
+        "KimiK3ForConditionalGeneration",
+        "Qwen3ForCausalLM",
+    ])
+    def test_every_other_iterator_loadable_architecture_moves_too(
+            self, architecture):
+        """The registry's other `WeightLoader`-less models, listed explicitly.
+
+        These are the architectures whose resolution this widening changes,
+        so the set is written down rather than left to be discovered: each
+        used to resolve to "vllm" under the streamer and now resolves to its
+        own implementation. No configuration in this repository reaches the
+        change, because every caller that passes `--load-format
+        runai_streamer` also pins MODEL_IMPL_TYPE.
+        """
+        config = self._config(architecture, "runai_streamer")
+        assert model_loader.resolve_model_architecture(config, False) \
+            == "flax_nnx"
+
+    def test_loadable_with_iterator_model_stays_on_flax(self):
+        """A model that loads through `LoadableWithIterator` streams fine.
+
+        KimiLinearForCausalLM has no `WeightLoader`; it takes the weights
+        iterator through the mixin, which is how most flax_nnx models load.
+        Requiring `WeightLoader` sent it to the vLLM implementation instead.
+        """
+        assert issubclass(
+            model_loader._get_model_architecture(
+                PretrainedConfig(architectures=["KimiLinearForCausalLM"])),
+            LoadableWithIterator)
+
+        config = self._config("KimiLinearForCausalLM", "runai_streamer")
+        assert model_loader.resolve_model_architecture(config, False) \
+            == "flax_nnx"
+
+    def test_weight_loader_model_stays_on_flax(self):
+        """The other supported way in: a `BaseWeightLoader` subclass."""
+        config = self._config("Gemma4ForCausalLM", "runai_streamer")
+        assert model_loader.resolve_model_architecture(config, False) \
+            == "flax_nnx"
+
+    def test_model_supporting_neither_falls_back_to_vllm(self):
+        """The guard the check exists for is still in force."""
+
+        class NotStreamable:
+            pass
+
+        config = self._config("Qwen3ForCausalLM", "runai_streamer")
+        with patch.object(model_loader,
+                          "_get_model_architecture",
+                          return_value=NotStreamable):
+            assert model_loader.resolve_model_architecture(config, False) \
+                == "vllm"
+
+    def test_non_streaming_load_format_ignores_the_capability(self):
+        """Without the streamer the capability is irrelevant to the choice."""
+
+        class NotStreamable:
+            pass
+
+        config = self._config("Qwen3ForCausalLM", "auto")
+        with patch.object(model_loader,
+                          "_get_model_architecture",
+                          return_value=NotStreamable):
+            assert model_loader.resolve_model_architecture(config, False) \
+                == "flax_nnx"
+
+    def test_vllm_preferred_architecture_still_wins(self):
+        """Streamable or not, a vLLM-preferred architecture resolves to vLLM."""
+        config = self._config("Qwen3MoeForCausalLM", "runai_streamer")
+        assert model_loader.resolve_model_architecture(config, False) == "vllm"
