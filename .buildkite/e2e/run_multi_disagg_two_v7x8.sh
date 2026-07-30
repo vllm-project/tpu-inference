@@ -27,7 +27,9 @@
 #
 # Requirements:
 #   * Both instances are single-host TPU v7x-8 resources.
-#   * Passwordless SSH from Prefill to Decode is already authorized.
+#   * When DECODE_TPU_NAME is provided, the active gcloud identity can grant
+#     SSH access to the Decode TPU VM. With DECODE_HOST_IP only, the generated
+#     public key must already be authorized on Decode.
 #   * Docker, gcloud, and access to the TPU inference Artifact Registry exist
 #     on both instances.
 #   * The VPC firewall allows Prefill-to-Decode traffic for the Decode API
@@ -46,6 +48,7 @@ readonly TENSOR_PARALLEL_SIZE=$((CHIPS_PER_HOST * CORES_PER_CHIP))
 readonly TPU_VISIBLE_CHIPS_VALUE="0,1,2,3"
 
 SSH_USER="${SSH_USER:-$(whoami)}"
+SSH_KEY_EXPIRE_AFTER="${SSH_KEY_EXPIRE_AFTER:-6h}"
 HOST_HF_HOME="${HOST_HF_HOME:-/mnt/disks/persist/models}"
 DECODE_HOST_HF_HOME="${DECODE_HOST_HF_HOME:-${HOST_HF_HOME}}"
 LOG_DIR="${LOG_DIR:-${HOME}/logs}"
@@ -117,7 +120,7 @@ PREFILL_ZONE="${PREFILL_ZONE:-$(get_metadata_value "instance/zone" | awk -F/ '{p
 PREFILL_TPU_NAME="${PREFILL_TPU_NAME:-$(get_metadata_value "instance/description")}"
 
 if [[ ! -f "${HOME}/.ssh/id_rsa" ]]; then
-  echo "--- Generating an SSH key; its public key must already be authorized on Decode."
+  echo "--- Generating an SSH key for Prefill-to-Decode access"
   mkdir -p "${HOME}/.ssh"
   ssh-keygen -t rsa -b 4096 -N "" -f "${HOME}/.ssh/id_rsa" -q
 fi
@@ -188,6 +191,43 @@ run_decode_host() {
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HOST_IP}" "${command}"
 }
 
+authorize_decode_ssh_key() {
+  if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HOST_IP}" true \
+    >/dev/null 2>&1; then
+    echo "--- SSH key is already authorized on Decode"
+    return
+  fi
+
+  if [[ -z "${DECODE_TPU_NAME:-}" ]]; then
+    echo "ERROR: SSH key is not authorized for ${SSH_USER}@${DECODE_HOST_IP}." >&2
+    echo "Set DECODE_TPU_NAME (and DECODE_ZONE when it cannot be discovered)" >&2
+    echo "so the script can register ${HOME}/.ssh/id_rsa.pub with gcloud." >&2
+    return 1
+  fi
+
+  DECODE_ZONE="${DECODE_ZONE:-${PREFILL_ZONE}}"
+  if [[ -z "${DECODE_ZONE}" ]]; then
+    echo "ERROR: Set DECODE_ZONE so the SSH key can be registered on Decode." >&2
+    return 1
+  fi
+
+  echo "--- Authorizing SSH key on Decode TPU VM ${DECODE_TPU_NAME}"
+  gcloud compute tpus tpu-vm ssh \
+    "${SSH_USER}@${DECODE_TPU_NAME}" \
+    --zone "${DECODE_ZONE}" \
+    --worker 0 \
+    --internal-ip \
+    --ssh-key-file "${HOME}/.ssh/id_rsa" \
+    --ssh-key-expire-after "${SSH_KEY_EXPIRE_AFTER}" \
+    --command true \
+    --quiet
+
+  if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HOST_IP}" true; then
+    echo "ERROR: gcloud registered the key, but direct SSH to Decode still failed." >&2
+    return 1
+  fi
+}
+
 get_remote_metadata_value() {
   local path=$1
   run_decode_host curl -fs -H "Metadata-Flavor: Google" \
@@ -235,6 +275,8 @@ preflight() {
   echo "Decode:  ${DECODE_HOST_IP} (${decode_type})"
   echo "Each role uses one PJRT process and tensor parallel size ${TENSOR_PARALLEL_SIZE}."
 }
+
+authorize_decode_ssh_key
 
 # Expansion of HOME must happen on the Decode host.
 # shellcheck disable=SC2016
