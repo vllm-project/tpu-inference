@@ -156,6 +156,7 @@ wait_for_server() {
   echo "   -> Found PID: $pid"
 
   local end_time=$((SECONDS + timeout))
+  local polls=0
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
     if curl -fs "localhost:${port}/health" > /dev/null; then
@@ -169,6 +170,15 @@ wait_for_server() {
       echo "Displaying logs from $container_name:$log_path"
       docker exec "$container_name" cat "$log_path" || true
       return 1
+    fi
+
+    # 4. Show where startup has got to. Without this the log only appears
+    # after the server is up or has died, so a large model's weight load and
+    # warmup -- tens of minutes -- look identical to a hang.
+    polls=$((polls + 1))
+    if ((polls % 12 == 0)); then
+      echo "--- $service_name still starting (${SECONDS}s of ${timeout}s); last lines of $log_path:"
+      docker exec "$container_name" tail -n 3 "$log_path" || true
     fi
 
     sleep 5
