@@ -28,7 +28,7 @@ steps:
       DECODE_ZONE: us-central1-c
     commands:
       - |
-        .buildkite/e2e/run_multi_disagg_two_v7x8.sh
+        .buildkite/e2e/run_multi_disagg.sh
 
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation"
     key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_CorrectnessTest"
