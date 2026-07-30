@@ -134,11 +134,18 @@ class TestMxfp4Config:
 
     def test_registry_returns_mxfp4_config(self):
         """`gpt_oss_mxfp4` selects Mxfp4Config in the quant config registry."""
-        vllm_config = SimpleNamespace(model_config=SimpleNamespace(
-            quantization=MXFP4,
-            hf_config=SimpleNamespace(
-                quantization_config={"quant_method": MXFP4}),
-        ))
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(
+                quantization=MXFP4,
+                model="openai/gpt-oss-120b",
+                hf_config=SimpleNamespace(
+                    quantization_config={"quant_method": MXFP4}),
+            ),
+            # Configs are handed where the weights live so they can consult
+            # the checkpoint itself; `Mxfp4Config` ignores it, but the
+            # registry reads both off the vLLM config.
+            load_config=SimpleNamespace(download_dir=None),
+        )
 
         quant_config = get_tpu_quantization_config(vllm_config)
 
