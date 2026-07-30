@@ -441,7 +441,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
-    # Controls whether FP8 layers perform incremental weight loading and sharding.
+    # Controls whether FP8 linear and MoE layers perform incremental weight
+    # loading, sharding, and immediate host RAM cleanup. When enabled, weights
+    # are sharded and transferred to TPU device memory layer-by-layer (or per
+    # MoE expert shard), freeing PyTorch CPU storage and trimming glibc malloc
+    # arenas after each layer. This prevents host CPU memory exhaustion (OOM)
+    # when initializing large FP8 models on smaller RAM TPUs such as TPU8i.
     "VLLM_INCREMENTAL_FP8_LOADING":
     env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
 }

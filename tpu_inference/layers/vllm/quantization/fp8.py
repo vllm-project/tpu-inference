@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import ctypes
+import ctypes.util
 import gc
 from typing import Optional, Union
 
@@ -63,6 +64,8 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+# TODO: Use custom op with overriding weight loading class so we will have a better
+# and cleaner interface.
 def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
     """Safely frees the underlying CPU memory storage of a PyTorch tensor.
 
@@ -77,23 +80,20 @@ def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
         tensor.set_(torch.storage.UntypedStorage())
 
 
-try:
-    _libc = ctypes.CDLL("libc.so.6")
-except Exception:
-    _libc = None
-
-
 def _release_host_memory() -> None:
     """Frees CPU host memory and trims malloc arena if incremental FP8 loading is enabled."""
     if not envs.VLLM_INCREMENTAL_FP8_LOADING:
         return
     gc.collect()
     jax.effects_barrier()
-    if _libc is not None and hasattr(_libc, "malloc_trim"):
-        try:
-            _libc.malloc_trim(0)
-        except Exception as e:
-            logger.debug(f"[fp8-incremental] malloc_trim failed: {e}")
+    try:
+        # Dynamically locate the system standard C library (e.g. libc.so.6 on Linux)
+        # to invoke glibc's malloc_trim(0) and return freed CPU pages to the kernel.
+        libc_name = ctypes.util.find_library("c")
+        if libc_name:
+            ctypes.CDLL(libc_name).malloc_trim(0)
+    except Exception as e:
+        logger.debug(f"[fp8-incremental] malloc_trim failed: {e}")
 
 
 @register_quantization_config(FP8)
@@ -403,6 +403,9 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
 
         layer._loaded_weights.add((param_name, expert_id, shard_id))
 
+        # For block-quantized FP8 MoE, each expert has 6 parameter shards:
+        # w1_weight, w1_weight_scale_inv, w3_weight, w3_weight_scale_inv,
+        # w2_weight, and w2_weight_scale_inv.
         expected_shards = 6 * layer.global_num_experts
 
         if len(layer._loaded_weights) >= expected_shards:
