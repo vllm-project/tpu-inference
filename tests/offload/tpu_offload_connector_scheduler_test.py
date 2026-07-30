@@ -36,6 +36,7 @@ class MockVllmConfig:
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
         self.parallel_config = self.Parallel()
+        self.kv_transfer_config = None
 
     class Model:
         model = "test-model"
