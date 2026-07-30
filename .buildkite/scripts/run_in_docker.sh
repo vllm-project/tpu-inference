@@ -56,6 +56,9 @@ ENV_VARS=(
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
   -e USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-}"
+  # Engine configuration a step cannot express through the named variables
+  # above; see the script that reads it.
+  -e ACCURACY_MODEL_ARGS_JSON="${ACCURACY_MODEL_ARGS_JSON:-}"
   # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
   # everywhere else; the suites that read them skip when they are empty.
   -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
