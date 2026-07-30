@@ -288,7 +288,7 @@ def _pcp_rank_reduce(
     denom_safe = jnp.where(denom == 0.0, 1.0, denom)[..., None]
     out_merged = o_weighted_sum.astype(denom.dtype) / denom_safe
     lse_merged = jnp.where(denom == 0.0, -jnp.inf, max_lse_own + jnp.log(denom))
-    return lse_merged, lse_merged
+    return out_merged, lse_merged
 
 
 def pcp_forward(
@@ -347,7 +347,7 @@ def pcp_forward(
         def all_gather_tokens(x):
             return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
-        def to_token_order(x):
+        def to_token_order(x):  # rank-order chunks -> global token order
             return all_gather_tokens(x).reshape(two_p, C, *x.shape[1:])[inv_row].reshape(
                 padded_q_len, *x.shape[1:])
 
@@ -377,6 +377,7 @@ def pcp_forward(
         context_out, context_lse = _pcp_rank_reduce(context_out, context_lse, pcp_axis, pcp_size)
 
         # Current phase: local Q (head+tail chunks) attends all-gathered current KV.
+        # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
         # remap_kv: if C aligns with page_size, all_gather_tokens() avoids an extra gather-reorder.
         page_size = kv_cache_local.shape[1]
         remap_kv = (C >= page_size) and (C % page_size == 0)
