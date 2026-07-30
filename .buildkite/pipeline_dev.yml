@@ -56,9 +56,14 @@ steps:
   # across all 16 chips, which also puts attention data-parallelism at 16
   # (dp-attention is required by MLA), i.e. dp groups that span the host
   # boundary.
+  #
+  # A 2048-token prefill budget against a 131072-token context forces the
+  # needle prompts through ~55 prefill chunks each, so the hybrid cache has
+  # to carry recurrent state across chunk seams and across the host boundary
+  # at the same time.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (2 hosts) Kimi-Linear-48B-A3B-Instruct"
-    key: tpu7x_kimi48b_multihost
+  - label: "tpu7x multi-host (2 hosts) Kimi-Linear-48B-A3B-Instruct 128K"
+    key: tpu7x_kimi48b_multihost_128k
     env:
       TPU_VERSION: "tpu7x"
       MODEL_IMPL_TYPE: "flax_nnx"
@@ -72,8 +77,9 @@ steps:
             --port 8000 \
             --tensor-parallel-size 16 \
             --trust-remote-code \
-            --max-model-len 2048 \
-            --max-num-seqs 32 \
+            --max-model-len 131072 \
+            --max-num-seqs 16 \
+            --max-num-batched-tokens 2048 \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
@@ -81,4 +87,5 @@ steps:
             --additional-config '{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":1,\"expert_parallelism\":16,\"enable_dp_attention\":true}}}'" \
           "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
             --concurrency 8 \
-            --long-tokens 512"
+            --long-tokens 512 \
+            --needle-tokens 128000"
