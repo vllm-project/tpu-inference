@@ -171,17 +171,18 @@ async def run_grpo_stream(
 
             assistant_response = "".join(full_response_text)
 
-            # Prefer the server-reported counts: they are what the engine
-            # actually processed. The fallbacks below reproduce them closely,
-            # but rely on the local tokenizer matching the server's template.
-            reported = usage or {}
-            prompt_tokens = reported.get("prompt_tokens")
-            completion_tokens = reported.get("completion_tokens")
+            # Token counts come from the server: they are what the engine
+            # actually processed. Counting client-side instead is inaccurate
+            # in both directions -- re-encoding detokenized text is not
+            # round-trip identity, and any tokens the server reports outside
+            # "content" are invisible here.
+            if not usage:
+                raise RuntimeError(
+                    "server did not report usage; it must support "
+                    "stream_options.include_usage")
 
-            if completion_tokens is None:
-                assistant_tokens = len(tokenizer.encode(assistant_response))
-            else:
-                assistant_tokens = completion_tokens
+            prompt_tokens = usage["prompt_tokens"]
+            assistant_tokens = usage["completion_tokens"]
 
             if ttft is None:
                 ttft = total_time_ms
@@ -195,13 +196,6 @@ async def run_grpo_stream(
                 "role": "assistant",
                 "content": assistant_response
             })
-
-            if prompt_tokens is None:
-                prompt_tokens = len(
-                    tokenizer.apply_chat_template(messages[:-1],
-                                                  add_generation_prompt=True,
-                                                  tokenize=True,
-                                                  return_dict=False))
 
             turn_stat = {
                 "group_idx": group_idx,
