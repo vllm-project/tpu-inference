@@ -25,24 +25,6 @@ from transformers import AutoTokenizer
 
 
 def make_client_session() -> aiohttp.ClientSession:
-    """Creates an aiohttp session suited to long-running benchmark requests.
-
-    Two defaults of aiohttp are unsuitable here and cause spurious failures
-    that look like server errors even though every response is HTTP 200:
-
-    - The default ``ClientTimeout(total=5*60)`` aborts a turn that legitimately
-      takes longer than 5 minutes, which happens at high concurrency with large
-      ``--output-len-max``. It surfaces as ``asyncio.TimeoutError``, whose
-      ``str()`` is empty, so the recorded error message is blank.
-    - Pooled keep-alive connections may be reused after the server has already
-      closed them during an idle gap between turns, raising
-      ``ServerDisconnectedError``. ``force_close`` opens a fresh connection per
-      request instead.
-
-    Returns:
-        aiohttp.ClientSession: Session with no total timeout and no connection
-        reuse.
-    """
     return aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=None,
                                       sock_read=None,
