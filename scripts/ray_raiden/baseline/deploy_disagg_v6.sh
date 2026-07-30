@@ -30,10 +30,24 @@ gcloud container clusters get-credentials "${CLUSTER}" \
   --project="${PROJECT}" \
   --zone="${ZONE}"
 
-echo "=== Step 2: Deploying Baseline Disaggregated Serving Manifest (${MANIFEST_FILE}) ==="
+echo "=== Step 2: Deleting old pods and waiting for cleanup ==="
+kubectl --context="${KUBE_CONTEXT}" delete lws vllm-prefill vllm-decode --ignore-not-found=true
+kubectl --context="${KUBE_CONTEXT}" delete deployment vllm-disagg-proxy --ignore-not-found=true
+kubectl --context="${KUBE_CONTEXT}" delete pod -l llm-d.ai/inferenceServing=true --ignore-not-found=true
+kubectl --context="${KUBE_CONTEXT}" delete pod -l app=vllm-proxy --ignore-not-found=true
+
+echo "=== Cleaning PVC storage (pvc-vllm-p and pvc-vllm-d) to free cached models ==="
+kubectl --context="${KUBE_CONTEXT}" delete pvc pvc-vllm-p pvc-vllm-d --ignore-not-found=true
+
+echo "Waiting for old pods to be completely deleted..."
+kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l llm-d.ai/inferenceServing=true --timeout=300s 2>/dev/null || true
+kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l app=vllm-proxy --timeout=300s 2>/dev/null || true
+
+
+echo "=== Step 3: Deploying Baseline Disaggregated Serving Manifest (${MANIFEST_FILE}) ==="
 kubectl --context="${KUBE_CONTEXT}" apply -f "${MANIFEST_FILE}"
 
-echo "=== Step 3: Waiting for vLLM Prefill & Decode Engines ==="
+echo "=== Step 4: Waiting for vLLM Prefill & Decode Engines ==="
 START_TIME=$(date +%s)
 while true; do
   PREFILL_COUNT=$(kubectl --context="${KUBE_CONTEXT}" logs vllm-prefill-0 2>/dev/null | grep -c -E "Uvicorn running on|Engine 000:" || true)
@@ -50,7 +64,7 @@ while true; do
 done
 echo ""
 
-echo "=== Step 4: Sending benchmark request through disaggregated proxy ==="
+echo "=== Step 5: Sending benchmark request through disaggregated proxy ==="
 kubectl --context="${KUBE_CONTEXT}" exec deployment/vllm-disagg-proxy -- \
   curl -s "http://localhost:10000/v1/chat/completions" \
     -H "Content-Type: application/json" \

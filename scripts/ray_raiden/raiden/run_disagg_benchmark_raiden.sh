@@ -24,24 +24,7 @@ INPUT_LEN="${INPUT_LEN:-8192}"
 OUTPUT_LEN="${OUTPUT_LEN:-1024}"
 RPS="${RPS:-2}"
 
-echo "=== Step 1: Polling vLLM Prefill & Decode Engine Readiness ==="
-START_TIME=$(date +%s)
-while true; do
-  PREFILL_READY=$(kubectl logs vllm-prefill-0 2>/dev/null | grep -c -E "Uvicorn running on|Engine 000:" || true)
-  DECODE_READY=$(kubectl logs vllm-decode-0 2>/dev/null | grep -c -E "Uvicorn running on|Engine 000:" || true)
-
-  if [ "$PREFILL_READY" -gt 0 ] && [ "$DECODE_READY" -gt 0 ]; then
-    echo "✅ Prefill and Decode vLLM engines are ready!"
-    break
-  fi
-
-  ELAPSED=$(( $(date +%s) - START_TIME ))
-  echo -ne "Waiting for engines... (${ELAPSED}s elapsed)\r"
-  sleep 5
-done
-echo ""
-
-echo "=== Step 2: Running vLLM Serving Benchmark inside Proxy Pod ==="
+echo "=== Step 1: Running vLLM Serving Benchmark inside Proxy Pod ==="
 echo "Configuration: ${NUM_PROMPTS} prompts, ${INPUT_LEN} input tokens, ${OUTPUT_LEN} output tokens @ ${RPS} RPS..."
 echo ""
 
@@ -60,7 +43,7 @@ kubectl exec deployment/vllm-disagg-proxy -- vllm bench serve \
   --metric-percentiles "95,97,99"
 
 echo ""
-echo "=== Step 3: Fetching KV Cache Hit Rate & Transfer Metrics from Decode Engine ==="
+echo "=== Step 2: Fetching KV Cache Hit Rate & Transfer Metrics from Decode Engine ==="
 kubectl logs vllm-decode-0 --tail=30 | grep -E "External prefix cache hit rate|GPU KV cache usage" | tail -n 5 || true
 echo ""
 echo "=== Benchmark Complete ==="
