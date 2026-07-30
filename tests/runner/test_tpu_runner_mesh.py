@@ -97,7 +97,7 @@ class TestTPUModelRunnerMeshInit:
         mock_vllm_config.sharding_config.device_indexes = [0, 1, 2, 3]
 
         with patch.dict(os.environ, {'NEW_MODEL_DESIGN': ''}), \
-             patch('jax.make_mesh') as mock_jax_mesh, \
+             patch('jax.sharding.Mesh') as mock_jax_mesh, \
              patch('tpu_inference.runner.tpu_runner.logger'):
 
             mock_mesh = Mock()
@@ -109,12 +109,10 @@ class TestTPUModelRunnerMeshInit:
             call_args = mock_jax_mesh.call_args
 
             # Verify mesh_shape
-            assert call_args[0][0] == (4, 8)
+            assert call_args[0][0].shape == (4, 8)
             # Verify axis_names
             assert call_args[0][1] == ("data", "model")
             # Verify devices
-            assert call_args[1]['devices'] == runner_instance.devices
-
             assert runner_instance.mesh == mock_mesh
 
     def test_init_mesh_new_model_single_slice(self, runner_instance,

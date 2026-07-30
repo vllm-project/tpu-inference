@@ -976,10 +976,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.vllm_config.sharding_config.device_indexes is not None
             and len(self.vllm_config.sharding_config.device_indexes) > 0)
 
+        num_devices = int(np.prod(mesh_shape))
+        if len(self.devices) < num_devices:
+            raise ValueError(
+                f"Insufficient devices for 2D mesh: found {len(self.devices)}, "
+                f"expected {num_devices} for mesh shape {mesh_shape}.")
+
         if enforce_device_order:
-            return jax.make_mesh(mesh_shape,
-                                 MESH_AXIS_NAMES_2D,
-                                 devices=self.devices)
+            return jax.sharding.Mesh(
+                np.array(self.devices[:num_devices]).reshape(mesh_shape),
+                MESH_AXIS_NAMES_2D,  # preserves given order; defaults to AxisType.Auto
+            )
         else:
             return make_optimized_mesh(mesh_shape,
                                        MESH_AXIS_NAMES_2D,
