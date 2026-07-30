@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Context-parallel (CP) attention: DCP (Decode Context Parallelism) and PCP (Prefill Context Parallelism)"""
 
 import jax
@@ -92,7 +91,6 @@ def _rpa_cp_call(
     )
 
 
-
 def _dcp_a2a_reduce(
     o: jax.Array,
     lse: jax.Array,
@@ -114,8 +112,15 @@ def _dcp_a2a_reduce(
     local_heads = o.shape[1]
     head_dim = o.shape[2]
 
-    o_gathered = lax.all_to_all(o, axis, split_axis=1, concat_axis=0, tiled=True)
-    lse_gathered = lax.all_to_all(lse, axis, split_axis=1, concat_axis=0,
+    o_gathered = lax.all_to_all(o,
+                                axis,
+                                split_axis=1,
+                                concat_axis=0,
+                                tiled=True)
+    lse_gathered = lax.all_to_all(lse,
+                                  axis,
+                                  split_axis=1,
+                                  concat_axis=0,
                                   tiled=True)
     # shapes: (local_tokens * axis_size, local_heads // axis_size, ...)
 
@@ -131,7 +136,7 @@ def _dcp_a2a_reduce(
     # query-phase result.
     weights = jnp.where(jnp.isneginf(out_lse[None]), 0.0, weights)
     out_merge = jnp.einsum('d t h, d t h f -> t h f', weights, o_chunks)
-    return out_merge, out_lse 
+    return out_merge, out_lse
 
 
 def dcp_forward(
@@ -151,11 +156,11 @@ def dcp_forward(
     """DCP attention forward — single shard_map over the 'dcp' axis.
 
     Inside the shard_map body:
-      1. all_gather Q heads    → cache phase needs full head view per rank
-      2. cache phase           → attend full Q against this rank's KV cache
-      3. _dcp_a2a_reduce      → all_to_all: head slices become token slices
-      4. current phase         → attend local Q against this rank's new tokens
-      5. merge_attn_states     → LSE-weighted combine
+      1. all_gather Q heads    cache phase needs full head view per rank
+      2. cache phase           attend full Q against this rank's KV cache
+      3. _dcp_a2a_reduce       all_to_all: head slices become token slices
+      4. current phase         attend local Q against this rank's new tokens
+      5. merge_attn_states     lse-weighted combine
     """
     if head_dim_original is None:
         head_dim_original = q.shape[-1]
@@ -192,7 +197,9 @@ def dcp_forward(
                   v_scale=v_scale,
                   sliding_window=attention_chunk_size)
 
-    def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local, page_indices_local, cu_q_lens_local, distribution_local, cp_rank):
+    def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
+                  page_indices_local, cu_q_lens_local, distribution_local,
+                  cp_rank):
         # Context phase: all_gather Q heads so every rank attends with dcp times of heads.
         # ATTN_HEAD includes 'dcp', so q_local has heads / (model * dcp).
         # After all_gather along heads axis: heads / model  (= KV_HEAD sharding).
@@ -215,7 +222,8 @@ def dcp_forward(
             **common)
 
         # Rank reduce: swap head shards for token shards, merge partial LSE.
-        context_out, context_lse = _dcp_a2a_reduce(context_out, context_lse, dcp_axis, dcp_size)
+        context_out, context_lse = _dcp_a2a_reduce(context_out, context_lse,
+                                                   dcp_axis, dcp_size)
 
         # Current phase: local Q (head-sharded by ATTN_HEAD) attends new tokens.
         curr_out, kv_cache_updated, curr_lse = _rpa_cp_call(
@@ -233,7 +241,8 @@ def dcp_forward(
             update_kv_cache=True,
             **common)
 
-        out, _ = merge_attn_states(context_out, context_lse, curr_out, curr_lse)
+        out, _ = merge_attn_states(context_out, context_lse, curr_out,
+                                   curr_lse)
         return kv_cache_updated, out.astype(q.dtype)
 
     return jax.shard_map(
@@ -244,10 +253,10 @@ def dcp_forward(
             kv_spec,
             kv_spec,
             kv_cache_spec,
-            P(ShardingAxisName.ATTN_DATA),   # kv_lens
-            P(ShardingAxisName.ATTN_DATA),   # page_indices
-            P(ShardingAxisName.ATTN_DATA),   # cu_q_lens
-            P(ShardingAxisName.ATTN_DATA),   # distribution
+            P(ShardingAxisName.ATTN_DATA),  # kv_lens
+            P(ShardingAxisName.ATTN_DATA),  # page_indices
+            P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
+            P(ShardingAxisName.ATTN_DATA),  # distribution
             P(ShardingAxisName.KV_CONTEXT),  # cp_rank_global
         ),
         out_specs=(kv_cache_spec, q_spec),
@@ -278,15 +287,17 @@ def _pcp_rs_reduce(
     max_lse_safe = jnp.where(jnp.isinf(max_lse), 0.0, max_lse)
     weights = jnp.exp(lse - max_lse_safe)
     o_weighted_sum = lax.psum_scatter(o * weights[..., None].astype(o.dtype),
-                                     axis,
-                                     scatter_dimension=0,
-                                     tiled=True)
+                                      axis,
+                                      scatter_dimension=0,
+                                      tiled=True)
     denom = lax.psum_scatter(weights, axis, scatter_dimension=0, tiled=True)
-    max_lse_own = lax.dynamic_slice_in_dim(max_lse_safe, lax.axis_index(axis) * chunk,
-                                           chunk, 0)
+    max_lse_own = lax.dynamic_slice_in_dim(max_lse_safe,
+                                           lax.axis_index(axis) * chunk, chunk,
+                                           0)
     denom_safe = jnp.where(denom == 0.0, 1.0, denom)[..., None]
     out_merged = o_weighted_sum.astype(denom.dtype) / denom_safe
-    lse_merged = jnp.where(denom == 0.0, -jnp.inf, max_lse_own + jnp.log(denom))
+    lse_merged = jnp.where(denom == 0.0, -jnp.inf,
+                           max_lse_own + jnp.log(denom))
     return out_merged, lse_merged
 
 
@@ -304,14 +315,14 @@ def pcp_forward(
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
-    """PCP attention forward — single shard_map over the 'pcp' axis.
+    """PCP attention forward.
 
     Inside the shard_map body:
-      1. all_gather Q tokens   → cache phase needs full sequence view per rank
-      2. cache phase           → attend full Q against this rank's KV cache shard
-      3. _pcp_rs_reduce      → reduce_scatter: each rank collects its token chunk
-      4. current phase         → local Q (head+tail) attends all-gathered current KV
-      5. merge_attn_states     → LSE-weighted combine
+      1. all_gather Q tokens   cache phase needs full sequence view per rank
+      2. cache phase           attend full Q against this rank's KV cache shard
+      3. _pcp_rs_reduce        reduce_scatter: each rank collects its token chunk
+      4. current phase         local Q (head+tail) attends all-gathered current KV
+      5. merge_attn_states     lse-weighted combine
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
@@ -336,22 +347,26 @@ def pcp_forward(
                   k_scale=k_scale,
                   v_scale=v_scale)
 
-    def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local, kv_cache_lens_local, page_indices_local, distribution_local, pcp_cu_q_lens_local, pcp_q_pos_offsets_local):
+    def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
+                  kv_cache_lens_local, page_indices_local, distribution_local,
+                  pcp_cu_q_lens_local, pcp_q_pos_offsets_local):
         axis_idx = lax.axis_index(pcp_axis)
-        cp_rank = jnp.reshape(axis_idx, (1,)).astype(jnp.int32)
+        cp_rank = jnp.reshape(axis_idx, (1, )).astype(jnp.int32)
 
         def all_gather_tokens(x):
             return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
         def to_token_order(x):  # rank-order chunks -> global token order
-            return all_gather_tokens(x).reshape(two_p, C, *x.shape[1:])[inv_row].reshape(
-                padded_q_len, *x.shape[1:])
+            return all_gather_tokens(x).reshape(two_p, C,
+                                                *x.shape[1:])[inv_row].reshape(
+                                                    padded_q_len, *x.shape[1:])
 
         # Cache phase: all_gather Q tokens so every rank sees the full sequence.
         # PCP local q_local has 2*C tokens (head + tail chunk for this rank).
         # After all_gather along tokens axis: pcp_size * 2 * C = padded_q_len.
         q_all_tokens = all_gather_tokens(q_local)
-        cu_cache = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(padded_q_len)
+        cu_cache = jnp.zeros_like(
+            pcp_cu_q_lens_local[0]).at[1:].set(padded_q_len)
         context_out, kv_cache_temp, context_lse = _rpa_cp_call(
             q_all_tokens,
             k_local,
@@ -370,15 +385,18 @@ def pcp_forward(
             **common)
 
         # Rank reduce: reduce_scatter so each rank gets its own 2*C token chunk.
-        context_out, context_lse = _pcp_rs_reduce(context_out, context_lse, pcp_axis, pcp_size)
+        context_out, context_lse = _pcp_rs_reduce(context_out, context_lse,
+                                                  pcp_axis, pcp_size)
 
         # Current phase: local Q (head+tail chunks) attends all-gathered current KV.
         # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
         # remap_kv: if C aligns with page_size, all_gather_tokens() avoids an extra gather-reorder.
         page_size = kv_cache_local.shape[1]
         remap_kv = (C >= page_size) and (C % page_size == 0)
-        k_curr = all_gather_tokens(k_local) if remap_kv else to_token_order(k_local)
-        v_curr = all_gather_tokens(v_local) if remap_kv else to_token_order(v_local)
+        k_curr = all_gather_tokens(k_local) if remap_kv else to_token_order(
+            k_local)
+        v_curr = all_gather_tokens(v_local) if remap_kv else to_token_order(
+            v_local)
         curr_out, kv_cache_updated, curr_lse = _rpa_cp_call(
             q_local,
             k_curr,
@@ -399,7 +417,8 @@ def pcp_forward(
             write_last_seq_only=True,
             **common)
 
-        out, _ = merge_attn_states(context_out, context_lse, curr_out, curr_lse)
+        out, _ = merge_attn_states(context_out, context_lse, curr_out,
+                                   curr_lse)
         return kv_cache_updated, out.astype(q.dtype)
 
     return jax.shard_map(
@@ -410,10 +429,10 @@ def pcp_forward(
             kv_spec,
             kv_spec,
             kv_cache_spec,
-            P(),                # kv_lens: replicated
-            P(),                # pcp.kv_cache_lens: replicated
-            P(),                # page_indices: replicated
-            P(),                # distribution: replicated
+            P(),  # kv_lens: replicated
+            P(),  # pcp.kv_cache_lens: replicated
+            P(),  # page_indices: replicated
+            P(),  # distribution: replicated
             P(pcp_axis, None),  # pcp.query_start_loc: per-rank cu_q_lens
             P(pcp_axis, None),  # pcp.q_pos_offsets: per-rank position offsets
         ),
