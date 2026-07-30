@@ -641,6 +641,12 @@ def fused_moe_func(
     # Fast path for low-concurrency decode: a specialized C=N Pallas MoE kernel
     # that skips the gather/scatter permutation of the general gmm path. Only
     # engaged for small decode batches with topk == CN_MOE_TOP_K.
+    # Compute reduce-scatter eligibility before the CN fast path
+    total_num_devices = mesh.devices.size
+    is_attn_dp = get_mesh_shape_product(
+        mesh, ShardingAxisName.ATTN_DATA) == total_num_devices
+    actual_enable_rs_kernel = enable_rs_kernel and is_attn_dp
+
     low_conc_threshold = getattr(envs, "MOE_LOW_CONC_THRESHOLD", 8)
     if 1 <= num_tokens <= low_conc_threshold and topk == CN_MOE_TOP_K:
         logger.info(
@@ -669,11 +675,64 @@ def fused_moe_func(
             local_out = cn_moe_full(hs, w1_local, w1_scale_local, w2_local,
                                     w2_scale_local, local_ids, local_weights,
                                     use_ep=use_ep)
-            reduction_axes = (ShardingAxisName.EXPERT
+
+            # ---- Reduction: mirror moe_gmm_local machinery ----
+            reduction_axis = (ShardingAxisName.EXPERT
                               if use_ep else ShardingAxisName.MLP_TENSOR)
-            if not defer_all_reduce:
+
+            if actual_enable_rs_kernel:
+                # Reduce-scatter path (when attention is pure DP)
+                reduction_axes_tuple = (
+                    reduction_axis if isinstance(reduction_axis, tuple)
+                    else (reduction_axis,))
+                scatter_axis_size = 1
+                for a in reduction_axes_tuple:
+                    scatter_axis_size *= jax.lax.axis_size(a)
+
+                # Fallback to psum-scatter for very small token counts
+                if local_out.shape[0] // scatter_axis_size < 8:
+                    return jax.lax.psum_scatter(
+                        local_out,
+                        axis_name=reduction_axis,
+                        scatter_dimension=0,
+                        tiled=True).astype(hs.dtype)
+                else:
+                    num_mb = (4 if local_out.shape[0] // scatter_axis_size > 600
+                              else 2)
+                    return hier_rs.hierarchical_reduce_scatter_local(
+                        local_out,
+                        num_devices=scatter_axis_size,
+                        num_micro_batches=num_mb,
+                        axis_name=reduction_axis).astype(hs.dtype)
+            elif scatter_results:
+                dp_axes = ShardingAxisName.ATTN_DATA
+                if not isinstance(dp_axes, tuple):
+                    dp_axes = (dp_axes,)
+                if isinstance(reduction_axis, tuple):
+                    reduce_axes = tuple(
+                        a for a in reduction_axis if a not in dp_axes)
+                    scatter_axes = tuple(
+                        a for a in reduction_axis if a in dp_axes)
+                else:
+                    reduce_axes = (
+                        () if reduction_axis in dp_axes
+                        else (reduction_axis,))
+                    scatter_axes = (
+                        (reduction_axis,) if reduction_axis in dp_axes
+                        else ())
+                if reduce_axes:
+                    local_out = jax.lax.psum(
+                        local_out, axis_name=reduce_axes)
+                if scatter_axes:
+                    return jax.lax.psum_scatter(
+                        local_out,
+                        axis_name=scatter_axes,
+                        scatter_dimension=0,
+                        tiled=True).astype(hs.dtype)
+                return local_out.astype(hs.dtype)
+            elif not defer_all_reduce:
                 return jax.lax.psum(
-                    local_out, axis_name=reduction_axes).astype(hs.dtype)
+                    local_out, axis_name=reduction_axis).astype(hs.dtype)
             else:
                 return local_out.astype(hs.dtype)
 
@@ -693,6 +752,11 @@ def fused_moe_func(
             lc_w2_scale_spec = (P(None, None, None, None) if w2_nblocks == 1
                                 else P(None, ShardingAxisName.MLP_TENSOR, None, None))
 
+        if scatter_results or enable_rs_kernel:
+            lc_out_spec = P(ShardingAxisName.ATTN_DATA, None)
+        else:
+            lc_out_spec = P(None, None)
+
         out = jax.shard_map(
             _local_low_conc_moe,
             mesh=mesh,
@@ -705,7 +769,7 @@ def fused_moe_func(
                 P(None, None),  # topk_ids
                 P(None, None),  # topk_weights
             ),
-            out_specs=P(None, None),
+            out_specs=lc_out_spec,
             check_vma=False,
         )(padded_hs, w1, w1_scale, w2, w2_scale, padded_topk_indices,
           padded_topk_weights)
@@ -727,11 +791,7 @@ def fused_moe_func(
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
-    # Only enable Reduce-Scatter if flag is on and Attention is pure DP
-    total_num_devices = mesh.devices.size
-    is_attn_dp = get_mesh_shape_product(
-        mesh, ShardingAxisName.ATTN_DATA) == total_num_devices
-    actual_enable_rs_kernel = enable_rs_kernel and is_attn_dp
+    # actual_enable_rs_kernel already computed above (before CN fast path)
 
     if envs.FORCE_MOE_RANDOM_ROUTING:
         logger.warning(
