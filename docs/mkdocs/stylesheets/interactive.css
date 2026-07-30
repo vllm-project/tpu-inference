@@ -104,6 +104,19 @@ body[data-md-color-scheme="slate"] .cg-output-container pre {
     background-color: rgba(0, 0, 0, 0.2) !important;
 }
 
+/* Token colors for highlightShell() output, using the theme's Pygments palette */
+.cg-output-container .c1 {
+    color: var(--md-code-hl-comment-color);
+}
+
+.cg-output-container .s2 {
+    color: var(--md-code-hl-string-color);
+}
+
+.cg-output-container .nv {
+    color: var(--md-code-hl-variable-color);
+}
+
 @media screen and (max-width: 60em) {
     .cg-options-group {
         flex-direction: column;

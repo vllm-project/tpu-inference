@@ -31,19 +31,37 @@ const COMMAND_DATA = {
     }
 };
 
+/* Minimal shell highlighter for dynamically injected snippets. Build-time
+   Pygments cannot color runtime content, so wrap comments, strings, and
+   variables in Pygments token classes styled in interactive.css. */
+function highlightShell(code) {
+    const escaped = code
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    return escaped.split('\n').map(line => {
+        if (/^\s*#/.test(line)) {
+            return '<span class="c1">' + line + '</span>';
+        }
+        return line
+            .replace(/("[^"]*")/g, '<span class="s2">$1</span>')
+            .replace(/(\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*)/g, '<span class="nv">$1</span>');
+    }).join('\n');
+}
+
 function updateCommandGenerator() {
     const activeMethod = document.querySelector('.cg-btn[data-group="method"].active');
-    
+
     if (!activeMethod) return;
-    
+
     const key = activeMethod.getAttribute('data-val');
     const data = COMMAND_DATA[key];
-    
+
     const cmdEl = document.getElementById('cg-output-command');
     const instEl = document.getElementById('cg-output-instructions');
-    
+
     if (cmdEl && instEl && data) {
-        cmdEl.textContent = data.cmd;
+        cmdEl.innerHTML = highlightShell(data.cmd);
         instEl.innerHTML = data.inst;
     }
 }
@@ -104,14 +122,14 @@ function updateProvisionGenerator() {
         
         containerEl.style.display = 'block';
         const accelerator = data.accel_prefix + chips;
-        
-        cmdEl.textContent = `gcloud alpha compute tpus queued-resources create my-queued-resource \\
+
+        cmdEl.innerHTML = highlightShell(`gcloud alpha compute tpus queued-resources create my-queued-resource \\
   --node-id my-tpu-name \\
   --project PROJECT_ID \\
   --zone ${data.zone} \\
   --accelerator-type ${accelerator} \\
   --runtime-version ${data.runtime} \\
-  --service-account SERVICE_ACCOUNT`;
+  --service-account SERVICE_ACCOUNT`);
         
         instEl.innerHTML = `Provision a <strong>${chips}-chip TPU ${hw.toUpperCase()}</strong> using the recommended zone <code>${data.zone}</code> and runtime <code>${data.runtime}</code>.`;
     }
