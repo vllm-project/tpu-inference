@@ -93,7 +93,7 @@ def _rpa_cp_call(
 
 
 
-def _dcp_rank_reduce(
+def _dcp_a2a_reduce(
     o: jax.Array,
     lse: jax.Array,
     axis: str,
@@ -153,7 +153,7 @@ def dcp_forward(
     Inside the shard_map body:
       1. all_gather Q heads    → cache phase needs full head view per rank
       2. cache phase           → attend full Q against this rank's KV cache
-      3. _dcp_rank_reduce      → all_to_all: head slices become token slices
+      3. _dcp_a2a_reduce      → all_to_all: head slices become token slices
       4. current phase         → attend local Q against this rank's new tokens
       5. merge_attn_states     → LSE-weighted combine
     """
@@ -215,7 +215,7 @@ def dcp_forward(
             **common)
 
         # Rank reduce: swap head shards for token shards, merge partial LSE.
-        context_out, context_lse = _dcp_rank_reduce(context_out, context_lse, dcp_axis, dcp_size)
+        context_out, context_lse = _dcp_a2a_reduce(context_out, context_lse, dcp_axis, dcp_size)
 
         # Current phase: local Q (head-sharded by ATTN_HEAD) attends new tokens.
         curr_out, kv_cache_updated, curr_lse = _rpa_cp_call(
@@ -256,7 +256,7 @@ def dcp_forward(
       md.request_distribution, cp_rank_global)
 
 
-def _pcp_rank_reduce(
+def _pcp_rs_reduce(
     o: jax.Array,
     lse: jax.Array,
     axis: str,
@@ -309,7 +309,7 @@ def pcp_forward(
     Inside the shard_map body:
       1. all_gather Q tokens   → cache phase needs full sequence view per rank
       2. cache phase           → attend full Q against this rank's KV cache shard
-      3. _pcp_rank_reduce      → reduce_scatter: each rank collects its token chunk
+      3. _pcp_rs_reduce      → reduce_scatter: each rank collects its token chunk
       4. current phase         → local Q (head+tail) attends all-gathered current KV
       5. merge_attn_states     → LSE-weighted combine
     """
@@ -370,7 +370,7 @@ def pcp_forward(
             **common)
 
         # Rank reduce: reduce_scatter so each rank gets its own 2*C token chunk.
-        context_out, context_lse = _pcp_rank_reduce(context_out, context_lse, pcp_axis, pcp_size)
+        context_out, context_lse = _pcp_rs_reduce(context_out, context_lse, pcp_axis, pcp_size)
 
         # Current phase: local Q (head+tail chunks) attends all-gathered current KV.
         # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
