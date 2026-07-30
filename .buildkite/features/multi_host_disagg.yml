@@ -24,7 +24,6 @@ steps:
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       TEST_MODE: 2 # only run correctness test
-      DECODE_HOST_IP: "10.128.0.112"
       DECODE_TPU_NAME: tpu7x-8-ci-17-cicd-us-central1-c
       DECODE_ZONE: us-central1-c
     commands:
