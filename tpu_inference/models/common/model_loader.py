@@ -663,6 +663,28 @@ def get_model(
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
 
 
+def _jax_model_can_stream_weights(model_class: Any) -> bool:
+    """Whether a flax_nnx model class can load from a weights iterator.
+
+    `get_flax_model` feeds streamed weights to a model in one of two ways, and
+    a model that supports either one can be served with `--load-format
+    runai_streamer`:
+
+    - it subclasses `LoadableWithIterator`, whose `load_weights` takes the
+      iterator directly (the path most flax_nnx models use); or
+    - it declares a `WeightLoader` deriving from `BaseWeightLoader`, which the
+      loader drives instead.
+
+    Checking only for `WeightLoader` sends every `LoadableWithIterator` model
+    to the vLLM implementation under `MODEL_IMPL_TYPE=auto`, which is a silent
+    change of implementation rather than an error.
+    """
+    if issubclass(model_class, LoadableWithIterator):
+        return True
+    return issubclass(getattr(model_class, "WeightLoader", object),
+                      BaseWeightLoader)
+
+
 def resolve_model_architecture(vllm_config: VllmConfig,
                                is_draft_model: bool) -> str:
     """Resolves the model implementation type.
@@ -671,9 +693,9 @@ def resolve_model_architecture(vllm_config: VllmConfig,
     architecture and whether the RunAI model streamer is active.
 
     When the RunAI model streamer is used, this function explicitly checks if
-    the JAX model supports the streaming capability. It returns 'vllm' if:
-    1. The JAX model class is found but does not have a `WeightLoader`.
-    2. The JAX model's `WeightLoader` is not a subclass of `BaseWeightLoader`.
+    the JAX model supports the streaming capability. It returns 'vllm' if the
+    JAX model class is found but supports neither of the two ways a flax_nnx
+    model can consume streamed weights (see `_jax_model_can_stream_weights`).
 
     If the architecture is not registered in JAX (UnsupportedArchitectureError),
     this function returns the default implementation ('flax_nnx'), allowing
@@ -699,10 +721,8 @@ def resolve_model_architecture(vllm_config: VllmConfig,
             # Try to get the JAX model class
             model_class = _get_model_architecture(hf_config)
 
-            # If found, check for WeightLoader capability
-            if not hasattr(model_class, "WeightLoader") or not issubclass(
-                    getattr(model_class, "WeightLoader", object),
-                    BaseWeightLoader):
+            # If found, check that it can actually consume streamed weights.
+            if not _jax_model_can_stream_weights(model_class):
                 return "vllm"
 
         except UnsupportedArchitectureError:
