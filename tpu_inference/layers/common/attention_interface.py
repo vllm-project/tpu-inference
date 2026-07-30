@@ -506,12 +506,7 @@ def attention(
 
     if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
         return dcp_forward(
-            kv_cache=kv_cache,
-            q=q,
-            k=k,
-            v=v,
-            md=md,
-            mesh=mesh,
+            mesh, q, k, v, kv_cache, md,
             head_dim_original=head_dim_original,
             sm_scale=sm_scale,
             attention_chunk_size=attention_chunk_size,
@@ -521,15 +516,7 @@ def attention(
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
         return pcp_forward(
-            mesh,
-            q,
-            k,
-            v,
-            kv_cache,
-            md.seq_lens,
-            md.block_tables,
-            md.request_distribution,
-            md.pcp,
+            mesh, q, k, v, kv_cache, md,
             sm_scale=sm_scale,
             q_scale=q_scale,
             k_scale=k_scale,

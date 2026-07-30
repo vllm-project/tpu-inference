@@ -21,8 +21,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
-from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, PCPMetadata)
+from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -136,12 +135,12 @@ def _dcp_rank_reduce(
 
 
 def dcp_forward(
-    kv_cache: jax.Array,
+    mesh: Mesh,
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
+    kv_cache: jax.Array,
     md: AttentionMetadata,
-    mesh: Mesh,
     head_dim_original: int | None = None,
     sm_scale: float | None = None,
     attention_chunk_size: int | None = None,
@@ -297,10 +296,7 @@ def pcp_forward(
     k: jax.Array,
     v: jax.Array,
     kv_cache: jax.Array,
-    kv_lens: jax.Array,
-    page_indices: jax.Array,
-    distribution: jax.Array,
-    pcp: PCPMetadata,
+    md: AttentionMetadata,
     sm_scale: float,
     q_scale: float | None = None,
     k_scale: float | None = None,
@@ -423,5 +419,5 @@ def pcp_forward(
         ),
         out_specs=(kv_cache_spec, q_spec),
         check_vma=False,
-    )(q, k, v, kv_cache, kv_lens, pcp.kv_cache_lens, page_indices,
-      distribution, pcp.query_start_loc, pcp.q_pos_offsets)
+    )(q, k, v, kv_cache, md.seq_lens, md.pcp.kv_cache_lens, md.block_tables,
+      md.request_distribution, md.pcp.query_start_loc, md.pcp.q_pos_offsets)
