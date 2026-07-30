@@ -44,6 +44,7 @@ steps:
       MAX_MODEL_LEN: "2048"
       MAX_NUM_SEQS: "64"
       MAX_NUM_BATCHED_TOKENS: "1024"
+      CLIENT_TRUST_REMOTE_CODE: "1"
       EXTRA_SERVE_FLAGS: '--trust-remote-code --gpu-memory-utilization 0.60 --additional-config {"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}'
     commands:
       - |

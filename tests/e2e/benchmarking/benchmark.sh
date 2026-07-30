@@ -265,9 +265,14 @@ fi
 
 echo "Starting the benchmark for $test_model..."
 echo "Current working directory: $(pwd)"
+client_extra_args=()
+if [ -n "${CLIENT_TRUST_REMOTE_CODE:-}" ]; then
+    client_extra_args+=(--trust-remote-code)
+fi
 python benchmarks/benchmark_serving.py \
 --backend vllm \
 --model "$test_model" \
+"${client_extra_args[@]}" \
 --dataset-name "$dataset_name" \
 --dataset-path "$dataset_path" \
 "${dataset_args[@]}" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"
