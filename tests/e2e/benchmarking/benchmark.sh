@@ -226,6 +226,14 @@ else
 fi
 
 
+if [ -n "${EXTRA_SERVE_FLAGS:-}" ]; then
+    echo "Appending EXTRA_SERVE_FLAGS: $EXTRA_SERVE_FLAGS"
+    # Intentional word splitting; values must not contain spaces (use
+    # compact JSON for --additional-config).
+    read -r -a _extra_flags <<< "$EXTRA_SERVE_FLAGS"
+    extra_serve_args+=("${_extra_flags[@]}")
+fi
+
 # Spin up the vLLM server
 echo "Spinning up the vLLM server..."
 if [[ "$test_model" == "RedHatAI/Meta-Llama-3.1-8B-Instruct-quantized.w8a8" ]]; then

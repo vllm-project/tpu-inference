@@ -11,6 +11,7 @@ sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
+import json
 import os
 import threading
 
@@ -31,7 +32,16 @@ def run_test(model_name, expected_value, more_args=None):
     """Run the end to end accuracy test."""
     print(f"Running test for model: {model_name}")
 
-    if model_name in ["Qwen/Qwen3-30B-A3B", "Qwen/Qwen2.5-VL-7B-Instruct"]:
+    override_json = os.environ.get("ACCURACY_MODEL_ARGS_JSON")
+    if override_json:
+        # Full lm_eval model_args as a JSON object. Enables nested engine
+        # args (e.g. additional_config sharding strategies) that the
+        # comma-separated k=v string form cannot express.
+        model_args = json.loads(override_json)
+        print(
+            f"[accuracy] model_args from ACCURACY_MODEL_ARGS_JSON: {model_args}"
+        )
+    elif model_name in ["Qwen/Qwen3-30B-A3B", "Qwen/Qwen2.5-VL-7B-Instruct"]:
         model_args = f"pretrained={model_name},max_model_len=4096,max_num_batched_tokens=16384"
     elif model_name in [
             "meta-llama/Llama-3.1-8B-Instruct",
@@ -41,7 +51,7 @@ def run_test(model_name, expected_value, more_args=None):
     else:
         model_args = f"pretrained={model_name},max_model_len=4096"
 
-    if more_args is not None:
+    if more_args is not None and isinstance(model_args, str):
         model_args = "{},{}".format(model_args, more_args)
 
     apply_chat_template = os.environ.get("USE_CHAT_TEMPLATE", "0") == "1"
