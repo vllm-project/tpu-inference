@@ -16,6 +16,7 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
+      NEW_MODEL_DESIGN: "1"
       TEST_MODEL: moonshotai/Kimi-Linear-48B-A3B-Instruct
       TENSOR_PARALLEL_SIZE: "8"
       MINIMUM_ACCURACY_THRESHOLD: "0.85"
@@ -33,6 +34,7 @@ steps:
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
+      NEW_MODEL_DESIGN: "1"
       TEST_MODEL: moonshotai/Kimi-Linear-48B-A3B-Instruct
       TENSOR_PARALLEL_SIZE: "8"
       MINIMUM_THROUGHPUT_THRESHOLD: "0.1"
