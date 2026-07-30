@@ -43,6 +43,11 @@ from tpu_inference.layers.jax.linear import JaxEinsum
 from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3Router
 
 CKPT = os.environ.get("K3_TINY_CKPT", "")
+# The suites skip when the checkpoint is merely *named*, not just when the
+# variable is unset: CI points the variable at a cache directory whose
+# contents are fetched separately, so it can exist as a path and not as a
+# checkpoint.
+HAVE_CKPT = bool(CKPT) and os.path.isdir(CKPT)
 # K3-tiny routed-MoE config (mirrors Kimi-K3 with smaller dims).
 NUM_EXPERTS, TOPK, HIDDEN = 32, 4, 1024
 ROUTED_SCALING = 1.0
@@ -215,7 +220,9 @@ def test_ignoring_the_bias_would_fail_this_test(mesh):
         "even with the bias dropped")
 
 
-@pytest.mark.skipif(not CKPT, reason="K3_TINY_CKPT unset")
+@pytest.mark.skipif(not HAVE_CKPT,
+                    reason="K3_TINY_CKPT unset "
+                    "or not a directory")
 @pytest.mark.parametrize("layer", [1, 4, 8])
 def test_router_matches_reference_on_checkpoint_and_golden_inputs(mesh, layer):
     """Real K3-shaped gate weights, driven by the activations the reference
@@ -236,7 +243,9 @@ def test_router_matches_reference_on_checkpoint_and_golden_inputs(mesh, layer):
     assert idx_jax.shape == (x.shape[0], TOPK)
 
 
-@pytest.mark.skipif(not CKPT, reason="K3_TINY_CKPT unset")
+@pytest.mark.skipif(not HAVE_CKPT,
+                    reason="K3_TINY_CKPT unset "
+                    "or not a directory")
 def test_weights_sum_to_one_and_scaling_is_identity(mesh):
     """K3 renormalizes the top-k weights and uses routed_scaling_factor=1.0,
     so each token's routing weights sum to 1."""

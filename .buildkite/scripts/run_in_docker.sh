@@ -56,6 +56,12 @@ ENV_VARS=(
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
   -e USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-}"
+  # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
+  # everywhere else; the suites that read them skip when they are empty.
+  -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
+  -e K3_TINY_MXFP4_CKPT="${K3_TINY_MXFP4_CKPT:-}"
+  -e K3_TINY_SOFTPLUS_CKPT="${K3_TINY_SOFTPLUS_CKPT:-}"
+  -e K3_KDA_GOLDENS="${K3_KDA_GOLDENS:-}"
   -e BENCH_DATASET="${BENCH_DATASET:-}"
   -e USE_BATCHED_RPA_KERNEL="${USE_BATCHED_RPA_KERNEL:-}"
   -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"

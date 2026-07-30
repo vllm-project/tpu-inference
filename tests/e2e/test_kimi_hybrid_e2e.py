@@ -38,7 +38,10 @@ from vllm.inputs import TokensPrompt
 CKPT = os.environ.get("K3_TINY_CKPT", "")
 TP = int(os.environ.get("K3_E2E_TP", "1"))
 
-pytestmark = pytest.mark.skipif(not CKPT, reason="K3_TINY_CKPT unset")
+# Guard on the directory, not just the variable: CI points the variable at
+# a cache directory whose contents are fetched separately.
+pytestmark = pytest.mark.skipif(not CKPT or not os.path.isdir(CKPT),
+                                reason="K3_TINY_CKPT unset or not a directory")
 
 
 @pytest.fixture(scope="module")
