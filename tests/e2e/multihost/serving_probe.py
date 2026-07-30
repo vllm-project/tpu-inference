@@ -20,7 +20,9 @@ multi-host serve can be compared against a single-host one:
   health        the endpoint reports ready and names exactly one model
   determinism   the same greedy request twice returns the same text
   isolation     N concurrent requests each answer their OWN prompt; no
-                response may contain another request's unique marker
+                response may contain another request's unique marker,
+                run twice: equal-length prompts, then a wide spread of
+                prompt lengths in one batch
   long          a long greedy generation terminates and does not collapse
                 into a single repeated token
   needle        a fact planted at several depths of a long prompt is
@@ -129,19 +131,34 @@ def _markers(count: int, seed: int = 0) -> list:
     return out
 
 
-def probe_isolation(base_url: str, model: str, concurrency: int) -> None:
+def probe_isolation(base_url: str,
+                    model: str,
+                    concurrency: int,
+                    ragged: bool = False) -> None:
     """Concurrent requests do not leak each other's state.
 
     Each request carries a unique marker and is asked to repeat it. A response
     that contains another request's marker means state crossed request slots —
     the failure mode that a sharded state pool, or slot indices that are
     global where they should be rank-local, would produce.
+
+    With `ragged`, the requests are padded to widely different prompt lengths.
+    Equal-length prompts exercise none of the ragged bookkeeping: it is unequal
+    sequence lengths in one batch that make per-request offsets and per-rank
+    packing disagree, so this variant is where a wrong slice shows up.
     """
-    markers = _markers(concurrency)
-    prompts = [
-        f"Repeat the word {m} five times, separated by spaces.\n{m}"
-        for m in markers
-    ]
+    tag = "ragged" if ragged else "isolation"
+    markers = _markers(concurrency, seed=1 if ragged else 0)
+    filler = "The shelves hold old paper records nobody has opened in years. "
+    prompts = []
+    for i, m in enumerate(markers):
+        # 0, 10, 20, ... filler sentences (~13 tokens each), so the longest
+        # request in the batch is ~1000 tokens and fits a 2048 context.
+        pad = filler * (i * 10)
+        prompts.append(
+            f"{pad}Repeat the word {m} five times, separated by spaces.\n{m}"
+            if ragged else
+            f"Repeat the word {m} five times, separated by spaces.\n{m}")
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         choices = list(
@@ -149,18 +166,19 @@ def probe_isolation(base_url: str, model: str, concurrency: int) -> None:
 
     for i, (marker, choice) in enumerate(zip(markers, choices)):
         text = choice["text"]
-        print(f"[probe:isolation] req {i} marker={marker} -> {text!r}")
+        print(f"[probe:{tag}] req {i} marker={marker} "
+              f"prompt_chars={len(prompts[i])} -> {text!r}")
         foreign = [m for m in markers if m != marker and m in text]
         if foreign:
             raise ProbeFailure(
-                f"[probe:isolation] request {i} (marker {marker}) emitted "
+                f"[probe:{tag}] request {i} (marker {marker}) emitted "
                 f"another request's marker(s) {foreign} — state crossed "
                 f"request slots. Text: {text!r}")
         if marker not in text:
             raise ProbeFailure(
-                f"[probe:isolation] request {i} never repeated its own "
+                f"[probe:{tag}] request {i} never repeated its own "
                 f"marker {marker}; got {text!r}")
-    print(f"[probe:isolation] OK, {concurrency} concurrent requests, "
+    print(f"[probe:{tag}] OK, {concurrency} concurrent requests, "
           "no marker crossed requests")
 
 
@@ -237,6 +255,7 @@ def main() -> int:
     try:
         probe_determinism(args.base_url, model, max_tokens=32)
         probe_isolation(args.base_url, model, args.concurrency)
+        probe_isolation(args.base_url, model, args.concurrency, ragged=True)
         probe_long_generation(args.base_url, model, args.long_tokens)
         if args.needle_tokens:
             probe_needle(args.base_url, model, args.needle_tokens)
