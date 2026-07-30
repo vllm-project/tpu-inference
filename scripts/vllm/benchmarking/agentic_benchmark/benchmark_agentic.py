@@ -17,10 +17,38 @@ import os
 import random
 import sys
 import time
+from collections import Counter
 from typing import Any, Dict, List
 
 import aiohttp
 from transformers import AutoTokenizer
+
+
+def make_client_session() -> aiohttp.ClientSession:
+    """Creates an aiohttp session suited to long-running benchmark requests.
+
+    Two defaults of aiohttp are unsuitable here and cause spurious failures
+    that look like server errors even though every response is HTTP 200:
+
+    - The default ``ClientTimeout(total=5*60)`` aborts a turn that legitimately
+      takes longer than 5 minutes, which happens at high concurrency with large
+      ``--output-len-max``. It surfaces as ``asyncio.TimeoutError``, whose
+      ``str()`` is empty, so the recorded error message is blank.
+    - Pooled keep-alive connections may be reused after the server has already
+      closed them during an idle gap between turns, raising
+      ``ServerDisconnectedError``. ``force_close`` opens a fresh connection per
+      request instead.
+
+    Returns:
+        aiohttp.ClientSession: Session with no total timeout and no connection
+        reuse.
+    """
+    return aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=None,
+                                      sock_read=None,
+                                      sock_connect=30),
+        connector=aiohttp.TCPConnector(force_close=True, limit=0),
+    )
 
 
 def get_percentile(data: List[float], percentile: float) -> float:
@@ -197,6 +225,11 @@ async def run_grpo_stream(
 
         except Exception as e:
             total_time_ms = (time.perf_counter() - start_time) * 1000.0
+            # Include the type: some exceptions (notably asyncio.TimeoutError)
+            # have an empty str(), which would otherwise record the failure
+            # with no reason at all.
+            error_msg = f"{type(e).__name__}: {e}" if str(e) else \
+                type(e).__name__
             stats.append({
                 "group_idx": group_idx,
                 "stream_idx": stream_idx,
@@ -208,7 +241,7 @@ async def run_grpo_stream(
                 "output_tokens": 0,
                 "input_history_tokens": 0,
                 "success": False,
-                "error": str(e),
+                "error": error_msg,
             })
             # End conversation on error
             break
@@ -301,6 +334,11 @@ def print_report(
     print(f"Total Conversational Turns:{total_turns} (Success: "
           f"{successful_turns}, Failed: {failed_turns}, "
           f"Rate: {success_rate:.2f}%)")
+    if failed_turns:
+        reasons = Counter(s["error"] for s in all_stats if not s["success"])
+        print("Failure Breakdown:")
+        for reason, count in reasons.most_common():
+            print(f"  {count:6d} x {reason}")
     print(f"Total Input Tokens (Pref): {total_input_tokens:,}")
     print(f"Total Output Tokens (Dec): {total_output_tokens:,}")
     print(f"Total Tokens Processed:    {total_tokens:,}")
@@ -407,7 +445,7 @@ async def main_async(args: argparse.Namespace):
     url = f"http://{args.host}:{args.port}/v1/chat/completions"
     print(f"Connecting to vLLM server at {url}...")
 
-    async with aiohttp.ClientSession() as session:
+    async with make_client_session() as session:
         try:
             async with session.get(
                     f"http://{args.host}:{args.port}/health") as resp:
@@ -431,7 +469,7 @@ async def main_async(args: argparse.Namespace):
 
     start_time = time.perf_counter()
 
-    async with aiohttp.ClientSession() as session:
+    async with make_client_session() as session:
         group_tasks = [
             worker(i, session) for i in range(1, args.num_groups + 1)
         ]
