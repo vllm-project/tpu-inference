@@ -950,9 +950,9 @@ class KVCacheManager:
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
                 num_blocks = min(
-                    shared_num_blocks, kv_cache_tensor.size //
-                    self._duplicated_group_page_size(kv_cache_tensor,
-                                                     layer_name_to_spec))
+                    shared_num_blocks,
+                    kv_cache_tensor.size // self._duplicated_group_page_size(
+                        kv_cache_tensor, layer_name_to_spec))
             elif kv_cache_tensor.block_stride:
                 # DeepseekV4 packed layout: vLLM overlays every cache
                 # (main MLA latent + indexer k_cache + compressor state +
