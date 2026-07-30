@@ -172,9 +172,8 @@ async def run_grpo_stream(
             assistant_response = "".join(full_response_text)
 
             # Prefer the server-reported counts: they are what the engine
-            # actually processed. The tokenizer fallbacks are approximations --
-            # the prompt one in particular tokenizes the Python repr of the
-            # message list, so dict punctuation is counted as prompt tokens.
+            # actually processed. The fallbacks below reproduce them closely,
+            # but rely on the local tokenizer matching the server's template.
             reported = usage or {}
             prompt_tokens = reported.get("prompt_tokens")
             completion_tokens = reported.get("completion_tokens")
@@ -198,7 +197,11 @@ async def run_grpo_stream(
             })
 
             if prompt_tokens is None:
-                prompt_tokens = len(tokenizer.encode(str(messages[:-1])))
+                prompt_tokens = len(
+                    tokenizer.apply_chat_template(messages[:-1],
+                                                  add_generation_prompt=True,
+                                                  tokenize=True,
+                                                  return_dict=False))
 
             turn_stat = {
                 "group_idx": group_idx,
