@@ -124,10 +124,14 @@ async def run_grpo_stream(
         }
         if args.ignore_eos:
             payload["ignore_eos"] = True
+        # Ask the server to report the token counts it actually processed.
+        # Sent as a final chunk with an empty "choices" list.
+        payload["stream_options"] = {"include_usage": True}
 
         headers = {"Authorization": f"Bearer {os.getenv('HF_TOKEN', '')}"}
         start_time = time.perf_counter()
         ttft = None
+        usage = None
         full_response_text = []
 
         try:
@@ -151,6 +155,9 @@ async def run_grpo_stream(
                                 ttft = ((time.perf_counter() - start_time) *
                                         1000.0)
 
+                            if data.get("usage"):
+                                usage = data["usage"]
+
                             if "choices" in data and len(data["choices"]) > 0:
                                 delta = data["choices"][0].get("delta", {})
                                 content = delta.get("content", "")
@@ -163,7 +170,19 @@ async def run_grpo_stream(
             total_time_ms = (end_time - start_time) * 1000.0
 
             assistant_response = "".join(full_response_text)
-            assistant_tokens = len(tokenizer.encode(assistant_response))
+
+            # Prefer the server-reported counts: they are what the engine
+            # actually processed. The tokenizer fallbacks are approximations --
+            # the prompt one in particular tokenizes the Python repr of the
+            # message list, so dict punctuation is counted as prompt tokens.
+            reported = usage or {}
+            prompt_tokens = reported.get("prompt_tokens")
+            completion_tokens = reported.get("completion_tokens")
+
+            if completion_tokens is None:
+                assistant_tokens = len(tokenizer.encode(assistant_response))
+            else:
+                assistant_tokens = completion_tokens
 
             if ttft is None:
                 ttft = total_time_ms
@@ -178,6 +197,9 @@ async def run_grpo_stream(
                 "content": assistant_response
             })
 
+            if prompt_tokens is None:
+                prompt_tokens = len(tokenizer.encode(str(messages[:-1])))
+
             turn_stat = {
                 "group_idx": group_idx,
                 "stream_idx": stream_idx,
@@ -187,8 +209,7 @@ async def run_grpo_stream(
                 "tpot_ms": tpot,
                 "total_time_ms": total_time_ms,
                 "output_tokens": assistant_tokens,
-                "input_history_tokens":
-                len(tokenizer.encode(str(messages[:-1]))),
+                "input_history_tokens": prompt_tokens,
                 "success": True,
             }
 
