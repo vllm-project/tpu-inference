@@ -2,11 +2,15 @@
 
 This guide provides instructions for installing and running `tpu-inference`.
 
-There are three ways to install `tpu-inference`: using `uv pip`, running a Docker container, or building from source.
+There are three ways to install `tpu-inference`:
 
-## Interactive Installation
+- **uv pip** (Recommended): Fast installation of official stable releases into a Python virtual environment. Best for standard inference and serving.
+- **Docker**: Pre-built containers with shared memory configured. Best for reproducible environments and Kubernetes (GKE).
+- **Source**: Build directly from the repository. Best for debugging, contributors, and custom kernel development.
 
-Select your preferred installation method and hardware target to generate the exact setup command.
+## Installation Commands
+
+Select your preferred installation method to generate the exact setup command.
 
 <div class="command-generator-container">
   <div class="cg-options-group">
@@ -14,6 +18,11 @@ Select your preferred installation method and hardware target to generate the ex
     <button class="cg-btn active" role="button" aria-pressed="true" data-group="method" data-val="uv_pip">uv pip</button>
     <button class="cg-btn" role="button" aria-pressed="false" data-group="method" data-val="docker">Docker</button>
     <button class="cg-btn" role="button" aria-pressed="false" data-group="method" data-val="source">Source</button>
+  </div>
+  <div class="cg-options-group" id="docker-image-group" style="display: none;">
+    <span class="cg-label">Image</span>
+    <button class="cg-btn active" role="button" aria-pressed="true" data-group="docker_img" data-val="latest">Release (latest)</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="docker_img" data-val="nightly">Nightly</button>
   </div>
   
   <div id="cg-output-instructions" class="cg-instructions"></div>

@@ -83,10 +83,17 @@ body[data-md-color-scheme="slate"] .cg-btn:hover:not(.active) {
     background-color: rgba(255, 255, 255, 0.05);
 }
 
+.cg-btn.disabled,
+.cg-btn[disabled] {
+    opacity: 0.35 !important;
+    cursor: not-allowed !important;
+    pointer-events: none !important;
+}
+
 .cg-instructions {
-    padding: 1.5rem 1.5rem 0.5rem;
-    font-size: 0.9rem;
-    color: var(--md-default-fg-color);
+    padding: 1rem 1.5rem 0.5rem;
+    font-size: 0.8rem;
+    color: var(--md-default-fg-color--light);
 }
 
 .cg-output-container {
@@ -115,6 +122,23 @@ body[data-md-color-scheme="slate"] .cg-output-container pre {
 
 .cg-output-container .nv {
     color: var(--md-code-hl-variable-color);
+}
+
+.cg-output-container .k {
+    color: var(--md-code-hl-keyword-color);
+    font-weight: 600;
+}
+
+.cg-output-container .nb {
+    color: var(--md-code-hl-function-color);
+}
+
+.cg-output-container .na {
+    color: var(--md-code-hl-constant-color);
+}
+
+.cg-output-container .o {
+    color: var(--md-code-hl-operator-color);
 }
 
 @media screen and (max-width: 60em) {
