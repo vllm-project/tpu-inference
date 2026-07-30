@@ -87,6 +87,7 @@ def inner_kernel(
     neg_inf = jnp.array(-jnp.inf, dtype=scores_val.dtype)
     masked_scores = jnp.where(mask_float_reshaped > 0.5, scores_val, neg_inf)
     weights = jax.nn.softmax(masked_scores, axis=1)
+    kv_val = jnp.where(mask_float_reshaped > 0.5, kv_val, 0.0)
     compressed = jnp.sum(weights * kv_val, axis=1)  # (tile_n, head_tiles, 128)
 
     # --- rms norm ---
@@ -239,9 +240,7 @@ def kernel_fn(
 
 
 def _select_mode(head_dim: int, overlap: bool) -> config.Mode:
-    if head_dim == 128:
-        return config.Mode.CSA_INDEXER
-    return config.Mode.CSA if overlap else config.Mode.HCA
+    return config.select_mode(head_dim, overlap)
 
 
 def derive_aliases(has_rope: bool, has_rope_cache: bool,
