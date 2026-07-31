@@ -45,15 +45,12 @@ class FlashAttentionKernelTuner(KernelTunerBase):
                          run_config=self.run_config)
 
     def generate_cases(self) -> list[TuningCase]:
-        # Based on xprof, we have the following fixed input shapes:
-        # batch_size=8, num_heads=16, q_seq_len=2560, kv_seq_len=2560, head_dim=72
         tuning_key = TuningKey(batch_size=8,
                                num_heads=16,
                                q_seq_len=2560,
                                kv_seq_len=2560,
                                head_dim=72)
 
-        # Expand search space for comprehensive tuning based on seqlen=2560 and batch=8
         block_q_values = [32, 64, 128, 256, 512, 640]
         block_k_values = [128, 256, 512, 640, 1280, 2560]
         block_b_values = [1, 2, 4, 8]
