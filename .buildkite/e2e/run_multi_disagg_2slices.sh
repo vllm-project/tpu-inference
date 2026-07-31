@@ -402,6 +402,79 @@ print_logs() {
   done
 }
 
+is_missing_container_error() {
+  local output=$1
+  [[ "${output}" == *"No such container"* ||
+    "${output}" == *"No such object"* ]]
+}
+
+cleanup_container_on_host() {
+  local host=$1
+  local container=$2
+  local label=$3
+  local inspect_output
+  local inspect_status
+  local remove_output=""
+  local remove_status=0
+
+  if inspect_output="$(
+    run_on_host "${host}" docker inspect "${container}" 2>&1
+  )"; then
+    :
+  else
+    inspect_status=$?
+    if is_missing_container_error "${inspect_output}"; then
+      echo "  ${label}: ${container} is already absent on ${host}; nothing to clean."
+      return 0
+    fi
+    echo "ERROR: Could not inspect ${label} container ${container} on ${host} (status ${inspect_status})." >&2
+    echo "${inspect_output}" >&2
+    return 1
+  fi
+
+  if remove_output="$(
+    run_on_host "${host}" docker rm -f "${container}" 2>&1
+  )"; then
+    echo "  ${label}: removed ${container} from ${host}."
+  else
+    remove_status=$?
+  fi
+
+  # Always verify the final state. A concurrent cleanup may make docker rm
+  # return "No such container"; that is a successful cleanup outcome.
+  if inspect_output="$(
+    run_on_host "${host}" docker inspect "${container}" 2>&1
+  )"; then
+    echo "ERROR: ${label} container ${container} still exists on ${host} after cleanup." >&2
+    if (( remove_status != 0 )); then
+      echo "--- docker rm failure (status ${remove_status}) ---" >&2
+      echo "${remove_output}" >&2
+    fi
+    echo "--- docker inspect ${container} on ${host} ---" >&2
+    echo "${inspect_output}" >&2
+    echo "--- recent docker logs for ${container} on ${host} ---" >&2
+    run_on_host "${host}" docker logs --tail 200 "${container}" 2>&1 ||
+      true
+    return 1
+  else
+    inspect_status=$?
+    if is_missing_container_error "${inspect_output}"; then
+      if (( remove_status != 0 )); then
+        echo "  ${label}: ${container} disappeared during cleanup on ${host}; ignoring docker rm status ${remove_status}."
+      fi
+      return 0
+    fi
+    echo "ERROR: Could not verify removal of ${label} container ${container} on ${host} (status ${inspect_status})." >&2
+    if (( remove_status != 0 )); then
+      echo "--- docker rm failure (status ${remove_status}) ---" >&2
+      echo "${remove_output}" >&2
+    fi
+    echo "--- docker inspect failure ---" >&2
+    echo "${inspect_output}" >&2
+    return 1
+  fi
+}
+
 cleanup() {
   local dump_logs=${1:-true}
   local status=0
@@ -412,22 +485,15 @@ cleanup() {
     collect_logs
   fi
 
-  docker rm -f "${PROXY_CONTAINER_NAME}" >/dev/null 2>&1 || true
+  cleanup_container_on_host "${PREFILL_LOCAL_IP}" \
+    "${PROXY_CONTAINER_NAME}" Proxy || status=1
   for host in "${PREFILL_HOSTS[@]}"; do
-    run_on_host "${host}" docker rm -f \
-      "${PREFILL_CONTAINER_NAME}" >/dev/null 2>&1 || true
+    cleanup_container_on_host "${host}" \
+      "${PREFILL_CONTAINER_NAME}" Prefill || status=1
   done
   for host in "${DECODE_HOSTS[@]}"; do
-    run_on_host "${host}" docker rm -f \
-      "${DECODE_CONTAINER_NAME}" >/dev/null 2>&1 || true
-  done
-
-  docker inspect "${PROXY_CONTAINER_NAME}" >/dev/null 2>&1 && status=1
-  for host in "${PREFILL_HOSTS[@]}"; do
-    remote_container_exists "${host}" "${PREFILL_CONTAINER_NAME}" && status=1
-  done
-  for host in "${DECODE_HOSTS[@]}"; do
-    remote_container_exists "${host}" "${DECODE_CONTAINER_NAME}" && status=1
+    cleanup_container_on_host "${host}" \
+      "${DECODE_CONTAINER_NAME}" Decode || status=1
   done
 
   if [[ "${dump_logs}" == "true" ]]; then
