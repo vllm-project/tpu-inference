@@ -314,9 +314,9 @@ def ragged_paged_attention(
         soft_cap=soft_cap,
         mask_value=mask_value,
     )
-    decode_bkv_p_new = (
+    max_decode_bkv_p_new = (
         1 if decode_query_size <= 1
-        else ((decode_query_size - 2) // page_size + 2)
+        else 1 + jnp.ceil(decode_query_size-1/page_size) 
     )
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,
@@ -330,7 +330,7 @@ def ragged_paged_attention(
         scale_k=k_scale,
         scale_v=v_scale,
         kv_layout=kv_layout,
-        decode_bkv_p_new=decode_bkv_p_new,
+        max_decode_bkv_p_new=max_decode_bkv_p_new,
     )
 
     q_hbm, new_kv_hbm = prepare_inputs(
