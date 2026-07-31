@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Deploy Raiden-accelerated Disaggregated Serving on piv-cluster-europe
+# Deploy Raiden-accelerated Multihost (no disagg) KV Cache Offloading on piv-cluster-europe
 set -euo pipefail
 
 CLUSTER="piv-cluster-europe"
@@ -22,7 +22,7 @@ ZONE="europe-west4-a"
 KUBE_CONTEXT="gke_${PROJECT}_${ZONE}_${CLUSTER}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFEST_FILE="${SCRIPT_DIR}/disagg-serving-v6-raiden.yaml"
+MANIFEST_FILE="${SCRIPT_DIR}/multihost-serving-v6-offload.yaml"
 MODEL_NAME="Qwen/Qwen3-8B"
 IMAGE_TAG="us-east5-docker.pkg.dev/cloud-tpu-inference-test/piv/vllm-tpu-raiden:latest"
 
@@ -35,7 +35,8 @@ if [ "${BUILD_IMAGE:-false}" = "true" ]; then
     echo "Running gcloud auth application-default login..."
     gcloud auth application-default login
   fi
-  DOCKER_BUILDKIT=1 docker build --secret "id=adc,src=${ADC_FILE}" -t "${IMAGE_TAG}" "${SCRIPT_DIR}"
+  REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+  DOCKER_BUILDKIT=1 docker build --secret "id=adc,src=${ADC_FILE}" -f "${SCRIPT_DIR}/Dockerfile" -t "${IMAGE_TAG}" "${REPO_ROOT}"
   docker push "${IMAGE_TAG}"
 fi
 
@@ -44,42 +45,41 @@ gcloud container clusters get-credentials "${CLUSTER}" \
   --project="${PROJECT}" \
   --zone="${ZONE}"
 
-echo "=== Step 2: Deleting old Raiden pods and waiting for cleanup ==="
-kubectl --context="${KUBE_CONTEXT}" delete lws vllm-prefill vllm-decode --ignore-not-found=true
+echo "=== Step 2: Deleting old Raiden serving & disagg pods and waiting for cleanup ==="
+kubectl --context="${KUBE_CONTEXT}" delete lws vllm-serving vllm-prefill vllm-decode --ignore-not-found=true
 kubectl --context="${KUBE_CONTEXT}" delete deployment vllm-disagg-proxy --ignore-not-found=true
 kubectl --context="${KUBE_CONTEXT}" delete pod -l llm-d.ai/inferenceServing=true --ignore-not-found=true
 kubectl --context="${KUBE_CONTEXT}" delete pod -l app=vllm-proxy --ignore-not-found=true
 
-echo "=== Cleaning PVC storage (pvc-vllm-p and pvc-vllm-d) to free cached models ==="
-kubectl --context="${KUBE_CONTEXT}" delete pvc pvc-vllm-p pvc-vllm-d --ignore-not-found=true
+# echo "=== Cleaning PVC storage (pvc-vllm-serving, pvc-vllm-p, pvc-vllm-d) ==="
+# kubectl --context="${KUBE_CONTEXT}" delete pvc pvc-vllm-serving pvc-vllm-p pvc-vllm-d --ignore-not-found=true
 
 echo "Waiting for old pods to be completely deleted..."
 kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l llm-d.ai/inferenceServing=true --timeout=300s 2>/dev/null || true
 kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l app=vllm-proxy --timeout=300s 2>/dev/null || true
 
-echo "=== Step 3: Deploying Raiden Disaggregated Serving Manifest (${MANIFEST_FILE}) ==="
+echo "=== Step 3: Deploying Raiden Multihost Offloading Manifest (${MANIFEST_FILE}) ==="
 kubectl --context="${KUBE_CONTEXT}" apply -f "${MANIFEST_FILE}"
 
-echo "=== Step 4: Waiting for vLLM Raiden Prefill & Decode Engines ==="
+echo "=== Step 4: Waiting for vLLM Raiden Multihost Engine ==="
 START_TIME=$(date +%s)
 while true; do
-  PREFILL_COUNT=$(kubectl --context="${KUBE_CONTEXT}" logs vllm-prefill-0 2>/dev/null | grep -c -E "Uvicorn running on|Engine 000:" || true)
-  DECODE_COUNT=$(kubectl --context="${KUBE_CONTEXT}" logs vllm-decode-0 2>/dev/null | grep -c -E "Uvicorn running on|Engine 000:" || true)
+  ENGINE_COUNT=$(kubectl --context="${KUBE_CONTEXT}" logs vllm-serving-0 -c vllm-leader 2>/dev/null | grep -c -E "Application startup complete\." || true)
 
-  if [ "$PREFILL_COUNT" -gt 0 ] && [ "$DECODE_COUNT" -gt 0 ]; then
-    echo "✅ Both Prefill and Decode vLLM Raiden engines are ready!"
+  if [ "$ENGINE_COUNT" -gt 0 ]; then
+    echo "✅ vLLM Raiden Multihost Serving Engine is ready!"
     break
   fi
 
   ELAPSED=$(( $(date +%s) - START_TIME ))
-  echo -ne "Waiting for Raiden engines... (${ELAPSED}s elapsed | prefill_count: ${PREFILL_COUNT}, decode_count: ${DECODE_COUNT})\r"
+  echo -ne "Waiting for Raiden engine... (${ELAPSED}s elapsed | engine_count: ${ENGINE_COUNT})\r"
   sleep 10
 done
 echo ""
 
-echo "=== Step 5: Sending benchmark request through disaggregated proxy ==="
-kubectl --context="${KUBE_CONTEXT}" exec deployment/vllm-disagg-proxy -- \
-  curl -s "http://localhost:10000/v1/chat/completions" \
+echo "=== Step 5: Sending benchmark request to vLLM engine ==="
+kubectl --context="${KUBE_CONTEXT}" exec vllm-serving-0 -c vllm-leader -- \
+  curl -s "http://localhost:8000/v1/chat/completions" \
     -H "Content-Type: application/json" \
     -d '{
       "model": "'"${MODEL_NAME}"'",

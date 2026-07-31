@@ -512,22 +512,23 @@ class TPUOffloadConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_runner(runner)
 
-    def start_load_kv(self, fwd_ctx: "ForwardContext") -> None:
+    def start_load_kv(self, fwd_ctx: "ForwardContext", *args,
+                      **kwargs) -> None:
         """Starts loading the KV cache for the given requests."""
         assert self.connector_worker is not None
         self.connector_worker.start_load_kv(fwd_ctx)
 
-    def wait_for_layer_load(self, layer_name: str) -> None:
+    def wait_for_layer_load(self, *args, **kwargs) -> None:
         logger.info("TPUOffloadConnector: Entering wait_for_layer_load")
         """TPU connector doesn't support layer wise load."""
         pass
 
-    def save_kv_layer(self, **kwargs) -> None:
+    def save_kv_layer(self, *args, **kwargs) -> None:
         logger.info("TPUOffloadConnector: Entering save_kv_layer")
         """TPU connector doesn't support layer wise save."""
         pass
 
-    def wait_for_save(self):
+    def wait_for_save(self, *args, **kwargs):
         assert isinstance(self._connector_metadata,
                           TPUOffloadConnectorMetadata)
         self.connector_worker.start_save_kv()

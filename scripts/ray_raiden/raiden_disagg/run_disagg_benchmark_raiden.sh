@@ -13,19 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Benchmark tpu-raiden Disaggregated Serving (30 prompts, 8k-in/1k-out @ 2 RPS)
+# Benchmark tpu-raiden Disaggregated Serving (shared prefix benchmark)
 # and report TTFT, TPOT, ITL, Token Throughput, and Decode KV Cache Hit Rate.
 set -euo pipefail
 
 PROXY_PORT="10000"
 MODEL_NAME="${MODEL:-Qwen/Qwen3-8B}"
 NUM_PROMPTS="${NUM_PROMPTS:-30}"
-INPUT_LEN="${INPUT_LEN:-8192}"
-OUTPUT_LEN="${OUTPUT_LEN:-1024}"
+PREFIX_LEN="${PREFIX_LEN:-8192}"
+INPUT_LEN="${INPUT_LEN:-128}"
+OUTPUT_LEN="${OUTPUT_LEN:-128}"
 RPS="${RPS:-2}"
 
 echo "=== Step 1: Running vLLM Serving Benchmark inside Proxy Pod ==="
-echo "Configuration: ${NUM_PROMPTS} prompts, ${INPUT_LEN} input tokens, ${OUTPUT_LEN} output tokens @ ${RPS} RPS..."
+echo "Configuration: ${NUM_PROMPTS} prompts, ${PREFIX_LEN} shared prefix + ${INPUT_LEN} input tokens, ${OUTPUT_LEN} output tokens @ ${RPS} RPS..."
 echo ""
 
 kubectl exec deployment/vllm-disagg-proxy -- vllm bench serve \
@@ -34,10 +35,12 @@ kubectl exec deployment/vllm-disagg-proxy -- vllm bench serve \
   --port "${PROXY_PORT}" \
   --model "${MODEL_NAME}" \
   --dataset-name random \
+  --random-prefix-len "${PREFIX_LEN}" \
   --random-input-len "${INPUT_LEN}" \
   --random-output-len "${OUTPUT_LEN}" \
   --num-prompts "${NUM_PROMPTS}" \
   --request-rate "${RPS}" \
+  --seed 42 \
   --trust-remote-code \
   --percentile-metrics "ttft,tpot,itl,e2el" \
   --metric-percentiles "95,97,99"

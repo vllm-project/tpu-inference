@@ -30,19 +30,18 @@ gcloud container clusters get-credentials "${CLUSTER}" \
   --project="${PROJECT}" \
   --zone="${ZONE}"
 
-echo "=== Step 2: Deleting old pods and waiting for cleanup ==="
-kubectl --context="${KUBE_CONTEXT}" delete lws vllm-prefill vllm-decode --ignore-not-found=true
+echo "=== Step 2: Deleting old Raiden serving & disagg pods and waiting for cleanup ==="
+kubectl --context="${KUBE_CONTEXT}" delete lws vllm-serving vllm-prefill vllm-decode --ignore-not-found=true
 kubectl --context="${KUBE_CONTEXT}" delete deployment vllm-disagg-proxy --ignore-not-found=true
 kubectl --context="${KUBE_CONTEXT}" delete pod -l llm-d.ai/inferenceServing=true --ignore-not-found=true
 kubectl --context="${KUBE_CONTEXT}" delete pod -l app=vllm-proxy --ignore-not-found=true
 
-echo "=== Cleaning PVC storage (pvc-vllm-p and pvc-vllm-d) to free cached models ==="
-kubectl --context="${KUBE_CONTEXT}" delete pvc pvc-vllm-p pvc-vllm-d --ignore-not-found=true
+# echo "=== Cleaning PVC storage (pvc-vllm-serving, pvc-vllm-p, pvc-vllm-d) ==="
+# kubectl --context="${KUBE_CONTEXT}" delete pvc pvc-vllm-serving pvc-vllm-p pvc-vllm-d --ignore-not-found=true
 
 echo "Waiting for old pods to be completely deleted..."
 kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l llm-d.ai/inferenceServing=true --timeout=300s 2>/dev/null || true
 kubectl --context="${KUBE_CONTEXT}" wait --for=delete pod -l app=vllm-proxy --timeout=300s 2>/dev/null || true
-
 
 echo "=== Step 3: Deploying Baseline Disaggregated Serving Manifest (${MANIFEST_FILE}) ==="
 kubectl --context="${KUBE_CONTEXT}" apply -f "${MANIFEST_FILE}"
