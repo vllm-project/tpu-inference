@@ -211,6 +211,7 @@ def _attention_kernel(
     def flash_attention_step1_qk_softmax(
             q,  # [bq_sz * num_q_heads, head_dim]
             kv,  # [bkv_sz, head_dim] <- Correspond to data from bkv_*_x2_ref
+            kv_len,  # real top-k entries for this query token
             swa_m,  # [bq_sz * num_q_heads],
             swa_l,  # [bq_sz * num_q_heads],
             attention_sinks,  # [num_q_heads]
@@ -224,6 +225,8 @@ def _attention_kernel(
         # Follow FlashAttention-2 forward pass.
         s = jnp.einsum("nd,md->nm", q, kv, preferred_element_type=jnp.float32)
         s *= sm_scale
+        k_span = lax.broadcasted_iota(jnp.int32, s.shape, 1)
+        s = jnp.where(k_span < kv_len, s, jnp.finfo(s.dtype).min)
 
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
         m_prev = swa_m
@@ -459,6 +462,7 @@ def _attention_kernel(
             p, exp_m_diff, l_sum = flash_attention_step1_qk_softmax(
                 bq,
                 bkv,
+                kv_lens_ref[batch_start_seq_idx + batch_idx],
                 swa_m,
                 swa_l,
                 attention_sinks,
