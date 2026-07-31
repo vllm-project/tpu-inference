@@ -24,8 +24,9 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 from tpu_inference.layers.common import sharding as sharding_mod
-from tpu_inference.layers.common.attention_interface import \
-    pcp_ragged_paged_attention
+from tpu_inference.layers.common.attention_metadata import (AttentionMetadata,
+                                                            PCPMetadata)
+from tpu_inference.layers.common.cp_attention import pcp_forward
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
 
@@ -209,20 +210,26 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         cu_q_lens, q_pos_offsets = _pcp_meta(pcp, C, num_current)
         distribution = jnp.array([0, 0, 2], jnp.int32)  # head + tail
 
-        out, new_cache = pcp_ragged_paged_attention(self._mesh(pcp),
-                                                    q,
-                                                    k,
-                                                    v,
-                                                    cache,
-                                                    kv_lens,
-                                                    self._page_indices(pps),
-                                                    cu_q_lens,
-                                                    distribution,
-                                                    kv_cache_lens,
-                                                    q_pos_offsets,
-                                                    sm_scale=SM_SCALE,
-                                                    update_kv_cache=True,
-                                                    use_causal_mask=True)
+        md = AttentionMetadata(
+            input_positions=jnp.zeros(1, jnp.int32),
+            seq_lens=kv_lens,
+            block_tables=self._page_indices(pps),
+            request_distribution=distribution,
+            pcp=PCPMetadata(
+                query_start_loc=cu_q_lens,
+                kv_cache_lens=kv_cache_lens,
+                q_pos_offsets=q_pos_offsets,
+            ),
+        )
+        new_cache, out = pcp_forward(self._mesh(pcp),
+                                     q,
+                                     k,
+                                     v,
+                                     cache,
+                                     md,
+                                     sm_scale=SM_SCALE,
+                                     update_kv_cache=True,
+                                     use_causal_mask=True)
         return np.asarray(out), np.asarray(new_cache), exp, C
 
     def _assert_matches(self, out, exp, pcp, C, num_current):
