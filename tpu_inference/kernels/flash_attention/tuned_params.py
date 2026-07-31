@@ -30,7 +30,7 @@ class TuningKey:
     kv_dtype: str = "bfloat16"
 
 
-@dataclass
+@dataclass(frozen=True)
 class TunableParams:
     block_q: int
     block_k_major: int
