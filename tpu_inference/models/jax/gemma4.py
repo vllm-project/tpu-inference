@@ -331,16 +331,15 @@ class Gemma4Attention(JaxModule):
             # and Gemma4Model's layer-name iteration.
             self.kv_sharing_target_layer_name = (
                 f"layer.{kv_share_map[layer_idx]}")
-
-        if self.is_kv_shared_layer:
             # Shared layers never use their own K/V: `__call__` reads the
             # source layer's already-normed-and-roped K/V straight from the
-            # redirected cache slot, so k_proj/v_proj/k_norm are dead weight
-            # and dead compute. Gemma 4 QAT exports omit them entirely for
-            # these layers, so allocating them makes those checkpoints fail
-            # to load (vllm-project/tpu-inference#3225). BF16 exports do ship
-            # them; every `load_weights` that builds this module drops them on
-            # the way in via `drop_shared_kv_weights`.
+            # redirected cache slot, so nothing ever reads what k_proj/
+            # v_proj/k_norm would produce. Gemma 4 QAT exports omit them
+            # entirely for these layers, so allocating them makes those
+            # checkpoints fail to load (vllm-project/tpu-inference#3225).
+            # BF16 exports do ship them; every `load_weights` that builds
+            # this module drops them on the way in via
+            # `drop_shared_kv_weights`.
             self.qkv_proj = None
             self.q_proj = JaxEinsum(
                 "TD,DNH->TNH",
