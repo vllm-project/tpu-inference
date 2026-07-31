@@ -150,6 +150,10 @@ if [[ ! -f "${HOME}/.ssh/id_rsa" ]]; then
   echo "--- Generating an SSH key for cross-worker orchestration"
   mkdir -p "${HOME}/.ssh"
   ssh-keygen -t rsa -b 4096 -N "" -f "${HOME}/.ssh/id_rsa" -q
+elif [[ ! -f "${HOME}/.ssh/id_rsa.pub" ]]; then
+  echo "--- Rebuilding the missing SSH public key from the existing private key"
+  ssh-keygen -y -f "${HOME}/.ssh/id_rsa" >"${HOME}/.ssh/id_rsa.pub"
+  chmod 644 "${HOME}/.ssh/id_rsa.pub"
 fi
 SSH_OPTS=(
   -o StrictHostKeyChecking=no
