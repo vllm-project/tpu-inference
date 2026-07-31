@@ -13,19 +13,14 @@
 # limitations under the License.
 
 steps:
-  - label: "tpu7x-32 queue smoke: host + TPU visibility"
-    key: tpu7x32_smoke
+  - label: "tpu7x-16 disk probe (host {{matrix}})"
+    key: tpu7x16_disk_probe
     agents:
-      queue: tpu_v7x_32_queue
+      queue: tpu_v7x_16_queue
+    matrix: ["a","b","c"]
     commands:
       - hostname
-      - echo "--- accel devices on this host:"
-      - ls /dev/vfio /dev/accel* 2>/dev/null || true
-      - echo "--- chip count via PCI:"
-      - lspci 2>/dev/null | grep -ci "google" || true
-      - echo "--- worker env:"
-      - env | grep -E "TPU|WORKER" || true
-      - echo "--- docker available:"
-      - docker --version
-      - echo "--- disk:"
-      - df -h / /mnt/disks/persist 2>/dev/null || df -h /
+      - df -h / /mnt/disks/persist 2>&1 || true
+      - ls /mnt/disks/persist 2>&1 | head -5 || true
+      - echo "--- docker root:"
+      - docker info 2>/dev/null | grep -i "docker root" || true
