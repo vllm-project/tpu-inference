@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
 import itertools
 import logging
 import time
@@ -28,31 +27,10 @@ from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
 from tpu_inference.kernels.flash_attention.kernel import (BlockSizes,
                                                           SegmentIds,
                                                           flash_attention)
+from tpu_inference.kernels.flash_attention.tuned_params import (TunableParams,
+                                                                TuningKey)
 
 logger = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass
-class TuningKey:
-    batch_size: int
-    num_heads: int
-    q_seq_len: int
-    kv_seq_len: int
-    head_dim: int
-
-
-@dataclasses.dataclass
-class TunableParams:
-    block_q: int
-    block_k_major: int
-    block_k: int
-    block_b: int
-
-    def __ge__(self, other) -> bool:
-        return False
-
-    def __le__(self, other) -> bool:
-        return False
 
 
 class FlashAttentionKernelTuner(KernelTunerBase):
