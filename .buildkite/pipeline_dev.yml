@@ -62,6 +62,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x multi-host (4 hosts) Kimi-Linear-48B-A3B-Instruct"
     key: tpu7x_kimi48b_multihost_32
+    timeout_in_minutes: 135
     env:
       TPU_VERSION: "tpu7x"
       MODEL_IMPL_TYPE: "flax_nnx"
