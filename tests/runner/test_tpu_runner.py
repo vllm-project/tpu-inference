@@ -182,6 +182,56 @@ class TestTPUJaxRunner:
         assert isinstance(attention_metadata, dict)
         assert len(attention_metadata) == 20
 
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_prefix_caching_omits_compact_mamba_slots(
+            self, mock_sampling_metadata):
+        self._create_mock_hybrid_kv_cache_config()
+        self.runner.kv_cache_config.has_mamba_layers = True
+        self.runner.cache_config.enable_prefix_caching = True
+        self.runner.mamba_state_manager.enabled = True
+        self.runner.mamba_state_manager.mamba_groups = {1: MagicMock()}
+        self.runner.mamba_state_manager.current_state_block_ids = {
+            1: {
+                'req1': 77
+            }
+        }
+
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 1
+        scheduler_output.num_scheduled_tokens = {'req1': 1}
+        scheduler_output.scheduled_spec_decode_tokens = {}
+        scheduler_output.grammar_bitmask = None
+
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.req_ids = ['req1']
+        self.runner.input_batch.req_id_to_index = {'req1': 0}
+        self.runner.input_batch.num_computed_tokens_cpu = np.array([16])
+        self.runner.input_batch.token_ids_cpu = np.random.randint(
+            0, 1000, (8, 64), dtype=np.int32)
+        self.runner.input_batch.mamba_state_indices_cpu = np.ones(
+            self.runner.max_num_reqs, dtype=np.int32)
+
+        mock_block_table = MagicMock()
+        mock_block_table.max_num_blocks_per_req = 8
+        mock_block_table.get_cpu_tensor.return_value = np.zeros((1, 8),
+                                                                dtype=np.int32)
+        self.runner.input_batch.block_table = [
+            mock_block_table, mock_block_table
+        ]
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+
+        output = self.runner._prepare_inputs(scheduler_output)
+        attention_metadata = output[2]
+
+        assert isinstance(attention_metadata, dict)
+        assert all(metadata.mamba_state_indices is None
+                   for metadata in attention_metadata.values())
+        mamba_block_tables = np.asarray(
+            attention_metadata['layer.10'].block_tables).reshape(
+                self.runner.max_num_reqs, -1)
+        assert mamba_block_tables[0, 0] == 77
+
     def _create_mock_hybrid_kv_cache_config(self):
         mock_kv_cache_config = MagicMock()
         mock_kv_cache_group1 = MagicMock()

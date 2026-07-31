@@ -39,6 +39,24 @@ from tpu_inference.utils import get_mesh_shape_product
 logger = init_logger(__name__)
 
 
+def _get_mamba_state_indices(attn_metadata) -> jax.Array:
+    """Returns compact slots or the current scheduler-owned state block."""
+    if attn_metadata.mamba_state_indices is not None:
+        return attn_metadata.mamba_state_indices.astype(jnp.int32)
+    if attn_metadata.block_tables is None:
+        raise RuntimeError(
+            "GDN attention requires block_tables when compact Mamba state "
+            "indices are disabled.")
+
+    max_num_reqs = attn_metadata.seq_lens.shape[0]
+    if attn_metadata.block_tables.size % max_num_reqs != 0:
+        raise ValueError(
+            "Flattened Mamba block table size must be divisible by the "
+            "request dimension.")
+    block_tables = attn_metadata.block_tables.reshape(max_num_reqs, -1)
+    return block_tables[:, 0].astype(jnp.int32)
+
+
 def gdn_attention_core_tpu(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -105,20 +123,10 @@ def gdn_attention_core_tpu(
     else:
         conv_state_in = conv_state
 
-    # Index mamba state by the per-request slot id from
-    # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
-    # (vLLM's GPU convention). Two reasons:
-    #
-    #  1. `_maybe_set_compact_mamba_num_blocks_override` caps the mamba
-    #     pool at `max_num_seqs + 1` while the attention pool is much
-    #     larger; using `block_tables[:, 0]` (a value in the attention
-    #     range) would walk off the end of the mamba arrays.
-    #  2. When vLLM's input batch runs `condense` to compact the persistent
-    #     batch (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662 — moves
-    #     requests into lower-index slots after earlier ones finish), the
-    #     slot id moves with the request so the kernel still reads/writes
-    #     the slot that holds this request's real state.
-    state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
+    # Compact mode uses stable per-request slots. Prefix caching instead uses
+    # scheduler-owned Mamba blocks; the runner places the current running
+    # block in column zero of each Mamba group's layer-specific block table.
+    state_indices = _get_mamba_state_indices(attn_metadata)
 
     config = GdnAttentionConfig(
         ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(

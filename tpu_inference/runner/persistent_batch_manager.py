@@ -340,6 +340,7 @@ class PersistentBatchManager:
         swap_cnt = self._reorder_batch(scheduler_output)
         if (isinstance(self.input_batch, InputBatch)
                 and self.input_batch.has_mamba_layers
+                and self.input_batch.use_compact_mamba_state
                 and (batch_changed or swap_cnt > 0)):
             self.input_batch.assert_mamba_state_invariants(
                 self.requests, dp_rank_map)

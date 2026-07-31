@@ -126,6 +126,12 @@ class CompilationManager:
                     self._precompile_subtract_num_rejected_tokens()
                     self._precompile_concat_last_sampled_tokens_and_draft_tokens(
                     )
+            if self.runner.mamba_state_manager.enabled:
+                self._run_compilation(
+                    "Mamba state block copy",
+                    self.runner.mamba_state_manager.
+                    precompile_copy_state_blocks,
+                )
             if not self.runner.is_last_rank:
                 return
             self._precompile_select_from_array()
@@ -239,7 +245,8 @@ class CompilationManager:
         # populate for hybrid attn+mamba models — for pure-attention models we
         # pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
-        if self.runner.kv_cache_config.has_mamba_layers:
+        if (self.runner.kv_cache_config.has_mamba_layers
+                and self.runner.kv_cache_manager.uses_compact_mamba_state):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -1082,7 +1089,8 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
-        if self.runner.kv_cache_config.has_mamba_layers:
+        if (self.runner.kv_cache_config.has_mamba_layers
+                and self.runner.kv_cache_manager.uses_compact_mamba_state):
             eagle3_mamba_state_indices = device_array(
                 self.runner.mesh,
                 np.zeros(self.runner.max_num_reqs, dtype=np.int32),
@@ -1229,7 +1237,8 @@ class CompilationManager:
         # ForbidCompile guard inside `Eagle3Proposer.propose` raises. None for
         # pure-attention models (the common eagle3 case) so the field stays
         # absent end-to-end.
-        if self.runner.kv_cache_config.has_mamba_layers:
+        if (self.runner.kv_cache_config.has_mamba_layers
+                and self.runner.kv_cache_manager.uses_compact_mamba_state):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,

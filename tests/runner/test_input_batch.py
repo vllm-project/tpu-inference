@@ -401,6 +401,27 @@ def test_mamba_state_indices_swap(input_batch: InputBatch):
     assert int(input_batch.mamba_state_indices_cpu[1]) == slot0
 
 
+class TestSchedulerAddressableMambaState:
+
+    def test_add_remove_does_not_allocate_or_release_compact_slot(
+            self, input_batch: InputBatch):
+        input_batch.use_compact_mamba_state = False
+        pools_before = [
+            list(pool) for pool in input_batch._free_mamba_slots_per_rank
+        ]
+        request = create_dummy_request("req-prefix")
+
+        input_batch.add_request(request)
+
+        assert request.mamba_state_slot is None
+        assert int(input_batch.mamba_state_indices_cpu[0]) == 0
+        assert input_batch._free_mamba_slots_per_rank == pools_before
+
+        input_batch.remove_request(request.req_id)
+
+        assert input_batch._free_mamba_slots_per_rank == pools_before
+
+
 def test_all_greedy_property(input_batch: InputBatch):
     """Tests the `all_greedy` property."""
     # Initially true

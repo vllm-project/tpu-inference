@@ -20,8 +20,8 @@ import pytest
 import torch
 from jax.sharding import Mesh
 
-from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
-    VllmGatedDeltaNetAttention
+from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import (
+    VllmGatedDeltaNetAttention, _get_mamba_state_indices)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
 
@@ -235,3 +235,34 @@ class TestVllmGatedDeltaNetAttention:
 
         assert torch.all(output[:num_tokens] == 5)
         assert torch.all(output[num_tokens:] == 0)
+
+
+class TestMambaStateIndices:
+
+    def test_compact_slots_take_precedence(self):
+        metadata = MagicMock()
+        metadata.mamba_state_indices = jax.numpy.array([3, 7])
+        metadata.block_tables = jax.numpy.array([11, 12, 21, 22])
+        metadata.seq_lens = jax.numpy.array([1, 1])
+
+        actual = _get_mamba_state_indices(metadata)
+
+        np.testing.assert_array_equal(actual, np.array([3, 7]))
+
+    def test_scheduler_blocks_use_layer_specific_first_column(self):
+        metadata = MagicMock()
+        metadata.mamba_state_indices = None
+        metadata.block_tables = jax.numpy.array([11, 12, 13, 21, 22, 23])
+        metadata.seq_lens = jax.numpy.array([9, 5])
+
+        actual = _get_mamba_state_indices(metadata)
+
+        np.testing.assert_array_equal(actual, np.array([11, 21]))
+
+    def test_scheduler_blocks_are_required_without_compact_slots(self):
+        metadata = MagicMock()
+        metadata.mamba_state_indices = None
+        metadata.block_tables = None
+
+        with pytest.raises(RuntimeError, match="requires block_tables"):
+            _get_mamba_state_indices(metadata)

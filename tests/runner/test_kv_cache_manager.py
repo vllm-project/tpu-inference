@@ -1120,6 +1120,7 @@ class TestKVCacheManager:
         max_num_reqs = 256
 
         self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.enable_prefix_caching = False
         self.runner.cache_config.num_gpu_blocks_override = None
         self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
         self.runner.max_num_reqs = max_num_reqs
@@ -1156,6 +1157,7 @@ class TestKVCacheManager:
         manager._hybrid_uniform_page_size_bytes = 2**20
 
         self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.enable_prefix_caching = False
         self.runner.scheduler_config = MagicMock(max_num_seqs=256)
         self.runner.max_num_reqs = 256
 
@@ -1169,6 +1171,28 @@ class TestKVCacheManager:
         assert manager._mamba_num_blocks is None
         assert self.runner.cache_config.num_gpu_blocks_override is None
 
+    def test_compact_mamba_override_skipped_for_prefix_caching(self):
+        """Prefix caching needs scheduler-owned Mamba blocks for reuse."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        self.runner.cache_config.enable_prefix_caching = True
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.max_num_reqs = 256
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes"
+        ) as mock_hbm_usage:
+            self._run_compact_mamba_override(manager,
+                                             attn_page=2**20,
+                                             unpadded_mamba=4 * 2**20)
+
+        mock_hbm_usage.assert_not_called()
+        assert manager._mamba_num_blocks is None
+        assert self.runner.cache_config.num_gpu_blocks_override is None
+        assert not manager.uses_compact_mamba_state
+
     def test_compact_mamba_override_respects_user_pinned_override(self):
         """When the user pins `num_gpu_blocks_override` explicitly,
         compact-mamba must not clobber it (their explicit choice wins)."""
@@ -1178,6 +1202,7 @@ class TestKVCacheManager:
         manager._hybrid_uniform_page_size_bytes = 2**20
 
         self.runner.cache_config.num_gpu_blocks_override = 999
+        self.runner.cache_config.enable_prefix_caching = False
         self.runner.scheduler_config = MagicMock(max_num_seqs=256)
         self.runner.max_num_reqs = 256
 

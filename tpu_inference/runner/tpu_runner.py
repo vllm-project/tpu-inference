@@ -74,6 +74,7 @@ from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
+from tpu_inference.runner.mamba_state_manager import MambaStateManager
 from tpu_inference.runner.multimodal_manager import MultiModalManager
 from tpu_inference.runner.persistent_batch_manager import \
     PersistentBatchManager
@@ -344,6 +345,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self)
             self.structured_decoding_manager = StructuredDecodingManager(self)
         self.kv_cache_manager = KVCacheManager(self)
+        self.mamba_state_manager = MambaStateManager(self)
         self.mm_manager = MultiModalManager(self)
         self.persistent_batch_manager = PersistentBatchManager(
             self.requests,
@@ -771,19 +773,26 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
+        self.input_batch.use_compact_mamba_state = (
+            kv_cache_config.has_mamba_layers
+            and self.kv_cache_manager.uses_compact_mamba_state)
 
-        if self.kv_cache_manager.actual_mamba_num_blocks is not None:
+        if (self.input_batch.use_compact_mamba_state
+                and self.kv_cache_manager.actual_mamba_num_blocks is not None):
             self.input_batch.init_mamba_pools(
                 self.kv_cache_manager.actual_mamba_num_blocks)
+        self.mamba_state_manager.initialize(kv_cache_config)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
     def delete_kv_cache(self) -> None:
+        self.mamba_state_manager.reset()
         self.kv_cache_manager.delete_kv_cache()
 
     def reinitialize_kv_cache(self) -> None:
         self.kv_cache_manager.reinitialize_kv_cache()
+        self.mamba_state_manager.initialize(self.kv_cache_config)
 
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
@@ -985,6 +994,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
+            self.mamba_state_manager.update_request_lifecycle(scheduler_output)
             if has_kv_transfer_group():
                 return self.kv_connector_no_forward(scheduler_output,
                                                     self.vllm_config)
@@ -1000,6 +1010,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 # raise Exception(
                 #     "Should not schedule a request that does nothing!")
             return EMPTY_MODEL_RUNNER_OUTPUT
+
+        with self.maybe_forbid_compile:
+            self.mamba_state_manager.preprocess(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
@@ -1068,6 +1081,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                      self.is_first_rank,
                      self.is_last_rank,
                  )
+            self.mamba_state_manager.postprocess(scheduler_output)
             if not self.is_last_rank:
                 assert isinstance(hidden_states, JaxIntermediateTensors)
                 hidden_states.kv_connector_output = kv_connector_output
@@ -2021,6 +2035,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         axis=0,
                         out=block_tables_view[req_offset:req_offset +
                                               _num_reqs])
+                if (self.mamba_state_manager.enabled and
+                        self.mamba_state_manager.is_mamba_group(kv_cache_gid)):
+                    for index, req_id in enumerate(req_ids_dp[dp_rank]):
+                        block_tables_view[req_offset + index,
+                                          0] = (self.mamba_state_manager.
+                                                get_current_state_block_id(
+                                                    kv_cache_gid, req_id))
 
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
@@ -2035,7 +2056,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # pure-attention models, leaving the field None keeps AttentionMetadata
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
-        if self.kv_cache_config.has_mamba_layers:
+        if (self.kv_cache_config.has_mamba_layers
+                and self.kv_cache_manager.uses_compact_mamba_state):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.

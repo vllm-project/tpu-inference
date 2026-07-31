@@ -50,8 +50,9 @@ class AttentionMetadata(object):
     # batch position. Used by mamba/GDN ops to read/write recurrent state
     # without going through `block_tables`, since the mamba pool is
     # smaller than the attention pool under compact-mamba sizing.
-    # None for models without mamba layers; pure-mamba models would also
-    # use this field, only hybrid models exercise it today.
+    # None for models without mamba layers and for prefix-caching Mamba
+    # models, which use the current scheduler-owned block in
+    # `block_tables[:, 0]` instead.
     mamba_state_indices: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket

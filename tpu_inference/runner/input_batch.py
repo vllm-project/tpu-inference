@@ -194,6 +194,9 @@ class InputBatch:
         # Initial pool size is based on max_num_reqs rounded up to dp_size;
         # init_mamba_pools() resizes after KV cache allocation is known.
         self.mamba_state_indices_cpu = np.zeros(max_num_reqs, dtype=np.int32)
+        # Prefix-caching Mamba models address scheduler-owned state blocks
+        # instead. The runner flips this off after KV-cache initialization.
+        self.use_compact_mamba_state = True
         # Mamba slot pool, partitioned by DP rank so each rank's requests
         # get slots within that rank's shard of the device-side state array.
         # Matches the sharding in kv_cache_manager: mamba_num_blocks is
@@ -391,22 +394,25 @@ class InputBatch:
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
-        # Allocate a fresh mamba state slot for this request. The slot stays
-        # with the request through the persistent batch's lifetime, even when
-        # condense moves the request to a different `req_index`.
-        if request.mamba_state_slot is None:
-            request.mamba_state_slot = self._free_mamba_slots_per_rank[
-                dp_rank].pop()
+        if self.use_compact_mamba_state:
+            # The slot stays with the request through condense, even when the
+            # request moves to a different persistent-batch position.
+            if request.mamba_state_slot is None:
+                request.mamba_state_slot = self._free_mamba_slots_per_rank[
+                    dp_rank].pop()
+            else:
+                slot_rank = int(
+                    request.mamba_state_slot) // self._mamba_local_slots
+                assert slot_rank == dp_rank, (
+                    f"Preserved mamba slot {request.mamba_state_slot} belongs "
+                    f"to DP rank {slot_rank}, not {dp_rank}")
+                pool = self._free_mamba_slots_per_rank[dp_rank]
+                if request.mamba_state_slot in pool:
+                    pool.remove(request.mamba_state_slot)
+            self.mamba_state_indices_cpu[req_index] = request.mamba_state_slot
         else:
-            slot_rank = int(
-                request.mamba_state_slot) // self._mamba_local_slots
-            assert slot_rank == dp_rank, (
-                f"Preserved mamba slot {request.mamba_state_slot} belongs to "
-                f"DP rank {slot_rank}, not {dp_rank}")
-            pool = self._free_mamba_slots_per_rank[dp_rank]
-            if request.mamba_state_slot in pool:
-                pool.remove(request.mamba_state_slot)
-        self.mamba_state_indices_cpu[req_index] = request.mamba_state_slot
+            request.mamba_state_slot = None
+            self.mamba_state_indices_cpu[req_index] = 0
 
         # NOTE(woosuk): self.generators should not include the requests that
         # do not have their own generator.
@@ -594,8 +600,7 @@ class InputBatch:
             row_i1 = self.seen_token_ids_mask[i1]
             row_i2 = self.seen_token_ids_mask[i2]
             self.seen_token_ids_mask = (
-                self.seen_token_ids_mask.at[i1].set(row_i2).at[i2].set(row_i1)
-            )
+                self.seen_token_ids_mask.at[i1].set(row_i2).at[i2].set(row_i1))
 
         self.token_ids_cpu[[i1, i2], :max_active_token_count] = \
             self.token_ids_cpu[[i2, i1], :max_active_token_count]

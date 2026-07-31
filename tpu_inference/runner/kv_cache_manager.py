@@ -101,6 +101,11 @@ class KVCacheManager:
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
 
+    @property
+    def uses_compact_mamba_state(self) -> bool:
+        """Whether Mamba kernels should use per-request state slots."""
+        return not self.runner.cache_config.enable_prefix_caching
+
     def _create_attention_spec(
             self,
             block_size: int,
@@ -344,6 +349,11 @@ class KVCacheManager:
             both unset.
         """
         cache_config = self.runner.cache_config
+        if cache_config.enable_prefix_caching:
+            logger.info(
+                "Compact-mamba sizing disabled because prefix caching needs "
+                "scheduler-addressable Mamba state blocks.")
+            return
         if cache_config.num_gpu_blocks_override is not None:
             return
 
