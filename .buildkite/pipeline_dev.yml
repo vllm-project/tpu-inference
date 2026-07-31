@@ -1,52 +1,31 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 steps:
-  - label: ":docker: Build base image (tpu7x)"
-    key: tpu7x_build_docker
+  - label: "tpu7x-32 queue smoke: host + TPU visibility"
+    key: tpu7x32_smoke
     agents:
-      queue: cpu_64_core
-    env:
-      TPU_VERSION: "tpu7x"
+      queue: tpu_v7x_32_queue
     commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-
-  - label: "tpu7x Accuracy (gsm8k) Kimi-Linear-48B-A3B-Instruct"
-    key: tpu7x_kimi48b_accuracy
-    depends_on: tpu7x_build_docker
-    agents:
-      queue: tpu_v7x_8_queue
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      NEW_MODEL_DESIGN: "1"
-      TEST_MODEL: moonshotai/Kimi-Linear-48B-A3B-Instruct
-      TENSOR_PARALLEL_SIZE: "8"
-      MINIMUM_ACCURACY_THRESHOLD: "0.85"
-      ACCURACY_MODEL_ARGS_JSON: '{"pretrained":"moonshotai/Kimi-Linear-48B-A3B-Instruct","tensor_parallel_size":8,"max_model_len":2048,"max_num_seqs":64,"gpu_memory_utilization":0.6,"trust_remote_code":true,"additional_config":{"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}}'
-    commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh \
-          bash -c 'pip install -q blobfile && bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
-
-  - label: "tpu7x Perf baseline Kimi-Linear-48B-A3B-Instruct"
-    key: tpu7x_kimi48b_benchmark
-    depends_on: tpu7x_kimi48b_accuracy
-    agents:
-      queue: tpu_v7x_8_queue
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      NEW_MODEL_DESIGN: "1"
-      TEST_MODEL: moonshotai/Kimi-Linear-48B-A3B-Instruct
-      TENSOR_PARALLEL_SIZE: "8"
-      MINIMUM_THROUGHPUT_THRESHOLD: "0.1"
-      INPUT_LEN: "1800"
-      OUTPUT_LEN: "128"
-      PREFIX_LEN: "0"
-      MAX_MODEL_LEN: "2048"
-      MAX_NUM_SEQS: "64"
-      MAX_NUM_BATCHED_TOKENS: "1024"
-      CLIENT_TRUST_REMOTE_CODE: "1"
-      EXTRA_SERVE_FLAGS: '--trust-remote-code --gpu-memory-utilization 0.60 --additional-config {"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}'
-    commands:
-      - |
-        .buildkite/scripts/run_in_docker.sh \
-          bash -c 'pip install -q blobfile && bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh'
+      - hostname
+      - echo "--- accel devices on this host:"
+      - ls /dev/vfio /dev/accel* 2>/dev/null || true
+      - echo "--- chip count via PCI:"
+      - lspci 2>/dev/null | grep -ci "google" || true
+      - echo "--- worker env:"
+      - env | grep -E "TPU|WORKER" || true
+      - echo "--- docker available:"
+      - docker --version
+      - echo "--- disk:"
+      - df -h / /mnt/disks/persist 2>/dev/null || df -h /
