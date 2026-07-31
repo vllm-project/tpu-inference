@@ -417,16 +417,17 @@ cleanup_container_on_host() {
   local remove_output=""
   local remove_status=0
 
-  if inspect_output="$(
+  inspect_status=0
+  inspect_output="$(
     run_on_host "${host}" docker inspect "${container}" 2>&1
-  )"; then
-    :
-  else
-    inspect_status=$?
-    if is_missing_container_error "${inspect_output}"; then
-      echo "  ${label}: ${container} is already absent on ${host}; nothing to clean."
-      return 0
-    fi
+  )" || inspect_status=$?
+  # Some Docker CLI versions print "[]" plus "No such object" while returning
+  # success. Treat the explicit missing-object message as authoritative.
+  if is_missing_container_error "${inspect_output}"; then
+    echo "  ${label}: ${container} is already absent on ${host}; nothing to clean."
+    return 0
+  fi
+  if (( inspect_status != 0 )); then
     echo "ERROR: Could not inspect ${label} container ${container} on ${host} (status ${inspect_status})." >&2
     echo "${inspect_output}" >&2
     return 1
@@ -442,9 +443,17 @@ cleanup_container_on_host() {
 
   # Always verify the final state. A concurrent cleanup may make docker rm
   # return "No such container"; that is a successful cleanup outcome.
-  if inspect_output="$(
+  inspect_status=0
+  inspect_output="$(
     run_on_host "${host}" docker inspect "${container}" 2>&1
-  )"; then
+  )" || inspect_status=$?
+  if is_missing_container_error "${inspect_output}"; then
+    if (( remove_status != 0 )); then
+      echo "  ${label}: ${container} disappeared during cleanup on ${host}; ignoring docker rm status ${remove_status}."
+    fi
+    return 0
+  fi
+  if (( inspect_status == 0 )); then
     echo "ERROR: ${label} container ${container} still exists on ${host} after cleanup." >&2
     if (( remove_status != 0 )); then
       echo "--- docker rm failure (status ${remove_status}) ---" >&2
@@ -456,23 +465,15 @@ cleanup_container_on_host() {
     run_on_host "${host}" docker logs --tail 200 "${container}" 2>&1 ||
       true
     return 1
-  else
-    inspect_status=$?
-    if is_missing_container_error "${inspect_output}"; then
-      if (( remove_status != 0 )); then
-        echo "  ${label}: ${container} disappeared during cleanup on ${host}; ignoring docker rm status ${remove_status}."
-      fi
-      return 0
-    fi
-    echo "ERROR: Could not verify removal of ${label} container ${container} on ${host} (status ${inspect_status})." >&2
-    if (( remove_status != 0 )); then
-      echo "--- docker rm failure (status ${remove_status}) ---" >&2
-      echo "${remove_output}" >&2
-    fi
-    echo "--- docker inspect failure ---" >&2
-    echo "${inspect_output}" >&2
-    return 1
   fi
+  echo "ERROR: Could not verify removal of ${label} container ${container} on ${host} (status ${inspect_status})." >&2
+  if (( remove_status != 0 )); then
+    echo "--- docker rm failure (status ${remove_status}) ---" >&2
+    echo "${remove_output}" >&2
+  fi
+  echo "--- docker inspect failure ---" >&2
+  echo "${inspect_output}" >&2
+  return 1
 }
 
 cleanup() {
