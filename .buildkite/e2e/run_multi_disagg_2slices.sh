@@ -229,19 +229,49 @@ authorize_slice_workers() {
   local role=$1
   local resource=$2
   local zone=$3
-  local worker
+  shift 3
+  local -a endpoints=("$@")
+  local host
+  local all_reachable=true
 
-  echo "--- Authorizing SSH access to ${role} workers"
-  for ((worker = 0; worker < HOSTS_PER_SLICE; worker++)); do
-    gcloud compute tpus tpu-vm ssh \
-      "${SSH_USER}@${resource}" \
-      --zone "${zone}" \
-      --worker "${worker}" \
-      --internal-ip \
-      --ssh-key-file "${HOME}/.ssh/id_rsa" \
-      --ssh-key-expire-after "${SSH_KEY_EXPIRE_AFTER}" \
-      --command true \
-      --quiet
+  for host in "${endpoints[@]}"; do
+    if [[ "${host}" == "${PREFILL_LOCAL_IP}" ]]; then
+      continue
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" true \
+      >/dev/null 2>&1; then
+      all_reachable=false
+      break
+    fi
+  done
+
+  if [[ "${all_reachable}" == "true" ]]; then
+    echo "--- SSH access to all ${role} workers is already authorized"
+    return
+  fi
+
+  # A single gcloud SSH invocation propagates the public key to every worker in
+  # the slice. Connecting separately to worker 0 and worker 1 would repeat that
+  # relatively expensive propagation step.
+  echo "--- Authorizing SSH access to all ${role} workers"
+  gcloud compute tpus tpu-vm ssh \
+    "${SSH_USER}@${resource}" \
+    --zone "${zone}" \
+    --worker 0 \
+    --internal-ip \
+    --ssh-key-file "${HOME}/.ssh/id_rsa" \
+    --ssh-key-expire-after "${SSH_KEY_EXPIRE_AFTER}" \
+    --command true \
+    --quiet
+
+  for host in "${endpoints[@]}"; do
+    if [[ "${host}" == "${PREFILL_LOCAL_IP}" ]]; then
+      continue
+    fi
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" true; then
+      echo "ERROR: SSH key propagation completed, but ${role} worker ${host} is unreachable." >&2
+      return 1
+    fi
   done
 }
 
@@ -286,8 +316,10 @@ PREFILL_UNORDERED_HOSTS=("${DISCOVERED_ENDPOINTS[@]}")
 discover_slice_endpoints Decode "${DECODE_TPU_NAME}" "${DECODE_ZONE}"
 DECODE_UNORDERED_HOSTS=("${DISCOVERED_ENDPOINTS[@]}")
 
-authorize_slice_workers Prefill "${PREFILL_TPU_NAME}" "${PREFILL_ZONE}"
-authorize_slice_workers Decode "${DECODE_TPU_NAME}" "${DECODE_ZONE}"
+authorize_slice_workers Prefill "${PREFILL_TPU_NAME}" "${PREFILL_ZONE}" \
+  "${PREFILL_UNORDERED_HOSTS[@]}"
+authorize_slice_workers Decode "${DECODE_TPU_NAME}" "${DECODE_ZONE}" \
+  "${DECODE_UNORDERED_HOSTS[@]}"
 
 order_slice_endpoints Prefill "${PREFILL_UNORDERED_HOSTS[@]}"
 PREFILL_HOSTS=("${ORDERED_ENDPOINTS[@]}")
