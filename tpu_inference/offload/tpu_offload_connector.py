@@ -337,13 +337,10 @@ class KVOffloadConnectorStats(KVConnectorStats):
     @property
     def process_index(self) -> int:
         if getattr(self, "_process_index", None) is None:
-            try:
-                # Under JAX's multi-process SPMD model, each host node runs its own Python process.
-                # Since Ray launches exactly one worker process (RayWorkerWrapper) per node,
-                # jax.process_index() acts as a unique ID mapping 1:1 to each Ray worker actor.
-                self._process_index = jax.process_index()
-            except Exception:
-                self._process_index = 0
+            # Under JAX's multi-process SPMD model, each host node runs its own Python process.
+            # Since Ray launches exactly one worker process (RayWorkerWrapper) per node,
+            # jax.process_index() acts as a unique ID mapping 1:1 to each Ray worker actor.
+            self._process_index = jax.process_index()
         return self._process_index
 
     def record_save(self, req: ReqId, saved_chunk_ids: list[int]):
@@ -806,18 +803,14 @@ class TPUOffloadConnectorScheduler():
                  stage (representing the number of expected completion stats per chunk).
         """
         num_nodes = 1
-        try:
-            is_multihost = jax.process_count() > 1
-        except Exception:
-            is_multihost = False
+        multihost_backend = envs.TPU_MULTIHOST_BACKEND
+        if multihost_backend and multihost_backend != "ray":
+            raise ValueError(
+                f"Multi-host KVCache offloading currently only supports Ray backend, "
+                f"but TPU_MULTIHOST_BACKEND is set to: {multihost_backend}")
 
-        if is_multihost:
-            try:
-                import ray
-            except ImportError as e:
-                raise ValueError(
-                    "Multi-host KVCache offloading currently only supports Ray backend. "
-                    "However, 'ray' module could not be imported.") from e
+        if multihost_backend == "ray":
+            import ray
 
             if not ray.is_initialized():
                 raise ValueError(

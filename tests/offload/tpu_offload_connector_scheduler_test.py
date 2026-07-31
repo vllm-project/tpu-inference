@@ -593,7 +593,7 @@ class TestTPUOffloadConnectorRayValidation:
         vllm_config = MockVllmConfig()
         from unittest.mock import patch
 
-        with patch("jax.process_count", return_value=2), \
+        with patch("tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND", "ray"), \
              patch.dict("sys.modules", {"ray": None}):
             with pytest.raises(ValueError,
                                match="module could not be imported"):
@@ -606,7 +606,7 @@ class TestTPUOffloadConnectorRayValidation:
         mock_ray = MagicMock()
         mock_ray.is_initialized.return_value = False
 
-        with patch("jax.process_count", return_value=2), \
+        with patch("tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND", "ray"), \
              patch.dict("sys.modules", {"ray": mock_ray}):
             with pytest.raises(ValueError, match="Ray is not initialized"):
                 TPUOffloadConnectorScheduler(vllm_config)
@@ -631,9 +631,23 @@ class TestTPUOffloadConnectorRayValidation:
             },
         ]
 
-        with patch("jax.process_count", return_value=2), \
+        with patch("tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND", "ray"), \
              patch.dict("sys.modules", {"ray": mock_ray}), \
              patch("vllm.platforms.current_platform.ray_device_key", "TPU_DEVICE"):
 
             scheduler = TPUOffloadConnectorScheduler(vllm_config)
             assert scheduler.num_tp_workers == 2
+
+    def test_multihost_unsupported_backend(self):
+        vllm_config = MockVllmConfig()
+        from unittest.mock import patch
+
+        with patch(
+                "tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND",
+                "unsupported_backend"):
+            with pytest.raises(
+                    ValueError,
+                    match=
+                    "currently only supports Ray backend, but TPU_MULTIHOST_BACKEND is set to: unsupported_backend"
+            ):
+                TPUOffloadConnectorScheduler(vllm_config)

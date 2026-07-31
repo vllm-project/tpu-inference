@@ -153,11 +153,8 @@ def main(args: dict):
         # to release TPU device allocations and placement groups immediately.
         # Otherwise, they remain locked until garbage collection, which blocks
         # the subsequent test runs from allocating TPU resources.
-        if hasattr(baseline_llm,
-                   "llm_engine") and baseline_llm.llm_engine is not None:
-            if hasattr(baseline_llm.llm_engine, "engine_core"
-                       ) and baseline_llm.llm_engine.engine_core is not None:
-                baseline_llm.llm_engine.engine_core.shutdown()
+        if baseline_llm.llm_engine is not None and baseline_llm.llm_engine.engine_core is not None:
+            baseline_llm.llm_engine.engine_core.shutdown()
         del baseline_llm
         gc.collect()
 
@@ -172,10 +169,8 @@ def main(args: dict):
                                        test_params,
                                        prompts=prompts,
                                        num_invocations=2)
-        if hasattr(test_llm, "llm_engine") and test_llm.llm_engine is not None:
-            if hasattr(test_llm.llm_engine, "engine_core"
-                       ) and test_llm.llm_engine.engine_core is not None:
-                test_llm.llm_engine.engine_core.shutdown()
+        if test_llm.llm_engine is not None and test_llm.llm_engine.engine_core is not None:
+            test_llm.llm_engine.engine_core.shutdown()
         del test_llm
         gc.collect()
 
