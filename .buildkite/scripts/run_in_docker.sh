@@ -61,6 +61,15 @@ ENV_VARS=(
   -e ACCURACY_MODEL_ARGS_JSON="${ACCURACY_MODEL_ARGS_JSON:-}"
   -e EXTRA_SERVE_FLAGS="${EXTRA_SERVE_FLAGS:-}"
   -e CLIENT_TRUST_REMOTE_CODE="${CLIENT_TRUST_REMOTE_CODE:-}"
+  # Read by run_serving_probe.sh: what to serve, how long to allow for weight
+  # loading, and what to pass through to the serving probe.
+  -e MODEL="${MODEL:-}"
+  -e STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-}"
+  -e PROBE_EXTRA_FLAGS="${PROBE_EXTRA_FLAGS:-}"
+  # DEV-ONLY: bypasses the MLA/DP-attention check in tpu_platform.py. Set by
+  # the dev step measuring MLA on a composed expert x tensor mesh. Not for
+  # upstream; see the comment at that check.
+  -e TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION="${TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION:-}"
   # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
   # everywhere else; the suites that read them skip when they are empty.
   -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}"
@@ -180,6 +189,11 @@ trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true' EXIT INT TERM
 #   initiate models and bypass vLLM's CompilationManager logic entirely.
 # -----------------------------------------------------------------------------
 
+# VLLM_XLA_CHECK_RECOMPILATION defaults to 1 here: CI wants a compilation at
+# request time to be a hard failure rather than a silent slowdown. It was
+# previously hardcoded, so a step that set it in its own env was overridden
+# without any sign; a step that deliberately serves a shape warmup cannot
+# precompile can now pass 0.
 docker run \
   --name "$IMAGE_NAME" \
   --privileged \
@@ -197,7 +211,7 @@ docker run \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH="$LOCAL_JAX_CACHE_DIR" \
   -e JAX_COMPILATION_CACHE_DIR="$LOCAL_JAX_CACHE_DIR" \
-  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  -e VLLM_XLA_CHECK_RECOMPILATION="${VLLM_XLA_CHECK_RECOMPILATION:-1}" \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
