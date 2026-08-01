@@ -56,6 +56,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] offline_inference.py"
     key: tpu7x_demo_offline_inference
+    skip: "dev branch: only the Kimi-48B multi-host step below is under test"
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
@@ -81,6 +82,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] vllm serve + vllm bench serve"
     key: tpu7x_demo_serve_bench
+    skip: "dev branch: only the Kimi-48B multi-host step below is under test"
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
@@ -101,6 +103,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
     key: tpu7x_demo_disagg
+    skip: "dev branch: only the Kimi-48B multi-host step below is under test"
     depends_on: tpu7x_build_docker
     env:
       USE_PREBUILT_IMAGE: "1"
@@ -123,11 +126,18 @@ steps:
   # Mirrors test_26 in pipeline_jax.yml.
   # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
   # Requires a 16-chip queue (tpu_v7x_16_queue).
+  #
+  # depends_on + USE_PREBUILT_IMAGE=1 makes every node pull the image the cpu
+  # builder already pushed, instead of rebuilding it from source on the head
+  # node of the slice.
   # -----------------------------------------------------------------
   - label: "tpu7x [demo] Ray-based multi-host"
     key: tpu7x_demo_multihost
+    depends_on: tpu7x_build_docker
+    skip: "dev branch: only the Kimi-48B multi-host step below is under test"
     env:
       TPU_VERSION: "tpu7x"
+      USE_PREBUILT_IMAGE: "1"
     agents:
       queue: tpu_v7x_16_queue
     commands:
@@ -146,3 +156,50 @@ steps:
             -X POST \
             -H 'Content-Type: application/json' \
             -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+
+  # -----------------------------------------------------------------
+  # Kimi-Linear-48B-A3B-Instruct across 2 hosts (16 chips) via Ray.
+  #
+  # depends_on + USE_PREBUILT_IMAGE=1: the cpu builder pushes the image to the
+  # CI cache and every node of the slice pulls it, so no time is spent building
+  # from source on the head node.
+  #
+  # Weights are streamed straight from GCS by the RunAI streamer, so no node
+  # needs a 92 GiB local copy. MODEL_IMPL_TYPE=flax_nnx selects the JAX-native
+  # implementation explicitly: 'auto' resolves a runai_streamer load to the vLLM
+  # path for any architecture whose JAX class has no WeightLoader attribute, and
+  # this one loads through the LoadableWithIterator mixin instead.
+  #
+  # Sharding: expert_parallelism=16 keeps the routed experts split one way
+  # across all 16 chips, which also puts attention data-parallelism at 16
+  # (dp-attention is required by MLA), i.e. dp groups that span the host
+  # boundary.
+  # -----------------------------------------------------------------
+  - label: "tpu7x multi-host (2 hosts) Kimi-Linear-48B-A3B-Instruct"
+    key: tpu7x_kimi48b_multihost
+    depends_on: tpu7x_build_docker
+    timeout_in_minutes: 90
+    env:
+      TPU_VERSION: "tpu7x"
+      USE_PREBUILT_IMAGE: "1"
+      MODEL_IMPL_TYPE: "flax_nnx"
+      NEW_MODEL_DESIGN: "1"
+    agents:
+      queue: tpu_v7x_16_queue
+    commands:
+      - |
+        .buildkite/scripts/run_multihost.sh \
+          "vllm serve gs://tpu-commons-ci/moonshootai/kimi/linear-48b \
+            --port 8000 \
+            --tensor-parallel-size 16 \
+            --trust-remote-code \
+            --max-model-len 2048 \
+            --max-num-seqs 32 \
+            --no-async-scheduling \
+            --load-format=runai_streamer \
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.6 \
+            --additional-config '{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":1,\"expert_parallelism\":16,\"enable_dp_attention\":true}}}'" \
+          "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
+            --concurrency 8 \
+            --long-tokens 512"
