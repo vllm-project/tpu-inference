@@ -22,11 +22,6 @@ from typing import Any
 import jax
 import yaml
 
-try:
-    import optuna
-except ImportError:
-    optuna = None
-
 # isort: off
 from tools.kernel.tuner.v1.common.tuner_datatypes import (
     CaseResult, RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey,
