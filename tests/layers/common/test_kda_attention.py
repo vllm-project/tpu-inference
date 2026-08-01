@@ -24,8 +24,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tpu_inference.layers.common.kda_attention import (KDAParams, KDAState,
-                                                       kda_attention)
+from tpu_inference.layers.common.kda_attention import (
+    KDAParams, KDAState, kda_a_log_from_checkpoint, kda_attention)
 
 CKPTS = {
     "sigmoid_fullrank": os.environ.get("K3_TINY_CKPT", ""),
@@ -52,7 +52,11 @@ def _load(ckpt, layer):
         q_conv_weight=jnp.asarray(t["q_conv1d.weight"]),
         k_conv_weight=jnp.asarray(t["k_conv1d.weight"]),
         v_conv_weight=jnp.asarray(t["v_conv1d.weight"]),
-        A_log=jnp.asarray(t["A_log"]),
+        # The two released checkpoints store this per-head vector differently
+        # (Kimi-K3 zero-pads it out to head_dim, Kimi-Linear-48B keeps it
+        # 4-D) and the tiny fixtures mirror each, so read it through the same
+        # helper the model's weight loader uses instead of assuming a layout.
+        A_log=jnp.asarray(kda_a_log_from_checkpoint(t["A_log"], H)),
         dt_bias=jnp.asarray(t["dt_bias"]),
         f_a_proj=jnp.asarray(t["f_a_proj.weight"]),
         f_b_proj=jnp.asarray(t["f_b_proj.weight"]),

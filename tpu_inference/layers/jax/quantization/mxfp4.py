@@ -35,8 +35,8 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import \
-    jax_array_from_reshaped_torch
+from tpu_inference.models.jax.utils.weight_utils import (
+    jax_array_from_reshaped_torch, shard_put)
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
@@ -428,11 +428,20 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
             final_attr = _CT_FINAL_ATTRS[projection]
             sharding = (layer.efd_sharding
                         if projection == "down_proj" else layer.edf_sharding)
-            named = jax.sharding.NamedSharding(mesh, P(*sharding))
-            setattr(layer, final_attr, nnx.Param(jax.device_put(values,
-                                                                named)))
+            # `shard_put`, not `jax.device_put(x, NamedSharding(mesh, ...))`.
+            # Under the Ray multi-host backend a process addresses only its
+            # own devices, so naming a sharding over the whole mesh is
+            # rejected ("must be a Device or a Sharding which represents
+            # addressable devices"). `shard_put` routes to
+            # `general_device_put`, which assembles the global array out of
+            # each process's addressable shards instead. The decode above runs
+            # under `cpu_mesh_context`, so `values`/`scale` are process-local
+            # and fully addressable -- exactly the case that needs it. Same
+            # helper the unquantized expert path already uses.
+            setattr(layer, final_attr,
+                    nnx.Param(shard_put(values, sharding, mesh=mesh)))
             setattr(layer, f"{final_attr}_weight_scale",
-                    nnx.Param(jax.device_put(scale, named)))
+                    nnx.Param(shard_put(scale, sharding, mesh=mesh)))
 
         logger.info(
             "[mxfp4-ct] %s: decoded %d MXFP4 expert projections losslessly "

@@ -68,6 +68,62 @@ class KDAParams(NamedTuple):
     g_b_proj: jax.Array | None = None  # [H*V, K]
 
 
+def kda_a_log_from_checkpoint(stored, num_heads: int, name: str = "A_log"):
+    """Read the per-head KDA decay vector out of a checkpoint tensor.
+
+    KDA's decay is per channel, but ``A_log`` is not the per-channel part: the
+    channel structure comes from ``f_b_proj(f_a_proj(x)) + dt_bias``, and
+    ``exp(A_log[h])`` is a single per-head scale applied to all of head ``h``'s
+    channels. The reference implementations agree on this:
+
+      * ``modeling_kimi_linear.py::KimiDeltaAttention`` allocates ``A_log``
+        with ``num_heads`` entries.
+      * vLLM's KDA gate kernel indexes it by head and broadcasts over the head
+        dimension -- ``b_a = exp(A_log[i_h])`` with ``i_h`` the head program id
+        and the channel offset applied only to ``raw_g``/``dt_bias``
+        (``vllm/models/kimi_k3/nvidia/ops/third_party/kda/fused_recurrent.py``,
+        ``_kda_gate_beta_fwd_kernel``).
+
+    Two storage layouts occur across the released checkpoints:
+
+      * ``moonshotai/Kimi-Linear-48B-A3B-Instruct``: ``[1, 1, num_heads, 1]``.
+      * ``moonshotai/Kimi-K3``: a flat buffer ``head_dim`` entries wide whose
+        leading ``num_heads`` entries are the parameter and whose tail is zero
+        padding. Measured over the released checkpoint, every one of the 69 KDA
+        layers stores ``[128]`` with entries 0..95 non-zero and 96..127 exactly
+        0.0, for ``num_heads=96`` / ``head_dim=128``. (Per-head-dim tensors in
+        the same layers -- ``o_norm.weight``, also ``[128]`` -- are dense, so
+        the zero tail is padding and not a value.)
+
+    Flattening and keeping the leading ``num_heads`` entries reads both. The
+    padding is required to be zero rather than assumed: a checkpoint whose tail
+    is non-zero holds something other than padding, and truncating it silently
+    would corrupt the decay of every head.
+
+    Written against the array protocol rather than a specific array library so
+    that anything reading a Kimi checkpoint directly -- the weight loader, the
+    KDA sublayer testbeds -- applies one convention instead of its own.
+    """
+    flat = stored.reshape(-1)
+    count = flat.shape[0]
+    if count == num_heads:
+        return flat
+    if count < num_heads:
+        raise ValueError(
+            f"[kimi] '{name}': checkpoint stores {count} KDA decay values but "
+            f"the model has {num_heads} heads; A_log holds one scalar per "
+            f"head, so the checkpoint cannot fill it.")
+    tail = flat[num_heads:]
+    if int((tail != 0).sum()):
+        raise ValueError(
+            f"[kimi] '{name}': checkpoint stores {count} KDA decay values for "
+            f"{num_heads} heads and the trailing {count - num_heads} are not "
+            f"zero padding (max |value| {float(abs(tail).max())}). A_log is "
+            f"per head; refusing to drop values that may be a different "
+            f"parameterization.")
+    return flat[:num_heads]
+
+
 class KDAState(NamedTuple):
     """Slot-indexed KDA caches (block 0 is the null block)."""
     conv_q: jax.Array  # [num_blocks, W-1, H*K], model dtype

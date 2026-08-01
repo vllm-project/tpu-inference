@@ -56,8 +56,8 @@ from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.kda_attention import (KDAParams, KDAState,
-                                                       kda_attention)
+from tpu_inference.layers.common.kda_attention import (
+    KDAParams, KDAState, kda_a_log_from_checkpoint, kda_attention)
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import \
     ShardingAxisNameBase as ShardingAxisName
@@ -117,10 +117,57 @@ _LOADER_LAYOUT_OVERRIDES = (
     ("embed_tokens.weight", None, (0, 1)),
     # Depthwise conv weight is [channels, 1, kernel_size] on both sides.
     ("conv1d.weight", None, (0, 1, 2)),
-    # Per-head KDA decay. Kimi-K3 stores it as [H], Kimi-Linear-48B as
-    # [1, 1, H, 1]; flattening accepts both and is a no-op for the former.
-    ("self_attn.A_log", (-1, ), None),
 )
+
+
+def load_kda_a_log(jax_param,
+                   torch_weight,
+                   _shard_id: int = -1,
+                   *,
+                   param_name: str = "self_attn.A_log") -> None:
+    """Load the KDA log-decay parameter.
+
+    The parameter is one scalar per head, but the released checkpoints store
+    that vector in two different layouts; which layouts are accepted, and the
+    evidence that the parameter is per head rather than per channel, are in
+    :func:`~tpu_inference.layers.common.kda_attention.kda_a_log_from_checkpoint`.
+    """
+    flat = kda_a_log_from_checkpoint(torch_weight,
+                                     jax_param.get_value().shape[0],
+                                     param_name)
+    load_nnx_param_from_reshaped_torch(jax_param,
+                                       flat,
+                                       _shard_id,
+                                       reshape_dims=None,
+                                       permute_dims=None,
+                                       param_name=param_name)
+
+
+# Params needing a dedicated loader rather than a reshape/permute of the
+# generic rule, as (name suffix, loader).
+_LOADER_FN_OVERRIDES = (("self_attn.A_log", load_kda_a_log), )
+
+
+def summarize_kda_decay_layout(
+        weights: Iterable[Tuple[str, Any]]) -> Iterable[Tuple[str, Any]]:
+    """Log, once per load, how this checkpoint stores the KDA decay.
+
+    ``A_log`` means the same thing in every Kimi checkpoint -- one log-decay
+    scalar per head -- but the released ones store that vector in two
+    different layouts and nothing in the config says which
+    (see :func:`load_kda_a_log`); only the tensor's shape does. Recording it on
+    the first KDA layer rather than after the load keeps the line in the log
+    even when a later tensor is what fails.
+    """
+    logged = False
+    for name, weight in weights:
+        if not logged and name.endswith("self_attn.A_log"):
+            logged = True
+            logger.info(
+                "[kimi] KDA decay: checkpoint stores A_log as %s; reading it "
+                "as one log-decay scalar per head (any trailing entries must "
+                "be zero padding).", list(getattr(weight, "shape", ())))
+        yield name, weight
 
 
 def _weight_init(random_init: bool):
@@ -141,17 +188,22 @@ def attach_default_weight_loaders(model: JaxModule) -> None:
         if hasattr(param, "weight_loader"):
             # Set by a quant method, which owns the layout for that param.
             continue
-        reshape_dims = permute_dims = None
-        for suffix, reshape, permute in _LOADER_LAYOUT_OVERRIDES:
+        loader = None
+        for suffix, loader_fn in _LOADER_FN_OVERRIDES:
             if name.endswith(suffix):
-                reshape_dims, permute_dims = reshape, permute
+                loader = functools.partial(loader_fn, param_name=name)
                 break
-        param.set_metadata(
-            "weight_loader",
-            functools.partial(load_nnx_param_from_reshaped_torch,
-                              reshape_dims=reshape_dims,
-                              permute_dims=permute_dims,
-                              param_name=name))
+        if loader is None:
+            reshape_dims = permute_dims = None
+            for suffix, reshape, permute in _LOADER_LAYOUT_OVERRIDES:
+                if name.endswith(suffix):
+                    reshape_dims, permute_dims = reshape, permute
+                    break
+            loader = functools.partial(load_nnx_param_from_reshaped_torch,
+                                       reshape_dims=reshape_dims,
+                                       permute_dims=permute_dims,
+                                       param_name=name)
+        param.set_metadata("weight_loader", loader)
 
 
 def adapt_wrapper_checkpoint(
@@ -413,8 +465,14 @@ class KimiDeltaAttention(JaxModule):
             )
 
         def _conv() -> _RawWeight:
+            # fp32, not the model dtype: Kimi-K3 checkpoints the short-conv
+            # weights in fp32 (Kimi-Linear-48B checkpoints them in bf16), and
+            # a bf16 parameter would round them away at load. vLLM's KDA layer
+            # holds them in fp32 for the same reason
+            # (`params_dtype=torch.float32` on its conv1d). See `_params` for
+            # where the compute dtype is applied.
             return _RawWeight(shape=(HP, 1, self.conv_kernel_size),
-                              dtype=self.dtype,
+                              dtype=jnp.float32,
                               rngs=rngs,
                               sharding=P(),
                               random_init=self.random_init)
@@ -444,12 +502,18 @@ class KimiDeltaAttention(JaxModule):
                                     dtype=jnp.float32,
                                     sharding=P(),
                                     random_init=self.random_init)
+        # fp32 for the same reason as the conv weights: Kimi-K3 checkpoints
+        # `o_norm.weight` in fp32, and the gated RMSNorm that consumes it runs
+        # in fp32 anyway, so a bf16 parameter would round the checkpoint value
+        # away for nothing. (Kimi-Linear-48B checkpoints it in bf16; widening
+        # that is exact.) Only the weight is used -- the norm math itself
+        # lives in `kda_attention._gated_rmsnorm`.
         self.o_norm = JaxRmsNorm(K,
                                  epsilon=self.rms_norm_eps,
                                  scale_init=nnx.with_partitioning(
                                      init_fn, (None, )),
-                                 param_dtype=self.dtype,
-                                 dtype=self.dtype,
+                                 param_dtype=jnp.float32,
+                                 dtype=jnp.float32,
                                  quant_config=None,
                                  prefix=self.prefix + ".o_norm",
                                  rngs=rngs)
@@ -464,8 +528,7 @@ class KimiDeltaAttention(JaxModule):
         def _t(layer: JaxEinsum) -> jax.Array:
             # Weights keep their checkpoint dtype; the layer decides the
             # compute dtype (they differ when a bf16 checkpoint is run in fp32
-            # for parity checks, and `lax.conv_general_dilated` rejects mixed
-            # dtypes).
+            # for parity checks).
             return layer.weight.value.astype(self.dtype).T
 
         gate_kwargs = {}
@@ -478,6 +541,14 @@ class KimiDeltaAttention(JaxModule):
             q_proj=_t(self.q_proj),
             k_proj=_t(self.k_proj),
             v_proj=_t(self.v_proj),
+            # The conv weights are held in fp32 (see `_conv`) but the ragged
+            # conv's prefill branch is a `lax.conv_general_dilated`, which
+            # rejects mixed dtypes, so the weight meets the activations at the
+            # model dtype. This is the one place the checkpoint's extra conv
+            # precision is dropped; the other two branches (the decode einsum
+            # and the accumulate-in-fp32 loop) would take fp32 directly, so
+            # running the whole conv in fp32 is a compute-dtype decision for
+            # `ragged_conv1d`, not a loading one.
             q_conv_weight=self.q_conv1d.weight.value.astype(self.dtype),
             k_conv_weight=self.k_conv1d.weight.value.astype(self.dtype),
             v_conv_weight=self.v_conv1d.weight.value.astype(self.dtype),
@@ -488,7 +559,9 @@ class KimiDeltaAttention(JaxModule):
             f_a_proj=_t(self.f_a_proj),
             f_b_proj=_t(self.f_b_proj),
             b_proj=_t(self.b_proj),
-            o_norm_weight=self.o_norm.weight.value.astype(self.dtype),
+            # Not cast: the gated RMSNorm runs in fp32 and the parameter is
+            # already fp32, so the checkpoint value reaches the math intact.
+            o_norm_weight=self.o_norm.weight.value,
             o_proj=_t(self.o_proj),
             **gate_kwargs)
 
@@ -1127,7 +1200,8 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
         if not isinstance(weights, Iterable):
             return super().load_weights(weights)
         loader = JaxAutoWeightsLoader(self)
-        loaded = loader.load_weights(adapt_wrapper_checkpoint(weights))
+        loaded = loader.load_weights(
+            summarize_kda_decay_layout(adapt_wrapper_checkpoint(weights)))
         # The absorbed-MLA up-projections are split out of `kv_b_proj` during
         # that call rather than read from the checkpoint, so they carry no
         # checkpoint name of their own.
