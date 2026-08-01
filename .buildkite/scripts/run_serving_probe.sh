@@ -110,7 +110,11 @@ while true; do
     exit 1
   fi
   if [ $(( ELAPSED % 60 )) -lt 10 ]; then
-    echo "[serve-probe] still loading, ${ELAPSED}s elapsed"
+    # Echo where the server has got to. Streaming a large checkpoint takes
+    # tens of minutes, and without this the job looks identical to a hang
+    # until the serve log is dumped at exit.
+    echo "[serve-probe] still loading, ${ELAPSED}s elapsed; last serve line:" \
+         "$(tail -n 1 "${SERVE_LOG}" 2>/dev/null | tr -d '\r' | tail -c 300)"
   fi
   sleep 10
 done
