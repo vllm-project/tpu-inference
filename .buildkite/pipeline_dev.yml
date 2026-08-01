@@ -87,13 +87,20 @@ steps:
       TENSOR_PARALLEL_SIZE: "8"
       MAX_MODEL_LEN: "2048"
       MAX_NUM_SEQS: "16"
-      GPU_MEMORY_UTILIZATION: "0.8"
+      GPU_MEMORY_UTILIZATION: "0.6"
       STARTUP_TIMEOUT_SECONDS: "3600"
+      # --max-num-batched-tokens is load-bearing here, not a tuning nicety.
+      # Left at its default the warmup sweep compiles token buckets up to
+      # 16384 even though max-model-len is 2048, and one device holds
+      # 896/8 = 112 routed experts (against 28 at the full model's
+      # expert_parallelism 32), so the MoE temporaries for the large
+      # buckets exceed a single chip's HBM before any request is served.
       EXTRA_SERVE_FLAGS: >-
         --trust-remote-code
         --no-async-scheduling
         --load-format=runai_streamer
         --no-enable-prefix-caching
+        --max-num-batched-tokens 2048
         --additional-config
         {"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}
       PROBE_EXTRA_FLAGS: "--allow-incoherent"
