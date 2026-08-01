@@ -256,8 +256,11 @@ def repack_shard(src_path, dst_path, header, data_start, keep_names):
 
 def copy_object(src, dst):
     if _is_gcs(src) or _is_gcs(dst):
+        # A bucket has no directories to create, and a gs://->gs:// copy is
+        # served entirely by the storage backend: no bytes reach this host.
         _run(["gsutil", "-q", "cp", src, dst])
     else:
+        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
         shutil.copyfile(src, dst)
 
 
