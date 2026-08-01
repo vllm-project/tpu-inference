@@ -47,7 +47,9 @@ from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.kda_attention import KDAState
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.models.jax.kimi_k3 import (KimiConfig,
+                                              KimiK3ForConditionalGeneration,
                                               KimiLinearForCausalLM,
+                                              adapt_wrapper_checkpoint,
                                               apply_attn_res)
 from tpu_inference.utils import align_to
 
@@ -109,6 +111,48 @@ def _build_loaded_model(ckpt, mesh):
                                       jax.random.PRNGKey(0), mesh)
         loaded = model.load_weights(_checkpoint_weights(ckpt))
     return model, loaded
+
+
+# The vision tensors the released Kimi-K3 checkpoint carries next to its text
+# stack, one of each kind, at the names it uses.
+WRAPPER_VISION_TENSORS = (
+    "vision_tower.patch_embed.proj.weight",
+    "vision_tower.encoder.blocks.0.wqkv.weight",
+    "mm_projector.post_norm.weight",
+)
+
+
+def _wrapper_layout_weights(ckpt):
+    """The tiny checkpoint presented the way the released K3 stores itself.
+
+    That checkpoint is the ``KimiK3ForConditionalGeneration`` multimodal
+    wrapper: the whole text stack sits under ``language_model.`` and the vision
+    tensors sit beside it. Building that view over the text-only fixture keeps
+    the two layouts in lockstep, where a second staged copy of every tensor
+    would drift.
+
+    One vision tensor is yielded first and the rest last, so a loader that only
+    drops them at one end of the stream still fails.
+    """
+    import torch
+    vision = [(n, torch.zeros(2, 2, dtype=torch.bfloat16))
+              for n in WRAPPER_VISION_TENSORS]
+    yield vision[0]
+    for name, tensor in _checkpoint_weights(ckpt):
+        yield f"language_model.{name}", tensor
+    yield from vision[1:]
+
+
+def _wrapper_vllm_config_double(ckpt):
+    """`_vllm_config_double`, with the text config nested as K3 nests it."""
+    double = _vllm_config_double(ckpt)
+    text = double.model_config.hf_config
+    double.model_config.hf_config = types.SimpleNamespace(
+        architectures=["KimiK3ForConditionalGeneration"],
+        model_type="kimi_k3",
+        text_config=text,
+        vision_config=types.SimpleNamespace(vt_hidden_size=8))
+    return double
 
 
 def _fresh_caches(config):
@@ -476,6 +520,38 @@ def test_moe_backend_follows_expert_parallelism(ep_size, expected):
 
 
 # --------------------------------------------------------------------------
+# Released-checkpoint layout (no checkpoint needed)
+# --------------------------------------------------------------------------
+
+
+def test_wrapper_checkpoint_is_mapped_onto_the_text_stack():
+    """`language_model.` off the text tensors, vision tensors dropped."""
+    src = [
+        ("vision_tower.patch_embed.proj.weight", 1),
+        ("language_model.model.layers.0.self_attn.q_proj.weight", 2),
+        ("mm_projector.post_norm.weight", 3),
+        ("language_model.lm_head.weight", 4),
+    ]
+    assert list(adapt_wrapper_checkpoint(src)) == [
+        ("model.layers.0.self_attn.q_proj.weight", 2),
+        ("lm_head.weight", 4),
+    ]
+
+
+def test_text_only_checkpoint_passes_through_unchanged():
+    """Kimi-Linear-48B stores the same stack without the wrapper."""
+    src = [("model.layers.0.self_attn.q_proj.weight", 1),
+           ("lm_head.weight", 2)]
+    assert list(adapt_wrapper_checkpoint(src)) == src
+
+
+def test_an_unknown_tensor_still_reaches_the_loader():
+    """Only the listed prefixes are dropped, so surprises fail loudly."""
+    src = [("audio_tower.encoder.weight", 1)]
+    assert list(adapt_wrapper_checkpoint(src)) == src
+
+
+# --------------------------------------------------------------------------
 # Golden parity (needs a checkpoint + TPU)
 # --------------------------------------------------------------------------
 
@@ -513,6 +589,48 @@ def test_every_checkpoint_tensor_is_loaded(variant, mesh):
     assert not unconsumed, (
         f"[kimi-k3] checkpoint tensors ignored by the loader: "
         f"{sorted(unconsumed)}")
+
+
+def test_conditional_generation_layout_loads_the_same_model(mesh):
+    """The released K3 layout must load, and load to the same weights.
+
+    The fixtures are text-only, so every earlier phase validated a layout the
+    released checkpoint does not use: it is the multimodal wrapper, with the
+    text stack under ``language_model.`` and 168 vision tensors beside it.
+    """
+    ckpt = CKPTS["sigmoid_fullrank"]
+    _skip_if_missing(ckpt)
+
+    with jax.set_mesh(mesh):
+        model = KimiK3ForConditionalGeneration(
+            _wrapper_vllm_config_double(ckpt), jax.random.PRNGKey(0), mesh)
+        loaded = model.load_weights(_wrapper_layout_weights(ckpt))
+
+    # Anti-vacuity: the vision tensors really were offered to the loader, and
+    # the text ones really did arrive wrapped.
+    offered = [n for n, _ in _wrapper_layout_weights(ckpt)]
+    assert set(WRAPPER_VISION_TENSORS) <= set(offered)
+    assert all(
+        n.startswith("language_model.") for n in offered
+        if n not in WRAPPER_VISION_TENSORS)
+
+    # Nothing is loaded under a wrapped name, and no vision weight created a
+    # parameter.
+    assert not [n for n in loaded if n.startswith("language_model.")]
+    assert not [
+        n for n, _ in model.named_parameters()
+        if "vision" in n or "mm_projector" in n
+    ]
+
+    # Same weights as the text-only layout, param for param.
+    reference, reference_loaded = _build_loaded_model(ckpt, mesh)
+    assert loaded == reference_loaded
+    wrapped_params = dict(model.named_parameters())
+    for name, param in reference.named_parameters():
+        np.testing.assert_array_equal(
+            np.asarray(wrapped_params[name].get_value()),
+            np.asarray(param.get_value()),
+            err_msg=f"[kimi-k3] {name} differs between checkpoint layouts")
 
 
 @pytest.mark.parametrize("variant", sorted(CKPTS))

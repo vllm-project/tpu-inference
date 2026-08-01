@@ -96,6 +96,16 @@ VISION_SKIP_PREFIXES = (
     "model.mm_projector",
 )
 
+# The released Kimi-K3 checkpoint is the multimodal wrapper: every text tensor
+# is stored under ``language_model.`` (``language_model.model.*`` and
+# ``language_model.lm_head.weight``) alongside the vision tensors above, and
+# `architectures` is ``KimiK3ForConditionalGeneration``. Kimi-Linear-48B stores
+# the same text stack unprefixed, so strip the prefix when it is present rather
+# than requiring one layout -- the same way :class:`KimiConfig` accepts the
+# text config either nested in ``text_config`` or at the top level, and the
+# same convention the other conditional-generation models here follow.
+WRAPPER_TEXT_PREFIX = "language_model."
+
 # Routed-expert weight names in the Kimi checkpoints vs the canonical names
 # `JaxMoE._load_weights` expects.
 _EXPERT_PARAM_MAP = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
@@ -142,6 +152,34 @@ def attach_default_weight_loaders(model: JaxModule) -> None:
                               reshape_dims=reshape_dims,
                               permute_dims=permute_dims,
                               param_name=name))
+
+
+def adapt_wrapper_checkpoint(
+        weights: Iterable[Tuple[str, Any]]) -> Iterable[Tuple[str, Any]]:
+    """Present a multimodal-wrapper checkpoint as the text stack.
+
+    Strips :data:`WRAPPER_TEXT_PREFIX` from the text tensors and drops the
+    vision ones, which this build does not implement. A checkpoint that is
+    already text-only passes through unchanged.
+
+    The drop is counted and reported once rather than per tensor: the released
+    Kimi-K3 checkpoint carries 168 vision tensors, and a line each would bury
+    the rest of the load log. Only the listed prefixes are dropped, so a
+    genuinely unexpected tensor still reaches the loader and fails loudly.
+    """
+    skipped: list[str] = []
+    for name, weight in weights:
+        if any(name.startswith(p + ".") for p in VISION_SKIP_PREFIXES):
+            skipped.append(name)
+            continue
+        if name.startswith(WRAPPER_TEXT_PREFIX):
+            name = name[len(WRAPPER_TEXT_PREFIX):]
+        yield name, weight
+    if skipped:
+        logger.info(
+            "[kimi] skipped %d vision/projector checkpoint tensors (e.g. %s); "
+            "this build serves the text stack only.", len(skipped),
+            ", ".join(sorted(skipped)[:3]))
 
 
 class KimiConfig:
@@ -1088,9 +1126,8 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
     def load_weights(self, weights: Iterable) -> set:
         if not isinstance(weights, Iterable):
             return super().load_weights(weights)
-        loader = JaxAutoWeightsLoader(self,
-                                      skip_prefixes=list(VISION_SKIP_PREFIXES))
-        loaded = loader.load_weights(weights)
+        loader = JaxAutoWeightsLoader(self)
+        loaded = loader.load_weights(adapt_wrapper_checkpoint(weights))
         # The absorbed-MLA up-projections are split out of `kv_b_proj` during
         # that call rather than read from the checkpoint, so they carry no
         # checkpoint name of their own.
@@ -1100,8 +1137,10 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
 class KimiK3ForConditionalGeneration(KimiLinearForCausalLM):
     """Kimi-K3 (text-only serving; vision-tower weights are skipped).
 
-    The multimodal checkpoint wraps the same text stack in a ``text_config``,
-    which :class:`KimiConfig` unwraps. Image inputs are rejected -- MoonViT-V2
+    The multimodal checkpoint wraps the same text stack twice over: in a
+    ``text_config``, which :class:`KimiConfig` unwraps, and under a
+    ``language_model.`` weight prefix, which
+    :func:`adapt_wrapper_checkpoint` strips. Image inputs are rejected -- MoonViT-V2
     is a later phase.
     """
 
