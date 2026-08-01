@@ -38,28 +38,27 @@
 steps:
 
   # -----------------------------------------------------------------
-  # DEV ONLY. Kimi-Linear-48B on 4 hosts with DP attention OFF and the
-  # routed experts split over BOTH axes (expert=4 x model=8 = 32).
+  # DEV ONLY (carries the env-gated platform-check downgrade).
+  # Kimi-K3 on 4 hosts, DP attention OFF, routed experts split over both
+  # axes: expert=4 x model=8 = 32 ways, ~59 GB/device of weights.
   #
-  # Purpose: the 48B has known-good behaviour on this rig (build 719,
-  # DP attention on, all probes green) AND answers the probe's semantic
-  # questions, so it can show whether MLA is CORRECT without DP attention
-  # -- which the truncated K3 slice cannot. TPU_INFERENCE_UNSAFE_MLA_WITH
-  # OUT_DP_ATTENTION downgrades the platform check to a warning.
-  #
-  # 48B dims at this split: moe_intermediate 1024/8 = 128 (a multiple of
-  # 128, so block-quantization-safe), 32 attention heads / 8 = 4.
-  #
-  # The KV pool is pinned SMALL on purpose. With DP attention off the
-  # attention KV is sharded on BATCH = data x attn_dp x attn_dp_expert = 1,
-  # i.e. replicated on every device, so each block costs 32x what it does
-  # with DP attention on. 2048 blocks put warmup at 96.07 GB against 94.74
-  # available (build 742) even though the weights are only 4.32 GB/device.
-  # 512 blocks is ~209k tokens, far more than 8 concurrent x 2048.
+  # Two memory terms are pinned small on purpose, because with DP
+  # attention off BATCH = data x attn_dp x attn_dp_expert = 1, so both
+  # the attention KV pool AND the attention activations replicate per
+  # device instead of splitting:
+  #   * --num-gpu-blocks-override 512 -- the pool. K3's MLA latent KV is
+  #     ~3.93 MB/page over 24 layers, so 512 blocks is ~2 GB/device.
+  #   * --max-num-batched-tokens 512 -- the program. Builds 741/742 died
+  #     on compiled-program size (58.89 GiB and 96.07 G) with tiny weight
+  #     footprints, and program size tracks the token budget, so start
+  #     low and raise it once it serves.
+  # K3 dims at this split: moe_intermediate 3072/8 = 384 and
+  # routed_expert_hidden 3584/8 = 448, both multiples of 128, so the
+  # block-quantized expert path is safe.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (4 hosts) 48B, MLA without DP attention"
-    key: tpu7x_48b_mla_nodp
-    timeout_in_minutes: 90
+  - label: "tpu7x multi-host (4 hosts) Kimi-K3, no DP attention"
+    key: tpu7x_k3_nodp
+    timeout_in_minutes: 150
     env:
       TPU_VERSION: "tpu7x"
       MODEL_IMPL_TYPE: "flax_nnx"
@@ -70,19 +69,19 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_multihost.sh \
-          "vllm serve gs://tpu-commons-ci/moonshootai/kimi/linear-48b \
+          "vllm serve gs://tpu-commons-ci/moonshootai/kimi/k3 \
             --port 8000 \
             --tensor-parallel-size 32 \
             --trust-remote-code \
             --max-model-len 2048 \
-            --max-num-seqs 32 \
-            --max-num-batched-tokens 2048 \
+            --max-num-seqs 8 \
+            --max-num-batched-tokens 512 \
             --num-gpu-blocks-override 512 \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
-            --gpu-memory-utilization 0.6 \
+            --gpu-memory-utilization 0.8 \
             --additional-config '{\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
           "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
-            --concurrency 8 \
-            --long-tokens 512"
+            --concurrency 4 \
+            --long-tokens 256"
