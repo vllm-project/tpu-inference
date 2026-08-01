@@ -40,6 +40,9 @@ Topology (scaled-down but architecture-faithful to Kimi-K3):
 Weight names/shapes follow the HF reference implementation in
 `moonshotai/Kimi-K3` (`modeling_kimi_linear.py`); the quantization_config
 mirrors the real K3 `config.json` (same ignore regexes, group_size 32).
+Where a released checkpoint's *storage* layout differs from the reference's
+parameter shape, the checkpoint wins -- see `store_a_log`, which reproduces
+Kimi-K3's zero-padded `A_log` buffer and Kimi-Linear-48B's `[1, 1, H, 1]`.
 
 Usage:
     python tests/models/jax/utils/k3_tiny_generator.py \
@@ -176,6 +179,42 @@ def softplus_gate_config():
 E2M1_GRID = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
 
 
+def store_a_log(values: torch.Tensor, cfg: dict) -> torch.Tensor:
+    """Lay out A_log the way the released checkpoint of this variant does.
+
+    `A_log` holds one log-decay scalar per KDA head (the HF reference
+    allocates it with `num_heads` entries; vLLM's KDA gate kernel indexes it
+    by head and broadcasts over the head's channels). The two released
+    checkpoints store that same vector differently, and the fixtures mirror
+    each one so the loader is covered against both:
+
+      * Kimi-K3 (`gate_lower_bound` present): a flat buffer `head_dim` wide
+        whose leading `num_heads` entries are the parameter and whose tail is
+        zero padding. Read off moonshotai/Kimi-K3's safetensors headers, every
+        one of the 69 KDA layers stores `[128]` with indices 0..95 non-zero
+        and 96..127 exactly 0.0, at num_heads=96 / head_dim=128. (`o_norm`,
+        genuinely per-head-dim and also `[128]`, is dense in the same layers.)
+      * Kimi-Linear-48B (`gate_lower_bound` absent): `[1, 1, num_heads, 1]`,
+        unpadded (moonshotai/Kimi-Linear-48B-A3B-Instruct).
+
+    Deriving the fixture layout from the released checkpoints rather than from
+    what our model builds is the point: an `A_log` written at `[num_heads]`
+    agrees with the loader by construction and cannot catch a padded
+    checkpoint.
+
+    NOTE for anyone regenerating goldens: the HF reference
+    `modeling_kimi_linear.py` allocates `A_log` with `num_heads` entries, so
+    loading the K3-form fixture (or the real Kimi-K3 checkpoint) into the
+    reference needs the padding dropped first.
+    """
+    lac = cfg["linear_attn_config"]
+    if lac.get("gate_lower_bound") is None:
+        return values.reshape(1, 1, -1, 1)
+    padded = torch.zeros(lac["head_dim"], dtype=values.dtype)
+    padded[:values.numel()] = values
+    return padded
+
+
 class _Rng:
     """Deterministic tensor factory: draw order defines the checkpoint."""
 
@@ -277,8 +316,9 @@ def build_state_dicts(seed: int, cfg=None):
             for c in ("q_conv1d", "k_conv1d", "v_conv1d"):
                 bf16[f"{a}.{c}.weight"] = rng.normal(
                     proj, 1, conv_k, std=0.2).to(torch.bfloat16)
-            bf16[f"{a}.A_log"] = torch.log(
-                rng.uniform(n_heads, low=1.0, high=16.0)).to(torch.bfloat16)
+            bf16[f"{a}.A_log"] = store_a_log(
+                torch.log(rng.uniform(n_heads, low=1.0,
+                                      high=16.0)).to(torch.bfloat16), cfg)
             bf16[f"{a}.dt_bias"] = rng.uniform(proj, low=-0.5,
                                                high=0.5).to(torch.bfloat16)
             lin(f"{a}.f_a_proj.weight", head_dim, hidden)

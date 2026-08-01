@@ -59,7 +59,11 @@ def kda_gate(
     Args:
       g_raw: Raw gate input of shape ``[..., H, K]`` (output of the low-rank
         f_b(f_a(x)) projection, before activation).
-      A_log: Per-head log-A parameter, shape ``[H]``.
+      A_log: Per-head log-A parameter, shape ``[H]`` -- one scalar per head,
+        broadcast over that head's K channels. Kimi-K3 checkpoints it
+        zero-padded out to ``head_dim``, so a caller reading a checkpoint
+        directly must narrow it first (see
+        ``layers/common/kda_attention.kda_a_log_from_checkpoint``).
       dt_bias: Per-channel bias, shape ``[H * K]``.
       gate_lower_bound: ``None`` selects the softplus form (Kimi-Linear-48B);
         a float L selects the sigmoid lower-bound form (Kimi-K3, L = -5.0).
@@ -68,6 +72,14 @@ def kda_gate(
       Log-decay of shape ``[..., H, K]``, fp32, always <= 0.
     """
     h = A_log.shape[0]
+    if A_log.ndim != 1 or g_raw.shape[-2] != h:
+        raise ValueError(
+            f"[kda] A_log has shape {A_log.shape} but the gate input carries "
+            f"{g_raw.shape[-2]} heads x {g_raw.shape[-1]} channels. A_log is "
+            f"one log-decay scalar per head, shape [H]; a checkpoint that "
+            f"stores it zero-padded to head_dim (Kimi-K3) or as "
+            f"[1, 1, H, 1] (Kimi-Linear-48B) must be read through "
+            f"kda_a_log_from_checkpoint before it gets here.")
     x = g_raw.astype(jnp.float32) + dt_bias.astype(jnp.float32).reshape(h, -1)
     a = jnp.exp(A_log.astype(jnp.float32))[:, None]
     if gate_lower_bound is None:
