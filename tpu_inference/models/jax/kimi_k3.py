@@ -44,6 +44,7 @@ the loader and image requests are rejected.
 """
 
 import functools
+import math
 from dataclasses import InitVar, dataclass
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
@@ -81,6 +82,7 @@ from tpu_inference.models.jax.deepseek_v3 import DeepSeekV3Router
 from tpu_inference.models.jax.utils.weight_utils import (
     JaxAutoWeightsLoader, LoadableWithIterator,
     load_nnx_param_from_reshaped_torch)
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -109,6 +111,141 @@ WRAPPER_TEXT_PREFIX = "language_model."
 # Routed-expert weight names in the Kimi checkpoints vs the canonical names
 # `JaxMoE._load_weights` expects.
 _EXPERT_PARAM_MAP = {"w1": "gate_proj", "w2": "down_proj", "w3": "up_proj"}
+
+
+def routed_expert_shardings() -> Tuple[P, P]:
+    """``(edf, efd)`` specs for the routed-expert kernels.
+
+    The routed experts are almost the whole model -- ~94 GiB of
+    Kimi-Linear-48B, ~1.4 TB of Kimi-K3 -- so they are split along two axes at
+    once:
+
+      * the expert axis ``E`` over :data:`ShardingAxisName.ATTN_DATA_EXPERT`,
+        which is what lets the MEGABLX_GMM backend dispatch each token to the
+        experts resident on this shard; and
+      * the intermediate axis ``F`` over the tensor axis
+        :data:`ShardingAxisName.MODEL`, the axis attention and the dense
+        weights are already sharded on.
+
+    Sharding only ``E`` -- the earlier layout -- forces a choice no single
+    mesh can satisfy. Kimi-K3's non-expert stack is ~113 GB and needs
+    ``model`` > 1 to fit, but on a fixed device budget every device given to
+    ``model`` is one taken from the expert axis, so the experts end up
+    replicated instead. Composing the two removes the conflict: at 32 devices,
+    ``E`` over 4 and ``F`` over 8 splits the expert bytes 32 ways while
+    ``model=8`` still shards attention.
+
+    The collectives follow from where each contraction lands, and are already
+    implemented -- this introduces no new communication:
+
+      * ``gate``/``up`` contract ``D``, replicated in ``edf``, so each shard's
+        product is already complete and nothing is reduced;
+      * ``down`` contracts ``F``, which is sharded, so every shard holds a
+        partial sum over its slice and they must be added.
+        ``sparse_moe_distributed_fwd`` reduces over ``<spec>[1]`` of each
+        kernel spec -- exactly ``F`` for ``efd`` and ``None`` for ``edf`` --
+        and ``dense_moe_func`` runs under automatic sharding, where XLA
+        inserts the same reduction.
+
+    ``ATTN_DATA_EXPERT`` and ``MODEL`` are disjoint mesh axes, so the two
+    splits multiply rather than collide. ``MODEL`` is used for ``F`` rather
+    than a compound axis containing ``attn_dp``: under attention data
+    parallelism distinct ``attn_dp`` ranks hold *different tokens*, so
+    reducing a partial sum across that axis would mix them.
+    """
+    return (P(ShardingAxisName.ATTN_DATA_EXPERT, None, ShardingAxisName.MODEL),
+            P(ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MODEL, None))
+
+
+def experts_are_block_quantized(quant_config) -> bool:
+    """Whether the routed-expert weights arrive with per-block scales.
+
+    Not ``quant_config is not None``: the unquantized path supplies an
+    ``UnquantizedConfig`` rather than ``None``, and its weights carry no block
+    scales, so the tiling constraint that goes with them does not apply.
+    """
+    if quant_config is None:
+        return False
+    from tpu_inference.layers.jax.quantization.unquantized import \
+        UnquantizedConfig
+    return not isinstance(quant_config, UnquantizedConfig)
+
+
+def routed_expert_sharding_ways(mesh: Mesh) -> Tuple[int, int]:
+    """``(expert_ways, tensor_ways)`` the routed-expert kernels are split."""
+    return (get_mesh_shape_product(mesh,
+                                   list(ShardingAxisName.ATTN_DATA_EXPERT)),
+            get_mesh_shape_product(mesh, ShardingAxisName.MODEL))
+
+
+def validate_routed_expert_sharding(config: "KimiConfig", mesh: Mesh, *,
+                                    block_quantized: bool) -> Tuple[int, int]:
+    """Check the routed experts really are split, and that the dims divide.
+
+    Raises rather than letting the load proceed: both failure modes surface
+    far from their cause. A mesh that replicates the experts dies as an
+    out-of-memory part-way through loading the layers, and a dimension that
+    does not divide dies inside the sharding machinery without naming the mesh
+    that produced it.
+    """
+    expert_ways, tensor_ways = routed_expert_sharding_ways(mesh)
+    mesh_desc = ", ".join(f"{n}={s}" for n, s in mesh.shape.items())
+
+    if config.num_experts % expert_ways:
+        raise ValueError(
+            f"[kimi] num_experts={config.num_experts} is not divisible by the "
+            f"{expert_ways} ways the expert axis "
+            f"{ShardingAxisName.ATTN_DATA_EXPERT} is split (mesh: "
+            f"{mesh_desc}).")
+    if config.moe_intermediate_size % tensor_ways:
+        raise ValueError(
+            f"[kimi] moe_intermediate_size={config.moe_intermediate_size} is "
+            f"not divisible by the {tensor_ways} ways the tensor axis "
+            f"'{ShardingAxisName.MODEL}' is split (mesh: {mesh_desc}).")
+    if block_quantized and tensor_ways > 1:
+        # Measured on a 2x4 mesh with the tiny fixtures: a per-shard F that is
+        # not a multiple of 128 makes the grouped matmul emit a handful of
+        # NaNs (9 of 8192 output entries) while every other entry stays
+        # correct to ~1e-8, so it corrupts silently rather than failing. The
+        # grouped matmul tiles the intermediate dimension at a multiple of
+        # 128; sharding F is what can leave a remainder there, and only the
+        # block-quantized path is affected (the bf16 twin is clean at the same
+        # per-shard width). Kimi-K3's F=3072 over 8 gives 384, which is fine.
+        # A multiple of 128 is also a multiple of `MXFP4_BLOCK_SIZE`, so this
+        # subsumes "the per-shard block-scale count must divide".
+        f_local = config.moe_intermediate_size // tensor_ways
+        if f_local % 128:
+            raise ValueError(
+                f"[kimi] splitting moe_intermediate_size="
+                f"{config.moe_intermediate_size} {tensor_ways} ways over "
+                f"'{ShardingAxisName.MODEL}' leaves {f_local} per shard, "
+                f"which is not a multiple of 128. The block-quantized grouped "
+                f"matmul returns NaNs for a few entries at that width instead "
+                f"of failing. Choose a tensor-parallel width that divides "
+                f"{config.moe_intermediate_size} into multiples of 128 "
+                f"(mesh: {mesh_desc}).")
+
+    num_devices = math.prod(mesh.axis_sizes)
+    if num_devices > 1 and expert_ways * tensor_ways == 1:
+        raise ValueError(
+            f"[kimi] the routed experts would be replicated on all "
+            f"{num_devices} devices: the expert axis "
+            f"{ShardingAxisName.ATTN_DATA_EXPERT} and the tensor axis "
+            f"'{ShardingAxisName.MODEL}' are both 1 in this mesh "
+            f"({mesh_desc}). They are the bulk of the model, so this runs out "
+            f"of memory part-way through loading. Give the mesh expert "
+            f"parallelism, tensor parallelism, or both.")
+
+    params = (config.num_experts * 3 * config.moe_hidden_size *
+              config.moe_intermediate_size)
+    logger.info(
+        "[kimi] routed experts split %d ways: E over %s (%d) x F over '%s' "
+        "(%d); %.3fG of %.3fG expert parameters per device (mesh: %s)",
+        expert_ways * tensor_ways, ShardingAxisName.ATTN_DATA_EXPERT,
+        expert_ways, ShardingAxisName.MODEL, tensor_ways,
+        params / expert_ways / tensor_ways / 1e9, params / 1e9, mesh_desc)
+    return expert_ways, tensor_ways
+
 
 # Params whose checkpoint layout is NOT "2-D [out, in], transpose it", as
 # (name suffix, reshape_dims, permute_dims).
@@ -658,6 +795,7 @@ class KimiSparseMoeBlock(JaxModule):
         self.use_latent_moe = config.routed_expert_hidden_size is not None
         moe_hidden = config.moe_hidden_size
         weight_init = _weight_init(random_init)
+        edf_sharding, efd_sharding = routed_expert_shardings()
 
         self.gate = DeepSeekV3Router(
             hidden_size=config.hidden_size,
@@ -721,12 +859,12 @@ class KimiSparseMoeBlock(JaxModule):
             quant_config=quant_config,
             activation_ffw_td=P(ShardingAxisName.MLP_DATA, None),
             activation_ffw_ted=P(ShardingAxisName.MLP_DATA, None, None),
-            # The routed experts are the bulk of the weights (~94 GB of
-            # Kimi-Linear-48B, ~1.4 TB of Kimi-K3), so they are sharded over
-            # the expert axis rather than replicated -- same layout DeepSeek-V3
-            # uses on its unfused backends.
-            edf_sharding=P(ShardingAxisName.ATTN_DATA_EXPERT, None, None),
-            efd_sharding=P(ShardingAxisName.ATTN_DATA_EXPERT, None, None),
+            # The routed experts are the bulk of the weights, and they are
+            # split over the expert axis *and* the tensor axis at once --
+            # see `routed_expert_shardings` for why one axis is not enough
+            # and where the down-projection's reduction comes from.
+            edf_sharding=edf_sharding,
+            efd_sharding=efd_sharding,
             moe_backend=moe_backend,
             qwix_quantized_weight_dtype=None,
             prefix=f"{prefix}.experts",
@@ -1118,16 +1256,28 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
         self.config = config
         dtype = model_config.dtype
 
-        # The routed experts are sharded on ATTN_DATA_EXPERT; how many ways
-        # decides which MoE backend can be used at all.
-        self.num_expert_parallelism = get_expert_parallelism(
+        # How the routed-expert bytes are split, checked and reported before
+        # anything is allocated: a mesh that replicates them only shows up as
+        # an out-of-memory some layers into the load.
+        self.num_expert_parallelism, self.num_expert_tensor_parallelism = (
+            validate_routed_expert_sharding(
+                config,
+                mesh,
+                block_quantized=experts_are_block_quantized(
+                    vllm_config.quant_config)))
+        # `num_expert_parallelism` stays the *expert*-axis count on purpose:
+        # it is what the GMM backend uses to decide whether tokens have to be
+        # dispatched to another shard, which sharding F does not change.
+        assert self.num_expert_parallelism == get_expert_parallelism(
             ShardingAxisName.ATTN_DATA_EXPERT, mesh)
         if moe_backend is None:
             moe_backend = self._select_moe_backend()
         logger.info(
-            "[kimi] MoE backend=%s, expert_parallelism=%d "
-            "(experts sharded on %s)", moe_backend.value,
-            self.num_expert_parallelism, ShardingAxisName.ATTN_DATA_EXPERT)
+            "[kimi] MoE backend=%s, expert_parallelism=%d, "
+            "expert_tensor_parallelism=%d (experts sharded on %s x '%s')",
+            moe_backend.value, self.num_expert_parallelism,
+            self.num_expert_tensor_parallelism,
+            ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.MODEL)
 
         self.model = KimiLinearModel(
             config=config,
@@ -1163,14 +1313,32 @@ class KimiLinearForCausalLM(JaxModule, LoadableWithIterator):
         hence one of the two unfused backends, which consume the
         ``(weights, indices)`` the router already produced.
 
-        Between those two: DENSE_MAT evaluates every expert for every token,
-        so with expert-sharded weights each device needs all of them (~94 GiB
-        for Kimi-Linear-48B, ~1.4 TB for K3) and the all-gather alone exceeds
-        HBM. MEGABLX_GMM dispatches tokens to the experts that live on this
-        shard, so it is the only workable choice once the experts are split.
+        Between those two: MEGABLX_GMM dispatches each token to the experts
+        resident on this shard, which is what makes a split expert axis work
+        at all, so it is the choice whenever the expert axis is split.
+        DENSE_MAT evaluates every expert for every token and therefore needs
+        every expert's weights locally.
+
+        Note this keys on the *expert* axis only. Sharding ``F`` over the
+        tensor axis (see :func:`routed_expert_shardings`) divides the bytes
+        each device holds but not which experts it holds, so it does not make
+        DENSE_MAT viable for a large expert count -- with the expert axis at 1
+        every device still owns a slice of all 896 K3 experts.
         """
         if self.num_expert_parallelism > 1:
             return MoEBackend.MEGABLX_GMM
+        if self.num_expert_tensor_parallelism > 1:
+            # Not fatal -- a small MoE is fine like this -- but it is how a
+            # mesh silently ends up evaluating every expert on every device,
+            # so say so with the numbers rather than let it show up as an OOM.
+            logger.warning(
+                "[kimi] the expert axis %s is 1, so every device holds a "
+                "slice of all %d experts and DENSE_MAT evaluates all of them "
+                "per token; only the tensor axis '%s' (%d) is dividing the "
+                "expert bytes. Give the mesh expert parallelism to use "
+                "MEGABLX_GMM instead.", ShardingAxisName.ATTN_DATA_EXPERT,
+                self.config.num_experts, ShardingAxisName.MODEL,
+                self.num_expert_tensor_parallelism)
         return MoEBackend.DENSE_MAT
 
     def __call__(
