@@ -81,7 +81,7 @@ steps:
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
             --gpu-memory-utilization 0.8 \
-            --additional-config '{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":8,\"expert_parallelism\":32,\"enable_dp_attention\":true}}}'" \
+            --additional-config '{\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":true,\"attn_dp_size\":4}}}'" \
           "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
             --concurrency 8 \
             --long-tokens 512"
