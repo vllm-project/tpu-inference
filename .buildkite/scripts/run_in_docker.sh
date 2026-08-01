@@ -63,6 +63,7 @@ ENV_VARS=(
   -e CLIENT_TRUST_REMOTE_CODE="${CLIENT_TRUST_REMOTE_CODE:-}"
   # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
   # everywhere else; the suites that read them skip when they are empty.
+  -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}"
   -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
   -e K3_TINY_MXFP4_CKPT="${K3_TINY_MXFP4_CKPT:-}"
   -e K3_TINY_SOFTPLUS_CKPT="${K3_TINY_SOFTPLUS_CKPT:-}"
