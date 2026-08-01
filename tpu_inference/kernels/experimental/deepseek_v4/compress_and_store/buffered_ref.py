@@ -115,7 +115,10 @@ class PageBufferRef(_BufferedRef):
         def loop_body(idx):
             n = idx // pages_to_buffer_per_token
             p = idx % pages_to_buffer_per_token
-            idx_n = global_idx + n
+            # Clamp for the final partial tile (same convention as
+            # gather_from_page_buffer); bounds checks are disabled, so an
+            # unclamped read would fetch a garbage page number.
+            idx_n = jnp.minimum(global_idx + n, self.cfgs.dims.size_n - 1)
 
             # Page numbers for each token's window are gathered outside the
             # kernel (see compress_norm_rope_store) so only the
@@ -408,7 +411,6 @@ def create_allocs_and_specs(
     cos_sin_cache_ref,
     positions_ref,
     token_window_pages_ref,
-    token_to_req_indices_ref,
     kv_slot_mapping_ref,
     is_first_mask_ref,
     is_first_mask_rope_ref,
