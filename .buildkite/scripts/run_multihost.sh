@@ -327,6 +327,9 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-vllm}" \
+  -e TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION="${TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION:-}" \
+  -e VLLM_XLA_CHECK_RECOMPILATION="${VLLM_XLA_CHECK_RECOMPILATION:-1}" \
+  -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}" \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
   -e NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-0}" \
   -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
@@ -362,6 +365,9 @@ bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
   -e MODEL_IMPL_TYPE='${MODEL_IMPL_TYPE:-vllm}' \
+  -e TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION='${TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION:-}' \
+  -e VLLM_XLA_CHECK_RECOMPILATION='${VLLM_XLA_CHECK_RECOMPILATION:-1}' \
+  -e MXFP4_SHARD_THEN_DECODE='${MXFP4_SHARD_THEN_DECODE:-}' \
   -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
   -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
   -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
@@ -388,7 +394,7 @@ docker exec \
 mh_timing serve_launched
 
 # 4. Wait for the server to be healthy
-wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
+wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "${SERVE_STARTUP_TIMEOUT_SECONDS:-7200}"
 mh_timing serve_healthy
 
 # 5. Run Benchmarks / Validation
