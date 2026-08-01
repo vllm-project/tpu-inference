@@ -41,6 +41,7 @@ from tpu_inference.kernels.kda.reference.ragged_kda_chunked import (
 from tpu_inference.layers.common.ragged_conv1d_jax import ragged_conv1d
 from tpu_inference.layers.common.sharding import (ShardingAxisName,
                                                   rank_local_slot_indices)
+from tpu_inference.utils import get_mesh_shape_product
 
 
 class KDAParams(NamedTuple):
@@ -266,40 +267,56 @@ def _core_specs():
     Resolved per call, not at import: `ShardingAxisName` is a lazy proxy whose
     backing class is chosen from the runtime sharding configuration.
 
-    Per-token arrays and the state pool split over ATTN_DATA; the ragged
-    metadata splits the same way (that is what makes each rank's view
-    self-consistent). The KDA parameters are replicated (see the sharding note
-    on `KimiDeltaAttention`), so the head / channel dimensions stay whole
-    inside the shard; when those parameters get head-sharded, the `None`s on
-    the state and per-token arrays' trailing dims become ATTN_HEAD.
+    Two orthogonal splits, on different dimensions of the same arrays:
+
+    * ATTN_DATA splits tokens and state slots. The ragged metadata splits the
+      same way, which is what makes each rank's view self-consistent, and is
+      a correctness requirement rather than an optimization.
+    * ATTN_HEAD splits the head axis -- the trailing `H * head_dim` of the
+      per-token arrays and the conv windows, and the head dimension of the
+      recurrent state. The per-head parameters carry the same split.
+
+    No head-axis collective appears inside the map because the core is
+    head-parallel throughout: the depthwise conv is per channel, the gate is
+    per (head, channel), the recurrent scan keeps one independent state per
+    head, and the only reduction (`l2norm`, and the scan's own recurrence) is
+    within a head. The one op that does contract the head axis, `o_proj`,
+    lives outside this map.
+
+    The runner already allocates the KDA state head-sharded -- see
+    `kv_cache_manager`, which gives the conv state
+    `P(ATTN_DATA, None, ATTN_HEAD)` and the recurrent state
+    `P(ATTN_DATA, ATTN_HEAD, None, None)` -- so naming ATTN_HEAD here also
+    removes an all-gather that the replicated specs used to force.
     """
     data = ShardingAxisName.ATTN_DATA
+    head = ShardingAxisName.ATTN_HEAD
     in_specs = (
-        P(data, None),  # q
-        P(data, None),  # k
-        P(data, None),  # v
-        P(data, None),  # beta_raw
-        P(data, None),  # g_raw
-        P(data, None, None),  # conv_q
-        P(data, None, None),  # conv_k
-        P(data, None, None),  # conv_v
-        P(data, None, None, None),  # recurrent
-        P(),  # q_conv_weight
-        P(),  # k_conv_weight
-        P(),  # v_conv_weight
-        P(),  # A_log
-        P(),  # dt_bias
+        P(data, head),  # q            [T, H*K]
+        P(data, head),  # k
+        P(data, head),  # v
+        P(data, head),  # beta_raw     [T, H]
+        P(data, head),  # g_raw        [T, H*K]
+        P(data, None, head),  # conv_q [blocks, W-1, H*K]
+        P(data, None, head),  # conv_k
+        P(data, None, head),  # conv_v
+        P(data, head, None, None),  # recurrent [blocks, H, K, V]
+        P(head, None, None),  # q_conv_weight  [H*K, 1, W]
+        P(head, None, None),  # k_conv_weight
+        P(head, None, None),  # v_conv_weight
+        P(head),  # A_log     [H]
+        P(head),  # dt_bias   [H*K]
         P(data),  # query_start_loc
         P(data),  # state_indices
         P(data),  # distribution
         P(data),  # has_initial_state
     )
     out_specs = (
-        P(data, None, None),  # new_conv_q
-        P(data, None, None),  # new_conv_k
-        P(data, None, None),  # new_conv_v
-        P(data, None, None, None),  # new_recurrent
-        P(data, None, None),  # o
+        P(data, None, head),  # new_conv_q
+        P(data, None, head),  # new_conv_k
+        P(data, None, head),  # new_conv_v
+        P(data, head, None, None),  # new_recurrent
+        P(data, head, None),  # o   [T, H, K]
     )
     return in_specs, out_specs
 
@@ -355,8 +372,19 @@ def kda_attention(
     g_raw = _linear(_linear(x, params.f_a_proj), params.f_b_proj)
     beta_raw = _linear(x, params.b_proj)  # [T, H]
 
+    # Inside the map every array is this shard's slice, so the core must be
+    # told how many heads it actually holds -- `num_heads` is a static
+    # argument used to unflatten `H * head_dim`, and passing the global count
+    # would reshape a 3-heads-per-device slice as if it had 96.
+    head_ways = (get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+                 if mesh is not None else 1)
+    if num_heads % head_ways:
+        raise ValueError(
+            f"[kda] {num_heads} heads do not divide by the {head_ways} ways "
+            f"the head axis {ShardingAxisName.ATTN_HEAD} is split; a head "
+            f"cannot be torn across devices.")
     core = functools.partial(_kda_ragged_core,
-                             num_heads=num_heads,
+                             num_heads=num_heads // head_ways,
                              head_dim=head_dim,
                              kernel_size=kernel_size,
                              gate_lower_bound=gate_lower_bound,
