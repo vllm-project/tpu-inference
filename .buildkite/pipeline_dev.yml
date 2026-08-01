@@ -49,6 +49,13 @@ steps:
   #
   # 48B dims at this split: moe_intermediate 1024/8 = 128 (a multiple of
   # 128, so block-quantization-safe), 32 attention heads / 8 = 4.
+  #
+  # The KV pool is pinned SMALL on purpose. With DP attention off the
+  # attention KV is sharded on BATCH = data x attn_dp x attn_dp_expert = 1,
+  # i.e. replicated on every device, so each block costs 32x what it does
+  # with DP attention on. 2048 blocks put warmup at 96.07 GB against 94.74
+  # available (build 742) even though the weights are only 4.32 GB/device.
+  # 512 blocks is ~209k tokens, far more than 8 concurrent x 2048.
   # -----------------------------------------------------------------
   - label: "tpu7x multi-host (4 hosts) 48B, MLA without DP attention"
     key: tpu7x_48b_mla_nodp
@@ -70,7 +77,7 @@ steps:
             --max-model-len 2048 \
             --max-num-seqs 32 \
             --max-num-batched-tokens 2048 \
-            --num-gpu-blocks-override 2048 \
+            --num-gpu-blocks-override 512 \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
