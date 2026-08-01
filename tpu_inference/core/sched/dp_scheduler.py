@@ -422,6 +422,10 @@ class DPScheduler(SchedulerInterface):
         # DP state
         self.dp_size = vllm_config.sharding_config.total_dp_size
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
+        # Rank routing policy, see DP_SCHED_ROUTING.
+        self._routing: str = envs.DP_SCHED_ROUTING
+        self._load_waiting_weight: int = envs.DP_SCHED_LOAD_WAITING_WEIGHT
+        self._rr_start = 0
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
         self._schedule_step_count = 0
@@ -711,6 +715,39 @@ class DPScheduler(SchedulerInterface):
         return pending, inflight, min_remaining
 
     def _find_best_rank_for_request(self, request: Request) -> int:
+        """Route a new request to a DP rank, per DP_SCHED_ROUTING."""
+        if self._routing == "load":
+            return self._find_rank_by_load()
+        return self._find_rank_by_cache_affinity(request)
+
+    def _find_rank_by_load(self) -> int:
+        """Pick the least loaded rank, mirroring vLLM upstream's DP balancer.
+
+        Upstream (DPLBAsyncMPClient.get_core_engine_for_request) scores each
+        engine as ``waiting * 4 + running`` and does not consult prefix cache
+        locality at all. Cache affinity is deliberately not an input here: the
+        attention-DP ranks advance in lockstep, so a rank made hot by cache
+        affinity gates every other rank's step.
+
+        The scan start rotates so ties do not systematically favour rank 0,
+        which also matches upstream.
+        """
+        for rank in range(self.dp_size):
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+
+        scores: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            scores[rank] = waiting * self._load_waiting_weight + running
+
+        order = [(self._rr_start + i) % self.dp_size
+                 for i in range(self.dp_size)]
+        rank = min(order, key=lambda r: scores[r])
+        self._rr_start = (self._rr_start + 1) % self.dp_size
+        return rank
+
+    def _find_rank_by_cache_affinity(self, request: Request) -> int:
         """Find the best DP rank for a new request based on load balancing.
 
         Two-tier strategy:

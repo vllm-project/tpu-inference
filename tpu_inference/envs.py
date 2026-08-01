@@ -69,6 +69,8 @@ if TYPE_CHECKING:
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    DP_SCHED_ROUTING: str = "cache"
+    DP_SCHED_LOAD_WAITING_WEIGHT: int = 4
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
@@ -415,6 +417,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DP scheduler: timeout (ms) to force flush pending requests.
     "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    # DP scheduler: how a new request picks its DP rank.
+    #   "cache" - prefer any rank reporting a prefix cache hit (default).
+    #   "load"  - ignore cache locality, pick the least loaded rank using
+    #             vLLM upstream's score: waiting * weight + running.
+    "DP_SCHED_ROUTING":
+    env_with_choices("DP_SCHED_ROUTING", "cache", ["cache", "load"]),
+    # DP scheduler: weight applied to waiting requests by "load" routing.
+    "DP_SCHED_LOAD_WAITING_WEIGHT":
+    lambda: int(os.getenv("DP_SCHED_LOAD_WAITING_WEIGHT", "4")),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
     "VLLM_MOE_CHUNK_SIZE":
