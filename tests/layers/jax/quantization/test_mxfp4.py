@@ -436,12 +436,19 @@ class TestCompressedTensorsMxfp4MultiHostPlacement:
     Under the Ray multi-host backend each process addresses only its own
     devices, so `jax.device_put(x, NamedSharding(full_mesh, ...))` is rejected
     ("must be a Device or a Sharding which represents addressable devices").
-    The decode in `process_weights_after_loading` runs on CPU and therefore
-    produces process-local arrays, which is exactly the case that has to go
-    through `general_device_put` (via `shard_put`) instead.
 
-    Everything below runs in one process, so the multi-host branch is selected
-    by patching the backend env var -- the same way
+    `process_weights_after_loading` has two decode paths and each reaches that
+    constraint its own way, so both are covered here:
+
+    - the host decode (`MXFP4_SHARD_THEN_DECODE=0`) produces process-local
+      arrays on CPU and must hand them to `general_device_put` (via
+      `shard_put`) rather than to a plain `device_put`;
+    - the shard decode (the default) needs no multi-host branch at all,
+      because it only ever builds one array per *addressable* device and
+      assembles the global array from those.
+
+    Everything below runs in one process, so the path and the multi-host
+    branch are both selected by patching env vars -- the same way
     `tests/layers/common/test_utils.py` covers `general_device_put`.
     """
 
@@ -493,17 +500,26 @@ class TestCompressedTensorsMxfp4MultiHostPlacement:
                                             dtype=np.uint8))))
         return out
 
-    def _decode(self, mesh, backend):
-        """Run the real load + decode with the given multi-host backend."""
-        from unittest import mock
-
-        from tpu_inference import envs
+    def _loaded_method(self, mesh):
         layer = self._layer(mesh)
         method = mxfp4.CompressedTensorsMxfp4MoEMethod(layer)
         method.create_weights_jax(layer, rngs=nnx.Rngs(0))
         method.load_weights(layer=layer,
                             original_load_weights_fn=None,
                             weights=self._staged_checkpoint())
+        return layer, method
+
+    def _decode(self, mesh, backend):
+        """Run the real load + host decode with the given multi-host backend.
+
+        Pins `MXFP4_SHARD_THEN_DECODE=0`: the `shard_put` contract these tests
+        assert belongs to the host decode. The default path is covered by
+        `test_shard_decode_places_only_process_local_shards` below.
+        """
+        from unittest import mock
+
+        from tpu_inference import envs
+        layer, method = self._loaded_method(mesh)
         real = jax.make_array_from_callback
         calls = []
 
@@ -511,10 +527,80 @@ class TestCompressedTensorsMxfp4MultiHostPlacement:
             calls.append((tuple(shape), sharding))
             return real(shape, sharding, cb)
 
-        with mock.patch.object(envs, "TPU_MULTIHOST_BACKEND", backend):
-            with mock.patch("jax.make_array_from_callback", side_effect=spy):
-                assert method.process_weights_after_loading(layer)
+        with mock.patch.object(envs, "TPU_MULTIHOST_BACKEND", backend), \
+                mock.patch.object(envs, "MXFP4_SHARD_THEN_DECODE", False), \
+                mock.patch("jax.make_array_from_callback", side_effect=spy):
+            assert method.process_weights_after_loading(layer)
         return layer, calls
+
+    def _shard_decode(self, mesh, backend):
+        """Run the real load + shard decode, recording how it assembles each
+        global array and out of which devices' shards."""
+        from unittest import mock
+
+        from tpu_inference import envs
+        layer, method = self._loaded_method(mesh)
+        real = jax.make_array_from_single_device_arrays
+        real_device_put = jax.device_put
+        calls, put_targets = [], []
+
+        def spy(shape, sharding, arrays):
+            calls.append((tuple(shape), sharding,
+                          {d
+                           for a in arrays
+                           for d in a.devices()}))
+            return real(shape, sharding, arrays)
+
+        def device_put_spy(x, device=None, **kwargs):
+            put_targets.append(device)
+            return real_device_put(x, device, **kwargs)
+
+        with mock.patch.object(envs, "TPU_MULTIHOST_BACKEND", backend), \
+                mock.patch.object(envs, "MXFP4_SHARD_THEN_DECODE", True), \
+                mock.patch("jax.device_put", side_effect=device_put_spy), \
+                mock.patch("jax.make_array_from_single_device_arrays",
+                           side_effect=spy):
+            assert method.process_weights_after_loading(layer)
+        return layer, calls, put_targets
+
+    def test_shard_decode_places_only_process_local_shards(self):
+        """The shard decode is multi-host-safe by construction rather than by
+        branching: every array it builds is assembled from exactly the shards
+        of the devices this process addresses, so no placement is ever asked
+        for a device the process cannot reach. Asserted under both backends,
+        because unlike the host decode this path does not read the env var.
+
+        One process addresses the whole mesh here, so the set of devices the
+        shards land on cannot by itself separate the addressable enumeration
+        from the global one. What it can check is the thing that actually
+        breaks across hosts: every placement names a single `Device`, never a
+        `Sharding` spanning the mesh.
+
+        That the shards themselves decode to the same bytes as the host decode
+        is `tests/models/jax/test_kimi_k3_mxfp4_shard_decode.py`.
+        """
+        mesh = self._mesh(2)
+        for backend in ("ray", ""):
+            layer, calls, put_targets = self._shard_decode(mesh, backend)
+            # 3 projections x (values, scale).
+            assert len(calls) == 6, (
+                f"backend={backend!r}: expected 6 assembled arrays, saw "
+                f"{len(calls)}: {calls}")
+            for shape, sharding, devices in calls:
+                assert sharding.mesh is mesh
+                addressable = set(
+                    sharding.addressable_devices_indices_map(shape))
+                assert devices == addressable, (
+                    f"backend={backend!r}: {shape} assembled from {devices}, "
+                    f"expected the addressable devices {addressable}")
+            assert put_targets, f"backend={backend!r}: nothing was placed"
+            for target in put_targets:
+                assert isinstance(target, jax.Device), (
+                    f"backend={backend!r}: a shard was placed with target "
+                    f"{target!r}; a process that addresses only part of the "
+                    "mesh can name a device but not a mesh-wide Sharding.")
+            assert layer.kernel_gating_EDF.value.sharding.spec == P(
+                None, None, "model")
 
     def test_multihost_placement_uses_the_process_local_api(self):
         """The fix, stated as the assertion that fails without it: the
