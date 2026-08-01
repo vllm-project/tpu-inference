@@ -34,6 +34,13 @@ buckets change XLA reduction order, so argmax can flip on near-ties. That is
 a property of batched serving, not of the model, so the isolation probe keys
 on unique markers rather than on token equality.
 
+``--allow-incoherent`` drops only the checks that need the served model to be
+a working language model (repeating its own marker, producing long
+non-degenerate text, retrieving the needle) and keeps every structural one, so
+a checkpoint that is deliberately not a language model -- a depth-sliced
+snapshot cut down to fit one host -- can still be probed for state leaks
+across concurrent requests.
+
 Exits non-zero on the first failed probe, and prints every observed value it
 checked so a failure can be diagnosed from the log alone.
 """
@@ -134,7 +141,8 @@ def _markers(count: int, seed: int = 0) -> list:
 def probe_isolation(base_url: str,
                     model: str,
                     concurrency: int,
-                    ragged: bool = False) -> None:
+                    ragged: bool = False,
+                    require_coherence: bool = True) -> None:
     """Concurrent requests do not leak each other's state.
 
     Each request carries a unique marker and is asked to repeat it. A response
@@ -146,6 +154,12 @@ def probe_isolation(base_url: str,
     Equal-length prompts exercise none of the ragged bookkeeping: it is unequal
     sequence lengths in one batch that make per-request offsets and per-rank
     packing disagree, so this variant is where a wrong slice shows up.
+
+    `require_coherence=False` keeps the leak check — the invariant this probe
+    exists for — but drops the "the response repeats its own marker" check,
+    which needs a model that follows the instruction. Depth-sliced or otherwise
+    truncated checkpoints emit meaningless text by construction, and for those
+    the leak check is still meaningful while the echo check is not.
     """
     tag = "ragged" if ragged else "isolation"
     markers = _markers(concurrency, seed=1 if ragged else 0)
@@ -175,15 +189,26 @@ def probe_isolation(base_url: str,
                 f"another request's marker(s) {foreign} — state crossed "
                 f"request slots. Text: {text!r}")
         if marker not in text:
-            raise ProbeFailure(
-                f"[probe:{tag}] request {i} never repeated its own "
-                f"marker {marker}; got {text!r}")
+            if require_coherence:
+                raise ProbeFailure(
+                    f"[probe:{tag}] request {i} never repeated its own "
+                    f"marker {marker}; got {text!r}")
+            print(f"[probe:{tag}] req {i} did not repeat its own marker "
+                  "(not asserted: --allow-incoherent)")
     print(f"[probe:{tag}] OK, {concurrency} concurrent requests, "
           "no marker crossed requests")
 
 
-def probe_long_generation(base_url: str, model: str, max_tokens: int) -> None:
-    """A long generation terminates and stays non-degenerate."""
+def probe_long_generation(base_url: str,
+                          model: str,
+                          max_tokens: int,
+                          require_coherence: bool = True) -> None:
+    """A long generation terminates and stays non-degenerate.
+
+    `require_coherence=False` keeps the request-completes check and still
+    prints every observed value, but does not assert the output is long or
+    non-degenerate: a truncated model legitimately produces degenerate text.
+    """
     prompt = ("Write a detailed explanation of how a hash table works, "
               "including collision handling.\n")
     choice = _complete(base_url, model, prompt, max_tokens)
@@ -192,11 +217,18 @@ def probe_long_generation(base_url: str, model: str, max_tokens: int) -> None:
     print(f"[probe:long] finish_reason={choice['finish_reason']} "
           f"chars={len(text)} words={len(words)}")
     print(f"[probe:long] text: {text!r}")
+    if not words:
+        raise ProbeFailure(f"[probe:long] empty completion "
+                           f"(finish_reason={choice['finish_reason']})")
+    top_share = max(words.count(w) for w in set(words)) / len(words)
+    if not require_coherence:
+        print(f"[probe:long] OK (coherence not asserted: --allow-incoherent), "
+              f"{len(words)} words, most frequent is {top_share:.0%}")
+        return
     if len(words) < max_tokens // 8:
         raise ProbeFailure(
             f"[probe:long] asked for {max_tokens} tokens but got only "
             f"{len(words)} words (finish_reason={choice['finish_reason']})")
-    top_share = max(words.count(w) for w in set(words)) / len(words)
     if top_share > 0.5:
         raise ProbeFailure(
             f"[probe:long] degenerate output: one word is {top_share:.0%} of "
@@ -247,18 +279,46 @@ def main() -> int:
                         type=int,
                         default=0,
                         help="Prompt budget for the needle probe. 0 skips it.")
+    parser.add_argument(
+        "--allow-incoherent",
+        action="store_true",
+        help="Do not assert that the served model produces meaningful text. "
+        "Every structural invariant still runs and still fails the probe: "
+        "the endpoint answers, greedy decoding is reproducible, concurrent "
+        "requests do not leak each other's markers, a long request comes "
+        "back non-empty. Use it for a checkpoint that is known not to be a "
+        "working language model -- a depth-sliced snapshot cut down so a "
+        "single host can serve it -- where the load and serve paths are "
+        "under test and the text is expected to be meaningless.")
     args = parser.parse_args()
 
     served = probe_health(args.base_url)
     model = args.model or served
+    coherent = not args.allow_incoherent
+    if not coherent:
+        print("[probe] --allow-incoherent: text-quality assertions are off; "
+              "structural invariants still enforced")
 
     try:
         probe_determinism(args.base_url, model, max_tokens=32)
-        probe_isolation(args.base_url, model, args.concurrency)
-        probe_isolation(args.base_url, model, args.concurrency, ragged=True)
-        probe_long_generation(args.base_url, model, args.long_tokens)
-        if args.needle_tokens:
+        probe_isolation(args.base_url,
+                        model,
+                        args.concurrency,
+                        require_coherence=coherent)
+        probe_isolation(args.base_url,
+                        model,
+                        args.concurrency,
+                        ragged=True,
+                        require_coherence=coherent)
+        probe_long_generation(args.base_url,
+                              model,
+                              args.long_tokens,
+                              require_coherence=coherent)
+        if args.needle_tokens and coherent:
             probe_needle(args.base_url, model, args.needle_tokens)
+        elif args.needle_tokens:
+            print("[probe:needle] SKIPPED (--allow-incoherent: retrieval is "
+                  "not defined for a model that is not a language model)")
         else:
             print("[probe:needle] SKIPPED (--needle-tokens not set)")
     except ProbeFailure as e:
