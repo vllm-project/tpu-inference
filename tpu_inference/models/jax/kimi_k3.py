@@ -465,8 +465,14 @@ class KimiDeltaAttention(JaxModule):
             )
 
         def _conv() -> _RawWeight:
+            # fp32, not the model dtype: Kimi-K3 checkpoints the short-conv
+            # weights in fp32 (Kimi-Linear-48B checkpoints them in bf16), and
+            # a bf16 parameter would round them away at load. vLLM's KDA layer
+            # holds them in fp32 for the same reason
+            # (`params_dtype=torch.float32` on its conv1d). See `_params` for
+            # where the compute dtype is applied.
             return _RawWeight(shape=(HP, 1, self.conv_kernel_size),
-                              dtype=self.dtype,
+                              dtype=jnp.float32,
                               rngs=rngs,
                               sharding=P(),
                               random_init=self.random_init)
@@ -496,12 +502,18 @@ class KimiDeltaAttention(JaxModule):
                                     dtype=jnp.float32,
                                     sharding=P(),
                                     random_init=self.random_init)
+        # fp32 for the same reason as the conv weights: Kimi-K3 checkpoints
+        # `o_norm.weight` in fp32, and the gated RMSNorm that consumes it runs
+        # in fp32 anyway, so a bf16 parameter would round the checkpoint value
+        # away for nothing. (Kimi-Linear-48B checkpoints it in bf16; widening
+        # that is exact.) Only the weight is used -- the norm math itself
+        # lives in `kda_attention._gated_rmsnorm`.
         self.o_norm = JaxRmsNorm(K,
                                  epsilon=self.rms_norm_eps,
                                  scale_init=nnx.with_partitioning(
                                      init_fn, (None, )),
-                                 param_dtype=self.dtype,
-                                 dtype=self.dtype,
+                                 param_dtype=jnp.float32,
+                                 dtype=jnp.float32,
                                  quant_config=None,
                                  prefix=self.prefix + ".o_norm",
                                  rngs=rngs)
@@ -516,8 +528,7 @@ class KimiDeltaAttention(JaxModule):
         def _t(layer: JaxEinsum) -> jax.Array:
             # Weights keep their checkpoint dtype; the layer decides the
             # compute dtype (they differ when a bf16 checkpoint is run in fp32
-            # for parity checks, and `lax.conv_general_dilated` rejects mixed
-            # dtypes).
+            # for parity checks).
             return layer.weight.value.astype(self.dtype).T
 
         gate_kwargs = {}
@@ -530,6 +541,14 @@ class KimiDeltaAttention(JaxModule):
             q_proj=_t(self.q_proj),
             k_proj=_t(self.k_proj),
             v_proj=_t(self.v_proj),
+            # The conv weights are held in fp32 (see `_conv`) but the ragged
+            # conv's prefill branch is a `lax.conv_general_dilated`, which
+            # rejects mixed dtypes, so the weight meets the activations at the
+            # model dtype. This is the one place the checkpoint's extra conv
+            # precision is dropped; the other two branches (the decode einsum
+            # and the accumulate-in-fp32 loop) would take fp32 directly, so
+            # running the whole conv in fp32 is a compute-dtype decision for
+            # `ragged_conv1d`, not a loading one.
             q_conv_weight=self.q_conv1d.weight.value.astype(self.dtype),
             k_conv_weight=self.k_conv1d.weight.value.astype(self.dtype),
             v_conv_weight=self.v_conv1d.weight.value.astype(self.dtype),
@@ -540,7 +559,9 @@ class KimiDeltaAttention(JaxModule):
             f_a_proj=_t(self.f_a_proj),
             f_b_proj=_t(self.f_b_proj),
             b_proj=_t(self.b_proj),
-            o_norm_weight=self.o_norm.weight.value.astype(self.dtype),
+            # Not cast: the gated RMSNorm runs in fp32 and the parameter is
+            # already fp32, so the checkpoint value reaches the math intact.
+            o_norm_weight=self.o_norm.weight.value,
             o_proj=_t(self.o_proj),
             **gate_kwargs)
 

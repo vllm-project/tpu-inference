@@ -175,6 +175,23 @@ RELEASED_TENSORS = {
                                                                   82432),
 }
 
+# The tensors Kimi-K3 checkpoints in fp32 while Kimi-Linear-48B checkpoints
+# them in bf16 (dtypes read from the same safetensors metadata). They are the
+# recurrent-state and router-selection tensors, i.e. exactly the ones where
+# rounding to bf16 is not obviously harmless: the short-conv weights and the
+# gated-RMSNorm scale feed the KDA recurrence, and `e_score_correction_bias`
+# decides the top-16 expert cut. Loading them into a bf16 parameter would
+# discard that precision before any compute dtype gets a say.
+RELEASED_FP32_TENSORS = (
+    "model.layers.N.self_attn.A_log",
+    "model.layers.N.self_attn.dt_bias",
+    "model.layers.N.self_attn.q_conv1d.weight",
+    "model.layers.N.self_attn.k_conv1d.weight",
+    "model.layers.N.self_attn.v_conv1d.weight",
+    "model.layers.N.self_attn.o_norm.weight",
+    "model.layers.N.block_sparse_moe.gate.e_score_correction_bias",
+)
+
 # The routed experts are stacked on a leading expert axis in this model, so one
 # fused parameter answers for all 896 of a layer's checkpoint tensors.
 _EXPERT_PARAM = {
@@ -351,6 +368,77 @@ def test_every_parameter_is_filled_by_a_released_tensor(
     }
     unfilled = sorted(set(real_config_param_shapes) - filled)
     assert not unfilled, f"parameters no released tensor fills: {unfilled[:20]}"
+
+
+def test_fp32_released_tensors_get_fp32_parameters(real_config_params):
+    """Kimi-K3 stores its recurrent-state and router-selection tensors in fp32
+    where Kimi-Linear-48B stores them in bf16, and these are the tensors where
+    rounding is least obviously harmless.
+
+    This is the *declared* parameter dtype. It is not what stops the load from
+    narrowing -- `weight_utils.jax_array_from_reshaped_torch` converts with
+    `t2j`, which keeps the checkpoint's dtype, and `assign_and_shard_param`
+    assigns it as is -- but it is what a dummy/random-init load produces, and
+    a bf16 declaration here would say the model intends bf16 for them.
+    `test_kda_params_keep_fp32_where_the_math_is_fp32` covers the value that
+    actually reaches the math.
+    """
+    by_pattern = {}
+    for name, (_shape, dtype) in real_config_params.items():
+        by_pattern.setdefault(_pattern(name), dtype)
+    narrowed = {
+        p: str(by_pattern[p])
+        for p in RELEASED_FP32_TENSORS if by_pattern[p] != jnp.float32
+    }
+    assert not narrowed, (
+        "released fp32 tensors declared narrower than fp32: " +
+        ", ".join(f"{p} -> {d}" for p, d in narrowed.items()))
+
+
+def test_kda_params_keep_fp32_where_the_math_is_fp32():
+    """An fp32 checkpoint value must still be fp32 when the KDA math sees it.
+
+    The load preserves the checkpoint dtype, so the only place precision can
+    be dropped is `KimiDeltaAttention._params`. Two of the three fp32 KDA
+    tensors must survive it, and the third must not:
+
+      * `A_log`, `dt_bias`, `o_norm.weight` -> fp32. The decay and the gated
+        RMSNorm both compute in fp32, so narrowing them buys nothing.
+      * the short-conv weights -> the model dtype. The ragged conv's prefill
+        branch is a `lax.conv_general_dilated`, which rejects mixed dtypes, so
+        the weight has to meet bf16 activations. Asserted rather than left
+        implicit: this is the one documented place K3's extra conv precision
+        is dropped.
+    """
+    num_heads, head_dim, hidden = 2, 8, 16
+    devices = np.array(jax.devices()[:1]).reshape((1, ) * len(MESH_AXIS_NAMES))
+    mesh = Mesh(devices, axis_names=MESH_AXIS_NAMES)
+    with jax.set_mesh(mesh):
+        layer = KimiDeltaAttention(hidden_size=hidden,
+                                   num_heads=num_heads,
+                                   head_dim=head_dim,
+                                   conv_kernel_size=4,
+                                   rms_norm_eps=1e-5,
+                                   dtype=jnp.bfloat16,
+                                   use_full_rank_gate=True,
+                                   mesh=mesh,
+                                   gate_lower_bound=-5.0,
+                                   rngs=nnx.Rngs(params=0))
+        # Stand in for a load from an fp32 checkpoint.
+        layer.A_log.set_value(jnp.ones((num_heads, ), jnp.float32))
+        layer.dt_bias.set_value(jnp.ones((num_heads * head_dim, ),
+                                         jnp.float32))
+        layer.o_norm.weight.set_value(jnp.ones((head_dim, ), jnp.float32))
+        layer.q_conv1d.weight.set_value(
+            jnp.ones((num_heads * head_dim, 1, 4), jnp.float32))
+        params = layer._params()
+    assert params.A_log.dtype == jnp.float32
+    assert params.dt_bias.dtype == jnp.float32
+    assert params.o_norm_weight.dtype == jnp.float32, (
+        "o_norm.weight was narrowed even though the gated RMSNorm is fp32")
+    assert params.q_conv_weight.dtype == jnp.bfloat16, (
+        "the short-conv weight must reach lax.conv_general_dilated at the "
+        "activation dtype")
 
 
 # --------------------------------------------------------------------------
