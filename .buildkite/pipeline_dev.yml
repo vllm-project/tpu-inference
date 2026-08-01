@@ -58,7 +58,7 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x multi-host (4 hosts) Kimi-K3, no DP attention"
     key: tpu7x_k3_nodp
-    timeout_in_minutes: 150
+    timeout_in_minutes: 330
     env:
       TPU_VERSION: "tpu7x"
       MODEL_IMPL_TYPE: "flax_nnx"
@@ -71,6 +71,12 @@ steps:
       # event seen from the other side. Allow the compile here; a slow first
       # request is the point of a bring-up run.
       VLLM_XLA_CHECK_RECOMPILATION: "0"
+      # Build 745 reached layer 59 of 93 in two hours and was still loading
+      # when a worker actor died; the MXFP4 decode runs per layer on the host
+      # and dominates. Give the health wait four hours, and take the
+      # instrumented run_multihost.sh so the next failure says what happened
+      # on the WORKER rather than only on the head.
+      SERVE_STARTUP_TIMEOUT_SECONDS: "14400"
     agents:
       queue: tpu_v7x_32_queue
     commands:
