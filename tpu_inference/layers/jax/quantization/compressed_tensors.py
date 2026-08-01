@@ -18,8 +18,10 @@ reuse its config-group parsing and scheme detection, then dispatches each layer
 to the existing JAX fp8 quant methods.
 """
 
+import json
+import os
 from types import MappingProxyType
-from typing import Optional
+from typing import Iterator, Optional
 
 from safetensors import safe_open
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import \
@@ -63,28 +65,68 @@ def _weight_block_size(weight_quant) -> Optional[list[int]]:
     return list(block) if block is not None else None
 
 
+# A ``*ForConditionalGeneration`` checkpoint nests the whole text stack under
+# this prefix (Kimi-K3, Llama-4, Gemma-4-MM all do), while the model's own
+# module paths -- what ``get_quant_method`` is asked about -- do not carry it.
+_WRAPPER_TEXT_PREFIX = "language_model."
+
+_SAFETENSORS_INDEX = "model.safetensors.index.json"
+
+
+def _checkpoint_tensor_names(model_name_or_path: str,
+                             download_dir: Optional[str]) -> Iterator[str]:
+    """Every tensor name in the checkpoint.
+
+    Prefers the safetensors index, for two reasons. It is one small JSON
+    instead of every shard's header (the alternative opens 96+ files for a
+    multi-TB checkpoint), and it is present locally even when the weights
+    themselves never are: loading from object storage downloads the config
+    files -- the index among them -- and streams only the shards, so reading
+    tensor names off the shards fails with "cannot find any *.safetensors
+    files" and takes the checkpoint's own layout out of the decision.
+
+    Falls back to the shard headers for single-file checkpoints, which have no
+    index.
+    """
+    index = os.path.join(model_name_or_path, _SAFETENSORS_INDEX)
+    if os.path.isfile(index):
+        with open(index) as f:
+            yield from json.load(f)["weight_map"]
+        return
+    # Imported here: weight_utils pulls in the model stack, and this module is
+    # imported from the quantization package that stack itself imports.
+    from tpu_inference.models.jax.utils.weight_utils import \
+        get_model_weights_files
+    for path in get_model_weights_files(model_name_or_path, download_dir):
+        with safe_open(path, framework="numpy") as f:
+            yield from f.keys()
+
+
 def _packed_module_paths(model_name_or_path: Optional[str],
                          download_dir: Optional[str]) -> Optional[set[str]]:
     """Module paths that own a ``weight_packed`` tensor in the checkpoint.
+
+    The returned set also holds every ancestor of such a path, so a caller
+    asking about a parent module (an MoE block owns a subtree of per-expert
+    modules) is a plain set lookup rather than a scan over a checkpoint that
+    can have hundreds of thousands of tensors.
 
     Returns ``None`` when the checkpoint cannot be inspected, which callers
     read as "no information, trust the config".
     """
     if not model_name_or_path:
         return None
-    # Imported here: weight_utils pulls in the model stack, and this module is
-    # imported from the quantization package that stack itself imports.
-    from tpu_inference.models.jax.utils.weight_utils import \
-        get_model_weights_files
     try:
-        weights_files = get_model_weights_files(model_name_or_path,
-                                                download_dir)
         packed = set()
-        for path in weights_files:
-            with safe_open(path, framework="numpy") as f:
-                for name in f.keys():
-                    if name.endswith(".weight_packed"):
-                        packed.add(name[:-len(".weight_packed")])
+        for name in _checkpoint_tensor_names(model_name_or_path, download_dir):
+            if not name.endswith(".weight_packed"):
+                continue
+            path = name[:-len(".weight_packed")]
+            if path.startswith(_WRAPPER_TEXT_PREFIX):
+                path = path[len(_WRAPPER_TEXT_PREFIX):]
+            while path and path not in packed:
+                packed.add(path)
+                path = path.rpartition(".")[0]
     except Exception as e:
         logger.warning(
             "[compressed-tensors] could not read the checkpoint tensor names "
@@ -95,9 +137,9 @@ def _packed_module_paths(model_name_or_path: Optional[str],
             type(e).__name__, e)
         return None
     logger.info(
-        "[compressed-tensors] checkpoint %s stores %d modules compressed; "
-        "using that (not the config ignore list) to select quant methods.",
-        model_name_or_path, len(packed))
+        "[compressed-tensors] checkpoint %s stores %d module paths compressed "
+        "(counting the parents of each); using that, not the config ignore "
+        "list, to select quant methods.", model_name_or_path, len(packed))
     return packed
 
 
@@ -130,18 +172,17 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_packed_in_checkpoint(self, prefix: str) -> bool:
         """Whether the checkpoint actually stores ``prefix`` compressed.
 
+        True for a compressed module and for any ancestor of one -- an MoE
+        block is asked about by the path that owns the per-expert subtree
+        (`<prefix>.<expert_id>.<proj>`), never by a leaf path.
+
         Falls back to trusting the config when the checkpoint could not be
         inspected (``None``), so behaviour is unchanged for callers that do not
         pass a model path.
         """
         if self._packed_modules is None:
             return True
-        if prefix in self._packed_modules:
-            return True
-        # MoE layers own a subtree of per-expert modules
-        # (`<prefix>.<expert_id>.<proj>`), so match on the subtree.
-        subtree = prefix + "."
-        return any(p.startswith(subtree) for p in self._packed_modules)
+        return prefix in self._packed_modules
 
     def _match_target(self, layer: JaxModule, prefix: str) -> Optional[dict]:
         """Return the config-group scheme for ``layer``, or None if unmatched.

@@ -19,6 +19,8 @@ right JAX quant method (or skipped)? They mirror `test_fp8.py::TestFp8Config`,
 which asserts `layer.quant_method` types rather than running a forward pass.
 """
 
+import json
+
 import jax
 import numpy as np
 import pytest
@@ -174,3 +176,79 @@ class TestCompressedTensorsConfig:
         # proj1 ignored, proj2 still quantized.
         assert isinstance(mlp.proj1.quant_method, UnquantizedLinearMethod)
         assert isinstance(mlp.proj2.quant_method, Fp8BlockwiseLinearMethod)
+
+
+class TestPackedModuleInspection:
+    """Which modules the checkpoint itself stores compressed.
+
+    The config's target/ignore lists are not a reliable statement of that (a
+    checkpoint may leave a targeted module uncompressed), so the config reads
+    the checkpoint's own tensor names. These tests cover the two ways that
+    reading has to work: from the safetensors index, and from the shards.
+    """
+
+    def _index(self, tmp_path, tensor_names):
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({
+                "metadata": {},
+                "weight_map": {
+                    n: "model-00001-of-00001.safetensors"
+                    for n in tensor_names
+                },
+            }))
+        return str(tmp_path)
+
+    def test_reads_the_index_when_the_shards_are_not_local(self, tmp_path):
+        """Streamed weights leave only the config files on disk.
+
+        Loading from object storage downloads `*.json` -- the index among them
+        -- and streams the shards, so a scan that opens `*.safetensors` finds
+        nothing and silently falls back to trusting the config.
+        """
+        path = self._index(tmp_path, [
+            "model.layers.0.mlp.experts.0.w1.weight_packed",
+            "model.layers.0.mlp.experts.0.w1.weight_scale",
+            "model.layers.0.self_attn.q_proj.weight"
+        ])
+        assert not list(tmp_path.glob("*.safetensors"))
+
+        config = CompressedTensorsConfig(_fp8_block_config(),
+                                         model_name_or_path=path)
+        assert config._packed_modules is not None, (
+            "the checkpoint was not inspected at all")
+        assert config._is_packed_in_checkpoint(
+            "model.layers.0.mlp.experts.0.w1")
+        # ...including for the parent that owns the per-expert subtree.
+        assert config._is_packed_in_checkpoint("model.layers.0.mlp.experts")
+        # The attention projection is stored plain, and must stay that way.
+        assert not config._is_packed_in_checkpoint(
+            "model.layers.0.self_attn.q_proj")
+
+    def test_the_wrapper_prefix_is_stripped_from_index_paths(self, tmp_path):
+        """`*ForConditionalGeneration` checkpoints nest the text stack.
+
+        Their tensor names carry a `language_model.` the model's own module
+        paths do not, so an unnormalized comparison finds no compressed module
+        anywhere and every quantized layer falls back to unquantized.
+        """
+        path = self._index(
+            tmp_path,
+            ["language_model.model.layers.0.mlp.experts.0.w1.weight_packed"])
+        config = CompressedTensorsConfig(_fp8_block_config(),
+                                         model_name_or_path=path)
+        # Anti-vacuity: an uninspected checkpoint answers True to everything,
+        # so pin that this one was read before believing the True below.
+        assert config._packed_modules is not None
+        assert not config._is_packed_in_checkpoint("model.layers.0.self_attn")
+
+        assert config._is_packed_in_checkpoint(
+            "model.layers.0.mlp.experts.0.w1")
+        assert config._is_packed_in_checkpoint("model.layers.0.mlp.experts")
+
+    def test_an_uninspectable_checkpoint_falls_back_to_the_config(
+            self, tmp_path):
+        """No index and no shards -> no information, trust the config."""
+        config = CompressedTensorsConfig(_fp8_block_config(),
+                                         model_name_or_path=str(tmp_path))
+        assert config._packed_modules is None
+        assert config._is_packed_in_checkpoint("anything.at.all")

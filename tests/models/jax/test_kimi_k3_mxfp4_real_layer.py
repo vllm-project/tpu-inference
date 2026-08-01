@@ -124,7 +124,15 @@ def loaded_experts(mesh, expert_prefix):
     from flax import nnx
     from jax.sharding import PartitionSpec as P
 
-    from tpu_inference.models.jax.kimi_k3 import KimiRoutedExperts
+    from tpu_inference.models.jax.kimi_k3 import (WRAPPER_TEXT_PREFIX,
+                                                  KimiRoutedExperts)
+
+    # The released checkpoint stores the text stack under `language_model.`;
+    # the model's module paths do not carry it, and neither does the prefix the
+    # quant config is asked about. Keep the two apart here for the same reason
+    # the loader does: `expert_prefix` names checkpoint tensors,
+    # `module_prefix` names a module.
+    module_prefix = expert_prefix.removeprefix(WRAPPER_TEXT_PREFIX)
 
     # Spelled out rather than taken from `ShardingAxisName`: that resolves
     # lazily against whichever mesh layout the process configured first, and
@@ -168,14 +176,16 @@ def loaded_experts(mesh, expert_prefix):
                 efd_sharding=P(expert_axis, None, None),
                 moe_backend=MoEBackend.DENSE_MAT,
                 qwix_quantized_weight_dtype=None,
-                prefix=expert_prefix,
+                prefix=module_prefix,
                 # Only `num_experts_per_tok` is read during construction; the
                 # tests below drive the expert kernels directly, not routing.
                 router=SimpleNamespace(
                     num_experts_per_tok=text_config["num_experts_per_token"]),
                 scoring_func="sigmoid",
                 renormalize=True)
-            experts.load_weights((n, f.get_tensor(n)) for n in names)
+            experts.load_weights(
+                (n.removeprefix(WRAPPER_TEXT_PREFIX), f.get_tensor(n))
+                for n in names)
             assert experts.quant_method.process_weights_after_loading(experts)
     return experts
 
