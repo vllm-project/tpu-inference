@@ -635,3 +635,28 @@ class TestResolveModelArchitectureWithRunaiStreamer:
         """Streamable or not, a vLLM-preferred architecture resolves to vLLM."""
         config = self._config("Qwen3MoeForCausalLM", "runai_streamer")
         assert model_loader.resolve_model_architecture(config, False) == "vllm"
+
+    @patch.dict(os.environ, {"MODEL_IMPL_TYPE": "auto"}, clear=True)
+    @patch("tpu_inference.models.common.model_loader.get_vllm_model")
+    @patch("tpu_inference.models.common.model_loader.get_flax_model")
+    def test_streamed_kimi_k3_serve_dispatches_to_flax(self, mock_get_flax,
+                                                       mock_get_vllm,
+                                                       vllm_config, rng, mesh):
+        """The reported configuration, end to end through `get_model`.
+
+        Serving Kimi-K3 from object-storage weights means `--load-format
+        runai_streamer` with `MODEL_IMPL_TYPE` left at its `auto` default; the
+        resolution above only matters because `get_model` acts on it, so pin
+        the dispatch rather than the returned string.
+        """
+        vllm_config.model_config.hf_config.architectures = [
+            "KimiK3ForConditionalGeneration"
+        ]
+        vllm_config.load_config.load_format = "runai_streamer"
+        mock_get_flax.return_value = "flax_model_sentinel"
+
+        result = model_loader.get_model(vllm_config, rng, mesh)
+
+        mock_get_flax.assert_called_once_with(vllm_config, rng, mesh, False)
+        mock_get_vllm.assert_not_called()
+        assert result == "flax_model_sentinel"
