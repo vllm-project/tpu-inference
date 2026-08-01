@@ -93,6 +93,11 @@ steps:
       # TPUPlatform.check_and_update_config. That check is the only place the
       # requirement is asserted, and it rules out the composed mesh below.
       TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION: "1"
+      # A healthy server that dies on its first request is, in the CI image,
+      # the signature of a precompile gap rather than a model bug: the image
+      # turns compilation at request time into a hard error. This step serves
+      # request shapes the warmup sweep does not cover, so let them compile.
+      VLLM_XLA_CHECK_RECOMPILATION: "0"
       # --max-num-batched-tokens is load-bearing here, not a tuning nicety.
       # Left at its default the warmup sweep compiles token buckets up to
       # 16384 even though max-model-len is 2048, and one device holds

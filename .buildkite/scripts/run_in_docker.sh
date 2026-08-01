@@ -188,6 +188,11 @@ trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true' EXIT INT TERM
 #   initiate models and bypass vLLM's CompilationManager logic entirely.
 # -----------------------------------------------------------------------------
 
+# VLLM_XLA_CHECK_RECOMPILATION defaults to 1 here: CI wants a compilation at
+# request time to be a hard failure rather than a silent slowdown. It was
+# previously hardcoded, so a step that set it in its own env was overridden
+# without any sign; a step that deliberately serves a shape warmup cannot
+# precompile can now pass 0.
 docker run \
   --name "$IMAGE_NAME" \
   --privileged \
@@ -205,7 +210,7 @@ docker run \
   -e HF_TOKEN="$HF_TOKEN" \
   -e VLLM_XLA_CACHE_PATH="$LOCAL_JAX_CACHE_DIR" \
   -e JAX_COMPILATION_CACHE_DIR="$LOCAL_JAX_CACHE_DIR" \
-  -e VLLM_XLA_CHECK_RECOMPILATION=1 \
+  -e VLLM_XLA_CHECK_RECOMPILATION="${VLLM_XLA_CHECK_RECOMPILATION:-1}" \
   ${QUANTIZATION:+-e QUANTIZATION="$QUANTIZATION"} \
   ${NEW_MODEL_DESIGN:+-e NEW_MODEL_DESIGN="$NEW_MODEL_DESIGN"} \
   ${USE_V6E8_QUEUE:+-e USE_V6E8_QUEUE="$USE_V6E8_QUEUE"} \
