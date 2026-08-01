@@ -113,11 +113,17 @@ cleanup() {
   fi
 
   echo "   -> Cleaning Head Node..."
+  # /tmp survives between builds on a persistent agent, so delete the copy
+  # after printing it: otherwise `docker cp` failing (no container, serve never
+  # started) leaves the PREVIOUS build's serve log in place and this prints it
+  # as if it belonged to this build.
+  rm -f /tmp/vllm_serve.log || true
   docker cp node:/root/vllm_serve.log /tmp/vllm_serve.log >/dev/null 2>&1 || true
   if [[ -f /tmp/vllm_serve.log ]]; then
     echo "==================== START OF VLLM SERVE LOG ===================="
     cat /tmp/vllm_serve.log || true
     echo "==================== END OF VLLM SERVE LOG ===================="
+    rm -f /tmp/vllm_serve.log || true
   fi
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
