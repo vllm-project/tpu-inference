@@ -64,6 +64,13 @@ steps:
       MODEL_IMPL_TYPE: "flax_nnx"
       NEW_MODEL_DESIGN: "1"
       TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION: "1"
+      # The CI image sets this to 1, which makes any compile at request time
+      # fatal. Builds 743 and 744 both reached a healthy server and then died
+      # the moment a probe request arrived -- 744 with "JAX compilation
+      # occurred but was forbidden", 743 with an IPC timeout that is the same
+      # event seen from the other side. Allow the compile here; a slow first
+      # request is the point of a bring-up run.
+      VLLM_XLA_CHECK_RECOMPILATION: "0"
     agents:
       queue: tpu_v7x_32_queue
     commands:
