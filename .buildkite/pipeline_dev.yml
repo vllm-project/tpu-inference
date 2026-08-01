@@ -74,11 +74,83 @@ steps:
   # same failure there: expert_parallelism = device count (896 routed
   # experts divide evenly), tensor_parallelism 1, dp-attention on for MLA.
   # -----------------------------------------------------------------
-  - label: "tpu7x Kimi-K3 slice, composed E2xF4 mesh, no dp-attention"
-    key: tpu7x_kimi_k3_sliced_8
+  # -----------------------------------------------------------------
+  # The per-shard MXFP4 decode, on real devices. The suite builds the
+  # composed expert x tensor meshes K3 uses out of this host's 8 chips and
+  # compares the sharded decode against the host decode word for word, so
+  # it also pins that XLA:TPU lowers the uint8 -> float4_e2m1fn bitcast and
+  # that a single-device decode is allowed inside a model-mesh context.
+  # Seconds of TPU time, and it fails before the serve steps below would.
+  # -----------------------------------------------------------------
+  - label: "tpu7x MXFP4 shard-then-decode parity"
+    key: tpu7x_mxfp4_shard_decode
+    depends_on: tpu7x_build_docker
+    timeout_in_minutes: 30
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - |
+        # Exports K3_TINY_MXFP4_CKPT; without it the fixture cases skip.
+        source .buildkite/scripts/fetch_k3_tiny_fixtures.sh
+        .buildkite/scripts/run_in_docker.sh \
+          python3 -m pytest -s -v \
+          /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4_shard_decode.py
+
+  - label: "tpu7x Kimi-K3 slice, MXFP4 decoded per shard on device"
+    key: tpu7x_kimi_k3_sliced_8_sharded
     depends_on: tpu7x_build_docker
     timeout_in_minutes: 120
     env:
+      MXFP4_SHARD_THEN_DECODE: "1"
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      MODEL_IMPL_TYPE: "flax_nnx"
+      NEW_MODEL_DESIGN: "1"
+      MODEL: "gs://tpu-commons-ci/moonshootai/kimi/k3-sliced"
+      TENSOR_PARALLEL_SIZE: "8"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "16"
+      GPU_MEMORY_UTILIZATION: "0.6"
+      STARTUP_TIMEOUT_SECONDS: "3600"
+      # DEV-ONLY: MLA without DP attention is refused by
+      # TPUPlatform.check_and_update_config. That check is the only place the
+      # requirement is asserted, and it rules out the composed mesh below.
+      TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION: "1"
+      # A healthy server that dies on its first request is, in the CI image,
+      # the signature of a precompile gap rather than a model bug: the image
+      # turns compilation at request time into a hard error. This step serves
+      # request shapes the warmup sweep does not cover, so let them compile.
+      VLLM_XLA_CHECK_RECOMPILATION: "0"
+      # --max-num-batched-tokens is load-bearing here, not a tuning nicety.
+      # Left at its default the warmup sweep compiles token buckets up to
+      # 16384 even though max-model-len is 2048, and one device holds
+      # 896/8 = 112 routed experts (against 28 at the full model's
+      # expert_parallelism 32), so the MoE temporaries for the large
+      # buckets exceed a single chip's HBM before any request is served.
+      EXTRA_SERVE_FLAGS: >-
+        --trust-remote-code
+        --no-async-scheduling
+        --load-format=runai_streamer
+        --no-enable-prefix-caching
+        --max-num-batched-tokens 2048
+        --num-gpu-blocks-override 256
+        --additional-config
+        {"sharding":{"sharding_strategy":{"tensor_parallelism":4,"expert_parallelism":2,"enable_dp_attention":false}}}
+      PROBE_EXTRA_FLAGS: "--allow-incoherent"
+    agents:
+      queue: tpu_v7x_8_queue
+    commands:
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/run_serving_probe.sh
+
+  - label: "tpu7x Kimi-K3 slice, MXFP4 decoded on the host (baseline)"
+    key: tpu7x_kimi_k3_sliced_8_hostdecode
+    depends_on: tpu7x_build_docker
+    timeout_in_minutes: 120
+    env:
+      MXFP4_SHARD_THEN_DECODE: "0"
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
       MODEL_IMPL_TYPE: "flax_nnx"
