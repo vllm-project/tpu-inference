@@ -422,6 +422,11 @@ class DPScheduler(SchedulerInterface):
         # DP state
         self.dp_size = vllm_config.sharding_config.total_dp_size
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
+        # Rank routing policy, see DP_SCHED_ROUTING.
+        self._routing: str = envs.DP_SCHED_ROUTING
+        self._makespan_decode_weight: int = (
+            envs.DP_SCHED_MAKESPAN_DECODE_WEIGHT)
+        self._rr_start = 0
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
         self._schedule_step_count = 0
@@ -711,6 +716,70 @@ class DPScheduler(SchedulerInterface):
         return pending, inflight, min_remaining
 
     def _find_best_rank_for_request(self, request: Request) -> int:
+        """Route a new request to a DP rank, per DP_SCHED_ROUTING."""
+        if self._routing == "makespan":
+            return self._find_rank_by_makespan(request)
+        return self._find_rank_by_cache_affinity(request)
+
+    def _find_rank_by_makespan(self, request: Request) -> int:
+        """Pick the rank minimising the resulting maximum load.
+
+        The DP ranks advance in lockstep, so a step costs whatever the most
+        loaded rank costs: the quantity to minimise is the post-assignment
+        maximum, not this request's own prefill. For each rank estimate the
+        prefill work it would hold after taking the request::
+
+            load(r) = pending_prefill[r]
+                      + (num_tokens - cached_on_rank[r])
+                      + running[r] * DP_SCHED_MAKESPAN_DECODE_WEIGHT
+
+        and take the argmin. The two leading terms are token counts on the
+        same rank, so they add directly with no relative weight to tune.
+
+        Cache locality lowers a rank's score because it removes work, not
+        because it is privileged. A rank holding this conversation's history
+        wins while it is idle, and loses once it is busy enough that the
+        saved prefill no longer compensates -- the decision that pure cache
+        affinity cannot make.
+        """
+        enable_cache = self.vllm_config.cache_config.enable_prefix_caching
+        decode_weight = self._makespan_decode_weight
+
+        # Send every query first, then collect, so ranks answer in parallel.
+        for rank in range(self.dp_size):
+            if enable_cache:
+                self._send_command(rank,
+                                   SchedulerCommand.PROBE_COMPUTED_BLOCKS,
+                                   request)
+            self._send_command(rank,
+                               SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            if decode_weight:
+                self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
+
+        num_tokens = request.num_tokens
+        loads: Dict[int, int] = {}
+        for rank in range(self.dp_size):
+            cached = 0
+            if enable_cache:
+                cached = self._get_result(
+                    rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
+            pending = self._get_result(
+                rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            running = 0
+            if decode_weight:
+                running, _ = self._get_result(
+                    rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            loads[rank] = (pending + max(0, num_tokens - cached) +
+                           running * decode_weight)
+
+        # Rotate the scan start so ties do not always favour rank 0.
+        order = [(self._rr_start + i) % self.dp_size
+                 for i in range(self.dp_size)]
+        rank = min(order, key=lambda r: loads[r])
+        self._rr_start = (self._rr_start + 1) % self.dp_size
+        return rank
+
+    def _find_rank_by_cache_affinity(self, request: Request) -> int:
         """Find the best DP rank for a new request based on load balancing.
 
         Two-tier strategy:

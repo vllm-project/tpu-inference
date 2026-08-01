@@ -69,6 +69,8 @@ if TYPE_CHECKING:
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    DP_SCHED_ROUTING: str = "cache"
+    DP_SCHED_MAKESPAN_DECODE_WEIGHT: int = 0
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
@@ -415,6 +417,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DP scheduler: timeout (ms) to force flush pending requests.
     "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    # DP scheduler: how a new request picks its DP rank.
+    #   "cache"    - prefer any rank reporting a prefix cache hit (default).
+    #   "makespan" - pick the rank minimising the resulting maximum load,
+    #                pending_prefill + (prompt - cached_on_rank). Cache
+    #                locality lowers a rank's score because it removes work,
+    #                so affinity applies only while the rank is not busy.
+    "DP_SCHED_ROUTING":
+    env_with_choices("DP_SCHED_ROUTING", "cache", ["cache", "makespan"]),
+    # DP scheduler: tokens of load attributed to each running (decoding)
+    # request by "makespan" routing. 0 counts queued prefill only.
+    "DP_SCHED_MAKESPAN_DECODE_WEIGHT":
+    lambda: int(os.getenv("DP_SCHED_MAKESPAN_DECODE_WEIGHT", "0")),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
     "VLLM_MOE_CHUNK_SIZE":
