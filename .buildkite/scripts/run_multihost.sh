@@ -313,6 +313,10 @@ echo "==== END MULTIHOST CONFIG ===="
 
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
+# xtrace off for this invocation: its argv carries HF_TOKEN, and `set -x`
+# would print the secret into the build log. (The worker start below goes
+# through an ssh heredoc, whose body xtrace does not echo.)
+{ set +x; } 2>/dev/null
 bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" \
   "${HEAD_INTERNAL_IP}" \
@@ -329,6 +333,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+set -x
 
 sleep 60
 mh_timing head_container_up
