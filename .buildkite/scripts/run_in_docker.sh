@@ -66,9 +66,11 @@ ENV_VARS=(
   -e MODEL="${MODEL:-}"
   -e STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-}"
   -e PROBE_EXTRA_FLAGS="${PROBE_EXTRA_FLAGS:-}"
+  # Selects the MXFP4 expert decode path; empty means the default (decode each
+  # shard on the device that keeps it), 0 forces the whole-layer host decode.
+  -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}"
   # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
   # everywhere else; the suites that read them skip when they are empty.
-  -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}"
   -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
   -e K3_TINY_MXFP4_CKPT="${K3_TINY_MXFP4_CKPT:-}"
   -e K3_TINY_SOFTPLUS_CKPT="${K3_TINY_SOFTPLUS_CKPT:-}"
