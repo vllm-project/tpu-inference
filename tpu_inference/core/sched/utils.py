@@ -36,15 +36,30 @@ def patch_vllm_scheduler_for_continue_decode():
     if not getattr(Scheduler, "_continue_decode_patched", False):
         original_update_base = Scheduler._update_request_with_output
 
-        def patched_update_base(scheduler_self, request, new_token_ids):
+        def patched_update_base(scheduler_self,
+                                request,
+                                new_token_ids,
+                                is_stale=False,
+                                **kwargs):
             # Original update appends new_token_ids to request output and trims on stop token.
-            res_token_ids, stopped = original_update_base(
-                scheduler_self, request, new_token_ids)
+            res_token_ids, stopped = original_update_base(scheduler_self,
+                                                          request,
+                                                          new_token_ids,
+                                                          is_stale=is_stale,
+                                                          **kwargs)
 
             # schedule() only incremented num_computed_tokens by 1. Advance by the remaining
             # (N - 1) tokens generated on-device so host-side num_computed_tokens is accurate.
+            # A stale delivery predates the preemption rollback of
+            # num_computed_tokens and must not advance it (mirrors the
+            # `if not output_is_stale` guards in vLLM's update_from_output).
+            # AsyncScheduler's original calls super() WITHOUT forwarding
+            # is_stale, so the async wrapper threads staleness through
+            # _cd_stale_in_flight instead — check both.
+            stale = is_stale or getattr(scheduler_self, "_cd_stale_in_flight",
+                                        False)
             diff = len(res_token_ids) - 1
-            if diff > 0:
+            if diff > 0 and not stale:
                 request.num_computed_tokens += diff
 
             return res_token_ids, stopped
@@ -71,16 +86,31 @@ def patch_vllm_scheduler_for_continue_decode():
     if not getattr(AsyncScheduler, "_continue_decode_patched", False):
         original_async_update_req = AsyncScheduler._update_request_with_output
 
-        def patched_async_update_request_with_output(scheduler_self, request,
-                                                     new_token_ids):
-            if len(new_token_ids) > 1:
+        def patched_async_update_request_with_output(scheduler_self,
+                                                     request,
+                                                     new_token_ids,
+                                                     is_stale=False,
+                                                     **kwargs):
+            if len(new_token_ids) > 1 and not is_stale:
                 # In AsyncScheduler, _update_after_schedule() added 1 in-flight placeholder token.
                 # When N tokens return, original_async_update_req will subtract N from
                 # num_output_placeholders. Pre-compensate by adding (N - 1) first so that
                 # num_output_placeholders cleanly decrements by 1 without underflowing < 0.
+                # Placeholders are zeroed at preemption, so a stale delivery must
+                # not be pre-compensated (the original skips its decrement too).
                 request.num_output_placeholders += (len(new_token_ids) - 1)
-            return original_async_update_req(scheduler_self, request,
-                                             new_token_ids)
+            # The original's super() call does not forward is_stale, so the
+            # patched base can't see it as a parameter. Thread it through an
+            # instance flag for the duration of this call.
+            scheduler_self._cd_stale_in_flight = is_stale
+            try:
+                return original_async_update_req(scheduler_self,
+                                                 request,
+                                                 new_token_ids,
+                                                 is_stale=is_stale,
+                                                 **kwargs)
+            finally:
+                scheduler_self._cd_stale_in_flight = False
 
         AsyncScheduler._update_request_with_output = patched_async_update_request_with_output
         AsyncScheduler._continue_decode_patched = True
