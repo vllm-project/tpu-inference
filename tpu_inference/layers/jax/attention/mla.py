@@ -437,19 +437,37 @@ class MLAEinsum(JaxEinsum):
                                                      mla_layer.anh_sharding)
         delattr(self, 'weight')
 
-    def load_weights(self, weights):
+    def load_weights(self, weights) -> set:
+        """Load `kv_b_proj`, then split it, and report what was loaded.
+
+        Returns the names of the parameters consumed **in this call**, module-
+        local (``"weight"``, ``"weight_scale_inv"``); the caller qualifies them
+        with this module's prefix. The return value is bookkeeping only -- it
+        does not change what is loaded -- but it is not optional: vLLM's
+        `AutoWeightsLoader._load_module` calls a child module's `load_weights`
+        and, when it returns None, logs "Unable to collect loaded parameters
+        for module %s" at WARNING with the module's full repr interpolated,
+        once per MLA layer on every load that goes through the auto-loader.
+
+        The derived `k_up_proj`/`v_up_proj` params are deliberately not
+        reported here: no checkpoint tensor carries their names and they hang
+        off the parent `MLAAttention`, not off this module, so the model
+        reports them via `derived_absorbed_mla_param_names`.
+        """
         named_params = dict(self.named_parameters())
         if len(self.loaded) >= 2:
             raise ValueError(
                 f"Expect at most 2 params to load for kv_b_proj, already got {self.loaded}, still have {[name for name, _ in weights]} coming."
             )
+        loaded_now: set = set()
         for name, weight in weights:
             param = named_params[name]
             weight_loader = getattr(param, "weight_loader")
             weight_loader(param, weight)
             self.loaded.add(name)
+            loaded_now.add(name)
         if len(self.loaded) != len(named_params):
-            return
+            return loaded_now
         # Presence of the scale param -- not of a quant_config -- is what
         # decides the path: an unquantized model still carries a
         # QuantizationConfig (UnquantizedConfig), it just never creates
@@ -457,7 +475,7 @@ class MLAEinsum(JaxEinsum):
         # keeps `self_attn.*` in bf16, so both land here.
         if not hasattr(self, "weight_scale_inv"):
             self._split_unquantized()
-            return
+            return loaded_now
         # After loading, split the weights into k/v
         with cpu_mesh_context():
             dequantized_weight = dequantize_tensor(
@@ -516,6 +534,7 @@ class MLAEinsum(JaxEinsum):
         delattr(self, 'weight')
         delattr(self, 'weight_scale_inv')
         delattr(self, 'quant_method')
+        return loaded_now
 
 
 @dataclass(kw_only=True)

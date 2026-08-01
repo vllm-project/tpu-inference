@@ -19,19 +19,26 @@ and forward numerics through the real MLA kernel) so the extraction and the
 Kimi-family feature flags cannot silently change it.
 """
 
+import contextlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import torch
 from flax import nnx
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+from vllm.model_executor.models import utils as vllm_model_utils
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.layers.common.sharding import ShardingAxisNameBase as Axis
+from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.attention.mla import MLAAttention
 from tpu_inference.layers.jax.rope import DeepseekScalingRotaryEmbedding
+from tpu_inference.models.jax.kimi_k3 import attach_default_weight_loaders
+from tpu_inference.models.jax.utils.weight_utils import JaxAutoWeightsLoader
 from tpu_inference.utils import align_to
 
 HIDDEN = 256
@@ -259,3 +266,114 @@ def test_output_gate_scales_output(mesh):
     assert not np.allclose(np.asarray(out_plain), np.asarray(out_gated)), (
         "[mla] use_output_gate=True produced identical output to the "
         "ungated layer; the gate is not being applied")
+
+
+class _SingleLayerModel(JaxModule):
+    """Smallest model shape the recursive auto-loader will walk into.
+
+    `AutoWeightsLoader` never calls `load_weights` on the root module (that is
+    how it avoids recursing into itself), so reaching `MLAEinsum.load_weights`
+    the way a real load does requires the layer to sit under a parent.
+    """
+
+    def __init__(self, attention):
+        super().__init__()
+        self.self_attn = attention
+
+
+_KV_B_PROJ_WEIGHT = "self_attn.kv_b_proj.weight"
+_UNCOLLECTED_WARNING = "Unable to collect loaded parameters"
+
+
+def _loadable_model(mesh):
+    """An MLA layer under a parent, wired the way a Kimi model wires it.
+
+    `attach_default_weight_loaders` is what the model does before handing
+    itself to the auto-loader; without it the loader would try to infer a
+    3-D MHA layout for the 2-D `o_proj`.
+    """
+    model = _SingleLayerModel(_build(mesh))
+    attach_default_weight_loaders(model)
+    return model
+
+
+def _kv_b_proj_checkpoint_weight(layer):
+    """The one checkpoint tensor `MLAEinsum` consumes.
+
+    Built in the checkpoint's `[out, in]` orientation, which the loader
+    transposes into the layer's `[in, out]` kernel.
+    """
+    rows, cols = layer.kv_b_proj.weight.get_value().shape
+    return torch.arange(rows * cols, dtype=torch.float32).reshape(cols,
+                                                                  rows) * 1e-4
+
+
+@contextlib.contextmanager
+def _captured_auto_loader_logs(caplog):
+    """Capture the auto-loader's own logger.
+
+    vLLM configures the `vllm` logger with `propagate=False`, so its records
+    never reach the root logger `caplog` installs on; attach caplog's handler
+    to the emitting logger directly.
+    """
+    logger = vllm_model_utils.logger
+    logger.addHandler(caplog.handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(caplog.handler)
+
+
+def test_kv_b_proj_load_weights_reports_the_names_it_loaded(mesh, caplog):
+    """`load_weights` must return its loaded names, not None.
+
+    vLLM's `AutoWeightsLoader._load_module` treats a None return from a child
+    module's `load_weights` as "this module cannot report what it loaded" and
+    logs a WARNING that interpolates the module's entire repr -- for an nnx
+    module that is the whole parameter tree, once per MLA layer, on every load
+    that goes through the auto-loader. The names are module-local; the caller
+    qualifies them with the module prefix.
+    """
+    with jax.set_mesh(mesh):
+        model = _loadable_model(mesh)
+        weight = _kv_b_proj_checkpoint_weight(model.self_attn)
+        loader = JaxAutoWeightsLoader(model)
+        with _captured_auto_loader_logs(caplog):
+            loaded = loader.load_weights([(_KV_B_PROJ_WEIGHT, weight)])
+
+    assert loaded == {_KV_B_PROJ_WEIGHT
+                      }, (f"[mla] auto-loader collected {loaded}, expected "
+                          f"{{{_KV_B_PROJ_WEIGHT!r}}}")
+    uncollected = [
+        record for record in caplog.records
+        if _UNCOLLECTED_WARNING in record.getMessage()
+    ]
+    assert not uncollected, (
+        "[mla] the auto-loader still could not collect kv_b_proj's loaded "
+        "parameters:\n" + "\n".join(r.getMessage() for r in uncollected))
+
+
+def test_kv_b_proj_load_weights_still_loads_and_splits(mesh):
+    """The bookkeeping fix must not disturb the load itself.
+
+    Same drive as above, checking the parts that were already working: the
+    checkpoint tensor lands in `kv_b_proj`, the fused weight is split into the
+    absorbed `k_up_proj`/`v_up_proj` the forward runs on, and the fused
+    parameter is released.
+    """
+    with jax.set_mesh(mesh):
+        model = _loadable_model(mesh)
+        attention = model.self_attn
+        weight = _kv_b_proj_checkpoint_weight(attention)
+        JaxAutoWeightsLoader(model).load_weights([(_KV_B_PROJ_WEIGHT, weight)])
+
+    assert not hasattr(attention.kv_b_proj, "weight"), (
+        "[mla] kv_b_proj.weight should be released once it is split")
+    k_up = np.asarray(attention.k_up_proj.weight.get_value())
+    v_up = np.asarray(attention.v_up_proj.weight.get_value())
+    assert k_up.shape == (KV_LORA, N_HEADS, QK_NOPE)
+    assert v_up.shape == (KV_LORA, N_HEADS, V_HEAD)
+
+    fused = weight.numpy().T.reshape(KV_LORA, N_HEADS, QK_NOPE + V_HEAD)
+    np.testing.assert_array_equal(k_up, fused[..., :QK_NOPE])
+    np.testing.assert_array_equal(v_up, fused[..., QK_NOPE:])
