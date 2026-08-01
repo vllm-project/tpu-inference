@@ -61,6 +61,11 @@ ENV_VARS=(
   -e ACCURACY_MODEL_ARGS_JSON="${ACCURACY_MODEL_ARGS_JSON:-}"
   -e EXTRA_SERVE_FLAGS="${EXTRA_SERVE_FLAGS:-}"
   -e CLIENT_TRUST_REMOTE_CODE="${CLIENT_TRUST_REMOTE_CODE:-}"
+  # Read by run_serving_probe.sh: what to serve, how long to allow for weight
+  # loading, and what to pass through to the serving probe.
+  -e MODEL="${MODEL:-}"
+  -e STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-}"
+  -e PROBE_EXTRA_FLAGS="${PROBE_EXTRA_FLAGS:-}"
   # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
   # everywhere else; the suites that read them skip when they are empty.
   -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
