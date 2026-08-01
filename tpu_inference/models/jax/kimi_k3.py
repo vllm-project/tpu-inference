@@ -171,6 +171,43 @@ def experts_are_block_quantized(quant_config) -> bool:
     return not isinstance(quant_config, UnquantizedConfig)
 
 
+def kda_head_ways(mesh: Optional[Mesh]) -> int:
+    """How many ways the KDA head axis is split on this mesh."""
+    if mesh is None:
+        return 1
+    return get_mesh_shape_product(mesh, list(ShardingAxisName.ATTN_HEAD))
+
+
+def validate_kda_head_sharding(num_heads: int,
+                               mesh: Optional[Mesh],
+                               prefix: str = "self_attn") -> int:
+    """Refuse a mesh that would split a KDA head across devices.
+
+    Most per-head tensors store the head axis flattened into
+    ``num_heads * head_dim``, and that product can divide when the head count
+    does not: Kimi-K3's 12288 divides by 64 while ``num_heads=96`` does not,
+    and a 64-way split of the flattened axis would hand each device 1.5
+    heads' worth of channels, which every KDA op would then misread.
+
+    ``A_log`` is shaped ``[num_heads]`` and carries the same split, so
+    ``shard_map`` would eventually reject such a mesh on that argument. This
+    check exists to reject it at model construction with the head count
+    named, rather than at the first forward pass inside a divisibility error
+    listing several unrelated arguments.
+    """
+    ways = kda_head_ways(mesh)
+    if num_heads % ways:
+        mesh_desc = ", ".join(f"{n}={s}" for n, s in mesh.shape.items())
+        raise ValueError(
+            f"[kda] '{prefix}': {num_heads} KDA heads do not divide by the "
+            f"{ways} ways the head axis {ShardingAxisName.ATTN_HEAD} is "
+            f"split, so a head would be torn across devices. The flattened "
+            f"num_heads*head_dim axis may still divide, which is why this is "
+            f"checked here rather than left to the sharding machinery "
+            f"(mesh: {mesh_desc}).")
+    return ways
+
+
 def routed_expert_sharding_ways(mesh: Mesh) -> Tuple[int, int]:
     """``(expert_ways, tensor_ways)`` the routed-expert kernels are split."""
     return (get_mesh_shape_product(mesh,
@@ -562,12 +599,15 @@ class KimiDeltaAttention(JaxModule):
     recurrent state) is threaded through the ``kv_cache`` slot exactly like an
     attention layer's KV cache, so the decoder loop stays uniform.
 
-    NOTE(sharding): the KDA parameters are replicated. The linear-attention
-    math is head-parallel and will be sharded on ``ATTN_HEAD`` together with
-    the hybrid-KV-cache work; correctness comes first here. The state-carrying
-    math still runs under a ``shard_map`` over ``ATTN_DATA`` (see
-    ``kda_attention``): that is not an optimization but a correctness
-    requirement, because the ragged metadata is laid out per DP rank.
+    NOTE(sharding): the per-head parameters are split over ``ATTN_HEAD`` and
+    the state-carrying math runs under a ``shard_map`` over ``ATTN_DATA``.
+    The two are orthogonal -- ``ATTN_DATA`` splits tokens and state slots,
+    ``ATTN_HEAD`` splits the head axis of the same arrays -- and the core is
+    head-parallel, so no head-axis collective is needed inside the map. The
+    ``shard_map`` is a correctness requirement, not an optimization, because
+    the ragged metadata is laid out per DP rank; the head split is a memory
+    one. Only ``o_proj`` contracts the head axis, and it does so outside the
+    map where XLA inserts the all-reduce.
     """
     hidden_size: int
     num_heads: int
@@ -590,14 +630,33 @@ class KimiDeltaAttention(JaxModule):
         K = self.head_dim
         weight_init = _weight_init(self.random_init)
 
-        def _einsum(name: str, shape: Tuple[int, int]) -> JaxEinsum:
+        # The linear-attention math is head-parallel: every op in the
+        # state-carrying core -- the depthwise convs, the per-(head, channel)
+        # gate, the recurrent scan, the headwise RMSNorm -- works on one head
+        # at a time and never contracts or reduces across heads. So the head
+        # axis is split over `ATTN_HEAD`, the axis MLA and the dense MLP
+        # already use. Everything indexed by head takes it; the low-rank
+        # bottlenecks (`f_a_proj` / `g_a_proj`, whose output is `head_dim`
+        # wide and shared by all heads) and `o_norm` (per channel *within* a
+        # head) are not per-head and stay replicated.
+        #
+        # `num_heads * head_dim` is laid out head-major, so splitting the
+        # flattened axis N ways equals splitting the head axis -- but only
+        # when N divides the head count. `validate_kda_head_sharding` refuses
+        # the rest: `num_heads * head_dim` can divide when `num_heads` does
+        # not, and the result is a silently torn head.
+        head = ShardingAxisName.ATTN_HEAD
+        validate_kda_head_sharding(self.num_heads, self.mesh, self.prefix)
+
+        def _einsum(name: str, shape: Tuple[int, int],
+                    sharding: P = P()) -> JaxEinsum:
             return JaxEinsum(
                 einsum_str="TD,DP->TP",
                 kernel_shape=shape,
                 rngs=rngs,
                 quant_config=self.quant_config,
                 param_dtype=self.dtype,
-                kernel_init=nnx.with_partitioning(weight_init, P()),
+                kernel_init=nnx.with_partitioning(weight_init, sharding),
                 prefix=f"{self.prefix}.{name}",
             )
 
@@ -611,33 +670,36 @@ class KimiDeltaAttention(JaxModule):
             return _RawWeight(shape=(HP, 1, self.conv_kernel_size),
                               dtype=jnp.float32,
                               rngs=rngs,
-                              sharding=P(),
+                              sharding=P(head, None, None),
                               random_init=self.random_init)
 
-        self.q_proj = _einsum("q_proj", (D, HP))
-        self.k_proj = _einsum("k_proj", (D, HP))
-        self.v_proj = _einsum("v_proj", (D, HP))
+        self.q_proj = _einsum("q_proj", (D, HP), P(None, head))
+        self.k_proj = _einsum("k_proj", (D, HP), P(None, head))
+        self.v_proj = _einsum("v_proj", (D, HP), P(None, head))
         self.q_conv1d = _conv()
         self.k_conv1d = _conv()
         self.v_conv1d = _conv()
         self.f_a_proj = _einsum("f_a_proj", (D, K))
-        self.f_b_proj = _einsum("f_b_proj", (K, HP))
-        self.b_proj = _einsum("b_proj", (D, self.num_heads))
+        self.f_b_proj = _einsum("f_b_proj", (K, HP), P(None, head))
+        self.b_proj = _einsum("b_proj", (D, self.num_heads), P(None, head))
         if self.use_full_rank_gate:
-            self.g_proj = _einsum("g_proj", (D, HP))
+            self.g_proj = _einsum("g_proj", (D, HP), P(None, head))
         else:
             self.g_a_proj = _einsum("g_a_proj", (D, K))
-            self.g_b_proj = _einsum("g_b_proj", (K, HP))
-        self.o_proj = _einsum("o_proj", (HP, D))
+            self.g_b_proj = _einsum("g_b_proj", (K, HP), P(None, head))
+        # Row-parallel: contracts the split head axis, so its output is a
+        # partial sum that XLA all-reduces (the standard TP output pattern,
+        # and what MLA's o_proj already does).
+        self.o_proj = _einsum("o_proj", (HP, D), P(head, None))
         self.A_log = create_param(rngs,
                                   shape=(self.num_heads, ),
                                   dtype=jnp.float32,
-                                  sharding=P(),
+                                  sharding=P(head),
                                   random_init=self.random_init)
         self.dt_bias = create_param(rngs,
                                     shape=(HP, ),
                                     dtype=jnp.float32,
-                                    sharding=P(),
+                                    sharding=P(head),
                                     random_init=self.random_init)
         # fp32 for the same reason as the conv weights: Kimi-K3 checkpoints
         # `o_norm.weight` in fp32, and the gated RMSNorm that consumes it runs
