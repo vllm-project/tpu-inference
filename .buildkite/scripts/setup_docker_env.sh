@@ -135,8 +135,15 @@ setup_environment() {
     fi
   fi
 
-  local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
-  local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}" 
+  # Callers pass either a bare image name ("vllm-tpu") or a fully-qualified
+  # registry path ("us-central1-docker.pkg.dev/<project>/tpu-inference/vllm-tpu")
+  # when they also need to push that image somewhere else. The CI cache repo is
+  # addressed by the bare name only, so interpolating a full path here produced a
+  # doubled registry path -- ".../tpu-inference-ci/us-central1-docker.pkg.dev/..."
+  # -- which no pull or push can resolve. Strip any registry/repo prefix; this is
+  # a no-op for the bare-name callers.
+  local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME##*/}"
+  local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}"
 
   local DOCKERFILE_NAME="Dockerfile"
 
@@ -200,6 +207,11 @@ setup_environment() {
   # Pull-Only Mode for TPU execution nodes
   # ==========================================
   if [[ "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
+    # Publish the registry ref that was pulled. Callers that have to hand the
+    # image to *another* machine (multi-host: the Ray workers pull it themselves)
+    # need the remote ref, not the node-local tags applied below.
+    PREBUILT_IMAGE_REF="${CI_IMAGE_REPO}:${CACHE_TAG}"
+    export PREBUILT_IMAGE_REF
     echo "Pulling pre-built Docker image: ${CI_IMAGE_REPO}:${CACHE_TAG} ..."
     docker pull "${CI_IMAGE_REPO}:${CACHE_TAG}"
     verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
