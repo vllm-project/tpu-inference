@@ -105,7 +105,7 @@ steps:
         --load-format=runai_streamer
         --no-enable-prefix-caching
         --max-num-batched-tokens 2048
-        --num-gpu-blocks-override 2048
+        --num-gpu-blocks-override 256
         --additional-config
         {"sharding":{"sharding_strategy":{"tensor_parallelism":4,"expert_parallelism":2,"enable_dp_attention":false}}}
       PROBE_EXTRA_FLAGS: "--allow-incoherent"
