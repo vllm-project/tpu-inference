@@ -13,6 +13,8 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference.kernels.flash_attention.tuned_params import (
+    TuningKey, get_tuned_params)
 from tpu_inference.utils import align_to
 
 DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
@@ -307,21 +309,37 @@ def flash_attention(
                 f"KV segment ids shape mismatch: expected ({batch_size=},"
                 f" {kv_seq_len=},), got {segment_ids.kv.shape}")
     if block_sizes is None:
-        block_sizes = BlockSizes.get_default(batch_size, num_heads, q_seq_len,
-                                             kv_seq_len, d_model)
-        # Dynamically estimate VMEM to decide if we can use the single-step optimization.
-        estimated_vmem = calculate_vmem_usage_bytes(block_sizes, q.dtype,
-                                                    k.dtype, d_model,
-                                                    kv_seq_len, ab,
-                                                    segment_ids)
-        vmem_limit = pltpu.get_tpu_info(
-        ).vmem_capacity_bytes if vmem_limit_bytes is None else vmem_limit_bytes
-        if estimated_vmem <= vmem_limit * 0.9:
-            # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
-            block_sizes = BlockSizes(block_q=block_sizes.block_q,
-                                     block_b=block_sizes.block_b,
-                                     block_k_major=kv_seq_len,
-                                     block_k=kv_seq_len)
+        tuned_params = get_tuned_params(
+            TuningKey(
+                batch_size=batch_size,
+                num_heads=num_heads,
+                q_seq_len=q_seq_len,
+                kv_seq_len=kv_seq_len,
+                head_dim=d_model,
+                q_dtype=q.dtype.name,
+                kv_dtype=k.dtype.name,
+            ))
+        if tuned_params is not None:
+            block_sizes = BlockSizes(block_q=tuned_params.block_q,
+                                     block_k_major=tuned_params.block_k_major,
+                                     block_k=tuned_params.block_k,
+                                     block_b=tuned_params.block_b)
+        else:
+            block_sizes = BlockSizes.get_default(batch_size, num_heads,
+                                                 q_seq_len, kv_seq_len,
+                                                 d_model)
+            # Dynamically estimate VMEM to decide if we can use the single-step optimization.
+            estimated_vmem = calculate_vmem_usage_bytes(
+                block_sizes, q.dtype, k.dtype, d_model, kv_seq_len, ab,
+                segment_ids)
+            vmem_limit = pltpu.get_tpu_info(
+            ).vmem_capacity_bytes if vmem_limit_bytes is None else vmem_limit_bytes
+            if estimated_vmem <= vmem_limit * 0.9:
+                # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
+                block_sizes = BlockSizes(block_q=block_sizes.block_q,
+                                         block_b=block_sizes.block_b,
+                                         block_k_major=kv_seq_len,
+                                         block_k=kv_seq_len)
     return _flash_attention(q, k, v, ab, segment_ids, False, causal, sm_scale,
                             block_sizes, vmem_limit_bytes, debug)
 

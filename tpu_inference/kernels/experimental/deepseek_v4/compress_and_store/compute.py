@@ -174,7 +174,6 @@ def pack_nope_tiled(q,
 def pack_rope_tiled(rope_slot_ropped, rope_head_dim_actual, rope_width=128):
     # rope_slot_ropped: (tile_n, 1, 128)
     # TODO: make this a config value rather than inferred
-    tile_n = rope_slot_ropped.shape[0]
     start = 128 - rope_head_dim_actual
     rope_val = rope_slot_ropped[:, :, start:]  # (tile_n, 1, rope_head_dim)
 
@@ -189,35 +188,11 @@ def pack_rope_tiled(rope_slot_ropped, rope_head_dim_actual, rope_width=128):
     else:
         rope_padded_bf16 = rope_bf16
 
-    rope_f32 = rope_padded_bf16.astype(jnp.float32)  # (tile_n, 1, 64)
-    rope_u32 = pltpu.bitcast(rope_f32, jnp.uint32)  # (tile_n, 1, 64)
-
-    rope_u32_2d = jnp.squeeze(rope_u32, axis=1)  # (tile_n, 64)
-
-    iota = jnp.arange(128)
-    dup_indices = iota // 2  # (128,)
-    dup_coords = jnp.broadcast_to(dup_indices, (tile_n, 128))[:, :, None]
-
-    gather_dn = jax.lax.GatherDimensionNumbers(
-        offset_dims=(),
-        collapsed_slice_dims=(1, ),
-        start_index_map=(1, ),
-        operand_batching_dims=(0, ),
-        start_indices_batching_dims=(0, ),
-    )
-
-    dup_u32_2d = jax.lax.gather(
-        rope_u32_2d,
-        dup_coords,
-        dimension_numbers=gather_dn,
-        slice_sizes=(1, 1),
-        unique_indices=False,
-        mode=jax.lax.GatherScatterMode.PROMISE_IN_BOUNDS,
-    )
-
-    shifts = jnp.where(iota % 2 == 0, 16, 24)  # (128,)
-    shifted = dup_u32_2d >> shifts[None, :]
-    rope_uint8_2d = (shifted & 0xFF).astype(jnp.uint8)  # (tile_n, 128)
+    rope_u16 = pltpu.bitcast(rope_padded_bf16, jnp.uint16)
+    rope_i32 = rope_u16.astype(jnp.int32)
+    rope_hi = ((rope_i32 >> 8) & 0xFF).astype(jnp.uint8)
+    rope_lo = (rope_i32 & 0xFF).astype(jnp.uint8)
+    rope_uint8_2d = jnp.concatenate([rope_hi, rope_lo], axis=-1)
 
     return rope_uint8_2d[:, None, :]
 
@@ -315,21 +290,25 @@ def gather_from_page_buffer(
                     row_score = page_buffer[n, p,
                                             score_row][...]  # shape (4, 256)
 
+                    # `proj_and_save_state` stores the f32 state byte-transposed
+                    # (u8[s, l] == byte s of f32 l), so one (4, 256) row holds
+                    # 256 floats across its LANES. The prev/curr halves of the
+                    # overlapping state are therefore lanes 0:128 and 128:256.
                     if overlap:
                         is_prev = w < (window // 2)
                         val_kv = jax.lax.select(
                             is_prev,
-                            row_kv[0:2, :].reshape(4, 128),
-                            row_kv[2:4, :].reshape(4, 128),
+                            row_kv[:, 0:128],
+                            row_kv[:, 128:256],
                         )
                         val_score = jax.lax.select(
                             is_prev,
-                            row_score[0:2, :].reshape(4, 128),
-                            row_score[2:4, :].reshape(4, 128),
+                            row_score[:, 0:128],
+                            row_score[:, 128:256],
                         )
                     else:
-                        val_kv = row_kv[0:2, :].reshape(4, 128)
-                        val_score = row_score[0:2, :].reshape(4, 128)
+                        val_kv = row_kv[:, 0:128]
+                        val_score = row_score[:, 0:128]
 
                     kv_window_u8[n, w, 0, :, :] = val_kv
                     score_window_u8[n, w, 0, :, :] = val_score

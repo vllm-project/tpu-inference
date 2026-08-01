@@ -24,8 +24,9 @@ from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 from tpu_inference.layers.common import sharding as sharding_mod
-from tpu_inference.layers.common.attention_interface import \
-    pcp_ragged_paged_attention
+from tpu_inference.layers.common.attention_metadata import (AttentionMetadata,
+                                                            PCPMetadata)
+from tpu_inference.layers.common.cp_attention import pcp_forward
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
 
@@ -144,6 +145,27 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         out[pps:2 * pps] = pi
         return jnp.asarray(out)
 
+    def _cache_at_pages(self, k, v, ntok, pcp, pps, npages, phys):
+        """Build an `npages`-page global pcp cache in which the request's
+        logical page i is stored at physical page `phys[i]` (so the block
+        table is non-contiguous), leaving the other pages unused."""
+        dims = self._cache_dims(1)
+        shards = []
+        for r in range(pcp):
+            idx = np.arange(r, ntok, pcp)
+            kv = np.asarray(merge_kv(k[idx], v[idx])) if len(idx) else None
+            shard = np.full((npages, PAGE, *dims), np.nan, np.float32)
+            if kv is not None:
+                n = kv.shape[0]
+                kv = np.pad(kv, ((0, cdiv(n, PAGE) * PAGE - n), (0, 0), (0, 0),
+                                 (0, 0)),
+                            constant_values=np.nan)
+                kv = kv.reshape(-1, PAGE, *dims)
+                for i in range(kv.shape[0]):
+                    shard[phys[i]] = kv[i]
+            shards.append(shard)
+        return jnp.asarray(np.concatenate(shards, axis=1), DTYPE)
+
     def _mesh(self, pcp):
         shape = tuple(pcp if a == "pcp" else 1 for a in MESH_AXIS_NAMES)
         return Mesh(
@@ -209,20 +231,29 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         cu_q_lens, q_pos_offsets = _pcp_meta(pcp, C, num_current)
         distribution = jnp.array([0, 0, 2], jnp.int32)  # head + tail
 
-        out, new_cache = pcp_ragged_paged_attention(self._mesh(pcp),
-                                                    q,
-                                                    k,
-                                                    v,
-                                                    cache,
-                                                    kv_lens,
-                                                    self._page_indices(pps),
-                                                    cu_q_lens,
-                                                    distribution,
-                                                    kv_cache_lens,
-                                                    q_pos_offsets,
-                                                    sm_scale=SM_SCALE,
-                                                    update_kv_cache=True,
-                                                    use_causal_mask=True)
+        md = AttentionMetadata(
+            input_positions=jnp.zeros(1, jnp.int32),
+            seq_lens=kv_lens,
+            block_tables=self._page_indices(pps),
+            request_distribution=distribution,
+            pcp=PCPMetadata(
+                query_start_loc=cu_q_lens,
+                kv_cache_lens=kv_cache_lens,
+                q_pos_offsets=q_pos_offsets,
+                # pages the CACHED tokens occupy (a token-ordered page holds
+                # PAGE*pcp tokens); 0 elides the cache phase.
+                cache_pages=cdiv(L, PAGE * pcp),
+            ),
+        )
+        new_cache, out = pcp_forward(self._mesh(pcp),
+                                     q,
+                                     k,
+                                     v,
+                                     cache,
+                                     md,
+                                     sm_scale=SM_SCALE,
+                                     update_kv_cache=True,
+                                     use_causal_mask=True)
         return np.asarray(out), np.asarray(new_cache), exp, C
 
     def _assert_matches(self, out, exp, pcp, C, num_current):
@@ -295,6 +326,164 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             page, off = local // PAGE, local % PAGE
             got = cache[page, r * PAGE + off]
             self.assertAllClose(got, ref[i], atol=2e-2, rtol=2e-2)
+
+    @parameterized.parameters((2, False), (4, False), (2, True), (4, True))
+    def test_noncontiguous_block_table(self, pcp, tight_hint):
+        """The cache phase must be correct when the request's pages are an
+        arbitrary, non-contiguous subset of a cache that is bigger than the
+        request -- i.e. what a real server looks like, where one KV cache holds
+        many sequences (in production num_blocks is ~9x the per-request block
+        table width).  Both conditions are needed to exercise gather-KV's page
+        compaction: it selects the request's pages via the block table before
+        the all-gather, so an indexing bug shows up as a numerical mismatch
+        against the plain-attention reference.
+
+        `tight_hint` additionally exercises the `cache_pages` bound: True
+        passes a rung strictly tighter than the block-table width, False passes
+        the full width.
+        """
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs {pcp} devices")
+        rng = np.random.default_rng(0)
+        C = 32
+        num_current = 2 * pcp * C
+        L = 4 * PAGE * pcp  # cached tokens
+        kv_total = L + num_current
+
+        q = self._rand(rng, (num_current, NQ, HD))
+        k = self._rand(rng, (num_current, NKV, HD))
+        v = self._rand(rng, (num_current, NKV, HD))
+        k_prev = self._rand(rng, (L, NKV, HD))
+        v_prev = self._rand(rng, (L, NKV, HD))
+
+        # ---- reference: plain non-PCP attention over the same tokens ----
+        ref_pps = cdiv(kv_total, PAGE)
+        ref_pi = jnp.pad(jnp.arange(ref_pps, dtype=jnp.int32),
+                         (0, MAX_SEQ * ref_pps - ref_pps))
+        exp, _ = ref_ragged_paged_attention(
+            q,
+            k,
+            v,
+            self._ref_cache(k_prev, v_prev, L, ref_pps),
+            jnp.pad(jnp.array([kv_total], jnp.int32), (0, MAX_SEQ - 1)),
+            ref_pi,
+            jnp.pad(jnp.array([0, num_current], jnp.int32), (0, MAX_SEQ - 1)),
+            jnp.array([0, 0, 1], jnp.int32),
+            sm_scale=SM_SCALE)
+
+        # ---- PCP: cache is 4x the request, pages non-contiguous ----
+        pps = cdiv(cdiv(kv_total, pcp), PAGE)
+        npages = 4 * pps  # cache bigger than the request
+        # arbitrary non-identity, non-contiguous physical placement
+        phys = (np.arange(pps) * 3 + 5) % npages
+        assert len(set(phys.tolist())) == pps, "phys must be a permutation"
+        cache = self._cache_at_pages(k_prev, v_prev, L, pcp, pps, npages, phys)
+
+        pi = np.zeros(MAX_SEQ * pps, np.int32)
+        pi[:pps] = phys
+        pi[pps:2 * pps] = phys
+        pi = jnp.asarray(pi)
+
+        def pad1(xs):
+            return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
+
+        # `cache_pages` is the static bound the runner supplies: the number of
+        # pages the CACHED tokens occupy (page P of the token-ordered cache
+        # holds gpage = PAGE*pcp tokens), rounded up to a power of two.  It is
+        # strictly tighter than pages_per_seq here, so it exercises the bound.
+        gpage = PAGE * pcp
+        live = cdiv(L, gpage)
+        # tight_hint=True exercises the bound (a rung strictly tighter than the
+        # block-table width); False passes the loosest legal value, i.e. the
+        # full width, so the compaction runs without the extra bound.
+        hint = (1 << (max(live - 1, 0)).bit_length()) if tight_hint else pps
+        self.assertGreaterEqual(hint, live, "hint must cover live pages")
+        if tight_hint:
+            self.assertLess(hint, pps,
+                            "hint must be tighter than pages_per_seq")
+
+        cu, qpos = _pcp_meta(pcp, C, num_current)
+        md = AttentionMetadata(
+            input_positions=jnp.zeros(1, jnp.int32),
+            seq_lens=pad1([kv_total, kv_total]),
+            block_tables=pi,
+            request_distribution=jnp.array([0, 0, 2], jnp.int32),
+            pcp=PCPMetadata(
+                query_start_loc=cu,
+                kv_cache_lens=pad1([L, L]),
+                q_pos_offsets=qpos,
+                cache_pages=hint,
+            ),
+        )
+        _, out = pcp_forward(self._mesh(pcp), _to_rank_order(q, pcp, C),
+                             _to_rank_order(k, pcp, C),
+                             _to_rank_order(v, pcp, C), cache, md, SM_SCALE)
+
+        inv = _inv_row(pcp)
+        got = np.asarray(out).reshape(2 * pcp, C, NQ,
+                                      HD)[inv].reshape(num_current, NQ, HD)
+        self.assertTrue(np.all(np.isfinite(got)))
+        self.assertGreater(float(np.abs(got).max()), 0.0)
+        self.assertAllClose(got, np.asarray(exp), atol=2e-2, rtol=2e-2)
+
+    @parameterized.parameters(2, 4)
+    def test_first_chunk_skips_cache_phase(self, pcp):
+        """cache_pages=0 elides the cache phase; with no cached tokens the
+        result must still match plain attention over the current chunk."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs {pcp} devices")
+        rng = np.random.default_rng(1)
+        C = 32
+        num_current = 2 * pcp * C
+        kv_total = num_current  # L == 0 -> first chunk, empty cache
+
+        q = self._rand(rng, (num_current, NQ, HD))
+        k = self._rand(rng, (num_current, NKV, HD))
+        v = self._rand(rng, (num_current, NKV, HD))
+
+        ref_pps = cdiv(kv_total, PAGE)
+        ref_pi = jnp.pad(jnp.arange(ref_pps, dtype=jnp.int32),
+                         (0, MAX_SEQ * ref_pps - ref_pps))
+        empty = jnp.full((ref_pps, PAGE, *self._cache_dims(1)), jnp.nan, DTYPE)
+        exp, _ = ref_ragged_paged_attention(
+            q,
+            k,
+            v,
+            empty,
+            jnp.pad(jnp.array([kv_total], jnp.int32), (0, MAX_SEQ - 1)),
+            ref_pi,
+            jnp.pad(jnp.array([0, num_current], jnp.int32), (0, MAX_SEQ - 1)),
+            jnp.array([0, 0, 1], jnp.int32),
+            sm_scale=SM_SCALE)
+
+        pps = cdiv(cdiv(kv_total, pcp), PAGE)
+        npages = 4 * pps
+        cache = jnp.full((npages, PAGE * pcp, *self._cache_dims(1)), jnp.nan,
+                         DTYPE)
+        pi = np.zeros(MAX_SEQ * pps, np.int32)
+        pi[:pps] = np.arange(pps)
+        pi[pps:2 * pps] = np.arange(pps)
+        pi = jnp.asarray(pi)
+
+        def pad1(xs):
+            return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
+
+        cu, qpos = _pcp_meta(pcp, C, num_current)
+        md = AttentionMetadata(
+            input_positions=jnp.zeros(1, jnp.int32),
+            seq_lens=pad1([kv_total, kv_total]),
+            block_tables=pi,
+            request_distribution=jnp.array([0, 0, 2], jnp.int32),
+            pcp=PCPMetadata(
+                query_start_loc=cu,
+                kv_cache_lens=pad1([0, 0]),
+                q_pos_offsets=qpos,
+                cache_pages=0,
+            ),
+        )
+        _, out = pcp_forward(self._mesh(pcp), _to_rank_order(q, pcp, C),
+                             _to_rank_order(k, pcp, C),
+                             _to_rank_order(v, pcp, C), cache, md, SM_SCALE)
 
 
 if __name__ == "__main__":
