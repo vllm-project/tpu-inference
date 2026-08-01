@@ -163,8 +163,14 @@ setup_environment() {
     echo "HF_TOKEN already exists in /etc/environment."
   fi
 
+  # Suppress xtrace while sourcing: /etc/environment carries HF_TOKEN, and
+  # under `set -x` the assignment -- secret included -- lands in the build
+  # log. Restore xtrace only if the caller had it on.
+  case "$-" in *x*) _had_xtrace=1 ;; *) _had_xtrace=0 ;; esac
+  { set +x; } 2>/dev/null
   # shellcheck disable=1091
   source /etc/environment
+  [ "${_had_xtrace}" = "1" ] && set -x
   cleanup_docker_resource "${IMAGE_NAME}"
 
   if [ -z "${BUILDKITE:-}" ]; then
