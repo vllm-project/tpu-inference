@@ -61,14 +61,14 @@ EXPERT_AXIS = "attn_dp_expert"
 MODEL_AXIS = "model"
 
 
-def _mesh(num_expert: int, num_model: int) -> Mesh:
+def _mesh(num_expert: int, num_model: int, num_data: int = 1) -> Mesh:
+    needed = num_expert * num_model * num_data
     devices = jax.devices()
-    if len(devices) < num_expert * num_model:
-        pytest.skip(f"needs {num_expert * num_model} devices, "
-                    f"have {len(devices)}")
-    shape = tuple(num_expert if name == EXPERT_AXIS else num_model if name ==
-                  MODEL_AXIS else 1 for name in MESH_AXIS_NAMES)
-    grid = np.array(devices[:num_expert * num_model]).reshape(shape)
+    if len(devices) < needed:
+        pytest.skip(f"needs {needed} devices, have {len(devices)}")
+    sizes = {EXPERT_AXIS: num_expert, MODEL_AXIS: num_model, "data": num_data}
+    shape = tuple(sizes.get(name, 1) for name in MESH_AXIS_NAMES)
+    grid = np.array(devices[:needed]).reshape(shape)
     return Mesh(grid, axis_names=MESH_AXIS_NAMES)
 
 
@@ -126,6 +126,21 @@ def test_shard_then_decode_is_bit_identical_to_the_host_decode(
     # divide by 8 the way K3's do (D=3584, F=3072, 32-wide groups), including
     # the scales' `in//group` axis, which `efd` shards.
     for spec in (edf, efd):
+        packed, scale = _stage(rng, 16, out=64, packed_in=128, group=32)
+        _compare_paths(packed, scale, spec, mesh)
+
+
+def test_replicated_mesh_axes_get_the_same_shard():
+    """A mesh axis the spec does not name replicates rather than splits.
+
+    The expert kernels' specs name only the expert and tensor axes, so on a
+    mesh with any other axis larger than one every device on that axis holds
+    the same shard -- and the decode has to hand each of them a copy, not a
+    slice of one.
+    """
+    mesh = _mesh(2, 2, num_data=2)
+    rng = np.random.default_rng(3)
+    for spec in _specs():
         packed, scale = _stage(rng, 16, out=64, packed_in=128, group=32)
         _compare_paths(packed, scale, spec, mesh)
 
