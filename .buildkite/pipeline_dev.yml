@@ -74,7 +74,7 @@ steps:
   # same failure there: expert_parallelism = device count (896 routed
   # experts divide evenly), tensor_parallelism 1, dp-attention on for MLA.
   # -----------------------------------------------------------------
-  - label: "tpu7x Kimi-K3 8-layer slice, single host"
+  - label: "tpu7x Kimi-K3 slice, composed E2xF4 mesh, no dp-attention"
     key: tpu7x_kimi_k3_sliced_8
     depends_on: tpu7x_build_docker
     timeout_in_minutes: 120
@@ -89,6 +89,10 @@ steps:
       MAX_NUM_SEQS: "16"
       GPU_MEMORY_UTILIZATION: "0.6"
       STARTUP_TIMEOUT_SECONDS: "3600"
+      # DEV-ONLY: MLA without DP attention is refused by
+      # TPUPlatform.check_and_update_config. That check is the only place the
+      # requirement is asserted, and it rules out the composed mesh below.
+      TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION: "1"
       # --max-num-batched-tokens is load-bearing here, not a tuning nicety.
       # Left at its default the warmup sweep compiles token buckets up to
       # 16384 even though max-model-len is 2048, and one device holds
@@ -101,8 +105,9 @@ steps:
         --load-format=runai_streamer
         --no-enable-prefix-caching
         --max-num-batched-tokens 2048
+        --num-gpu-blocks-override 2048
         --additional-config
-        {"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}
+        {"sharding":{"sharding_strategy":{"tensor_parallelism":4,"expert_parallelism":2,"enable_dp_attention":false}}}
       PROBE_EXTRA_FLAGS: "--allow-incoherent"
     agents:
       queue: tpu_v7x_8_queue

@@ -274,13 +274,39 @@ class TpuPlatform(Platform):
             )
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
-            if not envs.NEW_MODEL_DESIGN or not vllm_config.additional_config.get(
-                    "sharding", {}).get("sharding_strategy", {}).get(
-                        "enable_dp_attention", False):
+            dp_attention = vllm_config.additional_config.get(
+                "sharding", {}).get("sharding_strategy",
+                                    {}).get("enable_dp_attention", False)
+            # ---------------------------------------------------------------
+            # DEV-ONLY ESCAPE HATCH — DO NOT MERGE UPSTREAM.
+            #
+            # This branch exists to answer one question experimentally: does
+            # MLA actually need DP attention, or does only this check say so?
+            # The requirement is asserted here and nowhere else -- the layer
+            # and model code has no such dependency -- and it rules out the
+            # only mesh shape whose per-device weight bytes fit for a large
+            # MoE + MLA model, where every device spent on attention data
+            # parallelism is one taken from the axes that shard the experts.
+            #
+            # Remove this hatch (and restore the single combined raise) before
+            # any upstream PR. Nothing sets the variable except a dev
+            # pipeline step running that experiment.
+            # ---------------------------------------------------------------
+            unsafe_no_dp_attention = (os.environ.get(
+                "TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION") == "1")
+            if not envs.NEW_MODEL_DESIGN or not (dp_attention
+                                                 or unsafe_no_dp_attention):
                 raise ValueError(
                     "MLA models require both the NEW_MODEL_DESIGN=1 environment "
                     "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
                 )
+            if not dp_attention:
+                logger.warning(
+                    "[dev-only] Serving an MLA model WITHOUT DP attention "
+                    "because TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION=1. "
+                    "This bypasses the check in check_and_update_config and is "
+                    "not a supported configuration; it exists to measure "
+                    "whether MLA works on a composed expert x tensor mesh.")
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config

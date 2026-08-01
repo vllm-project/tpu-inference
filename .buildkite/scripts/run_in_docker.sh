@@ -66,6 +66,10 @@ ENV_VARS=(
   -e MODEL="${MODEL:-}"
   -e STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-}"
   -e PROBE_EXTRA_FLAGS="${PROBE_EXTRA_FLAGS:-}"
+  # DEV-ONLY: bypasses the MLA/DP-attention check in tpu_platform.py. Set by
+  # the dev step measuring MLA on a composed expert x tensor mesh. Not for
+  # upstream; see the comment at that check.
+  -e TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION="${TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION:-}"
   # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
   # everywhere else; the suites that read them skip when they are empty.
   -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
