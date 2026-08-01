@@ -38,31 +38,30 @@
 steps:
 
   # -----------------------------------------------------------------
-  # Kimi-Linear-48B-A3B-Instruct across 4 hosts (32 devices) via Ray —
-  # the same serve+probe as the 2-host run, retargeted at the new
-  # tpu_v7x_32_queue. run_multihost.sh discovers the full worker list
-  # from gcloud metadata, so the extra hosts need no step changes.
+  # Kimi-K3 (2.8T MoE, MXFP4 experts) across 4 hosts (32 devices) via
+  # Ray — first full-model serve attempt. Same rig as the 48B run on
+  # this queue, swapped to the K3 GCS snapshot.
   #
   # run_multihost.sh builds and pushes the image itself and pulls it on
   # every node, so this step must NOT set USE_PREBUILT_IMAGE or depend on
   # the docker build step (setup_environment would prepend the registry
   # prefix a second time and the image path would be wrong).
   #
-  # Weights are streamed straight from GCS by the RunAI streamer, so no
-  # node needs a 92 GiB local copy. MODEL_IMPL_TYPE=flax_nnx selects the
-  # JAX-native implementation explicitly: 'auto' resolves a
-  # runai_streamer load to the vLLM path for any architecture whose JAX
-  # class has no WeightLoader attribute, and this one loads through the
-  # LoadableWithIterator mixin instead.
+  # Weights (1.56 TB, 96 shards) stream from GCS via the RunAI streamer;
+  # no node holds a local copy. MODEL_IMPL_TYPE=flax_nnx is explicit
+  # because 'auto' + runai_streamer resolves architectures without a
+  # WeightLoader attribute to the vLLM torch path; this model loads
+  # through LoadableWithIterator.
   #
-  # Sharding: expert_parallelism=32 splits the routed experts one way
-  # across all 32 devices, which also puts attention data-parallelism at
-  # 32 (dp-attention is required by MLA), i.e. dp groups spanning three
-  # host boundaries.
+  # Sharding: expert_parallelism=32 (896 routed experts -> 28/device),
+  # attention data-parallel 32 (dp-attention required by MLA), dp groups
+  # spanning three host boundaries. gpu-memory-utilization 0.8: ~49-60
+  # GB/device of weights against the ~101.7 GB/device limit leaves the
+  # KV/state pool inside the 0.8 ceiling with margin for warmup peaks.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (4 hosts) Kimi-Linear-48B-A3B-Instruct"
-    key: tpu7x_kimi48b_multihost_32
-    timeout_in_minutes: 135
+  - label: "tpu7x multi-host (4 hosts) Kimi-K3 full model"
+    key: tpu7x_kimi_k3_multihost_32
+    timeout_in_minutes: 240
     env:
       TPU_VERSION: "tpu7x"
       MODEL_IMPL_TYPE: "flax_nnx"
@@ -72,16 +71,16 @@ steps:
     commands:
       - |
         .buildkite/scripts/run_multihost.sh \
-          "vllm serve gs://tpu-commons-ci/moonshootai/kimi/linear-48b \
+          "vllm serve gs://tpu-commons-ci/moonshootai/kimi/k3 \
             --port 8000 \
             --tensor-parallel-size 32 \
             --trust-remote-code \
             --max-model-len 2048 \
-            --max-num-seqs 32 \
+            --max-num-seqs 16 \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
-            --gpu-memory-utilization 0.6 \
+            --gpu-memory-utilization 0.8 \
             --additional-config '{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":1,\"expert_parallelism\":32,\"enable_dp_attention\":true}}}'" \
           "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
             --concurrency 8 \
