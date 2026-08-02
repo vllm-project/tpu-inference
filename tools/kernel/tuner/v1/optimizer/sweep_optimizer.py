@@ -120,7 +120,10 @@ class SweepOptimizer(TuningOptimizer):
                         f'Case {cid} average latency is {average_latency_us}us from {source}'
                     )
         except Exception as e:
-            logger.error(f"Error in sweeping : {e}")
+            logger.error(
+                f"Error in sweeping for CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, Bucket {bucket_id}: {e}",
+                exc_info=True,
+            )
             raise
         finally:
             bucket_total_time_us = int(
@@ -137,4 +140,3 @@ class SweepOptimizer(TuningOptimizer):
             )
             tuner._cleanup_xprof_dir()
             tuner.storage_manager.flush_results()
-            tuner.storage_manager.close()

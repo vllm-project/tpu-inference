@@ -162,7 +162,9 @@ class BayesianOptimizer(TuningOptimizer):
 
         int_param_sorted: dict[str, list] = {}
         for pname, pvalues in search_space.items():
-            if pvalues and all(isinstance(v, int) for v in pvalues):
+            if pvalues and all(
+                    isinstance(v, int) and not isinstance(v, bool)
+                    for v in pvalues):
                 int_param_sorted[pname] = sorted(pvalues)
 
         def objective(trial: optuna.Trial) -> float:
@@ -267,7 +269,10 @@ class BayesianOptimizer(TuningOptimizer):
                     callbacks=callbacks,
                 )
         except Exception as e:
-            logger.error(f"Error in Bayesian optimization: {e}")
+            logger.error(
+                f"Error in Bayesian optimization for CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, Bucket {bucket_id}: {e}",
+                exc_info=True,
+            )
             raise
         finally:
             tuner.storage_manager.flush_results()
@@ -280,7 +285,6 @@ class BayesianOptimizer(TuningOptimizer):
             tuner.storage_manager.mark_bucket_completed(
                 tuner.run_config.case_set_id, tuner.run_config.run_id,
                 bucket_id)
-            tuner.storage_manager.close()
 
         completed_trials = [
             t for t in study.trials

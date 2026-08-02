@@ -295,6 +295,7 @@ class SpannerStorageManager(StorageManager):
                                         'Latency', 'WarmupTime', 'TotalTime',
                                         'ProcessedAt', 'TPU'),
                                values=values)
+        self.results_buffer.clear()
 
     # tuner agents will query from the KernelTuningCases table and run the cases
     def get_bucket_configs(self, cs_id, start, end):

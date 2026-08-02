@@ -638,6 +638,7 @@ class BayesianOptimizationValidationTest(absltest.TestCase):
 
                 results = tuner.storage_manager._read_table("CaseResults")
                 self.assertGreaterEqual(len(results), 1)
+                tuner.storage_manager.close()
                 self.assertTrue(tuner.storage_manager._closed)
 
 

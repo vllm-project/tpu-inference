@@ -34,10 +34,13 @@ import argparse
 import ast
 import atexit
 import json
+import logging
 import math
 import os
 from collections import defaultdict
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Local backend helpers
@@ -246,16 +249,16 @@ def _matches_filter(kv: dict, filter_keys: list) -> FilterResult:
 
     for kv_str in filter_keys:
         if '=' not in kv_str:
-            print(
-                f'Warning: invalid filter "{kv_str}" ignored (expected format FIELD=VALUE)'
+            logger.warning(
+                f'Invalid filter "{kv_str}" ignored (expected format FIELD=VALUE)'
             )
             return FilterResult.INVALID_FILTER
         field, raw = kv_str.split('=', 1)
         field = field.strip()
         raw = raw.strip()
         if field not in combined:
-            print(
-                f'Warning: Filter field "{field}" not found in tuning_key or tunable_params'
+            logger.warning(
+                f'Filter field "{field}" not found in tuning_key or tunable_params'
             )
             return FilterResult.INVALID_FILTER
         stored = combined[field]
@@ -264,9 +267,8 @@ def _matches_filter(kv: dict, filter_keys: list) -> FilterResult:
                 return FilterResult.NO_MATCH
         elif isinstance(stored, bool):
             if raw.lower() not in ('true', 'false', '1', '0', 'yes', 'no'):
-                print(
-                    f'Warning: Invalid boolean value "{raw}" for field "{field}"'
-                )
+                logger.warning(
+                    f'Invalid boolean value "{raw}" for field "{field}"')
                 return FilterResult.INVALID_FILTER
             if stored != (raw.lower() in ('true', '1', 'yes')):
                 return FilterResult.NO_MATCH
@@ -334,21 +336,20 @@ def local_query_case_latency(db_path,
     for r in relevant:
         kv_str = case_kv_map.get((r['ID'], r['CaseId']))
         if not kv_str:
-            print(
-                f'Warning: no CaseKeyValue found for CaseId={r["CaseId"]}; skipping'
-            )
+            logger.warning(
+                f'No CaseKeyValue found for CaseId={r["CaseId"]}; skipping')
             continue
         try:
             kv = json.loads(kv_str)
         except (json.JSONDecodeError, TypeError):
-            print(
-                f'Warning: failed to decode CaseKeyValue for CaseId={r["CaseId"]}; skipping'
+            logger.warning(
+                f'Failed to decode CaseKeyValue for CaseId={r["CaseId"]}; skipping'
             )
             continue
         if filter_keys:
             result = _matches_filter(kv, filter_keys)
             if result == FilterResult.INVALID_FILTER:
-                print('One or more invalid filters; aborting query.')
+                logger.warning('One or more invalid filters; aborting query.')
                 return []
             if result != FilterResult.MATCH:
                 continue
@@ -724,6 +725,17 @@ def _print_flattened_table(rows,
     print(f'  ({len(rows)} result(s){count_suffix})')
 
 
+def _prepare_baseline_cols(baseline_map: dict, show_fields: list):
+    """Return extra_cols and updated show_fields when baseline_map is provided."""
+    extra_cols = ['baseline_latency', 'latency_improvement%'
+                  ] if baseline_map is not None else []
+    if baseline_map is not None and show_fields is not None:
+        extra_to_add = [c for c in extra_cols if c not in show_fields]
+        if extra_to_add:
+            show_fields = list(show_fields) + extra_to_add
+    return extra_cols, show_fields
+
+
 def _might_add_baseline_latency(baseline_map: dict, row: dict,
                                 formated_row: dict):
     if baseline_map is not None:
@@ -752,14 +764,7 @@ def _print_min_latency(rows, show_fields=None, baseline_map=None):
       - ``latency_improvement%`` – percentage improvement vs. the baseline
                                    (positive means our tuned result is faster).
     """
-    extra_cols = ['baseline_latency', 'latency_improvement%'
-                  ] if baseline_map is not None else []
-    # When the caller also specified --show fields, always append the baseline
-    # columns so they are not silently hidden by the field filter.
-    if baseline_map is not None and show_fields is not None:
-        extra_to_add = [c for c in extra_cols if c not in show_fields]
-        if extra_to_add:
-            show_fields = list(show_fields) + extra_to_add
+    extra_cols, show_fields = _prepare_baseline_cols(baseline_map, show_fields)
 
     def _build_row(r):
         row = {
@@ -791,12 +796,7 @@ def _print_case_latency(rows, show_fields=None, baseline_map=None):
                                    this row itself is not a SUCCESS.
       - ``latency_improvement%`` – percentage improvement vs. the baseline.
     """
-    extra_cols = ['baseline_latency', 'latency_improvement%'
-                  ] if baseline_map is not None else []
-    if baseline_map is not None and show_fields is not None:
-        extra_to_add = [c for c in extra_cols if c not in show_fields]
-        if extra_to_add:
-            show_fields = list(show_fields) + extra_to_add
+    extra_cols, show_fields = _prepare_baseline_cols(baseline_map, show_fields)
 
     def _build_row(r):
         status = r.get('ProcessedStatus')

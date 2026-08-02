@@ -484,5 +484,38 @@ class KernelTunerBaseTest(absltest.TestCase):
         self.assertEqual(bo_min_latency, 10.0)
 
 
+class DataclassProtocolTest(absltest.TestCase):
+
+    def test_tuning_key_and_params_protocols(self):
+        key1 = MockTuningKey(name="test", size=16)
+        key2 = MockTuningKey(name="test", size=16)
+        params1 = MockTunableParams(size=8)
+        params2 = MockTunableParams(size=16)
+
+        # 1. Test protocol compliance
+        self.assertTrue(isinstance(key1, TuningKey))
+        self.assertTrue(isinstance(params1, TunableParams))
+        self.assertTrue(issubclass(MockTuningKey, TuningKey))
+        self.assertTrue(issubclass(MockTunableParams, TunableParams))
+
+        # 2. Test hashability and dict/set usage
+        self.assertEqual(hash(key1), hash(key2))
+        self.assertEqual(hash(params1), hash(params1))
+        d = {key1: params1}
+        self.assertEqual(d[key2], params1)
+
+        # 3. Test immutability (frozen dataclass)
+        with self.assertRaises((AttributeError, TypeError, Exception)):
+            key1.size = 32
+        with self.assertRaises((AttributeError, TypeError, Exception)):
+            params1.size = 32
+
+        # 4. Test comparison operators
+        self.assertTrue(params1 <= params2)
+        self.assertFalse(params1 >= params2)
+        self.assertTrue(params2 >= params1)
+        self.assertFalse(params2 <= params1)
+
+
 if __name__ == "__main__":
     absltest.main()

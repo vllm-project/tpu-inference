@@ -39,6 +39,9 @@ def _literal_representer(dumper, data):
     return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
 
 
+yaml.add_representer(LiteralString, _literal_representer)
+
+
 class ProcessedCasesTracker:
     """Tracks evaluated case IDs and their execution statuses to manage state and OOM early-pruning."""
 
@@ -586,8 +589,9 @@ class KernelTunerBase(ABC):
 
         Fetches inputs via `generate_inputs`, runs the kernel with the supplied
         tunable parameters for `iters` iterations, and returns timing results.
-        All exceptions must be caught internally; nothing should propagate to
-        the caller.
+        OOM exceptions must be caught internally and return FAILED_OOM.
+        Other exceptions must be logged and re-raised. These non OOM exception will be logged
+        and stop the program since we should not fail silently.
 
         A common implementation pattern is:
         ```
