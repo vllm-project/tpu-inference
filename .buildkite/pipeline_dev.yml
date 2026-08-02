@@ -58,8 +58,13 @@ steps:
   # read must be a no-op: the [sharded-stream] log line must report
   # kept == total tensors and 0.0 GiB skipped, and the two rounds'
   # completions must be byte-identical. Serve config (tp=1 x ep=8, DP
-  # attention on, util 0.8) is exactly the slice rig's passing config,
-  # so the only variable under test is the streaming flag.
+  # attention on, util 0.6, batched-tokens 2048, NO block override) is
+  # verbatim the slice step that passed WITHOUT the KV warmup reserve --
+  # this branch does not carry the reserve commit, and at util 0.8 the
+  # KV pool leaves too little headroom for warmup's compile temporaries
+  # (HLO temporaries 100.50G vs 94.74G available), while the identical
+  # config at 0.6 served. Keeping the pre-reserve values makes the
+  # streaming flag the only variable under test.
   #
   # Timeout covers TWO full serves of the ~126 GB slice: streaming
   # dominates each round (the second round reuses the persistent JAX
@@ -78,7 +83,7 @@ steps:
       TENSOR_PARALLEL_SIZE: "8"
       MAX_MODEL_LEN: "2048"
       MAX_NUM_SEQS: "16"
-      GPU_MEMORY_UTILIZATION: "0.8"
+      GPU_MEMORY_UTILIZATION: "0.6"
       STARTUP_TIMEOUT_SECONDS: "3600"
       EXTRA_SERVE_FLAGS: >-
         --trust-remote-code

@@ -42,7 +42,11 @@
 #   TENSOR_PARALLEL_SIZE     default 8
 #   MAX_MODEL_LEN            default 2048
 #   MAX_NUM_SEQS             default 16
-#   GPU_MEMORY_UTILIZATION   default 0.8
+#   GPU_MEMORY_UTILIZATION   default 0.6 -- the pre-KV-warmup-reserve slice
+#                            value. Without the reserve, 0.8 sizes the KV
+#                            pool so large that warmup's compile temporaries
+#                            exceed the remaining HBM (100.50G needed vs
+#                            94.74G free); the identical config at 0.6 serves.
 #   STARTUP_TIMEOUT_SECONDS  per round, default 3600
 #   GATE_MAX_TOKENS          greedy tokens per prompt, default 32
 
@@ -53,7 +57,7 @@ PORT=${PORT:-8000}
 TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-8}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-2048}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.6}
 STARTUP_TIMEOUT_SECONDS=${STARTUP_TIMEOUT_SECONDS:-3600}
 GATE_MAX_TOKENS=${GATE_MAX_TOKENS:-32}
 OUT_DIR=${OUT_DIR:-/tmp/sharded_stream_gate}
