@@ -78,9 +78,11 @@ grep -E "strict-match|flexible-extract|exact_match" /root/k3_gsm8k.log \
   | tail -10 || true
 
 # ---------------------------------------------------------------------------
-# Phase 2: 8k-in/1k-out throughput, 32 requests. max-concurrency 8 matches
-# --max-num-seqs; the KV pool (256 blocks) holds 8 full 9k-token requests.
-# ignore-eos forces the full 1024 output tokens per request.
+# Phase 2: throughput at two shapes, 32 requests each, max-concurrency 8
+# (= --max-num-seqs). ignore-eos forces the full output length per request.
+#   * 1k/1k first: decode-dominated, fast, a clean TPOT read.
+#   * 8k/1k second: long-prefill shape; the KV pool (256 blocks) holds 8
+#     full 9k-token requests.
 # ---------------------------------------------------------------------------
 if [ "${SKIP_BENCH}" = "--skip-bench" ]; then
   echo "[k3-bench] SKIPPED (--skip-bench; numbers already recorded for this config)"
@@ -92,24 +94,33 @@ if [ "${SKIP_BENCH}" = "--skip-bench" ]; then
   exit 0
 fi
 
-echo "[k3-bench] random 8192/1024, 32 prompts, max-concurrency 8, cap 60 min"
-timeout 3600 vllm bench serve \
-  --base-url "${BASE}" \
-  --model "${MODEL}" \
-  --tokenizer "${TOK_DIR}" \
-  --trust-remote-code \
-  --dataset-name random \
-  --random-input-len 8192 \
-  --random-output-len 1024 \
-  --num-prompts 32 \
-  --max-concurrency 8 \
-  --ignore-eos \
-  2>&1 | tee /root/k3_bench.log
-bench_rc=${PIPESTATUS[0]}
-echo "[k3-bench] rc=${bench_rc} (124 means the 60-min timeout killed a hang)"
+run_bench() {
+  local in_len="$1" out_len="$2" cap="$3" log="$4"
+  echo "[k3-bench] random ${in_len}/${out_len}, 32 prompts, max-concurrency 8, cap $((cap / 60)) min"
+  timeout "${cap}" vllm bench serve \
+    --base-url "${BASE}" \
+    --model "${MODEL}" \
+    --tokenizer "${TOK_DIR}" \
+    --trust-remote-code \
+    --dataset-name random \
+    --random-input-len "${in_len}" \
+    --random-output-len "${out_len}" \
+    --num-prompts 32 \
+    --max-concurrency 8 \
+    --ignore-eos \
+    2>&1 | tee "${log}"
+  local rc=${PIPESTATUS[0]}
+  echo "[k3-bench] ${in_len}/${out_len} rc=${rc} (124 means the timeout killed a hang)"
+  return "${rc}"
+}
 
-if [ "${acc_rc}" -ne 0 ] || [ "${bench_rc}" -ne 0 ]; then
-  echo "[k3-measure] FAILED acc_rc=${acc_rc} bench_rc=${bench_rc}"
+run_bench 1024 1024 3600 /root/k3_bench_1k1k.log
+bench_1k_rc=$?
+run_bench 8192 1024 3600 /root/k3_bench_8k1k.log
+bench_8k_rc=$?
+
+if [ "${acc_rc}" -ne 0 ] || [ "${bench_1k_rc}" -ne 0 ] || [ "${bench_8k_rc}" -ne 0 ]; then
+  echo "[k3-measure] FAILED acc_rc=${acc_rc} bench_1k1k_rc=${bench_1k_rc} bench_8k1k_rc=${bench_8k_rc}"
   exit 1
 fi
-echo "[k3-measure] both phases completed"
+echo "[k3-measure] all phases completed"
