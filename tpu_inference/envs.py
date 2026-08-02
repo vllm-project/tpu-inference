@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
+    CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
     # Optional operator override for the RPA v3 kernel block sizes, one per
@@ -78,6 +79,7 @@ if TYPE_CHECKING:
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
 
 
@@ -333,6 +335,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_JAX_PROFILER_SERVER"),
     "JAX_PROFILER_SERVER_PORT":
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
+    # continue_decode: check the any-sequence-hit-EOS early exit every N steps
+    # instead of every step, amortizing the per-step dispatch. Sequences still
+    # stop at their own EOS (the <=N-1 extra tokens are masked like a normal
+    # stop), so the sampled distribution is unchanged. Default 1 = stock.
+    "CONTINUE_DECODE_EOS_CHECK_INTERVAL":
+    lambda: int(os.getenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL") or "1"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
@@ -463,6 +471,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Controls whether FP8 linear and MoE layers perform incremental weight
+    # loading, sharding, and immediate host RAM cleanup. When enabled, weights
+    # are sharded and transferred to TPU device memory layer-by-layer (or per
+    # MoE expert shard), freeing PyTorch CPU storage and trimming glibc malloc
+    # arenas after each layer. This prevents host CPU memory exhaustion (OOM)
+    # when initializing large FP8 models on smaller RAM TPUs such as TPU8i.
+    "VLLM_INCREMENTAL_FP8_LOADING":
+    env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
 }
 
 
