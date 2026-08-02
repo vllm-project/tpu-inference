@@ -477,7 +477,7 @@ class TestTPUJaxRunner:
     @patch('jax.device_get')
     def test_execute_continue_decode_eos_check_interval_config(
             self, mock_device_get, mock_continue_decode):
-        """_execute_continue_decode() should pass continue_decode_eos_check_interval when configured in additional_config."""
+        """_execute_continue_decode() should pass continue_decode_eos_check_interval (sourced from the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var) through to continue_decode."""
         runner = MagicMock()
         runner.max_num_reqs = 8
         runner.max_model_len = 512
@@ -487,7 +487,6 @@ class TestTPUJaxRunner:
         runner.scheduler_config.async_scheduling = False
         runner.vllm_config.additional_config = {
             "enable_continue_decode": True,
-            "continue_decode_eos_check_interval": 5,
             "max_decode_steps": 5,
         }
         runner.continue_decode_eos_check_interval = 5

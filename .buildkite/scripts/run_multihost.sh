@@ -242,6 +242,11 @@ docker system prune -a --volumes -f || true
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
 
+# setup_environment traces a long tail of docker tag/build/push plumbing and
+# one line per variable it sources from /etc/environment. It echoes its own
+# progress, so the trace adds nothing; xtrace is on for this whole script, so
+# turn it off across the call and back on after.
+{ set +x; } 2>/dev/null
 if [[ "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
   # An upstream cpu-builder step already built this commit's image and pushed it
   # to the CI cache, so pull it instead of spending ~10+ minutes rebuilding it on
@@ -263,6 +268,7 @@ else
 
   DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 fi
+set -x
 mh_timing image_ready
 
 # Clean up potential leftovers from previous runs

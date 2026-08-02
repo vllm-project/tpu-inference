@@ -28,7 +28,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, PCPMetadata, SharedAttentionMetadata,
+    pcp_cache_page_buckets)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -176,26 +177,22 @@ class CompilationManager:
                 reason)
             return
 
-        try:
-            with jax.set_mesh(self.runner.mesh):
-                lowered = fn.lower(*args, **call_kwargs)
-        except Exception as e:
-            if compile_only:
-                logger.error(
-                    f"Failed to lower {name} with compile_only=True: {e}")
-                raise
-            else:
-                # AOT lower not supported here (e.g. a jit whose body contains a
-                # nested jit with compiler_options). Fall back to warmup-only — the
-                # warmup pass will trigger inline compile.
-                logger.info(
-                    "AOT lower skipped for %s (%r); will compile in warmup.",
-                    name, e)
-                return
-
-        # Compilation is thread-safe
-        def _compile(lowered, name, mesh):
+        def _lower_and_compile(fn, args, call_kwargs, name, mesh,
+                               compile_only):
             with jax.set_mesh(mesh):
+                try:
+                    lowered = fn.lower(*args, **call_kwargs)
+                except Exception as e:
+                    if compile_only:
+                        logger.error(
+                            f"Failed to lower {name} with compile_only=True: {e}"
+                        )
+                        raise
+                    else:
+                        logger.info(
+                            "AOT lower skipped for %s (%r); will compile in warmup.",
+                            name, e)
+                        return None
                 start = time.perf_counter()
                 compiled = lowered.compile()
                 elapsed = time.perf_counter() - start
@@ -204,10 +201,13 @@ class CompilationManager:
                 return compiled
 
         if self._compile_executor is None:
-            _compile(lowered, log_name, self.runner.mesh)
+            _lower_and_compile(fn, args, call_kwargs, log_name,
+                               self.runner.mesh, compile_only)
         else:
-            future = self._compile_executor.submit(_compile, lowered, log_name,
-                                                   self.runner.mesh)
+            future = self._compile_executor.submit(_lower_and_compile, fn,
+                                                   args, call_kwargs, log_name,
+                                                   self.runner.mesh,
+                                                   compile_only)
             self._compile_futures.append(future)
 
     def _flush_compilations(self) -> None:
@@ -253,53 +253,49 @@ class CompilationManager:
         try:
             with self.runner.maybe_setup_dummy_loras(
                     self.runner.lora_config), jax.set_mesh(self.runner.mesh):
+                # Phase 1: Backbones
                 self._precompile_backbone_text_only()
-                self._flush_compilations()
                 if self.runner.is_multimodal_model:
                     if self.runner.precompile_vision_encoder_fn is not None:
                         self.runner.precompile_vision_encoder_fn(
                             self._run_compilation, )
                     self._precompile_input_embeddings_merger()
-                    self._flush_compilations()
                     self._precompile_backbone_with_inputs_embeds()
-                    self._flush_compilations()
+                # Barrier 1: Flush Backbones
+                self._flush_compilations()
+
+                # Phase 2: Async manipulators
                 if self.runner.scheduler_config.async_scheduling:
                     self._precompile_substitute_placeholder_token()
-                    self._flush_compilations()
                     if self.runner.speculative_config:
                         self._precompile_subtract_num_rejected_tokens()
-                        self._flush_compilations()
                         self._precompile_concat_last_sampled_tokens_and_draft_tokens(
                         )
-                        self._flush_compilations()
+                # Barrier 2: Flush Async Manipulators
+                self._flush_compilations()
 
                 if not self.runner.is_last_rank:
                     return
+                # Phase 3: Auxiliary Kernels & Helpers
                 self._precompile_select_from_array()
-                self._flush_compilations()
                 if not self.runner.is_pooling_model:
                     self._precompile_compute_logits()
                 else:
                     self._precompile_compute_pooling()
-                self._flush_compilations()
                 # Skip sampling if already precompiled before KV cache allocation
                 if not self._sampling_precompiled:
                     self._precompile_sampling()
-                    self._flush_compilations()
                 self._precompile_disagg_utils()
-                self._flush_compilations()
                 # Skip gather_logprobs if already precompiled before KV cache allocation
                 if not self._gather_logprobs_precompiled:
                     self._precompile_gather_logprobs()
-                    self._flush_compilations()
                 self._precompile_structured_decoding()
-                self._flush_compilations()
                 if self.runner.speculative_config:
                     self._precompile_speculative_decoding()
-                    self._flush_compilations()
                 if self.runner.enable_continue_decode:
                     self._precompile_continue_decode()
-                    self._flush_compilations()
+                # Barrier 3: Flush Auxiliary Kernels
+                self._flush_compilations()
         finally:
             self._finalize_compilation()
         elapsed = time.perf_counter() - compilation_start_time
@@ -375,6 +371,19 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
+    def _pcp_cache_page_buckets(self) -> list[int]:
+        """Rungs of the shared `pcp_cache_pages` ladder to precompile.
+
+        It is a META field of PCPMetadata, so each value is its own compiled
+        program; precompiling the ladder keeps the first request of each rung
+        off the compile path.  Non-PCP runs use a single value (0), where the
+        field is never read.
+        """
+        pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
+        if pcp_size <= 1:
+            return [0]
+        return pcp_cache_page_buckets(self.runner.max_num_blocks_per_req)
+
     def _precompile_backbone_helper(self,
                                     name,
                                     *,
@@ -384,7 +393,8 @@ class CompilationManager:
                                     intermediate_tensors=None,
                                     is_first_rank=True,
                                     is_last_rank=True,
-                                    num_reqs: int) -> None:
+                                    num_reqs: int,
+                                    pcp_cache_pages: int = 0) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -409,26 +419,27 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
                                             sharding=metadata_attn_sharding)
-        pcp_kv_cache_lens = None
-        pcp_q_pos_offsets = None
+        pcp = None
         if pcp_size > 1:
             n_reqs = self.runner.max_num_reqs
-            pcp_kv_cache_lens = device_array(self.runner.mesh,
-                                             np.zeros(n_reqs, dtype=np.int32),
-                                             sharding=NamedSharding(
-                                                 self.runner.mesh,
-                                                 PartitionSpec()))
             pcp_spec = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
-            query_start_loc = device_array(self.runner.mesh,
-                                           np.zeros((pcp_size, n_reqs + 1),
-                                                    dtype=np.int32),
-                                           sharding=pcp_spec)
-            pcp_q_pos_offsets = device_array(self.runner.mesh,
-                                             np.zeros((pcp_size, n_reqs),
+            repl = NamedSharding(self.runner.mesh, PartitionSpec())
+            pcp = PCPMetadata(
+                query_start_loc=device_array(self.runner.mesh,
+                                             np.zeros((pcp_size, n_reqs + 1),
                                                       dtype=np.int32),
-                                             sharding=pcp_spec)
+                                             sharding=pcp_spec),
+                kv_cache_lens=device_array(self.runner.mesh,
+                                           np.zeros(n_reqs, dtype=np.int32),
+                                           sharding=repl),
+                q_pos_offsets=device_array(self.runner.mesh,
+                                           np.zeros((pcp_size, n_reqs),
+                                                    dtype=np.int32),
+                                           sharding=pcp_spec),
+                cache_pages=pcp_cache_pages,
+            )
         # Dummy mamba fields for compile-cache pre-tracing.
         (mamba_state_indices, has_initial_state) = (
             self._create_dummy_mamba_fields(metadata_attn_sharding))
@@ -454,8 +465,7 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 has_initial_state=has_initial_state,
                 padded_num_reqs=num_reqs,
-                pcp_kv_cache_lens=pcp_kv_cache_lens,
-                pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp=pcp,
             )
 
             return attention_metadata_gid
@@ -584,9 +594,10 @@ class CompilationManager:
                              spec_next_tokens_size, dp_sharding)
         else:
             for num_tokens in all_token_sizes:
-                for next_tokens_size in all_token_sizes:
-                    _compile_one(num_tokens, dp_sharding, next_tokens_size,
-                                 dp_sharding)
+                # Precompile matching token shapes (next_tokens_size == num_tokens).
+                # Rationale: Off-diagonal shapes (where next_tokens_size differs from prompt num_tokens) are
+                # only required when speculative draft token counts vary.
+                _compile_one(num_tokens, dp_sharding, num_tokens, dp_sharding)
                 for num_reqs in self.runner.num_reqs_paddings:
                     _compile_one(num_tokens, dp_sharding, num_reqs,
                                  replicated_sharding)
@@ -701,15 +712,17 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone",
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=None,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+                for _cache_pages in self._pcp_cache_page_buckets():
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone",
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=None,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        pcp_cache_pages=_cache_pages)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -1089,8 +1102,17 @@ class CompilationManager:
         logger.info(
             "Compiling compute_and_gather_prompt_logprobs with different input shapes."
         )
-        # Bypassed MAX_PRECOMPILE_PROMPT_TOKENS limit as ShapeDtypeStruct compilation allocates no HBM
+        # Restricting precompilation of auxiliary prompt logprobs to prompt lengths num_tokens <= 1024
+        # speeds up engine startup time by avoiding redundant host CPU JAX tracing and XLA lowering overhead
+        # for long prompt sequence lengths (> 1024 tokens).
+        MAX_PRECOMPILE_PROMPT_TOKENS = 1024
         for num_tokens in self.runner.num_tokens_paddings:
+            if num_tokens > MAX_PRECOMPILE_PROMPT_TOKENS:
+                logger.info(
+                    f"Skipping precompilation of compute_and_gather_prompt_logprobs for {num_tokens=}, "
+                    f"as it exceeds the {MAX_PRECOMPILE_PROMPT_TOKENS=} limit to avoid redundant host CPU JAX tracing for long sequence lengths."
+                )
+                continue
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,

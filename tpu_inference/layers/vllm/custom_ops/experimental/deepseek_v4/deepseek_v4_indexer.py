@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 # =====================================================================
 # IMPORT TPU CUSTOM OPS TO TRIGGER vLLM @register_oot DECORATORS
 # =====================================================================
-from tpu_inference.kernels.experimental.deepseek_v4.streamindex_topk import \
+from tpu_inference.kernels.experimental.deepseek_v4.indexer.streamindex_topk import \
     streamindex_topk
 from tpu_inference.layers.common import quantization
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -134,7 +134,6 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
         self,
         hidden_states: torch.Tensor,
         query: torch.Tensor,
-        compressed_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
@@ -147,11 +146,11 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
         q_quant, q_scales = fused_indexer_q_rope_quant(q, positions,
                                                        rotary_emb)
 
-        # Fold the query quantization scales into the weights
+        # Fold the query quantization scales into the weights.
         weights = (indexer_weights.to(q.dtype) * self.softmax_scale *
-                   (self.head_dim**-0.5) * q_scales)
+                   (self.n_head**-0.5) * q_scales)
 
-        self.compressor(compressed_kv_score, positions, rotary_emb)
+        self.compressor(hidden_states, positions, rotary_emb)
 
         wrapper_ctx = get_vllm_model_wrapper_context()
         kv_cache_index = wrapper_ctx.layer_name_to_kvcache_index[
@@ -190,8 +189,8 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
                 k=self.topk_tokens,
                 compression_ratio=self.compress_ratio,
                 # TODO(hwanginho): Tune num_kv_pages_per_block, num_queries_per_block
-                num_kv_pages_per_block=1,
-                num_queries_per_block=1,
+                num_kv_pages_per_block=(3, 2, 2),
+                num_queries_per_block=(1, 128, 128),
             )
 
         topk_indices = jax.shard_map(

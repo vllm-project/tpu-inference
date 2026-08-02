@@ -171,6 +171,19 @@ def create_kv_caches(
     return [sharded_allocate() for _ in layer_names]
 
 
+def create_kv_cache_of_shape(
+    cache_shape: tuple,
+    mesh: Mesh,
+    cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+) -> jax.Array:
+    """Creates a single zero-filled KV cache array with an explicit shape.
+    """
+    sharding = NamedSharding(
+        mesh, PartitionSpec(ShardingAxisName.BATCH,
+                            ShardingAxisName.KV_CONTEXT))
+    return _get_kv_cache_allocator(tuple(cache_shape), cache_dtype, sharding)()
+
+
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,
                                   dtype, use_mla) -> int:
     jax_dtype = to_jax_dtype(dtype)

@@ -222,6 +222,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         torch.nn.Module.__init__(self)
 
