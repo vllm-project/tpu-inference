@@ -69,7 +69,8 @@ def interleaved_rope(
 def gather_state_windows(
     state_cache: jax.Array,
     positions: jax.Array,
-    block_table: jax.Array,
+    block_table: jax.Array,  # [num_reqs * block_table_stride]
+    block_table_stride: int,
     token_to_req_indices: jax.Array,
     block_size: int,
     head_dim: int,
@@ -88,7 +89,8 @@ def gather_state_windows(
 
     safe_pos = jnp.maximum(pos, 0)
     req = token_to_req_indices[:, None]
-    block_numbers = block_table[req, safe_pos // block_size]
+    block_numbers = block_table[req * block_table_stride +
+                                safe_pos // block_size]
     block_offsets = safe_pos % block_size
 
     head_offset = (w_idx >= compress_ratio).astype(jnp.int32) * head_dim
@@ -154,11 +156,12 @@ def ref_compress_norm_rope_store(
     rope_cache: jax.Array,  # [num_pages, rope_page_size, 4, 128] uint8
     positions: jax.Array,  # [num_tokens] int
     slot_mapping: jax.Array,  # [num_tokens] int (state-cache slots)
-    block_table: jax.Array,  # [num_reqs, max_blocks] int (state pages)
+    block_table: jax.Array,  # [num_reqs * stride] int (state pages)
     token_to_req_indices: jax.Array,  # [num_tokens] int
     kv_slot_mapping: jax.Array,  # [num_tokens] int (compressed-KV slots)
     rms_weight: jax.Array,  # [head_dim] fp32
     cos_sin_cache: jax.Array,  # [max_pos, rope_head_dim] fp32
+    block_table_stride: int,
     state_block_size: int,
     head_dim: int,
     rope_head_dim: int,
@@ -169,8 +172,13 @@ def ref_compress_norm_rope_store(
     is_quantized: bool = True,
     has_rope: bool = True,
     has_rope_cache: bool | None = None,
+    state_cache: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Golden JAX reference for Kernel 2 (compress + store)."""
+    """Golden JAX reference for Kernel 2 (compress + store).
+
+    ``state_cache`` is the array holding the f32 states; ``None`` means it
+    shares ``cache``'s buffer (CSA / indexer).
+    """
     coff = 1 + int(overlap)
     state_width = coff * head_dim
     state_dim = 2 * state_width
@@ -210,7 +218,9 @@ def ref_compress_norm_rope_store(
         assert d2 == 128
         slot_bytes = slots_per_part_hbm * d2
 
-    slots_per_token = page_size // state_block_size
+    state_source = cache if state_cache is None else state_cache
+    state_page_size = page_size if state_cache is None else state_cache.shape[1]
+    slots_per_token = state_page_size // state_block_size
     f32_per_slot = state_dim // slots_per_token
     bytes_per_slot = f32_per_slot * 4
     assert bytes_per_slot == slot_bytes
@@ -226,12 +236,13 @@ def ref_compress_norm_rope_store(
     # within a row the ``hbm_pack`` sub-slots hold the four bytes of an f32, so a
     # single byte-transpose inverts the packing for every mode. This is the exact
     # inverse of the pack in ``ref_wkv_proj_and_save_state``.
-    phys_pages, phys_page_size, hbm_pack, last_dim = cache.shape
+    phys_pages, phys_page_size, hbm_pack, last_dim = state_source.shape
     assert hbm_pack == 4, f"expected 4 bytes per f32 in a slot row, got {hbm_pack}"
     state_rows = phys_page_size // state_block_size
     assert state_rows * hbm_pack * last_dim == state_dim * 4
-    state_bytes_t = cache.reshape(phys_pages, state_block_size, state_rows,
-                                  hbm_pack, last_dim).transpose(0, 1, 2, 4, 3)
+    state_bytes_t = state_source.reshape(phys_pages, state_block_size,
+                                         state_rows, hbm_pack,
+                                         last_dim).transpose(0, 1, 2, 4, 3)
     state_view = jax.lax.bitcast_convert_type(state_bytes_t,
                                               jnp.float32).reshape(
                                                   phys_pages, state_block_size,
@@ -242,6 +253,7 @@ def ref_compress_norm_rope_store(
         state_cache=state_view,
         positions=positions,
         block_table=block_table,
+        block_table_stride=block_table_stride,
         token_to_req_indices=token_to_req_indices,
         block_size=state_block_size,
         head_dim=head_dim,

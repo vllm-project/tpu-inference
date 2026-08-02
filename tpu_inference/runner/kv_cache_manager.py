@@ -1053,12 +1053,12 @@ class KVCacheManager:
             HCA ``*.attn``        ``(N, T*2, 4, 128)``     1024B/token (raw
                                                             bf16)
 
-        - Every compressor state cache maps to the array of its
-          compressed-KV layer: the compressor kernel writes the f32 state
-          rows and the compressed KV through one buffer, and
-          ``VllmDeepseekCompressor.forward`` asserts both layer names
-          resolve to the same array index. State and full-attention groups
-          never own the same block ID, so the rows never collide.
+        - Every CSA / indexer compressor state cache maps to the array of its
+          own compressed-KV layer; the compressor kernel writes the f32 state
+          rows and the compressed KV through one buffer there. State and
+          full-attention groups never own the same block ID, so the rows never
+          collide.
+        - The i-th *HCA* compressor state cache maps to the i-th CSA NoPE array.
         - Every ``swa_cache`` maps to a CSA NoPE array by its position in its
           cache group.
         """
@@ -1101,12 +1101,6 @@ class KVCacheManager:
         if self.runner.cache_config.num_gpu_blocks_override is not None:
             num_blocks = min(num_blocks,
                              self.runner.cache_config.num_gpu_blocks_override)
-
-        def _page_bytes(cache: jax.Array) -> int:
-            page_elems = 1
-            for dim in cache.shape[1:]:
-                page_elems *= dim
-            return page_elems * cache.dtype.itemsize
 
         def _create_cache(shape: tuple, tag: str) -> jax.Array:
             """Allocate one uint8 DSv4 array and register it as a new index."""
@@ -1156,8 +1150,12 @@ class KVCacheManager:
             )
 
         layer_to_index: dict[str, int] = {}
-        # CSA NoPE arrays, in layer order; the SWA caches overlay these.
+        # CSA NoPE arrays, in layer order; the SWA caches and the HCA
+        # compressor states overlay these.
         csa_nope_indices: list[int] = []
+        # HCA compressed-KV layers, whose own page (two token states) is far
+        # too small to host their state cache.
+        hca_layer_names: set[str] = set()
         for layer_name in mla_layer_names:
             spec = layer_name_to_spec[layer_name]
             page_size = spec.storage_block_size * common_utils.get_mesh_shape_product(
@@ -1187,6 +1185,7 @@ class KVCacheManager:
                          128)
                 _create_cache(shape, layer_name)
                 layer_to_index[layer_name] = len(kv_caches) - 1
+                hca_layer_names.add(layer_name)
 
         # Overlay swa_caches onto the CSA NoPE arrays.
         if not csa_nope_indices:
@@ -1206,42 +1205,50 @@ class KVCacheManager:
                     swa_host_indices.append(len(kv_caches) - 1)
                 layer_to_index[layer_name] = swa_host_indices[position]
 
-        # Compressor state caches overlay the compressed-KV array of their
-        # own (sub)layer.
+        # CSA and indexer compressor state caches overlay onto the compressed kv
+        # array of their own (sub)layer;
+        # HCA compressor state caches overlay onto CSA NoPE arrays.
+        hca_state_layers: list[str] = []
         for layer_name in state_layer_names:
-            spec = layer_name_to_spec[layer_name]
             kv_layer_name = self._ds_v4_compressed_kv_layer_name(layer_name)
             if kv_layer_name not in layer_to_index:
                 raise ValueError(
                     "[kv-cache] DSv4 compressor state cache has no "
-                    "compressed-KV layer to overlay (the compressor kernel "
-                    "writes the f32 state and the compressed KV through one "
-                    f"buffer): state_cache={layer_name}, expected KV layer "
+                    "compressed-KV layer (its compressed records are written "
+                    f"there): state_cache={layer_name}, expected KV layer "
                     f"{kv_layer_name}, known MLA layers={mla_layer_names}")
-            host_index = layer_to_index[kv_layer_name]
-            host_cache = kv_caches[host_index]
-            # The kernel byte-packs `block_size` state rows of `head_size`
-            # values into each page of the host array (see
-            # `pack_state_cache`); validate the fit here so a layout
-            # regression fails at startup with context instead of inside the
-            # kernel.
-            state_page_bytes = (spec.block_size * spec.num_kv_heads *
-                                spec.head_size *
-                                jnp.dtype(t2j_dtype(spec.dtype)).itemsize)
-            host_page_entries = host_cache.shape[1] * host_cache.shape[2]
-            if (state_page_bytes > _page_bytes(host_cache)
-                    or host_page_entries % spec.block_size != 0):
-                raise ValueError(
-                    "[kv-cache] DSv4 compressor state cache does not fit its "
-                    f"compressed-KV array: state_cache={layer_name} needs "
-                    f"{state_page_bytes}B per page ({spec.block_size} state "
-                    f"rows x {spec.num_kv_heads}x{spec.head_size} "
-                    f"{spec.dtype}), but KV layer {kv_layer_name} array has "
-                    f"shape {host_cache.shape} ({_page_bytes(host_cache)}B "
-                    f"and {host_page_entries} entries per page; entries must "
-                    f"also divide evenly by the {spec.block_size}-row state "
-                    "page).")
+            if kv_layer_name in hca_layer_names:
+                hca_state_layers.append(layer_name)
+            else:
+                layer_to_index[layer_name] = layer_to_index[kv_layer_name]
+
+        # `swa_host_indices` is CSA's NOPE + potential overflow
+        hca_state_host = swa_host_indices
+        for position, layer_name in enumerate(hca_state_layers):
+            if position < len(hca_state_host):
+                host_index = hca_state_host[position]
+            else:
+                # Overflow: more HCA layers than CSA layers, so add a
+                # standalone array of the same shape (mirrors the swa path).
+                _create_cache(kv_caches[csa_nope_indices[0]].shape,
+                              f"hca_state_overflow.{len(kv_caches)}")
+                host_index = len(kv_caches) - 1
             layer_to_index[layer_name] = host_index
+
+        # Sanity check.
+        for group in kv_cache_config.kv_cache_groups:
+            hosts: dict[int, str] = {}
+            for layer_name in group.layer_names:
+                index = layer_to_index[layer_name]
+                if index in hosts:
+                    raise ValueError(
+                        "[kv-cache] DSv4 KV cache overlay put two layers of "
+                        "one cache group on the same array; they share a "
+                        "block table, so they would corrupt each other: "
+                        f"{layer_name} and {hosts[index]} both map to array "
+                        f"{index} (shape {kv_caches[index].shape}). Group "
+                        f"layers={group.layer_names}")
+                hosts[index] = layer_name
 
         for layer_name, index in layer_to_index.items():
             self.runner.layer_name_to_kvcache_index[layer_name] = index
