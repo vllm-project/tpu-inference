@@ -232,6 +232,50 @@ class TestShardingConfigManager(unittest.TestCase):
         self.assertEqual(manager.expert_size, 1)
         self.assertEqual(manager.total_dp_size, 8)  # 8 * 1 * 1
 
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    @patch("tpu_inference.layers.common.sharding.envs.USE_BATCHED_RPA_KERNEL",
+           False)
+    @patch(
+        "tpu_inference.layers.common.sharding.envs.USE_BATCHED_RPA_SEQ_ON_LANE",
+        False)
+    def test_sharding_config_manager_dp_attention_oversized_tp_raises(self):
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = 4
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.model_config.use_mla = True
+        vllm_config.model_config.get_total_num_kv_heads.return_value = 1
+        vllm_config.model_config.get_head_size.return_value = 128
+        vllm_config.speculative_config = None
+        vllm_config.lora_config = None
+        vllm_config.cache_config.cache_dtype = "bfloat16"
+
+        # Pin attn_dp_size to 1 while TP exceeds the per-device KV-head
+        # capacity of the cache.
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": True,
+                    "attn_dp_size": 1,
+                }
+            }
+        }
+
+        # num_kv_heads = 1 (MLA), packing = 2 (BF16)
+        # num_kv_heads_per_device_in_kv_cache = max(1, (1 * 2) / 2) = 1
+        # attn_dp is pinned to 1, so tensor_parallelism stays 4, which is
+        # larger than the KV-head capacity (1): the KV-head shard divisor
+        # would be 0. This must surface as a config error, not a
+        # ZeroDivisionError.
+        with self.assertRaises(ValueError) as ctx:
+            ShardingConfigManager.from_vllm_config(vllm_config)
+        msg = str(ctx.exception)
+        self.assertIn("[sharding]", msg)
+        self.assertIn("enable_dp_attention=True", msg)
+        self.assertIn("attn_dp=1", msg)
+        self.assertIn("tensor_parallelism=4", msg)
+
     def test_sharding_config_manager_explicit_tp(self):
         vllm_config = MagicMock()
         vllm_config.parallel_config.tensor_parallel_size = 1

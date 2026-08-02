@@ -286,6 +286,20 @@ class ShardingConfigManager:
                 # Otherwise, shard KV heads over the expert axis.
                 # Use the remaining KV heads per device as the divisor.
                 shard_divisor = num_kv_heads_per_device_in_kv_cache // tensor_parallelism
+                if shard_divisor < 1:
+                    raise ValueError(
+                        f"[sharding] invalid sharding_strategy: "
+                        f"enable_dp_attention=True with attn_dp={attn_dp} and "
+                        f"tensor_parallelism={tensor_parallelism} — "
+                        f"tensor_parallelism exceeds the per-device KV-head "
+                        f"capacity of the KV cache "
+                        f"(num_kv_heads_per_device_in_kv_cache="
+                        f"{num_kv_heads_per_device_in_kv_cache}), so TP would "
+                        f"duplicate KV heads instead of sharding them. Remove "
+                        f"attn_dp_size to derive attn_dp automatically, or "
+                        f"choose attn_dp_size so that tensor_parallelism / "
+                        f"attn_dp_size <= "
+                        f"{num_kv_heads_per_device_in_kv_cache}.")
                 attn_dp_expert = max(1,
                                      int(expert_parallelism // shard_divisor))
                 expert_parallelism //= attn_dp_expert
