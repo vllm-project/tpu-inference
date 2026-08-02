@@ -224,8 +224,8 @@ def ragged_kda_mixed_prefill(
         if gate_lower_bound is None:
             g_chunk = -fp32_gate_scale * jax.nn.softplus(x_gate)
         else:
-            g_chunk = gate_lower_bound * jax.nn.sigmoid(fp32_gate_scale *
-                                                        x_gate)
+            g_chunk = gate_lower_bound * jax.nn.sigmoid(
+                fp32_gate_scale * x_gate)
         g_chunk = g_chunk * chunk_valid.astype(jnp.float32)[None, :, None]
         G = jnp.cumsum(g_chunk, axis=-2)  # [H, BT, K]
         beta = jax.nn.sigmoid(b.astype(jnp.float32))
@@ -305,8 +305,11 @@ def ragged_kda_mixed_prefill(
                                            seq_idx,
                                            axis=0,
                                            keepdims=False)
-        finals = jax.lax.dynamic_update_index_in_dim(
-            finals, jnp.where(is_last, h_new, row), seq_idx, axis=0)
+        finals = jax.lax.dynamic_update_index_in_dim(finals,
+                                                     jnp.where(
+                                                         is_last, h_new, row),
+                                                     seq_idx,
+                                                     axis=0)
 
         return (h_new, finals), o_c.astype(initial_dtype)
 
@@ -406,8 +409,7 @@ def ragged_kda_decode_only(
     req_indices = jnp.clip(token_idx, 0, max_reqs - 1)
     valid_mask = token_idx < distribution[2]
 
-    beta = jax.nn.sigmoid(
-        b_reshaped[:num_step_tokens].astype(jnp.float32))
+    beta = jax.nn.sigmoid(b_reshaped[:num_step_tokens].astype(jnp.float32))
     g = kda_gate(a_reshaped[:num_step_tokens], A_log, dt_bias,
                  gate_lower_bound)
 
@@ -430,8 +432,7 @@ def ragged_kda_decode_only(
     outputs = jnp.where(valid_mask[:, None, None], outputs, 0.0)
     outputs = outputs.reshape(num_step_tokens, -1)
     if num_step_tokens < num_tokens:
-        outputs = jnp.pad(outputs,
-                          ((0, num_tokens - num_step_tokens), (0, 0)))
+        outputs = jnp.pad(outputs, ((0, num_tokens - num_step_tokens), (0, 0)))
 
     states_to_set = jnp.where(valid_mask[:, None, None, None], new_states,
                               current_states)
