@@ -388,19 +388,32 @@ def ragged_kda_decode_only(
 
     Mirrors ``ragged_gated_delta_rule_decode_only``; ``a_reshaped`` is
     ``[num_tokens, H, K]`` and the gate form follows ``gate_lower_bound``.
+
+    HBM note: decode-only means one token per sequence, so at most
+    ``recurrent_state.shape[0]`` (the rank's state-slot count) leading tokens
+    can be real -- everything past that is bucket padding whose output is
+    zeroed anyway. The per-token state tensors ([R, H, K, V] fp32, three of
+    them) are therefore sized by the SLOT count, not by the token bucket:
+    unsliced, this branch alone contributed ~2.3 MiB of HLO temporaries per
+    padded token to every mixed-bucket executable on Kimi-K3 (96 heads),
+    because `lax.cond` makes the compiler budget for it at full bucket size.
     """
     num_tokens = query.shape[0]
     max_reqs = recurrent_state.shape[0]
+    num_step_tokens = min(num_tokens, max_reqs)
 
-    token_idx = jnp.arange(num_tokens)
+    token_idx = jnp.arange(num_step_tokens)
     req_indices = jnp.clip(token_idx, 0, max_reqs - 1)
     valid_mask = token_idx < distribution[2]
 
-    beta = jax.nn.sigmoid(b_reshaped.astype(jnp.float32))
-    g = kda_gate(a_reshaped, A_log, dt_bias, gate_lower_bound)
+    beta = jax.nn.sigmoid(
+        b_reshaped[:num_step_tokens].astype(jnp.float32))
+    g = kda_gate(a_reshaped[:num_step_tokens], A_log, dt_bias,
+                 gate_lower_bound)
 
-    query = l2norm(query)
-    key = l2norm(key)
+    query = l2norm(query[:num_step_tokens])
+    key = l2norm(key[:num_step_tokens])
+    value = value[:num_step_tokens]
     scale = query.shape[-1]**-0.5
     query = query * jnp.asarray(scale, dtype=query.dtype)
 
@@ -415,7 +428,10 @@ def ragged_kda_decode_only(
                                              state=current_states)
 
     outputs = jnp.where(valid_mask[:, None, None], outputs, 0.0)
-    outputs = outputs.reshape(num_tokens, -1)
+    outputs = outputs.reshape(num_step_tokens, -1)
+    if num_step_tokens < num_tokens:
+        outputs = jnp.pad(outputs,
+                          ((0, num_tokens - num_step_tokens), (0, 0)))
 
     states_to_set = jnp.where(valid_mask[:, None, None, None], new_states,
                               current_states)
