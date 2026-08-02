@@ -36,10 +36,13 @@ def patch_vllm_scheduler_for_continue_decode():
     if not getattr(Scheduler, "_continue_decode_patched", False):
         original_update_base = Scheduler._update_request_with_output
 
-        def patched_update_base(scheduler_self, request, new_token_ids):
-            # Original update appends new_token_ids to request output and trims on stop token.
+        def patched_update_base(scheduler_self, request, new_token_ids, *args,
+                                **kwargs):
+            # Original update appends new_token_ids to request output and
+            # trims on stop token. Extra args (e.g. `is_stale`, added by newer
+            # vLLM) pass through untouched.
             res_token_ids, stopped = original_update_base(
-                scheduler_self, request, new_token_ids)
+                scheduler_self, request, new_token_ids, *args, **kwargs)
 
             # schedule() only incremented num_computed_tokens by 1. Advance by the remaining
             # (N - 1) tokens generated on-device so host-side num_computed_tokens is accurate.
@@ -72,7 +75,8 @@ def patch_vllm_scheduler_for_continue_decode():
         original_async_update_req = AsyncScheduler._update_request_with_output
 
         def patched_async_update_request_with_output(scheduler_self, request,
-                                                     new_token_ids):
+                                                     new_token_ids, *args,
+                                                     **kwargs):
             if len(new_token_ids) > 1:
                 # In AsyncScheduler, _update_after_schedule() added 1 in-flight placeholder token.
                 # When N tokens return, original_async_update_req will subtract N from
@@ -80,7 +84,7 @@ def patch_vllm_scheduler_for_continue_decode():
                 # num_output_placeholders cleanly decrements by 1 without underflowing < 0.
                 request.num_output_placeholders += (len(new_token_ids) - 1)
             return original_async_update_req(scheduler_self, request,
-                                             new_token_ids)
+                                             new_token_ids, *args, **kwargs)
 
         AsyncScheduler._update_request_with_output = patched_async_update_request_with_output
         AsyncScheduler._continue_decode_patched = True
