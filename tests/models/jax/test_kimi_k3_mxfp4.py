@@ -228,7 +228,7 @@ def test_uncompressed_targets_are_read_off_the_checkpoint_not_the_config():
     hf = _hf_config(MXFP4_CKPT)
     config = CompressedTensorsConfig(hf.quantization_config,
                                      model_name_or_path=MXFP4_CKPT)
-    assert config._packed_modules is not None, (
+    assert config._compressed_modules is not None, (
         "checkpoint scan failed; the rest of this test would pass vacuously")
 
     # Every Linear is a target, so the config alone offers no way out.
@@ -240,10 +240,10 @@ def test_uncompressed_targets_are_read_off_the_checkpoint_not_the_config():
                                        ignore=config._ct.ignore,
                                        fused_mapping=MappingProxyType({}))
         # ...but the checkpoint does not store them compressed.
-        assert not config._is_packed_in_checkpoint(prefix)
+        assert not config._is_compressed_in_checkpoint(prefix)
 
     # The experts, which the checkpoint really does compress, are selected.
-    assert config._is_packed_in_checkpoint(_expert_prefix())
+    assert config._is_compressed_in_checkpoint(_expert_prefix())
 
 
 def test_moe_layer_gets_the_mxfp4_method(mxfp4_model):
@@ -258,8 +258,8 @@ def test_uncompressed_moe_falls_back_to_the_unquantized_method():
     hf = _hf_config(MXFP4_CKPT)
     config = CompressedTensorsConfig(hf.quantization_config,
                                      model_name_or_path=BF16_CKPT)
-    assert config._packed_modules == set()
-    assert not config._is_packed_in_checkpoint(_expert_prefix())
+    assert config._compressed_modules == set()
+    assert not config._is_compressed_in_checkpoint(_expert_prefix())
 
 
 def test_fused_backend_is_rejected(mesh):

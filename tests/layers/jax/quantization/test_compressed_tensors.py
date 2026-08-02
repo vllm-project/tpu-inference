@@ -214,14 +214,15 @@ class TestPackedModuleInspection:
 
         config = CompressedTensorsConfig(_fp8_block_config(),
                                          model_name_or_path=path)
-        assert config._packed_modules is not None, (
+        assert config._compressed_modules is not None, (
             "the checkpoint was not inspected at all")
-        assert config._is_packed_in_checkpoint(
+        assert config._is_compressed_in_checkpoint(
             "model.layers.0.mlp.experts.0.w1")
         # ...including for the parent that owns the per-expert subtree.
-        assert config._is_packed_in_checkpoint("model.layers.0.mlp.experts")
+        assert config._is_compressed_in_checkpoint(
+            "model.layers.0.mlp.experts")
         # The attention projection is stored plain, and must stay that way.
-        assert not config._is_packed_in_checkpoint(
+        assert not config._is_compressed_in_checkpoint(
             "model.layers.0.self_attn.q_proj")
 
     def test_the_wrapper_prefix_is_stripped_from_index_paths(self, tmp_path):
@@ -238,17 +239,50 @@ class TestPackedModuleInspection:
                                          model_name_or_path=path)
         # Anti-vacuity: an uninspected checkpoint answers True to everything,
         # so pin that this one was read before believing the True below.
-        assert config._packed_modules is not None
-        assert not config._is_packed_in_checkpoint("model.layers.0.self_attn")
+        assert config._compressed_modules is not None
+        assert not config._is_compressed_in_checkpoint(
+            "model.layers.0.self_attn")
 
-        assert config._is_packed_in_checkpoint(
+        assert config._is_compressed_in_checkpoint(
             "model.layers.0.mlp.experts.0.w1")
-        assert config._is_packed_in_checkpoint("model.layers.0.mlp.experts")
+        assert config._is_compressed_in_checkpoint(
+            "model.layers.0.mlp.experts")
+
+    def test_fp8_checkpoints_mark_compression_with_weight_scale_alone(
+            self, tmp_path):
+        """Float-quantized checkpoints have no `weight_packed` at all.
+
+        FP8 compressed-tensors (e.g. gemma-4 FP8-Dynamic) stores a plain
+        `weight` plus `weight_scale`. Keying compression on `weight_packed`
+        alone classified every module of such a checkpoint as uncompressed and
+        silently built the whole model unquantized -- the loader then crashed
+        on the resulting fused bf16 qkv_proj (CI build 23675). A module owning
+        `weight_scale` must count as compressed; one owning only `weight`
+        (norms, embeddings) must not.
+        """
+        path = self._index(tmp_path, [
+            "model.layers.0.self_attn.qkv_proj.weight",
+            "model.layers.0.self_attn.qkv_proj.weight_scale",
+            "model.layers.0.self_attn.o_proj.weight",
+            "model.layers.0.self_attn.o_proj.weight_scale",
+            "model.layers.0.input_layernorm.weight",
+            "model.embed_tokens.weight",
+        ])
+        config = CompressedTensorsConfig(_fp8_block_config(),
+                                         model_name_or_path=path)
+        assert config._compressed_modules is not None
+        assert config._is_compressed_in_checkpoint(
+            "model.layers.0.self_attn.qkv_proj")
+        assert config._is_compressed_in_checkpoint(
+            "model.layers.0.self_attn.o_proj")
+        assert not config._is_compressed_in_checkpoint(
+            "model.layers.0.input_layernorm")
+        assert not config._is_compressed_in_checkpoint("model.embed_tokens")
 
     def test_an_uninspectable_checkpoint_falls_back_to_the_config(
             self, tmp_path):
         """No index and no shards -> no information, trust the config."""
         config = CompressedTensorsConfig(_fp8_block_config(),
                                          model_name_or_path=str(tmp_path))
-        assert config._packed_modules is None
-        assert config._is_packed_in_checkpoint("anything.at.all")
+        assert config._compressed_modules is None
+        assert config._is_compressed_in_checkpoint("anything.at.all")

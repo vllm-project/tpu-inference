@@ -102,9 +102,19 @@ def _checkpoint_tensor_names(model_name_or_path: str,
             yield from f.keys()
 
 
-def _packed_module_paths(model_name_or_path: Optional[str],
-                         download_dir: Optional[str]) -> Optional[set[str]]:
-    """Module paths that own a ``weight_packed`` tensor in the checkpoint.
+# A module is stored compressed when the checkpoint gives it one of these
+# companion tensors. Pack-quantized formats (MXFP4) rename the weight itself
+# to `weight_packed`; float-quantized formats (FP8) keep a plain `weight` and
+# mark compression with `weight_scale` alone. Matching only `weight_packed`
+# classified EVERY module of an FP8 checkpoint as uncompressed and silently
+# built the whole model unquantized (caught by gemma-4 FP8-Dynamic in CI).
+_COMPRESSED_COMPANION_SUFFIXES = (".weight_packed", ".weight_scale")
+
+
+def _compressed_module_paths(
+        model_name_or_path: Optional[str],
+        download_dir: Optional[str]) -> Optional[set[str]]:
+    """Module paths the checkpoint stores compressed.
 
     The returned set also holds every ancestor of such a path, so a caller
     asking about a parent module (an MoE block owns a subtree of per-expert
@@ -119,9 +129,12 @@ def _packed_module_paths(model_name_or_path: Optional[str],
     try:
         packed = set()
         for name in _checkpoint_tensor_names(model_name_or_path, download_dir):
-            if not name.endswith(".weight_packed"):
+            for suffix in _COMPRESSED_COMPANION_SUFFIXES:
+                if name.endswith(suffix):
+                    path = name[:-len(suffix)]
+                    break
+            else:
                 continue
-            path = name[:-len(".weight_packed")]
             if path.startswith(_WRAPPER_TEXT_PREFIX):
                 path = path[len(_WRAPPER_TEXT_PREFIX):]
             while path and path not in packed:
@@ -165,11 +178,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         # down/up projections and the attention-residual projections as plain
         # bf16 while its ignore list only covers self_attn / shared_experts /
         # mlp / lm_head). The checkpoint's own tensor names are authoritative,
-        # so record which module paths carry a `weight_packed` tensor.
-        self._packed_modules = _packed_module_paths(model_name_or_path,
-                                                    download_dir)
+        # so record which module paths carry a compression companion tensor.
+        self._compressed_modules = _compressed_module_paths(
+            model_name_or_path, download_dir)
 
-    def _is_packed_in_checkpoint(self, prefix: str) -> bool:
+    def _is_compressed_in_checkpoint(self, prefix: str) -> bool:
         """Whether the checkpoint actually stores ``prefix`` compressed.
 
         True for a compressed module and for any ancestor of one -- an MoE
@@ -180,9 +193,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         inspected (``None``), so behaviour is unchanged for callers that do not
         pass a model path.
         """
-        if self._packed_modules is None:
+        if self._compressed_modules is None:
             return True
-        return prefix in self._packed_modules
+        return prefix in self._compressed_modules
 
     def _match_target(self, layer: JaxModule, prefix: str) -> Optional[dict]:
         """Return the config-group scheme for ``layer``, or None if unmatched.
@@ -210,7 +223,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                                    fused_mapping=self._fused_mapping):
                 return UnquantizedFusedMoEMethod(layer)
             scheme = self._match_target(layer, prefix)
-            if scheme is None or not self._is_packed_in_checkpoint(prefix):
+            if scheme is None or not self._is_compressed_in_checkpoint(prefix):
                 return UnquantizedFusedMoEMethod(layer)
             weight_quant = scheme.get("weights")
             input_quant = scheme.get("input_activations")
@@ -229,7 +242,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                                fused_mapping=self._fused_mapping):
             return UnquantizedLinearMethod(linear_config)
 
-        if not self._is_packed_in_checkpoint(prefix):
+        if not self._is_compressed_in_checkpoint(prefix):
             # Targeted by the config groups, but stored uncompressed.
             return UnquantizedLinearMethod(linear_config)
 
