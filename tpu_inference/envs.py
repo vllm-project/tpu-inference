@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     MXFP4_SHARD_THEN_DECODE: bool = True
+    K3_SHARDED_EXPERT_STREAMING: bool = False
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
@@ -284,6 +285,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # host decode.
     "MXFP4_SHARD_THEN_DECODE":
     env_bool("MXFP4_SHARD_THEN_DECODE", default=True),
+    # Stream only this host's routed-expert tensors from the checkpoint when
+    # loading compressed-tensors MXFP4 MoE weights through the runai streamer.
+    # Each expert's bytes are read only by the hosts whose devices keep a
+    # shard of it (derived from the expert kernels' sharding), instead of
+    # every host reading every expert and slicing after the bytes arrived.
+    # With experts sharded E-ways across hosts this cuts the per-host read of
+    # the expert bytes (the overwhelming majority of a large MoE checkpoint)
+    # by ~E x. Default off: the full-read path is unchanged unless opted in.
+    "K3_SHARDED_EXPERT_STREAMING":
+    env_bool("K3_SHARDED_EXPERT_STREAMING", default=False),
     # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),
