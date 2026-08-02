@@ -62,26 +62,28 @@ steps:
   # This step exercises the LOAD and SERVE path, not output quality --
   # 8 of 93 layers is not a language model, hence --allow-incoherent.
   #
-  # This configuration is deliberately the one that failed. At
-  # GPU_MEMORY_UTILIZATION 0.8 with no --num-gpu-blocks-override, the
-  # pool took 404.09 of 404.11 GiB and warmup died with
-  # `HLO temporaries (100.50G) exceeds available HBM (94.74G)`; the
-  # same config at 0.6 served. The only change here is that the pool
-  # now leaves KV_CACHE_WARMUP_RESERVE_FRACTION of the post-weight
-  # budget free, so serving at 0.8 without a hand-pinned block count is
-  # the pass condition. The [precompile-mem] lines report XLA's actual
-  # per-shape temp/out/alias budget either way.
+  # This configuration is deliberately the one that failed as build 732
+  # (GPU_MEMORY_UTILIZATION 0.8, no --num-gpu-blocks-override: warmup
+  # died with `HLO temporaries (100.50G) exceeds available HBM
+  # (94.74G)`). KV_CACHE_WARMUP_RESERVE_FRACTION=0 disables the warmup
+  # reserve, so the ONLY change vs 732 is the KDA/conv decode-branch
+  # slot-count sizing and the input-dtype chunked-KDA stream on this
+  # branch: serving at util 0.8 with no reserve and no pinned block
+  # count is the pass condition. The [precompile-mem] lines report the
+  # backbone's actual per-bucket temp/out/alias (locally the fix took
+  # the 16384-token bucket from a 100.47G compile failure to 6.4G).
   #
   # --max-num-batched-tokens 2048 is carried over from the passing run
   # so utilization is the only variable that moved.
   # -----------------------------------------------------------------
-  - label: "tpu7x K3 slice, util 0.8, warmup reserve on"
-    key: tpu7x_k3_slice_warmup_reserve
+  - label: "tpu7x K3 slice, util 0.8, NO reserve (decode-branch fix A/B vs 732)"
+    key: tpu7x_k3_slice_kvfix
     depends_on: tpu7x_build_docker
     timeout_in_minutes: 120
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
+      KV_CACHE_WARMUP_RESERVE_FRACTION: "0"
       MODEL_IMPL_TYPE: "flax_nnx"
       NEW_MODEL_DESIGN: "1"
       MODEL: "gs://tpu-commons-ci/moonshootai/kimi/k3-sliced"

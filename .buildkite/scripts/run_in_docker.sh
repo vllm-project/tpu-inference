@@ -69,6 +69,7 @@ ENV_VARS=(
   # Selects the MXFP4 expert decode path; empty means the default (decode each
   # shard on the device that keeps it), 0 forces the whole-layer host decode.
   -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}"
+  -e KV_CACHE_WARMUP_RESERVE_FRACTION="${KV_CACHE_WARMUP_RESERVE_FRACTION:-}"
   # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
   # everywhere else; the suites that read them skip when they are empty.
   -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
