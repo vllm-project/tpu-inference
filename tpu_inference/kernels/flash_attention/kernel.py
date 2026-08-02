@@ -89,6 +89,7 @@ def encoder_only_flash_attention(
     k,  # [k_len, num_kv_heads, head_size]
     v,  # [k_len, num_kv_heads, head_size]
     seq_lens,  # [batch_size]
+    alibi_slopes=None,  # [num_heads] or None
     *,
     causal: bool = False,
     sm_scale: float | None = None,
@@ -160,13 +161,29 @@ def encoder_only_flash_attention(
         )
         return segment_ids
 
-    if sliding_window is not None:
+    if sliding_window is not None or alibi_slopes is not None:
         row_ids = jnp.arange(padded_len_q)[:, None]
         col_ids = jnp.arange(padded_len_kv)[None, :]
-        mask = jnp.abs(row_ids - col_ids) <= sliding_window
+        distance = jnp.abs(row_ids - col_ids)
+    if sliding_window is not None and alibi_slopes is None:
+        mask = distance <= sliding_window
         ab = jnp.where(mask, 0.0, -1e4).astype(q_bhtd.dtype)
         ab = jnp.expand_dims(ab, axis=(0, 1))
         ab = jnp.tile(ab, (1, num_heads, 1, 1))
+    elif alibi_slopes is not None:
+        # Symmetric (encoder) ALiBi: bias[h, i, j] = -slope_h * |i - j|.
+        # Cross-sequence pairs in the concatenated ragged batch are masked by
+        # segment IDs inside the kernel, so the global |i - j| formulation is
+        # correct per sequence. NOTE: the kernel adds `ab` to the raw q·k
+        # logits BEFORE multiplying by sm_scale, while the ALiBi reference
+        # adds the bias to the already-scaled logits — so pre-divide by
+        # sm_scale here. Kept in float32 for numerical parity.
+        alibi = -alibi_slopes.astype(jnp.float32)[:, None, None] * (
+            distance.astype(jnp.float32)[None, :, :] / sm_scale)
+        ab = jnp.expand_dims(alibi, axis=0)  # [1, num_heads, Tq, Tkv]
+        if sliding_window is not None:
+            window_bias = jnp.where(distance <= sliding_window, 0.0, -1e4)
+            ab = ab + window_bias[None, None, :, :]
     else:
         ab = None
 

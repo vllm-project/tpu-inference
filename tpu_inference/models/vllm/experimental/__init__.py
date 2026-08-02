@@ -19,6 +19,12 @@
 _TPU_VLLM_MODELS = {
     "DeepseekV4ForCausalLM":
     "tpu_inference.models.vllm.experimental.deepseek_v4:DeepseekV4ForCausalLM",
+    # JAX-native encoder-only embedding model; the vLLM-side class is only a
+    # registry-compatibility shim (see jina_bert_compat.py).
+    "JinaBertForMaskedLM":
+    "tpu_inference.models.vllm.jina_bert_compat:JinaBertForMaskedLM",
+    "JinaBertModel":
+    "tpu_inference.models.vllm.jina_bert_compat:JinaBertForMaskedLM",
 }
 
 

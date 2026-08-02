@@ -130,21 +130,26 @@ def sharded_encoder_only_attention(
     sm_scale: Optional[float] = None,
     sliding_window: Optional[int] = None,
     vmem_limit_bytes: int | None = None,
+    has_alibi: bool = False,
 ) -> Callable[..., Any]:
-    in_specs = (
+    in_specs = [
         P(None, "model", None),  # q: [q_len, num_heads, head_size]
         P(None, "model", None),  # k: [k_len, num_kv_heads, head_size]
         P(None, "model", None),  # v: [k_len, num_kv_heads, head_size]
         P(),  # seq_lens: [batch_size]
-    )
+    ]
+    if has_alibi:
+        # alibi_slopes: [num_heads], sharded with the heads.
+        in_specs.append(P("model"))
     out_specs = P(None, "model", None)
 
-    def _flash_attention(q, k, v, seq_lens):
+    def _flash_attention(q, k, v, seq_lens, alibi_slopes=None):
         return encoder_only_flash_attention(
             q,
             k,
             v,
             seq_lens,
+            alibi_slopes,
             causal=causal,
             sm_scale=sm_scale,
             sliding_window=sliding_window,
@@ -155,7 +160,7 @@ def sharded_encoder_only_attention(
         jax.shard_map(
             _flash_attention,
             mesh=mesh,
-            in_specs=in_specs,
+            in_specs=tuple(in_specs),
             out_specs=out_specs,
             check_vma=False,
         ))
@@ -717,11 +722,15 @@ def encoder_only_attention(
     mesh: Mesh,
     sm_scale: float | None = None,
     sliding_window: int | None = None,
+    alibi_slopes: jax.Array | None = None,
 ) -> jax.Array:
     kernel = sharded_encoder_only_attention(
         mesh=mesh,
         causal=False,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
+        has_alibi=alibi_slopes is not None,
     )
+    if alibi_slopes is not None:
+        return kernel(q, k, v, attention_metadata.seq_lens, alibi_slopes)
     return kernel(q, k, v, attention_metadata.seq_lens)
