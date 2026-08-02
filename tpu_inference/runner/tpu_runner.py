@@ -2053,9 +2053,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 build_block_table_host(gid)
 
         # Mamba slot ids are only consumed by hybrid attn+mamba models; for
-        # pure-attention models, leaving the field None keeps AttentionMetadata
-        # byte-identical to the pre-compact-mamba layout (so the model_fn
-        # signature on those models is unchanged).
+        # pure-attention models and prefix-caching Mamba models, leaving the
+        # field None keeps the model_fn signature unchanged. Prefix mode uses
+        # each layer's group-specific block table instead.
         if (self.kv_cache_config.has_mamba_layers
                 and self.kv_cache_manager.uses_compact_mamba_state):
             # Reorder mamba_state_indices per DP rank (like block_tables)

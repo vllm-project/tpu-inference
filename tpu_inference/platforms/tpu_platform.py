@@ -110,6 +110,7 @@ class TpuPlatform(Platform):
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
+        "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER",
     ]
 
     @classmethod

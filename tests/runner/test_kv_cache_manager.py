@@ -1145,12 +1145,10 @@ class TestKVCacheManager:
         assert (
             self.runner.cache_config.num_gpu_blocks_override == expected_attn)
 
-    def test_compact_mamba_override_skipped_when_hbm_probe_fails(self):
+    def test_compact_mamba_override_keeps_mamba_when_hbm_probe_fails(self):
         """`hbm_usage_bytes` raises on CPU-only test machines (no real
-        devices to query). Compact-mamba must skip the override silently —
-        no `_mamba_num_blocks`, no `num_gpu_blocks_override` — so vLLM
-        keeps its uniform sizing. The page-size padding done elsewhere
-        still keeps per-layer block IDs in range."""
+        devices to query). The attention override cannot be derived, but the
+        mode-specific Mamba allocation does not depend on the HBM probe."""
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
@@ -1168,34 +1166,140 @@ class TestKVCacheManager:
                                              attn_page=2**20,
                                              unpadded_mamba=4 * 2**20)
 
-        assert manager._mamba_num_blocks is None
+        assert manager._mamba_num_blocks == 257
         assert self.runner.cache_config.num_gpu_blocks_override is None
 
-    def test_compact_mamba_override_skipped_for_prefix_caching(self):
-        """Prefix caching needs scheduler-owned Mamba blocks for reuse."""
+    @pytest.mark.parametrize("multiplier", [2, 4])
+    def test_compact_mamba_override_sizes_align_prefix_cache(
+            self, monkeypatch, multiplier):
+        """Align-mode prefix caching honors the configured block multiplier.
+
+        Two blocks cover the cached source and current running state. Larger
+        multipliers reserve additional private-pool prefix retention.
+        """
+        monkeypatch.setenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER",
+                           str(multiplier))
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 4 * (2**20)
+        max_num_seqs = 256
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.enable_prefix_caching = True
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_seqs)
+        self.runner.dp_size = 1
+        self.runner.max_num_reqs = max_num_seqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        expected_mamba = 1 + multiplier * max_num_seqs
+        assert manager._mamba_num_blocks == expected_mamba
+
+        avail_per_tensor = (304 * 2**30) // 15
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+
+        used_per_tensor = (expected_attn * attn_page +
+                           3 * expected_mamba * unpadded_mamba)
+        assert used_per_tensor <= avail_per_tensor
+        assert used_per_tensor + attn_page > avail_per_tensor
+
+        # Prefix mode remains scheduler-addressed; this flag only selects the
+        # separate per-request-slot metadata path used without prefix caching.
+        assert not manager.uses_compact_mamba_state
+
+    def test_compact_mamba_override_sizes_align_prefix_cache_per_dp_rank(self):
+        """Every DP rank gets a null block and two blocks per request."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 4 * (2**20)
+        dp_size = 2
+        max_num_seqs = 64
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.enable_prefix_caching = True
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_seqs)
+        self.runner.dp_size = dp_size
+        self.runner.max_num_reqs = dp_size * max_num_seqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        expected_mamba = dp_size * (1 + 2 * max_num_seqs)
+        assert manager._mamba_num_blocks == expected_mamba
+        assert manager._mamba_num_blocks // dp_size == 1 + 2 * max_num_seqs
+
+        avail_per_tensor = (304 * 2**30) // 15
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+        assert not manager.uses_compact_mamba_state
+
+    def test_compact_mamba_override_rejects_non_align_prefix_cache(self):
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
 
         self.runner.cache_config.enable_prefix_caching = True
+        self.runner.cache_config.mamba_cache_mode = "all"
         self.runner.cache_config.num_gpu_blocks_override = None
-        self.runner.max_num_reqs = 256
+        self.runner.dp_size = 1
+        self.runner.max_num_reqs = 64
 
-        with patch(
-                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes"
-        ) as mock_hbm_usage:
+        with pytest.raises(NotImplementedError, match="requires.*align"):
             self._run_compact_mamba_override(manager,
                                              attn_page=2**20,
                                              unpadded_mamba=4 * 2**20)
 
-        mock_hbm_usage.assert_not_called()
-        assert manager._mamba_num_blocks is None
-        assert self.runner.cache_config.num_gpu_blocks_override is None
-        assert not manager.uses_compact_mamba_state
+    def test_compact_mamba_override_rejects_oversized_mamba_pool(
+            self, monkeypatch):
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        monkeypatch.setenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "4")
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.enable_prefix_caching = True
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.dp_size = 1
+        self.runner.max_num_reqs = 64
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, 256 * 2**20)] * 4):
+            with pytest.raises(ValueError, match="exceeds.*HBM budget"):
+                self._run_compact_mamba_override(manager,
+                                                 attn_page=2**20,
+                                                 unpadded_mamba=4 * 2**20)
 
     def test_compact_mamba_override_respects_user_pinned_override(self):
         """When the user pins `num_gpu_blocks_override` explicitly,
-        compact-mamba must not clobber it (their explicit choice wins)."""
+        compact-mamba preserves it while sizing Mamba independently."""
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
@@ -1208,14 +1312,13 @@ class TestKVCacheManager:
 
         with patch(
                 "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
-                return_value=[(0, 304 * (2**30) // 4)] * 4):
+                return_value=[(0, 304 * (2**30) // 4)] * 4) as mock_hbm_usage:
             self._run_compact_mamba_override(manager,
                                              attn_page=2**20,
                                              unpadded_mamba=4 * 2**20)
 
-        # User's override survives; mamba sizing is left alone so
-        # `initialize_kv_cache` allocates the uniform `num_blocks`.
-        assert manager._mamba_num_blocks is None
+        mock_hbm_usage.assert_not_called()
+        assert manager._mamba_num_blocks == 257
         assert self.runner.cache_config.num_gpu_blocks_override == 999
 
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):

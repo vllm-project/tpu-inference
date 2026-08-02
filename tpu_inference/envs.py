@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_BATCHED_SAVE: bool = False
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
+    TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER: int = 2
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
@@ -344,6 +345,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv offload to dram: Whether to use unpinned_host for KV cache tensors on host dram.
     "TPU_OFFLOAD_USE_UNPINNED_HOST":
     lambda: bool(int(os.getenv("TPU_OFFLOAD_USE_UNPINNED_HOST", "0"))),
+    # Mamba prefix cache: physical blocks per active request. Two blocks are
+    # required for the cached source and running destination; larger values
+    # retain more unreferenced prefix states in the private pool.
+    "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER":
+    lambda: int(os.getenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "2")),
     "AGGREGATED_STATS_DIR":
     lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
     # MoE: whether to use approximate top-k for expert selection.

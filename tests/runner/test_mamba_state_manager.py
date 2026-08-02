@@ -112,6 +112,9 @@ class TestMambaStateManager:
         old_caches = tuple(
             tuple(np.asarray(state).copy() for state in states)
             for states in manager.runner.kv_caches)
+        old_formats = tuple(
+            tuple(state.format for state in states)
+            for states in manager.runner.kv_caches)
         copy_calls = 0
         copy_state_blocks = mamba_state_manager_module._copy_state_blocks
 
@@ -129,27 +132,21 @@ class TestMambaStateManager:
         # (physical block 4), so every GDN state must be restored there by one
         # compiled call. Padded 0->0 copies leave the null block unchanged.
         assert copy_calls == 1
-        for new_states, old_states in zip(manager.runner.kv_caches,
-                                          old_caches,
-                                          strict=True):
-            for new_state, old_state in zip(new_states,
-                                            old_states,
-                                            strict=True):
+        for new_states, old_states, expected_formats in zip(
+                manager.runner.kv_caches, old_caches, old_formats,
+                strict=True):
+            for new_state, old_state, expected_format in zip(new_states,
+                                                             old_states,
+                                                             expected_formats,
+                                                             strict=True):
                 np.testing.assert_array_equal(new_state[4], old_state[3])
                 np.testing.assert_array_equal(new_state[0], old_state[0])
                 np.testing.assert_array_equal(new_state[5], old_state[5])
+                assert new_state.format == expected_format
         assert manager.get_current_state_block_id(1, "request-0") == 4
         assert manager.mamba_state_idx["request-0"] == 2
 
-    def test_precompile_copy_state_blocks_warms_runtime_shape(
-            self, manager, monkeypatch):
-        copy_state_blocks = mamba_state_manager_module._copy_state_blocks
-        fresh_copy_state_blocks = jax.jit(
-            copy_state_blocks.__wrapped__,
-            donate_argnames=("states_by_group", ),
-        )
-        monkeypatch.setattr(mamba_state_manager_module, "_copy_state_blocks",
-                            fresh_copy_state_blocks)
+    def test_precompile_copy_state_blocks_warms_runtime_shape(self, manager):
         old_caches = tuple(
             tuple(np.asarray(state).copy() for state in states)
             for states in manager.runner.kv_caches)
@@ -197,6 +194,48 @@ class TestMambaStateManager:
         for actual, expected in zip(manager.runner.kv_caches[0], old_states):
             np.testing.assert_array_equal(actual, expected)
 
+    def test_preprocess_tracks_group_local_current_blocks(self, manager):
+        self._add_mamba_group(manager, "gdn.2", 2)
+        third_states = tuple(state + 1000
+                             for state in manager.runner.kv_caches[0])
+        expected_third_states = tuple(
+            np.asarray(state).copy() for state in third_states)
+        manager.runner.kv_caches.append(third_states)
+        manager.runner.requests["request-0"].block_ids = (
+            [0, 1, 2],
+            [2, 3, 4],
+            [5, 6, 7],
+        )
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_cached_reqs.resumed_req_ids = set()
+        scheduler_output.preempted_req_ids = set()
+        scheduler_output.finished_req_ids = set()
+        scheduler_output.num_scheduled_tokens = {"request-0": 1}
+        scheduler_output.assigned_dp_rank = {"request-0": 0}
+
+        manager.preprocess(scheduler_output)
+
+        assert manager.get_current_state_block_id(1, "request-0") == 4
+        assert manager.get_current_state_block_id(2, "request-0") == 7
+        for actual, expected in zip(manager.runner.kv_caches[2],
+                                    expected_third_states,
+                                    strict=True):
+            np.testing.assert_array_equal(actual[7], expected[6])
+
+    def test_preprocess_rejects_null_current_block(self, manager):
+        manager.runner.requests["request-0"].block_ids = ([0, 1, 2], [2, 3, 0])
+        manager.runner.requests["request-0"].num_computed_tokens = 9
+        manager.mamba_state_idx["request-0"] = 2
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_cached_reqs.resumed_req_ids = set()
+        scheduler_output.preempted_req_ids = set()
+        scheduler_output.finished_req_ids = set()
+        scheduler_output.num_scheduled_tokens = {"request-0": 1}
+        scheduler_output.assigned_dp_rank = {"request-0": 0}
+
+        with pytest.raises(RuntimeError, match="reserved null block"):
+            manager.preprocess(scheduler_output)
+
     def test_preprocess_rejects_missing_layer_mapping(self, manager):
         manager.runner.layer_name_to_kvcache_index.clear()
         scheduler_output = MagicMock()
@@ -208,6 +247,29 @@ class TestMambaStateManager:
 
         with pytest.raises(RuntimeError, match="missing KV-cache mappings"):
             manager.preprocess(scheduler_output)
+
+    def test_preprocess_rejects_shared_source_and_running_block(self, manager):
+        manager.runner.requests["request-0"].block_ids = ([0, 1, 2], [2, 3, 3])
+        scheduler_output = MagicMock()
+        scheduler_output.scheduled_cached_reqs.resumed_req_ids = set()
+        scheduler_output.preempted_req_ids = set()
+        scheduler_output.finished_req_ids = set()
+        scheduler_output.num_scheduled_tokens = {"request-0": 1}
+        scheduler_output.assigned_dp_rank = {"request-0": 0}
+
+        with pytest.raises(RuntimeError, match="same physical block 3"):
+            manager.preprocess(scheduler_output)
+
+    def test_postprocess_rejects_shared_running_and_snapshot_block(
+            self, manager):
+        manager.runner.requests["request-0"].block_ids = ([0, 1, 2], [2, 3, 3])
+        manager.mamba_state_idx["request-0"] = 1
+        scheduler_output = MagicMock()
+        scheduler_output.num_scheduled_tokens = {"request-0": 4}
+        scheduler_output.assigned_dp_rank = {"request-0": 0}
+
+        with pytest.raises(RuntimeError, match="same physical block 3"):
+            manager.postprocess(scheduler_output)
 
     def test_copy_rejects_duplicate_destination_blocks(self, manager):
         with pytest.raises(RuntimeError, match="duplicate destination blocks"):

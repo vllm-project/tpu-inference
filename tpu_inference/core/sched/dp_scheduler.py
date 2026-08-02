@@ -32,11 +32,9 @@ import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, GrammarOutput,
                                        SchedulerOutput)
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -1390,14 +1388,47 @@ class DPScheduler(SchedulerInterface):
 
 def update_vllm_config_for_dp_scheduler(vllm_config: Any) -> None:
     """
-    Update vLLM configuration to use DPScheduler when DP size > 1.
+    Select the TPU scheduler, wrapping it with DPScheduler when DP size > 1.
     """
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    from tpu_inference.core.compact_mamba_pool import (
+        is_mamba_prefix_cache_enabled, validate_mamba_prefix_cache_config)
+    from tpu_inference.core.sched.compact_mamba_scheduler import (
+        CompactMambaAsyncScheduler, CompactMambaScheduler)
+
     dp_size = vllm_config.sharding_config.total_dp_size
+    scheduler_config = vllm_config.scheduler_config
+    needs_compact_mamba_pool = is_mamba_prefix_cache_enabled(vllm_config)
+
+    if needs_compact_mamba_pool:
+        validate_mamba_prefix_cache_config(vllm_config)
+        configured_cls = scheduler_config.scheduler_cls
+        default_scheduler_classes = {
+            None,
+            Scheduler,
+            AsyncScheduler,
+            CompactMambaScheduler,
+            CompactMambaAsyncScheduler,
+            DPScheduler,
+            "vllm.v1.core.sched.scheduler.Scheduler",
+            "vllm.v1.core.sched.async_scheduler.AsyncScheduler",
+        }
+        if configured_cls not in default_scheduler_classes:
+            raise ValueError(
+                "A custom scheduler cannot be combined with compact Mamba "
+                "prefix-cache pools. Use the default scheduler or disable "
+                "Mamba prefix caching.")
+        original_scheduler_cls = (CompactMambaAsyncScheduler
+                                  if scheduler_config.async_scheduling else
+                                  CompactMambaScheduler)
+    else:
+        original_scheduler_cls = (
+            AsyncScheduler if scheduler_config.async_scheduling else Scheduler)
 
     if dp_size > 1:
-        if vllm_config.scheduler_config.async_scheduling:
-            vllm_config.scheduler_config._original_scheduler_cls = AsyncScheduler
-        else:
-            vllm_config.scheduler_config._original_scheduler_cls = Scheduler
-
-        vllm_config.scheduler_config.scheduler_cls = DPScheduler
+        scheduler_config._original_scheduler_cls = original_scheduler_cls
+        scheduler_config.scheduler_cls = DPScheduler
+    elif needs_compact_mamba_pool:
+        scheduler_config.scheduler_cls = original_scheduler_cls

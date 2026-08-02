@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import dataclasses
+from math import lcm
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -33,6 +34,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
+from tpu_inference.core.compact_mamba_pool import \
+    get_mamba_prefix_cache_num_blocks
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -90,20 +93,23 @@ class KVCacheManager:
         # because mamba and attention caches have different shapes).
         self._hybrid_uniform_page_size_bytes: int | None = None
         # Per-mamba-layer leading-dim cap for hybrid models. Mamba state is
-        # recurrent (one slot per *active* request), so the `num_blocks`
-        # slots vLLM hands out are mostly idle. Set by
+        # recurrent, so the shared attention block pool would leave most
+        # Mamba slots idle. Set by
         # `_maybe_set_compact_mamba_num_blocks_override`; when set,
         # `initialize_kv_cache` allocates this many slots per mamba layer
         # while attention layers keep the full `num_blocks` from the
-        # (correspondingly enlarged) attention pool. The GDN op indexes
-        # mamba state with `attn_metadata.mamba_state_indices` (in
-        # `[0, max_num_reqs]`) so it stays in-bounds for the smaller arrays.
+        # (correspondingly enlarged) attention pool.
         self._mamba_num_blocks: int | None = None
         self.actual_mamba_num_blocks: int | None = None
 
     @property
     def uses_compact_mamba_state(self) -> bool:
-        """Whether Mamba kernels should use per-request state slots."""
+        """Whether Mamba kernels should use worker-owned request slots.
+
+        Prefix caching uses compact scheduler-owned Mamba block pools. Their
+        IDs directly address the compact arrays, so prefix mode deliberately
+        stays on the scheduler-addressed path.
+        """
         return not self.runner.cache_config.enable_prefix_caching
 
     def _create_attention_spec(
@@ -287,8 +293,8 @@ class KVCacheManager:
         self.runner.cache_config.mamba_page_size_padded = int(
             uniform_page_size_bytes)
 
-        # Cap each mamba layer at `max_num_reqs+1` slots and grow the
-        # attention pool with the freed HBM. See
+        # Compact each mamba layer and grow the attention pool with the freed
+        # HBM. See
         # `_maybe_set_compact_mamba_num_blocks_override`.
         self._maybe_set_compact_mamba_num_blocks_override(
             attn_page_size_bytes, int(unpadded_mamba_page_size),
@@ -299,33 +305,31 @@ class KVCacheManager:
             unpadded_mamba_page_size_bytes: int, num_attn_groups: int,
             num_mamba_groups: int, num_attn_layers: int, num_mamba_layers: int,
             group_size: int) -> None:
-        """Cap mamba layers at `max_num_reqs+1` slots and pin
+        """Compact Mamba layers and pin
         `num_gpu_blocks_override` so the freed HBM grows the attention pool.
 
         Tradeoff vs. the uniform num_blocks layout
         ------------------------------------------
-        Mamba state is recurrent: one slot per *active* request, regardless
-        of context length. The uniform layout gives every layer the same
-        `num_blocks`, leaving `num_blocks − max_num_reqs` mamba slots idle
-        forever. The compact layout caps mamba at `max_num_reqs + 1` (the
-        `+1` is vLLM's null block), which is strictly better for any model
-        where `num_blocks > max_num_reqs` — i.e. all production hybrid
-        configs we run.
-        Cost: a small bookkeeping invariant in the GDN op (it must index
-        mamba state by per-request slot id rather than by `block_tables`,
-        since the mamba leading dim is now smaller than the attn pool).
-        See `gdn_attention_op.gdn_attention_core_tpu`.
-        Skipped if the user pinned `num_gpu_blocks_override` or
-        `hbm_usage_bytes` cannot read HBM (e.g. CPU-only tests). In those
-        cases vLLM keeps its uniform sizing; the page-size padding done in
-        the caller still keeps the per-layer block-ID range correct.
+        Without prefix caching, recurrent state needs one worker-owned slot
+        per active request. With aligned prefix caching, each Mamba group has
+        a private scheduler block pool: upstream MambaManager can retain one
+        cached/source state and one running state per active request. Cached
+        states with refcount zero remain in that pool's free/LRU queue, so
+        they do not require additional admission capacity. Each DP shard thus
+        needs at least ``1 + 2 * max_num_seqs`` slots (the one is its null
+        block). ``TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER`` may reserve more
+        slots for inactive prefix-state retention.
+
+        Prefix mode keeps scheduler addressing: private-pool IDs are the
+        physical compact-array indices. Non-prefix mode keeps the existing
+        worker-owned per-request indexing in the GDN op.
 
         Sizing math
         -----------
         Each kv-cache tensor is shared across `num_attn_groups +
         num_mamba_groups` layers; there are `group_size` such tensors.
-        Per-tensor budget `B = avail / group_size`. With
-        `N_mamba = max_num_reqs + 1`,
+        Per-tensor budget `B = avail / group_size`. With the mode-specific
+        compact `N_mamba`,
             N_attn = floor((B − num_mamba_groups × N_mamba × mamba_unpadded)
                             / (num_attn_groups × attn_page))
         rounded down to the sharding divisor.
@@ -345,34 +349,17 @@ class KVCacheManager:
         Returns:
             None. On success: sets `cache_config.num_gpu_blocks_override`
             and `_mamba_num_blocks` so `initialize_kv_cache` allocates the
-            smaller mamba arrays. On any preconditions-fail path: leaves
-            both unset.
+            smaller mamba arrays. A user-pinned attention override is
+            preserved while `_mamba_num_blocks` is still compacted
+            independently.
         """
         cache_config = self.runner.cache_config
-        if cache_config.enable_prefix_caching:
-            logger.info(
-                "Compact-mamba sizing disabled because prefix caching needs "
-                "scheduler-addressable Mamba state blocks.")
-            return
-        if cache_config.num_gpu_blocks_override is not None:
-            return
-
-        devices = self.runner.mesh.devices.flatten()
-        try:
-            hbm_usage = utils.hbm_usage_bytes(devices)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "Compact-mamba sizing skipped: hbm_usage_bytes failed (%s). "
-                "vLLM will size the block pool from the uniform spec; "
-                "page-size padding keeps per-layer block IDs in range.", exc)
-            return
-
-        total_limit = sum(limit for _, limit in hbm_usage)
-        total_used = sum(used for used, _ in hbm_usage)
-        gpu_mem_util = cache_config.gpu_memory_utilization
-        avail = int(total_limit * gpu_mem_util - total_used)
-        if avail <= 0:
-            return
+        dp_size = max(int(getattr(self.runner, "dp_size", 1)), 1)
+        max_num_reqs = int(self.runner.max_num_reqs)
+        if max_num_reqs % dp_size != 0:
+            raise ValueError(
+                f"max_num_reqs={max_num_reqs} must be divisible by "
+                f"dp_size={dp_size} for compact Mamba allocation.")
 
         # Sharding divisor: per-layer num_blocks must be a multiple of the
         # per-axis device count so JAX shardings don't round up. MLA shards
@@ -391,13 +378,53 @@ class KVCacheManager:
         # defensive against an empty mesh shape that produces 0.
         divisor = max(divisor, 1)
 
-        # Mamba slot budget: one per persistent-batch slot plus the null
-        # block, rounded up to the sharding divisor. `runner.max_num_reqs`
-        # already includes the DP multiplier
-        # (= `dp_size × scheduler_config.max_num_seqs`).
-        mamba_num_blocks = self.runner.max_num_reqs + 1
-        mamba_num_blocks = (
-            (mamba_num_blocks + divisor - 1) // divisor) * divisor
+        # Every DP scheduler owns a distinct null block. Prefix-cache align
+        # mode additionally needs a source and running block per active
+        # request. The private Mamba BlockPool uses these IDs directly.
+        if cache_config.enable_prefix_caching:
+            if cache_config.mamba_cache_mode != "align":
+                raise NotImplementedError(
+                    "Compact TPU Mamba prefix caching requires "
+                    "mamba_cache_mode='align'.")
+            max_num_reqs_per_rank = max_num_reqs // dp_size
+            mamba_num_blocks = dp_size * get_mamba_prefix_cache_num_blocks(
+                max_num_reqs_per_rank)
+        else:
+            mamba_num_blocks = max_num_reqs + dp_size
+        block_alignment = lcm(divisor, dp_size)
+        mamba_num_blocks = ((mamba_num_blocks + block_alignment - 1) //
+                            block_alignment) * block_alignment
+        self._mamba_num_blocks = int(mamba_num_blocks)
+
+        # A user-pinned attention block count remains authoritative, while the
+        # independent Mamba allocation can still be compact.
+        if cache_config.num_gpu_blocks_override is not None:
+            logger.info(
+                "Compact-mamba KV cache: preserving user-pinned attention "
+                "num_gpu_blocks_override=%d and allocating %d Mamba blocks.",
+                cache_config.num_gpu_blocks_override, mamba_num_blocks)
+            return
+
+        devices = self.runner.mesh.devices.flatten()
+        try:
+            hbm_usage = utils.hbm_usage_bytes(devices)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "Compact-mamba attention-pool sizing skipped: "
+                "hbm_usage_bytes failed (%s). Keeping %d compact Mamba "
+                "blocks with vLLM's default attention block count.", exc,
+                mamba_num_blocks)
+            return
+
+        total_limit = sum(limit for _, limit in hbm_usage)
+        total_used = sum(used for used, _ in hbm_usage)
+        gpu_mem_util = cache_config.gpu_memory_utilization
+        avail = int(total_limit * gpu_mem_util - total_used)
+        if avail <= 0:
+            raise ValueError(
+                "No HBM remains for compact hybrid KV cache allocation: "
+                f"limit={total_limit}, used={total_used}, "
+                f"gpu_memory_utilization={gpu_mem_util}.")
 
         # Attention block count: fits into HBM left after mamba.
         # `attn_page_size_bytes` is per-block per-attention-layer; the
@@ -408,34 +435,26 @@ class KVCacheManager:
                             unpadded_mamba_page_size_bytes)
         attn_per_tensor_avail = avail_per_tensor - mamba_per_tensor
         if attn_per_tensor_avail <= 0:
-            # Mamba already saturates the budget — pathological
-            # configuration (e.g., mamba_unpadded × max_num_reqs alone
-            # exceeds gpu_memory_utilization × total_hbm). Skip the
-            # override and let vLLM fall back to its uniform sizing; if
-            # the model genuinely doesn't fit, vLLM will OOM with the
-            # uniform layout too and we want that signal to surface.
-            logger.warning(
-                "Compact-mamba sizing skipped: mamba alone (mamba_num_blocks="
-                "%d × num_mamba_groups=%d × mamba_unpadded=%d) exceeds "
-                "per-tensor budget %d. Lower `gpu_memory_utilization` or "
-                "`max_num_seqs`.", mamba_num_blocks, num_mamba_groups,
-                unpadded_mamba_page_size_bytes, avail_per_tensor)
-            return
+            raise ValueError(
+                "Compact Mamba state exceeds the per-tensor HBM budget: "
+                f"{mamba_num_blocks} blocks * {num_mamba_groups} groups * "
+                f"{unpadded_mamba_page_size_bytes} bytes = "
+                f"{mamba_per_tensor} bytes, budget={avail_per_tensor}. "
+                "Increase gpu_memory_utilization or reduce max_num_seqs or "
+                "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER.")
 
         attn_num_blocks = attn_per_tensor_avail // (num_attn_groups *
                                                     attn_page_size_bytes)
         attn_num_blocks = (attn_num_blocks // divisor) * divisor
         if attn_num_blocks <= 0:
-            logger.warning(
-                "Compact-mamba sizing skipped: attn_num_blocks=0 after "
-                "rounding to divisor=%d (avail_per_tensor=%d, "
-                "mamba_per_tensor=%d). Lower `gpu_memory_utilization` or "
-                "`max_num_seqs`.", divisor, avail_per_tensor, mamba_per_tensor)
-            return
+            raise ValueError(
+                "Compact hybrid KV cache has no room for an attention block "
+                f"after rounding to sharding divisor {divisor}: "
+                f"budget={avail_per_tensor}, Mamba={mamba_per_tensor}. "
+                "Increase gpu_memory_utilization or reduce max_num_seqs or "
+                "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER.")
 
         cache_config.num_gpu_blocks_override = int(attn_num_blocks)
-        self._mamba_num_blocks = int(mamba_num_blocks)
-
         attn_bytes = num_attn_layers * attn_num_blocks * attn_page_size_bytes
         mamba_bytes = (num_mamba_layers * mamba_num_blocks *
                        unpadded_mamba_page_size_bytes)
@@ -791,15 +810,32 @@ class KVCacheManager:
                     num_blocks,
                     self.runner.cache_config.num_gpu_blocks_override)
 
-            # When compact-mamba sizing succeeded (set by
-            # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
-            # allocate `_mamba_num_blocks` (= max_num_reqs + 1) slots while
-            # attention layers keep the full `num_blocks`. When that override
-            # didn't run (CPU tests, user-pinned `num_gpu_blocks_override`),
-            # mamba and attn use the same `num_blocks` — vLLM's uniform sizing.
+            # Compact Mamba arrays are independent from the attention pool.
+            # Without prefix caching they hold one worker-owned state per
+            # active request. Align-mode prefix caching uses scheduler-owned
+            # private pools and reserves source + running state per request.
             mamba_num_blocks = (self._mamba_num_blocks
                                 if self._mamba_num_blocks is not None else
                                 num_blocks)
+            has_mamba_tensor = any(
+                isinstance(layer_name_to_spec[layer_name], MambaSpec)
+                for layer_name in kv_cache_tensor.shared_by)
+            if (has_mamba_tensor and self._mamba_num_blocks is not None
+                    and self.runner.cache_config.enable_prefix_caching):
+                dp_size = self.runner.dp_size
+                if mamba_num_blocks % dp_size != 0:
+                    raise ValueError(
+                        f"Mamba block count {mamba_num_blocks} must be "
+                        f"divisible by dp_size={dp_size}.")
+                minimum_local_blocks = get_mamba_prefix_cache_num_blocks(
+                    self.runner.scheduler_config.max_num_seqs)
+                actual_local_blocks = mamba_num_blocks // dp_size
+                if actual_local_blocks < minimum_local_blocks:
+                    raise ValueError(
+                        "Compact Mamba allocation is smaller than the "
+                        "scheduler's private block pool: "
+                        f"{actual_local_blocks} < {minimum_local_blocks} "
+                        "blocks per DP rank.")
             if self.actual_mamba_num_blocks is None:
                 self.actual_mamba_num_blocks = mamba_num_blocks
 

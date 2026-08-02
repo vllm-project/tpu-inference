@@ -113,6 +113,12 @@ class CompilationManager:
 
         with self.runner.maybe_setup_dummy_loras(
                 self.runner.lora_config), jax.set_mesh(self.runner.mesh):
+            if self.runner.mamba_state_manager.enabled:
+                self._run_compilation(
+                    "Mamba state block copy",
+                    self.runner.mamba_state_manager.
+                    precompile_copy_state_blocks,
+                )
             self._precompile_backbone_text_only()
             if self.runner.is_multimodal_model:
                 if self.runner.precompile_vision_encoder_fn is not None:
@@ -126,12 +132,6 @@ class CompilationManager:
                     self._precompile_subtract_num_rejected_tokens()
                     self._precompile_concat_last_sampled_tokens_and_draft_tokens(
                     )
-            if self.runner.mamba_state_manager.enabled:
-                self._run_compilation(
-                    "Mamba state block copy",
-                    self.runner.mamba_state_manager.
-                    precompile_copy_state_blocks,
-                )
             if not self.runner.is_last_rank:
                 return
             self._precompile_select_from_array()
@@ -241,10 +241,9 @@ class CompilationManager:
         request_distribution = device_array(self.runner.mesh,
                                             request_distribution,
                                             sharding=dp_sharding)
-        # Dummy mamba_state_indices for compile-cache pre-tracing. Only
-        # populate for hybrid attn+mamba models — for pure-attention models we
-        # pass None at runtime (see `_prepare_inputs`), and the precompile
-        # primer must match that shape so the cached HLO is reused.
+        # Dummy mamba_state_indices for compile-cache pre-tracing. Prefix
+        # caching uses group-specific block tables instead, so its metadata
+        # keeps this field unset just like runtime.
         if (self.runner.kv_cache_config.has_mamba_layers
                 and self.runner.kv_cache_manager.uses_compact_mamba_state):
             mamba_state_indices = device_array(self.runner.mesh,
@@ -297,8 +296,13 @@ class CompilationManager:
             block_tables = build_block_table(0) if not no_kv_cache else None
             attention_metadata = build_attn(block_tables)
         else:
+            block_tables_by_gid = {
+                gid: build_block_table(gid)
+                for gid in range(
+                    len(self.runner.kv_cache_config.kv_cache_groups))
+            }
             attention_metadata = {
-                name: build_attn(build_block_table(gid))
+                name: build_attn(block_tables_by_gid[gid])
                 for gid, kv_cache_group in enumerate(
                     self.runner.kv_cache_config.kv_cache_groups)
                 for name in kv_cache_group.layer_names

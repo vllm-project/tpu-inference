@@ -25,6 +25,8 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 
+from tpu_inference.core.sched.compact_mamba_scheduler import (
+    CompactMambaAsyncScheduler, CompactMambaScheduler)
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand,
     update_vllm_config_for_dp_scheduler)
@@ -983,6 +985,14 @@ class TestDPScheduler:
 class TestUpdateVllmConfigForDPScheduler:
     """Test the update_vllm_config_for_dp_scheduler function."""
 
+    @staticmethod
+    def _enable_compact_mamba(mock_config):
+        mock_config.model_config.is_hybrid = True
+        mock_config.cache_config.enable_prefix_caching = True
+        mock_config.cache_config.mamba_cache_mode = "align"
+        mock_config.kv_transfer_config = None
+        mock_config.speculative_config = None
+
     def test_update_config_with_dp_size_greater_than_one(self):
         """Test Config is updated when DP size > 1."""
         mock_config = MagicMock()
@@ -990,6 +1000,8 @@ class TestUpdateVllmConfigForDPScheduler:
         mock_config.scheduler_config._original_scheduler_cls = None
         mock_config.scheduler_config.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
         mock_config.scheduler_config.async_scheduling = False
+        mock_config.model_config.is_hybrid = False
+        mock_config.cache_config.enable_prefix_caching = False
 
         update_vllm_config_for_dp_scheduler(mock_config)
 
@@ -997,17 +1009,134 @@ class TestUpdateVllmConfigForDPScheduler:
         assert mock_config.scheduler_config._original_scheduler_cls == Scheduler
         assert mock_config.scheduler_config.scheduler_cls == DPScheduler
 
-    def test_update_config_with_dp_size_one(self):
-        """Test that config is NOT updated when DP size == 1."""
+    def test_update_config_with_dp_and_compact_mamba(self):
         mock_config = MagicMock()
-        mock_config.sharding_config.total_dp_size = 1
-        original_scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
-        mock_config.scheduler_config.scheduler_cls = original_scheduler_cls
+        mock_config.sharding_config.total_dp_size = 2
+        mock_config.scheduler_config._original_scheduler_cls = None
+        mock_config.scheduler_config.scheduler_cls = None
+        mock_config.scheduler_config.async_scheduling = False
+        self._enable_compact_mamba(mock_config)
 
         update_vllm_config_for_dp_scheduler(mock_config)
 
-        # Verify config was NOT changed
-        assert mock_config.scheduler_config.scheduler_cls == original_scheduler_cls
+        assert (mock_config.scheduler_config._original_scheduler_cls ==
+                CompactMambaScheduler)
+        assert mock_config.scheduler_config.scheduler_cls == DPScheduler
+
+    def test_update_config_with_dp_size_one(self):
+        """Test that DP size one selects the compact TPU scheduler."""
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.scheduler_config.scheduler_cls = None
+        mock_config.scheduler_config.async_scheduling = False
+        self._enable_compact_mamba(mock_config)
+
+        update_vllm_config_for_dp_scheduler(mock_config)
+
+        assert (mock_config.scheduler_config.scheduler_cls ==
+                CompactMambaScheduler)
+
+    def test_update_config_selects_compact_async_scheduler(self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.scheduler_config.scheduler_cls = None
+        mock_config.scheduler_config.async_scheduling = True
+        self._enable_compact_mamba(mock_config)
+
+        update_vllm_config_for_dp_scheduler(mock_config)
+
+        assert (mock_config.scheduler_config.scheduler_cls ==
+                CompactMambaAsyncScheduler)
+
+    def test_update_config_preserves_single_dp_custom_scheduler_without_mamba(
+            self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.cache_config.enable_prefix_caching = False
+        mock_config.model_config.is_hybrid = False
+        custom_scheduler = object()
+        mock_config.scheduler_config.scheduler_cls = custom_scheduler
+
+        update_vllm_config_for_dp_scheduler(mock_config)
+
+        assert mock_config.scheduler_config.scheduler_cls is custom_scheduler
+
+    def test_update_config_ignores_mamba_knobs_for_attention_model(self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.model_config.is_hybrid = False
+        mock_config.cache_config.enable_prefix_caching = True
+        mock_config.cache_config.mamba_cache_mode = "align"
+        mock_config.speculative_config = object()
+        original_scheduler = mock_config.scheduler_config.scheduler_cls
+
+        update_vllm_config_for_dp_scheduler(mock_config)
+
+        assert mock_config.scheduler_config.scheduler_cls is original_scheduler
+
+    def test_update_config_rejects_custom_scheduler_with_compact_mamba(self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        custom_scheduler = object()
+        mock_config.scheduler_config.scheduler_cls = custom_scheduler
+        self._enable_compact_mamba(mock_config)
+
+        with pytest.raises(ValueError, match="custom scheduler"):
+            update_vllm_config_for_dp_scheduler(mock_config)
+
+    def test_update_config_rejects_kv_transfer_with_compact_mamba(self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.scheduler_config.scheduler_cls = None
+        self._enable_compact_mamba(mock_config)
+        mock_config.kv_transfer_config = object()
+
+        with pytest.raises(NotImplementedError, match="KV transfer"):
+            update_vllm_config_for_dp_scheduler(mock_config)
+
+    def test_update_config_rejects_spec_decode_with_compact_mamba(self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.scheduler_config.scheduler_cls = None
+        self._enable_compact_mamba(mock_config)
+        mock_config.speculative_config = object()
+
+        with pytest.raises(NotImplementedError, match="speculative decoding"):
+            update_vllm_config_for_dp_scheduler(mock_config)
+
+    def test_update_config_rejects_non_align_mamba_prefix_cache(self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.scheduler_config.scheduler_cls = None
+        self._enable_compact_mamba(mock_config)
+        mock_config.cache_config.mamba_cache_mode = "all"
+
+        with pytest.raises(NotImplementedError, match="requires.*align"):
+            update_vllm_config_for_dp_scheduler(mock_config)
+
+    def test_update_config_rejects_invalid_mamba_pool_multiplier(
+            self, monkeypatch):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.scheduler_config.scheduler_cls = None
+        self._enable_compact_mamba(mock_config)
+        monkeypatch.setenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "1")
+
+        with pytest.raises(ValueError, match="must be at least 2"):
+            update_vllm_config_for_dp_scheduler(mock_config)
+
+    def test_update_config_is_idempotent_for_compact_mamba(self):
+        mock_config = MagicMock()
+        mock_config.sharding_config.total_dp_size = 1
+        mock_config.scheduler_config.scheduler_cls = None
+        mock_config.scheduler_config.async_scheduling = True
+        self._enable_compact_mamba(mock_config)
+
+        update_vllm_config_for_dp_scheduler(mock_config)
+        update_vllm_config_for_dp_scheduler(mock_config)
+
+        assert (mock_config.scheduler_config.scheduler_cls ==
+                CompactMambaAsyncScheduler)
 
 
 if __name__ == "__main__":

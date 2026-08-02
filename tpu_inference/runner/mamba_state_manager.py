@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import jax
@@ -37,13 +38,12 @@ MambaGroupStates = tuple[MambaLayerStates, ...]
 MambaStates = tuple[MambaGroupStates, ...]
 
 
-@jax.jit(donate_argnames=("states_by_group", ))
 def _copy_state_blocks(
     states_by_group: MambaStates,
     src_block_ids_by_group: tuple[jax.Array, ...],
     dst_block_ids_by_group: tuple[jax.Array, ...],
 ) -> MambaStates:
-    """Copies every Mamba state leaf in one compiled operation."""
+    """Copies every Mamba state leaf in one operation."""
 
     def copy_state(
         state: jax.Array,
@@ -74,6 +74,7 @@ class MambaStateManager:
         self.mamba_groups: dict[int, MambaSpec] = {}
         self.mamba_state_idx: dict[str, int] = {}
         self.current_state_block_ids: dict[int, dict[str, int]] = {}
+        self._copy_state_blocks_fn: Callable[..., MambaStates] | None = None
         self.enabled = False
 
     def initialize(self, kv_cache_config: KVCacheConfig) -> None:
@@ -85,6 +86,7 @@ class MambaStateManager:
         }
         self.mamba_state_idx.clear()
         self.current_state_block_ids = {gid: {} for gid in self.mamba_groups}
+        self._copy_state_blocks_fn = None
         self.enabled = bool(
             self.mamba_groups
             and self.runner.cache_config.enable_prefix_caching
@@ -207,6 +209,11 @@ class MambaStateManager:
                         f"{curr_state_idx}, but group {gid} has only "
                         f"{len(block_ids)} blocks.")
                 curr_block_id = block_ids[curr_state_idx]
+                if curr_block_id <= 0:
+                    raise RuntimeError(
+                        f"Request {req_id!r} cannot use Mamba group {gid}'s "
+                        f"reserved null block {curr_block_id} as running state."
+                    )
                 self.current_state_block_ids[gid][req_id] = curr_block_id
 
                 if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
@@ -214,8 +221,14 @@ class MambaStateManager:
                         raise RuntimeError(
                             f"Request {req_id!r} has stale Mamba state index "
                             f"{prev_state_idx} for group {gid}.")
+                    src_block_id = block_ids[prev_state_idx]
+                    if src_block_id == curr_block_id:
+                        raise RuntimeError(
+                            f"Request {req_id!r} maps distinct Mamba states "
+                            f"{prev_state_idx} and {curr_state_idx} to the same "
+                            f"physical block {src_block_id} in group {gid}.")
                     copies_by_group[gid].append(
-                        (block_ids[prev_state_idx], curr_block_id, dp_rank))
+                        (src_block_id, curr_block_id, dp_rank))
 
         self._apply_copies(copies_by_group)
 
@@ -253,9 +266,15 @@ class MambaStateManager:
             dp_rank = assigned_dp_rank.get(req_id, 0)
             for gid in self.mamba_groups:
                 block_ids = req_state.block_ids[gid]
+                src_block_id = block_ids[src_state_idx]
+                dst_block_id = block_ids[dst_state_idx]
+                if src_block_id == dst_block_id:
+                    raise RuntimeError(
+                        f"Request {req_id!r} maps distinct Mamba states "
+                        f"{src_state_idx} and {dst_state_idx} to the same "
+                        f"physical block {src_block_id} in group {gid}.")
                 copies_by_group[gid].append(
-                    (block_ids[src_state_idx], block_ids[dst_state_idx],
-                     dp_rank))
+                    (src_block_id, dst_block_id, dp_rank))
 
         self._apply_copies(copies_by_group)
 
@@ -280,6 +299,10 @@ class MambaStateManager:
         # only a subset of groups has copies in a given step.
         for gid in self.mamba_groups:
             copies = copies_by_group.get(gid, ())
+            if len(copies) > max_num_reqs:
+                raise RuntimeError(
+                    f"Mamba group {gid} requested {len(copies)} state copies, "
+                    f"exceeding max_num_reqs={max_num_reqs}.")
             group = self.kv_cache_config.kv_cache_groups[gid]
             missing_layers = [
                 layer_name for layer_name in group.layer_names
@@ -308,9 +331,14 @@ class MambaStateManager:
             seen_cache_indices.update(cache_indices)
 
             destination_keys = [(dp_rank, dst) for _, dst, dp_rank in copies]
-            if any(src == 0 or dst == 0 for src, dst, _ in copies):
+            if any(dp_rank < 0 or dp_rank >= dp_size
+                   for _, _, dp_rank in copies):
+                raise IndexError(
+                    f"Mamba group {gid} received a DP rank outside "
+                    f"[0, {dp_size}).")
+            if any(src <= 0 or dst <= 0 for src, dst, _ in copies):
                 raise RuntimeError(
-                    "Mamba state restore cannot copy to or from the null block."
+                    "Mamba state restore requires positive, non-null block IDs."
                 )
             if len(set(destination_keys)) != len(destination_keys):
                 raise RuntimeError(
@@ -320,6 +348,10 @@ class MambaStateManager:
             first_states = self.runner.kv_caches[cache_indices[0]]
             if not isinstance(first_states, tuple):
                 raise TypeError("Mamba layers must have tuple state caches.")
+            if first_states[0].shape[0] % dp_size != 0:
+                raise ValueError(
+                    "Mamba state block count must be divisible by dp_size: "
+                    f"{first_states[0].shape[0]} % {dp_size} != 0.")
             local_num_blocks = first_states[0].shape[0] // dp_size
             # Real copies exclude block 0, so trailing 0->0 entries are no-ops.
             src_block_ids = np.zeros(max_num_reqs, dtype=np.int32)
@@ -356,7 +388,22 @@ class MambaStateManager:
             src_block_ids_by_group.append(src_device)
             dst_block_ids_by_group.append(dst_device)
 
-        copied_states_by_group = _copy_state_blocks(
+        if self._copy_state_blocks_fn is None:
+            state_formats_by_group = tuple(
+                tuple(
+                    tuple(state.format for state in layer_states)
+                    for layer_states in group_states)
+                for group_states in states_by_group)
+            # The explicit output formats prevent a size-one data mesh axis
+            # from being canonicalized away by the scatter. The backbone JIT
+            # keys on this format, so the copy must return the allocation
+            # format byte-for-byte.
+            self._copy_state_blocks_fn = jax.jit(
+                _copy_state_blocks,
+                donate_argnames=("states_by_group", ),
+                out_shardings=state_formats_by_group,
+            )
+        copied_states_by_group = self._copy_state_blocks_fn(
             tuple(states_by_group),
             tuple(src_block_ids_by_group),
             tuple(dst_block_ids_by_group),

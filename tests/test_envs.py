@@ -265,6 +265,15 @@ def test_ray_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE == "shm"
 
 
+def test_mamba_prefix_cache_block_multiplier(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER",
+                       raising=False)
+    assert envs.TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER == 2
+
+    monkeypatch.setenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "4")
+    assert envs.TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER == 4
+
+
 def test_invalid_attribute_raises_error():
     with pytest.raises(AttributeError,
                        match="has no attribute 'NONEXISTENT_VAR'"):
@@ -280,6 +289,7 @@ def test_dir_returns_all_env_vars():
     assert "SKIP_JAX_PRECOMPILE" in env_vars
     assert "VLLM_XLA_CHECK_RECOMPILATION" in env_vars
     assert "MODEL_IMPL_TYPE" in env_vars
+    assert "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER" in env_vars
 
 
 def test_tpu_multihost_env_vars(monkeypatch: pytest.MonkeyPatch):

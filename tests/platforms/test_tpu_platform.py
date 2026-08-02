@@ -79,6 +79,10 @@ class TestTpuPlatform:
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
 
+    def test_mamba_pool_multiplier_is_forwarded_to_ray_workers(self):
+        assert ("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER"
+                in TpuPlatform.additional_env_vars)
+
     def test_get_infinity_values(self):
         min_val, max_val = TpuPlatform.get_infinity_values(jnp.float32)
         assert min_val == jnp.finfo(jnp.float32).min
