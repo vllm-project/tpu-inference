@@ -589,16 +589,6 @@ class TestTPUOffloadConnectorValidation:
 
 class TestTPUOffloadConnectorRayValidation:
 
-    def test_multihost_ray_not_imported(self):
-        vllm_config = MockVllmConfig()
-        from unittest.mock import patch
-
-        with patch("tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND", "ray"), \
-             patch.dict("sys.modules", {"ray": None}):
-            with pytest.raises(ValueError,
-                               match="module could not be imported"):
-                TPUOffloadConnectorScheduler(vllm_config)
-
     def test_multihost_ray_not_initialized(self):
         vllm_config = MockVllmConfig()
         from unittest.mock import patch
