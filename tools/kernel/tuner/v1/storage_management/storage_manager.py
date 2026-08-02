@@ -107,6 +107,9 @@ class StorageManager:
         Args:
             result: A CaseResult instance.
         """
+        assert isinstance(
+            result,
+            CaseResult), f'result is not a CaseResult instance: {result}'
         self.results_buffer.append(result)
         if len(self.results_buffer) >= self.results_batch_size:
             self.flush_results()
@@ -114,7 +117,7 @@ class StorageManager:
     def flush_results(self):
         """Flushes any buffered result tuples to the backend storage."""
         if self.results_buffer:
-            self.save_results_batch(self.results_buffer)
+            self.save_results_batch()
             self.results_buffer.clear()
 
     def flush(self):
@@ -224,15 +227,10 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement get_already_processed_ids")
 
-    def save_results_batch(self, results):
+    def save_results_batch(self):
         """Immediately persists a batch of tuning results to the backend.
 
         Called by tuner agents after completing a batch of cases.
-
-        Args:
-            results: A list of result tuples, each containing fields for
-                CaseResults (ID, RunId, CaseId, ProcessedStatus, WorkerID,
-                Latency, WarmupTime, TotalTime, ProcessedAt, TPU).
         """
         raise NotImplementedError(
             "Subclasses must implement save_results_batch")

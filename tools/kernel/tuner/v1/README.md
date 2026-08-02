@@ -56,7 +56,7 @@ class MyKernelTuner(KernelTunerBase):
             tunable_params_class=MyTunableParams,
             kernel_tuner_name="my_kernel_tuner",  # must match KERNEL_TUNER_REGISTRY key
             support_bayesian_optimization=True,   # enable Bayesian Optimization support
-            n_bayesian_trials=50,                  # max BO trials per tuning key bucket (default 50)
+            n_bayesian_trials=100,                 # max BO trials per tuning key bucket (default 100)
             bayesian_early_stopping_patience=10,   # stop trial if no improvement for 10 trials
             bayesian_early_stopping_min_delta_ratio=0.05, # min 5% relative improvement
         )
@@ -174,7 +174,7 @@ On Buildkite, set `KERNEL_TUNING_KERNEL_TUNER_NAME=my_kernel_tuner` and optional
 Install dependencies first:
 
 ```bash
-pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt 
+pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt 
 ```
 
 We recommend running the tuner with local storage first to verify that your custom kernel tuner is set up correctly.
@@ -201,7 +201,6 @@ python -m tools.kernel.tuner.v1.kernel_tuner_runner \
 | `--case_set_desc` | `""` | Human-readable description. |
 | `--tpu_version` | `""` | TPU generation (`tpu6e` or `tpu7x`). |
 | `--tpu_cores` | `0` | TPU core count (e.g. 1, 2, 8, 16). |
-| `--debug` | `False` | Print detailed logs after each case iteration. |
 
 Local results are written to JSON files in the directory `/tmp/kernel_tuner_runner_{case_set_desc}`.
 
@@ -264,6 +263,7 @@ curl -s -X POST \
 | `KERNEL_TUNING_TPU_VERSION` | `tpu6e` or `tpu7x` | TPU generation. Controls agent queue selection. |
 | `KERNEL_TUNING_TPU_CORES` | `1`, `8`, `16` | Number of TPU cores for tuning jobs. |
 | `KERNEL_TUNING_USE_BAYESIAN_OPTIMIZATION` | `True` or `False` | Set to `True` to use Bayesian Optimization instead of full grid sweep. |
+| `KERNEL_TUNING_N_BAYESIAN_TRIALS` | `100` | Number of Bayesian trials to sample per tuning key bucket (overrides tuner default). |
 
 ---
 
@@ -278,7 +278,7 @@ The framework decouples tuning execution from search strategies via the `TuningO
 
 - **TPE Sampler with Integer Remapping**: Maps discrete parameter choices to continuous indices, allowing Optuna to learn parameter trends and converge rapidly.
 - **Relative Early Stopping**: Automatically stops trial sampling per tuning key if latency does not improve by at least `bayesian_early_stopping_min_delta_ratio` over `bayesian_early_stopping_patience` consecutive trials.
-- **Smart Fallback**: Automatically reverts to full sweep (`SweepOptimizer`) if `get_search_space()` returns an empty dictionary or if `support_bayesian_optimization` is disabled in `TunerConfig`.
+- **Smart Fallback**: Automatically reverts to full sweep (`SweepOptimizer`) if `get_search_space()` returns an empty dictionary, if the total search space cases for a key is less than `min_cases_for_bayesian`, or if `support_bayesian_optimization` is disabled in `TunerConfig`.
 
 ---
 

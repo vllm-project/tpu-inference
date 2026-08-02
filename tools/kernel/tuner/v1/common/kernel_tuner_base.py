@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import dataclasses
 import logging
 import os
 import time
@@ -66,21 +65,6 @@ class ProcessedCasesTracker:
         return False
 
 
-def assure_frozen_not_ordered_dataclass(c: type, message_prefix: str = ""):
-    assert c is not None, f"{message_prefix}: Class must be specified"
-    assert dataclasses.is_dataclass(
-        c), f"{message_prefix}: {c.__name__} must be a dataclass"
-    params = getattr(c, "__dataclass_params__", None)
-    assert params and params.frozen, f"{message_prefix}: {c.__name__} must be a frozen dataclass"
-    assert params and not params.order, f"{message_prefix}: {c.__name__} must not be an ordered dataclass"
-
-
-def assure_le_ge_defined(c: type, message_prefix: str = ""):
-    assert c is not None, f"{message_prefix}: Class must be specified"
-    assert '__ge__' in c.__dict__, f"{message_prefix}: {c.__name__} must have __ge__ method"
-    assert '__le__' in c.__dict__, f"{message_prefix}: {c.__name__} must have __le__ method"
-
-
 class KernelTunerBase(ABC):
     """
     Base class for kernel tuner runner. The kernel tuner runner is responsible for generating the tuning cases, partitioning the cases into buckets, generating the Buildkite pipeline, and measuring the latency of the cases. The specific kernel tuner runner should inherit from this base class and implement the generate_cases, generate_inputs, and run methods.
@@ -103,13 +87,15 @@ class KernelTunerBase(ABC):
                  run_config: RunConfig = None):
         assert tuner_config is not None, "tuner_config must be specified"
         assert run_config is not None, "run_config must be specified"
-        assure_frozen_not_ordered_dataclass(tuner_config.tuning_key_class,
-                                            "tuner_config.tuning_key_class")
-        assure_frozen_not_ordered_dataclass(
-            tuner_config.tunable_params_class,
-            "tuner_config.tunable_params_class")
-        assure_le_ge_defined(tuner_config.tunable_params_class,
-                             "tuner_config.tunable_params_class")
+        assert tuner_config.tuning_key_class is not None and issubclass(
+            tuner_config.tuning_key_class, TuningKey
+        ), (f"tuner_config.tuning_key_class ({tuner_config.tuning_key_class}) "
+            "must satisfy the TuningKey protocol (hashable/frozen).")
+        assert tuner_config.tunable_params_class is not None and issubclass(
+            tuner_config.tunable_params_class, TunableParams
+        ), (f"tuner_config.tunable_params_class ({tuner_config.tunable_params_class}) "
+            "must satisfy the TunableParams protocol (__hash__, __le__, __ge__)."
+            )
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."
         # lazy import the storage manager to avoid import spanner when running locally
         if run_config.run_locally:
@@ -128,6 +114,8 @@ class KernelTunerBase(ABC):
         self._tuning_key = None
         self.tuner_config = tuner_config
         self.run_config = run_config
+        if run_config.n_bayesian_trials is not None:
+            self.tuner_config.n_bayesian_trials = run_config.n_bayesian_trials
         self.worker_id = run_config.worker_id or 'unknown_worker'
         self.xprof_dir = os.path.join("/tmp/kernel_tuning",
                                       self.tuner_config.kernel_tuner_name,
@@ -209,7 +197,8 @@ class KernelTunerBase(ABC):
                     # tunable_params_list.append(TunableParams.from_dict(current_combination))
                     if not current_combination:
                         return
-                    yield TunableParams(**current_combination)
+                    yield self.tuner_config.tunable_params_class(
+                        **current_combination)
                     return
                 key = remain_keys[0]
                 for value in search_space[key]:
@@ -331,7 +320,7 @@ class KernelTunerBase(ABC):
                     'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
-                    'pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && '
+                    'pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
                     f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
                     f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
@@ -339,6 +328,7 @@ class KernelTunerBase(ABC):
                     f'  --tpu_cores={self.run_config.tpu_cores} '
                     f'  --case_set_desc=\"{self.run_config.case_set_desc}\" '
                     f'  --use_bayesian_optimization={self.run_config.use_bayesian_optimization} '
+                    f'  --n_bayesian_trials={self.tuner_config.n_bayesian_trials} '
                     f'  --run_locally=False '
                     f'  --tpu_queue_multi={self.run_config.tpu_queue_multi} '
                     f'  --max_execution_minutes={self.run_config.max_execution_minutes} '

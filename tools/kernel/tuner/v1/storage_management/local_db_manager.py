@@ -275,8 +275,8 @@ class LocalDbManager(StorageManager):
             and start <= row['CaseId'] <= end
         }
 
-    def save_results_batch(self, results):
-        if not results:
+    def save_results_batch(self):
+        if not self.results_buffer:
             return
         cols = ('ID', 'RunId', 'CaseId', 'ProcessedStatus', 'WorkerID',
                 'Latency', 'WarmupTime', 'TotalTime', 'ProcessedAt', 'TPU')
@@ -286,8 +286,19 @@ class LocalDbManager(StorageManager):
             (row['ID'], row['RunId'], row['CaseId']): i
             for i, row in enumerate(table)
         }
-        for result in results:
-            t = result.to_tuple() if hasattr(result, 'to_tuple') else result
+        for result in self.results_buffer:
+            t = (
+                result.case_set_id,
+                result.run_id,
+                result.case_id,
+                result.processed_status,
+                result.worker_id,
+                result.latency,
+                result.warmup_time,
+                result.total_time,
+                result.processed_at,
+                result.tpu,
+            )
             row = dict(zip(cols, t))
             key = (row['ID'], row['RunId'], row['CaseId'])
             if key in index:
@@ -296,7 +307,8 @@ class LocalDbManager(StorageManager):
                 index[key] = len(table)
                 table.append(row)
         self._write_table('CaseResults', table)
-        logger.info(f'Saved {len(results)} results to CaseResults')
+        logger.info(f'Saved {len(self.results_buffer)} results to CaseResults')
+        self.results_buffer.clear()
 
     def get_bucket_configs(self, cs_id, start, end):
         table = self._read_table('KernelTuningCases')

@@ -271,12 +271,23 @@ class SpannerStorageManager(StorageManager):
                                            })
             }
 
-    def save_results_batch(self, results):
-        if not results:
+    def save_results_batch(self):
+        if not self.results_buffer:
             return
-        values = [
-            r.to_tuple() if hasattr(r, 'to_tuple') else r for r in results
-        ]
+        values = []
+        for r in self.results_buffer:
+            values.append((
+                r.case_set_id,
+                r.run_id,
+                r.case_id,
+                r.processed_status,
+                r.worker_id,
+                r.latency,
+                r.warmup_time,
+                r.total_time,
+                r.processed_at,
+                r.tpu,
+            ))
         with self.database.batch() as b:
             b.insert_or_update(table='CaseResults',
                                columns=('ID', 'RunId', 'CaseId',

@@ -30,8 +30,6 @@ from tools.kernel.tuner.v1.utils import get_tpu_queue_by_version_and_cores
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_DEBUG = flags.DEFINE_bool(
-    'debug', False, 'If true, prints results after each case iteration.')
 _RUN_LOCALLY = flags.DEFINE_bool(
     'run_locally', False,
     'If true, uses local storage instead of cloud storage.')
@@ -109,6 +107,12 @@ _USE_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
     'by each kernel tuner\'s TunerConfig.support_bayesian_optimization is used.'
 )
 
+_N_BAYESIAN_TRIALS = flags.DEFINE_integer(
+    'n_bayesian_trials', 100,
+    'Number of Bayesian optimization trials to run per tuning key bucket. '
+    'Overrides default if specified via flag or KERNEL_TUNING_N_BAYESIAN_TRIALS env var.'
+)
+
 # Note: For simplicity, we are directly referencing the kernel tuner class
 # here. In the future, we can consider a more flexible plugin-based system
 # if we have more kernel tuners. For example, we can define an interface for
@@ -166,7 +170,7 @@ def main(argv):
         worker_id=_WORKER_ID.value,
         autotune_mode=_AUTOTUNE_MODE.value,
         use_bayesian_optimization=_USE_BAYESIAN_OPTIMIZATION.value,
-        debug=_DEBUG.value)
+        n_bayesian_trials=_N_BAYESIAN_TRIALS.value)
     kernel_tuner_cls = KERNEL_TUNER_REGISTRY.get(_KERNEL_TUNER_NAME.value)
     kernel_tuner = kernel_tuner_cls(run_config=run_config)
 

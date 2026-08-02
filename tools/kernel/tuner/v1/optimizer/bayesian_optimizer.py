@@ -146,6 +146,18 @@ class BayesianOptimizer(TuningOptimizer):
                 tuner.tuner_config.tunable_params_class)
             params_to_case_id[tc.tunable_params] = cid
 
+        if (tuner.tuner_config.min_cases_for_bayesian > 0
+                and len(params_to_case_id)
+                < tuner.tuner_config.min_cases_for_bayesian):
+            logger.warning(
+                f"Tuning key {tuning_key} search space contains {len(params_to_case_id)} cases, "
+                f"which is less than min_cases_for_bayesian threshold ({tuner.tuner_config.min_cases_for_bayesian}). "
+                "Falling back to sequential sweep.")
+            from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
+                SweepOptimizer
+            SweepOptimizer(tuner).measure_latency(begin_case_id, end_case_id)
+            return
+
         bucket_start_perf = time.perf_counter()
 
         int_param_sorted: dict[str, list] = {}

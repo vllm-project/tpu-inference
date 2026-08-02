@@ -36,19 +36,16 @@ import tempfile
 import uuid
 from unittest.mock import patch
 
-from absl import flags
 from absl.testing import absltest
 
 from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
                                                           TuningStatus)
-# Importing kernel_tuner_runner registers the absl flags FLAGS.debug and
-# FLAGS.worker_id that KernelTunerBase.measure_latency reads at runtime.
+# Importing kernel_tuner_runner registers the absl flags that
+# KernelTunerBase.measure_latency reads at runtime.
 from tools.kernel.tuner.v1.kernel_tuner_runner import (
     KERNEL_TUNER_REGISTRY, get_tpu_queue_by_version_and_cores)
 from tools.kernel.tuner.v1.storage_management.local_db_manager import \
     LocalDbManager
-
-FLAGS = flags.FLAGS
 
 # Statuses that are acceptable outcomes for a tuning case in a smoke test.
 # SKIPPED is added because Bayesian optimization prunes cases that are

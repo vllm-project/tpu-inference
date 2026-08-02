@@ -60,6 +60,11 @@ class ExampleKernelTuner(KernelTunerBase):
     # demonstrate the tuning pipeline.
 
     def __init__(self, run_config: RunConfig):
+        # Note: support_bayesian_optimization=True demonstrates BO support.
+        # For small search spaces (e.g. 2-3 configurations per key in this mock example),
+        # Bayesian optimization evaluates up to min(n_bayesian_trials, total_cases).
+        # Set min_cases_for_bayesian in TunerConfig if automatic fallback to sweep
+        # is desired for small search spaces.
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
