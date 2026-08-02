@@ -50,99 +50,56 @@ steps:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
-  # Demo 1: offline_inference.py
-  # Shows the simplest pattern: run a Python script inside Docker.
-  # Use this as a starting point for any offline batch inference test.
+  # KV pool warmup reserve: the Kimi-K3 depth slice at the utilization
+  # that used to OOM.
+  #
+  # gs://.../k3-sliced is the released Kimi-K3 checkpoint with only its
+  # first 8 decoder layers kept. Every kept tensor is the original bytes
+  # and the config keeps every K3-only feature the full model has:
+  # MXFP4-packed experts with their scales, fp32 KDA tensors, the
+  # LatentMoE projections, the q-LoRA MLA layers, the noaux_tc router
+  # over 896 experts, and the compressed-tensors quantization config.
+  # This step exercises the LOAD and SERVE path, not output quality --
+  # 8 of 93 layers is not a language model, hence --allow-incoherent.
+  #
+  # This configuration is deliberately the one that failed. At
+  # GPU_MEMORY_UTILIZATION 0.8 with no --num-gpu-blocks-override, the
+  # pool took 404.09 of 404.11 GiB and warmup died with
+  # `HLO temporaries (100.50G) exceeds available HBM (94.74G)`; the
+  # same config at 0.6 served. The only change here is that the pool
+  # now leaves KV_CACHE_WARMUP_RESERVE_FRACTION of the post-weight
+  # budget free, so serving at 0.8 without a hand-pinned block count is
+  # the pass condition. The [precompile-mem] lines report XLA's actual
+  # per-shape temp/out/alias budget either way.
+  #
+  # --max-num-batched-tokens 2048 is carried over from the passing run
+  # so utilization is the only variable that moved.
   # -----------------------------------------------------------------
-  - label: "tpu7x [demo] offline_inference.py"
-    key: tpu7x_demo_offline_inference
+  - label: "tpu7x K3 slice, util 0.8, warmup reserve on"
+    key: tpu7x_k3_slice_warmup_reserve
     depends_on: tpu7x_build_docker
+    timeout_in_minutes: 120
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 examples/offline_inference.py \
-            --model Qwen/Qwen3-0.6B \
-            --tensor-parallel-size 2 \
-            --max-model-len 1024 \
-            --max-tokens 128'
-
-  # -----------------------------------------------------------------
-  # Demo 2: vllm serve + vllm bench serve
-  # Shows how to start a server and run a benchmark against it.
-  # Uses --dataset-name random so no dataset file is needed.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] vllm serve + vllm bench serve"
-    key: tpu7x_demo_serve_bench
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
-        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
-        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
-
-  # -----------------------------------------------------------------
-  # Demo 3: DCN-based P/D disaggregation
-  # Mirrors test_25 in pipeline_jax.yml.
-  # Uses run_disagg.sh which delegates to examples/disagg/.
-  # Requires a multi-chip queue (tpu_v7x_8_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
-    key: tpu7x_demo_disagg
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      # Customize these to change the disagg benchmark behaviour.
-      MODEL: "Qwen/Qwen3-0.6B"
-      INPUT_LEN: 1024
-      OUTPUT_LEN: 128
-      NUM_PROMPTS: 5
-      RANDOM_SEED: 10
-      MAX_CONCURRENCY: 4
-      TEST_MODE: 1
+      MODEL_IMPL_TYPE: "flax_nnx"
+      NEW_MODEL_DESIGN: "1"
+      MODEL: "gs://tpu-commons-ci/moonshootai/kimi/k3-sliced"
+      TENSOR_PARALLEL_SIZE: "8"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "16"
+      GPU_MEMORY_UTILIZATION: "0.8"
+      STARTUP_TIMEOUT_SECONDS: "3600"
+      EXTRA_SERVE_FLAGS: >-
+        --trust-remote-code
+        --no-async-scheduling
+        --load-format=runai_streamer
+        --no-enable-prefix-caching
+        --max-num-batched-tokens 2048
+        --additional-config
+        {"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}
+      PROBE_EXTRA_FLAGS: "--allow-incoherent"
     agents:
       queue: tpu_v7x_8_queue
     commands:
-      - .buildkite/scripts/run_disagg.sh
-
-  # -----------------------------------------------------------------
-  # Demo 4: Ray-based multi-host inference
-  # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
-  # Requires a 16-chip queue (tpu_v7x_16_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
-    env:
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_16_queue
-    commands:
-      - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-        .buildkite/scripts/run_multihost.sh \
-          "vllm serve \${MODEL} \
-            --port 8000 \
-            --tensor-parallel-size 16 \
-            --trust-remote-code \
-            --max-model-len 1024 \
-            --no-async-scheduling \
-            --load-format=runai_streamer \
-            --no-enable-prefix-caching" \
-          "curl http://localhost:8000/v1/completions \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/run_serving_probe.sh
