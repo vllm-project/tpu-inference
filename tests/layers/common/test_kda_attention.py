@@ -87,7 +87,8 @@ def _run(x,
          n_seqs=1,
          lens=None,
          decode=False,
-         has_init=False):
+         has_init=False,
+         mesh=None):
     lens = lens or [x.shape[0]]
     qsl = jnp.asarray(np.cumsum([0] + lens).astype(np.int32))
     dist = (jnp.array([n_seqs, n_seqs, n_seqs], jnp.int32)
@@ -105,7 +106,8 @@ def _run(x,
                          head_dim=D,
                          kernel_size=W,
                          gate_lower_bound=lower_bound,
-                         rms_norm_eps=EPS)
+                         rms_norm_eps=EPS,
+                         mesh=mesh)
 
 
 def _maxerr(a, b):
@@ -244,3 +246,93 @@ def test_mixed_batch_equals_separate(variant):
     print(f"[observed] {variant} mixed-vs-separate out={err_o:.3e} "
           f"S={err_s:.3e}")
     assert err_o < 5e-5 and err_s < 5e-5
+
+
+def _head_mesh(head_ways):
+    """A mesh whose only nontrivial axis is one of the ATTN_HEAD axes."""
+    import jax
+    from jax.sharding import Mesh
+
+    from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+    if len(jax.devices()) < head_ways:
+        pytest.skip(f"needs >= {head_ways} devices")
+    shape = tuple(head_ways if n == "model" else 1 for n in MESH_AXIS_NAMES)
+    return Mesh(np.array(jax.devices()[:head_ways]).reshape(shape),
+                axis_names=MESH_AXIS_NAMES)
+
+
+@pytest.mark.parametrize("variant", list(CKPTS))
+@pytest.mark.parametrize("decode", [False, True])
+def test_head_sharding_matches_the_unsharded_layer(variant, decode):
+    """Splitting the head axis must not change the answer.
+
+    KDA is head-parallel -- convs are per channel, the gate is per
+    (head, channel), and the recurrent scan keeps one independent state per
+    head -- so sharding heads should be exactly equivalent, not merely close.
+    Both legs use the same weights and the same inputs; the only difference is
+    that one runs the state-carrying core inside a `shard_map` that splits the
+    head axis. Outputs *and* the written-back caches are compared, because a
+    head-axis mix-up shows up in the state before it shows up in the output.
+    """
+    import jax
+    ckpt = CKPTS[variant]
+    if not ckpt:
+        pytest.skip("checkpoint env var unset")
+    params, lb = _load(ckpt, KDA_LAYERS[0])
+
+    rng = np.random.default_rng(0)
+    T = 8 if decode else 32
+    n_seqs = T if decode else 1
+    x = rng.standard_normal((T, params.q_proj.shape[1])).astype(np.float32)
+    lens = [1] * n_seqs if decode else [T]
+
+    ref_state, ref_out = _run(x,
+                              params,
+                              lb,
+                              _zero_state(slots=n_seqs + 1),
+                              n_seqs=n_seqs,
+                              lens=lens,
+                              decode=decode)
+    mesh = _head_mesh(4)
+    assert H % 4 == 0, "test needs the head count to divide the head ways"
+    with jax.set_mesh(mesh):
+        got_state, got_out = _run(x,
+                                  params,
+                                  lb,
+                                  _zero_state(slots=n_seqs + 1),
+                                  n_seqs=n_seqs,
+                                  lens=lens,
+                                  decode=decode,
+                                  mesh=mesh)
+
+    assert float(np.abs(np.asarray(ref_out)).max()) > 0, (
+        "reference output is all zeros; the comparison would be vacuous")
+    np.testing.assert_allclose(np.asarray(got_out),
+                               np.asarray(ref_out),
+                               rtol=2e-5,
+                               atol=2e-5)
+    for name in ("recurrent", "conv_q", "conv_k", "conv_v"):
+        np.testing.assert_allclose(np.asarray(getattr(got_state, name)),
+                                   np.asarray(getattr(ref_state, name)),
+                                   rtol=2e-5,
+                                   atol=2e-5,
+                                   err_msg=f"{name} differs when heads split")
+
+
+def test_head_sharding_refuses_to_tear_a_head():
+    """`num_heads * head_dim` can divide when `num_heads` does not, so the
+    head count is checked explicitly. `shard_map` would also reject this mesh
+    (via `A_log`, which is shaped `[num_heads]`), but only at the first
+    forward and with a message listing several arguments; this fails early
+    and names the head count."""
+    ckpt = CKPTS["sigmoid_fullrank"]
+    if not ckpt:
+        pytest.skip("checkpoint env var unset")
+    params, lb = _load(ckpt, KDA_LAYERS[0])
+    assert (H * D) % 16 == 0 and H % 16 != 0, "premise of this test"
+    with pytest.raises(ValueError, match="do not divide"):
+        _run(np.zeros((4, params.q_proj.shape[1]), np.float32),
+             params,
+             lb,
+             _zero_state(),
+             mesh=_head_mesh(16))
