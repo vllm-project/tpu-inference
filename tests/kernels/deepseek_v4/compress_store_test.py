@@ -465,6 +465,39 @@ class CompressStoreTest(jtu.JaxTestCase):
             self.skipTest("skip csa_decode_batch_large on TPUv6e")
         self.run_compress_store_correctness(**cfg)
 
+    def test_compress_store_production_scale_block_table(self):
+        """Regression test for b/541619368 (SMEM overflow).
+
+        A [64, 4608] int32 block table — the nightly DeepSeek-V4-Flash MMLU
+        engine shape (max_num_seqs=64, max_model_len=9216,
+        state_block_size=2) — is 1.125 MiB, over the 1 MiB scoped-SMEM
+        budget. A kernel that prefetches the full table (as before the
+        per-token window-page gather) fails to compile here with
+        RESOURCE_EXHAUSTED; the gathered form must stay bounded by the
+        token count. The case also pins the request axis of the gather:
+        all tokens map to request row 37 and every other row points at
+        page 0, so indexing the wrong row breaks output parity.
+        """
+        num_reqs, max_blocks, req_idx = 64, 4608, 37
+        num_tokens = 8
+        block_table = np.zeros((num_reqs, max_blocks), dtype=np.int32)
+        # Identity mapping on the real row; entries past the pages the test
+        # actually allocates are never dereferenced by valid positions.
+        block_table[req_idx, :] = np.arange(max_blocks, dtype=np.int32)
+        self.run_compress_store_correctness(
+            num_tokens=num_tokens,
+            head_dim=512,
+            rope_head_dim=64,
+            compress_ratio=4,
+            overlap=True,
+            physical_page_size=256,
+            hidden_size=4096,
+            token_to_req_indices=np.full((num_tokens, ),
+                                         req_idx,
+                                         dtype=np.int32),
+            block_table=block_table,
+        )
+
     def test_derive_aliases(self):
         # HCA: has_rope=True, has_rope_cache=False, num_scalar_prefetch=5
         self.assertEqual(

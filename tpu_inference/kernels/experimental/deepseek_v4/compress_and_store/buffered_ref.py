@@ -102,14 +102,11 @@ class PageBufferRef(_BufferedRef):
 
         (
             state_cache_ref,
-            positions_ref,
-            block_table_ref,
-            token_to_req_indices_ref,
+            token_window_pages_ref,
         ) = src_ref
 
         tile_n = self.cfgs.tile_sizes.tile_n
         pages_to_buffer_per_token = self.cfgs.pages_to_buffer_per_token
-        block_size = self.cfgs.state_block_size
 
         page_buffer_ref = self.window_ref.at[slot]
         global_idx = pid * tile_n
@@ -118,15 +115,16 @@ class PageBufferRef(_BufferedRef):
         def loop_body(idx):
             n = idx // pages_to_buffer_per_token
             p = idx % pages_to_buffer_per_token
-            idx_n = global_idx + n
+            # Clamp for the final partial tile (same convention as
+            # gather_from_page_buffer); bounds checks are disabled, so an
+            # unclamped read would fetch a garbage page number.
+            idx_n = jnp.minimum(global_idx + n, self.cfgs.dims.size_n - 1)
 
-            position = positions_ref[idx_n]
-            req_idx = token_to_req_indices_ref[idx_n]
-
-            block_idx = position // block_size - (pages_to_buffer_per_token -
-                                                  1) + p
-            safe_block_idx = jnp.maximum(block_idx, 0)
-            page = block_table_ref[req_idx, safe_block_idx]
+            # Page numbers for each token's window are gathered outside the
+            # kernel (see compress_norm_rope_store) so only the
+            # [num_tokens, pages_to_buffer_per_token] slice is prefetched
+            # into SMEM instead of the full block table (b/541619368).
+            page = token_window_pages_ref[idx_n, p]
 
             src = state_cache_ref.at[page, :, :, :]
             dest = page_buffer_ref.at[n, p, :, :, :]
@@ -412,8 +410,7 @@ def create_allocs_and_specs(
     rope_cache_ref,
     cos_sin_cache_ref,
     positions_ref,
-    block_table_ref,
-    token_to_req_indices_ref,
+    token_window_pages_ref,
     kv_slot_mapping_ref,
     is_first_mask_ref,
     is_first_mask_rope_ref,
@@ -487,9 +484,7 @@ def create_allocs_and_specs(
     )
     page_buffer_args = (
         cache_ref,
-        positions_ref,
-        block_table_ref,
-        token_to_req_indices_ref,
+        token_window_pages_ref,
     )
 
     # rope

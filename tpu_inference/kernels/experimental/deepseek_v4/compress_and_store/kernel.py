@@ -180,9 +180,8 @@ def inner_kernel(
 
 def kernel_fn(
     # prefetched inputs (scalar)
-    block_table_ref,
+    token_window_pages_ref,
     positions_ref,
-    token_to_req_indices_ref,
     kv_slot_mapping_ref,
     is_first_mask_ref,
     is_first_mask_rope_ref,
@@ -207,8 +206,7 @@ def kernel_fn(
         rope_cache_ref=rope_cache_ref,
         cos_sin_cache_ref=cos_sin_cache_ref,
         positions_ref=positions_ref,
-        block_table_ref=block_table_ref,
-        token_to_req_indices_ref=token_to_req_indices_ref,
+        token_window_pages_ref=token_window_pages_ref,
         kv_slot_mapping_ref=kv_slot_mapping_ref,
         is_first_mask_ref=is_first_mask_ref,
         is_first_mask_rope_ref=is_first_mask_rope_ref,
@@ -362,13 +360,33 @@ def compress_norm_rope_store(
         # TODO: this is confusing, should probably find a better name for it
         pack_factor=cfgs.hbm_pack,
     )
+    # Per token, gather the page numbers covering its compression window
+    # (the exact lookups PageBufferRef.copy_in used to do against the full
+    # block table). Prefetching this [num_tokens, pages_to_buffer_per_token]
+    # gather keeps the SMEM operand bounded by the scheduled-token count;
+    # prefetching the whole [num_reqs, max_blocks] block table scales with
+    # num_reqs * max_model_len / state_block_size and overflows the 1 MiB
+    # scoped-SMEM budget at production shapes (b/541619368: 64 reqs x 4608
+    # blocks = 1.125 MiB at max_model_len=9216, state_block_size=2).
+    # The gathered form still has a ceiling: at ~(P + 4) int32s per token the
+    # 1 MiB budget is reached again around ~13K scheduled tokens for CSA
+    # (P=5) - revisit before raising max_num_batched_tokens that far.
+    pages_per_token = cfgs.pages_to_buffer_per_token
+    base_block = positions // cfgs.state_block_size
+    block_offsets = jnp.arange(pages_per_token) - (pages_per_token - 1)
+    block_indices = jnp.maximum(base_block[:, None] + block_offsets[None, :],
+                                0)
+    token_window_pages = block_table[token_to_req_indices[:, None],
+                                     block_indices]
+
     # Outer pallas_call operands, in call order. Optional operands are passed as
     # None to keep kernel_fn's argument positions fixed; pallas drops the Nones
     # when indexing, so alias indices count only the operands actually present.
+    # token_to_req_indices is consumed by the gather above and is not needed
+    # inside the kernel.
     scalar_prefetch = (
-        block_table,
+        token_window_pages,
         positions,
-        token_to_req_indices,
         kv_slot_mapping,
         is_first_mask,
         is_first_mask_rope,
