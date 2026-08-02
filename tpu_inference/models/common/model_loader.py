@@ -41,6 +41,8 @@ from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
     update_vllm_config_for_qwix_quantization)
+from tpu_inference.models.jax.utils.sharded_stream import \
+    maybe_load_with_sharded_expert_streaming
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
                                                          LoadableWithIterator)
 from tpu_inference.runner.mm_encoder_jit_manager import \
@@ -287,7 +289,13 @@ def _get_nnx_model(
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
-                loader.load_weights(model, model_config)
+                # Opt-in (K3_SHARDED_EXPERT_STREAMING=1): stream only the
+                # routed-expert tensors this host's devices keep instead of
+                # the whole checkpoint; returns False (and logs why) when it
+                # does not apply, leaving the stock path untouched.
+                if not maybe_load_with_sharded_expert_streaming(
+                        loader, model, model_config):
+                    loader.load_weights(model, model_config)
             elif isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = model_config.model
                 if hasattr(model_config, "model_weights"):
