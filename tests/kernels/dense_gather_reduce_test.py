@@ -89,17 +89,15 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
                 [10],
                 [False],
             ),
-            # Hidden sizes that are not a multiple of the 128-wide lane tile.
-            # gpt-oss uses hidden_size=2880, for which no tile-aligned column
-            # chunk exists, so dense_gather_reduce must fall back to the JAX
-            # path instead of emitting an unaligned tpu.memref_slice that fails
-            # Mosaic verification ("Slice sizes along tiled dimensions must be
-            # aligned to tiles"). 2944 is a multiple of 128 but only admits a
-            # 128-wide chunk; both must still produce correct results.
+            # Non-128-aligned hidden sizes — gpt-oss-120b-BF16 uses K=2880.
+            # The kernel pads x to K_pad (the next multiple of col_chunk) then
+            # slices the output back to [:, :K].  Both dtypes and
+            # topk_wgt_zero_nan variants must produce correct results and must
+            # run on the SC kernel (not silently fall through to _jax_fallback).
             itertools.product(
                 [32768],
-                [2880, 2944],
-                [jnp.bfloat16],
+                [2880, 2944, 2816, 3000],
+                [jnp.bfloat16, jnp.float32],
                 [4],
                 [False, True],
             ),
@@ -212,6 +210,49 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
         )
         self.assertTrue(jnp.isnan(actual_with_nan).any())
 
+    @parameterized.named_parameters(
+        ("k2880_bf16", 2880, jnp.bfloat16),
+        ("k3000_bf16", 3000, jnp.bfloat16),
+        ("k2944_bf16", 2944, jnp.bfloat16),
+        ("k2816_bf16", 2816, jnp.bfloat16),
+        ("k2880_f32", 2880, jnp.float32),
+    )
+    def test_sc_path_taken_for_arbitrary_hidden_size(self, hidden_size, dtype):
+        """SC kernel is used (not _jax_fallback) for these hidden sizes.
+
+        Uses out_size=65536 (not in _test_cases, so the JIT cache is cold) and
+        monkeypatches _jax_fallback to raise under NORMAL JIT (no disable_jit
+        — Pallas kernels require JIT and crash under disable_jit). A re-traced
+        call that routes to _jax_fallback would raise AssertionError, proving
+        the SC kernel is always selected for compatible inputs.
+        """
+        # out_size=65536 is a multiple of row_wave_size=32768 and is NOT used
+        # in _test_cases, so dense_gather_reduce re-traces for this shape.
+        out_size = 65536
+        reduce_group_size = 4
+        key = jax.random.key(0)
+        x = jax.random.normal(key, (out_size, hidden_size),
+                              jnp.float32).astype(dtype)
+        indices = jax.random.permutation(key, out_size)
+        topk_weights = jax.random.normal(
+            key, (out_size // reduce_group_size, reduce_group_size),
+            jnp.bfloat16)
+
+        orig = dgr_mod._jax_fallback
+        dgr_mod._jax_fallback = lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError(
+                f"_jax_fallback called for hidden_size={hidden_size}; "
+                "expected SC kernel path (is_compatible should be True)"))
+        try:
+            actual = dense_gather_reduce(x, indices, topk_weights,
+                                         reduce_group_size)
+        finally:
+            dgr_mod._jax_fallback = orig
+
+        desired = reference_dense_gather_reduce(x, indices, topk_weights,
+                                                reduce_group_size)
+        np.testing.assert_allclose(actual, desired, atol=1e-2, rtol=1e-2)
+
     def test_debug_layout(self):
         out_size = 520
         hidden_size = 8192
@@ -280,6 +321,64 @@ class IsCompatibleTest(parameterized.TestCase):
             self.assertEqual(
                 is_compatible(op, idx, reduce_group_size=reduce_group_size),
                 expected)
+
+
+class ColChunkComputationTest(parameterized.TestCase):
+    """Hardware-independent tests for the _choose_col_chunk policy.
+
+    Exercises the production _choose_col_chunk() directly (no TPU needed) over
+    representative model hidden sizes and structural invariants. The 128-aligned
+    cases pin the pre-change behavior (same col_chunk, K_pad == K, no padding) so
+    a future policy edit that regresses an existing model fails here; the
+    non-128-aligned cases pin the new padded fast path (e.g. gpt-oss K=2880).
+    """
+
+    # (K, expected_col_chunk, expected_K_pad).
+    # 128-aligned K: OLD while-loop col_chunk, K_pad == K (zero padding).
+    # Non-128-aligned K: new align_to/cdiv policy, K_pad > K.
+    _cases = [
+        (128, 128, 128),  # 128-aligned, unchanged
+        (512, 512, 512),  # 128-aligned, unchanged
+        (2816, 1408, 2816),  # 128-aligned, unchanged (while-loop: 1408)
+        (2944, 128, 2944),  # 128-aligned, unchanged (while-loop: 128)
+        (3072, 1536, 3072),  # 128-aligned, unchanged
+        (4096, 2048, 4096),  # 128-aligned, unchanged
+        (5120, 1280, 5120),  # 128-aligned, unchanged (while-loop: 1280)
+        (6144, 2048, 6144),  # 128-aligned, unchanged
+        (7168, 1792, 7168),  # 128-aligned, unchanged
+        (8192, 2048, 8192),  # 128-aligned, unchanged
+        (11008, 256, 11008),  # 128-aligned, unchanged (while-loop: 256)
+        (13824, 1536, 13824),  # 128-aligned, unchanged (while-loop: 1536)
+        (2880, 1536, 3072),  # non-128-aligned: pad 192 — gpt-oss-120b-BF16
+        (3000, 1536, 3072),  # non-128-aligned: pad 72
+    ]
+
+    @parameterized.named_parameters(
+        (f"k{K}", K, cc, kp) for K, cc, kp in _cases)
+    def test_col_chunk_policy(self, K, expected_col_chunk, expected_K_pad):
+        col_chunk, K_pad = dgr_mod._choose_col_chunk(K)
+        self.assertEqual(
+            col_chunk, expected_col_chunk,
+            f"K={K}: col_chunk={col_chunk}, want {expected_col_chunk}")
+        self.assertEqual(K_pad, expected_K_pad,
+                         f"K={K}: K_pad={K_pad}, want {expected_K_pad}")
+
+    def test_invariants_for_all_k(self):
+        """Structural invariants hold for all K in 1..16384."""
+        for K in range(1, 16385):
+            col_chunk, K_pad = dgr_mod._choose_col_chunk(K)
+            self.assertGreaterEqual(K_pad, K, f"K={K}: K_pad={K_pad} < K")
+            self.assertEqual(col_chunk % 128, 0,
+                             f"K={K}: col_chunk={col_chunk} not 128-aligned")
+            self.assertEqual(
+                K_pad % col_chunk, 0,
+                f"K={K}: K_pad={K_pad} not divisible by col_chunk={col_chunk}")
+            self.assertGreater(col_chunk, 0,
+                               f"K={K}: col_chunk=0 (no valid chunk found)")
+            # For 128-aligned K, the surgical fix guarantees K_pad == K.
+            if K % 128 == 0:
+                self.assertEqual(
+                    K_pad, K, f"K={K} is 128-aligned but K_pad={K_pad} != K")
 
 
 if __name__ == "__main__":
