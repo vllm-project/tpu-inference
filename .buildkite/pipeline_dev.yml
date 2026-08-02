@@ -51,7 +51,7 @@ steps:
   # attention off BATCH = data x attn_dp x attn_dp_expert = 1, so both
   # the attention KV pool AND the attention activations replicate per
   # device instead of splitting:
-  #   * --num-gpu-blocks-override 512 -- the pool. K3's MLA latent KV is
+  #   * --num-gpu-blocks-override 64 -- the pool. K3's MLA latent KV is
   #     ~3.93 MB/page over 24 layers, so 512 blocks is ~2 GB/device.
   #   * --max-num-batched-tokens 512 -- the program. Builds 741/742 died
   #     on compiled-program size (58.89 GiB and 96.07 G) with tiny weight
@@ -98,7 +98,7 @@ steps:
             --max-model-len 2048 \
             --max-num-seqs 8 \
             --max-num-batched-tokens 512 \
-            --num-gpu-blocks-override 512 \
+            --num-gpu-blocks-override 64 \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
