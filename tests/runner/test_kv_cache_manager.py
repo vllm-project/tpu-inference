@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -1196,12 +1197,16 @@ class TestKVCacheManager:
 
         # Mamba is capped at max_num_reqs + 1 (the +1 is the null block).
         assert manager._mamba_num_blocks == max_num_reqs + 1
-        # Attention pool is sized to fill the remaining per-tensor budget.
-        # group_size=15 ⇒ avail_per_tensor = 304 GiB / 15.
+        # Attention pool is sized to fill the remaining per-tensor budget,
+        # after the warmup reserve is taken off the top.
+        # avail = 304 GiB − warmup reserve.
+        # group_size=15 ⇒ avail_per_tensor = avail / 15.
         # mamba_per_tensor = 3 × 257 × 4 MiB.
         # attn_per_tensor = avail_per_tensor − mamba_per_tensor.
         # N_attn = attn_per_tensor / (1 × 1 MiB), divisor=1.
-        avail_per_tensor = (304 * 2**30) // 15
+        total_avail = 304 * 2**30
+        total_avail -= manager._warmup_reserve_bytes(total_avail)
+        avail_per_tensor = total_avail // 15
         expected_attn = (avail_per_tensor - 3 *
                          (max_num_reqs + 1) * unpadded_mamba) // attn_page
         assert (
@@ -1255,6 +1260,210 @@ class TestKVCacheManager:
         # `initialize_kv_cache` allocates the uniform `num_blocks`.
         assert manager._mamba_num_blocks is None
         assert self.runner.cache_config.num_gpu_blocks_override == 999
+
+    def _allocated_pool_bytes(self, manager, *, attn_page, unpadded_mamba,
+                              num_attn_groups, num_mamba_groups, group_size):
+        """Bytes the sized pool actually allocates across the whole mesh.
+
+        `initialize_kv_cache` allocates, for each of the `group_size`
+        kv-cache tensors, `num_attn_groups` attention arrays of
+        `num_gpu_blocks_override` blocks and `num_mamba_groups` mamba arrays
+        of `_mamba_num_blocks` slots. That product is what has to leave room
+        for the compiled program.
+        """
+        attn_blocks = self.runner.cache_config.num_gpu_blocks_override
+        mamba_blocks = manager._mamba_num_blocks
+        assert attn_blocks is not None and mamba_blocks is not None
+        return group_size * (num_attn_groups * attn_blocks * attn_page +
+                             num_mamba_groups * mamba_blocks * unpadded_mamba)
+
+    @pytest.mark.parametrize(
+        "spec_name,num_attn_groups,num_mamba_groups,group_size",
+        [
+            # Hybrid, Qwen3.5-shaped: 15 attn + 45 mamba layers, so vLLM
+            # splits mamba into 3 groups against 1 attention group.
+            ("hybrid", 1, 3, 15),
+            # Uniform page size: equal layer counts put every layer in one
+            # group each, so a kv-cache tensor is one attn + one mamba layer.
+            ("uniform", 1, 1, 24),
+        ])
+    def test_compact_mamba_override_leaves_warmup_headroom(
+            self, spec_name, num_attn_groups, num_mamba_groups, group_size):
+        """The pool must not spend the whole post-weight HBM budget.
+
+        Sizing runs before `capture_model` compiles anything, so whatever the
+        pool does not take is all the compiled program has to work with. This
+        asserts the reserve survives the split for both group layouts: the
+        floor-division that turns a byte budget into whole blocks can only
+        shrink the pool further, never grow it past the reserve.
+        """
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False  # divisor is computed from ATTN_DATA.
+
+        num_devices = 4
+        limit_per_device = 304 * (2**30) // num_devices
+        total_limit = limit_per_device * num_devices
+        attn_page = 2**20
+        unpadded_mamba = 4 * (2**20)
+        max_num_reqs = 256
+        util = 0.9
+
+        self.runner.cache_config.gpu_memory_utilization = util
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        # Weights already resident, as they are at the real call site.
+        used_per_device = limit_per_device // 4
+        post_weight_budget = int(total_limit * util -
+                                 used_per_device * num_devices)
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(used_per_device, limit_per_device)] *
+                num_devices):
+            self._run_compact_mamba_override(
+                manager,
+                attn_page=attn_page,
+                unpadded_mamba=unpadded_mamba,
+                num_attn_groups=num_attn_groups,
+                num_mamba_groups=num_mamba_groups,
+                num_attn_layers=group_size * num_attn_groups,
+                num_mamba_layers=group_size * num_mamba_groups,
+                group_size=group_size)
+
+        allocated = self._allocated_pool_bytes(
+            manager,
+            attn_page=attn_page,
+            unpadded_mamba=unpadded_mamba,
+            num_attn_groups=num_attn_groups,
+            num_mamba_groups=num_mamba_groups,
+            group_size=group_size)
+        headroom = post_weight_budget - allocated
+        expected_reserve = manager._warmup_reserve_bytes(post_weight_budget)
+
+        assert expected_reserve > 0, (
+            "test is vacuous with a zero reserve fraction")
+        assert headroom >= expected_reserve, (
+            f"[{spec_name}] pool took {allocated} B of a "
+            f"{post_weight_budget} B post-weight budget, leaving "
+            f"{headroom} B — less than the {expected_reserve} B warmup "
+            "reserve")
+        # And the pool is still the overwhelming majority of the budget: a
+        # reserve that starved the cache would also pass the check above.
+        assert allocated > 0.5 * post_weight_budget, (
+            f"[{spec_name}] pool shrank to {allocated} B, under half of the "
+            f"{post_weight_budget} B budget — the reserve is too aggressive")
+
+    def test_compact_mamba_override_spends_everything_without_reserve(self):
+        """Anti-vacuity for `..._leaves_warmup_headroom`.
+
+        With `KV_CACHE_WARMUP_RESERVE_FRACTION=0` the pool goes back to
+        consuming essentially all of `avail` — under 0.01% left over, which
+        is the behaviour that made warmup OOM. Any reserve large enough to
+        matter has to fail this assertion, so the headroom test above cannot
+        pass by accident.
+        """
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        num_devices = 4
+        limit_per_device = 304 * (2**30) // num_devices
+        total_limit = limit_per_device * num_devices
+        attn_page = 2**20
+        unpadded_mamba = 4 * (2**20)
+        max_num_reqs = 256
+        util = 0.9
+        num_attn_groups, num_mamba_groups, group_size = 1, 3, 15
+
+        self.runner.cache_config.gpu_memory_utilization = util
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        used_per_device = limit_per_device // 4
+        post_weight_budget = int(total_limit * util -
+                                 used_per_device * num_devices)
+
+        with patch.dict(os.environ,
+                        {"KV_CACHE_WARMUP_RESERVE_FRACTION": "0"}), \
+             patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(used_per_device, limit_per_device)] *
+                num_devices):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba,
+                                             num_attn_groups=num_attn_groups,
+                                             num_mamba_groups=num_mamba_groups,
+                                             num_attn_layers=group_size,
+                                             num_mamba_layers=group_size *
+                                             num_mamba_groups,
+                                             group_size=group_size)
+
+        allocated = self._allocated_pool_bytes(
+            manager,
+            attn_page=attn_page,
+            unpadded_mamba=unpadded_mamba,
+            num_attn_groups=num_attn_groups,
+            num_mamba_groups=num_mamba_groups,
+            group_size=group_size)
+        headroom = post_weight_budget - allocated
+        assert 0 <= headroom < post_weight_budget * 1e-4, (
+            f"expected the unreserved pool to spend ~all {post_weight_budget}"
+            f" B, but it left {headroom} B")
+
+    def test_warmup_reserve_fraction_rejects_out_of_range_values(self):
+        """A fraction of 1.0 or more would leave the pool nothing, and a
+        negative one would grow it past `gpu_memory_utilization`. Both are
+        configuration errors worth naming at startup rather than surfacing
+        as a mystery OOM or a zero-block pool."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+
+        for bad in ("-0.1", "1.0", "2.5"):
+            with patch.dict(os.environ,
+                            {"KV_CACHE_WARMUP_RESERVE_FRACTION": bad}):
+                with pytest.raises(ValueError,
+                                   match="KV_CACHE_WARMUP_RESERVE_FRACTION"):
+                    manager._warmup_reserve_bytes(1 << 30)
+
+    def test_warmup_reserve_not_applied_to_uniform_attention_model(self):
+        """Non-hybrid models must be untouched by the reserve.
+
+        `_maybe_set_compact_mamba_num_blocks_override` is only reached from
+        `install_hybrid_page_size_padding`, which only runs for models that
+        have recurrent layers. An attention-only model therefore keeps
+        vLLM's own pool sizing (driven by
+        `TPUWorker.determine_available_memory`), and its pool is exactly as
+        large as it was before the reserve existed.
+        """
+        mock_attn = MagicMock(spec=Attention)
+        mock_attn.attn_type = AttentionType.DECODER
+        mock_attn.num_kv_heads = 8
+        mock_attn.head_size = 128
+        mock_attn.sliding_window = None
+        mock_attn.kv_sharing_target_layer_name = None
+        layers = {f'layer.{i}': mock_attn for i in range(4)}
+
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_page_size_padded = None
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                return_value=layers), \
+             patch.object(
+                self.runner.kv_cache_manager,
+                '_maybe_set_compact_mamba_num_blocks_override') as mock_compact:
+            self.runner.get_kv_cache_spec()
+
+        mock_compact.assert_not_called()
+        assert self.runner.cache_config.num_gpu_blocks_override is None
+        assert self.runner.kv_cache_manager._mamba_num_blocks is None
 
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)

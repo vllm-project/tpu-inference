@@ -376,6 +376,77 @@ class KVCacheManager:
             attn_page_size_bytes, int(unpadded_mamba_page_size),
             num_attn_groups, num_mamba_groups, num_attn, num_mamba, group_size)
 
+    def _warmup_reserve_bytes(self, avail: int) -> int:
+        """HBM to hold back from the KV cache pool for the compiled program.
+
+        `avail` is `gpu_memory_utilization × total_hbm − currently_used`, and
+        `currently_used` at this point is the model weights and nothing else:
+        the KV pool is sized *before* `capture_model` compiles and runs a
+        single shape. So without a reserve the pool takes every byte of
+        `avail`, resident lands at exactly `gpu_memory_utilization × HBM`,
+        and every compiled program — activations, kernel scratch, and the
+        buffers XLA assigns for the KV cache round-trip — has to fit in the
+        `(1 − gpu_memory_utilization)` slice. That slice is a fraction of
+        *total* HBM and tracks nothing about the model, so whether warmup
+        fits is incidental. When it doesn't, the failure is
+        `RESOURCE_EXHAUSTED: ... total memory required for HLO temporaries
+        (X) exceeds available HBM (Y)` from inside `capture_model`, long
+        after sizing, and the only workaround is to hand-tune
+        `--num-gpu-blocks-override` or lower `--gpu-memory-utilization`.
+
+        This is a heuristic, and it is a heuristic on purpose. The exact
+        figure is `compiled.memory_analysis().temp_size_in_bytes` — logged
+        per shape by `compilation_manager._log_executable_memory` — and it is
+        only knowable after compiling the program, which happens after the
+        KV cache the program consumes has already been allocated. Deriving it
+        up front from layer shapes would mean reimplementing XLA buffer
+        assignment.
+
+        What the measurements say, so the number below is not mistaken for
+        an estimate of anything:
+
+        * A healthy hybrid model's temporaries are negligible. Measured on a
+          32-layer attention+linear-attention model on 8 v7x devices, the
+          backbone wanted 0.28-0.34 GiB/device across every precompiled token
+          bucket from 16 to 2048, against ~19 GiB/device of free HBM. There,
+          the pool taking all of `avail` is harmless and this reserve is pure
+          cost.
+        * The failure mode it guards against is two orders of magnitude
+          bigger, and it scales with the pool rather than with the model: one
+          hybrid MLA configuration reported 100.50 GiB/device of temporaries
+          — roughly twice its 50.51 GiB/device pool, and more than the whole
+          94.74 GiB device — while an otherwise identical run with a
+          31.57 GiB/device pool compiled and served. Something there costs
+          about two copies of the pool. A KV round-trip that XLA could not
+          alias in place would explain the factor, and the log line above
+          reports `out` and `alias` so a diverging pair would show it, but
+          that has not been confirmed on the model in question: its
+          `model_fn` is not a top-level jit, so it is compiled inside warmup
+          rather than AOT and produces no `memory_analysis`. Treat the
+          mechanism as unexplained and the ratio as the measured fact.
+
+        So the reserve is a fraction of `avail` rather than a fixed byte
+        count: the demand it protects against is proportional to the pool, so
+        the protection has to be too. It also degrades gracefully — when
+        weights already fill the device, `avail` is small, the pool is small,
+        and so is the reserve.
+
+        `gpu_memory_utilization` keeps its meaning as the cap on total
+        resident HBM. This reserve sits underneath it, so raising utilization
+        no longer eats the program's working space one-for-one.
+
+        Override with `KV_CACHE_WARMUP_RESERVE_FRACTION` (0 restores the
+        previous take-everything behaviour).
+        """
+        fraction = tpu_envs.KV_CACHE_WARMUP_RESERVE_FRACTION
+        if not 0.0 <= fraction < 1.0:
+            raise ValueError(
+                "[kv-cache] KV_CACHE_WARMUP_RESERVE_FRACTION must be in "
+                f"[0.0, 1.0), got {fraction}. It is the fraction of "
+                "post-weight HBM withheld from the KV cache pool for "
+                "compilation/warmup temporaries.")
+        return int(avail * fraction)
+
     def _maybe_set_compact_mamba_num_blocks_override(
             self, attn_page_size_bytes: int,
             unpadded_mamba_page_size_bytes: int, num_attn_groups: int,
@@ -404,10 +475,12 @@ class KVCacheManager:
 
         Sizing math
         -----------
-        Each kv-cache tensor is shared across `num_attn_groups +
-        num_mamba_groups` layers; there are `group_size` such tensors.
-        Per-tensor budget `B = avail / group_size`. With
-        `N_mamba = max_num_reqs + 1`,
+        `avail` first gives up a warmup reserve (see
+        `_warmup_reserve_bytes`) so the pool cannot take the HBM the
+        compiled program needs for its temporaries. Each kv-cache tensor is
+        shared across `num_attn_groups + num_mamba_groups` layers; there are
+        `group_size` such tensors. Per-tensor budget `B = avail /
+        group_size`. With `N_mamba = max_num_reqs + 1`,
             N_attn = floor((B − num_mamba_groups × N_mamba × mamba_unpadded)
                             / (num_attn_groups × attn_page))
         rounded down to the sharding divisor.
@@ -449,6 +522,19 @@ class KVCacheManager:
         gpu_mem_util = cache_config.gpu_memory_utilization
         avail = int(total_limit * gpu_mem_util - total_used)
         if avail <= 0:
+            return
+
+        # Hold back room for compilation/warmup temporaries before splitting
+        # the rest between mamba and attention. See `_warmup_reserve_bytes`.
+        warmup_reserve = self._warmup_reserve_bytes(avail)
+        avail -= warmup_reserve
+        if avail <= 0:
+            logger.warning(
+                "[kv-cache] Compact-mamba sizing skipped: the warmup reserve "
+                "(%.2f GiB) consumed the whole post-weight budget. Raise "
+                "`gpu_memory_utilization` or lower "
+                "`KV_CACHE_WARMUP_RESERVE_FRACTION`.",
+                warmup_reserve / (2**30))
             return
 
         # Sharding divisor: per-layer num_blocks must be a multiple of the
@@ -529,12 +615,14 @@ class KVCacheManager:
             "Compact-mamba KV cache: num_gpu_blocks_override=%d (attn), "
             "_mamba_num_blocks=%d. HBM split: attn=%d layers × %d blocks "
             "× %d B = %.2f GiB; mamba=%d layers × %d slots × %d B = "
-            "%.2f GiB; total=%.2f GiB / avail=%.2f GiB.", attn_num_blocks,
-            mamba_num_blocks, num_attn_layers, attn_num_blocks,
-            attn_page_size_bytes, attn_bytes / (2**30), num_mamba_layers,
-            mamba_num_blocks, unpadded_mamba_page_size_bytes,
+            "%.2f GiB; total=%.2f GiB / avail=%.2f GiB "
+            "(warmup reserve %.2f GiB withheld from %.2f GiB post-weight "
+            "budget).", attn_num_blocks, mamba_num_blocks, num_attn_layers,
+            attn_num_blocks, attn_page_size_bytes, attn_bytes / (2**30),
+            num_mamba_layers, mamba_num_blocks, unpadded_mamba_page_size_bytes,
             mamba_bytes / (2**30), (attn_bytes + mamba_bytes) / (2**30),
-            avail / (2**30))
+            avail / (2**30), warmup_reserve / (2**30),
+            (avail + warmup_reserve) / (2**30))
 
     def get_kv_cache_spec(self):
         # TODO(xiang): this hack tricks engine core to init successfully

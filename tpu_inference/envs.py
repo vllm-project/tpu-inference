@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     SLICE_ROPE_CACHE: bool = False
     MIN_TOKEN_BUCKET: int = 16
+    KV_CACHE_WARMUP_RESERVE_FRACTION: float = 0.25
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -446,6 +447,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Minimum max num of batched tokens.
     "MIN_TOKEN_BUCKET":
     lambda: int(os.getenv("MIN_TOKEN_BUCKET") or "16"),
+    # Fraction of post-weight HBM that the hybrid KV cache pool leaves free
+    # for compilation/warmup temporaries. Must be in [0.0, 1.0); 0 lets the
+    # pool consume every available byte, which is what it did before this
+    # knob existed. See `KVCacheManager._warmup_reserve_bytes`.
+    "KV_CACHE_WARMUP_RESERVE_FRACTION":
+    lambda: float(os.getenv("KV_CACHE_WARMUP_RESERVE_FRACTION") or "0.25"),
     # Route padding tokens to expert 0 instead of picking other experts, to
     # avoid activating unneeded experts and speed up the GMM kernel by not
     # loading unnecessary weights. Only applies when DP attention size is 1
