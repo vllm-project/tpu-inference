@@ -93,10 +93,10 @@ def compute_linear_attention_layout(
         model_dtype: torch.dtype) -> Optional[LinearAttentionStateLayout]:
     """Derive the recurrent-state layout, or None if the model has none.
 
-    The state is the three depthwise-conv windows (one each
-    for q/k/v, `short_conv_kernel_size - 1` positions deep) plus the
-    `[heads, head_dim, head_dim]` recurrent matrix. This mirrors
-    `KDAState` in `layers/common/kda_attention.py`.
+    The state is four buffers per layer: three depthwise-conv windows (one
+    each for q/k/v, `short_conv_kernel_size - 1` positions deep) plus the
+    `[heads, head_dim, head_dim]` recurrent matrix — exactly what the KDA op
+    reads at the start of a step and writes back at the end.
 
     The conv windows follow the model dtype; the recurrent state is always
     fp32 (it accumulates over the whole sequence). Same split vLLM applies in

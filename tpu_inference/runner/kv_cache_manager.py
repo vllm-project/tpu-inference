@@ -151,9 +151,9 @@ class KVCacheManager:
         """Bytes per block for one `shared_by` group, when every layer in it
         gets its own array.
 
-        Uses the per-layer *TPU-actual* per-block bytes so the sum equals the
-        `page_size_padded` that `install_hybrid_page_size_padding` put on
-        every spec (== attn_page + N × mamba_unpadded). For attention, the
+        Uses the per-layer *TPU-actual* per-block bytes so the sum is at most
+        the `page_size_padded` that `install_hybrid_page_size_padding` put on
+        every spec (attn_page + N × mamba_unpadded). For attention, the
         TPU-actual size includes dtype-specific packing (e.g., fp8 KV packs 4
         elements per 32-bit word) which `spec.real_page_size_bytes` doesn't
         account for — on fp8 models they differ by 2×, which would break the

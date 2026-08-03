@@ -22,8 +22,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.gdn.v3 import wrapper
-from tpu_inference.layers.common.sharding import (ShardingAxisName,
-                                                  rank_local_slot_indices)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
 
@@ -66,7 +65,10 @@ def run_jax_gdn_attention(
         j_A_log: Log of A parameter tensor of shape `(n_v,)`.
         j_dt_bias: Delta T bias tensor of shape `(n_v,)`.
         state_indices: Tensor of shape `(max_reqs,)` mapping request index to
-          state index.
+          state index. Rank-local: the runner rebases global slot ids per DP
+          rank before publishing ``AttentionMetadata.mamba_state_indices``,
+          so each id indexes directly into that rank's shard of the state
+          pool.
         query_start_loc: Tensor of shape `(num_seqs + 1,)` with start locations of
           each sequence.
         distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
@@ -127,9 +129,11 @@ def run_jax_gdn_attention(
 
     def _local(qkv, b, a, conv_state, recurrent_state, conv_weight, conv_bias,
                a_log, dt_bias, qsl, state_indices, dist, has_init):
-        # `state_indices` are global slot ids while `conv_state` /
-        # `recurrent_state` here are this rank's shard of the pool, so rebase
-        # before the kernel indexes them (identity at dp_size == 1).
+        # `state_indices` arrive already rank-local: the runner rebases the
+        # global slot ids per DP rank (`global % local_slots`, see the
+        # mamba_state_indices block in `TPURunner._prepare_inputs`) before
+        # publishing `AttentionMetadata.mamba_state_indices`, so they index
+        # this rank's shard of the state pool directly.
         return wrapper.fused_conv1d_gdn(
             qkv,
             b,
@@ -141,7 +145,7 @@ def run_jax_gdn_attention(
             a_log,
             dt_bias,
             qsl,
-            rank_local_slot_indices(state_indices, conv_state.shape[0]),
+            state_indices,
             dist,
             has_init,
             n_kq=n_kq // tp_size,

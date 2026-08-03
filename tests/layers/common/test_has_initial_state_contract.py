@@ -175,17 +175,20 @@ def test_gdn_batched_metadata_takes_the_flag_verbatim(flags):
 
 
 @pytest.mark.parametrize("flags", [[1, 0], [0, 1]])
-def test_gdn_per_seq_metadata_takes_the_flag_verbatim(flags):
+@pytest.mark.parametrize("start_seq", [0, 1])
+def test_gdn_per_seq_metadata_takes_the_flag_verbatim(flags, start_seq):
     """Same for the prefill/mixed path, which additionally rolls the flag by
-    `start_seq` so it stays aligned with the rolled sequence order."""
+    `start_seq` so it stays aligned with the rolled sequence order.
+    `start_seq=1` pins that alignment: slot 0 of the published flag must be
+    `flags[1]`, which a verbatim (unrolled) copy would get wrong."""
     num_seqs = len(flags)
     meta = metadata.compute_per_seq_metadata(
         cfg=_gdn_cfg(config.GDNMode.PER_SEQ, batch_size=8, tile_size=4),
         has_initial_state=jnp.asarray(flags, jnp.int32),
         query_start_loc=jnp.asarray([0, 4, 8], jnp.int32),
         state_indices=jnp.arange(1, num_seqs + 1, dtype=jnp.int32),
-        start_seq=jnp.int32(0),
+        start_seq=jnp.int32(start_seq),
         end_seq=jnp.int32(num_seqs),
     )
     np.testing.assert_array_equal(np.asarray(meta.s_idx_has_initial_state),
-                                  np.asarray(flags, bool))
+                                  np.roll(np.asarray(flags, bool), -start_seq))
