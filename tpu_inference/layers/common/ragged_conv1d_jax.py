@@ -293,22 +293,29 @@ def ragged_conv1d(
     is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
+        # Decode-only means one token per sequence, so only the first
+        # `state_indices.shape[0]` (slot count) tokens can be real; the rest
+        # of the bucket is padding whose output is zeroed anyway. Slicing
+        # keeps this branch's per-token state gathers ([R, kernel_size-1,
+        # dim] x several) sized by the slot count instead of the token
+        # bucket -- `lax.cond` makes the compiler budget HBM for the branch
+        # at full bucket size even when it cannot run there.
         num_tokens = x.shape[0]
-        pad_size = max(0, num_tokens - state_indices.shape[0])
-        padded_state_indices = jnp.pad(state_indices, (0, pad_size),
-                                       mode='constant',
-                                       constant_values=0)
-        return ragged_conv1d_decode_only(
-            x,
+        num_step_tokens = min(num_tokens, state_indices.shape[0])
+        out, new_conv_state = ragged_conv1d_decode_only(
+            x[:num_step_tokens],
             conv_state,
             conv_weight,
             conv_bias,
             query_start_loc,
-            padded_state_indices,
+            state_indices[:num_step_tokens],
             distribution,
             has_initial_state,
             kernel_size=kernel_size,
         )
+        if num_step_tokens < num_tokens:
+            out = jnp.pad(out, ((0, num_tokens - num_step_tokens), (0, 0)))
+        return out, new_conv_state
 
     def mixed_prefill_branch(_):
         return ragged_conv1d_mixed_prefill(

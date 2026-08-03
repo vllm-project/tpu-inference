@@ -327,3 +327,63 @@ def test_cross_impl_golden_parity(case):
                                    z[f"{case}.state_fp64"][i],
                                    atol=3e-5,
                                    rtol=3e-4)
+
+
+def test_decode_bucket_larger_than_slots_matches_exact_batch():
+    """Decode-only tokens past the slot count are padding: a bucket 8x the
+    slot count must produce the same valid outputs and state as the
+    exactly-sized batch, with zeros in the tail.
+
+    Guards the decode-branch slicing in `ragged_kda_decode_only`: the
+    per-token [R, H, K, V] state tensors are sized by the slot count, and
+    tokens past it (which can never be real requests in a decode-only batch)
+    must neither leak into outputs nor perturb the state pool.
+    """
+    rng = np.random.default_rng(7)
+    H, K, V = 4, 64, 64
+    slots, valid, bucket = 4, 3, 32
+    q, k, v, g, b = _rand_inputs(rng, slots, H, K, V)
+    A_log, dt_bias = _params(rng, H, K)
+
+    state = jnp.asarray(rng.normal(size=(slots, H, K, V)), dtype=jnp.float32)
+    state_indices = jnp.arange(slots, dtype=jnp.int32)
+    distribution = jnp.array([valid, 0, valid], dtype=jnp.int32)
+    qsl = jnp.arange(slots + 1, dtype=jnp.int32)
+
+    def pad(x, fill=7.7):
+        widths = ((0, bucket - slots), ) + ((0, 0), ) * (x.ndim - 1)
+        return jnp.pad(jnp.asarray(x), widths, constant_values=fill)
+
+    state_exact, out_exact = ragged_kda_decode_only(
+        jnp.asarray(q),
+        jnp.asarray(k),
+        jnp.asarray(v),
+        jnp.asarray(b),
+        jnp.asarray(g),
+        state,
+        jnp.asarray(A_log),
+        jnp.asarray(dt_bias),
+        qsl,
+        state_indices,
+        distribution,
+        gate_lower_bound=LOWER_BOUND)
+    state_padded, out_padded = ragged_kda_decode_only(
+        pad(q),
+        pad(k),
+        pad(v),
+        pad(b),
+        pad(g),
+        state,
+        jnp.asarray(A_log),
+        jnp.asarray(dt_bias),
+        qsl,
+        state_indices,
+        distribution,
+        gate_lower_bound=LOWER_BOUND)
+
+    assert out_padded.shape[0] == bucket
+    np.testing.assert_allclose(np.asarray(out_padded[:slots]),
+                               np.asarray(out_exact))
+    np.testing.assert_allclose(np.asarray(out_padded[slots:]), 0.0)
+    np.testing.assert_allclose(np.asarray(state_padded),
+                               np.asarray(state_exact))
