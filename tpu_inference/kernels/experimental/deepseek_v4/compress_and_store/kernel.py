@@ -192,12 +192,14 @@ def kernel_fn(
     cos_sin_cache_ref,
     cache_ref,
     rope_cache_ref,
+    state_cache_ref,
     # outputs (aliased)
     _out_cache_ref,
     _out_rope_cache_ref,
     window_scratch_ref,
     *,
     cfgs: config.Configs,
+    block_table_stride: int,
 ):
     """Pallas kernel entry point."""
     grid_size = grid_size_ref[...]
@@ -205,9 +207,11 @@ def kernel_fn(
         cfgs=cfgs,
         cache_ref=cache_ref,
         rope_cache_ref=rope_cache_ref,
+        state_cache_ref=state_cache_ref,
         cos_sin_cache_ref=cos_sin_cache_ref,
         positions_ref=positions_ref,
         block_table_ref=block_table_ref,
+        block_table_stride=block_table_stride,
         token_to_req_indices_ref=token_to_req_indices_ref,
         kv_slot_mapping_ref=kv_slot_mapping_ref,
         is_first_mask_ref=is_first_mask_ref,
@@ -287,6 +291,7 @@ def compute_is_first_mask(kv_slot_mapping, tile_n, pack_factor=4):
 @functools.partial(
     jax.jit,
     static_argnames=(
+        "block_table_stride",
         "compress_ratio",
         "overlap",
         "quant_block",
@@ -299,11 +304,13 @@ def compute_is_first_mask(kv_slot_mapping, tile_n, pack_factor=4):
 def compress_norm_rope_store(
     cache: jax.Array,
     positions: jax.Array,
-    block_table: jax.Array,
+    block_table: jax.Array,  # [num_reqs * block_table_stride] int
     token_to_req_indices: jax.Array,
     kv_slot_mapping: jax.Array,
     rms_weight: jax.Array,
     *,
+    block_table_stride: int,
+    state_cache: jax.Array | None = None,
     rope_cache: jax.Array | None = None,
     cos_sin_cache: jax.Array | None = None,
     compress_ratio: int,
@@ -313,18 +320,24 @@ def compress_norm_rope_store(
     interpret: bool = False,
     name: str = "compress_norm_rope_store",
 ) -> tuple[jax.Array, jax.Array | None]:
-    """Compresses, normalizes, applies RoPE and stores to cache."""
-    # TODO(alynie): In HCA, we want to overlay HCA's compressor state cache
-    # onto CSA's compressed KV cache (instead of HCA's compressed KV cache)
-    # to save memory.
+    """Compresses, normalizes, applies RoPE and stores to cache.
+    """
+    assert block_table.ndim == 1
+    assert block_table.shape[0] % block_table_stride == 0
+
     num_tokens = positions.shape[0]
     head_dim = rms_weight.shape[0]
     rope_head_dim = cos_sin_cache.shape[1] if cos_sin_cache is not None else 0
+
+    state_operand = (None if state_cache is None or state_cache is cache else
+                     state_cache)
+    state_source = cache if state_operand is None else state_operand
 
     cfgs = config.Configs.make(
         _select_mode(head_dim, overlap),
         size_n=num_tokens,
         physical_page_size=cache.shape[1],
+        state_physical_page_size=state_source.shape[1],
         rms_eps=rms_eps,
         tile_n=4,
         head_dim=head_dim,
@@ -384,6 +397,8 @@ def compress_norm_rope_store(
         pl.BlockSpec(memory_space=pltpu.HBM),  # cache
         (pl.BlockSpec(memory_space=pltpu.HBM)
          if cfgs.dims.has_rope_cache else None),  # rope_cache
+        (pl.BlockSpec(memory_space=pltpu.HBM)
+         if state_operand is not None else None),  # state_cache
     )
     out_specs = (
         pl.BlockSpec(memory_space=pltpu.HBM),  # cache
@@ -407,7 +422,9 @@ def compress_norm_rope_store(
     )
 
     out_cache, out_rope_cache = pl.pallas_call(
-        functools.partial(kernel_fn, cfgs=cfgs),
+        functools.partial(kernel_fn,
+                          cfgs=cfgs,
+                          block_table_stride=block_table_stride),
         out_shape=out_shapes,
         grid_spec=grid_spec,
         input_output_aliases=aliases,
@@ -420,6 +437,7 @@ def compress_norm_rope_store(
         cos_sin_operand,
         cache,
         rope_operand,
+        state_operand,
     )
 
     return out_cache, out_rope_cache

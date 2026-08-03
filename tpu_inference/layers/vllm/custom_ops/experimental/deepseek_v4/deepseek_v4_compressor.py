@@ -60,17 +60,8 @@ class VllmCompressorStateCache(CompressorStateCache):
         )
         coff = 1 + (compress_ratio == 4)
         self.head_dim = state_dim // 2 // coff
-        # We let HCA's state cache overlay with HCA's compressed cache;
-        # CSA's state cache overlay with CSA's compressed cache for now.
-        # TODO: we may better let HCA's state cache overlay on CSA's compressed cache,
-        # whose page size is bigger, for better performance.
-        #
-        # This block_size is the granularity of the block table the compressor
-        # kernel indexes with, so it must be the number of token states that
-        # physically fit in one page of the array `KVCacheManager` allocates --
-        # which is *not* the same across modes: HCA stores raw bf16 (two rows
-        # per record) and the indexer array is 256 lanes wide. Derive it from
-        # the kernel's own layout model instead of a closed-form guess.
+        # CSA's and the indexer's state caches overlay their own compressed-KV
+        # array; HCA's overlays a *CSA NoPE* array.
         kv_cache_block_size = get_current_vllm_config().cache_config.block_size
         assert kv_cache_block_size // compress_ratio > 0
         mode = compressor_config.select_mode(self.head_dim,
@@ -79,6 +70,8 @@ class VllmCompressorStateCache(CompressorStateCache):
             mode,
             size_n=0,
             physical_page_size=compressor_config.physical_page_size(
+                mode, kv_cache_block_size, compress_ratio),
+            state_physical_page_size=compressor_config.state_host_page_size(
                 mode, kv_cache_block_size, compress_ratio),
             head_dim=self.head_dim,
             compress_ratio=compress_ratio,
@@ -158,15 +151,15 @@ class VllmDeepseekCompressor(DeepseekCompressor):
         state_cache_index = wrapper_ctx.layer_name_to_kvcache_index[
             self.state_cache.prefix]
 
-        # code under
-        # `tpu_inference.kernels.experimental.deepseek_v4.compress_and_store`
-        # assume state cache and the compressed kv cache of the *same layer* overlay
-        # on the same tensor. That is, layer-i's HCA state cache share the same
-        # Tensor with layer-i's HCA compressed kv cache.
-        # This assumption is too strict.
-        # TODO: we may better let HCA's state cache overlay on CSA's main kv cache,
-        # whose page size is bigger, for better performance.
-        assert state_cache_index == cache_index
+        separate_state = state_cache_index != cache_index
+        if self.overlap:
+            # CSA
+            assert separate_state is False
+        else:
+            # HCA
+            assert separate_state is True
+        state_cache = (wrapper_ctx.kv_caches[state_cache_index]
+                       if separate_state else None)
 
         data_spec = P(ShardingAxisName.ATTN_DATA)
         cache_spec = P(ShardingAxisName.BATCH)
@@ -184,35 +177,37 @@ class VllmDeepseekCompressor(DeepseekCompressor):
             cache_spec,  # cache
         )
         has_rope_cache = rope_cache is not None
+        out_spec_list = [cache_spec]
         if has_rope_cache:
             in_specs += (cache_spec, )  # rope_cache
-            out_specs = (cache_spec, cache_spec)
-        else:
-            out_specs = cache_spec
+            out_spec_list.append(cache_spec)
+        if separate_state:
+            in_specs += (cache_spec, )  # state_cache
+            out_spec_list.append(cache_spec)
+        out_specs = (tuple(out_spec_list)
+                     if len(out_spec_list) > 1 else out_spec_list[0])
 
         def _compress(hidden_states, wkv_wgate, ape, norm_weight,
                       cos_sin_cache, positions, state_block_tables,
                       query_start_loc, k_block_tables, request_distribution,
-                      cache, *rope_cache_operand):
-            rope_c = rope_cache_operand[0] if rope_cache_operand else None
-            num_reqs = query_start_loc.shape[0] - 1
-            assert state_block_tables.shape[0] % num_reqs == 0
-            assert k_block_tables.shape[0] % num_reqs == 0
-            block_table = state_block_tables.reshape(num_reqs, -1)
-            kv_block_table = k_block_tables.reshape(num_reqs, -1)
+                      cache, *optional_caches):
+            optional_caches = list(optional_caches)
+            rope_c = optional_caches.pop(0) if has_rope_cache else None
+            state_c = optional_caches.pop(0) if separate_state else None
 
-            new_cache, new_rope_cache = compressor_forward(
+            new_cache, new_rope_cache, new_state_cache = compressor_forward(
                 hidden_states=hidden_states,
                 wkv_wgate=wkv_wgate,
                 ape=ape,
                 norm_weight=norm_weight,
                 cos_sin_cache=cos_sin_cache,
                 positions=positions,
-                block_table=block_table,
+                block_table=state_block_tables,
                 query_start_loc=query_start_loc,
-                kv_block_table=kv_block_table,
+                kv_block_table=k_block_tables,
                 cache=cache,
                 rope_cache=rope_c,
+                state_cache=state_c,
                 distribution=request_distribution,
                 state_block_size=self.state_cache.block_size,
                 head_dim=self.head_dim,
@@ -221,9 +216,12 @@ class VllmDeepseekCompressor(DeepseekCompressor):
                 rms_eps=self.rms_norm_eps,
                 quant_block=self._quant_block,
             )
+            outs = [new_cache]
             if has_rope_cache:
-                return new_cache, new_rope_cache
-            return new_cache
+                outs.append(new_rope_cache)
+            if separate_state:
+                outs.append(new_state_cache)
+            return tuple(outs) if len(outs) > 1 else outs[0]
 
         operands = (
             jax_view(hidden_states),
@@ -240,6 +238,8 @@ class VllmDeepseekCompressor(DeepseekCompressor):
         )
         if has_rope_cache:
             operands += (rope_cache, )
+        if separate_state:
+            operands += (state_cache, )
 
         outs = jax.shard_map(
             _compress,
@@ -249,9 +249,9 @@ class VllmDeepseekCompressor(DeepseekCompressor):
             check_vma=False,
         )(*operands)
 
+        outs = list(outs) if isinstance(outs, tuple) else [outs]
+        wrapper_ctx.kv_caches[cache_index] = outs.pop(0)
         if has_rope_cache:
-            new_cache, new_rope_cache = outs
-            wrapper_ctx.kv_caches[rope_cache_index] = new_rope_cache
-        else:
-            new_cache = outs
-        wrapper_ctx.kv_caches[state_cache_index] = new_cache
+            wrapper_ctx.kv_caches[rope_cache_index] = outs.pop(0)
+        if separate_state:
+            wrapper_ctx.kv_caches[state_cache_index] = outs.pop(0)

@@ -45,6 +45,7 @@ LANE = 128  # bytes per sub-slot / TPU lane width
 SLOT_PACK = 4  # sub-slots packed into one physical HBM slot row
 N_FIELDS = 2  # values stored per token: kv + score
 FP32_BYTES = 4
+CSA_COMPRESS_RATIO = 4  # the compress ratio that selects Mode.CSA
 
 
 class Mode(enum.Enum):
@@ -113,6 +114,16 @@ def physical_page_size(mode: Mode, kv_cache_block_size: int,
     return storage_block_size * 2
 
 
+def state_host_page_size(mode: Mode, kv_cache_block_size: int,
+                         compress_ratio: int) -> int:
+    """Rows per page of the array that *hosts* ``mode``'s f32 compressor state.
+    """
+    if mode is Mode.HCA:
+        return physical_page_size(Mode.CSA, kv_cache_block_size,
+                                  CSA_COMPRESS_RATIO)
+    return physical_page_size(mode, kv_cache_block_size, compress_ratio)
+
+
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class TileSizes:
@@ -131,6 +142,7 @@ class Dimensions:
     rope_head_dim: int
     compress_ratio: int
     physical_page_size: int
+    state_physical_page_size: int
     quant_block: int
     overlap: bool
     has_rope_cache: bool
@@ -171,11 +183,16 @@ class Configs:
         *,
         size_n,
         physical_page_size,
+        state_physical_page_size=None,
         rms_eps=1e-6,
         tile_n=4,
         **overrides,
     ) -> "Configs":
-        """Build a config for `mode`; `overrides` replace per-mode defaults."""
+        """Build a config for `mode`; `overrides` replace per-mode defaults.
+
+        `state_physical_page_size` defaults to `physical_page_size`, i.e. the
+        state and the compressed KV share one buffer.
+        """
         actual_overrides = {**_MODE_DEFAULTS[mode], **overrides}
         if mode == Mode.HCA:
             actual_overrides["quant_block"] = 0
@@ -184,6 +201,9 @@ class Configs:
             mode=mode,
             size_n=size_n,
             physical_page_size=physical_page_size,
+            state_physical_page_size=(physical_page_size
+                                      if state_physical_page_size is None else
+                                      state_physical_page_size),
             rms_eps=rms_eps,
             **actual_overrides,
         )
@@ -285,8 +305,13 @@ class Configs:
     # --- block sizes and physical page size ------------------------------------
     @property
     def physical_page_size(self) -> int:
-        """Number of physical HBM rows per page."""
+        """Number of physical HBM rows per page of the compressed-KV array."""
         return self.dims.physical_page_size
+
+    @property
+    def state_physical_page_size(self) -> int:
+        """Number of physical HBM rows per page of the *state* array."""
+        return self.dims.state_physical_page_size
 
     @property
     def state_rows_per_token(self) -> int:
@@ -302,8 +327,8 @@ class Configs:
 
     @property
     def state_block_size(self) -> int:
-        """Number of state tokens per page."""
-        return self.physical_page_size // self.state_rows_per_token
+        """Number of state tokens per page of the state array."""
+        return self.state_physical_page_size // self.state_rows_per_token
 
     @property
     def kv_block_size(self) -> int:
@@ -353,11 +378,15 @@ class Configs:
         return (self._tile_n, self.record_rows) + self.cache_last_dims
 
     def page_buffer_shape(self) -> tuple[int, ...]:
-        """Page-buffer VMEM block: (tile, pages, physical_page_size) + cache_last_dims."""
+        """Page-buffer VMEM block: (tile, pages, state page rows) + cache_last_dims.
+
+        Pages are DMA'd whole out of the *state* array, so this is sized by
+        `state_physical_page_size`, not by the compressed-KV page.
+        """
         return (
             self._tile_n,
             self.pages_to_buffer_per_token,
-            self.physical_page_size,
+            self.state_physical_page_size,
         ) + self.cache_last_dims
 
     def rope_output_shape(self) -> tuple[int, ...]:
@@ -372,6 +401,11 @@ class Configs:
     def cache_shape(self, num_pages: int) -> tuple[int, ...]:
         """Shape of the global HBM KV cache."""
         return (num_pages, self.physical_page_size) + self.cache_last_dims
+
+    def state_cache_shape(self, num_pages: int) -> tuple[int, ...]:
+        """Shape of the global HBM array hosting the f32 compressor state."""
+        return (num_pages,
+                self.state_physical_page_size) + self.cache_last_dims
 
     def rope_cache_shape(self, num_pages: int) -> tuple[int, ...]:
         """Shape of the global HBM RoPE cache."""
