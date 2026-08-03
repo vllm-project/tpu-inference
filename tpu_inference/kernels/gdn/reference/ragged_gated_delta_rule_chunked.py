@@ -154,7 +154,13 @@ def pack_inputs_single_stream(
     padded_indices_valid = new_start + (jnp.arange(num_tokens) -
                                         original_start)
 
-    max_packed_tokens = num_tokens + num_seqs * chunk_size
+    # Worst-case packed length: every sequence wastes at most chunk_size-1
+    # slots of padding, and only NONEMPTY sequences contribute chunks -- of
+    # which there are at most num_tokens. Without the min(), a large request
+    # bucket (num_seqs >> num_tokens, e.g. hundreds of slots at a small token
+    # bucket) blows the packed stream up to num_seqs * chunk_size rows and
+    # every downstream per-token tensor with it.
+    max_packed_tokens = num_tokens + min(num_seqs, num_tokens) * chunk_size
     max_packed_tokens = ((max_packed_tokens + chunk_size - 1) // chunk_size *
                          chunk_size)
 
