@@ -469,11 +469,23 @@ def get_flax_model(
     model_supports_spec_step = supports_kw(model_class.__call__,
                                            "spec_step_idx")
 
-    def wrapped_model_fn(*args, **kwargs):
+    def _drop_unsupported_kwargs(kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
         kwargs.pop("shared_attention_metadata", None)
-        return jitted_model_fn(*args, **kwargs)
+        return kwargs
+
+    def wrapped_model_fn(*args, **kwargs):
+        return jitted_model_fn(*args, **_drop_unsupported_kwargs(kwargs))
+
+    def _lower_model_fn(*args, **kwargs):
+        return jitted_model_fn.lower(*args, **_drop_unsupported_kwargs(kwargs))
+
+    # Expose `lower` so the precompile pass can AOT-lower the backbone (and so
+    # report `memory_analysis` for it) instead of taking the "not a jit"
+    # warmup-only path: the wrapper hides the underlying jit from
+    # `_run_compilation`'s `hasattr(fn, 'lower')` check.
+    wrapped_model_fn.lower = _lower_model_fn
 
     compute_logits_fn = run_compute_logits
     embed_input_ids_fn = run_embed_input_ids
