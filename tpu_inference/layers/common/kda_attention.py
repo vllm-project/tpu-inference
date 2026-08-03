@@ -39,8 +39,7 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference.kernels.kda.reference.ragged_kda_chunked import (
     ragged_kda_decode_only, ragged_kda_mixed_prefill)
 from tpu_inference.layers.common.ragged_conv1d_jax import ragged_conv1d
-from tpu_inference.layers.common.sharding import (ShardingAxisName,
-                                                  rank_local_slot_indices)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
 
@@ -182,10 +181,13 @@ def _kda_ragged_core(
 
     Returns ``(new_conv_q, new_conv_k, new_conv_v, new_recurrent,
     o [num_tokens, H, K])``.
-    """
-    # Global slot ids -> ids within this rank's shard of the state pool.
-    state_indices = rank_local_slot_indices(state_indices, conv_q.shape[0])
 
+    ``state_indices`` arrive already rank-local: the runner rebases the
+    global slot ids per DP rank (``global % local_slots``, see the
+    mamba_state_indices block in ``TPURunner._prepare_inputs``) before
+    publishing ``AttentionMetadata.mamba_state_indices``, so they index
+    this rank's shard of the state pool directly.
+    """
     q, new_conv_q = ragged_conv1d(q,
                                   conv_q,
                                   q_conv_weight,

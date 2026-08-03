@@ -22,9 +22,11 @@ length nor the right values, which is why `kda_attention` runs its
 state-carrying part inside a `shard_map` over `ShardingAxisName.ATTN_DATA` —
 the same treatment `run_jax_gdn_attention` gives the GDN kernel.
 
-Slot ids in the packed metadata are GLOBAL (rank k allocates out of
-`[k * local_slots, (k + 1) * local_slots)`), so the shard_map also has to
-rebase them onto each rank's shard of the state pool.
+Slot ids in the packed metadata are rank-local: the runner rebases the
+globally allocated slot ids per DP rank (`global % local_slots` in
+`TPURunner._prepare_inputs`) before publishing
+`AttentionMetadata.mamba_state_indices`, so each rank's slice of the packed
+array indexes that rank's shard of the state pool directly.
 """
 
 import jax
@@ -96,11 +98,12 @@ def _params():
     )
 
 
-def _rank_inputs(rank, has_init_flags, global_slots):
+def _rank_inputs(rank, has_init_flags):
     """One rank's view: tokens, its shard of the state pool, its metadata.
 
-    `global_slots` selects whether the slot ids are the global ones the runner
-    publishes (`rank * BLOCKS_PER_RANK + i`) or rank-local ones.
+    Slot ids are rank-local (slots 1..REQS_PER_RANK), exactly as the runner
+    publishes them in `AttentionMetadata.mamba_state_indices` (it rebases
+    global slot ids per DP rank before publishing).
     """
     rngs = iter(jax.random.split(jax.random.key(200 + rank), 8))
     x = jax.random.normal(next(rngs), (TOKENS_PER_RANK, HIDDEN), jnp.float32)
@@ -110,7 +113,6 @@ def _rank_inputs(rank, has_init_flags, global_slots):
         s = jax.random.normal(next(rngs), shape, jnp.float32) * 0.1
         return s.at[0].set(0.0)  # null block
 
-    base = rank * BLOCKS_PER_RANK if global_slots else 0
     return dict(
         x=x,
         state=KDAState(
@@ -120,9 +122,7 @@ def _rank_inputs(rank, has_init_flags, global_slots):
             recurrent=state((BLOCKS_PER_RANK, H, D, D)),
         ),
         query_start_loc=jnp.asarray([0] + list(np.cumsum(LENGTHS)), jnp.int32),
-        state_indices=jnp.arange(base + 1,
-                                 base + REQS_PER_RANK + 1,
-                                 dtype=jnp.int32),
+        state_indices=jnp.arange(1, REQS_PER_RANK + 1, dtype=jnp.int32),
         distribution=jnp.asarray([0, 0, REQS_PER_RANK], jnp.int32),
         has_initial_state=jnp.asarray(has_init_flags, jnp.int32),
     )
@@ -163,15 +163,12 @@ def _packed_state(per_rank):
 def test_kda_attention_dp_matches_per_rank_single_device_runs(dp_mesh):
     """The sharded call over packed metadata == each rank running alone."""
     params = _params()
-    per_rank = [
-        _rank_inputs(r, FLAGS[r], global_slots=True) for r in range(DP_SIZE)
-    ]
+    per_rank = [_rank_inputs(r, FLAGS[r]) for r in range(DP_SIZE)]
 
-    # Reference: each rank alone, on rank-local slot ids (what that rank's
-    # shard of the pool is indexed by).
+    # Reference: each rank alone, on the same rank-local slot ids.
     ref = []
     for rank in range(DP_SIZE):
-        local = dict(_rank_inputs(rank, FLAGS[rank], global_slots=False))
+        local = dict(_rank_inputs(rank, FLAGS[rank]))
         new_state, out = jax.jit(lambda i, p: _call(i, p))(local, params)
         ref.append((new_state, np.asarray(out)))
 
@@ -213,10 +210,7 @@ def test_kda_attention_dp_isolates_ranks(dp_mesh):
     params = _params()
 
     def run(flags):
-        per_rank = [
-            _rank_inputs(r, flags[r], global_slots=True)
-            for r in range(DP_SIZE)
-        ]
+        per_rank = [_rank_inputs(r, flags[r]) for r in range(DP_SIZE)]
         packed = dict(
             x=_pack(per_rank, "x"),
             state=_packed_state(per_rank),
@@ -242,9 +236,7 @@ def test_kda_attention_packed_metadata_needs_the_shard_map():
     """Without the shard_map the packed layout is a shape error, not a
     silently wrong number — this pins the failure the 48B hit."""
     params = _params()
-    per_rank = [
-        _rank_inputs(r, FLAGS[r], global_slots=True) for r in range(DP_SIZE)
-    ]
+    per_rank = [_rank_inputs(r, FLAGS[r]) for r in range(DP_SIZE)]
     packed = dict(
         x=_pack(per_rank, "x"),
         state=_packed_state(per_rank),
