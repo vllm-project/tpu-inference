@@ -287,20 +287,99 @@ def test_gdn_reduction_property():
                                rtol=5e-4)
 
 
+def test_decode_only_padded_tokens_and_scattered_slots():
+    """Multi-request ragged decode with padding (num_tokens > distribution[2])
+    and non-identity state_indices: valid rows must scatter into their
+    (non-contiguous) slots, padded rows must emit zero output, and every
+    untouched slot must come back bit-identical."""
+    rng = np.random.default_rng(5)
+    H, K, V = 4, 64, 64
+    num_reqs, num_tokens, num_slots = 3, 5, 6
+    A_log, dt_bias = _params(rng, H, K)
+    # Rows >= num_reqs are padding and hold garbage on purpose.
+    q, k, v, g, b = _rand_inputs(rng, num_tokens, H, K, V)
+    slots = np.array([4, 2, 5], dtype=np.int32)
+    state_indices = jnp.asarray(
+        np.concatenate([slots,
+                        np.zeros(num_tokens - num_reqs, np.int32)]))
+    init = rng.standard_normal((num_slots, H, K, V)).astype(np.float32)
+    new_state, out = ragged_kda_decode_only(jnp.asarray(q),
+                                            jnp.asarray(k),
+                                            jnp.asarray(v),
+                                            jnp.asarray(b),
+                                            jnp.asarray(g),
+                                            jnp.asarray(init),
+                                            jnp.asarray(A_log),
+                                            jnp.asarray(dt_bias),
+                                            jnp.arange(num_tokens + 1,
+                                                       dtype=jnp.int32),
+                                            state_indices,
+                                            jnp.array([num_reqs, 0, num_reqs],
+                                                      dtype=jnp.int32),
+                                            gate_lower_bound=LOWER_BOUND)
+    out, new_state = np.asarray(out), np.asarray(new_state)
+    for r in range(num_reqs):
+        o_ref, s_ref = naive_kda_fp64(q[r:r + 1],
+                                      k[r:r + 1],
+                                      v[r:r + 1],
+                                      g[r:r + 1],
+                                      b[r:r + 1],
+                                      A_log,
+                                      dt_bias,
+                                      LOWER_BOUND,
+                                      h0=init[slots[r]])
+        np.testing.assert_allclose(out[r].reshape(H, V),
+                                   o_ref[0],
+                                   atol=2e-5,
+                                   rtol=2e-4)
+        np.testing.assert_allclose(new_state[slots[r]],
+                                   s_ref,
+                                   atol=2e-5,
+                                   rtol=2e-4)
+    np.testing.assert_array_equal(out[num_reqs:], 0.0)
+    for s in (0, 1, 3):
+        np.testing.assert_array_equal(new_state[s], init[s])
+
+
+def test_prefill_zeroes_garbage_state_when_not_initial():
+    """has_initial_state=False must zero the slot's content before use: seq A
+    (True) continues from its state, seq B (False) must start fresh even
+    though its slot holds large garbage."""
+    rng = np.random.default_rng(6)
+    T, H, K, V = 48, 4, 64, 64
+    A_log, dt_bias = _params(rng, H, K)
+    seqs = [_rand_inputs(rng, T, H, K, V) for _ in range(2)]
+    h0_a = rng.standard_normal((H, K, V)).astype(np.float32)
+    garbage = 1e3 * rng.standard_normal((H, K, V)).astype(np.float32)
+    outs, states = _run_prefill(seqs,
+                                A_log,
+                                dt_bias,
+                                LOWER_BOUND,
+                                init_states=[h0_a, garbage],
+                                has_initial_state=np.array([True, False]))
+    for idx, h0 in ((0, h0_a), (1, None)):
+        q, k, v, g, b = seqs[idx]
+        o_ref, s_ref = naive_kda_fp64(q,
+                                      k,
+                                      v,
+                                      g,
+                                      b,
+                                      A_log,
+                                      dt_bias,
+                                      LOWER_BOUND,
+                                      h0=h0)
+        np.testing.assert_allclose(outs[idx], o_ref, atol=2e-5, rtol=2e-4)
+        np.testing.assert_allclose(states[idx], s_ref, atol=2e-5, rtol=2e-4)
+
+
 GOLDEN = os.environ.get("K3_KDA_GOLDENS", "")
+SMOKE_GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "kda_smoke_goldens.npz")
 
 
-@pytest.mark.parametrize("case", [
-    "base_sig", "base_sp", "long_sig", "long_sp", "decay_floor_sig",
-    "decay_one_sig", "decay_floor_sp", "decay_one_sp", "small_sig",
-    "initstate_sig"
-])
-def test_cross_impl_golden_parity(case):
-    """Gate 6 (op-level): parity vs the fla-derived fp64 op goldens —
-    an independent implementation of the same contract."""
-    if not GOLDEN or not os.path.exists(GOLDEN):
-        pytest.skip(f"golden file not present: {GOLDEN}")
-    z = np.load(GOLDEN)
+def _check_golden_case(z, case):
+    """Asserts prefill parity against one stored golden case (fixture format
+    and regeneration steps: ``tests/kernels/kda_goldens_generator.py``)."""
     lower_bound = float(z["lower_bound"]) if case.endswith("_sig") else None
     B = z[f"{case}.q"].shape[0]
     for i in range(B):
@@ -327,3 +406,29 @@ def test_cross_impl_golden_parity(case):
                                    z[f"{case}.state_fp64"][i],
                                    atol=3e-5,
                                    rtol=3e-4)
+
+
+@pytest.mark.parametrize("case",
+                         ["smoke_sig", "smoke_sp", "smoke_initstate_sig"])
+def test_cross_impl_smoke_golden_parity(case):
+    """Gate 6a (op-level, always on): parity vs the checked-in smoke subset
+    of the fla-derived fp64 op goldens (``kda_smoke_goldens.npz``, both gate
+    forms + initial-state; regenerated via
+    ``kda_goldens_generator.py --smoke``)."""
+    _check_golden_case(np.load(SMOKE_GOLDEN), case)
+
+
+@pytest.mark.parametrize("case", [
+    "base_sig", "base_sp", "long_sig", "long_sp", "decay_floor_sig",
+    "decay_one_sig", "decay_floor_sp", "decay_one_sp", "small_sig",
+    "initstate_sig"
+])
+def test_cross_impl_golden_parity(case):
+    """Gate 6b (op-level, opt-in): parity vs the full fla-derived fp64 op
+    goldens at production shapes. Runs only when ``K3_KDA_GOLDENS`` points at
+    the full fixture (regenerated by ``kda_goldens_generator.py``, fixed
+    seed); when unset, cross-impl coverage in CI comes from the always-on
+    smoke subset above."""
+    if not GOLDEN or not os.path.exists(GOLDEN):
+        pytest.skip(f"opt-in golden fixture not present: {GOLDEN}")
+    _check_golden_case(np.load(GOLDEN), case)
