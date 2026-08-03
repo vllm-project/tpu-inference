@@ -304,6 +304,35 @@ _CT_FINAL_ATTRS = {
     "down_proj": "kernel_down_proj_EFD",
 }
 
+# Attribute set by the sharded-expert-streaming loader (see
+# `models/jax/utils/sharded_stream.py`) naming the expert ids this host's
+# devices keep. When present, only those staging slots can ever be filled --
+# the checkpoint filter dropped the rest before their bytes were read -- so
+# the completeness gate below waits on the local set instead of all experts.
+_SHARDED_STREAM_NEEDED_ATTR = "_sharded_stream_needed_experts"
+
+
+def _staging_complete(layer, staged_attrs: list[str]) -> bool:
+    """Whether every expert slot this decode will touch has been staged.
+
+    Full-read loading (the default) requires every expert of every staging
+    attribute: expert weights can be split across safetensors files, so an
+    unfilled slot just means a later file has not streamed in yet. Under
+    sharded expert streaming, non-local experts are filtered out of the read
+    entirely and their slots stay `None` forever; the gate then requires
+    exactly the host's needed set, which `_decode_sharded` alone touches.
+    """
+    needed = getattr(layer, _SHARDED_STREAM_NEEDED_ATTR, None)
+    for attr in staged_attrs:
+        staged = getattr(layer, attr)._weights_to_load
+        if needed is None:
+            if any(w is None for w in staged):
+                return False
+        else:
+            if any(staged[i] is None for i in needed):
+                return False
+    return True
+
 
 def _named_sharding(sharding, mesh: Mesh) -> NamedSharding:
     """Normalize the spellings `shard_put` accepts into a `NamedSharding`."""
@@ -358,6 +387,85 @@ def _decode_executable(decode: Callable, shape: tuple[int, ...],
     return executable
 
 
+def _staged_expert_bytes(staged: list, cache: dict, expert_id: int):
+    """The staged packed bytes of one expert, as numpy, materialized lazily.
+
+    With sharded expert streaming only this host's experts are staged (the
+    rest stay `None`), so the numpy views are built per expert as a shard
+    loop first touches it rather than for the whole list up front -- an
+    absent non-local expert must never be converted. Touching a `None` slot
+    means a shard needs an expert that never arrived; fail with the ids so
+    the log alone identifies what is missing.
+    """
+    arr = cache.get(expert_id)
+    if arr is None:
+        w = staged[expert_id]
+        if w is None:
+            present = [i for i, s in enumerate(staged) if s is not None]
+            raise ValueError(
+                f"[mxfp4-ct] expert {expert_id} is needed by a local device "
+                f"shard but was never staged; {len(present)} of "
+                f"{len(staged)} experts arrived "
+                f"(first staged ids: {present[:8]}). With sharded expert "
+                f"streaming this means the checkpoint filter dropped an "
+                f"expert this host's devices keep.")
+        # numpy view of the staged tensor: the per-shard gather is pure
+        # slicing and concatenation, which numpy does without a jax dispatch
+        # per expert (there are hundreds of experts per shard).
+        arr = np.asarray(w)
+        cache[expert_id] = arr
+    return arr
+
+
+def _staged_layer_shape(staged: list, expansion: int) -> tuple[int, int, int]:
+    """The decoded `[E, in_ * expansion, out]` shape of one staged layer.
+
+    Derived from the first staged expert rather than `staged[0]`: under
+    sharded expert streaming only this host's experts are staged and expert
+    0 need not be one of them.
+    """
+    template = next((w for w in staged if w is not None), None)
+    if template is None:
+        raise ValueError(
+            "[mxfp4-ct] no experts staged for this layer at all; cannot "
+            "infer the expert tensor shape. The weights iterator yielded "
+            "nothing for this projection.")
+    _, out, packed_in = template.shape
+    return (len(staged), packed_in * expansion, out)
+
+
+def _decode_one_shard(staged: list, source_cache: dict, decode: Callable,
+                      expansion: int, shape: tuple[int, int, int],
+                      device: jax.Device, index) -> jax.Array:
+    """Gather one device's packed slice out of `staged` and decode it there.
+
+    `index` is the device's entry in the sharding's device->index map over
+    the decoded `shape`. Only the experts in the device's expert slice are
+    touched, so staged slots no local device needs may be `None`.
+    """
+    num_experts, in_total, out = shape
+    expert_slice = _full_slice(index[0], num_experts)
+    in_slice = _full_slice(index[1], in_total)
+    out_slice = _full_slice(index[2], out)
+    if in_slice.start % expansion or in_slice.stop % expansion:
+        raise ValueError(
+            f"[mxfp4-ct] shard {in_slice} of the {shape} decoded tensor "
+            f"splits a packed uint8 word ({expansion} values each); "
+            f"cannot decode this shard on its own.")
+    packed_slice = slice(in_slice.start // expansion,
+                         in_slice.stop // expansion)
+    # `[e, out, in_]` for the experts this device keeps, still packed.
+    local = np.concatenate([
+        _staged_expert_bytes(staged, source_cache, e)[:, out_slice,
+                                                      packed_slice]
+        for e in range(expert_slice.start, expert_slice.stop)
+    ],
+                           axis=0)
+    executable = _decode_executable(decode, local.shape, device)
+    with jax.set_mesh(_one_device_mesh(device)):
+        return executable(jax.device_put(local, device))
+
+
 def _decode_sharded(staged: list[jax.Array], decode: Callable, expansion: int,
                     sharding, mesh: Mesh) -> jax.Array:
     """Build one decoded, sharded expert tensor a device shard at a time.
@@ -376,40 +484,19 @@ def _decode_sharded(staged: list[jax.Array], decode: Callable, expansion: int,
     whole-layer decode would have produced -- while the host never
     materializes the ~4.5x-larger decoded layer, only packed bytes cross the
     host/device boundary, and each process touches just the experts its own
-    devices keep instead of all of them.
+    devices keep instead of all of them. Under sharded expert streaming,
+    `staged` may hold `None` for experts no local device keeps; the shard
+    loop below never reaches them.
     """
-    num_experts = len(staged)
-    _, out, packed_in = staged[0].shape
-    shape = (num_experts, packed_in * expansion, out)
+    shape = _staged_layer_shape(staged, expansion)
     sharding = _named_sharding(sharding, mesh)
 
-    # numpy views of the staged tensors: the per-shard gather below is pure
-    # slicing and concatenation, which numpy does without a jax dispatch per
-    # expert (there are hundreds of experts per shard).
-    source = [np.asarray(w) for w in staged]
-
-    shards = []
-    for device, index in sharding.addressable_devices_indices_map(
-            shape).items():
-        expert_slice = _full_slice(index[0], num_experts)
-        in_slice = _full_slice(index[1], packed_in * expansion)
-        out_slice = _full_slice(index[2], out)
-        if in_slice.start % expansion or in_slice.stop % expansion:
-            raise ValueError(
-                f"[mxfp4-ct] shard {in_slice} of the {shape} decoded tensor "
-                f"splits a packed uint8 word ({expansion} values each); "
-                f"cannot decode this shard on its own.")
-        packed_slice = slice(in_slice.start // expansion,
-                             in_slice.stop // expansion)
-        # `[e, out, in_]` for the experts this device keeps, still packed.
-        local = np.concatenate([
-            w[:, out_slice, packed_slice]
-            for w in source[expert_slice.start:expert_slice.stop]
-        ],
-                               axis=0)
-        executable = _decode_executable(decode, local.shape, device)
-        with jax.set_mesh(_one_device_mesh(device)):
-            shards.append(executable(jax.device_put(local, device)))
+    source: dict = {}
+    shards = [
+        _decode_one_shard(staged, source, decode, expansion, shape, device,
+                          index) for device, index in
+        sharding.addressable_devices_indices_map(shape).items()
+    ]
     return jax.make_array_from_single_device_arrays(shape, sharding, shards)
 
 
@@ -518,10 +605,20 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: JaxMoE) -> bool:
         """Decode the staged tensors into device-resident fp4 + fp32 scales."""
         staged_attrs = [a for pair in _CT_STAGED_ATTRS.values() for a in pair]
-        if not all(
-                all(w is not None
-                    for w in getattr(layer, attr)._weights_to_load)
-                for attr in staged_attrs):
+        needed = getattr(layer, _SHARDED_STREAM_NEEDED_ATTR, None)
+        if needed is not None and not envs.MXFP4_SHARD_THEN_DECODE:
+            # `_decode_on_host` concatenates every expert; with only the
+            # local set staged it would crash on the `None` slots (or worse,
+            # silently mis-index). The streaming loader refuses to filter
+            # when the host decode is selected, so reaching here means the
+            # two flags changed between marking and decoding.
+            raise ValueError(
+                f"[mxfp4-ct] {layer.prefix}: sharded expert streaming staged "
+                f"only {len(needed)} local experts, but "
+                f"MXFP4_SHARD_THEN_DECODE=0 selects the host decode, which "
+                f"needs all of them. Unset K3_SHARDED_EXPERT_STREAMING or "
+                f"set MXFP4_SHARD_THEN_DECODE=1.")
+        if not _staging_complete(layer, staged_attrs):
             # Expert weights can be split across safetensors files, so this is
             # called more than once; wait until every expert has arrived.
             return False
