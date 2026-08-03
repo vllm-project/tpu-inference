@@ -46,7 +46,7 @@ This module removes that waste at the request level, opt-in via
 """
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
 import jax
@@ -131,6 +131,9 @@ class FilterStats:
     total_tensors: int = 0
     kept_bytes: int = 0
     skipped_bytes: int = 0
+    # Every dropped tensor name, so the post-load validation can prove each
+    # one belonged to a layer whose decode gate knows about the filtering.
+    dropped_names: list = field(default_factory=list)
 
 
 def build_filtered_requests(paths: list[str], safetensors_metadatas: list,
@@ -165,9 +168,18 @@ def build_filtered_requests(paths: list[str], safetensors_metadatas: list,
                 return
             if sum(run_sizes) == 0:
                 # The streamer's request iterator treats an all-empty request
-                # as end-of-queue; zero-byte tensors carry no data to read
-                # anyway.
-                return
+                # as end-of-queue, so a run consisting solely of zero-byte
+                # tensors cannot be submitted -- and silently dropping it
+                # would starve `get_tensors` of those names. No real
+                # checkpoint stores zero-byte expert neighbours; refuse
+                # loudly rather than mis-stream.
+                raise ValueError(
+                    "[sharded-stream] a contiguous run of kept tensors is "
+                    "entirely zero-byte, which the filtered streamer cannot "
+                    "submit: "
+                    f"{[m.name for m in run_meta][:8]}. Unset "
+                    "K3_SHARDED_EXPERT_STREAMING to load this checkpoint "
+                    "with the stock full read.")
             request_id = len(requests)
             requests.append(
                 FileChunks(request_id, path, file_offset + run_start,
@@ -187,6 +199,7 @@ def build_filtered_requests(paths: list[str], safetensors_metadatas: list,
                 flush()
                 run_meta, run_sizes = [], []
                 stats.skipped_bytes += size
+                stats.dropped_names.append(meta.name)
         flush()
 
     return requests, id_to_meta, stats
@@ -221,10 +234,16 @@ def _filtered_stream(streamer,
 def sharded_expert_weights_iterator(hf_weights_files: list[str],
                                     needed_experts: frozenset,
                                     num_experts: int,
-                                    use_tqdm_on_load: bool = False):
+                                    use_tqdm_on_load: bool = False,
+                                    dropped_names_sink: Optional[list] = None):
     """Yield `(name, torch.Tensor)` like the stock runai iterator, but only
     reading the expert tensors this host's devices keep (plus every
-    non-expert tensor)."""
+    non-expert tensor).
+
+    `dropped_names_sink`, when given, receives every dropped tensor name so
+    the caller can validate after the load that each one belonged to a layer
+    whose decode gate expects the filtering.
+    """
     from runai_model_streamer import SafetensorsStreamer
     from tqdm.auto import tqdm
 
@@ -234,6 +253,8 @@ def sharded_expert_weights_iterator(hf_weights_files: list[str],
 
     with SafetensorsStreamer() as streamer:
         stats = _filtered_stream(streamer, hf_weights_files, keep)
+        if dropped_names_sink is not None:
+            dropped_names_sink.extend(stats.dropped_names)
         logger.info(
             "[sharded-stream] process %d streams %d/%d routed experts: "
             "keeping %d/%d checkpoint tensors (%.1f GiB), skipping %.1f GiB "
@@ -246,11 +267,22 @@ def sharded_expert_weights_iterator(hf_weights_files: list[str],
                            desc="Loading safetensors (sharded expert read)",
                            disable=not use_tqdm_on_load,
                            mininterval=2)
+        yielded = 0
         for name, tensor in tensor_iter:
+            yielded += 1
             # The streamer reuses its CPU buffer across requests; detach the
             # tensor from it before handing it out, as the stock iterator
             # does.
             yield name, tensor.clone()
+        if yielded != stats.kept_tensors:
+            # A silent shortfall here would surface much later as a
+            # partially-initialized model (or not at all); convert any
+            # request/metadata misalignment into a load failure.
+            raise ValueError(
+                f"[sharded-stream] the filtered stream yielded {yielded} "
+                f"tensors but the request filter kept {stats.kept_tensors}; "
+                f"the streamer dropped or duplicated part of the "
+                f"checkpoint. Unset K3_SHARDED_EXPERT_STREAMING and reload.")
 
 
 def _mxfp4_moe_layers(model):
@@ -273,6 +305,11 @@ def plan_sharded_expert_streaming(model) -> Optional[tuple[frozenset, int]]:
     if not layers:
         return None
 
+    # Two passes: compute every layer's set first, mark only if they all
+    # agree. Marking any layer relaxes its decode gate, which is only sound
+    # when the filter (driven by the shared set) actually runs -- so on
+    # disagreement nothing may be marked and the caller falls back to the
+    # stock full read, whose unrelaxed gates need no filter.
     needed: Optional[frozenset] = None
     num_experts: Optional[int] = None
     for name, layer in layers:
@@ -283,27 +320,88 @@ def plan_sharded_expert_streaming(model) -> Optional[tuple[frozenset, int]]:
         if needed is None:
             needed, num_experts = layer_needed, layer.num_local_experts
         elif (layer_needed, layer.num_local_experts) != (needed, num_experts):
-            raise ValueError(
-                f"[sharded-stream] MoE layers disagree on the local expert "
-                f"set: {name} needs {len(layer_needed)} of "
-                f"{layer.num_local_experts} experts, an earlier layer needs "
-                f"{len(needed)} of {num_experts}. A single checkpoint filter "
-                f"cannot serve both; not filtering would be required.")
-        setattr(layer, _SHARDED_STREAM_NEEDED_ATTR, frozenset(layer_needed))
+            logger.warning(
+                "[sharded-stream] MoE layers disagree on the local expert "
+                "set (%s needs %d of %d experts, an earlier layer %d of %d); "
+                "one checkpoint filter cannot serve both, falling back to "
+                "the full checkpoint read.", name, len(layer_needed),
+                layer.num_local_experts, len(needed), num_experts)
+            return None
+    for _, layer in layers:
+        setattr(layer, _SHARDED_STREAM_NEEDED_ATTR, frozenset(needed))
     return needed, num_experts
 
 
-def validate_sharded_streaming_complete(model) -> None:
-    """Fail loudly if any marked layer never decoded its local experts.
+def _marked_layer_prefixes(layers) -> list[str]:
+    """Name paths under which dropped expert tensors are accounted for."""
+    prefixes = []
+    for module_name, layer in layers:
+        for prefix in (getattr(layer, "prefix", ""), module_name):
+            if prefix:
+                prefixes.append(prefix)
+    return prefixes
 
-    The decode gate returns False while streaming is still in flight, so a
-    needed expert the filter wrongly dropped surfaces only here, after the
-    weights iterator is exhausted: the layer's staging attributes are still
-    present (decode deletes them) with `None` in needed slots.
+
+def _covered_by_marked_layer(dropped_name: str, prefixes: list[str]) -> bool:
+    """Whether a dropped checkpoint tensor belongs to a marked MoE layer.
+
+    The checkpoint namespace may carry an extra wrapper prefix the module
+    tree does not (`language_model.` on Kimi-K3), so the tensor's path up to
+    its expert id is suffix-matched against each marked layer's prefix.
     """
+    match = _EXPERT_TENSOR_RE.search(dropped_name)
+    if not match:
+        return False
+    # `...layers.3.block_sparse_moe.experts` -- the path up to the id.
+    stem = dropped_name[:match.start(1) - 1]
+    for prefix in prefixes:
+        # The marked prefix may or may not spell the trailing `.experts`
+        # segment itself, depending on how the module names it.
+        candidates = [prefix]
+        if not prefix.endswith(".experts"):
+            candidates.append(prefix + ".experts")
+        for candidate in candidates:
+            if stem == candidate or stem.endswith("." + candidate):
+                return True
+    return False
+
+
+def validate_sharded_streaming_complete(model, dropped_names=()) -> None:
+    """Fail loudly if the filtered load left anything unaccounted for.
+
+    Two checks, both after the weights iterator is exhausted:
+
+    * every marked layer decoded its local experts -- the decode gate
+      returns False while streaming is in flight, so a needed expert the
+      filter wrongly dropped surfaces here as staging attributes that are
+      still present (decode deletes them) with `None` in needed slots;
+    * every DROPPED tensor name belongs to a marked layer. The name filter
+      drops `.experts.<id>.` tensors model-wide, but only the marked
+      (compressed-tensors MXFP4) layers have the relaxed gate that knows
+      slots may stay empty -- an expert tensor of any other module would be
+      silently missing (the auto-loader has no missing-weight check) and
+      that module would serve its initialization values.
+    """
+    layers = _mxfp4_moe_layers(model)
+    marked = [(name, layer) for name, layer in layers
+              if getattr(layer, _SHARDED_STREAM_NEEDED_ATTR, None) is not None]
+    prefixes = _marked_layer_prefixes(marked)
+    unaccounted = [
+        name for name in dropped_names
+        if not _covered_by_marked_layer(name, prefixes)
+    ]
+    if unaccounted:
+        raise ValueError(
+            f"[sharded-stream] {len(unaccounted)} dropped checkpoint "
+            f"tensors do not belong to any marked MXFP4 MoE layer (e.g. "
+            f"{unaccounted[:8]}); their module would silently keep its "
+            f"initialization weights. Marked layer prefixes: "
+            f"{sorted(set(prefixes))[:8]}. Unset K3_SHARDED_EXPERT_STREAMING "
+            f"for this model.")
+
     staged_attrs = [a for pair in _CT_STAGED_ATTRS.values() for a in pair]
     problems = []
-    for name, layer in _mxfp4_moe_layers(model):
+    for name, layer in layers:
         needed = getattr(layer, _SHARDED_STREAM_NEEDED_ATTR, None)
         if needed is None:
             continue
@@ -353,6 +451,13 @@ def maybe_load_with_sharded_expert_streaming(loader, model,
             "full checkpoint read.",
             type(loader).__name__)
         return False
+    if getattr(loader, "_is_distributed", False):
+        logger.warning(
+            "[sharded-stream] K3_SHARDED_EXPERT_STREAMING=1 but the runai "
+            "loader is in distributed mode, which re-broadcasts every chunk "
+            "to all ranks and would defeat (and fight) the per-host filter; "
+            "falling back to the full checkpoint read.")
+        return False
     if not envs.MXFP4_SHARD_THEN_DECODE:
         logger.warning(
             "[sharded-stream] K3_SHARDED_EXPERT_STREAMING=1 requires "
@@ -375,8 +480,12 @@ def maybe_load_with_sharded_expert_streaming(loader, model,
         model_weights = model_config.model_weights
     hf_weights_files = loader._prepare_weights(model_weights,
                                                model_config.revision)
+    dropped_names: list = []
     model.load_weights(
-        sharded_expert_weights_iterator(hf_weights_files, needed, num_experts,
-                                        loader.load_config.use_tqdm_on_load))
-    validate_sharded_streaming_complete(model)
+        sharded_expert_weights_iterator(hf_weights_files,
+                                        needed,
+                                        num_experts,
+                                        loader.load_config.use_tqdm_on_load,
+                                        dropped_names_sink=dropped_names))
+    validate_sharded_streaming_complete(model, dropped_names=dropped_names)
     return True
