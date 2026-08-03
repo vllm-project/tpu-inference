@@ -19,6 +19,14 @@
 _TPU_VLLM_MODELS = {
     "DeepseekV4ForCausalLM":
     "tpu_inference.models.vllm.experimental.deepseek_v4:DeepseekV4ForCausalLM",
+    # Kimi-K3 (HF moonshotai/Kimi-K3) is unknown to the pinned vLLM. Register
+    # the architecture so vLLM's config/registry resolution succeeds; on TPU
+    # the model is served by the JAX implementation
+    # (tpu_inference.models.jax.kimi_k3), never by this torch class. vLLM's
+    # KimiLinearForCausalLM (the K3 text-stack family) provides the correct
+    # static model-interface traits for registry inspection.
+    "KimiK3ForConditionalGeneration":
+    "vllm.model_executor.models.kimi_linear:KimiLinearForCausalLM",
 }
 
 

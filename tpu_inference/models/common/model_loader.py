@@ -81,6 +81,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         Gemma4ForConditionalGeneration
     from tpu_inference.models.jax.gemma4_mtp import Gemma4MTPForCausalLM
     from tpu_inference.models.jax.gpt_oss import GptOss
+    from tpu_inference.models.jax.kimi_k3 import (
+        KimiK3ForConditionalGeneration, KimiLinearForCausalLM)
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
@@ -105,6 +107,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
     _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
     _MODEL_REGISTRY["DFlashDraftModel"] = DFlashForCausalLM
+    _MODEL_REGISTRY["KimiLinearForCausalLM"] = KimiLinearForCausalLM
+    _MODEL_REGISTRY[
+        "KimiK3ForConditionalGeneration"] = KimiK3ForConditionalGeneration
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
