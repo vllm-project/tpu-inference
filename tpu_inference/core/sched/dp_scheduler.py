@@ -704,8 +704,14 @@ class DPScheduler(SchedulerInterface):
         wins while it is idle, and loses once it is busy enough that the
         saved prefill no longer compensates.
 
+        Ties on load are broken by in-flight requests, which is the only
+        signal here that reflects decode load: queued prefill says nothing
+        about a rank already running many long-lived decodes, and ranks tie
+        at zero queued prefill for much of a decode-heavy phase.
+
         With prefix caching disabled every rank reports zero cached tokens,
-        so this reduces to picking the rank with the least queued prefill.
+        so this reduces to (least queued prefill, fewest in-flight) -- the
+        same order the previous cache-affinity fallback used.
         """
         enable_cache = self.vllm_config.cache_config.enable_prefix_caching
 
@@ -717,9 +723,11 @@ class DPScheduler(SchedulerInterface):
                                    request)
             self._send_command(rank,
                                SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
 
         num_tokens = request.num_tokens
         loads: Dict[int, int] = {}
+        inflight: Dict[int, int] = {}
         for rank in range(self.dp_size):
             cached = 0
             if enable_cache:
@@ -727,12 +735,15 @@ class DPScheduler(SchedulerInterface):
                     rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
             pending = self._get_result(
                 rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
+            running, waiting = self._get_result(
+                rank, SchedulerCommand.GET_REQUEST_COUNTS)
             loads[rank] = pending + max(0, num_tokens - cached)
+            inflight[rank] = running + waiting
 
-        # Rotate the scan start so ties do not always favour rank 0.
+        # Rotate the scan start so remaining ties do not always favour rank 0.
         order = [(self._rr_start + i) % self.dp_size
                  for i in range(self.dp_size)]
-        rank = min(order, key=lambda r: loads[r])
+        rank = min(order, key=lambda r: (loads[r], inflight[r]))
         self._rr_start = (self._rr_start + 1) % self.dp_size
         return rank
 

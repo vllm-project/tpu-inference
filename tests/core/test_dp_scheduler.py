@@ -245,9 +245,11 @@ class TestDPScheduler:
         # Per rank the scheduler collects (cached_tokens, pending_prefill).
         scheduler._get_result = MagicMock(side_effect=[
             10,
-            0,  # rank 0: 10 cached, idle -> load 90
+            0,
+            (0, 0),  # rank 0: 10 cached, idle -> load 90
             25,
-            0,  # rank 1: 25 cached, idle -> load 75
+            0,
+            (0, 0),  # rank 1: 25 cached, idle -> load 75
         ])
 
         assert scheduler._find_best_rank_for_request(mock_request) == 1
@@ -270,9 +272,11 @@ class TestDPScheduler:
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[
             500,
-            800,  # rank 0: 500 cached but 800 queued -> load 1300
+            800,
+            (0, 0),  # rank 0: 500 cached but 800 queued -> load 1300
             0,
-            0,  # rank 1: nothing cached, idle       -> load 1000
+            0,
+            (0, 0),  # rank 1: nothing cached, idle      -> load 1000
         ])
 
         assert scheduler._find_best_rank_for_request(mock_request) == 1
@@ -291,8 +295,39 @@ class TestDPScheduler:
         mock_request.num_tokens = 100
 
         scheduler._send_command = MagicMock()
-        # No cache probe is issued, so only pending_prefill is collected.
-        scheduler._get_result = MagicMock(side_effect=[100, 50])
+        # No cache probe is issued; pending_prefill and counts are collected.
+        scheduler._get_result = MagicMock(side_effect=[
+            100,
+            (0, 0),  # rank 0
+            50,
+            (0, 0),  # rank 1
+        ])
+
+        assert scheduler._find_best_rank_for_request(mock_request) == 1
+
+    def test_find_best_rank_breaks_load_ties_by_inflight(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Equal load falls back to fewest in-flight requests.
+
+        Queued prefill does not reflect decode load, and ranks tie at zero
+        queued prefill for much of a decode-heavy phase.
+        """
+        mock_vllm_config.cache_config.enable_prefix_caching = False
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.num_tokens = 100
+
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(side_effect=[
+            0,
+            (7, 0),  # rank 0: idle prefill queue, 7 in flight
+            0,
+            (3, 0),  # rank 1: idle prefill queue, 3 in flight
+        ])
 
         assert scheduler._find_best_rank_for_request(mock_request) == 1
 
