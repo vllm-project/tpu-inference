@@ -46,7 +46,7 @@ for arg in "$@"; do
   case "$arg" in
     --skip-bench) SKIP_BENCH="--skip-bench" ;;
     --skip-acc) SKIP_ACC="1" ;;
-    --full-gsm8k) GSM8K_LIMIT_ARGS=(); GSM8K_DESC="FULL 1319"; ACC_CAP=9600 ;;
+    --full-gsm8k) GSM8K_LIMIT_ARGS=(); GSM8K_DESC="FULL 1319"; ACC_CAP=12600 ;;
     --bs1-bench) BS1_BENCH="1" ;;
     --matrix-bench) MATRIX_BENCH="1" ;;
     *) echo "[k3-measure] unknown flag: $arg" >&2; exit 2 ;;

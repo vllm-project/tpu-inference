@@ -95,4 +95,4 @@ steps:
             --concurrency 4 \
             --long-tokens 256 \
             --needle-tokens 8000 \
-          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --skip-acc --bs1-bench --matrix-bench"
+          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --full-gsm8k --bs1-bench --matrix-bench"
