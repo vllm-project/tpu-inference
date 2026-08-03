@@ -417,6 +417,55 @@ def _staged_expert_bytes(staged: list, cache: dict, expert_id: int):
     return arr
 
 
+def _staged_layer_shape(staged: list, expansion: int) -> tuple[int, int, int]:
+    """The decoded `[E, in_ * expansion, out]` shape of one staged layer.
+
+    Derived from the first staged expert rather than `staged[0]`: under
+    sharded expert streaming only this host's experts are staged and expert
+    0 need not be one of them.
+    """
+    template = next((w for w in staged if w is not None), None)
+    if template is None:
+        raise ValueError(
+            "[mxfp4-ct] no experts staged for this layer at all; cannot "
+            "infer the expert tensor shape. The weights iterator yielded "
+            "nothing for this projection.")
+    _, out, packed_in = template.shape
+    return (len(staged), packed_in * expansion, out)
+
+
+def _decode_one_shard(staged: list, source_cache: dict, decode: Callable,
+                      expansion: int, shape: tuple[int, int, int],
+                      device: jax.Device, index) -> jax.Array:
+    """Gather one device's packed slice out of `staged` and decode it there.
+
+    `index` is the device's entry in the sharding's device->index map over
+    the decoded `shape`. Only the experts in the device's expert slice are
+    touched, so staged slots no local device needs may be `None`.
+    """
+    num_experts, in_total, out = shape
+    expert_slice = _full_slice(index[0], num_experts)
+    in_slice = _full_slice(index[1], in_total)
+    out_slice = _full_slice(index[2], out)
+    if in_slice.start % expansion or in_slice.stop % expansion:
+        raise ValueError(
+            f"[mxfp4-ct] shard {in_slice} of the {shape} decoded tensor "
+            f"splits a packed uint8 word ({expansion} values each); "
+            f"cannot decode this shard on its own.")
+    packed_slice = slice(in_slice.start // expansion,
+                         in_slice.stop // expansion)
+    # `[e, out, in_]` for the experts this device keeps, still packed.
+    local = np.concatenate([
+        _staged_expert_bytes(staged, source_cache, e)[:, out_slice,
+                                                      packed_slice]
+        for e in range(expert_slice.start, expert_slice.stop)
+    ],
+                           axis=0)
+    executable = _decode_executable(decode, local.shape, device)
+    with jax.set_mesh(_one_device_mesh(device)):
+        return executable(jax.device_put(local, device))
+
+
 def _decode_sharded(staged: list[jax.Array], decode: Callable, expansion: int,
                     sharding, mesh: Mesh) -> jax.Array:
     """Build one decoded, sharded expert tensor a device shard at a time.
@@ -439,40 +488,15 @@ def _decode_sharded(staged: list[jax.Array], decode: Callable, expansion: int,
     `staged` may hold `None` for experts no local device keeps; the shard
     loop below never reaches them.
     """
-    num_experts = len(staged)
-    template = next((w for w in staged if w is not None), None)
-    if template is None:
-        raise ValueError(
-            "[mxfp4-ct] no experts staged for this layer at all; cannot "
-            "infer the expert tensor shape. The weights iterator yielded "
-            "nothing for this projection.")
-    _, out, packed_in = template.shape
-    shape = (num_experts, packed_in * expansion, out)
+    shape = _staged_layer_shape(staged, expansion)
     sharding = _named_sharding(sharding, mesh)
 
     source: dict = {}
-    shards = []
-    for device, index in sharding.addressable_devices_indices_map(
-            shape).items():
-        expert_slice = _full_slice(index[0], num_experts)
-        in_slice = _full_slice(index[1], packed_in * expansion)
-        out_slice = _full_slice(index[2], out)
-        if in_slice.start % expansion or in_slice.stop % expansion:
-            raise ValueError(
-                f"[mxfp4-ct] shard {in_slice} of the {shape} decoded tensor "
-                f"splits a packed uint8 word ({expansion} values each); "
-                f"cannot decode this shard on its own.")
-        packed_slice = slice(in_slice.start // expansion,
-                             in_slice.stop // expansion)
-        # `[e, out, in_]` for the experts this device keeps, still packed.
-        local = np.concatenate([
-            _staged_expert_bytes(staged, source, e)[:, out_slice, packed_slice]
-            for e in range(expert_slice.start, expert_slice.stop)
-        ],
-                               axis=0)
-        executable = _decode_executable(decode, local.shape, device)
-        with jax.set_mesh(_one_device_mesh(device)):
-            shards.append(executable(jax.device_put(local, device)))
+    shards = [
+        _decode_one_shard(staged, source, decode, expansion, shape, device,
+                          index) for device, index in
+        sharding.addressable_devices_indices_map(shape).items()
+    ]
     return jax.make_array_from_single_device_arrays(shape, sharding, shards)
 
 

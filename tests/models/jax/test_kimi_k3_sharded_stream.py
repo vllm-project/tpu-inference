@@ -52,11 +52,12 @@ from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.layers.jax.moe.moe import MoEBackend
 from tpu_inference.layers.jax.quantization.mxfp4 import (
     _SHARDED_STREAM_NEEDED_ATTR, CompressedTensorsMxfp4MoEMethod,
-    _staged_expert_bytes, _staging_complete)
+    _decode_one_shard, _staged_expert_bytes, _staged_layer_shape,
+    _staging_complete)
 from tpu_inference.models.jax.utils.sharded_stream import (
     build_filtered_requests, expert_id_from_tensor_name,
     maybe_load_with_sharded_expert_streaming, needed_expert_ids,
-    validate_sharded_streaming_complete)
+    plan_sharded_expert_streaming, validate_sharded_streaming_complete)
 
 EXPERT_AXIS = "attn_dp_expert"
 MODEL_AXIS = "model"
@@ -298,7 +299,16 @@ def _slices(index, shape):
 @pytest.mark.parametrize("spec", (EDF_SPEC, EFD_SPEC))
 def test_subset_decode_is_bit_identical_to_full_decode(spec):
     """Each simulated host decodes from only its staged subset; every device
-    shard matches the full-staging host decode bit for bit."""
+    shard matches the full-staging host decode bit for bit.
+
+    This drives the REAL shard path -- `_staged_layer_shape` for the shape
+    (the None-tolerant template derivation) and `_decode_one_shard` for the
+    gather + on-device decode, exactly what `_decode_sharded` runs per
+    device -- with a None-holed staged list, restricted to the simulated
+    host's devices via the sharding's own device->index map. Only the final
+    cross-host array assembly is not exercised, because a single process
+    cannot hold a subset of a mesh's addressable shards.
+    """
     mesh = _mesh(2, 4)
     rng = np.random.default_rng(11)
     packed, scale = _stage(rng, OUT, PACKED_IN, GROUP)
@@ -313,34 +323,27 @@ def test_subset_decode_is_bit_identical_to_full_decode(spec):
         (packed, u8_unpack_e2m1, 2, np_full_values, np.uint8),
         (scale, e8m0_to_fp32, 1, np_full_scale, np.uint32),
     ):
-        packed_in = staged[0].shape[-1]
-        shape = (NUM_EXPERTS, packed_in * expansion, OUT)
-        index_map = named.devices_indices_map(shape)
         for group in _expert_groups(mesh):
             needed = needed_expert_ids(spec,
                                        mesh,
                                        NUM_EXPERTS,
                                        local_devices=group)
             subset = [w if i in needed else None for i, w in enumerate(staged)]
+            # The production shape derivation, on the holed list. Expert 0
+            # is None for the second host's subset, so `staged[0].shape`
+            # would crash here -- that is the point.
+            shape = _staged_layer_shape(subset, expansion)
+            assert shape == (NUM_EXPERTS, staged[0].shape[-1] * expansion, OUT)
+            index_map = named.devices_indices_map(shape)
             cache = {}
             for device in group:
-                expert_slice, in_slice, out_slice = _slices(
-                    index_map[device], shape)
-                assert in_slice.start % expansion == 0
-                assert in_slice.stop % expansion == 0
-                packed_slice = slice(in_slice.start // expansion,
-                                     in_slice.stop // expansion)
-                # The gather `_decode_sharded` performs, from the subset:
-                # absent experts must never be touched (they would raise).
-                local = np.concatenate([
-                    _staged_expert_bytes(subset, cache, e)[:, out_slice,
-                                                           packed_slice]
-                    for e in range(expert_slice.start, expert_slice.stop)
-                ],
-                                       axis=0)
                 shard = np.asarray(
-                    jnp.swapaxes(decode(jnp.asarray(local)), 1, 2)).view(raw)
-                want = np_full[expert_slice, in_slice, out_slice]
+                    _decode_one_shard(subset, cache, decode, expansion, shape,
+                                      device, index_map[device])).view(raw)
+                # `_decode_one_shard` returns the decoded-and-transposed
+                # `[e, in, out]` shard; compare against the same slice of
+                # the full-staging host decode.
+                want = np_full[_slices(index_map[device], shape)]
                 assert shard.shape == want.shape
                 assert np.array_equal(shard, want), (
                     f"{spec} {device}: subset-decoded shard differs from "
@@ -453,3 +456,157 @@ def test_flag_on_with_non_runai_loader_falls_back(monkeypatch):
                         raising=False)
     assert maybe_load_with_sharded_expert_streaming(object(), None,
                                                     None) is False
+
+
+def test_flag_on_with_distributed_runai_loader_falls_back(monkeypatch):
+    # The runai distributed mode re-broadcasts every chunk to all ranks and
+    # would fight the per-host filter; the loader must fall back.
+    from vllm.model_executor.model_loader.runai_streamer_loader import \
+        RunaiModelStreamerLoader
+    monkeypatch.setattr(envs,
+                        "K3_SHARDED_EXPERT_STREAMING",
+                        True,
+                        raising=False)
+    loader = object.__new__(RunaiModelStreamerLoader)
+    loader._is_distributed = True
+    assert maybe_load_with_sharded_expert_streaming(loader, None,
+                                                    None) is False
+
+
+# --- 5. Dropped tensors must be accounted for by a marked layer -----------
+
+
+def test_dropped_names_must_belong_to_a_marked_layer():
+    # The marked layer's prefix is spelled the way Kimi-K3 spells it; the
+    # dropped names carry the checkpoint's extra wrapper prefix.
+    marked = _fake_layer([W, W, None, None],
+                         needed={0, 1},
+                         prefix="model.layers.0.block_sparse_moe.experts")
+    for attr in _STAGED_ATTRS:
+        delattr(marked, attr)
+    model = _fake_model(marked)
+
+    covered = [
+        "language_model.model.layers.0.block_sparse_moe.experts.2.w1"
+        ".weight_packed",
+        "language_model.model.layers.0.block_sparse_moe.experts.3.w2"
+        ".weight_scale",
+    ]
+    validate_sharded_streaming_complete(model, dropped_names=covered)
+
+    # An expert tensor of a module that is NOT a marked MXFP4 MoE layer
+    # would silently keep its initialization weights -- must fail loudly.
+    foreign = covered + [
+        "vision_tower.blocks.1.moe.experts.7.w1.weight",
+    ]
+    with pytest.raises(ValueError, match=r"\[sharded-stream\].*vision_tower"):
+        validate_sharded_streaming_complete(model, dropped_names=foreign)
+
+
+def test_dropped_name_guard_accepts_module_tree_name(monkeypatch):
+    # Marked layers are also matched by their module-tree name (the fake
+    # model names them model.layers.<i>.mlp), with or without the trailing
+    # `.experts` segment in the dropped name's stem.
+    marked = _fake_layer([W, W, None, None], needed={0, 1}, prefix="")
+    for attr in _STAGED_ATTRS:
+        delattr(marked, attr)
+    model = _fake_model(marked)
+    validate_sharded_streaming_complete(
+        model,
+        dropped_names=[
+            "wrapper.model.layers.0.mlp.experts.3.w1.weight_packed"
+        ])
+
+
+# --- 6. Stream-count and zero-byte-run guards -----------------------------
+
+
+class _FakeOffsets:
+
+    def __init__(self, start, end):
+        self.start, self.end = start, end
+
+
+class _FakeMeta:
+
+    def __init__(self, name, start, end):
+        self.name = name
+        self.offsets = _FakeOffsets(start, end)
+
+    def get_bytesize(self):
+        return self.offsets.end - self.offsets.start
+
+
+def test_zero_byte_run_is_refused_loudly():
+    # A kept run consisting solely of zero-byte tensors cannot be submitted
+    # to the streamer (an all-empty request reads as end-of-queue) and must
+    # not be dropped silently.
+    metas = [
+        _FakeMeta("model.a", 0, 0),
+        _FakeMeta("model.layers.0.mlp.experts.0.w1.weight_packed", 0, 4),
+    ]
+    with pytest.raises(ValueError, match=r"\[sharded-stream\].*zero-byte"):
+        build_filtered_requests(
+            ["f"], [(8, metas, [0, 4])],
+            lambda name: expert_id_from_tensor_name(name) is None)
+
+
+def test_stream_yield_count_mismatch_fails_loudly(tmp_path, monkeypatch):
+    pytest.importorskip("runai_model_streamer")
+    import tpu_inference.models.jax.utils.sharded_stream as ss
+
+    path = str(tmp_path / "model.safetensors")
+    _write_checkpoint(path)
+
+    real_filtered_stream = ss._filtered_stream
+
+    def inflated(streamer, paths, keep, device="cpu"):
+        stats = real_filtered_stream(streamer, paths, keep, device)
+        stats.kept_tensors += 1  # claim one more tensor than will arrive
+        return stats
+
+    monkeypatch.setattr(ss, "_filtered_stream", inflated)
+    with pytest.raises(ValueError, match=r"\[sharded-stream\].*yielded"):
+        list(
+            ss.sharded_expert_weights_iterator([path], KEEP_EXPERTS,
+                                               NUM_EXPERTS))
+
+
+# --- 7. Disagreeing layers fall back instead of raising -------------------
+
+
+def _fake_planned_layer(mesh, num_experts):
+    layer = SimpleNamespace(prefix="model.layers.x.mlp.experts",
+                            moe_backend=MoEBackend.DENSE_MAT,
+                            edf_sharding=EDF_SPEC,
+                            efd_sharding=EFD_SPEC,
+                            mesh=mesh,
+                            num_local_experts=num_experts)
+    layer.quant_method = CompressedTensorsMxfp4MoEMethod(layer)
+    return layer
+
+
+def test_plan_falls_back_and_marks_nothing_when_layers_disagree():
+    mesh = _mesh(2, 4)
+    agree = _fake_planned_layer(mesh, NUM_EXPERTS)
+    disagree = _fake_planned_layer(mesh, NUM_EXPERTS * 2)
+    model = _fake_model(agree, disagree)
+    assert plan_sharded_expert_streaming(model) is None
+    # Nothing may be marked: a relaxed gate without the filter running
+    # would decode from partial staging under the stock full read.
+    for layer in (agree, disagree):
+        assert getattr(layer, _SHARDED_STREAM_NEEDED_ATTR, None) is None
+
+
+def test_plan_marks_every_layer_when_they_agree():
+    mesh = _mesh(2, 4)
+    layers = [
+        _fake_planned_layer(mesh, NUM_EXPERTS),
+        _fake_planned_layer(mesh, NUM_EXPERTS)
+    ]
+    model = _fake_model(*layers)
+    needed, num_experts = plan_sharded_expert_streaming(model)
+    assert num_experts == NUM_EXPERTS
+    assert needed == frozenset(range(NUM_EXPERTS))  # single process = all
+    for layer in layers:
+        assert getattr(layer, _SHARDED_STREAM_NEEDED_ATTR) == needed

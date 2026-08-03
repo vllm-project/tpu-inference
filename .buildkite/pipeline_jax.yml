@@ -183,6 +183,7 @@ steps:
               /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4.py \
               /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4_real_layer.py \
               /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4_shard_decode.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_sharded_stream.py \
               /workspace/tpu_inference/tests/layers/common/test_kda_attention.py \
               /workspace/tpu_inference/tests/layers/common/test_kda_attention_dp.py
 
