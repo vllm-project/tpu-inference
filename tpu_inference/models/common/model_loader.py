@@ -377,7 +377,12 @@ def get_flax_model(
     # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
     _state_treedef = jax.tree_util.tree_structure(state)
 
-    @jax.jit(
+    def _run_model_impl(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
+        model = nnx.merge(graphdef, state)
+        return model(*args)
+
+    _run_model_jit_kwargs = dict(
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
@@ -388,12 +393,16 @@ def get_flax_model(
         static_argnums=(
             6, 9, 10
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
-        compiler_options=get_step_fn_compiler_options(),
     )
-    def run_model(state_leaves, *args):
-        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
-        model = nnx.merge(graphdef, state)
-        return model(*args)
+
+    run_model = jax.jit(_run_model_impl,
+                        **_run_model_jit_kwargs,
+                        compiler_options=get_step_fn_compiler_options())
+    # JAX forbids compiler_options on a jit nested inside another traced
+    # computation, so callers that inline the step function into a larger
+    # jitted program (the fused decode loop, which hoists the same options
+    # onto its own top-level jit) need this variant.
+    run_model_no_options = jax.jit(_run_model_impl, **_run_model_jit_kwargs)
 
     @jax.jit(
         out_shardings=(
@@ -486,6 +495,17 @@ def get_flax_model(
     # warmup-only path: the wrapper hides the underlying jit from
     # `_run_compilation`'s `hasattr(fn, 'lower')` check.
     wrapped_model_fn.lower = _lower_model_fn
+
+    def _wrapped_model_fn_no_options(*args, **kwargs):
+        return run_model_no_options(*args, **_drop_unsupported_kwargs(kwargs))
+
+    # Same attribute name the torchax wrapper uses, for the same reason: the
+    # fused decode loop inlines the step function into its own jit, where the
+    # compiler_options-carrying `run_model` is rejected as a nested jit. The
+    # draft model's jit carries no compiler options, so it is its own
+    # no-options variant.
+    wrapped_model_fn.step_fn_no_options = (wrapped_model_fn if is_draft_model
+                                           else _wrapped_model_fn_no_options)
 
     compute_logits_fn = run_compute_logits
     embed_input_ids_fn = run_embed_input_ids
