@@ -419,3 +419,52 @@ class RaggedConv1dJaxTest(parameterized.TestCase):
             x, conv_state).compile().memory_analysis()
         if unsliced_stats is not None:
             self.assertGreater(unsliced_stats.temp_size_in_bytes, bound)
+
+    def test_short_sequence_fixup_survives_wide_channels(self):
+        """A 1-token continuation at conv width 1024 must match the manual
+        window exactly.
+
+        Guards the boundary fixup against the scatter miscompile this
+        replaced: `.at[].set(mode="drop", wrap_negative_indices=False)`
+        stopped dropping -1 indices at row width 1024 on jax 0.10.2 TPU
+        (fine at width 128), so the garbage fixup rows of every sequence
+        shorter than kernel_size-1 wrapped onto its first token. The fixup
+        is now a per-token gather with an explicit mask and no
+        out-of-bounds index at all; this test pins the numerics at the
+        width that used to break, through the mixed path a decode-shaped
+        batch takes under `decode_only_bucket=False`.
+        """
+        dtype = jnp.float32
+        dim, kernel_size, t_pre = 1024, 4, 8
+        rng = np.random.default_rng(0)
+        conv_weight = jnp.asarray(rng.normal(size=(dim, 1, kernel_size)),
+                                  dtype=dtype)
+        x_pre = jnp.asarray(rng.normal(size=(t_pre, dim)), dtype=dtype)
+        state = jnp.zeros((2, kernel_size - 1, dim), dtype=dtype)
+        _, state = ragged_conv1d_jax.ragged_conv1d(x_pre,
+                                                   state,
+                                                   conv_weight,
+                                                   None,
+                                                   jnp.array([0, t_pre],
+                                                             jnp.int32),
+                                                   jnp.array([1], jnp.int32),
+                                                   jnp.array([0, 0, 1],
+                                                             jnp.int32),
+                                                   jnp.array([0], jnp.int32),
+                                                   kernel_size=kernel_size)
+
+        x1 = jnp.asarray(rng.normal(size=(1, dim)), dtype=dtype)
+        out, _ = ragged_conv1d_jax.ragged_conv1d(x1,
+                                                 jnp.array(state),
+                                                 conv_weight,
+                                                 None,
+                                                 jnp.array([0, 1], jnp.int32),
+                                                 jnp.array([1], jnp.int32),
+                                                 jnp.array([1, 1, 1],
+                                                           jnp.int32),
+                                                 jnp.array([1], jnp.int32),
+                                                 kernel_size=kernel_size)
+
+        window = np.concatenate([np.asarray(state)[1], np.asarray(x1)], axis=0)
+        ref = (window * np.asarray(conv_weight)[:, 0, :].T).sum(0)
+        np.testing.assert_allclose(np.asarray(out)[0], ref, atol=1e-5)

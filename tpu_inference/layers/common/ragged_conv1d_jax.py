@@ -159,11 +159,25 @@ def ragged_conv1d_mixed_prefill(
     if conv_bias is not None:
         b_out += conv_bias[jnp.newaxis, :]
 
-    # Scatter the updates. Note that scatter indices may contain -1, which will be
-    # ignored by the scatter operation with mode="drop".
-    out = out.at[scatter_indices.flatten()].set(b_out.astype(out.dtype),
-                                                mode="drop",
-                                                wrap_negative_indices=False)
+    # Select the fixup rows by GATHER rather than scattering with -1
+    # sentinels: `.at[].set(mode="drop", wrap_negative_indices=False)` is
+    # miscompiled on some jax/XLA:TPU versions once the row is wide -- at
+    # row width 1024 a -1 index stops being dropped and wraps to the last
+    # position, so the garbage fixup rows of every short sequence
+    # overwrote token 0 (jax 0.10.2; width 128 behaves). A gather with an
+    # explicit mask has one write per token and no out-of-bounds index at
+    # all.
+    token_idx = jnp.arange(num_tokens)
+    token_seq = jnp.clip(
+        jnp.searchsorted(query_start_loc, token_idx, side="right") - 1, 0,
+        max_blocks - 1)
+    token_off = token_idx - query_start_loc[token_seq]
+    use_fixup = ((token_off < kernel_size - 1) & (token_seq < num_valid_seqs) &
+                 (token_idx < query_start_loc[num_valid_seqs]))
+    fixup_row = jnp.clip(token_seq * (kernel_size - 1) + token_off, 0,
+                         b_out.shape[0] - 1)
+    out = jnp.where(use_fixup[:, None], b_out[fixup_row].astype(out.dtype),
+                    out)
     # Mask invalid tokens to 0
     total_valid_tokens = query_start_loc[num_valid_seqs]
     valid_token_mask = jnp.arange(num_tokens) < total_valid_tokens
@@ -245,7 +259,8 @@ def ragged_conv1d_decode_only(
 
 
 # Donate conv_state to avoid "copy" op by XLA
-@jax.jit(donate_argnames=("conv_state", ), static_argnames=("kernel_size", ))
+@jax.jit(donate_argnames=("conv_state", ),
+         static_argnames=("kernel_size", "decode_only_bucket"))
 @jax.named_scope("ragged_conv1d_jax")
 def ragged_conv1d(
     x: jax.Array,
@@ -258,8 +273,15 @@ def ragged_conv1d(
     has_initial_state: jax.Array,
     *,
     kernel_size: int,
+    decode_only_bucket: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Applies 1D convolution over ragged sequences and updates state.
+
+    ``decode_only_bucket`` selects the decode-only path at TRACE time (see
+    ``AttentionMetadata.decode_only_bucket``): the conv state pool then never
+    crosses a ``lax.cond`` boundary, so its in-place update aliases instead
+    of costing a pool-sized HLO temporary per layer. False traces the
+    prefill/mixed path, which is correct for every batch shape.
 
     Args:
       x: Input tensor of shape `(num_tokens, dim)`.
@@ -290,7 +312,6 @@ def ragged_conv1d(
       - updated_conv_state: The updated convolutional state of shape `(max_blocks,
         kernel_size - 1, dim)`.
     """
-    is_decode_only = distribution[0] == distribution[2]
 
     def decode_only_branch(_):
         # Decode-only means one token per sequence, so only the first
@@ -330,7 +351,6 @@ def ragged_conv1d(
             kernel_size=kernel_size,
         )
 
-    return jax.lax.cond(is_decode_only,
-                        decode_only_branch,
-                        mixed_prefill_branch,
-                        operand=None)
+    if decode_only_bucket:
+        return decode_only_branch(None)
+    return mixed_prefill_branch(None)
