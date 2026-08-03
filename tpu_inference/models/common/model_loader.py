@@ -357,10 +357,20 @@ def get_flax_model(
                                pooler=pooler,
                                is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
-    kv_cache_sharding = NamedSharding(
-        mesh,
-        PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                      ShardingAxisName.KV_HEAD))
+    # KV-cache outputs deliberately carry NO out_sharding (None = let XLA
+    # propagate). The caches are donated inputs updated in place; every
+    # attention op already produces its cache in the storage sharding it was
+    # allocated with (RPA: [BATCH, KV_CONTEXT, KV_HEAD]; MLA: [BATCH,
+    # KV_CONTEXT] with the pool replicated when DP attention is off; mamba
+    # recurrent state: heads on ATTN_HEAD dim 1). A single blanket
+    # PartitionSpec here cannot express that mix: it used to force
+    # KV_HEAD=('model','expert') onto dim 2 of every cache, which is a no-op
+    # when DP attention shards the batch axis (KV_HEAD product == 1) but on a
+    # TP/EP mesh without DP attention resharded every layer's pool per step —
+    # XLA budgeted a pool-sized all-to-all plus an un-aliased pool copy PER
+    # LAYER, blowing HLO temporaries at pool scale (token-count invariant)
+    # and breaking in-place donation of the caches.
+    kv_cache_sharding = None
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
