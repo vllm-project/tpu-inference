@@ -194,8 +194,14 @@ docker system prune -a --volumes -f || true
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
+# setup_environment traces a long tail of docker tag/build/push plumbing and
+# one line per variable it sources from /etc/environment. It echoes its own
+# progress, so the trace adds nothing; xtrace is on for this whole script, so
+# turn it off across the call and back on after.
+{ set +x; } 2>/dev/null
 # Pass "true" to enable pushing to GCR
 setup_environment "${IMAGE_NAME}" "true"
+set -x
 
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
@@ -205,6 +211,10 @@ cleanup
 
 # 1. Start Ray Head Node locally
 echo "--- Starting Ray Head Node Locally"
+# This call carries ~a dozen -e flags; its xtrace line is long and adds
+# nothing over the "Starting Ray Head Node Locally" banner above. The worker
+# start below is already quiet, since xtrace does not echo ssh heredoc bodies.
+{ set +x; } 2>/dev/null
 bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" \
   "${HEAD_INTERNAL_IP}" \
@@ -221,6 +231,7 @@ bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
   -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
   -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+set -x
 
 sleep 60
 

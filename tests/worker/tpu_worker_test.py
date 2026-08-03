@@ -667,3 +667,46 @@ class TestTPUWorker:
             assert os.environ["TPU_PROCESS_ADDRESSES"] == "localhost:9999"
             assert os.environ["TPU_PROCESS_PORT"] == "9999"
             assert os.environ["CLOUD_TPU_TASK_ID"] == "0"
+
+    #
+    # --- Weight Update Tests ---
+    #
+
+    def _weight_update_worker(self, mock_vllm_config):
+        """A worker with a stub model runner."""
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test_method",
+                           devices=['tpu:0'])
+        worker.model_runner = MagicMock()
+        return worker
+
+    def test_full_update_cycle(self, mock_vllm_config):
+        """Tests that a weight update cycles the KV cache and closes cleanly."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        runner = worker.model_runner
+
+        worker.start_weight_update()
+        worker.update_weights({})
+        worker.finish_weight_update()
+
+        runner.delete_kv_cache.assert_called_once()
+        runner.reinitialize_kv_cache.assert_called_once()
+        assert worker._weight_update_active is False
+
+    def test_kv_cache_untouched_when_not_freed(self, mock_vllm_config):
+        """Tests that free_kv_cache=False leaves the KV cache alone."""
+        worker = self._weight_update_worker(mock_vllm_config)
+        runner = worker.model_runner
+
+        # Also exercised after a session that did free it.
+        worker.start_weight_update()
+        worker.finish_weight_update()
+        runner.reset_mock()
+
+        worker.start_weight_update(free_kv_cache=False)
+        worker.finish_weight_update()
+
+        runner.delete_kv_cache.assert_not_called()
+        runner.reinitialize_kv_cache.assert_not_called()

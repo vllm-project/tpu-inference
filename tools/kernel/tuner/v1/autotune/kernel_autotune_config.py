@@ -15,4 +15,6 @@
 kernel_autotune_mapping = {
     'mla_kernel_tuner':
     '/workspace/tpu_inference/tpu_inference/kernels/mla/v2/tuned_params.py',
+    'flash_attention_kernel_tuner':
+    '/workspace/tpu_inference/tpu_inference/kernels/flash_attention/tuned_params.py',
 }

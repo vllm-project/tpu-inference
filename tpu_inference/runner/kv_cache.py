@@ -62,14 +62,13 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  use_mla: bool = False):
     """Gets the KV cache shape based on the mesh configuration.
 
-    This function scales block_size by the CONTEXT (DCP) axis and num_heads by duplicate kv heads.
+    This function scales block_size by the CONTEXT (DCP, PCP) axis and num_heads by duplicate kv heads.
 
     """
 
-    model_cnt = utils.get_mesh_shape_product(mesh,
-                                             ShardingAxisName.KV_CACHE_HEAD)
-
-    context_cnt = utils.get_mesh_shape_product(mesh, ShardingAxisName.CONTEXT)
+    model_cnt = utils.get_mesh_shape_product(mesh, ShardingAxisName.KV_HEAD)
+    context_cnt = utils.get_mesh_shape_product(mesh,
+                                               ShardingAxisName.KV_CONTEXT)
     physical_block_size = block_size * context_cnt
 
     # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
@@ -160,16 +159,29 @@ def create_kv_caches(
     if use_mla:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT))
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT))
     else:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
-                          ShardingAxisName.KV_CACHE_HEAD))
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD))
 
     sharded_allocate = _get_kv_cache_allocator(cache_shape, cache_dtype,
                                                sharding)
     return [sharded_allocate() for _ in layer_names]
+
+
+def create_kv_cache_of_shape(
+    cache_shape: tuple,
+    mesh: Mesh,
+    cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+) -> jax.Array:
+    """Creates a single zero-filled KV cache array with an explicit shape.
+    """
+    sharding = NamedSharding(
+        mesh, PartitionSpec(ShardingAxisName.BATCH,
+                            ShardingAxisName.KV_CONTEXT))
+    return _get_kv_cache_allocator(tuple(cache_shape), cache_dtype, sharding)()
 
 
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,

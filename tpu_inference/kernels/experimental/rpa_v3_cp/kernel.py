@@ -346,7 +346,8 @@ def _ragged_paged_attention_kernel_loop(
     # Static kwargs
     cp_group_size: int | None = None,
     use_causal_mask: bool = True,
-    update_kv_cache: bool = True,  # KV-share: False = skip cache writes
+    update_kv_cache: bool = True,
+    write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -358,6 +359,7 @@ def _ragged_paged_attention_kernel_loop(
     k_scale: float | None = None,
     v_scale: float | None = None,
     static_q_len: int | None = None,
+    pcp_chunk_size: int | None = None,
     bq_sz,  # bq fetch size
     bkv_sz,  # bkv prefetch size
     bq_csz,  # bq compute size
@@ -732,6 +734,16 @@ def _ragged_paged_attention_kernel_loop(
             # Fetch new kvs.
             if not skip_current_attn:
                 new_kv_len_start = _seq_kv_new_end - kv_left_frm_new
+                if pcp_chunk_size is not None:
+                    two_p = 2 * cp_group_size
+                    chunk_idx = new_kv_len_start // pcp_chunk_size
+                    offset_in_chunk = (new_kv_len_start -
+                                       chunk_idx * pcp_chunk_size)
+                    rank_slot = jnp.where(chunk_idx < cp_group_size,
+                                          2 * chunk_idx,
+                                          2 * (two_p - 1 - chunk_idx) + 1)
+                    new_kv_len_start = (rank_slot * pcp_chunk_size +
+                                        offset_in_chunk)
                 debug_print("[RPA debug] new_kv_len_start={}",
                             new_kv_len_start)
                 _async_copy(
@@ -1284,9 +1296,17 @@ def _ragged_paged_attention_kernel_loop(
                 # KV-share: skip the cache write when update_kv_cache=False
                 # so shared layers don't overwrite the source layer's slot.
                 if update_kv_cache:
+                    _do_write = jnp.logical_and(update_sz > 0,
+                                                bq_idx == num_bq - 1)
+                    # PCP fuses a request's head+tail chunks into ONE launch as
+                    # two "sequences" that share the same request (same
+                    # kv_lens/kv_cache_lens), so each would write the SAME
+                    # strided current KV. Write on exactly one of them.
+                    if write_last_seq_only:
+                        _do_write = jnp.logical_and(_do_write,
+                                                    seq_idx == end_seq_idx - 1)
 
-                    @pl.when(
-                        jnp.logical_and(update_sz > 0, bq_idx == num_bq - 1))
+                    @pl.when(_do_write)
                     def update_cur_bkv_to_cache():
                         start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
                                               update_sz, src_start_base)
@@ -1703,10 +1723,6 @@ def static_validate_inputs(
             f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")
     if k.shape != v.shape:
         raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
-    if not (q.shape[0] == k.shape[0] == v.shape[0]):
-        raise ValueError(
-            f"Expected {q.shape[0]=} to be equal to {k.shape[0]=} and {v.shape[0]=}"
-        )
     if not (q.shape[2] == k.shape[2] == v.shape[2]):
         raise ValueError(
             f"Expected {q.shape[2]=} to be equal to {k.shape[2]=} and {v.shape[2]=}"
@@ -1960,7 +1976,9 @@ def get_default_block_sizes(
         "disable_bounds_checks",
         "disable_semaphore_checks",
         "update_kv_cache",
+        "write_last_seq_only",
         "cp_group_size",
+        "pcp_chunk_size",
     ),
     donate_argnames="kv_cache",
 )
@@ -1981,9 +1999,11 @@ def ragged_paged_attention(
     cp_rank: jax.Array
     | None = None,  # i32[1] - per-device rank, sharded along the DCP axis
     cp_group_size: int | None = None,
-    q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs] 
+    q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs]
+    pcp_chunk_size: int | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
+    write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -2032,6 +2052,11 @@ def ragged_paged_attention(
     cp_group_size: the size of the context parallelism group.
     q_pos_offsets: the position of the query tokens in the global sequence, only needed for PCP. 
     use_causal_mask: if true, use causal mask.
+    write_last_seq_only: PCP only. PCP fuses a request's head and tail chunk
+      into one launch as two "sequences" that are really the same request (same
+      kv_lens/kv_cache_lens), so each of them would redundantly write the same
+      strided current KV to the cache. When true, the write is performed by the
+      tail seq only.
     skip_kv_mask: only set to true if use_causal_mask=False and each dynamic
       kv_len % bkv_csz == 0. Set to true can improve performance.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
@@ -2271,6 +2296,7 @@ def ragged_paged_attention(
             functools.partial(
                 _ragged_paged_attention_kernel,
                 cp_group_size=cp_group_size,
+                write_last_seq_only=write_last_seq_only,
                 use_causal_mask=use_causal_mask,
                 skip_kv_mask=skip_kv_mask,
                 skip_cache_attn=skip_cache_attn,
@@ -2283,6 +2309,7 @@ def ragged_paged_attention(
                 k_scale=k_scale,
                 v_scale=v_scale,
                 static_q_len=static_q_len,
+                pcp_chunk_size=pcp_chunk_size,
                 bq_sz=bq_sz,
                 bkv_sz=bkv_sz,
                 bq_csz=bq_csz,
@@ -2340,7 +2367,7 @@ def ragged_paged_attention(
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:
-            return get_default_block_sizes(
+            bs = get_default_block_sizes(
                 q.dtype,
                 kv_cache.dtype,
                 actual_num_q_heads,
@@ -2352,12 +2379,24 @@ def ragged_paged_attention(
                 pages_per_seq,
                 case=case,
             )
-        return {
-            "bq_sz": block_sizes[0],
-            "bkv_sz": block_sizes[1],
-            "bq_csz": block_sizes[2],
-            "bkv_csz": block_sizes[3],
-        }
+        else:
+            bs = {
+                "bq_sz": block_sizes[0],
+                "bkv_sz": block_sizes[1],
+                "bq_csz": block_sizes[2],
+                "bkv_csz": block_sizes[3],
+            }
+        # PCP current phase (rank-ordered KV remap) needs the prefetch block to
+        # stay within one head-tail chunk of size C, i.e. bkv_sz <= C.
+        if pcp_chunk_size is not None and case == RpaCase.MIXED:
+            bkv_sz = min(bs["bkv_sz"], pcp_chunk_size)
+            while bkv_sz > page_size and pcp_chunk_size % bkv_sz != 0:
+                bkv_sz -= page_size
+            bkv_csz = min(bs["bkv_csz"], bkv_sz)
+            while bkv_csz > page_size and bkv_sz % bkv_csz != 0:
+                bkv_csz -= page_size
+            bs = {**bs, "bkv_sz": bkv_sz, "bkv_csz": bkv_csz}
+        return bs
 
     # Decode-only
     q, kv_cache, lse_hbm = run_rpa_kernel(
