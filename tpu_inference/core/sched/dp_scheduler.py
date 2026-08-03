@@ -687,37 +687,9 @@ class DPScheduler(SchedulerInterface):
     def _find_best_rank_for_request(self, request: Request) -> int:
         """Pick the rank minimising the resulting maximum load.
 
-        The DP ranks advance in lockstep, so a step costs whatever the most
-        loaded rank costs: the quantity to minimise is the post-assignment
-        maximum, not this request's own prefill. For each rank estimate the
-        prefill work it would hold after taking the request::
-
-            load(r) = pending_prefill[r] + (num_tokens - cached_on_rank[r])
-
-        and take the argmin. Both terms are token counts on the same rank, so
-        they add directly with no relative weight to tune.
-
-        Cache locality lowers a rank's score because it removes work, not
-        because it is privileged. A rank holding this conversation's history
-        wins while it is idle, and loses once it is busy enough that the
-        saved prefill no longer compensates.
-
-        Ties on load fall back to the order the previous cache-affinity
-        fallback used: fewest in-flight requests, then the rank whose running
-        request is closest to its max_tokens (so most likely to free a slot
-        soonest). In-flight is the only signal here reflecting decode load --
-        queued prefill says nothing about a rank already running many
-        long-lived decodes, and ranks tie at zero queued prefill for much of
-        a decode-heavy phase.
-
-        With prefix caching disabled every rank reports zero cached tokens,
-        so this reduces to (least queued prefill, fewest in-flight, smallest
-        remaining output), matching the previous behaviour exactly.
-
-        No rotation is needed for fully tied ranks. ADD_REQUEST is issued
-        synchronously after routing, so a rank's queued prefill already
-        reflects the request just placed on it by the time the next one is
-        routed, and the tie is broken by load from then on.
+        Ties on load with fewest in-flight requests, then the rank whose
+        running request is closest to its max_tokens (so most likely to free
+        a slot soonest).
         """
         enable_cache = self.vllm_config.cache_config.enable_prefix_caching
 
