@@ -29,6 +29,8 @@ scheduler.py kernel. Kernel is calculated once and ammortized across different l
 Note: batched_rpa is build on top / derived from RPA3. 
 """
 
+import math
+
 import jax
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
@@ -314,9 +316,10 @@ def ragged_paged_attention(
         soft_cap=soft_cap,
         mask_value=mask_value,
     )
+    # Using standard Python math.ceil to evaluate at JIT trace-time without creating a JAX float tracer
     max_decode_bkv_p_new = (
         1 if decode_query_size <= 1
-        else 1 + jnp.ceil(decode_query_size-1/page_size) 
+        else 1 + math.ceil((decode_query_size - 1) / page_size)
     )
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,
