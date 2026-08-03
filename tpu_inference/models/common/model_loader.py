@@ -498,10 +498,13 @@ def get_flax_model(
     def _lower_model_fn(*args, **kwargs):
         return jitted_model_fn.lower(*args, **_drop_unsupported_kwargs(kwargs))
 
-    # Expose `lower` so the precompile pass can AOT-lower the backbone (and so
-    # report `memory_analysis` for it) instead of taking the "not a jit"
-    # warmup-only path: the wrapper hides the underlying jit from
-    # `_run_compilation`'s `hasattr(fn, 'lower')` check.
+    # Expose `lower` so the precompile pass can AOT-lower the backbone
+    # instead of taking the "not a jit" warmup-only path: the wrapper hides
+    # the underlying jit from `_run_compilation`'s `hasattr(fn, 'lower')`
+    # check. This buys per-bucket AOT lowering with per-bucket compile-time
+    # attribution (see `_lower_and_compile`'s timing log), and gives the
+    # precompile pass a real Lowered/Compiled object that memory-analysis
+    # tooling (`compiled.memory_analysis()`) can hook into.
     wrapped_model_fn.lower = _lower_model_fn
 
     def _wrapped_model_fn_no_options(*args, **kwargs):

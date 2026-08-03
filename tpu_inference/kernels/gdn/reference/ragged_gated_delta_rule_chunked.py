@@ -110,8 +110,9 @@ def pack_inputs_single_stream(
       g_dtype: Dtype the packed gate stream is stored in. fp32 (the default)
         preserves the GDN behaviour of packing the post-gate log-decay; a
         caller that packs the RAW gate input and applies the gate math
-        per-chunk (the KDA path) can keep the stream in the input dtype and
-        halve the packed-gate HBM footprint without a numerics change.
+        per-chunk (the KDA path) can keep the stream in the input dtype
+        without a numerics change (a saving only when that input is
+        narrower than fp32; the production KDA path passes fp32 inputs).
 
     Returns:
       A tuple containing:
