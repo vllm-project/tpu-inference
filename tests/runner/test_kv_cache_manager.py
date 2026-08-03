@@ -1171,13 +1171,17 @@ class TestKVCacheManager:
         """With HBM available, compact-mamba caps each mamba layer at
         `max_num_reqs + 1` slots (rounded up to the sharding divisor) and
         sets `num_gpu_blocks_override` for the attention pool that fits
-        the remaining HBM."""
+        the remaining PER-DEVICE HBM. The budget must be one device's free
+        HBM, not the sum across devices: on this 1-device mesh nothing
+        shards the pools, so every allocated byte lands on each device in
+        full — the old summed budget would have sized the pool 4× too
+        large here (four mock devices) and either failed allocation or
+        consumed the compile/warmup headroom."""
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
-        manager.use_mla = False  # divisor is computed from ATTN_DATA.
+        manager.use_mla = False
 
-        # 304 GiB across 4 mock devices (sum is total_limit).
-        avail_per_device = 304 * (2**30) // 4
+        avail_per_device = 304 * (2**30) // 4  # 76 GiB free on each device
         attn_page = 2**20  # 1 MiB / block / attn layer
         unpadded_mamba = 4 * (2**20)  # 4 MiB / slot / mamba layer
         max_num_reqs = 256
@@ -1196,12 +1200,14 @@ class TestKVCacheManager:
 
         # Mamba is capped at max_num_reqs + 1 (the +1 is the null block).
         assert manager._mamba_num_blocks == max_num_reqs + 1
-        # Attention pool is sized to fill the remaining per-tensor budget.
-        # group_size=15 ⇒ avail_per_tensor = 304 GiB / 15.
+        # Attention pool is sized to fill the remaining per-device
+        # per-tensor budget. This mesh has 1 device on every sharding axis,
+        # so per-device page costs equal the logical page sizes:
+        # group_size=15 ⇒ avail_per_tensor = 76 GiB / 15.
         # mamba_per_tensor = 3 × 257 × 4 MiB.
-        # attn_per_tensor = avail_per_tensor − mamba_per_tensor.
-        # N_attn = attn_per_tensor / (1 × 1 MiB), divisor=1.
-        avail_per_tensor = (304 * 2**30) // 15
+        # N_attn = (avail_per_tensor − mamba_per_tensor) / (1 × 1 MiB),
+        # divisor=1.
+        avail_per_tensor = avail_per_device // 15
         expected_attn = (avail_per_tensor - 3 *
                          (max_num_reqs + 1) * unpadded_mamba) // attn_page
         assert (
