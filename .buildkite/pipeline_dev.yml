@@ -89,6 +89,7 @@ steps:
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
+            --num-gpu-blocks-override 256 \
             --gpu-memory-utilization 0.8 \
             --additional-config '{\"enable_continue_decode\":true,\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
           "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
