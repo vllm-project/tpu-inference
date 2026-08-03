@@ -61,12 +61,20 @@ def evaluate_with_vllm(
         model.model.llm_engine.engine_core.shutdown()
 
 
-def _parse_model_args(value: str) -> str | dict[str, Any]:
+def parse_model_args(value: str) -> str | dict[str, Any]:
+    """lm_eval model_args in either accepted form.
+
+    A JSON object goes to `create_from_arg_obj` and can carry nested values;
+    anything else is passed through as the comma-separated `key=value` string
+    `create_from_arg_string` expects.
+    """
     if not value.lstrip().startswith("{"):
         return value
     parsed = json.loads(value)
     if not isinstance(parsed, dict):
-        raise ValueError("--model_args JSON must be an object")
+        raise ValueError(
+            f"model_args JSON must be an object, got {type(parsed).__name__}: "
+            f"{value[:200]}")
     return parsed
 
 
@@ -103,7 +111,7 @@ def main() -> None:
         )
 
     results = evaluate_with_vllm(
-        model_args=_parse_model_args(args.model_args),
+        model_args=parse_model_args(args.model_args),
         tasks=args.tasks,
         batch_size=args.batch_size,
         max_batch_size=args.max_batch_size,
