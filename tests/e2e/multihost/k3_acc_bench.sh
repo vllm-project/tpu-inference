@@ -28,7 +28,10 @@ TOK_DIR=/tmp/k3_tok
 #                  exact serve config, e.g. build 761).
 #   --full-gsm8k   run the full 1319-question set instead of --limit 250.
 #                  ~105 min at the measured 250-in-20-min rate; cap 160 min.
+#   --bs1-bench    single-request decode benchmark: 8k/1k at max-concurrency 1
+#                  (the batch-size-1 shape public K3 numbers are quoted at).
 SKIP_BENCH=""
+BS1_BENCH=""
 GSM8K_LIMIT_ARGS=(--limit 250)
 GSM8K_DESC="--limit 250"
 ACC_CAP=5400
@@ -36,6 +39,7 @@ for arg in "$@"; do
   case "$arg" in
     --skip-bench) SKIP_BENCH="--skip-bench" ;;
     --full-gsm8k) GSM8K_LIMIT_ARGS=(); GSM8K_DESC="FULL 1319"; ACC_CAP=9600 ;;
+    --bs1-bench) BS1_BENCH="1" ;;
     *) echo "[k3-measure] unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -90,26 +94,9 @@ echo "[k3-acc] rc=${acc_rc} (124 means the cap killed a hang)"
 grep -E "strict-match|flexible-extract|exact_match" /root/k3_gsm8k.log \
   | tail -10 || true
 
-# ---------------------------------------------------------------------------
-# Phase 2: throughput at two shapes, 32 requests each, max-concurrency 8
-# (= --max-num-seqs). ignore-eos forces the full output length per request.
-#   * 1k/1k first: decode-dominated, fast, a clean TPOT read.
-#   * 8k/1k second: long-prefill shape; the KV pool (256 blocks) holds 8
-#     full 9k-token requests.
-# ---------------------------------------------------------------------------
-if [ "${SKIP_BENCH}" = "--skip-bench" ]; then
-  echo "[k3-bench] SKIPPED (--skip-bench; numbers already recorded for this config)"
-  if [ "${acc_rc}" -ne 0 ]; then
-    echo "[k3-measure] FAILED acc_rc=${acc_rc}"
-    exit 1
-  fi
-  echo "[k3-measure] accuracy phase completed"
-  exit 0
-fi
-
 run_bench() {
-  local in_len="$1" out_len="$2" cap="$3" log="$4"
-  echo "[k3-bench] random ${in_len}/${out_len}, 32 prompts, max-concurrency 8, cap $((cap / 60)) min"
+  local in_len="$1" out_len="$2" cap="$3" log="$4" nprompts="$5" conc="$6"
+  echo "[k3-bench] random ${in_len}/${out_len}, ${nprompts} prompts, max-concurrency ${conc}, cap $((cap / 60)) min"
   timeout "${cap}" vllm bench serve \
     --base-url "${BASE}" \
     --model "${MODEL}" \
@@ -118,22 +105,48 @@ run_bench() {
     --dataset-name random \
     --random-input-len "${in_len}" \
     --random-output-len "${out_len}" \
-    --num-prompts 32 \
-    --max-concurrency 8 \
+    --num-prompts "${nprompts}" \
+    --max-concurrency "${conc}" \
     --ignore-eos \
     2>&1 | tee "${log}"
   local rc=${PIPESTATUS[0]}
-  echo "[k3-bench] ${in_len}/${out_len} rc=${rc} (124 means the timeout killed a hang)"
+  echo "[k3-bench] ${in_len}/${out_len} conc=${conc} rc=${rc} (124 means the timeout killed a hang)"
   return "${rc}"
 }
 
-run_bench 1024 1024 3600 /root/k3_bench_1k1k.log
+# ---------------------------------------------------------------------------
+# Phase 2a (--bs1-bench): single-request decode rate, 8k/1k at concurrency 1
+# — the batch-size-1 shape public K3 serving numbers are quoted at. At BS=1
+# the reported output-token throughput IS the per-request decode rate
+# (1000 / TPOT-ms tok/s). 3 requests to average; runs even with --skip-bench.
+# ---------------------------------------------------------------------------
+bs1_rc=0
+if [ -n "${BS1_BENCH}" ]; then
+  run_bench 8192 1024 3600 /root/k3_bench_bs1.log 3 1
+  bs1_rc=$?
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 2b: throughput at two shapes, 32 requests each, max-concurrency 8
+# (= --max-num-seqs). ignore-eos forces the full output length per request.
+# ---------------------------------------------------------------------------
+if [ "${SKIP_BENCH}" = "--skip-bench" ]; then
+  echo "[k3-bench] concurrency-8 suite SKIPPED (--skip-bench; numbers already recorded)"
+  if [ "${acc_rc}" -ne 0 ] || [ "${bs1_rc}" -ne 0 ]; then
+    echo "[k3-measure] FAILED acc_rc=${acc_rc} bs1_rc=${bs1_rc}"
+    exit 1
+  fi
+  echo "[k3-measure] phases completed"
+  exit 0
+fi
+
+run_bench 1024 1024 3600 /root/k3_bench_1k1k.log 32 8
 bench_1k_rc=$?
-run_bench 8192 1024 3600 /root/k3_bench_8k1k.log
+run_bench 8192 1024 3600 /root/k3_bench_8k1k.log 32 8
 bench_8k_rc=$?
 
-if [ "${acc_rc}" -ne 0 ] || [ "${bench_1k_rc}" -ne 0 ] || [ "${bench_8k_rc}" -ne 0 ]; then
-  echo "[k3-measure] FAILED acc_rc=${acc_rc} bench_1k1k_rc=${bench_1k_rc} bench_8k1k_rc=${bench_8k_rc}"
+if [ "${acc_rc}" -ne 0 ] || [ "${bs1_rc}" -ne 0 ] || [ "${bench_1k_rc}" -ne 0 ] || [ "${bench_8k_rc}" -ne 0 ]; then
+  echo "[k3-measure] FAILED acc_rc=${acc_rc} bs1_rc=${bs1_rc} bench_1k1k_rc=${bench_1k_rc} bench_8k1k_rc=${bench_8k_rc}"
   exit 1
 fi
 echo "[k3-measure] all phases completed"
