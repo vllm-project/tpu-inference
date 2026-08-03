@@ -22,6 +22,8 @@ from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
+from tpu_inference.models.common.compiler_options import \
+    get_step_fn_compiler_options
 
 
 def _first_group_metadata(
@@ -125,38 +127,46 @@ def _split_rngs(rng, static_size, dynamic_size):
     return all_rngs[:static_size], all_rngs[dynamic_size]
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=(
-        "model_fn",
-        "compute_logits_fn",
-        "sample_fn",
-        "mesh",
-        "static_max_decode_steps",
-        "eos_token_id",
-        "padding_token_id",
-        "dp_size",
-        "pad_len",
-        "has_experts",
-        "expert_shape",
-        "expert_dtype",
-        "layer_name_to_kvcache_index",
-        "is_first_rank",
-        "is_last_rank",
-        "max_logprobs",
-        "logprobs_mode",
-        "continue_decode_eos_check_interval",
-    ),
-    donate_argnames=("kv_caches", ),
-    # Hoisted here from the model's step_fun: JAX forbids compiler_options on
-    # a nested jit, so they must live on this top-level loop jit instead.
-    compiler_options={
-        "xla_tpu_all_gather_collective_matmul_mode": "post_spmd_conservative",
-        "xla_tpu_reduce_scatter_collective_matmul_mode":
-        "post_spmd_conservative",
-        "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
-    },
-)
+@functools.cache
+def _get_decode_core():
+    """The jitted decode core, built lazily on first use.
+
+    The step-fn compiler options are hoisted here from the model's step_fun:
+    JAX forbids compiler_options on a nested jit, so they must live on this
+    top-level loop jit instead. They come from the same
+    `get_step_fn_compiler_options()` the standalone step fn uses (see
+    `model_loader`), so the fused loop and the per-step path always agree —
+    including the env-gated SparseCore offload flags
+    (SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES). Built lazily (not at import)
+    because resolving those options may query the TPU backend.
+    """
+    return functools.partial(
+        jax.jit,
+        static_argnames=(
+            "model_fn",
+            "compute_logits_fn",
+            "sample_fn",
+            "mesh",
+            "static_max_decode_steps",
+            "eos_token_id",
+            "padding_token_id",
+            "dp_size",
+            "pad_len",
+            "has_experts",
+            "expert_shape",
+            "expert_dtype",
+            "layer_name_to_kvcache_index",
+            "is_first_rank",
+            "is_last_rank",
+            "max_logprobs",
+            "logprobs_mode",
+            "continue_decode_eos_check_interval",
+        ),
+        donate_argnames=("kv_caches", ),
+        compiler_options=get_step_fn_compiler_options(),
+    )(_decode_core)
+
+
 def _decode_core(
     *,
     state,
@@ -488,7 +498,7 @@ def continue_decode(
 
     (step_counter, current_tokens, active_mask, positions, seq_lens, kv_caches,
      token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
-     lp_ranks_buffer) = _decode_core(
+     lp_ranks_buffer) = _get_decode_core()(
          state=state,
          kv_caches=kv_caches,
          step_rngs=step_rngs,
