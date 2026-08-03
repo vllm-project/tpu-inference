@@ -16,7 +16,6 @@
 set -e
 
 # --- Configuration ---
-REPO_URL="https://github.com/vllm-project/tpu-inference.git"
 TARGET_BRANCH="${BUILDKITE_BRANCH:-main}"
 
 # Conditional Configuration for Release vs. Nightly
@@ -40,18 +39,11 @@ else
   ARTIFACT_DOWNLOAD_PATH="support_matrices"
   COMMIT_MESSAGE="[skip ci] Update support matrices for ${COMMIT_TAG} (v6e/v7x)"
 fi
-# Construct the repository URL with the access token for authentication.
-AUTHENTICATED_REPO_URL="https://x-access-token:${GITHUB_PAT}@${REPO_URL#https://}"
 
-# Ensure the GITHUB_PAT is available before proceeding.
-if [ -z "${GITHUB_PAT:-}" ]; then
-  echo "--- ERROR: GITHUB_PAT secret not found. Cannot proceed."
-  exit 1
-fi
 
 echo "--- Configuring Git user details"
-git config user.name "Buildkite Bot"
-git config user.email "buildkite-bot@users.noreply.github.com"
+git config user.name "vllm-ci-bot[bot]"
+git config user.email "vllm-ci-bot[bot]@users.noreply.github.com"
 
 echo "--- Fetching and checking out the target branch"
 git fetch origin "${TARGET_BRANCH}"
@@ -98,5 +90,5 @@ else
   git commit -s -m "${COMMIT_MESSAGE}"
 
   echo "--- Pushing changes to '${TARGET_BRANCH}'"
-  git push "${AUTHENTICATED_REPO_URL}" "HEAD:${TARGET_BRANCH}"
+  git push origin "HEAD:${TARGET_BRANCH}"
 fi
