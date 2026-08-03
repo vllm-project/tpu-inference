@@ -505,7 +505,12 @@ class KimiConfig:
     def is_moe_layer(self, layer_idx: int) -> bool:
         if self.num_experts == 0 or layer_idx < self.first_k_dense_replace:
             return False
-        return (layer_idx + 1) % self.moe_layer_freq == 0
+        # Matches the reference (modeling_kimi_linear.py::KimiDecoderLayer):
+        # `layer_idx % moe_layer_freq == 0`. Both released configs set
+        # moe_layer_freq=1, where every phase is equivalent, but at freq>1
+        # this differs from the `(layer_idx + 1) % freq` form some other
+        # models in this repo use.
+        return layer_idx % self.moe_layer_freq == 0
 
     def is_attn_res_checkpoint(self, layer_idx: int) -> bool:
         return (self.use_attn_residuals
@@ -825,8 +830,12 @@ class KimiRoutedExperts(JaxMoE):
                 # `JaxMoE._load_weights` only prepends the expert axis, it does
                 # not transpose, while the expert kernels are declared
                 # `(E, in, out)` and the checkpoint stores `[out, in]`.
+                # `transpose(1, 0)` is the axis swap under both conventions:
+                # torch swaps dims 1 and 0, numpy permutes axes to (1, 0).
+                # (The torch-idiomatic `transpose(0, 1)` would be an identity
+                # permutation on a numpy array.)
                 if weight.ndim == 2:
-                    weight = weight.transpose(0, 1)
+                    weight = weight.transpose(1, 0)
                 yield name, weight
 
         return super()._load_weights(adapted(), **kwargs)
@@ -859,6 +868,9 @@ class KimiSparseMoeBlock(JaxModule):
         weight_init = _weight_init(random_init)
         edf_sharding, efd_sharding = routed_expert_shardings()
 
+        # The router is deliberately replicated (P(None) shardings below):
+        # its [hidden, num_experts] table is negligible next to the experts,
+        # and every device needs the full per-token scores to route.
         self.gate = DeepSeekV3Router(
             hidden_size=config.hidden_size,
             num_experts=config.num_experts,
@@ -878,6 +890,11 @@ class KimiSparseMoeBlock(JaxModule):
             quant_config=None)
 
         if self.use_latent_moe:
+            # The latent down/up projections are deliberately replicated
+            # (P(None, None)): they sit on the data-parallel activation path
+            # outside the expert-sharded region, so splitting these two small
+            # dense weights would buy little memory at the cost of a
+            # collective on every MoE block.
             self.routed_expert_down_proj = JaxEinsum(
                 einsum_str="TD,DL->TL",
                 kernel_shape=(config.hidden_size, moe_hidden),
@@ -1182,6 +1199,14 @@ class KimiLinearModel(JaxModule):
                 mesh=self.mesh,
                 prefix=f"{prefix}.self_attn")
         else:
+            if not config.mla_use_nope:
+                raise NotImplementedError(
+                    f"[kimi] layer {layer_idx}: MLA with rotary embeddings "
+                    f"(mla_use_nope=False) is not wired up in this port -- "
+                    f"no rope module is constructed here (`rope=None` below). "
+                    f"Every released Kimi-Linear/Kimi-K3 config sets "
+                    f"mla_use_nope=true; wire a DeepseekScalingRotaryEmbedding "
+                    f"through this call before loading such a config.")
             self_attn = MLAAttention(
                 hidden_size=config.hidden_size,
                 num_attention_heads=config.num_attention_heads,

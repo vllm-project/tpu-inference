@@ -320,6 +320,44 @@ def test_moe_layer_split_respects_first_k_dense_replace():
     assert [i for i in range(4) if c.is_moe_layer(i)] == [2, 3]
 
 
+def test_moe_layer_split_matches_reference_rule_at_freq_2():
+    """The reference (modeling_kimi_linear.py::KimiDecoderLayer) gates MoE on
+    `layer_idx % moe_layer_freq == 0` -- so at freq=2 the even layers past
+    the dense prefix are MoE, not the odd ones a `(layer_idx + 1) % freq`
+    form would pick."""
+    c = _config_from(num_experts=8,
+                     first_k_dense_replace=1,
+                     moe_layer_freq=2,
+                     num_hidden_layers=6)
+    assert [i for i in range(6) if c.is_moe_layer(i)] == [2, 4]
+
+
+def _mesh_with_model_ways(ways):
+    """A mesh whose only nontrivial axis is `model` (a KDA head-split axis)."""
+    if len(jax.devices()) < ways:
+        pytest.skip(f"needs >= {ways} devices")
+    shape = tuple(ways if name == "model" else 1 for name in MESH_AXIS_NAMES)
+    devices = np.array(jax.devices()[:ways]).reshape(shape)
+    return Mesh(devices, axis_names=MESH_AXIS_NAMES)
+
+
+def test_validate_kda_head_sharding_accepts_a_dividing_head_count():
+    from tpu_inference.models.jax.kimi_k3 import validate_kda_head_sharding
+    mesh = _mesh_with_model_ways(4)
+    assert validate_kda_head_sharding(8, mesh, prefix="self_attn") == 4
+    # No mesh means no split.
+    assert validate_kda_head_sharding(96, None) == 1
+
+
+def test_validate_kda_head_sharding_refuses_a_torn_head():
+    """6 heads on a 4-way head axis: 6*head_dim may divide, the heads do
+    not -- the check must name the head count and the mesh."""
+    from tpu_inference.models.jax.kimi_k3 import validate_kda_head_sharding
+    mesh = _mesh_with_model_ways(4)
+    with pytest.raises(ValueError, match=r"\[kda\] 'self_attn': 6 KDA heads"):
+        validate_kda_head_sharding(6, mesh, prefix="self_attn")
+
+
 # --------------------------------------------------------------------------
 # Kimi-Linear-48B-shaped config: the paths K3-tiny cannot reach
 # --------------------------------------------------------------------------
@@ -371,6 +409,14 @@ def _build_48b_shaped(mesh, **overrides):
                                 quant_config=UnquantizedConfig({}),
                                 random_init=True)
     return config, model
+
+
+def test_mla_layer_without_nope_is_refused_at_construction(mesh):
+    """The port never builds a rope module, so a config with an MLA layer and
+    mla_use_nope unset must fail loudly at construction, not at forward."""
+    with pytest.raises(NotImplementedError,
+                       match=r"\[kimi\] layer 0: MLA with rotary"):
+        _build_48b_shaped(mesh, mla_use_nope=False)
 
 
 def test_48b_shaped_model_omits_k3_only_parameters(mesh):
