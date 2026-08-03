@@ -114,41 +114,41 @@ def calculate_and_store_out(
         utils.strided_store(out_ref, 0, out_ref.shape[0], 1, out)
 
     def _write_lse(b_idx: int):
-        # LSE is only written at is_last_k: the request's final step in the
-        # batch, where (m, l) have converged to their correct final values.
-        if cfgs.serve.return_lse and lse_hbm_ref is not None:
-            lse_val = m_scratch_ref[b_idx] + jnp.log(
-                jnp.maximum(l_scratch_ref[b_idx], 1e-9))
-            s_idx = schedule_ref.s_idx[step_idx, b_idx]
-            q_idx = schedule_ref.q_idx[step_idx, b_idx]
-            q_src = cu_q_lens_ref[s_idx] + q_idx * cfgs.bq_sz
-            q_src_flat = pl.multiple_of(
-                q_src * cfgs.model.num_q_heads_per_kv_head, 8)
-            _, q_sz_task = schedule_ref.get_dma_q(step_idx, b_idx)
-            q_sz_flat = pl.multiple_of(
-                q_sz_task * cfgs.model.num_q_heads_per_kv_head, 8)
-            m_scratch_ref[b_idx] = lse_val.astype(cfgs.serve.dtype_out)
-            cp = pltpu.make_async_copy(
-                m_scratch_ref.at[b_idx, :, pl.ds(0, q_sz_flat), :],
-                lse_hbm_ref.at[:, pl.ds(q_src_flat, q_sz_flat), :],
-                lse_dma_sem_ref.at[0],
-            )
-            cp.start()
-            cp.wait()
+        lse_val = m_scratch_ref[b_idx] + jnp.log(
+            jnp.maximum(l_scratch_ref[b_idx], 1e-9))
+        s_idx = schedule_ref.s_idx[step_idx, b_idx]
+        q_idx = schedule_ref.q_idx[step_idx, b_idx]
+        q_src = cu_q_lens_ref[s_idx] + q_idx * cfgs.bq_sz
+        q_src_flat = pl.multiple_of(
+            q_src * cfgs.model.num_q_heads_per_kv_head, 8)
+        _, q_sz_task = schedule_ref.get_dma_q(step_idx, b_idx)
+        q_sz_flat = pl.multiple_of(
+            q_sz_task * cfgs.model.num_q_heads_per_kv_head, 8)
+        m_scratch_ref[b_idx] = lse_val.astype(cfgs.serve.dtype_out)
+        cp = pltpu.make_async_copy(
+            m_scratch_ref.at[b_idx, :, pl.ds(0, q_sz_flat), :],
+            lse_hbm_ref.at[:, pl.ds(q_src_flat, q_sz_flat), :],
+            lse_dma_sem_ref.at[0],
+        )
+        cp.start()
+        cp.wait()
 
     for b in range(cfgs.batch_size):
-        is_last_k = schedule_ref.is_last_k[step_idx, b] == 1
         # Adding a conditional causes a scheduling barrier. In prefill, we often
         # use small block sizes, so it's not worth executing the accumulation
         # on every block. In decode, because of the large block sizes / and or
         # batch sizes, we almost always use accumulation on every block. Please
         # tune `fuse_accum` for your use case.
         if not cfgs.fuse_accum:
+            is_last_k = schedule_ref.is_last_k[step_idx, b] == 1
             jax.lax.cond(is_last_k, jax.named_call(_accum, name="accum"),
                          lambda _: None, b)
         else:
             _accum(b)
-        jax.lax.cond(is_last_k, _write_lse, lambda _: None, b)
+
+        if  cfgs.serve.return_lse :
+            is_last_k = schedule_ref.is_last_k[step_idx, b] == 1
+            jax.lax.cond(is_last_k, _write_lse, lambda _: None, b)
 
 
 def rpa_body(
@@ -234,7 +234,7 @@ def rpa_body(
         if (sliding_window := cfgs.model.sliding_window) is not None:
             sw_start_idx = offset + q_idx * cfgs.bq_sz - sliding_window + 1
             start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
-        if cfgs.serve.skip_cache_attn:
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
             start_k_idx = jnp.maximum(start_k_idx, offset // cfgs.bkv_sz)
 
         is_first_k_block = k_idx == start_k_idx

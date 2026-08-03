@@ -192,8 +192,7 @@ def get_kv_cache_shape(
         "update_kv_cache",
         "kv_layout",
         "cp_group_size",
-        "skip_cache_attn",
-        "skip_current_attn",
+        "attention_scope",
         "return_lse",
     ),
     # Donation of transient inputs can fail for some runtime buffer layouts in
@@ -229,8 +228,7 @@ def ragged_paged_attention(
     kv_layout: configs.KVLayout | None = None,
     cp_group_size: int | None = None,
     cp_rank: jax.Array | None = None,
-    skip_cache_attn: bool = False,
-    skip_current_attn: bool = False,
+    attention_scope: configs.AttentionScope = configs.AttentionScope.FULL,
     return_lse: bool = False,
 ) -> tuple[jax.Array, jax.Array] | tuple[jax.Array, jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
@@ -270,8 +268,8 @@ def ragged_paged_attention(
         use_causal_mask: Not used.
         cp_group_size: Size of the context parallelism (CP) group. KV cache is sharded across devices in this group. Defaults to None.
         cp_rank: Rank of the current device within the CP group, which determine the token ownership. Defaults to None. 
-        skip_cache_attn: If True, skip attention over the tokens in kv cache. Defaults to False.
-        skip_current_attn: If True, skip attention over the new kv tokens. Defaults to False.
+        attention_scope: Which KV positions to attend to. FULL attends all positions,
+            CACHE_ONLY skips new tokens, NEW_TOKENS_ONLY skips cached tokens. Defaults to FULL.
         return_lse: If True, return log-sum-exp (lse) values along with the output. Defaults to False.
 
     Returns:
@@ -337,8 +335,7 @@ def ragged_paged_attention(
         scale_v=v_scale,
         kv_layout=kv_layout,
         cp_group_size=cp_group_size,
-        skip_cache_attn=skip_cache_attn,
-        skip_current_attn=skip_current_attn,
+        attention_scope=attention_scope,
         return_lse=return_lse,
         update_kv_cache=update_kv_cache,
     )

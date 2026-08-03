@@ -90,11 +90,11 @@ def flash_attention_qk_softmax(
             mask_b = jnp.logical_and(mask_b, q_idx_b
                                      < kv_idx_b + sliding_window)
 
-        if cfgs.serve.skip_cache_attn:
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
             cache_len_b = kv_cache_len_local[b_idx].astype(int_ty)
             mask_b = jnp.logical_and(mask_b, kv_idx_b >= cache_len_b)
 
-        if cfgs.serve.skip_current_attn:
+        if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
             cache_len_b = kv_cache_len_local[b_idx].astype(int_ty)
             mask_b = jnp.logical_and(mask_b, kv_idx_b < cache_len_b)
 
