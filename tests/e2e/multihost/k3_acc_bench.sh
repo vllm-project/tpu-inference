@@ -23,9 +23,22 @@ set -u
 MODEL="${K3_MODEL:-gs://tpu-commons-ci/moonshootai/kimi/k3}"
 BASE="${K3_BASE_URL:-http://localhost:8000}"
 TOK_DIR=/tmp/k3_tok
-# --skip-bench: run accuracy only (used when a prior run already produced the
-# bench numbers for this exact serve config, e.g. build 761).
-SKIP_BENCH="${1:-}"
+# Flags (any order):
+#   --skip-bench   run accuracy only (bench numbers already recorded for this
+#                  exact serve config, e.g. build 761).
+#   --full-gsm8k   run the full 1319-question set instead of --limit 250.
+#                  ~105 min at the measured 250-in-20-min rate; cap 160 min.
+SKIP_BENCH=""
+GSM8K_LIMIT_ARGS=(--limit 250)
+GSM8K_DESC="--limit 250"
+ACC_CAP=5400
+for arg in "$@"; do
+  case "$arg" in
+    --skip-bench) SKIP_BENCH="--skip-bench" ;;
+    --full-gsm8k) GSM8K_LIMIT_ARGS=(); GSM8K_DESC="FULL 1319"; ACC_CAP=9600 ;;
+    *) echo "[k3-measure] unknown flag: $arg" >&2; exit 2 ;;
+  esac
+done
 
 # ---------------------------------------------------------------------------
 # Tokenizer: the server reads it from GCS via the streamer, but lm_eval and
@@ -62,18 +75,18 @@ fi
 # Phase 1: gsm8k accuracy against the live endpoint. limit 250 sets/checks the
 # publish gate (strict-match > 0.85). Concurrency 8 = --max-num-seqs.
 # ---------------------------------------------------------------------------
-echo "[k3-acc] gsm8k --limit 250, num_concurrent=8, cap 90 min"
+echo "[k3-acc] gsm8k ${GSM8K_DESC}, num_concurrent=8, cap $((ACC_CAP / 60)) min"
 # tokenizer_backend=None: build 761 showed the default huggingface backend
 # calls AutoTokenizer.from_pretrained on the model name, which is a gs://
 # path transformers cannot load. gsm8k is generation-only, so no client-side
 # tokenizer is needed (tokenized_requests=False sends plain text).
-timeout 5400 python3 -m lm_eval \
+timeout "${ACC_CAP}" python3 -m lm_eval \
   --model local-completions \
   --model_args "model=${MODEL},base_url=${BASE}/v1/completions,num_concurrent=8,max_retries=2,timeout=600,tokenized_requests=False,tokenizer_backend=None" \
-  --tasks gsm8k --limit 250 \
+  --tasks gsm8k ${GSM8K_LIMIT_ARGS[@]+"${GSM8K_LIMIT_ARGS[@]}"} \
   2>&1 | tee /root/k3_gsm8k.log
 acc_rc=${PIPESTATUS[0]}
-echo "[k3-acc] rc=${acc_rc} (124 means the 90-min timeout killed a hang)"
+echo "[k3-acc] rc=${acc_rc} (124 means the cap killed a hang)"
 grep -E "strict-match|flexible-extract|exact_match" /root/k3_gsm8k.log \
   | tail -10 || true
 
