@@ -138,7 +138,108 @@ def make_lookup_key(
 
 
 # Tuned entries may be added for validated, model-agnostic workloads.
+#
+# Validation methodology: paired-t sweep of (bkv_sz, batch_size, n_buffer) over
+# the VMEM-fit space, N=15 interleaved reps, best-per-shape recorded. Baseline
+# is the ``calculate_block_sizes`` heuristic in ``wrapper.py``. Entries here
+# override the heuristic when the lookup key matches; otherwise the heuristic
+# (which itself now searches over (batch, n_buffer) candidates) is used.
+_QWEN3_CODER_TP8_V7X = {
+    # Qwen3-Coder-480B on TP=8, TPU v7x, per-shard: 12 Q (rounds to 16) / 1 KV /
+    # d128, bf16 Q/KV. Baseline vs heuristic (measured on v7x-8, iters=20):
+    # Values are (bq_sz, bq_c_sz, bkv_sz, batch_size, n_buffer).
+    #
+    # 256k context, {conc=8, conc=16} share the same batched_tokens_bucket=64.
+    # Winner: bkv=22528, batch=2 (compromise for c8 at 1052us / c16 at 1385us
+    # vs 1077us / 1408us heuristic).
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_bfloat16",
+        "q16_kv1_d128",
+        262144,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 22528, 2, 2),
+    # 512k context. batch=1 with big bkv wins on both conc.
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_bfloat16",
+        "q16_kv1_d128",
+        524288,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 40960, 1, 2),
+    # FP8 KV entries for max_model_len 64k / 128k / 256k / 512k / 1M at
+    # batched_tokens_bucket=64 (single-token decode with num_seqs <= 64).
+    # 64k-256k use triple-buffered bkv=65536, which fits the actual VMEM
+    # allocation but exceeds the heuristic's 80% cap; the extra buffer
+    # hides more DMA when there are few outer steps per sequence. 512k
+    # and 1M drop to nbuf=2 with a wider tile once enough outer steps
+    # amortise the buffer count.
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        65536,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 65536, 1, 3),
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        131072,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 65536, 1, 3),
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        262144,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 65536, 1, 3),
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        524288,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 77568, 1, 2),
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        1048576,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 77568, 1, 2),
+}
 TUNED_BLOCK_SIZES: dict[tuple, tuple[int, int, int, int, int]] = {}
+TUNED_BLOCK_SIZES.update(_QWEN3_CODER_TP8_V7X)
 
 
 def get_tuned_block_sizes(

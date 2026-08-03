@@ -79,10 +79,15 @@ def test_environment_overrides(monkeypatch):
     assert not envvars.stacked_rpa_sw_bound()
 
 
-def test_tuned_lookup_falls_back_when_table_is_empty():
+def test_tuned_lookup_returns_none_when_key_not_in_table():
+    """When ``TUNED_BLOCK_SIZES`` has no entry matching a call's key, the
+    lookup falls back to ``None`` so callers use the heuristic. This must
+    remain true regardless of what entries are present.
+    """
     cfgs = _cfgs()
 
-    assert not tuned_block_sizes.TUNED_BLOCK_SIZES
+    # ``_cfgs()`` uses num_q_heads=8, num_kv_heads=2, head_dim=128 which never
+    # appears in the tuned table (Qwen3-Coder entries key on q16_kv1_d128).
     assert (tuned_block_sizes.get_tuned_block_sizes(
         cfgs.model,
         cfgs.serve,

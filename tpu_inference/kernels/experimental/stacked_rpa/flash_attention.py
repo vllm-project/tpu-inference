@@ -15,76 +15,10 @@
 import jax
 import jax.numpy as jnp
 from jax import lax
-from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.stacked_rpa import configs, utils
 
-# ---------------------------------------------------------------------------
-# `pltpu.einshape` compatibility shim. Older JAX nightlies (e.g. older
-# deployed images on libtpu==0.0.37.dev) don't ship einshape.
-# Implement a focused fallback covering the merge/split patterns used in this
-# file. Remove once the deployed image is rebuilt with jax==0.9.2.
-# ---------------------------------------------------------------------------
-if not hasattr(pltpu, "einshape"):
 
-    def _tokens(spec: str):
-        toks, i = [], 0
-        while i < len(spec):
-            if spec[i] == "(":
-                j = spec.index(")", i)
-                toks.append(spec[i + 1:j])
-                i = j + 1
-            else:
-                toks.append(spec[i])
-                i += 1
-        return toks
-
-    def _einshape_compat(spec, x, *_args, **kwargs):
-        in_spec, out_spec = spec.split("->")
-        in_toks, out_toks = _tokens(in_spec), _tokens(out_spec)
-        in_has_groups = any(len(t) > 1 for t in in_toks)
-        out_has_groups = any(len(t) > 1 for t in out_toks)
-
-        if out_has_groups and not in_has_groups:
-            # Merge case: e.g. "bkth->(bk)th"
-            in_axis = {t: i for i, t in enumerate(in_toks)}
-            new_shape = []
-            for t in out_toks:
-                if len(t) > 1:
-                    size = 1
-                    for ch in t:
-                        size *= x.shape[in_axis[ch]]
-                    new_shape.append(size)
-                else:
-                    new_shape.append(x.shape[in_axis[t]])
-            return x.reshape(new_shape)
-
-        if in_has_groups and not out_has_groups:
-            # Split case: e.g. "(bk)ts->bkts" with b=B kwarg.
-            new_shape = []
-            for axis_idx, t in enumerate(in_toks):
-                if len(t) > 1:
-                    merged = x.shape[axis_idx]
-                    running = 1
-                    # All chars but the last get sizes from kwargs; last is the
-                    # remainder.
-                    for ch in t[:-1]:
-                        sz = kwargs[ch]
-                        new_shape.append(sz)
-                        running *= sz
-                    new_shape.append(merged // running)
-                else:
-                    new_shape.append(x.shape[axis_idx])
-            return x.reshape(new_shape)
-
-        # Pure permutation
-        in_axis = {t: i for i, t in enumerate(in_toks)}
-        return jnp.transpose(x, [in_axis[t] for t in out_toks])
-
-    pltpu.einshape = _einshape_compat
-
-
-@jax.named_scope("flash_qk_softmax")
 def flash_attention_qk_softmax(
     q: jax.Array,  # [B, KV, TQ, H]
     k: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
@@ -100,7 +34,7 @@ def flash_attention_qk_softmax(
     bq_start: int,
 ):
     """Flash attention kernel."""
-    b, k_heads, tq, _ = q.shape
+    b, k_heads, tq, h_size = q.shape
 
     if cfgs.serve.scale_q is not None:
         q = q / cfgs.serve.scale_q
@@ -113,13 +47,13 @@ def flash_attention_qk_softmax(
 
     s = k.shape[3]
     qk = lax.dot_general(
-        pltpu.einshape("bkth->(bk)th", q, True),
-        pltpu.einshape("bkhs->(bk)hs", k, True),
+        q.reshape(-1, tq, h_size),
+        k.reshape(-1, h_size, s),
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
     ).astype(configs.accum_dtype(cfgs.serve.dtype_out))
 
-    qk = pltpu.einshape("(bk)ts->bkts", qk, True, b=b)
+    qk = qk.reshape(b, k_heads, tq, s)
 
     qk *= cfgs.model.sm_scale
     if cfgs.serve.scale_k is not None:
@@ -164,11 +98,35 @@ def flash_attention_qk_softmax(
             mask = jnp.logical_and(mask, q_idx_b >= kv_idx_b)
 
             if (sliding_window := cfgs.model.sliding_window) is not None:
-                mask = jnp.logical_and(mask, q_idx_b
-                                       < kv_idx_b + sliding_window)
+                # Overflow guard: on v6e/v7x with int_ty=int16, `kv_idx_b +
+                # sliding_window` can exceed INT16_MAX (32767) even when
+                # max_model_len itself is <= 32767, because iota + processed_kv_len
+                # already lands near max_model_len at the tail. Wrapping there
+                # flips the predicate and silently drops valid keys.  Promote the
+                # sum to int32 for the compare -- the compare's result is a bool,
+                # so no downstream cost.
+                mask = jnp.logical_and(
+                    mask,
+                    q_idx_b.astype(jnp.int32)
+                    < kv_idx_b.astype(jnp.int32) + int(sliding_window))
             return mask
 
-        if skip_mask is not None:
+        # Small qk tiles (decode, tq == 1) fit the branchless path without VREG
+        # spill; the always-materialised mask elides Mosaic's control-flow
+        # barrier and lets the mask compute fuse into the QK+softmax pipeline.
+        # For large tiles (prefill/mixed, tq >> 1) the always-materialised
+        # ``masked_qk`` is a (K, TQ, S) intermediate that spills VREGs
+        # catastrophically (>44 MB scratch on bq_sz=512 prefill measured on
+        # v7x-8), so keep the original ``lax.cond`` there. Threshold picked as
+        # tq == 1 -- exactly the single-token decode fast path.
+        _branchless_ok = (skip_mask is not None
+                          and qk.shape[2] * qk.shape[3] <= 64 * 1024)
+        if skip_mask is not None and _branchless_ok:
+            mask_pred = compute_mask(None)
+            masked_qk = jnp.where(mask_pred, qk[b_idx], mask_value)
+            qk_masked_b = jnp.where(skip_mask[b_idx] != 0, qk[b_idx],
+                                    masked_qk)
+        elif skip_mask is not None:
             qk_masked_b = lax.cond(
                 skip_mask[b_idx] != 0,
                 lambda _: qk[b_idx],
@@ -195,7 +153,6 @@ def flash_attention_qk_softmax(
     return p, alpha, m_next, l_next
 
 
-@jax.named_scope("flash_pv")
 def flash_attention_pv(
     p: jax.Array,  # [B, KV, TQ, S]
     v: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
@@ -204,14 +161,15 @@ def flash_attention_pv(
     cfgs: configs.RpaConfigs,
 ):
     """Flash attention kernel."""
-    b = p.shape[0]
+    b, k_heads, tq, s = p.shape
+    h_size = v.shape[2]
     pv = lax.dot_general(
-        pltpu.einshape("bkts->(bk)ts", p, True),
-        pltpu.einshape("bkhs->(bk)hs", v, True),
+        p.reshape(-1, tq, s),
+        v.reshape(-1, h_size, s),
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
     ).astype(configs.accum_dtype(cfgs.serve.dtype_out))
-    pv = pltpu.einshape("(bk)th->bkth", pv, True, b=b)
+    pv = pv.reshape(b, k_heads, tq, h_size)
 
     if cfgs.serve.scale_v is not None:
         pv *= cfgs.serve.scale_v

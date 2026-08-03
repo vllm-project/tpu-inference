@@ -14,7 +14,6 @@
 
 import dataclasses
 import functools
-import inspect
 
 import jax
 import jax.experimental.pallas as pl
@@ -24,45 +23,169 @@ from jax import lax
 
 # isort: off
 from tpu_inference.kernels.experimental.stacked_rpa import (
-    bref_override, configs, flash_attention, schedule, stitch_utils, utils)
+    bref_override, configs, flash_attention, flash_attention_chunked, schedule,
+    stitch_utils, utils)
 # isort: on
 
-# ---------------------------------------------------------------------------
-# `pl.with_scoped` compatibility shim.
-#
-# Upstream introduced `pl.with_scoped` (a decorator form of `pl.run_scoped`) in
-# the JAX nightly that ships with the current tpu-inference image. Older JAX
-# nightlies (e.g. older deployed images on libtpu==0.0.37.dev)
-# only have `pl.run_scoped`. Synthesize `with_scoped` from `run_scoped` on
-# those older versions so the vendored kernel runs on both.
-# Remove this shim once the deployed image is rebuilt with jax==0.9.2 (which
-# ships `pl.with_scoped` natively).
-# ---------------------------------------------------------------------------
-if not hasattr(pl, "with_scoped"):
+# pl.with_scoped is required at import time; enforced by JAX >= 0.9.2.
 
-    def _with_scoped_compat(**scopes):
 
-        def decorator(fn):
-            param_names = list(inspect.signature(fn).parameters)
-            ordered = tuple(scopes[name] for name in param_names
-                            if name in scopes)
+def _run_chunked_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
+                            acc_scratch_ref, processed_q_len, processed_kv_len,
+                            effective_kv_len, bkv_sz_frm_cache_list,
+                            new_kv_len_start_list, visibility_list,
+                            skip_mask_list, step, schedule_ref, cfgs, m_val,
+                            l_val, acc_val):
+    # Decode-only path (bq_sz=1) with the 5-D VMEM layout and per-page
+    # flash. m_val / l_val / acc_val are the accumulator snapshot the caller
+    # took after any dense-pack reset.
+    for bq_start in range(0, cfgs.bq_sz, cfgs.bq_c_sz):
+        bq_end = min(bq_start + cfgs.bq_c_sz, cfgs.bq_sz)
+        q_start = bq_start * cfgs.aligned_num_q_heads_per_kv_head
+        q_end = bq_end * cfgs.aligned_num_q_heads_per_kv_head
+        q_slice = slice(q_start, q_end)
+        for b_idx in range(cfgs.batch_size):
+            new_tok_off_b = (new_kv_len_start_list[b_idx].astype(jnp.int32) %
+                             cfgs.serve.page_size)
+            m_next, l_next, o_next = flash_attention_chunked.flash_attention_chunked(
+                q[b_idx:b_idx + 1, :, q_slice, :],
+                kv_in_vref,
+                m_prev=m_val[b_idx:b_idx + 1, :, q_slice, :],
+                l_prev=l_val[b_idx:b_idx + 1, :, q_slice, :],
+                o_prev=acc_val[b_idx:b_idx + 1, :, q_slice, :],
+                b_batch_idx=b_idx,
+                processed_q_len=processed_q_len[b_idx],
+                processed_kv_len=processed_kv_len[b_idx],
+                effective_kv_len=effective_kv_len[b_idx],
+                bkv_sz_frm_cache=bkv_sz_frm_cache_list[b_idx],
+                new_tok_offset=new_tok_off_b,
+                visibility=(visibility_list[b_idx]
+                            if cfgs.has_visibility else None),
+                skip_mask=(skip_mask_list[b_idx]
+                           if skip_mask_list is not None else None),
+                cfgs=cfgs,
+                bq_start=bq_start,
+                num_cache_pages=cfgs.bkv_p_cache,
+                num_new_pages=cfgs.bkv_p_new,
+            )
+            m_scratch_ref[b_idx:b_idx + 1, :, q_slice, :] = m_next
+            l_scratch_ref[b_idx:b_idx + 1, :, q_slice, :] = l_next
+            acc_scratch_ref[b_idx:b_idx + 1, :, q_slice, :] = o_next
 
-            def wrapper(*args, **kwargs):
-                return pl.run_scoped(
-                    lambda *res: fn(*res, *args, **kwargs),
-                    *ordered,
-                )
 
-            return wrapper
+def _run_shipped_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
+                            acc_scratch_ref, processed_q_len, processed_kv_len,
+                            effective_kv_len, bkv_sz_frm_cache_list,
+                            new_kv_len_start_list, visibility_list,
+                            skip_mask_list, step, schedule_ref, cfgs, m_val,
+                            l_val, acc_val):
+    # MIXED / PREFILL path (and DECODE when the chunked path is not enabled).
+    # Uses the 4-D VMEM layout, a single-shot flash, and a stitch pass.
+    # Snapshot arguments follow the same convention as
+    # ``_run_chunked_flash_path``.
+    _defer_v = cfgs.bq_sz == 1
+    stitch_results = []
+    for b_idx in range(cfgs.batch_size):
+        res = stitch_utils.stitch_new_kv_lane(kv_in_vref,
+                                              b_idx,
+                                              bkv_sz_frm_cache_list[b_idx],
+                                              new_kv_len_start_list[b_idx],
+                                              cfgs=cfgs)
+        stitch_results.append(res)
+    for b_idx in range(cfgs.batch_size):
+        stitch_utils.store_new_kv_lane(kv_in_vref,
+                                       b_idx,
+                                       stitch_results[b_idx],
+                                       cfgs=cfgs)
+    k_b = []
+    v_b = []
+    for b_idx in range(cfgs.batch_size):
+        ks = []
+        vs = []
+        for kv_head in range(cfgs.model.num_kv_heads):
+            k_head = kv_in_vref[b_idx, kv_head * 2, :, 0:cfgs.bkv_sz]
+            ks.append(k_head)
+            if not _defer_v:
+                v_head = kv_in_vref[b_idx, kv_head * 2 + 1, :, 0:cfgs.bkv_sz]
+                vs.append(v_head)
+        k_b.append(jnp.stack(ks, axis=0))
+        if not _defer_v:
+            v_b.append(jnp.stack(vs, axis=0))
+    k = jnp.stack(k_b, axis=0)
+    v = jnp.stack(v_b, axis=0) if not _defer_v else None
 
-        return decorator
+    def _mask_v(vv):
+        kv_valid = jnp.stack([
+            jnp.clip(
+                effective_kv_len[b].astype(jnp.int32) -
+                processed_kv_len[b].astype(jnp.int32),
+                0,
+                cfgs.bkv_sz,
+            ) for b in range(cfgs.batch_size)
+        ])
+        keep = lax.broadcasted_iota(
+            jnp.int32, vv.shape, vv.ndim -
+            1) < kv_valid.reshape((cfgs.batch_size, ) + (1, ) * (vv.ndim - 1))
+        return jnp.where(keep, vv, 0)
 
-    pl.with_scoped = _with_scoped_compat
+    if not _defer_v:
+        v = _mask_v(v)
+
+    # dense_pack reset + m_val snapshot already done by caller.
+
+    prev_p = prev_alpha = prev_q_slice = None
+    for bq_start in range(0, cfgs.bq_sz, cfgs.bq_c_sz):
+        bq_end = min(bq_start + cfgs.bq_c_sz, cfgs.bq_sz)
+        q_start = bq_start * cfgs.aligned_num_q_heads_per_kv_head
+        q_end = bq_end * cfgs.aligned_num_q_heads_per_kv_head
+        q_slice = slice(q_start, q_end)
+        p, alpha, m_next, l_next = flash_attention.flash_attention_qk_softmax(
+            q[:, :, q_slice],
+            k,
+            m_val[:, :, q_slice],
+            l_val[:, :, q_slice],
+            processed_q_len=processed_q_len,
+            processed_kv_len=processed_kv_len,
+            effective_kv_len=effective_kv_len,
+            visibility=visibility_list if cfgs.has_visibility else None,
+            skip_mask=skip_mask_list,
+            cfgs=cfgs,
+            bq_start=bq_start)
+        m_scratch_ref[:, :, q_slice] = m_next
+        l_scratch_ref[:, :, q_slice] = l_next
+        if prev_p is not None:
+            o_next = flash_attention.flash_attention_pv(prev_p,
+                                                        v,
+                                                        prev_alpha,
+                                                        acc_val[:, :,
+                                                                prev_q_slice],
+                                                        cfgs=cfgs)
+            acc_scratch_ref[:, :, prev_q_slice] = o_next
+        prev_p = p
+        prev_alpha = alpha
+        prev_q_slice = q_slice
+
+    if _defer_v:
+        v_b_deferred = []
+        for b_idx in range(cfgs.batch_size):
+            vs = []
+            for kv_head in range(cfgs.model.num_kv_heads):
+                v_head = kv_in_vref[b_idx, kv_head * 2 + 1, :, 0:cfgs.bkv_sz]
+                vs.append(v_head)
+            v_b_deferred.append(jnp.stack(vs, axis=0))
+        v = jnp.stack(v_b_deferred, axis=0)
+        v = _mask_v(v)
+    o_next = flash_attention.flash_attention_pv(prev_p,
+                                                v,
+                                                prev_alpha,
+                                                acc_val[:, :, prev_q_slice],
+                                                cfgs=cfgs)
+    acc_scratch_ref[:, :, prev_q_slice] = o_next
+
 
 # Define inner kernel.
 
 
-@jax.named_scope("calculate_and_store_out")
 def calculate_and_store_out(
     step_idx: jax.Array,
     schedule_ref: schedule.RpaSchedule,
@@ -73,7 +196,6 @@ def calculate_and_store_out(
     cfgs: configs.RpaConfigs,
 ):
 
-    @jax.named_scope("accum")
     def _accum(b_idx: int):
         batch_acc = acc_scratch_ref[b_idx]
         batch_l = l_scratch_ref[b_idx]
@@ -110,13 +232,11 @@ def calculate_and_store_out(
         # tune `fuse_accum` for your use case.
         if not cfgs.fuse_accum:
             is_last_k = schedule_ref.is_last_k[step_idx, b] == 1
-            jax.lax.cond(is_last_k, jax.named_call(_accum, name="accum"),
-                         lambda _: None, b)
+            jax.lax.cond(is_last_k, _accum, lambda _: None, b)
         else:
             _accum(b)
 
 
-@jax.named_scope("stacked_combine_and_store")
 def _stacked_combine_and_store(
     step_idx: jax.Array,
     schedule_ref: schedule.RpaSchedule,
@@ -201,7 +321,6 @@ def _stacked_combine_and_store(
                 acc_scratch_ref[m] = jnp.where(reset, 0.0, acc_scratch_ref[m])
 
 
-@jax.named_scope("dense_combine_and_store")
 def _dense_combine_and_store(
     step_idx: jax.Array,
     schedule_ref: schedule.RpaSchedule,
@@ -339,7 +458,6 @@ def _dense_combine_and_store(
         utils.strided_store(out_ref, 0, out_ref.shape[0], 1, out_b)
 
 
-@jax.named_scope("rpa_body")
 def rpa_body(
     # Inputs.
     q_vref: jax.Ref,
@@ -380,243 +498,131 @@ def rpa_body(
     # the DMA/VPU on the critical path -- like kv_zero_pad, it can look serial in
     # an LLO trace but cost ~0 wall-clock. Only hoist if a stub/precompute A/B
     # actually moves LLO-off latency.
-    with jax.named_scope("rpa_metadata"):
-        processed_q_len = []
-        processed_kv_len = []
-        effective_kv_len = []
-        # Lists to hold the 2 variables needed for stitching
-        bkv_sz_frm_cache_list = []
-        new_kv_len_start_list = []
-        visibility_list = []
-        skip_mask_list = []
-        int_ty = cfgs.serve.int_ty
-        for b_idx in range(cfgs.batch_size):
-            s_idx = schedule_ref.s_idx[step, b_idx]
-            is_valid = s_idx != -1
-            q_idx = schedule_ref.q_idx[step, b_idx]
-            k_idx = schedule_ref.k_idx[step, b_idx]
-            kv_len = jnp.where(is_valid, kv_lens_ref[s_idx], 0)
-            q_start = jnp.where(is_valid, cu_q_lens_ref[s_idx], 0)
-            q_end = jnp.where(is_valid, cu_q_lens_ref[s_idx + 1], 0)
-            q_len = q_end - q_start
-            offset = kv_len - q_len
+    processed_q_len = []
+    processed_kv_len = []
+    effective_kv_len = []
+    # Lists to hold the 2 variables needed for stitching
+    bkv_sz_frm_cache_list = []
+    new_kv_len_start_list = []
+    visibility_list = []
+    skip_mask_list = []
+    int_ty = cfgs.serve.int_ty
+    for b_idx in range(cfgs.batch_size):
+        s_idx = schedule_ref.s_idx[step, b_idx]
+        is_valid = s_idx != -1
+        q_idx = schedule_ref.q_idx[step, b_idx]
+        k_idx = schedule_ref.k_idx[step, b_idx]
+        kv_len = jnp.where(is_valid, kv_lens_ref[s_idx], 0)
+        q_start = jnp.where(is_valid, cu_q_lens_ref[s_idx], 0)
+        q_end = jnp.where(is_valid, cu_q_lens_ref[s_idx + 1], 0)
+        q_len = q_end - q_start
+        offset = kv_len - q_len
 
-            if cfgs.use_window_anchor:
-                # Match schedule.py's anchored block base (page-aligned window
-                # start); k_idx is the local block index (0) in the anchored range.
-                anchor_tok = utils.window_anchor_tok(kv_len, q_len,
-                                                     cfgs.model.sliding_window,
-                                                     cfgs.serve.page_size_log2)
-                k_id = jnp.where(is_valid, anchor_tok + k_idx * cfgs.bkv_sz, 0)
-            else:
-                k_id = jnp.where(is_valid, k_idx * cfgs.bkv_sz, 0)
+        if cfgs.use_window_anchor:
+            # Match schedule.py's anchored block base (page-aligned window
+            # start); k_idx is the local block index (0) in the anchored range.
+            anchor_tok = utils.window_anchor_tok(kv_len, q_len,
+                                                 cfgs.model.sliding_window,
+                                                 cfgs.serve.page_size_log2)
+            k_id = jnp.where(is_valid, anchor_tok + k_idx * cfgs.bkv_sz, 0)
+        else:
+            k_id = jnp.where(is_valid, k_idx * cfgs.bkv_sz, 0)
 
-            processed_q_len.append(
-                (q_idx * cfgs.bq_sz + offset).astype(int_ty))
-            processed_kv_len.append(k_id.astype(int_ty))
-            effective_kv_len.append(kv_len.astype(int_ty))
-            if cfgs.has_visibility:
-                visibility_list.append(visibility_vref[b_idx, :, :2])
-            skip_mask_list.append(schedule_ref.skip_mask[step, b_idx])
+        processed_q_len.append((q_idx * cfgs.bq_sz + offset).astype(int_ty))
+        processed_kv_len.append(k_id.astype(int_ty))
+        effective_kv_len.append(kv_len.astype(int_ty))
+        if cfgs.has_visibility:
+            visibility_list.append(visibility_vref[b_idx, :, :2])
+        skip_mask_list.append(schedule_ref.skip_mask[step, b_idx])
 
-            # Stitching metadata
-            kv_left = jnp.maximum(kv_len - k_id, 0)
-            if cfgs.update_kv_cache:
-                kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
-            else:
-                kv_left_frm_cache = kv_left
-            kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
+        # Stitching metadata
+        kv_left = jnp.maximum(kv_len - k_id, 0)
+        if cfgs.update_kv_cache:
+            kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+        else:
+            kv_left_frm_cache = kv_left
+        kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
 
-            bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
-            new_kv_len_start = q_end - kv_left_frm_new
+        bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
+        new_kv_len_start = q_end - kv_left_frm_new
 
-            bkv_sz_frm_cache_list.append(bkv_sz_frm_cache.astype(int_ty))
-            new_kv_len_start_list.append(new_kv_len_start.astype(int_ty))
+        bkv_sz_frm_cache_list.append(bkv_sz_frm_cache.astype(int_ty))
+        new_kv_len_start_list.append(new_kv_len_start.astype(int_ty))
 
-            if not cfgs.is_stacked:
-                start_k_idx = 0
-                if (sliding_window := cfgs.model.sliding_window) is not None:
-                    sw_start_idx = (kv_len - q_len + q_idx * cfgs.bq_sz -
-                                    sliding_window + 1)
-                    start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
+        if not cfgs.is_stacked:
+            start_k_idx = 0
+            if (sliding_window := cfgs.model.sliding_window) is not None:
+                sw_start_idx = (kv_len - q_len + q_idx * cfgs.bq_sz -
+                                sliding_window + 1)
+                start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
 
-                is_first_k_block = k_idx == start_k_idx
-                reset_cond = jnp.logical_and(is_valid, is_first_k_block)
-                m_scratch_ref[b_idx] = jnp.where(reset_cond, -jnp.inf,
-                                                 m_scratch_ref[b_idx])
-                l_scratch_ref[b_idx] = jnp.where(reset_cond, 0.0,
-                                                 l_scratch_ref[b_idx])
-                acc_scratch_ref[b_idx] = jnp.where(reset_cond, 0.0,
-                                                   acc_scratch_ref[b_idx])
+            is_first_k_block = k_idx == start_k_idx
+            reset_cond = jnp.logical_and(is_valid, is_first_k_block)
+            m_scratch_ref[b_idx] = jnp.where(reset_cond, -jnp.inf,
+                                             m_scratch_ref[b_idx])
+            l_scratch_ref[b_idx] = jnp.where(reset_cond, 0.0,
+                                             l_scratch_ref[b_idx])
+            acc_scratch_ref[b_idx] = jnp.where(reset_cond, 0.0,
+                                               acc_scratch_ref[b_idx])
 
     # Step 2: Fetch inputs.
-    with jax.named_scope("q_load"):
-        q_p = cfgs.aligned_num_q_heads_per_kv_head // cfgs.serve.packing_q
-        q_ref = q_vref.bitcast(jnp.uint32).reshape(-1, cfgs.aligned_q_head_dim)
-        q_loaded = utils.strided_load(
-            q_ref,
-            0,
-            cfgs.batch_size * cfgs.model.num_kv_heads * cfgs.bq_sz * q_p,
-            1,
-            dtype=cfgs.serve.dtype_q,
-        )
-        q = q_loaded.reshape(
-            cfgs.batch_size,
-            cfgs.model.num_kv_heads,
-            cfgs.bq_sz * cfgs.aligned_num_q_heads_per_kv_head,
-            cfgs.aligned_q_head_dim,
-        )
-        if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:
-            q = q[..., :cfgs.aligned_kv_head_dim]
+    q_p = cfgs.aligned_num_q_heads_per_kv_head // cfgs.serve.packing_q
+    q_ref = q_vref.bitcast(jnp.uint32).reshape(-1, cfgs.aligned_q_head_dim)
+    q_loaded = utils.strided_load(
+        q_ref,
+        0,
+        cfgs.batch_size * cfgs.model.num_kv_heads * cfgs.bq_sz * q_p,
+        1,
+        dtype=cfgs.serve.dtype_q,
+    )
+    q = q_loaded.reshape(
+        cfgs.batch_size,
+        cfgs.model.num_kv_heads,
+        cfgs.bq_sz * cfgs.aligned_num_q_heads_per_kv_head,
+        cfgs.aligned_q_head_dim,
+    )
+    if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:
+        q = q[..., :cfgs.aligned_kv_head_dim]
 
-    # We want to load k, v from (batch, bkv_sz, bkv_stride, kv_packing, d)
-    # where bkv_stride ~= num_kv_heads * 2 // kv_packing
-    # to 2x (batch, num_kv_heads, bkv_sz, d)
-    # We use strided_load to avoid the expensive transpose.
-    # Overlapped V-load: for single-token SEQ_ALONG_LANE decode, defer the V
-    # VMEM->reg load until after the QK softmax (below) so the load units overlap
-    # the VPU softmax. Only valid for bq_sz==1 (the only-final-pv flow).
-    _defer_v = cfgs.bq_sz == 1
-    k_b = []
-    v_b = []
-
-    with jax.named_scope("kv_stitch"):
-        stitch_results = []
-        for b_idx in range(cfgs.batch_size):
-            res = stitch_utils.stitch_new_kv_lane(
-                kv_in_vref,
-                b_idx,
-                bkv_sz_frm_cache_list[b_idx],
-                new_kv_len_start_list[b_idx],
-                cfgs=cfgs,
-            )
-            stitch_results.append(res)
-        for b_idx in range(cfgs.batch_size):
-            stitch_utils.store_new_kv_lane(
-                kv_in_vref,
-                b_idx,
-                stitch_results[b_idx],
-                cfgs=cfgs,
-            )
-    with jax.named_scope("k_load" if _defer_v else "kv_load"):
-        for b_idx in range(cfgs.batch_size):
-            ks = []
-            vs = []
-            for kv_head in range(cfgs.model.num_kv_heads):
-                # 4D [.., head_dim, tokens]: slice is already [hd, bkv], no
-                # reshape (the old [hd_sub, pk]->hd reshape forced a relayout).
-                k_head = kv_in_vref[b_idx, kv_head * 2, :, 0:cfgs.bkv_sz]
-                ks.append(k_head)
-                if not _defer_v:
-                    v_head = kv_in_vref[b_idx, kv_head * 2 + 1, :,
-                                        0:cfgs.bkv_sz]
-                    vs.append(v_head)
-            k_b.append(jnp.stack(ks, axis=0))
-            if not _defer_v:
-                v_b.append(jnp.stack(vs, axis=0))
-    # Stack to (batch, num_heads, bkv_sz, num_lanes)
-    with jax.named_scope("kv_reshape"):
-        k = jnp.stack(k_b, axis=0)
-        if not _defer_v:
-            v = jnp.stack(v_b, axis=0)
-
-    # Zero V beyond the block's valid length before p@V: the QK score mask forces
-    # p==0 on padding positions, but 0*NaN==NaN, so stale/uninitialized paged-cache
-    # V in the padding slots must be made finite. Matches the original RPA kernel:
-    # fold the V-mask into the point where V is consumed (per path below) instead
-    # of a standalone zero-pad phase. K needs no masking -- the QK score mask
-    # already sanitizes padding/NaN K.
-    def _mask_v(vv):
-        kv_valid = jnp.stack([
-            jnp.clip(
-                effective_kv_len[b].astype(jnp.int32) -
-                processed_kv_len[b].astype(jnp.int32),
-                0,
-                cfgs.bkv_sz,
-            ) for b in range(cfgs.batch_size)
-        ])  # int32: Mosaic only supports i32 subi
-        keep = lax.broadcasted_iota(
-            jnp.int32, vv.shape, vv.ndim -
-            1) < kv_valid.reshape((cfgs.batch_size, ) + (1, ) * (vv.ndim - 1))
-        return jnp.where(keep, vv, 0)
-
-    if not _defer_v:
-        v = _mask_v(v)
-
-    # Dense packing: each cell holds a NEW request's block this step, so reset
-    # all cells to identity before the flash (fresh per-block partials).
+    # dense_pack reset happens BEFORE the flash so both paths see fresh
+    # identity in scratches; snapshot captures those identity values so the
+    # idle-cell restore below can put idle cells BACK to identity (they
+    # were reset here, then written to garbage by the fully-masked flash
+    # since they're not valid cells this step).
     if cfgs.dense_pack:
-        with jax.named_scope("dense_reset"):
-            m_scratch_ref[...] = jnp.full_like(m_scratch_ref[...], -jnp.inf)
-            l_scratch_ref[...] = jnp.zeros_like(l_scratch_ref[...])
-            acc_scratch_ref[...] = jnp.zeros_like(acc_scratch_ref[...])
-
-    # Step 3: Perform compute.
+        m_scratch_ref[...] = jnp.full_like(m_scratch_ref[...], -jnp.inf)
+        l_scratch_ref[...] = jnp.zeros_like(l_scratch_ref[...])
+        acc_scratch_ref[...] = jnp.zeros_like(acc_scratch_ref[...])
     m_val = m_scratch_ref[...]
     l_val = l_scratch_ref[...]
     acc_val = acc_scratch_ref[...]
 
-    prev_p = prev_alpha = prev_q_slice = None
-    for bq_start in range(0, cfgs.bq_sz, cfgs.bq_c_sz):
-        bq_end = min(bq_start + cfgs.bq_c_sz, cfgs.bq_sz)
-        q_start = bq_start * cfgs.aligned_num_q_heads_per_kv_head
-        q_end = bq_end * cfgs.aligned_num_q_heads_per_kv_head
-        q_slice = slice(q_start, q_end)
-
-        p, alpha, m_next, l_next = flash_attention.flash_attention_qk_softmax(
-            q[:, :, q_slice],
-            k,
-            m_val[:, :, q_slice],
-            l_val[:, :, q_slice],
-            processed_q_len=processed_q_len,
-            processed_kv_len=processed_kv_len,
-            effective_kv_len=effective_kv_len,
-            visibility=visibility_list if cfgs.has_visibility else None,
-            skip_mask=skip_mask_list,
-            cfgs=cfgs,
-            bq_start=bq_start,
-        )
-        m_scratch_ref[:, :, q_slice] = m_next
-        l_scratch_ref[:, :, q_slice] = l_next
-
-        if prev_p is not None:
-            o_next = flash_attention.flash_attention_pv(
-                prev_p,
-                v,
-                prev_alpha,
-                acc_val[:, :, prev_q_slice],
-                cfgs=cfgs,
-            )
-            acc_scratch_ref[:, :, prev_q_slice] = o_next
-
-        prev_p = p
-        prev_alpha = alpha
-        prev_q_slice = q_slice
-
-    # Overlapped V-load: load V now (after the QK softmax) so the VMEM->reg load
-    # overlaps the softmax VPU work above. Single-token decode only (_defer_v).
-    if _defer_v:
-        with jax.named_scope("load_v"):
-            v_b_deferred = []
-            for b_idx in range(cfgs.batch_size):
-                vs = []
-                for kv_head in range(cfgs.model.num_kv_heads):
-                    v_head = kv_in_vref[b_idx, kv_head * 2 + 1, :,
-                                        0:cfgs.bkv_sz]
-                    vs.append(v_head)
-                v_b_deferred.append(jnp.stack(vs, axis=0))
-            v = jnp.stack(v_b_deferred, axis=0)
-            v = _mask_v(v)
-
-    assert prev_p is not None
-    o_next = flash_attention.flash_attention_pv(
-        prev_p,
-        v,
-        prev_alpha,
-        acc_val[:, :, prev_q_slice],
+    # Dispatch: chunked flash on 5-D VMEM for DECODE (fixed bq_sz=1); shipped
+    # flash on 4-D VMEM for MIXED / PREFILL. See configs.use_chunked_flash.
+    if cfgs.use_chunked_flash:
+        _run_flash = _run_chunked_flash_path
+    else:
+        _run_flash = _run_shipped_flash_path
+    _run_flash(
+        q=q,
+        kv_in_vref=kv_in_vref,
+        m_scratch_ref=m_scratch_ref,
+        l_scratch_ref=l_scratch_ref,
+        acc_scratch_ref=acc_scratch_ref,
+        processed_q_len=processed_q_len,
+        processed_kv_len=processed_kv_len,
+        effective_kv_len=effective_kv_len,
+        bkv_sz_frm_cache_list=bkv_sz_frm_cache_list,
+        new_kv_len_start_list=new_kv_len_start_list,
+        visibility_list=visibility_list,
+        skip_mask_list=skip_mask_list,
+        step=step,
+        schedule_ref=schedule_ref,
         cfgs=cfgs,
+        m_val=m_val,
+        l_val=l_val,
+        acc_val=acc_val,
     )
-    acc_scratch_ref[:, :, prev_q_slice] = o_next
 
     if cfgs.is_stacked:
         # Idle cells (s_idx == -1) ran a fully-masked flash which, for an
@@ -624,18 +630,15 @@ def rpa_body(
         # every idle cell to its pre-step value so it either stays identity or
         # keeps its earlier partial (S>1 tail cells), keeping the cross-cell
         # combine correct.
-        with jax.named_scope("stacked_idle_restore"):
-            for b_idx in range(cfgs.batch_size):
-                is_valid_b = schedule_ref.s_idx[step, b_idx] != -1
-                m_scratch_ref[b_idx] = jnp.where(is_valid_b,
-                                                 m_scratch_ref[b_idx],
-                                                 m_val[b_idx])
-                l_scratch_ref[b_idx] = jnp.where(is_valid_b,
-                                                 l_scratch_ref[b_idx],
-                                                 l_val[b_idx])
-                acc_scratch_ref[b_idx] = jnp.where(is_valid_b,
-                                                   acc_scratch_ref[b_idx],
-                                                   acc_val[b_idx])
+        for b_idx in range(cfgs.batch_size):
+            is_valid_b = schedule_ref.s_idx[step, b_idx] != -1
+            m_scratch_ref[b_idx] = jnp.where(is_valid_b, m_scratch_ref[b_idx],
+                                             m_val[b_idx])
+            l_scratch_ref[b_idx] = jnp.where(is_valid_b, l_scratch_ref[b_idx],
+                                             l_val[b_idx])
+            acc_scratch_ref[b_idx] = jnp.where(is_valid_b,
+                                               acc_scratch_ref[b_idx],
+                                               acc_val[b_idx])
 
     # Step 4: Write back outputs.
     if cfgs.is_stacked and cfgs.dense_pack:
@@ -889,14 +892,13 @@ def rpa_kernel(
                 # zeroing masked columns, which is only safe if rhs (v) has no NaNs;
                 # pre-zeroing the scratch guarantees that (stale non-NaN data is
                 # also fine).
-                with jax.named_scope("kv_cache_init"):
-                    kv_alloc = final_allocs[1]
-                    # Zero the KV scratch via the u32 view directly. Do NOT reshape
-                    # to [-1, num_lanes]: under the collapsed [.., head_dim, v_len]
-                    # SEQ layout that changes the minormost (tiled) dim, which
-                    # Mosaic rejects ("minormost dimension must be unchanged").
-                    kv_ref_u32 = kv_alloc.window_ref.bitcast(jnp.uint32)
-                    kv_ref_u32[...] = jnp.zeros_like(kv_ref_u32)
+                kv_alloc = final_allocs[1]
+                # Zero the KV scratch via the u32 view directly. Do NOT reshape
+                # to [-1, num_lanes]: under the collapsed [.., head_dim, v_len]
+                # SEQ layout that changes the minormost (tiled) dim, which
+                # Mosaic rejects ("minormost dimension must be unchanged").
+                kv_ref_u32 = kv_alloc.window_ref.bitcast(jnp.uint32)
+                kv_ref_u32[...] = jnp.zeros_like(kv_ref_u32)
 
             def _sched_copies(w, n_steps, buf, sem_idx):
                 # Build (not start) the clamped HBM->SMEM copies for window w into
@@ -957,12 +959,11 @@ def rpa_kernel(
                 # kv_cache_init, then one pipeline pass (upstream structure).
                 buf = schedule_ref[0]
                 safe_steps = jnp.minimum(actual_steps, w_size)
-                with jax.named_scope("sched_dma_load"):
-                    descs = _sched_copies(0, safe_steps, buf, 0)
-                    for c in descs:
-                        c.start()
-                    _kv_cache_init()  # overlaps the schedule copy
-                    jax.tree.map(lambda c: c.wait(), descs)
+                descs = _sched_copies(0, safe_steps, buf, 0)
+                for c in descs:
+                    c.start()
+                _kv_cache_init()  # overlaps the schedule copy
+                jax.tree.map(lambda c: c.wait(), descs)
                 _run_pipeline(safe_steps, buf)
             else:
                 # MULTI-WINDOW path (static): the schedule exceeds one SMEM window.
@@ -977,10 +978,9 @@ def rpa_kernel(
                 # Prologue: start window 0's copy into buf0 (sem 0), overlapped
                 # with kv_cache_init. Its wait happens in iteration 0.
                 win0_steps = jnp.minimum(actual_steps, w_size)
-                with jax.named_scope("sched_dma_load"):
-                    for c in _sched_copies(0, win0_steps, buf0, 0):
-                        c.start()
-                    _kv_cache_init()
+                for c in _sched_copies(0, win0_steps, buf0, 0):
+                    c.start()
+                _kv_cache_init()
 
                 def _window(w, _):
                     win_steps = jnp.clip(actual_steps - w * w_size, 0, w_size)
@@ -993,17 +993,15 @@ def rpa_kernel(
                     # it overlaps this window's compute.
                     @pl.when(jnp.logical_and(nxt < num_windows_actual, even))
                     def _prefetch_to_buf1():
-                        with jax.named_scope("sched_dma_load"):
-                            for c in _sched_copies(nxt, nxt_steps, buf1, 1):
-                                c.start()
+                        for c in _sched_copies(nxt, nxt_steps, buf1, 1):
+                            c.start()
 
                     @pl.when(
                         jnp.logical_and(nxt < num_windows_actual,
                                         jnp.logical_not(even)))
                     def _prefetch_to_buf0():
-                        with jax.named_scope("sched_dma_load"):
-                            for c in _sched_copies(nxt, nxt_steps, buf0, 0):
-                                c.start()
+                        for c in _sched_copies(nxt, nxt_steps, buf0, 0):
+                            c.start()
 
                     # Wait this window's copy (started in the previous iteration or
                     # the prologue) and run its pipeline, on the parity-selected

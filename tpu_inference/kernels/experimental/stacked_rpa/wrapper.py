@@ -212,10 +212,9 @@ def _calculate_vmem_usage(
         model_cfgs.num_q_heads_per_kv_head, serve_cfgs.packing_q)
     aligned_num_q_heads = aligned_num_q_heads_per_kv_head * model_cfgs.num_kv_heads
 
-    bkv_stride = pl.cdiv(model_cfgs.num_kv_heads * 2, serve_cfgs.packing_kv)
-    if utils.has_bank_conflicts(bkv_stride):
-        bkv_stride += 1
-    aligned_num_kv_heads_x2 = bkv_stride * serve_cfgs.packing_kv
+    # kv_vmem_shape puts num_kv_heads*2 on a regular axis (index 1), not on
+    # the sublane or lane axis, so it is stored without packing_kv padding.
+    num_kv_heads_x2 = model_cfgs.num_kv_heads * 2
 
     q_bytes = jnp.dtype(serve_cfgs.dtype_q).itemsize
     kv_bytes = jnp.dtype(serve_cfgs.dtype_kv).itemsize
@@ -225,8 +224,8 @@ def _calculate_vmem_usage(
     # Buffer memory (double/triple buffered). SEQ_ALONG_LANE staging carries a
     # +2*page_size halo for the boundary stitch.
     bq_array_size = bq_sz * aligned_num_q_heads * aligned_head_dim
-    bkv_array_size = ((bkv_sz + 2 * serve_cfgs.page_size) *
-                      aligned_num_kv_heads_x2 * aligned_head_dim)
+    bkv_array_size = ((bkv_sz + 2 * serve_cfgs.page_size) * num_kv_heads_x2 *
+                      aligned_head_dim)
     bo_array_size = bq_array_size
 
     buffer_bytes = (bq_array_size * q_bytes * n_buffer +
@@ -276,8 +275,9 @@ def calculate_block_sizes(
             fixed_bq_sz: int | None = None) -> configs.BlockSizes:
         """Loop through different block sizes to find the most optimal one."""
 
-        # Even if we loose some potential performance, we want to avoid OOM at all
-        # costs. Therefore, we conservatively only use 80% of the VMEM budget.
+        # Use 80% of VMEM to leave room for compiler-emitted scratch that this
+        # estimator does not account for. Higher caps have been observed to
+        # OOM on short-context small-batch shapes.
         capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
 
         bkv_sz = bkv_stride = mxu_column_size
@@ -369,24 +369,73 @@ def calculate_block_sizes(
     # full static bq_sz, so any bq_sz above decode_q_len is wasted attention FLOPs
     # (e.g. rounding q_len=4 up to 8 doubles the per-seq QK/PV work).
     decode_fixed_bq_sz = max(decode_q_len, 1)
-    decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer,
-                                               decode_fixed_bq_sz)
-    # NOTE: the batched-RPA `long_ctx_decode` override (force bkv_sz=16384/
-    # batch_size=4 when max_model_len>=32768) was REMOVED for stacked. It was
-    # tuned on batched RPA (batched_rpa.benchmark --tune-blocks), keyed on the
-    # static max_model_len rather than the live kv_len, and stacked's flash does
-    # not clip compute to kv_len -> short/medium-context decode over-computed a
-    # 16384-token block (~11x waste). Stacked decode now uses find_best_block_sizes;
-    # a stacked-specific block-size sweep should set any long-context override.
 
-    # DECODE runs the whole draft in ONE flash compute chunk. (1) Ensure
-    # bq_sz >= decode_q_len -- the long-context override above pins bq_sz=1, which
-    # is invalid for spec decode (decode_q_len>1). (2) Pin bq_c_sz == bq_sz:
-    # decode's bq is tiny (1..decode_q_len), so one chunk is the efficient tiling;
-    # a smaller bq_c_sz splits it into bq_sz fragmented QK+softmax+PV matmuls
-    # (M = qpk each), which measured ~35% slower for spec decode at mid context.
-    # PREFILL/MIXED are untouched: their large bq keeps the threshold-derived
-    # smaller bq_c_sz (a full-bq compute buffer would blow VMEM there).
+    # Decode strategy depends on context length. Short context (below
+    # LONG_CTX_THRESHOLD) fits a small bkv, and packing many sequences into
+    # batched cells wins; the legacy (batch=8, nbuf=3) pick handles it well.
+    # Long context is HBM-bound, so a bigger bkv per step amortises DMA setup,
+    # softmax, and combine overhead; we search over (batch, nbuf) candidates
+    # and pick the one that maximises useful tokens streamed per step
+    # (batch * min(bkv, max_model_len)).
+    #
+    # In both branches, cap bkv at max_model_len. The flash kernel does not
+    # clip MXU compute to kv_len, so a bkv larger than max_model_len still
+    # pays the full matmul cost on the masked-zero tail.
+    max_model_len_from_cfg = serve_cfgs.pages_per_seq * serve_cfgs.page_size
+    LONG_CTX_THRESHOLD = 128 * 1024
+
+    if max_model_len_from_cfg < LONG_CTX_THRESHOLD:
+        decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer,
+                                                   decode_fixed_bq_sz)
+        if decode_block_sizes.bkv_sz > max_model_len_from_cfg:
+            capped = max(max_model_len_from_cfg, serve_cfgs.page_size)
+            decode_block_sizes = dataclasses.replace(decode_block_sizes,
+                                                     bkv_sz=capped)
+    else:
+        # (batch, nbuf) candidates for the long-context search. Ties break
+        # towards the last-listed entry (>= in the loop below), which puts
+        # more weight on higher batch when bkv is already saturated.
+        decode_candidates = [
+            (1, 4),
+            (2, 3),
+            (1, 3),
+            (2, 2),
+            (4, 2),
+            (1, 2),
+            (decode_batch_size, n_buffer),  # legacy: (8, 3)
+            (decode_batch_size, 2),
+        ]
+        decode_block_sizes = None
+        best_score = -1
+        for batch, nbuf in decode_candidates:
+            try:
+                cand = find_best_block_sizes(batch, nbuf, decode_fixed_bq_sz)
+            except ValueError:
+                continue
+            if cand.bkv_sz > max_model_len_from_cfg:
+                capped = max(max_model_len_from_cfg, serve_cfgs.page_size)
+                cand = dataclasses.replace(cand, bkv_sz=capped)
+            score = cand.batch_size * cand.bkv_sz
+            if score >= best_score:
+                best_score = score
+                decode_block_sizes = cand
+        if decode_block_sizes is None:
+            decode_block_sizes = find_best_block_sizes(1, 2,
+                                                       decode_fixed_bq_sz)
+    # The batched-RPA long_ctx_decode override (force bkv=16384, batch=4 when
+    # max_model_len>=32768) was intentionally not carried over. It keyed on
+    # the static max_model_len rather than the live kv_len, so short and
+    # medium context decode overcomputed a 16384-token block. Any
+    # long-context override for the stacked kernel should come from a
+    # dedicated block-size sweep instead.
+
+    # Run the whole draft in one flash compute chunk. Floor bq_sz up to
+    # decode_q_len (the long-context pick uses bq_sz=1, which is invalid for
+    # spec decode) and pin bq_c_sz to bq_sz so the flash body issues a single
+    # QK/softmax/PV pass. Splitting bq into smaller compute chunks is
+    # noticeably slower at spec-decode sizes. Prefill/MIXED keep their
+    # threshold-derived bq_c_sz -- their bq is too large to fit as a single
+    # compute buffer.
     decode_block_sizes = decode_block_sizes.floor_bq_to_decode_q_len(
         decode_q_len)
     decode_block_sizes = dataclasses.replace(decode_block_sizes,
@@ -1192,9 +1241,11 @@ def ragged_paged_attention(
         queries: [max_num_tokens, num_q_heads, head_dim]. Output of q projection.
         keys: [max_num_tokens, num_kv_heads, head_dim]. Output of k projection.
         values: [max_num_tokens, num_kv_heads, head_dim]. Output of v projection.
-        kv_cache: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
-            kv_packing, head_dim]. Stores existing kv cache data where k & vs are
-            concatenated along num kv heads dim.
+        kv_cache: 4D SEQ_ALONG_LANE layout only, shape
+            ``[num_pages, num_kv_heads * 2, align_to(head_dim, num_sublanes *
+            kv_packing), page_size]`` (see ``get_kv_cache_shape``). K and V are
+            interleaved along the ``num_kv_heads * 2`` axis; the last axis is
+            the per-page sequence tokens, placed on the TPU lane axis.
         kv_lens: [max_num_seqs]. Existing kv cache length of each sequence.
             page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
             sequence.
@@ -1228,9 +1279,9 @@ def ragged_paged_attention(
 
     Returns:
         out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
-        new_kv_cache: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
-            kv_packing, head_dim]. Result of new kv cache where k & vs are
-            concatenated along num kv heads dim.
+        new_kv_cache: same 4D SEQ_ALONG_LANE layout as ``kv_cache`` (donated
+            in and out); shape ``[num_pages, num_kv_heads * 2, align_to(
+            head_dim, num_sublanes * kv_packing), page_size]``.
     """
 
     if not use_causal_mask:

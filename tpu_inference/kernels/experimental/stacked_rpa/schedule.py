@@ -254,7 +254,6 @@ def compute_metadata(
     """
     w_size = cfgs.sched_window
 
-    @jax.named_scope("k_loop")
     def k_loop(
         k_idx,
         step,
@@ -324,7 +323,13 @@ def compute_metadata(
             fetch_dma_valid = jnp.where(i < num_pages_to_fetch, 1, 0)
             new_page_start = (hbm_token_idx_base -
                               new_tok_offset) + i * cfgs.serve.page_size
-            fetch_vmem = (cache_pages + i) * cfgs.serve.page_size
+            # Halo VMEM slot. Chunked flash reads at a static offset
+            # ``bkv_p_cache + i``; the single-shot flash reads at
+            # ``cache_pages + i``, just after the cache tokens.
+            if cfgs.use_chunked_flash:
+                fetch_vmem = (cfgs.bkv_p_cache + i) * cfgs.serve.page_size
+            else:
+                fetch_vmem = (cache_pages + i) * cfgs.serve.page_size
 
             p_idx = jnp.minimum(
                 (kv_len_start + slot_start) >> cfgs.serve.page_size_log2,
@@ -421,7 +426,6 @@ def compute_metadata(
 
         return step + 1
 
-    @jax.named_scope("q_loop")
     def q_loop(q_idx, _, *, s_idx, q_start, q_end, k_len, q_len, num_k):
         # TODO(perf, load-imbalance): all k-blocks of a (seq, q-block) are pinned
         # to one lane (k_loop runs start_k..end_k on `target_lane`) and a single
@@ -478,7 +482,6 @@ def compute_metadata(
         lane_lengths_ref[target_lane] = jax.lax.fori_loop(
             start_k_idx, end_k_idx, k_loop_fn, curr_ptr)
 
-    @jax.named_scope("seq_loop")
     def seq_loop(s_idx, _):
         q_start = cu_q_lens_ref[s_idx]
         q_end = cu_q_lens_ref[s_idx + 1]
@@ -557,7 +560,6 @@ def compute_metadata(
                 schedule.combine_span[clocal, cell] = span
                 schedule.is_final[clocal, cell] = is_final
 
-        @jax.named_scope("dense_seq_loop")
         def dense_seq_loop(order_idx, g):
             s_idx = sorted_seq_idx_ref[order_idx]
             seq_off = pl.multiple_of(s_idx * pps_pad, pps_pad)
@@ -695,7 +697,6 @@ def compute_metadata(
             def _w():
                 schedule.combine_span[clocal, root] = span
 
-        @jax.named_scope("sk_seq_loop")
         def sk_seq_loop(order_idx, carry):
             step_base, cell_cursor = carry
             s_idx = sorted_seq_idx_ref[order_idx]
@@ -869,7 +870,6 @@ def rpa_metadata_schedule_kernel(
 
     # Mask one full SMEM window (window-local steps [0, w_size)); steps not
     # written by compute_metadata for this window stay masked (s_idx == -1).
-    @jax.named_scope("mask_window")
     def mask_window(step, _):
         for b_idx in range(cfgs.batch_size):
             schedule_ref.s_idx[step, b_idx] = -1

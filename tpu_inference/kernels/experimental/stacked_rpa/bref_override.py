@@ -21,30 +21,6 @@ from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.stacked_rpa import configs, schedule
 
-# `pltpu.BufferType` compatibility shim. The JAX that ships with the build image
-# (jax==0.9.2) does not expose `pltpu.BufferType`; the real `buffer_type` value is
-# passed through from `emit_pipeline` to `BufferedRef.create`, so the annotations
-# and asserts below are advisory only. Provide a permissive stand-in whose enum
-# members compare equal to anything, turning those asserts into no-ops (matching
-# the upstream base, which kept them commented out). Remove once the image ships
-# a JAX that exposes `pltpu.BufferType`.
-if not hasattr(pltpu, "BufferType"):
-
-    class _AlwaysEq:
-
-        def __eq__(self, _other):
-            return True
-
-        def __hash__(self):
-            return 0
-
-    class _BufferTypeCompat:
-
-        def __getattr__(self, _name):
-            return _AlwaysEq()
-
-    pltpu.BufferType = _BufferTypeCompat()
-
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
@@ -93,7 +69,6 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
             },
         )
 
-    @jax.named_scope("kv_copy_in")
     def copy_in(
         self,
         src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
@@ -105,47 +80,76 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
         sem = self.sem_recvs.at[slot]
         block_idx = jnp.maximum(grid_indices[0], 0)
 
-        vmem_dst_lane = self.window_ref.at[slot]
-        for b in range(self.cfgs.batch_size):
-            # TODO(perf, kv-page-coalescing): this issues one make_async_copy per
-            # KV page (bkv_p_cache descriptors per batch item), so at long context
-            # kv_copy_in spends scalar-core time issuing many tiny descriptors and
-            # caps DMA/compute overlap. From the fp8 128k trace, kv_copy_in is
-            # ~13% of the RPAd op with the HBM engine idle ~half the time (the
-            # kernel is co-bottlenecked on this + flash compute, ~50% HBM util).
-            # Coalesce runs of pages that are contiguous in HBM AND land
-            # contiguously in VMEM into a single larger async copy (one descriptor
-            # per run) to cut issue occupancy. Requires a build-side run-length
-            # pass over the schedule's physical page list (page-major in HBM vs
-            # token-contiguous in VMEM), then emitting one copy per contiguous run.
-            for i in range(self.cfgs.bkv_p_cache):
-                p_idx, dst_off, dma_valid = schedule_ref.get_dma_kv_cache(
-                    block_idx, b, i)
-                hbm_p_idx = p_idx  # schedule stores the physical page directly
-                sz = dma_valid * self.cfgs.serve.page_size
-                dst_off = pl.multiple_of(dst_off, 128)
-                sz = pl.multiple_of(sz, 128)
+        page_size = self.cfgs.serve.page_size
+        bkv_p_cache = self.cfgs.bkv_p_cache
+        if self.cfgs.use_chunked_flash:
+            # Coalesce all cache pages into a single DMA descriptor. The
+            # 5-D VMEM shape matches HBM so make_async_copy accepts it.
+            # Assumes each sequence's KV pages are contiguous in HBM --
+            # true for fresh allocations, not guaranteed once the page
+            # pool starts recycling.
+            vmem_dst_5d = self.window_ref.at[slot]
+            for b in range(self.cfgs.batch_size):
+                total_valid = 0
+                for i in range(bkv_p_cache):
+                    _, _, dma_valid = schedule_ref.get_dma_kv_cache(
+                        block_idx, b, i)
+                    total_valid += dma_valid
+                first_p_idx, first_dst_off, _ = schedule_ref.get_dma_kv_cache(
+                    block_idx, b, 0)
+                first_dst_page = first_dst_off // page_size
                 pltpu.make_async_copy(
-                    kv_cache_hbm.at[hbm_p_idx, :, :,
-                                    pl.ds(0, sz)],
-                    vmem_dst_lane.at[b, :, :, pl.ds(dst_off, sz)],
+                    kv_cache_hbm.at[pl.ds(first_p_idx, total_valid), :, :, :],
+                    vmem_dst_5d.at[
+                        b, pl.ds(first_dst_page, total_valid), :, :, :],
                     sem,
                 ).start()
 
-            for i in range(self.cfgs.bkv_p_new):
-                src_new_off, dst_vmem_off, dma_valid = (
-                    schedule_ref.get_dma_fetch_kv_new(block_idx, b, i))
-                sz = dma_valid * self.cfgs.serve.page_size
-                src_new_off = pl.multiple_of(src_new_off, 128)
-                dst_vmem_off = pl.multiple_of(dst_vmem_off, 128)
-                sz = pl.multiple_of(sz, 128)
-                pltpu.make_async_copy(
-                    new_kv_hbm.at[:, :, pl.ds(src_new_off, sz)],
-                    vmem_dst_lane.at[b, :, :, pl.ds(dst_vmem_off, sz)],
-                    sem,
-                ).start()
+                for i in range(self.cfgs.bkv_p_new):
+                    src_new_off, dst_vmem_off, dma_valid = (
+                        schedule_ref.get_dma_fetch_kv_new(block_idx, b, i))
+                    sz = dma_valid * page_size
+                    src_new_off = pl.multiple_of(src_new_off, 128)
+                    dst_page = dst_vmem_off // page_size
+                    sz = pl.multiple_of(sz, 128)
+                    pltpu.make_async_copy(
+                        new_kv_hbm.at[:, :, pl.ds(src_new_off, sz)],
+                        vmem_dst_5d.at[b, dst_page, :, :,
+                                       pl.ds(0, sz)],
+                        sem,
+                    ).start()
+        else:
+            # 4-D VMEM path: original per-page DMAs for the shipped flash
+            # (mixed / prefill). See flash_attention_qk_softmax +
+            # flash_attention_pv in flash_attention.py.
+            vmem_dst_lane = self.window_ref.at[slot]
+            for b in range(self.cfgs.batch_size):
+                for i in range(bkv_p_cache):
+                    p_idx, dst_off, dma_valid = schedule_ref.get_dma_kv_cache(
+                        block_idx, b, i)
+                    sz = dma_valid * page_size
+                    dst_off = pl.multiple_of(dst_off, 128)
+                    sz = pl.multiple_of(sz, 128)
+                    pltpu.make_async_copy(
+                        kv_cache_hbm.at[p_idx, :, :, pl.ds(0, sz)],
+                        vmem_dst_lane.at[b, :, :, pl.ds(dst_off, sz)],
+                        sem,
+                    ).start()
 
-    @jax.named_scope("kv_copy_out")
+                for i in range(self.cfgs.bkv_p_new):
+                    src_new_off, dst_vmem_off, dma_valid = (
+                        schedule_ref.get_dma_fetch_kv_new(block_idx, b, i))
+                    sz = dma_valid * page_size
+                    src_new_off = pl.multiple_of(src_new_off, 128)
+                    dst_vmem_off = pl.multiple_of(dst_vmem_off, 128)
+                    sz = pl.multiple_of(sz, 128)
+                    pltpu.make_async_copy(
+                        new_kv_hbm.at[:, :, pl.ds(src_new_off, sz)],
+                        vmem_dst_lane.at[b, :, :,
+                                         pl.ds(dst_vmem_off, sz)],
+                        sem,
+                    ).start()
+
     def copy_out(
         self,
         dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
@@ -156,25 +160,42 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]
 
-        vmem_src_lane = self.window_ref.at[slot]
-        for b in range(self.cfgs.batch_size):
-            do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
-            for i in range(self.cfgs.bkv_p_new):
-                dst_hbm_p, src_vmem_off, dma_valid = schedule_ref.get_dma_update_kv_new(
-                    block_idx, b, i)
-                hbm_p_idx = dst_hbm_p  # physical page (folded in at build)
-                sz = jnp.where(do_writeback,
-                               dma_valid * self.cfgs.serve.page_size, 0)
-                src_vmem_off = pl.multiple_of(src_vmem_off, 128)
-                sz = pl.multiple_of(sz, 128)
-                pltpu.make_async_copy(
-                    vmem_src_lane.at[b, :, :, pl.ds(src_vmem_off, sz)],
-                    kv_out_ref.at[hbm_p_idx, :, :,
-                                  pl.ds(0, sz)],
-                    sem,
-                ).start()
+        page_size = self.cfgs.serve.page_size
+        if self.cfgs.use_chunked_flash:
+            vmem_src_5d = self.window_ref.at[slot]
+            for b in range(self.cfgs.batch_size):
+                do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
+                for i in range(self.cfgs.bkv_p_new):
+                    dst_hbm_p, src_vmem_off, dma_valid = schedule_ref.get_dma_update_kv_new(
+                        block_idx, b, i)
+                    sz = jnp.where(do_writeback, dma_valid * page_size, 0)
+                    src_page = src_vmem_off // page_size
+                    sz = pl.multiple_of(sz, 128)
+                    pltpu.make_async_copy(
+                        vmem_src_5d.at[b, src_page, :, :,
+                                       pl.ds(0, sz)],
+                        kv_out_ref.at[dst_hbm_p, :, :,
+                                      pl.ds(0, sz)],
+                        sem,
+                    ).start()
+        else:
+            vmem_src_lane = self.window_ref.at[slot]
+            for b in range(self.cfgs.batch_size):
+                do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
+                for i in range(self.cfgs.bkv_p_new):
+                    dst_hbm_p, src_vmem_off, dma_valid = schedule_ref.get_dma_update_kv_new(
+                        block_idx, b, i)
+                    sz = jnp.where(do_writeback, dma_valid * page_size, 0)
+                    src_vmem_off = pl.multiple_of(src_vmem_off, 128)
+                    sz = pl.multiple_of(sz, 128)
+                    pltpu.make_async_copy(
+                        vmem_src_lane.at[b, :, :,
+                                         pl.ds(src_vmem_off, sz)],
+                        kv_out_ref.at[dst_hbm_p, :, :,
+                                      pl.ds(0, sz)],
+                        sem,
+                    ).start()
 
-    @jax.named_scope("kv_wait_in")
     def wait_in(
         self,
         src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
@@ -186,26 +207,43 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
         vmem_dst = self.window_ref.at[slot]
         block_idx = grid_indices[0]
 
-        for b in range(self.cfgs.batch_size):
-            total_pages_b = 0
-            for i in range(self.cfgs.bkv_p_cache):
-                _, _, dma_valid = schedule_ref.get_dma_kv_cache(
-                    block_idx, b, i)
-                total_pages_b += dma_valid
-            for i in range(self.cfgs.bkv_p_new):
-                _, _, dma_valid = schedule_ref.get_dma_fetch_kv_new(
-                    block_idx, b, i)
-                total_pages_b += jnp.where(dma_valid > 0, 1, 0)
+        if self.cfgs.use_chunked_flash:
+            vmem_dst_5d = self.window_ref.at[slot]
+            for b in range(self.cfgs.batch_size):
+                total_pages_b = 0
+                for i in range(self.cfgs.bkv_p_cache):
+                    _, _, dma_valid = schedule_ref.get_dma_kv_cache(
+                        block_idx, b, i)
+                    total_pages_b += dma_valid
+                for i in range(self.cfgs.bkv_p_new):
+                    _, _, dma_valid = schedule_ref.get_dma_fetch_kv_new(
+                        block_idx, b, i)
+                    total_pages_b += jnp.where(dma_valid > 0, 1, 0)
+                pltpu.make_async_copy(
+                    vmem_dst_5d.at[b, pl.ds(0, total_pages_b), :, :, :],
+                    vmem_dst_5d.at[b, pl.ds(0, total_pages_b), :, :, :],
+                    sem,
+                ).wait()
+        else:
+            vmem_dst = self.window_ref.at[slot]
+            for b in range(self.cfgs.batch_size):
+                total_pages_b = 0
+                for i in range(self.cfgs.bkv_p_cache):
+                    _, _, dma_valid = schedule_ref.get_dma_kv_cache(
+                        block_idx, b, i)
+                    total_pages_b += dma_valid
+                for i in range(self.cfgs.bkv_p_new):
+                    _, _, dma_valid = schedule_ref.get_dma_fetch_kv_new(
+                        block_idx, b, i)
+                    total_pages_b += jnp.where(dma_valid > 0, 1, 0)
+                sz = total_pages_b * self.cfgs.serve.page_size
+                sz = pl.multiple_of(sz, 128)
+                pltpu.make_async_copy(
+                    vmem_dst.at[b, :, :, pl.ds(0, sz)],
+                    vmem_dst.at[b, :, :, pl.ds(0, sz)],
+                    sem,
+                ).wait()
 
-            sz = total_pages_b * self.cfgs.serve.page_size
-            sz = pl.multiple_of(sz, 128)
-            pltpu.make_async_copy(
-                vmem_dst.at[b, :, :, pl.ds(0, sz)],
-                vmem_dst.at[b, :, :, pl.ds(0, sz)],
-                sem,
-            ).wait()
-
-    @jax.named_scope("kv_wait_out")
     def wait_out(
         self,
         dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
@@ -272,7 +310,6 @@ class BatchingORef(pltpu.BufferedRef):
             },
         )
 
-    @jax.named_scope("o_copy_out")
     def copy_out(
         self,
         dst_ref: tuple[jax.Ref, schedule.RpaSchedule],
@@ -308,7 +345,6 @@ class BatchingORef(pltpu.BufferedRef):
                 sem,
             ).start()
 
-    @jax.named_scope("o_wait_out")
     def wait_out(
         self,
         dst_ref: tuple[jax.Ref, schedule.RpaSchedule],
@@ -379,7 +415,6 @@ class BatchingVisibilityRef(pltpu.BufferedRef):
             },
         )
 
-    @jax.named_scope("visibility_copy_in")
     def copy_in(
         self,
         src_ref: tuple[jax.Ref, schedule.RpaSchedule],
@@ -402,7 +437,6 @@ class BatchingVisibilityRef(pltpu.BufferedRef):
                 sem,
             ).start()
 
-    @jax.named_scope("visibility_wait_in")
     def wait_in(
         self,
         src_ref: tuple[jax.Ref, schedule.RpaSchedule],
@@ -466,7 +500,6 @@ class BatchingQRef(pltpu.BufferedRef):
             },
         )
 
-    @jax.named_scope("q_copy_in")
     def copy_in(
         self,
         src_ref: tuple[jax.Ref, schedule.RpaSchedule],
@@ -492,7 +525,6 @@ class BatchingQRef(pltpu.BufferedRef):
                 sem,
             ).start()
 
-    @jax.named_scope("q_wait_in")
     def wait_in(
         self,
         src_ref: tuple[jax.Ref, schedule.RpaSchedule],

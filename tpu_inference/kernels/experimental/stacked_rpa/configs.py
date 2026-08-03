@@ -493,10 +493,42 @@ class RpaConfigs:
         )
 
     @property
+    def use_chunked_flash(self):
+        """Whether to route decode through the chunked-KV flash path.
+
+        The chunked path uses a 5-D SEQ_ALONG_LANE VMEM buffer whose shape
+        matches HBM's outer-page axis, which lets each step issue one DMA
+        descriptor that spans all cache pages instead of one per page.
+        ``pltpu.make_async_copy`` requires src/dst shapes to match, so the
+        4-D VMEM layout cannot coalesce.
+
+        Off by default: the descriptor-count saving does not currently
+        offset the per-page loop overhead on any workload we have
+        measured. Opt in with ``STACKED_RPA_CHUNKED_FLASH`` when paged KV
+        is fragmented enough that DMA setup dominates. Restricted to
+        single-token decode -- for larger bq_sz the per-page overhead
+        scales with bq_c and regresses sharply.
+        """
+        if self.mode != RpaCase.DECODE or self.block.bq_sz != 1:
+            return False
+        import os
+        return os.environ.get("STACKED_RPA_CHUNKED_FLASH",
+                              "0").strip() in ("1", "true", "on", "yes")
+
+    @property
     def kv_vmem_shape(self):
-        # 4D [.., head_dim, tokens] SEQ_ALONG_LANE layout: head_dim is contiguous
-        # so the matmul reads K/V in its native packed layout (no relayout) and
-        # the V-load can overlap the softmax.
+        if self.use_chunked_flash:
+            # 5-D layout matching HBM's outer-page axis; consumed by
+            # flash_attention_chunked.
+            num_pages = self.bkv_p_cache + 2
+            return (
+                self.block.batch_size,
+                num_pages,
+                self.model.num_kv_heads * 2,
+                self.aligned_kv_head_dim,
+                self.serve.page_size,
+            )
+        # 4-D layout used by the single-shot flash path.
         return (
             self.block.batch_size,
             self.model.num_kv_heads * 2,
