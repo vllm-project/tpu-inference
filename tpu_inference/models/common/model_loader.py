@@ -192,7 +192,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
 
-            model = nnx.eval_shape(abstract_model_fn)
+            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
             quantization_config = vllm_config.model_config.hf_config.quantization_config if hasattr(
                 vllm_config.model_config.hf_config,
                 "quantization_config") else {}
@@ -268,7 +268,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         with jax.set_mesh(mesh):
-            model = nnx.eval_shape(abstract_model_fn)
+            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -354,8 +354,8 @@ def get_flax_model(
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+        PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                      ShardingAxisName.KV_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
