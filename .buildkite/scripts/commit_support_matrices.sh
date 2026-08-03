@@ -94,15 +94,15 @@ echo "--- Compressing support matrices"
 if [ -n "$TARGET_DIRS" ]; then
   # shellcheck disable=SC2086
   tar -czf support_matrices.tar.gz $TARGET_DIRS
+
+  echo "--- Uploading compressed support matrices to Buildkite"
+  buildkite-agent artifact upload "support_matrices.tar.gz"
+
+  echo "--- Cleaning up compressed file"
+  rm -f support_matrices.tar.gz
 else
   echo "No target directories to compress."
 fi
-
-echo "--- Uploading compressed support matrices to Buildkite"
-buildkite-agent artifact upload "support_matrices.tar.gz"
-
-echo "--- Cleaning up compressed file"
-rm -f support_matrices.tar.gz
 
 echo "--- Staging changes"
 git add support_matrices/
