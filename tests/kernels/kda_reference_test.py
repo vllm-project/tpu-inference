@@ -329,6 +329,70 @@ def test_cross_impl_golden_parity(case):
                                    rtol=3e-4)
 
 
+def test_mixed_prefill_padded_bucket_matches_exact_batch():
+    """Runner-style mixed-prefill padding: the token bucket is larger than
+    the real token count (garbage tail past query_start_loc[-1]) AND
+    distribution[2] < the number of query_start_loc segments (trailing
+    zero-length padding sequences mapped to the null state slot). Real
+    outputs and the whole state pool must be bit-identical to the
+    exactly-sized batch.
+
+    Guards the per-seq finals carry in `ragged_kda_mixed_prefill`: padded
+    tokens must stay inert in the packed stream, and zero-length padding
+    sequences never own a chunk, so their finals rows (gathered at entry)
+    write back as no-ops.
+    """
+    rng = np.random.default_rng(11)
+    H, K, V = 4, 64, 64
+    lens = [5, 63]
+    n = len(lens)
+    T = sum(lens)
+    num_pad_seqs, token_pad = 3, 60
+
+    q, k, v, g, b = _rand_inputs(rng, T + token_pad, H, K, V)
+    for arr in (q, k, v, g, b):
+        arr[T:] = 7.7  # garbage token tail: must not leak anywhere
+    A_log, dt_bias = _params(rng, H, K)
+
+    num_slots = n + num_pad_seqs + 2
+    state = jnp.asarray(rng.normal(size=(num_slots, H, K, V)),
+                        dtype=jnp.float32)
+    qsl_exact = np.cumsum([0] + lens).astype(np.int32)
+    # Runner-style padding: query_start_loc repeats the final offset
+    # (tail-only zero-length seqs), which map to null state slot 0.
+    qsl_padded = np.concatenate(
+        [qsl_exact, np.full(num_pad_seqs, qsl_exact[-1], np.int32)])
+    si_exact = np.arange(1, n + 1, dtype=np.int32)
+    si_padded = np.concatenate([si_exact, np.zeros(num_pad_seqs, np.int32)])
+    distribution = jnp.array([0, 0, n], dtype=jnp.int32)
+    his = np.arange(n + num_pad_seqs) % 2 == 0
+
+    def run(q_, k_, v_, g_, b_, qsl, si, his_):
+        return ragged_kda_mixed_prefill(jnp.asarray(q_),
+                                        jnp.asarray(k_),
+                                        jnp.asarray(v_),
+                                        jnp.asarray(b_),
+                                        jnp.asarray(g_),
+                                        jnp.asarray(A_log),
+                                        jnp.asarray(dt_bias),
+                                        jnp.asarray(qsl),
+                                        state,
+                                        jnp.asarray(si),
+                                        distribution,
+                                        has_initial_state=jnp.asarray(his_),
+                                        chunk_size=64,
+                                        gate_lower_bound=LOWER_BOUND)
+
+    state_exact, out_exact = run(q[:T], k[:T], v[:T], g[:T], b[:T], qsl_exact,
+                                 si_exact, his[:n])
+    state_padded, out_padded = run(q, k, v, g, b, qsl_padded, si_padded, his)
+
+    np.testing.assert_array_equal(np.asarray(out_padded[:T]),
+                                  np.asarray(out_exact))
+    np.testing.assert_array_equal(np.asarray(state_padded),
+                                  np.asarray(state_exact))
+
+
 def test_decode_bucket_larger_than_slots_matches_exact_batch():
     """Decode-only tokens past the slot count are padding: a bucket 8x the
     slot count must produce the same valid outputs and state as the

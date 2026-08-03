@@ -102,7 +102,6 @@ def ragged_kda_mixed_prefill(
     has_initial_state: jnp.ndarray | None = None,
     chunk_size: int = 64,
     gate_lower_bound: float | None = None,
-    compute_dtype: jnp.dtype = jnp.float32,
     precision: jax.lax.Precision = jax.lax.Precision.HIGHEST,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Chunked KDA for the mixed / prefill case (ragged sequences).
@@ -116,16 +115,20 @@ def ragged_kda_mixed_prefill(
     Returns ``(updated_recurrent_state, output)`` with output shape
     ``[num_tokens, H * V]``.
 
-    HBM note: the packed q/k/v/gate streams stay in the INPUT dtype and all
-    fp32 math (l2norm, sigmoid, gate, delta rule) happens per chunk inside
-    the scan — casting bf16 up to fp32 per chunk produces bit-identical
-    values to casting the whole stream up front, so this is a memory layout
-    change, not a numerics change. Likewise the per-chunk recurrent-state
-    stacks (``[num_chunks, H, K, V]`` init snapshots and scan-stacked
-    finals) are replaced by a ``[num_seqs, H, K, V]`` carry: at 96 heads
-    those stacks dominated the compiled step function's HLO temporaries
-    (measured ~2.3 MiB per padded token per model on Kimi-K3, ~100 GiB at
-    the largest precompile bucket).
+    HBM note: the memory win on the production path is the removal of the
+    per-chunk recurrent-state stacks — the ``[num_chunks, H, K, V]`` init
+    snapshots and scan-stacked finals are replaced by a
+    ``[num_seqs, H, K, V]`` carry with a single dynamic row update per
+    chunk. At 96 heads those stacks dominated the compiled step function's
+    HLO temporaries (measured ~2.3 MiB per padded token per model on
+    Kimi-K3, ~100 GiB at the largest precompile bucket). The packed
+    q/k/v/gate streams are kept in the INPUT dtype with all fp32 math
+    (l2norm, sigmoid, gate, delta rule) done per chunk inside the scan;
+    casting up per chunk is bit-identical to casting the whole stream up
+    front, so this is dtype-generic — but note it saves nothing on the
+    production KDA path, where `kda_attention` upcasts q/k/v to fp32
+    (post-conv SiLU) before calling in, so the packed streams are fp32
+    there regardless.
     """
     initial_dtype = query.dtype
 
@@ -171,6 +174,12 @@ def ragged_kda_mixed_prefill(
     # Which sequence owns each chunk, and whether the chunk is that
     # sequence's last -- this is what lets the scan write final states into a
     # [num_seqs, ...] carry instead of stacking every chunk's state.
+    # The cumsum attribution assumes zero-length sequences appear only as a
+    # TAIL (the runner pads query_start_loc by repeating the final offset):
+    # a zero-length sequence produces no chunk-start reset, so one
+    # interleaved between real sequences would shift every later chunk's
+    # owner index. Its `finals` row keeps the state gathered at entry, and
+    # the write-back below is then a no-op for it.
     last_chunk_indices = (new_query_start_loc[1:] // chunk_size) - 1
     seq_of_chunk = jnp.cumsum(reset_mask.astype(jnp.int32)) - 1  # [N]
     is_last_chunk = (jnp.arange(num_chunks) == last_chunk_indices[jnp.clip(
@@ -224,8 +233,8 @@ def ragged_kda_mixed_prefill(
         if gate_lower_bound is None:
             g_chunk = -fp32_gate_scale * jax.nn.softplus(x_gate)
         else:
-            g_chunk = gate_lower_bound * jax.nn.sigmoid(fp32_gate_scale *
-                                                        x_gate)
+            g_chunk = gate_lower_bound * jax.nn.sigmoid(
+                fp32_gate_scale * x_gate)
         g_chunk = g_chunk * chunk_valid.astype(jnp.float32)[None, :, None]
         G = jnp.cumsum(g_chunk, axis=-2)  # [H, BT, K]
         beta = jax.nn.sigmoid(b.astype(jnp.float32))
@@ -305,8 +314,11 @@ def ragged_kda_mixed_prefill(
                                            seq_idx,
                                            axis=0,
                                            keepdims=False)
-        finals = jax.lax.dynamic_update_index_in_dim(
-            finals, jnp.where(is_last, h_new, row), seq_idx, axis=0)
+        finals = jax.lax.dynamic_update_index_in_dim(finals,
+                                                     jnp.where(
+                                                         is_last, h_new, row),
+                                                     seq_idx,
+                                                     axis=0)
 
         return (h_new, finals), o_c.astype(initial_dtype)
 
@@ -406,8 +418,7 @@ def ragged_kda_decode_only(
     req_indices = jnp.clip(token_idx, 0, max_reqs - 1)
     valid_mask = token_idx < distribution[2]
 
-    beta = jax.nn.sigmoid(
-        b_reshaped[:num_step_tokens].astype(jnp.float32))
+    beta = jax.nn.sigmoid(b_reshaped[:num_step_tokens].astype(jnp.float32))
     g = kda_gate(a_reshaped[:num_step_tokens], A_log, dt_bias,
                  gate_lower_bound)
 
@@ -430,8 +441,7 @@ def ragged_kda_decode_only(
     outputs = jnp.where(valid_mask[:, None, None], outputs, 0.0)
     outputs = outputs.reshape(num_step_tokens, -1)
     if num_step_tokens < num_tokens:
-        outputs = jnp.pad(outputs,
-                          ((0, num_tokens - num_step_tokens), (0, 0)))
+        outputs = jnp.pad(outputs, ((0, num_tokens - num_step_tokens), (0, 0)))
 
     states_to_set = jnp.where(valid_mask[:, None, None, None], new_states,
                               current_states)
