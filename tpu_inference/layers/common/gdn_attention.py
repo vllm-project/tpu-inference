@@ -15,7 +15,6 @@
 Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
-import dataclasses
 import functools
 from typing import Optional, Tuple
 
@@ -23,149 +22,9 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-import tpu_inference.layers.common.ragged_gated_delta_rule_wrapper as ragged_gated_delta_rule_wrapper
-from tpu_inference.kernels.causal_conv1d import causal_conv1d
-from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
-    ragged_gated_delta_rule as ragged_gated_delta_rule_ref
+from tpu_inference.kernels.gdn.v3 import wrapper
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
-
-RaggedGatedDeltaRuleImpl = ragged_gated_delta_rule_wrapper.RaggedGatedDeltaRuleImpl
-
-
-@jax.tree_util.register_dataclass
-@dataclasses.dataclass(frozen=True)
-class GdnAttentionConfig:
-    ragged_gated_delta_rule_impl: RaggedGatedDeltaRuleImpl = (
-        RaggedGatedDeltaRuleImpl.CHUNKED_KERNEL_PD)
-
-
-def run_jax_gdn_attention_local(
-    mixed_qkv: jnp.ndarray,
-    b: jnp.ndarray,
-    a: jnp.ndarray,
-    conv_state: jnp.ndarray,
-    recurrent_state: jnp.ndarray,
-    conv_weight: jnp.ndarray,
-    conv_bias: Optional[jnp.ndarray],
-    A_log: jnp.ndarray,
-    dt_bias: jnp.ndarray,
-    query_start_loc: jnp.ndarray,
-    state_indices: jnp.ndarray,
-    distribution: jnp.ndarray,
-    seq_lens: jnp.ndarray,
-    n_kq: int,
-    n_v: int,
-    d_k: int,
-    d_v: int,
-    kernel_size: int,
-    config: GdnAttentionConfig = GdnAttentionConfig(),
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
-    """Runs the local JAX GDN attention mechanism with combined QKV tensors.
-
-    Args:
-        mixed_qkv: Combined QKV tensor of shape `(num_tokens, dim)`.
-        b: B tensor of shape `(num_tokens, n_v)`.
-        a: A tensor of shape `(num_tokens, n_v)`.
-        conv_state: Combined convolutional state of shape `(num_blocks,
-          kernel_size - 1, dim)`. `num_blocks` is always equal or larger than
-          `max_seqs + 1`. The first block is a null_block and only used for
-          padded / invalid tokens.
-        recurrent_state: Recurrent state of shape `(num_blocks, n_v, d_k, d_v)`.
-        conv_weight: Combined convolutional weight of shape `(dim, 1,
-          kernel_size)`.
-        conv_bias: Optional combined convolutional bias of shape `(dim,)`.
-        A_log: Log of A parameter of shape `(n_v,)`.
-        dt_bias: Delta T bias of shape `(n_v,)`.
-        query_start_loc: Tensor of shape `(num_seqs + 1,)` with start locations of
-          each sequence.
-        state_indices: Tensor of shape `(max_reqs,)` mapping request index to
-          state index.
-        distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
-          mixed_end)`.
-        seq_lens: Tensor of shape `(max_reqs,)` with the total sequence length
-          per request (computed + scheduled). Used to derive
-          ``has_initial_state`` so brand-new prefills don't read stale state
-          from a reused mamba slot, mirroring GPU's
-          ``initial_state[~has_initial_state, ...] = 0`` in
-          ``gdn_linear_attn._forward_core``.
-        n_kq: Number of key/query heads.
-        n_v: Number of value heads.
-        d_k: Dimension of key.
-        d_v: Dimension of value.
-        kernel_size: Convolution kernel size.
-        config: Configuration for implementation selection.
-
-    Returns:
-        A tuple containing:
-        - A tuple of (new_conv_state, new_recurrent_state).
-        - The output tensor of shape `(num_tokens, n_v * d_v)`.
-    """
-    # has_initial_state[i] = True iff request i already has computed
-    # tokens in its mamba slot (chunked-prefill continuation, prefix-cache
-    # hit, or running decode). False for brand-new prefills, in which
-    # case the conv1d, the chunked / ref delta-rule impls, and the fused
-    # Pallas recurrent kernel all zero the slot's prior state before
-    # the update so a freshly-allocated mamba slot can't leak its
-    # previous tenant's state. context_len = seq_len - query_len.
-    max_reqs = seq_lens.shape[0]
-    query_lens = query_start_loc[1:max_reqs + 1] - query_start_loc[:max_reqs]
-    has_initial_state = (seq_lens - query_lens) > 0
-
-    out_mixed_qkv, new_conv_state = causal_conv1d.ragged_causal_conv1d(
-        mixed_qkv,
-        conv_state,
-        conv_weight,
-        conv_bias,
-        query_start_loc,
-        state_indices,
-        distribution,
-        has_initial_state,
-        kernel_size=kernel_size,
-    )
-
-    if config.ragged_gated_delta_rule_impl == RaggedGatedDeltaRuleImpl.REF:
-        ragged_gdn_impl = functools.partial(
-            ragged_gated_delta_rule_ref,
-            has_initial_state=has_initial_state,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-        )
-        new_recurrent_state, output = ragged_gdn_impl(
-            out_mixed_qkv,
-            b,
-            a,
-            recurrent_state,
-            A_log,
-            dt_bias,
-            query_start_loc,
-            state_indices,
-            distribution,
-        )
-    else:
-        wrapper_config = config.ragged_gated_delta_rule_impl.to_config()
-        new_recurrent_state, output = ragged_gated_delta_rule_wrapper.ragged_gated_delta_rule_wrapper(
-            mixed_qkv=out_mixed_qkv,
-            b=b,
-            a=a,
-            recurrent_state=recurrent_state,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            query_start_loc=query_start_loc,
-            state_indices=state_indices,
-            distribution=distribution,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=d_k,
-            d_v=d_v,
-            config=wrapper_config,
-            chunk_size=32,
-            has_initial_state=has_initial_state,
-        )
-
-    return (new_conv_state, new_recurrent_state), output
 
 
 def run_jax_gdn_attention(
@@ -188,7 +47,6 @@ def run_jax_gdn_attention(
     d_v: int,
     kernel_size: int,
     mesh: jax.sharding.Mesh,
-    config: GdnAttentionConfig = GdnAttentionConfig(),
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -264,13 +122,12 @@ def run_jax_gdn_attention(
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
     p_run_jax_gdn_attention_local = functools.partial(
-        run_jax_gdn_attention_local,
+        wrapper.fused_conv1d_gdn,
         n_kq=n_kq // tp_size,
         n_v=n_v // tp_size,
         d_k=d_k,
         d_v=d_v,
         kernel_size=kernel_size,
-        config=config,
     )
 
     mapped_fn = jax.shard_map(

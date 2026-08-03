@@ -21,10 +21,10 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 from tests.test_utils import poison_tpu_memory
+from tpu_inference.kernels.gdn.reference.ragged_gated_delta_rule_ref import \
+    ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 from tpu_inference.kernels.gdn.v2.gdn_decode_kernel import \
     ragged_gated_delta_rule_decode_only
-from tpu_inference.layers.common.ragged_gated_delta_rule_ref import \
-    ragged_gated_delta_rule as ragged_gated_delta_rule_ref
 
 jax.config.parse_flags_with_absl()
 

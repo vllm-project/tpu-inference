@@ -38,13 +38,14 @@ from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
-from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.moe import \
+    FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.moe_weights import (
     FusedMoEWeights, process_moe_weights, quantize_moe_weights,
     shard_moe_weights)
 from tpu_inference.layers.common.quant_methods import MXFP4
-from tpu_inference.layers.common.quantization import \
-    dequantize_tensor_from_mxfp4_packed
+from tpu_inference.layers.common.quantization import (
+    MXFP4_REQUANTIZED_BLOCK_SIZE, dequantize_tensor_from_mxfp4_packed)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
@@ -53,8 +54,6 @@ from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product, t2j
-
-REQUANTIZED_BLOCK_SIZE = 512
 
 P = PartitionSpec
 
@@ -92,7 +91,7 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
         return None
 
 
-class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
+class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
 
     def __init__(
         self,
@@ -109,11 +108,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            # When fused moe kernle is used, we pass extra arguments like
-            # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+        TpuFusedMoEMethodBase.__init__(self, self.moe_backend, ep_axis_name)
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> FusedMoEQuantConfig | None:
@@ -168,7 +163,7 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod):
                     w2_bias=w2_bias,
                 ),
                 jnp.float4_e2m1fn,
-                REQUANTIZED_BLOCK_SIZE,
+                MXFP4_REQUANTIZED_BLOCK_SIZE,
                 w13_interleave=w13_interleave,
             )
             return process_moe_weights(

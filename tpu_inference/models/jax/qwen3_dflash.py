@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple
+from dataclasses import replace
+from typing import Any, List, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -24,8 +25,6 @@ from vllm.config import VllmConfig
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.dflash_attention_interface import \
-    dflash_concat_attention
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
@@ -75,9 +74,9 @@ class Qwen3DFlashAttention(nnx.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
-        self.rope_theta = config.rope_theta
+        self.rope_theta = getattr(config, "rope_theta", 1000000.0)
         self.rope_scaling = getattr(config, "rope_scaling", None)
-        self.rms_norm_eps = config.rms_norm_eps
+        self.rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
 
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
@@ -158,6 +157,8 @@ class Qwen3DFlashAttention(nnx.Module):
         hidden_states: jax.Array,
         target_hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
+        target_query_start_loc: jax.Array,
+        target_positions: jax.Array,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         q = self.q_proj(hidden_states)
@@ -173,7 +174,7 @@ class Qwen3DFlashAttention(nnx.Module):
 
         k_ctx = self.k_proj(target_hidden_states)
         k_ctx = self.k_norm(k_ctx)
-        k_ctx = apply_rope(k_ctx, md.input_positions, self.head_dim_original,
+        k_ctx = apply_rope(k_ctx, target_positions, self.head_dim_original,
                            self.rope_theta, self.rope_scaling)
         v_ctx = self.v_proj(target_hidden_states)
 
@@ -195,53 +196,72 @@ class Qwen3DFlashAttention(nnx.Module):
                 k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v,
                                    k_scale, v_scale)
 
+            num_reqs = md.seq_lens.shape[0]
+            block_size = q.shape[0] // num_reqs
+            seq_lens_noise = md.seq_lens + block_size
+
             new_kv_cache, outputs = attention(
                 kv_cache,
                 q,
                 k,
                 v,
-                attention_metadata,
+                replace(attention_metadata, seq_lens=seq_lens_noise),
                 self.mesh,
                 self.head_dim_original,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                use_causal_mask=False,
             )
         elif self.dflash_attention_impl == "concat_dense":
-            outputs = dflash_concat_attention(
-                q,
-                k_ctx,
-                k_noise,
-                v_ctx,
-                v_noise,
-                attention_metadata,
-                max_query_len=self.max_query_len,
-                sm_scale=self.head_dim_original**-0.5,
-            )
-
+            q_target = jnp.zeros(
+                (target_hidden_states.shape[0], self.num_heads, self.head_dim),
+                dtype=q.dtype)
             q_scale = k_scale = v_scale = None
-            k_for_cache = k_noise
-            v_for_cache = v_noise
             if self.kv_cache_quantized_dtype:
                 k_scale = self._k_scale
                 v_scale = self._v_scale
-                k_for_cache, v_for_cache = quantize_kv(
-                    self.kv_cache_quantized_dtype, k_for_cache, v_for_cache,
-                    k_scale, v_scale)
+                k_ctx, v_ctx = quantize_kv(self.kv_cache_quantized_dtype,
+                                           k_ctx, v_ctx, k_scale, v_scale)
+                k_noise, v_noise = quantize_kv(self.kv_cache_quantized_dtype,
+                                               k_noise, v_noise, k_scale,
+                                               v_scale)
 
-            # Keep existing draft KV-cache update behavior using the noise
-            # stream while computing DFlash outputs from concat K/V semantics.
+            # Step 1: Write target tokens to KV cache
             new_kv_cache, _ = attention(
                 kv_cache,
-                q,
-                k_for_cache,
-                v_for_cache,
-                attention_metadata,
+                q_target,
+                k_ctx,
+                v_ctx,
+                replace(attention_metadata,
+                        query_start_loc=target_query_start_loc),
                 self.mesh,
                 self.head_dim_original,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                use_causal_mask=True,
+                update_kv_cache=True,
+            )
+
+            # Step 2: Compute attention for noise tokens against the full global cache
+            num_reqs = md.seq_lens.shape[0]
+            block_size = q.shape[0] // num_reqs
+            seq_lens_noise = md.seq_lens + block_size
+
+            new_kv_cache, outputs = attention(
+                new_kv_cache,
+                q,
+                k_noise,
+                v_noise,
+                replace(attention_metadata, seq_lens=seq_lens_noise),
+                self.mesh,
+                self.head_dim_original,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                use_causal_mask=False,
+                update_kv_cache=True,
             )
         else:
             raise ValueError(
@@ -296,21 +316,26 @@ class Qwen3DFlashDecoderLayer(nnx.Module):
         hidden_states: jax.Array,
         target_hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[jax.Array, jax.Array]:
+        target_query_start_loc: jax.Array,
+        target_positions: jax.Array,
+    ) -> Tuple[jax.Array, jax.Array, jax.Array]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        kv_cache, attn_out = self.self_attn(
-            kv_cache,
-            hidden_states,
-            target_hidden_states,
-            attention_metadata,
+
+        new_kv_cache, attn_out = self.self_attn(
+            kv_cache=kv_cache,
+            hidden_states=hidden_states,
+            target_hidden_states=target_hidden_states,
+            attention_metadata=attention_metadata,
+            target_query_start_loc=target_query_start_loc,
+            target_positions=target_positions,
         )
         hidden_states = residual + attn_out
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
-        return kv_cache, hidden_states
+        return new_kv_cache, hidden_states, residual
 
 
 class Qwen3DFlashModel(nnx.Module):
@@ -388,24 +413,29 @@ class Qwen3DFlashModel(nnx.Module):
         input_ids: jax.Array,
         target_hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
+        target_query_start_loc: jax.Array,
+        target_positions: jax.Array,
     ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
         hidden_states = self.embed_tokens(input_ids)
 
         num_draft_layers = len(self.layers)
         draft_kv_start = max(0, len(kv_caches) - num_draft_layers)
+        residuals = []
+
         for i, layer in enumerate(self.layers):
             kv_idx = draft_kv_start + i
-            kv_cache, hidden_states = layer(
+            kv_caches[kv_idx], hidden_states, residual = layer(
                 kv_caches[kv_idx],
                 hidden_states,
                 target_hidden_states,
                 attention_metadata,
+                target_query_start_loc,
+                target_positions,
             )
-            kv_caches[kv_idx] = kv_cache
+            residuals.append(residual)
 
-        residual = hidden_states
-        hidden_states = self.norm(hidden_states)
-        return kv_caches, hidden_states, [residual]
+        o = self.norm(hidden_states)
+        return kv_caches, o, residuals
 
     def combine_hidden_states(self, hidden_states: jax.Array) -> jax.Array:
         hidden_states = self.fc(hidden_states)
@@ -465,13 +495,19 @@ class Qwen3DFlashForCausalLM(nnx.Module):
         input_ids: jax.Array,
         target_hidden_states: jax.Array,
         attention_metadata: AttentionMetadata,
-    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]]:
-        return self.model(
+        target_query_start_loc: jax.Array,
+        target_positions: jax.Array,
+        **kwargs,
+    ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array], Any]:
+        kv_caches, hidden_states, residuals = self.model(
             kv_caches,
             input_ids,
             target_hidden_states,
             attention_metadata,
+            target_query_start_loc,
+            target_positions,
         )
+        return kv_caches, hidden_states, residuals, None
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
         return self.model.embed_tokens.decode(hidden_states)

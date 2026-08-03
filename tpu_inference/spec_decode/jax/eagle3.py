@@ -130,6 +130,8 @@ class Eagle3Proposer:
             # 2. Resolve target embed param in target_model (which is already the target state)
             target_embed_param = None
             for path in [
+                    "model.language_model.embed_tokens.weight",
+                    "language_model.embed_tokens.weight",
                     "model.embed_tokens.weight", "model.embed.embedding",
                     "model.embed_tokens.embedding"
             ]:

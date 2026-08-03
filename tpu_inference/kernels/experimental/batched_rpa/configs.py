@@ -51,6 +51,17 @@ class ModelConfigs:
         return self.num_q_heads // self.num_kv_heads
 
 
+class KVLayout(enum.StrEnum):
+    """Represents the different layouts for KV cache.
+
+  - HEAD_ALONG_SUBLANE: Number of heads on sublane, head_dim on lane.
+  - SEQ_ALONG_LANE: Sequence is packed along the lane, head_dim on sublane.
+  """
+
+    HEAD_ALONG_SUBLANE = enum.auto()
+    SEQ_ALONG_LANE = enum.auto()
+
+
 @dataclasses.dataclass(frozen=True)
 class ServingConfigs:
     """Serving config that can change depending on use cases."""
@@ -65,6 +76,7 @@ class ServingConfigs:
     scale_q: int | None = None
     scale_k: int | None = None
     scale_v: int | None = None
+    kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
 
     @property
     def pages_per_seq(self) -> int:
@@ -101,10 +113,10 @@ class ServingConfigs:
 class RpaCase(enum.StrEnum):
     """Represents the different cases for Ragged Paged Attention.
 
-    - DECODE: Sequences are in decode-only mode (q_len = 1).
-    - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
-    - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
-    """
+  - DECODE: Sequences are in decode-only mode (q_len = 1).
+  - PREFILL: Sequences are in prefill-only mode (q_len > 1, static).
+  - MIXED: Sequences can be a mix of prefill and decode (q_len > 1, dynamic).
+  """
 
     DECODE = enum.auto()
     PREFILL = enum.auto()
@@ -170,7 +182,8 @@ class RpaConfigs:
         fixed_bytes = 0
         fixed_bytes += self.serve.num_seqs  # kv_lens
         fixed_bytes += self.serve.num_seqs + 1  # cu_q_lens
-        fixed_bytes += self.serve.num_seqs * self.serve.pages_per_seq  # page_indices
+        fixed_bytes += (self.serve.num_seqs * self.serve.pages_per_seq
+                        )  # page_indices
         fixed_bytes += 3  # distribution
         fixed_bytes += self.block.batch_size  # lane_lengths
         fixed_bytes += 1  # actual_steps
@@ -185,8 +198,9 @@ class RpaConfigs:
         # s_idx, q_idx, k_idx, is_last_k, do_writeback: 5 * 4 = 20
         # dma_q: 2 * 4 = 8
         # dma_kv_cache: bkv_p_cache * 3 * 4 = 12 * bkv_p_cache
-        # dma_kv_new: bkv_p_new * 4 * 4 = 16 * bkv_p_new
-        bytes_per_step = 28 + 12 * self.bkv_p_cache + 16 * self.bkv_p_new
+        # dma_kv_new: bkv_p_new * self.dma_kv_new_size * 4
+        bytes_per_step = (28 + 12 * self.bkv_p_cache +
+                          4 * self.dma_kv_new_size * self.bkv_p_new)
         bytes_per_step *= self.block.batch_size
 
         max_steps_ub = available_bytes // bytes_per_step
@@ -209,6 +223,8 @@ class RpaConfigs:
     def bkv_p_new(self) -> int:
         if self.mode == RpaCase.DECODE:
             return 1
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            return self.bkv_p + 1
         return self.bkv_p
 
     @property
@@ -221,8 +237,18 @@ class RpaConfigs:
         return bkv_stride
 
     @property
-    def aligned_head_dim(self) -> int:
+    def aligned_q_head_dim(self) -> int:
         num_lanes = pltpu.get_tpu_info().num_lanes
+        return utils.align_to(self.model.head_dim, num_lanes)
+
+    @property
+    def aligned_kv_head_dim(self) -> int:
+        num_lanes = pltpu.get_tpu_info().num_lanes
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
+        kv_packing = utils.get_dtype_packing(self.serve.dtype_kv)
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            return utils.align_to(self.model.head_dim,
+                                  num_sublanes * kv_packing)
         return utils.align_to(self.model.head_dim, num_lanes)
 
     @property
@@ -237,6 +263,8 @@ class RpaConfigs:
 
     @property
     def kv_hbm_stride(self) -> int:
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            return self.model.num_kv_heads * 2
         kv_packing = utils.get_dtype_packing(self.serve.dtype_kv)
         return utils.align_to(self.model.num_kv_heads * 2,
                               kv_packing) // kv_packing
@@ -247,7 +275,7 @@ class RpaConfigs:
 
     @property
     def q_vmem_shape(self):
-        q_per_kv_packing = (self.model.num_q_heads_per_kv_head //
+        q_per_kv_packing = (self.aligned_num_q_heads_per_kv_head //
                             self.serve.packing_q)
         return (
             self.block.batch_size,
@@ -255,18 +283,32 @@ class RpaConfigs:
             self.block.bq_sz,
             q_per_kv_packing,
             self.serve.packing_q,
-            self.model.head_dim,
+            self.aligned_q_head_dim,
         )
 
     @property
     def kv_vmem_shape(self):
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            return (
+                self.block.batch_size,
+                self.model.num_kv_heads * 2,
+                self.aligned_kv_head_dim // self.serve.packing_kv,
+                self.serve.packing_kv,
+                self.block.bkv_sz + 2 * self.serve.page_size,
+            )
         return (
             self.block.batch_size,
             self.block.bkv_sz,
             self.bkv_stride,
             self.serve.packing_kv,
-            self.model.head_dim,
+            self.aligned_kv_head_dim,
         )
+
+    @property
+    def dma_kv_new_size(self) -> int:
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            return 5
+        return 4
 
     @property
     def lm_scratch_shape(self):
@@ -274,7 +316,7 @@ class RpaConfigs:
         return (
             self.block.batch_size,
             self.model.num_kv_heads,
-            self.block.bq_sz * self.model.num_q_heads_per_kv_head,
+            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
             num_lanes,
         )
 
@@ -283,8 +325,8 @@ class RpaConfigs:
         return (
             self.block.batch_size,
             self.model.num_kv_heads,
-            self.block.bq_sz * self.model.num_q_heads_per_kv_head,
-            self.model.head_dim,
+            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
+            self.aligned_kv_head_dim,
         )
 
     def validate_inputs(
@@ -314,13 +356,26 @@ class RpaConfigs:
                 "Expected number of head dimensions in Q, K, and V to be the same,"
                 f" but got {q.shape[2]=}, {k.shape[2]=}, and {v.shape[2]=}")
 
-        expected_kv_cache_shape = (
-            kv_cache.shape[0],
-            self.serve.page_size,
-            self.aligned_num_kv_heads_x2 // self.serve.packing_kv,
-            self.serve.packing_kv,
-            self.aligned_head_dim,
-        )
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            if self.serve.page_size != 128:
+                raise ValueError(
+                    "Expected page_size=128 for SEQ_ALONG_LANE tile alignment, but got"
+                    f" {self.serve.page_size=}")
+            expected_kv_cache_shape = (
+                kv_cache.shape[0],
+                self.model.num_kv_heads * 2,
+                self.aligned_kv_head_dim // self.serve.packing_kv,
+                self.serve.packing_kv,
+                self.serve.page_size,
+            )
+        else:
+            expected_kv_cache_shape = (
+                kv_cache.shape[0],
+                self.serve.page_size,
+                self.aligned_num_kv_heads_x2 // self.serve.packing_kv,
+                self.serve.packing_kv,
+                self.aligned_kv_head_dim,
+            )
 
         if kv_cache.shape != expected_kv_cache_shape:
             raise ValueError(f"Expected {kv_cache.shape=} to be equal to"

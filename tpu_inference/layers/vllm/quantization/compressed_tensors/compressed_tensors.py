@@ -32,6 +32,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from tpu_inference.layers.common.quant_methods import COMPRESSED_TENSORS
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe import \
     VllmCompressedTensorsMoEMethod
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import \
+    VllmCompressedTensorsW4A4Fp4
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a8_fp8 import \
     VllmCompressedTensorsW4A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_fp8 import \
@@ -99,6 +101,24 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
             # TODO(dmolitor): Handle unpacked weights or propagate a guard here based on the quantization config format.
             return VllmCompressedTensorsW4A8Fp8(
                 weight_quant=weight_quant,
+                is_static_input_scheme=input_quant and not input_quant.dynamic,
+                linear_config=linear_config,
+            )
+
+        if self._is_nvfp4_format(weight_quant):
+            if input_quant is None:
+                return VllmCompressedTensorsW4A4Fp4(
+                    use_a16=True,
+                    is_static_input_scheme=False,
+                    linear_config=linear_config,
+                )
+            if not self._is_nvfp4_format(input_quant):
+                raise ValueError(
+                    "For NVFP4 weights, input quantization must also be NVFP4 format, ",
+                    "None for NVFP4A16",
+                )
+            return VllmCompressedTensorsW4A4Fp4(
+                use_a16=False,
                 is_static_input_scheme=input_quant and not input_quant.dynamic,
                 linear_config=linear_config,
             )

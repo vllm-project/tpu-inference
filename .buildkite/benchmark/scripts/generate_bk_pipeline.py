@@ -222,10 +222,15 @@ def create_benchmark_steps(case_data: Dict[str, Any],
     child_steps = []
     mlcompass_select_tests = _get_mlcompass_select_tests()
     for agent in ci_queues:
+        # Determine TPU version from queue name
+        tpu_version = "tpu7x" if "v7x" in agent else "tpu6e"
+
         # Build the environment for this specific step
         step_env = {
-            **combined_env, "ci_queue": agent,
-            "USE_PREBUILT_IMAGE": "1"
+            **combined_env,
+            "ci_queue": agent,
+            "USE_PREBUILT_IMAGE": "1",
+            "TPU_VERSION": tpu_version,
         }
 
         step_env["TARGET_CASE_NAME"] = case_name
@@ -296,6 +301,9 @@ def main():
     # Inject UPLOAD_DB environment variable if present in parent environment
     if "UPLOAD_DB" in os.environ:
         global_env["UPLOAD_DB"] = os.environ["UPLOAD_DB"]
+    # Global_env will be passed into docker container. This Extra_ENVS will be saved to DB when report the bm result.
+    if "EXTRA_ENVS" in os.environ:
+        global_env["EXTRA_ENVS"] = os.environ["EXTRA_ENVS"]
 
     all_steps = []
     used_keys = set()  # Track keys for this file

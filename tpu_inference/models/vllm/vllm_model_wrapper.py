@@ -15,7 +15,7 @@
 import copy
 import time
 from collections.abc import Sequence
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from functools import partial
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
@@ -37,9 +37,7 @@ from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
-from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
 from vllm.model_executor.models.interfaces_base import is_pooling_model
-from vllm.platforms import current_platform
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
@@ -48,7 +46,8 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
 from tpu_inference import envs
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
@@ -56,6 +55,8 @@ from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
 from tpu_inference.lora.lora_manager import (TPULRUCacheWorkerLoRAManager,
                                              parse_lora_module_path_env)
+from tpu_inference.models.common.compiler_options import \
+    get_step_fn_compiler_options
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -67,107 +68,10 @@ from tpu_inference.models.vllm.experimental.vision_tower_jit import (
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
-from tpu_inference.runner.mm_encoder_jit_manager import MMEncoderJITManager
+from tpu_inference.runner.mm_encoder_jit_manager import (
+    MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
 logger = init_logger(__name__)
-
-
-def _get_sc_allreduce_allgather_offload_min_size_bytes() -> int:
-    """Returns the SparseCore all-reduce/all-gather offload minimum size in bytes.
-
-    Returns 0 if we use default XLA offload threshold.
-    """
-    sc_threshold_val = envs.SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES
-    sc_threshold_bytes = 0
-    if sc_threshold_val == "auto":
-        from tpu_inference.tpu_info import get_tpu_vmem_size_bytes
-        sc_threshold_bytes = get_tpu_vmem_size_bytes()
-    else:
-        try:
-            sc_threshold_bytes = int(sc_threshold_val)
-        except ValueError:
-            logger.warning(
-                f"Invalid value for SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: "
-                f"'{sc_threshold_val}'. Defaulting to 0 (always offload).")
-            sc_threshold_bytes = 0
-    return sc_threshold_bytes
-
-
-@contextmanager
-def _maybe_patch_for_deepseek_v4(vllm_config: VllmConfig):
-    architectures = getattr(vllm_config.model_config.hf_config,
-                            "architectures", None) or []
-    is_ds_v4 = any("DeepseekV4ForCausalLM" in arch for arch in architectures)
-    if not is_ds_v4:
-        yield
-        return
-
-    # There is two model.py, one NVIDIA variant, one AMD variant.
-    # NVIDIA variant is the default one picked by vLLM's registry.
-    # NVIDIA variant has CUDA/cutedsl ops do not run on TPU.
-    # And the AMD variant uses more extensible, e.g. allows us to
-    # swap in custom MHCPreOp, MHCPostOp etc.
-    # Therefore, we patch the registry to resolve to AMD variant.
-    import vllm.models.deepseek_v4 as ds_v4
-    from vllm.models.deepseek_v4.amd.model import \
-        DeepseekV4ForCausalLM as _AmdDeepseekV4ForCausalLM
-    ds_v4.DeepseekV4ForCausalLM = _AmdDeepseekV4ForCausalLM
-
-    # Clear cached resolved architecture so the AMD model.py are picked up.
-    from vllm.model_executor.model_loader import utils as _ml_utils
-    from vllm.model_executor.models.registry import _try_load_model_cls
-    _ml_utils._MODEL_ARCH_BY_HASH.clear()
-    _try_load_model_cls.cache_clear()
-
-    # DeepseekV4ROCMAiterMLAAttention is a plain nn.Module instantiated directly
-    # in amd/model.py (not CustomOp/register_oot hook).
-    # Swap the class symbol for the TPU subclass before the
-    # model is built.
-    from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
-        patch_deepseek_v4_mla_cls
-    patch_deepseek_v4_mla_cls()
-
-    # DeepSeek-V4 builds CUDA streams (``torch.cuda.Stream``) at construction
-    # which is unavailable on TPU. Mock it to return None.
-    _orig_cuda_stream = torch.cuda.Stream
-    torch.cuda.Stream = lambda *args, **kwargs: None
-    try:
-        # DeepSeek-V4's implementation use sth like:
-        # torch.zeros(.. device=device). Pass `cpu``
-        # instead of tpu to avoid error. Those buffer won't
-        # be used in the forward anyway.
-        with patch.object(current_platform, "device_type", "cpu"):
-            yield
-    finally:
-        torch.cuda.Stream = _orig_cuda_stream
-
-
-def _disable_ds_v4_mtp_buffer(vllm_config: VllmConfig,
-                              vllm_model: torch.nn.Module):
-
-    class _NoOpBuffer:
-        """Sentinel that absorbs ``buf[:n].copy_(x)`` as a no-op.
-        """
-
-        def __getitem__(self, idx):
-            return self
-
-        def copy_(self, *args, **kwargs):
-            return self
-
-    architectures = getattr(vllm_config.model_config.hf_config,
-                            "architectures", None) or []
-    is_ds_v4 = any("DeepseekV4ForCausalLM" in arch for arch in architectures)
-    if not is_ds_v4:
-        return
-
-    # self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1)) in
-    # DS V4 causes error on torchax path. Mock it out as DS V4 MTP is not yet
-    # supported in tpu-inference.
-    inner = getattr(vllm_model, "model", None)
-    if inner is not None and getattr(inner, "_mtp_hidden_buffer",
-                                     None) is not None:
-        inner._mtp_hidden_buffer = _NoOpBuffer()
 
 
 class _VllmRunner(torch.nn.Module):
@@ -304,14 +208,11 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
-        with _maybe_patch_for_deepseek_v4(
-                vllm_config_for_load
-        ), load_context, jax_context, set_current_vllm_config(
+        with load_context, jax_context, set_current_vllm_config(
                 self.vllm_config):
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)
-        _disable_ds_v4_mtp_buffer(vllm_config_for_load, vllm_model)
         lora_manager = None
         if vllm_config_for_load.lora_config is not None:
             # Replace layers in the model with LoRA layers.
@@ -352,6 +253,25 @@ class VllmModelWrapper:
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
 
+        # Slice rotary cos_sin_cache buffers to max_model_len to save HBM usage
+        # and reduce the per-step overhead of the XLA layout copy. Assumes rope
+        # positions are 1-D and bounded by max_model_len (standard text RoPE);
+        # MRoPE video positions are structural and can exceed max_model_len, so
+        # skip the slice there to avoid an out-of-bounds cos_sin_cache gather.
+        if envs.SLICE_ROPE_CACHE and \
+                not self.vllm_config.model_config.uses_mrope:
+            max_len = self.vllm_config.model_config.max_model_len
+            for key, val in list(params_and_buffers.items()):
+                if key.endswith("rotary_emb.cos_sin_cache"):
+                    arr = jax_view(val)
+                    if arr.shape[0] > max_len:
+                        params_and_buffers[key] = torch_view(arr[:max_len])
+                        logger.info(
+                            "Sliced rope cache %s rows %d -> %d. Assumes "
+                            "positions are 1-D and bounded by max_model_len "
+                            "(%d); MRoPE (video) can exceed it and is excluded",
+                            key, arr.shape[0], max_len, max_len)
+
         self._pooler: Pooler | None = self.model.pooler
 
         if self.vllm_config.model_config.is_multimodal_model:
@@ -379,28 +299,15 @@ class VllmModelWrapper:
         )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         params = jax_view(params_and_buffers)
-        self._mm_encoder_jit_manager = self._maybe_create_mm_encoder_jit_manager(
-            params)
+        self._mm_encoder_jit_manager = maybe_create_mm_encoder_jit_manager(
+            vllm_config=self.vllm_config,
+            vllm_model=self.model.vllm_model,
+            vllm_runner=self.model,
+            params_and_buffers=params,
+        )
         return params, lora_manager
 
     def jit_step_func(self):
-
-        compiler_options = {
-            "xla_tpu_all_gather_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_reduce_scatter_collective_matmul_mode":
-            "post_spmd_conservative",
-            "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
-        }
-        sc_offload_bytes = _get_sc_allreduce_allgather_offload_min_size_bytes()
-        if sc_offload_bytes > 0:
-            threshold_bytes = str(sc_offload_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
-            compiler_options[
-                "xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes"] = (
-                    threshold_bytes)
 
         def step_fun_impl(
             params_and_buffers,  # This has been wrapped into torchax TorchValue
@@ -414,18 +321,30 @@ class VllmModelWrapper:
             intermediate_tensors: JaxIntermediateTensors = None,
             is_first_rank: bool = True,
             is_last_rank: bool = True,
+            shared_attention_metadata: SharedAttentionMetadata | None = None,
             *args,
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array]] | Tuple[
                 List[jax.Array], jax.Array, List[jax.Array], jax.Array]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
             lora_metadata = torch_view(lora_metadata)
+            # Pass num_tokens (padded) to set_forward_context. vLLM's
+            # set_forward_context requires it whenever the DP-metadata path runs
+            # -- which for MoE models is now gated on
+            # parallel_config.use_sequence_parallel_moe (enable_expert_parallel +
+            # tensor_parallel_size > 1), not just data_parallel_size > 1. Without
+            # it, that path asserts `num_tokens is not None`. input_positions is
+            # (num_tokens,) or (3, num_tokens) for mRoPE, so shape[-1] is the
+            # padded token count.
+            num_tokens = input_positions.shape[-1]
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
-                    vllm_config=self.vllm_config), set_forward_context(
-                        attn_metadata=attn_metadata,
-                        vllm_config=self.vllm_config):
+                    vllm_config=self.vllm_config,
+                    shared_attn_metadata=shared_attention_metadata
+            ), set_forward_context(attn_metadata=attn_metadata,
+                                   vllm_config=self.vllm_config,
+                                   num_tokens=num_tokens):
                 # We need to wrap args from jax land into TorchValue with
                 # torch_view in order to call the Torch function.
                 original_lora_metadata = replace_lora_metadata(
@@ -480,12 +399,16 @@ class VllmModelWrapper:
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
                    Optional[jax.Array]]:
             layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+            # See step_fun_impl above: vLLM's set_forward_context requires
+            # num_tokens for the MoE sequence-parallel DP-metadata path.
+            num_tokens = attn_metadata.input_positions.shape[-1]
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=kv_caches,
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index
             ), set_forward_context(attn_metadata=attn_metadata,
-                                   vllm_config=self.vllm_config):
+                                   vllm_config=self.vllm_config,
+                                   num_tokens=num_tokens):
                 kwargs = {
                     "input_ids": torch_view(input_ids),
                     "positions": torch_view(attn_metadata.input_positions),
@@ -545,7 +468,7 @@ class VllmModelWrapper:
 
         step_fun_with_options = step_fun_jit(
             step_fun_impl,
-            compiler_options=compiler_options,
+            compiler_options=get_step_fn_compiler_options(),
         )
 
         if self.is_draft_model:
@@ -554,19 +477,6 @@ class VllmModelWrapper:
         else:
             self.step_fn_no_options = step_fun_no_options
             return step_fun_with_options
-
-    def _maybe_create_mm_encoder_jit_manager(
-            self, params) -> 'MMEncoderJITManager | None':
-        if not self.vllm_config.compilation_config.cudagraph_mm_encoder:
-            return None
-        if not supports_encoder_cudagraph(self.model.vllm_model):
-            return None
-        return MMEncoderJITManager(
-            vllm_config=self.vllm_config,
-            vllm_runner=self.model,
-            vllm_model=self.model.vllm_model,
-            params_and_buffers=params,
-        )
 
     def wrap_precompile_vision_encoder_fn(
         self,
@@ -580,16 +490,7 @@ class VllmModelWrapper:
         if not self.vllm_config.model_config.is_multimodal_model:
             return None
         if self._mm_encoder_jit_manager is not None:
-
-            def jit_manager_precompile_fn(run_compilation):
-                for budget in self._mm_encoder_jit_manager.token_budgets:
-                    run_compilation(
-                        "mm_encoder_jit",
-                        self._mm_encoder_jit_manager._capture_budget_graph,
-                        budget,
-                        budget=budget)
-
-            return jit_manager_precompile_fn
+            return self._mm_encoder_jit_manager.precompile_vision_encoder
 
         embed_multimodal_fn = self.wrap_embed_multimodal_func()
         return maybe_precompile_vision_encoder_fn(params, embed_multimodal_fn,
@@ -609,16 +510,17 @@ class VllmModelWrapper:
                 for k, v in kwargs.items()
             }
 
-            output_from_torch = torch.func.functional_call(
-                self.model,
-                torch_view(params_and_buffers),
-                kwargs={
-                    "call_method": "embed_multimodal",
-                    "call_args": (),
-                    "call_kwargs": call_kwargs,
-                },
-                tie_weights=False,
-            )
+            with torchax.default_env():
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_method": "embed_multimodal",
+                        "call_args": (),
+                        "call_kwargs": call_kwargs,
+                    },
+                    tie_weights=False,
+                )
 
             return jax_view(output_from_torch)
 
@@ -828,11 +730,12 @@ def replace_set_lora(model):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
     ):
-        with torchax.default_env():
+        # Use torch.no_grad() to prevent RuntimeError during leaf variable in-place updates
+        with torchax.default_env(), torch.no_grad():
             self._original_set_lora(index, lora_a, lora_b)
 
     def _tpu_reset_lora(self, index: int):
-        with torchax.default_env():
+        with torchax.default_env(), torch.no_grad():
             self._original_reset_lora(index)
 
     for _, module in model.named_modules():

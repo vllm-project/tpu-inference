@@ -46,11 +46,14 @@ class Fp8LinearMethod:
     def _apply_fused(self, x: jax.Array, weight_jax: jax.Array,
                      weight_scale_jax: jax.Array,
                      bias: Optional[jax.Array]) -> jax.Array:
-        outs = sharded_quantized_matmul(x,
-                                        weight_jax,
-                                        weight_scale_jax,
-                                        self.linear_config.weight_sharding,
-                                        mesh=self.linear_config.mesh)
+
+        outs = sharded_quantized_matmul(
+            x,
+            weight_jax,
+            weight_scale_jax,
+            self.linear_config.weight_sharding,
+            mesh=self.linear_config.mesh,
+            defer_all_reduce=self.linear_config.defer_all_reduce)
 
         if bias is not None:
             outs += bias
@@ -67,11 +70,13 @@ class Fp8LinearMethod:
         outs = []
         for i, (weight, weight_scale) in enumerate(weight_and_scale):
 
-            out = sharded_quantized_matmul(x,
-                                           weight,
-                                           weight_scale,
-                                           self.linear_config.weight_sharding,
-                                           mesh=mesh)
+            out = sharded_quantized_matmul(
+                x,
+                weight,
+                weight_scale,
+                self.linear_config.weight_sharding,
+                mesh=mesh,
+                defer_all_reduce=self.linear_config.defer_all_reduce)
 
             if bias is not None:
                 out += bias[i]

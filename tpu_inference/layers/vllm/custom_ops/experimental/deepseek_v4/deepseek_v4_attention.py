@@ -29,6 +29,8 @@ rebinds it on ``amd.model`` directly. It is invoked from
 ``_maybe_patch_for_deepseek_v4`` in ``vllm_model_wrapper`` while ``is_rocm`` is
 forced True and the package has been reloaded onto the AMD implementation.
 """
+from unittest.mock import patch
+
 import jax
 import jax.numpy as jnp
 import torch
@@ -38,14 +40,17 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowMLASpec)
 
-from tpu_inference.kernels.experimental.deepseek_v4.mla import \
+from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla import \
     mla_ragged_paged_attention
-from tpu_inference.kernels.experimental.deepseek_v4.mla_swa import \
+from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla_swa import \
     mla_sliding_window_ragged_paged_attention
+from tpu_inference.kernels.experimental.deepseek_v4.core_attention.sparse_mla import \
+    sparse_ragged_paged_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
     VllmDeepseekCompressor
@@ -67,6 +72,15 @@ def align_to(x, a):
     return cdiv(x, a) * a
 
 
+def _largest_divisor(x: int, cap: int) -> int:
+    """Largest divisor of ``x`` that is <= ``cap``.
+    """
+    for candidate in range(min(x, cap), 0, -1):
+        if x % candidate == 0:
+            return candidate
+    return 1
+
+
 class VllmDeepseekV4SWACache(DeepseekV4SWACache):
 
     def __init__(
@@ -79,21 +93,24 @@ class VllmDeepseekV4SWACache(DeepseekV4SWACache):
     ):
         super().__init__(head_dim, window_size, dtype, prefix, cache_config)
         compressed_kv_cache_bz = cache_config.block_size
-        # We would like to overlay the SWA cache with CSA's main cache
-        # on the same KV-Tensor
+        # We would like to overlay the SWA cache with CSA's main NOPE cache
+        # on the same KV-Tensor, whose shape is [num_pages, page_size, 4, 128]
+        # u8.
         # Thus set swa cache's block size accordingly.
         csa_compression_ratio = 4
-        self.block_size = min(compressed_kv_cache_bz // csa_compression_ratio,
-                              window_size)
+        # In SWA, we store kv cache in bf16 to avoid expensive quantization
+        # and dequantization. The extra storage overhead is small since kvs
+        # outside the sliding window can be reclaimed as needed.
+        # 2 because bf16 occupies 2 bytes per element.
+        self.block_size = min(
+            compressed_kv_cache_bz // csa_compression_ratio // 2, window_size)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # In DSV4 FP8 format
-        # 448 fp8, 64 bf16, 7 fp8 scales, 7 e8m0 scale for 448 fp8 (block size 64)
-        # packed as uint8
+        # ``mla_swa`` keeps the SWA entries as raw bf16, packed as uint8.
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
-            head_size=align_to(448 + 64 * 2 + 7, 128),
+            head_size=512 * 2,
             dtype=torch.uint8,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
@@ -119,17 +136,35 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         dsv4_attention.DeepseekV4Indexer = VllmDeepseekV4Indexer
         dsv4_attention.DeepseekCompressor = VllmDeepseekCompressor
         dsv4_attention.DeepseekV4SWACache = VllmDeepseekV4SWACache
+
+        # The base ctor also allocates CUDA-backed stream-sync events (the
+        # ``ln_events``), used only for GPU stream overlap. Mock them to no-ops.
+        # vLLM #47668 reverted these from ``torch.Event`` back to
+        # ``torch.cuda.Event``, so both symbols must be neutralized -- the
+        # ``torch.Event`` mock alone no longer matches the reverted code, and a
+        # real ``torch.cuda.Event`` is a dummy stub on TPU (no CUDA).
+        orig_event = torch.Event
+        orig_cuda_event = torch.cuda.Event
+        torch.Event = lambda *args, **kwargs: None
+        torch.cuda.Event = lambda *args, **kwargs: None
         try:
-            super().__init__(
-                vllm_config,
-                prefix=prefix,
-                topk_indices_buffer=topk_indices_buffer,
-                aux_stream_list=aux_stream_list,
-            )
+            # DeepSeek-V4's implementation use sth like:
+            # torch.zeros(.. device=device). Pass `cpu``
+            # instead of tpu to avoid error. Those buffer won't
+            # be used in the forward anyway.
+            with patch.object(current_platform, "device_type", "cpu"):
+                super().__init__(
+                    vllm_config,
+                    prefix=prefix,
+                    topk_indices_buffer=topk_indices_buffer,
+                    aux_stream_list=aux_stream_list,
+                )
         finally:
             dsv4_attention.DeepseekV4Indexer = orig_indexer
             dsv4_attention.DeepseekCompressor = orig_compressor
             dsv4_attention.DeepseekV4SWACache = orig_swa_cache
+            torch.Event = orig_event
+            torch.cuda.Event = orig_cuda_event
 
     # Abstract platform hooks required to instantiate the DeepseekV4Attention
     # ABC; unused on the TPU pass-through path.
@@ -142,17 +177,35 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 <= 1):  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
 
-        # In DSV4 FP8 format
-        # 448 fp8, 64 bf16, 7 fp8 scales, 7 e8m0 scale for 448 fp8 (block size 64)
-        # packed as uint8
-        return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=1,
-            head_size=align_to(448 + 64 * 2 + 7, 128),
-            dtype=torch.uint8,
-            compress_ratio=self.compress_ratio,
-            alignment=None,
-        )
+        # CSA (`sparse_mla`) reads the NoPE record from this array and the RoPE
+        # channels from the companion `{prefix}_rope` array; the budget here
+        # covers both. HCA (`mla`) stores raw bf16 in this array. Both are
+        # packed as uint8.
+        is_csa = self.compress_ratio == 4
+        if is_csa:
+            # In DSV4 FP8 format
+            # 448 fp8, 64 bf16, 7 fp8 scales, 7 e8m0 scale for 448 fp8 (block size 64)
+            # packed as uint8
+            return MLAAttentionSpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=1,
+                head_size=align_to(448 + 64 * 2 + 7, 128),
+                dtype=torch.uint8,
+                compress_ratio=self.compress_ratio,
+                alignment=None,
+            )
+        else:
+            # For HCA, we store raw bf16 values in the KV cache to avoid
+            # expernsive DSV4 FP8 quantization and dequantization. The
+            # size of HCA cache only take very small memory overall, so it's ok.
+            return MLAAttentionSpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=1,
+                head_size=512 * 2,
+                dtype=torch.uint8,
+                compress_ratio=self.compress_ratio,
+                alignment=None,
+            )
 
     def _o_proj(self, o: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:
@@ -187,26 +240,17 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         # MergedColumnParallelLinear returns (output, bias); bias is None.
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
 
-        if self.compressor is not None:
-            compressor = self.compressor
-            kv_score = torch_view(
-                jax_view(hidden_states) @ jax_view(
-                    compressor.fused_wkv_wgate.weight.T))
-        else:
-            kv_score = None
-
+        # The compressors' ``fused_wkv_wgate`` projections are fused into the
+        # TPU compress-and-store kernel, which takes ``hidden_states``
+        # directly.
         if self.indexer is not None:
             indexer = self.indexer
             # ReplicatedLinear returns (output, bias); bias is None.
             indexer_weights, _ = indexer.weights_proj(hidden_states)
-            indexer_kv_score = torch_view(
-                jax_view(hidden_states) @ jax_view(
-                    indexer.compressor.fused_wkv_wgate.weight.T))
         else:
             indexer_weights = None
-            indexer_kv_score = None
 
-        return qr_kv, kv_score, indexer_kv_score, indexer_weights
+        return qr_kv, indexer_weights
 
     def qnorm_rope(
             self,
@@ -239,8 +283,6 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             hidden_states: torch.Tensor,
             qr: torch.Tensor,
             kv: torch.Tensor,
-            kv_score: torch.Tensor,
-            indexer_kv_score: torch.Tensor,
             indexer_weights: torch.Tensor,
             positions: torch.Tensor,
             out: torch.Tensor,  # Not used
@@ -254,15 +296,16 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         q = self.qnorm_rope(q, positions)
         kv = self.kv_rope(kv, positions)
 
+        # The TPU compressor fuses its own ``fused_wkv_wgate`` projection, so it
+        # consumes ``hidden_states``.
         topk_indices = None
         if self.indexer is not None:
             assert self.compressor is not None
-            topk_indices = self.indexer(hidden_states, qr, indexer_kv_score,
-                                        indexer_weights, positions,
-                                        self.indexer_rotary_emb)
-            self.compressor(kv_score, positions, self.rotary_emb)
+            topk_indices = self.indexer(hidden_states, qr, indexer_weights,
+                                        positions, self.indexer_rotary_emb)
+            self.compressor(hidden_states, positions, self.rotary_emb)
         elif self.compressor is not None:
-            self.compressor(kv_score, positions, self.rotary_emb)
+            self.compressor(hidden_states, positions, self.rotary_emb)
 
         return self.forward_mqa(q,
                                 kv,
@@ -309,12 +352,21 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             extra = (q_positions + 1).astype(jnp.int32) // self.compress_ratio
 
         two_caches_same_buffer = False
+        main_cache_rope = None
         if not swa_only:
             main_layer_name = self.prefix
             main_attn_metadata = attn_metadata[main_layer_name]
             main_cache_index = wrapper_ctx.layer_name_to_kvcache_index[
                 main_layer_name]
             main_cache_kv = wrapper_ctx.kv_caches[main_cache_index]
+
+            if is_csa:
+                # CSA splits the compressed KV across two arrays: this layer's
+                # main array holds the NoPE record and a companion array holds
+                # the RoPE channels. Both are written by the compressor.
+                main_cache_rope = wrapper_ctx.kv_caches[
+                    wrapper_ctx.
+                    layer_name_to_kvcache_index[f"{main_layer_name}_rope"]]
 
             main_kv_lens = main_attn_metadata.seq_lens // self.compress_ratio
             main_page_indices = main_attn_metadata.block_tables
@@ -352,6 +404,8 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             data_spec,  # main_distribution
             P(),  # attention_sinks (replicated)
         )
+        if main_cache_rope is not None:
+            in_specs += (cache_spec, )  # main_cache_rope
         out_specs = (
             data_spec,  # attention output
             cache_spec,  # updated swa cache
@@ -360,7 +414,8 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         def _attention(q, new_kv, sw_cache, swa_kv_lens, swa_page_indices,
                        swa_cu_q_lens, swa_distribution, main_cache_kv,
                        main_kv_lens, extra, main_page_indices, main_cu_q_lens,
-                       main_distribution, attention_sinks):
+                       main_distribution, attention_sinks,
+                       *main_cache_rope_operand):
             swa_output, updated_sw_cache, swa_l, swa_m = (
                 mla_sliding_window_ragged_paged_attention(
                     q=q,
@@ -375,10 +430,12 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                     sliding_window=self.window_size,
                     logical_page_size=self.swa_cache_layer.block_size,
                     # TODO: tune num_kv_pages_per_block & num_queries_per_block
-                    num_kv_pages_per_block=1,
-                    num_queries_per_block=1,
+                    num_kv_pages_per_block=(2, 2, 2),
+                    num_queries_per_block=(1, 32, 32),
+                    q_compute_block_size=2,
                     unnormalized_output=False if swa_only else True,
                 ))
+
             if swa_only:
                 return swa_output, updated_sw_cache
 
@@ -386,33 +443,58 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 # main cache and swa cache overlay on the same buffer
                 main_cache_kv = updated_sw_cache
 
-            output = mla_ragged_paged_attention(
-                q=q,
-                cache_kv=main_cache_kv,
-                kv_lens=main_kv_lens,
-                kv_lens_to_attend=None if is_csa else extra,
-                topk_indices=extra if is_csa else None,
-                page_indices=main_page_indices,
-                cu_q_lens=main_cu_q_lens,
-                distribution=main_distribution,
-                attention_sinks=attention_sinks,
-                swa_accumution=swa_output,
-                swa_l=swa_l,
-                swa_m=swa_m,
-                sm_scale=self.scale,
-                # TODO: tune num_kv_pages_per_block & num_queries_per_block
-                num_kv_pages_per_block=1,
-                num_queries_per_block=1,
-            )
+            if is_csa:
+                # CSA gathers only the top-k KV tokens per query, so it takes
+                # `topk_indices` (as `extra`).
+                gather_and_attention_chunk_size = 64 if (q.shape[0] %
+                                                         64 == 0) else None
+                if gather_and_attention_chunk_size is None:
+                    # The kernel falls back to a single chunk of q.shape[0];
+                    # the batch size must divide it.
+                    attention_kernel_batch_size = _largest_divisor(
+                        q.shape[0], 16)
+                else:
+                    attention_kernel_batch_size = 16
+                output = sparse_ragged_paged_attention(
+                    q=q,
+                    cache_kv_nope=main_cache_kv,
+                    cache_kv_rope=main_cache_rope_operand[0],
+                    topk_indices=extra,
+                    page_indices=main_page_indices,
+                    cu_q_lens=main_cu_q_lens,
+                    distribution=main_distribution,
+                    attention_sinks=attention_sinks,
+                    swa_accumution=swa_output,
+                    swa_l=swa_l,
+                    swa_m=swa_m,
+                    sm_scale=self.scale,
+                    # TODO: tune attention_kernel_batch_size &
+                    # gather_and_attention_chunk_size.
+                    gather_and_attention_chunk_size=
+                    gather_and_attention_chunk_size,
+                    attention_kernel_batch_size=attention_kernel_batch_size,
+                )
+            else:
+                output = mla_ragged_paged_attention(
+                    q=q,
+                    cache_kv=main_cache_kv,
+                    kv_lens=main_kv_lens,
+                    kv_lens_to_attend=extra,
+                    page_indices=main_page_indices,
+                    cu_q_lens=main_cu_q_lens,
+                    distribution=main_distribution,
+                    attention_sinks=attention_sinks,
+                    swa_accumution=swa_output,
+                    swa_l=swa_l,
+                    swa_m=swa_m,
+                    sm_scale=self.scale,
+                    # TODO: tune num_kv_pages_per_block & num_queries_per_block
+                    num_kv_pages_per_block=(16, 16, 16),
+                    num_queries_per_block=(1, 32, 32),
+                )
             return output, updated_sw_cache
 
-        output, updated_sw_cache = jax.shard_map(
-            _attention,
-            mesh=mesh,
-            in_specs=in_specs,
-            out_specs=out_specs,
-            check_vma=False,
-        )(
+        operands = (
             jax_view(q),
             jax_view(kv),
             sw_cache,
@@ -428,6 +510,16 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             main_distribution,
             attention_sinks,
         )
+        if main_cache_rope is not None:
+            operands += (main_cache_rope, )
+
+        output, updated_sw_cache = jax.shard_map(
+            _attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False,
+        )(*operands)
 
         wrapper_ctx.kv_caches[swa_cache_index] = updated_sw_cache
         return torch_view(output)
@@ -438,8 +530,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        qr_kv, kv_score, indexer_kv_score, indexer_weights = (
-            self.attn_gemm(hidden_states))
+        qr_kv, indexer_weights = (self.attn_gemm(hidden_states))
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         qr = self.q_norm(qr)
         kv = self.kv_norm(kv)
@@ -448,25 +539,9 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             hidden_states,
             qr,
             kv,
-            kv_score,
-            indexer_kv_score,
             indexer_weights,
             positions,
             None,
         )
 
         return self._o_proj(attn_output, positions)
-
-
-def patch_deepseek_v4_mla_cls() -> None:
-    """Rebind ``DeepseekV4ROCMAiterMLAAttention`` to the TPU subclass.
-
-    Must run after ``vllm.models.deepseek_v4.amd.model`` is imported (it holds
-    its own ``from ...amd.rocm import DeepseekV4ROCMAiterMLAAttention``
-    reference) and before the model is constructed.
-    """
-    import vllm.models.deepseek_v4.amd.model as ds_v4_amd_model
-    ds_v4_amd_model.DeepseekV4ROCMAiterMLAAttention = VllmDeepseekV4MLAAttention
-    logger.info(
-        "Patched DeepseekV4ROCMAiterMLAAttention -> VllmDeepseekV4MLAAttention for TPU."
-    )

@@ -59,8 +59,11 @@ ENV_VARS=(
   -e BENCH_DATASET="${BENCH_DATASET:-}"
   -e USE_BATCHED_RPA_KERNEL="${USE_BATCHED_RPA_KERNEL:-}"
   -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
+  -e BUILDKITE_STEP_KEY="${BUILDKITE_STEP_KEY:-}"
+  -e COMPILATION_CONFIG="${COMPILATION_CONFIG:-}"
   -e HOST_NAME="${HOST_NAME:-}"
   -e GCS_BUCKET="${GCS_BUCKET:-}"
+  -e GITHUB_CI_BOT_TOKEN="${GITHUB_CI_BOT_TOKEN:-}"
 )
 
 if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
@@ -136,9 +139,16 @@ if ! mkdir -p "$LOCAL_JAX_CACHE_DIR"; then
   exit 1
 fi
 echo "[INFO] Pulling JAX Cache from GCS to local directory..."
-# Parallel CI builds‘ pushes are safe because JAX's compilation cache 
+# Parallel CI builds‘ pushes are safe because JAX's compilation cache
 # entries are content-addressed. Concurrent pushes are thus idempotent;
-gsutil -m rsync -d -r "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
+gcloud storage rsync \
+  --recursive \
+  --no-clobber \
+  --delete-unmatched-destination-objects \
+  --exclude=".*_.gstmp$" \
+  --no-user-output-enabled \
+  "$FINAL_CACHE_PATH" "$LOCAL_JAX_CACHE_DIR" || \
+  echo "[WARN] Failed to pull JAX Cache from GCS. Proceeding with cold start."
 
 # ==========================================
 # 2. Run Docker Container
@@ -153,9 +163,9 @@ trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true' EXIT INT TERM
 
 # -----------------------------------------------------------------------------
 # JAX Cache Env Variables Explanation:
-# - VLLM_XLA_CACHE_PATH: Prevents vLLM's CompilationManager from overriding our 
+# - VLLM_XLA_CACHE_PATH: Prevents vLLM's CompilationManager from overriding our
 #   path with its default.
-# - JAX_COMPILATION_CACHE_DIR: Serves as a global catch-all for unit tests that 
+# - JAX_COMPILATION_CACHE_DIR: Serves as a global catch-all for unit tests that
 #   initiate models and bypass vLLM's CompilationManager logic entirely.
 # -----------------------------------------------------------------------------
 
@@ -200,7 +210,20 @@ set -e
 # ==========================================
 echo "[INFO] Docker finished with exit code ${DOCKER_EXIT_CODE}."
 
-echo "[INFO] Syncing local JAX Cache back to GCS..."
-gsutil -m rsync -r "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || echo "[WARN] Failed to sync JAX Cache back to GCS."
+if [ $DOCKER_EXIT_CODE -eq 0 ]; then
+  echo "[INFO] Syncing local JAX Cache back to GCS..."
+  gcloud storage rsync \
+    --recursive \
+    --no-clobber \
+    --exclude=".*_.gstmp$" \
+    --no-user-output-enabled \
+    "$LOCAL_JAX_CACHE_DIR" "$FINAL_CACHE_PATH" || \
+    echo "[WARN] Failed to sync JAX Cache back to GCS."
+else
+  echo "[WARN] Docker exited with non-zero code ${DOCKER_EXIT_CODE}. Skipping syncing local JAX Cache back to GCS to avoid potential cache corruption."
+fi
+
+echo "--- Cleaning up Docker resources after run"
+cleanup_docker_resource "${IMAGE_NAME}"
 
 exit $DOCKER_EXIT_CODE

@@ -44,11 +44,11 @@ from tpu_inference.runner.mm_encoder_jit_manager import (
 
 
 def _make_vllm_config(budgets=None, max_vision_items=0):
+    model_config = ModelConfig(dtype=torch.bfloat16)
+    model_config.multimodal_config = MultiModalConfig(
+        limit_per_prompt={"video": 0})
     return VllmConfig(
-        model_config=ModelConfig(
-            dtype=torch.bfloat16,
-            multimodal_config=MultiModalConfig(limit_per_prompt={"video": 0}),
-        ),
+        model_config=model_config,
         compilation_config=CompilationConfig(
             encoder_cudagraph_token_budgets=budgets or [],
             encoder_cudagraph_max_vision_items_per_batch=max_vision_items,
@@ -262,7 +262,7 @@ class TestMMEncoderJITManagerInit:
     def test_jit_forward_is_callable(self):
         """_jit_forward is a callable built once at init (not per-call)."""
         manager = _make_manager()
-        assert callable(manager._jit_forward)
+        assert callable(manager.model._jit_forward)
 
 
 def _image_mm_kwargs(t=1, h=4, w=4):

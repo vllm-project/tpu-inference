@@ -21,11 +21,11 @@ import numpy as np
 from absl import flags
 from vllm.utils.math_utils import cdiv
 
-from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
-                                                            RunConfig,
-                                                            TunerConfig,
-                                                            TuningCase,
-                                                            TuningStatus)
+from tools.kernel.tuner.v1.common.kernel_tuner_base import KernelTunerBase
+from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
+                                                          TunerConfig,
+                                                          TuningCase,
+                                                          TuningStatus)
 from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import TunableParams, TuningKey
 from tpu_inference.utils import align_to, get_dtype_packing
@@ -161,8 +161,13 @@ class MlaKernelTuner(KernelTunerBase):
     def __init__(self, run_config: RunConfig):
         self.tuner_config = TunerConfig(tuning_key_class=TuningKey,
                                         tunable_params_class=TunableParams,
-                                        kernel_tuner_name="mla_kernel_tuner")
+                                        kernel_tuner_name="mla_kernel_tuner",
+                                        support_autotune=True,
+                                        support_bayesian_optimization=False)
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
+
+    def get_search_space(self, tuning_key: TuningKey) -> dict:
+        return {}
 
     def generate_cases(self) -> list[TuningCase]:
         tuning_set_from_log = []
@@ -180,7 +185,6 @@ class MlaKernelTuner(KernelTunerBase):
                     actual_r_dim=flags.FLAGS.mla_actual_r_dim,
                     kv_dtype=flags.FLAGS.mla_kv_dtype,
                     q_dtype=flags.FLAGS.mla_q_dtype,
-                    total_num_pages=flags.FLAGS.mla_total_num_pages,
                     page_size_per_kv_packing=flags.FLAGS.
                     mla_page_size_per_kv_packing,
                     kv_packing=flags.FLAGS.mla_kv_packing,
@@ -253,7 +257,7 @@ class MlaKernelTuner(KernelTunerBase):
             tuning_key.kv_packing,
             q_dtype=jnp.dtype(tuning_key.q_dtype),
             kv_dtype=jnp.dtype(tuning_key.kv_dtype),
-            num_pages=tuning_key.total_num_pages,
+            num_pages=tuning_key.pages_per_seq * tuning_key.max_num_seqs,
             rng=rng,
         )
 

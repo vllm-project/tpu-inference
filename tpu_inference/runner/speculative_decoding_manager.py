@@ -98,25 +98,126 @@ class SpeculativeDecodingManager:
                 valid_sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
-        elif self.runner.speculative_config.use_eagle():
+        elif self.runner.speculative_config.use_eagle(
+        ) or self.runner.speculative_config.method == "dflash":
             assert input_ids is not None
-            self._draft_token_ids = self.propose_eagle3_draft_token_ids(
-                spec_decode_metadata,
-                last_sampled_token_id,
-                num_rejected_tokens,
-                discard_sampled_tokens_req_indices,
-                aux_hidden_states,
-                attn_metadata,
-                scheduler_output,
-                input_ids,
-                async_scheduling,
-                hidden_states,
-            )
+            if self.runner.speculative_config.method == "dflash":
+                self._draft_token_ids = self.propose_dflash_draft_token_ids(
+                    spec_decode_metadata,
+                    last_sampled_token_id,
+                    num_rejected_tokens,
+                    discard_sampled_tokens_req_indices,
+                    aux_hidden_states,
+                    attn_metadata,
+                    scheduler_output,
+                    input_ids,
+                    async_scheduling,
+                    hidden_states,
+                )
+            else:
+                self._draft_token_ids = self.propose_eagle3_draft_token_ids(
+                    spec_decode_metadata,
+                    last_sampled_token_id,
+                    num_rejected_tokens,
+                    discard_sampled_tokens_req_indices,
+                    aux_hidden_states,
+                    attn_metadata,
+                    scheduler_output,
+                    input_ids,
+                    async_scheduling,
+                    hidden_states,
+                )
             self._req_indices_dp = spec_decode_metadata.req_indices_dp
         else:
             raise NotImplementedError(
                 f"Speculative decoding method "
                 f"'{self.runner.speculative_config.method}' is not supported.")
+
+    def propose_dflash_draft_token_ids(
+        self,
+        spec_decode_metadata: SpecDecodeMetadata,
+        last_sampled_token_id: jnp.ndarray,
+        num_rejected_tokens: jnp.ndarray,
+        discard_sampled_tokens_req_indices: list[int],
+        aux_hidden_states: Optional[tuple[jnp.ndarray, ...]],
+        attn_metadata: AttentionMetadata | dict[str, AttentionMetadata],
+        scheduler_output: VllmSchedulerOutput,
+        input_ids: jnp.ndarray,
+        async_scheduling: bool,
+        hidden_states: jnp.ndarray,
+    ) -> list[list[int]] | jnp.ndarray:
+        from tpu_inference.spec_decode.jax.dflash import DFlashProposer
+        assert isinstance(self.runner.drafter, DFlashProposer)
+        if isinstance(attn_metadata, dict):
+            attn_key = None
+            for key in attn_metadata.keys():
+                if ".self_attn." in key:
+                    attn_key = key
+                    break
+            if attn_key is not None:
+                attn_metadata = attn_metadata[attn_key]
+            else:
+                attn_metadata = next(iter(attn_metadata.values()))
+
+        req_ids = self.runner.input_batch.req_ids
+        max_num_seqs = attn_metadata.seq_lens.shape[0]
+        next_prompt_token_id = np.zeros(max_num_seqs, dtype=np.int32)
+        is_in_prefill = np.zeros(max_num_seqs, dtype=np.int32)
+
+        discard_sampled_tokens_req_indices_set = set(
+            discard_sampled_tokens_req_indices)
+        dp_size = self.runner.dp_size
+        max_num_reqs_per_dp_rank = self.runner.max_num_reqs // dp_size
+        num_reqs_dp = np.zeros((dp_size, ), dtype=np.int32)
+        for rank in range(dp_size):
+            req_indices = spec_decode_metadata.req_indices_dp[rank]
+            num_reqs_dp[rank] = len(req_indices)
+            for j, req_idx in enumerate(req_indices):
+                if req_idx in discard_sampled_tokens_req_indices_set:
+                    req_id = req_ids[req_idx]
+                    req_state = self.runner.requests[req_id]
+                    seq_len = (req_state.num_computed_tokens +
+                               scheduler_output.num_scheduled_tokens[req_id])
+                    next_token_id = req_state.get_token_id(seq_len)
+                    next_prompt_token_id[
+                        j + rank * max_num_reqs_per_dp_rank] = next_token_id
+                    is_in_prefill[j + rank * max_num_reqs_per_dp_rank] = 1
+
+        next_prompt_token_id, is_in_prefill, num_reqs_dp = device_array(
+            self.runner.mesh,
+            (next_prompt_token_id, is_in_prefill, num_reqs_dp),
+            sharding=(PartitionSpec(ShardingAxisName.ATTN_DATA)))
+
+        aux_hidden_states_for_drafter = aux_hidden_states
+
+        target_hidden_states, input_ids, last_token_indices, attn_metadata = self.runner.drafter.prepare_inputs(
+            attn_metadata,
+            input_ids,
+            aux_hidden_states_for_drafter,
+            last_sampled_token_id,
+            next_prompt_token_id,
+            is_in_prefill,
+            num_rejected_tokens,
+            num_reqs_dp,
+        )
+
+        self.runner.kv_caches, draft_token_ids = self.runner.drafter.propose(
+            kv_caches=self.runner.kv_caches,
+            input_ids=input_ids,
+            attn_metadata=attn_metadata,
+            last_token_indices=last_token_indices,
+            target_hidden_states=target_hidden_states,
+        )
+
+        if async_scheduling:
+            if jnp.ndim(draft_token_ids) == 1:
+                draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
+            return draft_token_ids
+        else:
+            draft_token_ids = np.array(draft_token_ids)
+            if draft_token_ids.ndim == 1:
+                draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
+            return draft_token_ids.tolist()
 
     def propose_eagle3_draft_token_ids(
         self,

@@ -21,6 +21,9 @@ PROXY_LABEL="app=vllm-proxy"
 INTERVAL=5
 TIMEOUT_SECONDS=7200
 
+# Cleanup whenever exit
+trap cleanup_1p1d EXIT
+
 init_env() {
     # Get credentials to GKE cluster
     echo "gcloud container clusters get-credentials $CLUSTER_NAME --zone $ZONE --project $PROJECT_NAME"
@@ -212,7 +215,3 @@ for RESULT_FILE in "1024_8192.json" "8192_1024.json"; do
     done
 done
 
-
-
-# Cleanup
-cleanup_1p1d

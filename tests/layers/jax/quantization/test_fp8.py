@@ -27,7 +27,8 @@ from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
-from tpu_inference.layers.jax.linear import JaxEinsum, JaxLinear
+from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
+                                             JaxMergedColumnParallelLinear)
 from tpu_inference.layers.jax.moe.moe import JaxMoE
 from tpu_inference.layers.jax.quantization.configs import QuantLinearConfig
 # yapf: disable
@@ -133,6 +134,20 @@ class TestQuantLinearConfig:
         assert config.in_features == (128, )  # D is contracting
         assert config.out_features == (8, 16)  # N, H are free
         assert config.batch_features == ()  # no batch dims
+        # N and H are two axes of one projection (e.g. k_proj's
+        # num_kv_heads, head_dim) and must be multiplied, not summed, to
+        # get the true output size — regression test for a bug where
+        # output_sizes was derived by summing per-axis sizes instead.
+        assert config.output_sizes == [8 * 16]
+
+    def test_merged_column_parallel_linear_output_sizes(self, rngs):
+        """Merged linear (e.g. gate_up_proj): output_sizes must preserve
+        the per-projection split (for fusing/splitting checkpoint shards),
+        not collapse to the product of the fused kernel's output axis."""
+        layer = JaxMergedColumnParallelLinear(32, [16, 16], rngs)
+        config = QuantLinearConfig(layer, enable_sp=False)
+        assert config.out_features == (32, )  # fused kernel's single axis
+        assert config.output_sizes == [16, 16]  # per-projection split
 
     def test_batched_einsum_tnh_anh_tna(self, rngs):
         """TNH,ANH->TNA: N is batch dim, H is contracting."""

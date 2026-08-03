@@ -23,11 +23,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
-from tpu_inference import envs
-from tpu_inference.layers.common.gdn_attention import (GdnAttentionConfig,
-                                                       run_jax_gdn_attention)
-from tpu_inference.layers.common.ragged_gated_delta_rule_wrapper import \
-    RaggedGatedDeltaRuleImpl
+from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     reorder_concatenated_tensor_for_sharding, truncate_sharded_tensor)
@@ -63,7 +59,15 @@ def gdn_attention_core_tpu(
        in the cache.
     """
     fc = get_forward_context()
-    attn_metadata = fc.attn_metadata[layer_name]
+    # attn_metadata = fc.attn_metadata[layer_name]
+    key = list(fc.attn_metadata.keys())[0]
+    first_attn_metadata = fc.attn_metadata[key]
+
+    padded_num_reqs = first_attn_metadata.padded_num_reqs
+    request_distribution = first_attn_metadata.request_distribution
+    query_start_loc = first_attn_metadata.query_start_loc
+    seq_lens = first_attn_metadata.seq_lens
+    state_indices = first_attn_metadata.mamba_state_indices
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
@@ -118,14 +122,8 @@ def gdn_attention_core_tpu(
     #     requests into lower-index slots after earlier ones finish), the
     #     slot id moves with the request so the kernel still reads/writes
     #     the slot that holds this request's real state.
-    state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
-
-    config = GdnAttentionConfig(
-        ragged_gated_delta_rule_impl=RaggedGatedDeltaRuleImpl(
-            envs.RAGGED_GATED_DELTA_RULE_IMPL))
-    logger.info_once(f"GDN Attention Config: {config}")
-
-    padded_num_reqs_per_dp = attn_metadata.padded_num_reqs // dp_size
+    state_indices = state_indices.astype(jnp.int32)
+    padded_num_reqs_per_dp = padded_num_reqs // dp_size
 
     # Slice the state indices to the padded_num_reqs, which is the actual number
     # of requests padded to the bucket.
@@ -133,9 +131,9 @@ def gdn_attention_core_tpu(
                                                    padded_num_reqs_per_dp,
                                                    dp_size)
     query_start_loc_sliced = truncate_sharded_tensor(
-        attn_metadata.query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
-    seq_lens_sliced = truncate_sharded_tensor(attn_metadata.seq_lens,
-                                              padded_num_reqs_per_dp, dp_size)
+        query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
+    seq_lens_sliced = truncate_sharded_tensor(seq_lens, padded_num_reqs_per_dp,
+                                              dp_size)
 
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
@@ -150,7 +148,7 @@ def gdn_attention_core_tpu(
          j_dt_bias,
          state_indices_sliced,
          query_start_loc_sliced,
-         attn_metadata.request_distribution,
+         request_distribution,
          seq_lens_sliced,
          n_kq,
          n_v,
@@ -158,7 +156,7 @@ def gdn_attention_core_tpu(
          d_v,
          kernel_size,
          mesh=mesh,
-         config=config)
+     )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
         new_conv_state = jnp.concatenate(
@@ -178,7 +176,7 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
+        output: torch.Tensor | None = None,
     ):
         """
         Implements the exact same logic as in vLLM (https://github.com/vllm-project/vllm/blob/9c81f35/vllm/model_executor/layers/mamba/gdn_linear_attn.py#L508)
@@ -249,4 +247,8 @@ class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
         # ============================================================
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        if output is not None:
+            output[:num_tokens], _ = self.out_proj(core_attn_out)
+            return output
+        else:
+            return self.out_proj(core_attn_out)[0]

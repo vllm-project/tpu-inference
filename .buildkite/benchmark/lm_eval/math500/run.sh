@@ -35,7 +35,9 @@ unset MODEL_IMPL_TYPE VLLM_XLA_CHECK_RECOMPILATION
 mkdir -p "$LOG_DIR"
 
 CMD=(
-    lm_eval
+    python3
+    -m
+    scripts.vllm.integration.lm_eval_accuracy
     --model vllm
     --model_args "pretrained=$MODEL_NAME,tensor_parallel_size=${TENSOR_PARALLEL_SIZE:-8},dtype=auto,max_model_len=$MAX_MODEL_LEN,gpu_memory_utilization=0.98"
     --tasks "$TASK_NAME"

@@ -18,11 +18,11 @@ import logging
 import random
 import time
 
-from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
-                                                            RunConfig,
-                                                            TunerConfig,
-                                                            TuningCase,
-                                                            TuningStatus)
+from tools.kernel.tuner.v1.common.kernel_tuner_base import KernelTunerBase
+from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
+                                                          TunerConfig,
+                                                          TuningCase,
+                                                          TuningStatus)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +44,12 @@ class TuningKey:
 class TunableParams:
     param1: int
     param2: int
+
+    def __ge__(self, other) -> bool:
+        return self.param1 >= other.param1 and self.param2 >= other.param2
+
+    def __le__(self, other) -> bool:
+        return self.param1 <= other.param1 and self.param2 <= other.param2
 
 
 class ExampleKernelTuner(KernelTunerBase):
