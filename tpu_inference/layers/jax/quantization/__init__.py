@@ -49,7 +49,9 @@ def get_tpu_quantization_config(vllm_config: VllmConfig):
     # There are some cases to be supported in the future:
     # 1) Some vision model keep quantization config under text_config
     # 2) overriding through `--hf_overrides`
-    return quant_config(hg_quant_config)
+    return quant_config(hg_quant_config,
+                        model_name_or_path=model_config.model,
+                        download_dir=vllm_config.load_config.download_dir)
 
 
 class QuantizeMethodBase(ABC):

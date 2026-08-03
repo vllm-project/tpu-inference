@@ -14,6 +14,7 @@
 
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -540,3 +541,78 @@ class TestGetModel:
         mock_get_vllm.assert_called_once_with(vllm_config, rng, mesh, False,
                                               None)
         assert result == "vllm_model_sentinel"
+
+
+class TestResolveModelArchitectureStreaming:
+    """The `--load-format runai_streamer` capability check.
+
+    Under `MODEL_IMPL_TYPE=auto`, `resolve_model_architecture` must keep a
+    JAX model on the flax_nnx implementation when it can actually consume
+    streamed weights, and fall back to vllm only when it cannot.
+    """
+
+    class _LoadableModel(model_loader.LoadableWithIterator):
+        """Streams via `LoadableWithIterator.load_weights`."""
+
+    class _WeightLoaderModel:
+        """Streams via a declared `WeightLoader`."""
+        WeightLoader = model_loader.BaseWeightLoader
+
+    class _PlainModel:
+        """Supports neither streaming path."""
+
+    def _config(self, load_format="runai_streamer"):
+        return SimpleNamespace(
+            load_config=SimpleNamespace(load_format=load_format),
+            model_config=SimpleNamespace(hf_config=SimpleNamespace(
+                architectures=["NotAVllmPreferredArch"])))
+
+    def test_loadable_with_iterator_can_stream(self):
+        assert model_loader._jax_model_can_stream_weights(self._LoadableModel)
+
+    def test_weight_loader_model_can_stream(self):
+        assert model_loader._jax_model_can_stream_weights(
+            self._WeightLoaderModel)
+
+    def test_plain_model_cannot_stream(self):
+        assert not model_loader._jax_model_can_stream_weights(self._PlainModel)
+
+    def test_streamer_keeps_flax_nnx_for_loadable_with_iterator(self):
+        with patch.object(model_loader,
+                          "_get_model_architecture",
+                          return_value=self._LoadableModel):
+            assert model_loader.resolve_model_architecture(
+                self._config(), False) == "flax_nnx"
+
+    def test_streamer_keeps_flax_nnx_for_weight_loader_model(self):
+        with patch.object(model_loader,
+                          "_get_model_architecture",
+                          return_value=self._WeightLoaderModel):
+            assert model_loader.resolve_model_architecture(
+                self._config(), False) == "flax_nnx"
+
+    def test_streamer_falls_back_to_vllm_for_non_streamable_model(self):
+        with patch.object(model_loader,
+                          "_get_model_architecture",
+                          return_value=self._PlainModel):
+            assert model_loader.resolve_model_architecture(
+                self._config(), False) == "vllm"
+
+    def test_streamer_with_unregistered_arch_falls_through_to_flax_nnx(self):
+        """Not-in-JAX architectures resolve to flax_nnx; the caller then
+        tries the flax path, fails, and falls back to vllm with a warning."""
+        with patch.object(
+                model_loader,
+                "_get_model_architecture",
+                side_effect=model_loader.UnsupportedArchitectureError(
+                    "not registered")):
+            assert model_loader.resolve_model_architecture(
+                self._config(), False) == "flax_nnx"
+
+    def test_non_streamer_load_skips_the_capability_check(self):
+        with patch.object(model_loader,
+                          "_get_model_architecture",
+                          side_effect=AssertionError(
+                              "must not inspect the JAX registry")):
+            assert model_loader.resolve_model_architecture(
+                self._config(load_format="auto"), False) == "flax_nnx"
