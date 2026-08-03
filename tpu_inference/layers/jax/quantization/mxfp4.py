@@ -108,9 +108,8 @@ class Mxfp4FusedMoEMethod(QuantizeMethodBase):
                 "Mxfp4FusedMoEMethod only handles GPT-OSS MXFP4 expert "
                 f"tensors, got unexpected checkpoint tensors: {unexpected}")
 
-        logger.debug(
-            f"Loaded {len(loaded_names)} MXFP4 tensors for {layer.prefix} MoE layer."
-        )
+        logger.debug("[mxfp4] %s: loaded %d MXFP4 tensors for the MoE layer.",
+                     layer.prefix, len(loaded_names))
 
         return loaded_names
 
@@ -435,10 +434,20 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
 
     def __init__(self, layer: JaxMoE, weight_quant=None):
         FusedMoEMethodBase.__init__(self, layer.moe_backend, "model")
+        # Methods are constructed while the model is being built, before any
+        # weights stream in, so this starts each load from a clean slot
+        # instead of measuring the first layer's wait against whatever model
+        # this process loaded previously.
+        global _LAST_LAYER_FINISHED_AT
+        _LAST_LAYER_FINISHED_AT = 0.0
         self.group_size = getattr(weight_quant, "group_size",
                                   None) or MXFP4_BLOCK_SIZE
         num_bits = getattr(weight_quant, "num_bits", 4)
         strategy = getattr(weight_quant, "strategy", "group")
+        # compressed-tensors parses `strategy` into a str-mixin enum whose
+        # `str()` is "QuantizationStrategy.TENSOR", so compare against the
+        # enum's value (raw configs hand a plain string through unchanged).
+        strategy = getattr(strategy, "value", strategy)
         if num_bits != 4 or str(strategy).endswith("tensor"):
             raise NotImplementedError(
                 f"[mxfp4-ct] {layer.prefix}: only 4-bit group-wise MXFP4 is "
@@ -505,14 +514,22 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
             packed_attr, scale_attr = _CT_STAGED_ATTRS[projection]
             attr = packed_attr if kind == "weight_packed" else scale_attr
             jax_param = getattr(layer, attr)
-            slot = int(expert_id)
+            try:
+                slot = int(expert_id)
+            except ValueError:
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: expert id '{expert_id}' in "
+                    f"checkpoint tensor '{torch_name}' is not an integer; "
+                    f"expected <...>.<expert_id>.<projection>."
+                    f"<weight_packed|weight_scale>.") from None
             # `[None] + shape` so the expert axis exists for concatenation.
             jax_param._weights_to_load[slot] = jax_array_from_reshaped_torch(
                 torch_weight, reshape_dims=(1, ) + tuple(torch_weight.shape))
             loaded_names.add(attr)
 
-        logger.debug(f"Staged {len(loaded_names)} MXFP4 tensor groups for "
-                     f"{layer.prefix} MoE layer.")
+        logger.debug(
+            "[mxfp4-ct] %s: staged %d MXFP4 tensor groups for the MoE layer.",
+            layer.prefix, len(loaded_names))
         return loaded_names
 
     def process_weights_after_loading(self, layer: JaxMoE) -> bool:

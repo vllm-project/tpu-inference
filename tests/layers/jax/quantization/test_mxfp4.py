@@ -21,6 +21,16 @@ lifecycle (`create_weights_jax` -> `load_weights` ->
 tensors laid out like gpt-oss-20b's expert tensors, scaled down.
 """
 
+import os
+
+if "--xla_force_host_platform_device_count" not in os.environ.get(
+        "XLA_FLAGS", ""):
+    # Multi-device coverage for the sharded-decode tests on CPU-only hosts.
+    # A no-op on TPU (the flag only sizes the CPU backend) and when jax was
+    # already initialized by an earlier test module.
+    os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") +
+                               " --xla_force_host_platform_device_count=8")
+
 from types import SimpleNamespace
 
 import jax
@@ -652,3 +662,151 @@ class TestCompressedTensorsMxfp4MultiHostPlacement:
         # Sharded 2 ways on the last axis.
         assert values.addressable_shards[0].data.shape == (self.E, self.D,
                                                            self.F // 2)
+
+
+# Every fp4 (E2M1) code point by nibble value: sign bit 3, two exponent bits
+# (bias 1), one mantissa bit. Written out so the reference below shares
+# nothing with the implementation under test.
+_E2M1_VALUES = np.array([
+    0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0,
+    -4.0, -6.0
+],
+                        dtype=np.float32)
+
+
+def _ref_unpack_e2m1(packed: np.ndarray) -> np.ndarray:
+    """Numpy reference unpack: the LOW nibble of each byte comes first."""
+    low = packed & 0xF
+    high = (packed >> 4) & 0xF
+    pairs = np.stack([_E2M1_VALUES[low], _E2M1_VALUES[high]], axis=-1)
+    return pairs.reshape(packed.shape[:-1] + (-1, ))
+
+
+def _ref_e8m0_to_fp32(u8: np.ndarray) -> np.ndarray:
+    """Numpy reference E8M0 expansion: exact powers of two, bias 127."""
+    return np.float32(2.0)**(u8.astype(np.int32) - 127)
+
+
+def _assert_bit_equal(actual: jax.Array, expected: np.ndarray, name: str):
+    """fp4/fp32 equality that distinguishes -0.0 from +0.0."""
+    actual_f32 = np.asarray(actual.astype(jnp.float32))
+    np.testing.assert_array_equal(actual_f32, expected, err_msg=name)
+    np.testing.assert_array_equal(np.signbit(actual_f32),
+                                  np.signbit(expected),
+                                  err_msg=f"{name}: -0.0 vs +0.0 mismatch")
+
+
+class TestCompressedTensorsMxfp4GoldenDecode:
+    """Hand-computed reference for the lossless decode.
+
+    Pins the three properties the checkpoint bytes must survive: the nibble
+    order of the fp4 unpack (low nibble of each byte first), the E8M0 scale
+    expansion (exact powers of two, exponent bias 127), and the final
+    checkpoint-orientation `[E, out, in]` -> kernel `[E, in, out]` transpose.
+    """
+
+    def _mesh(self):
+        return Mesh(
+            np.array(jax.devices()[:1]).reshape(1, 1), ("data", "model"))
+
+    def test_golden_bytes_decode_to_hand_computed_values(self):
+        # One expert, out=2 rows of in=4 values (2 packed bytes per row), one
+        # E8M0 scale byte per row.
+        packed = np.array([[[0x2E, 0x71], [0x10, 0x9F]]], dtype=np.uint8)
+        scales = np.array([[[126], [128]]], dtype=np.uint8)
+
+        values, scale = \
+            mxfp4.CompressedTensorsMxfp4MoEMethod._decode_on_host(
+                [jnp.asarray(packed)], [jnp.asarray(scales)],
+                (None, None, None), self._mesh())
+
+        assert values.dtype == jnp.float4_e2m1fn
+        assert scale.dtype == jnp.float32
+        # [E=1, out=2, in=4] checkpoint orientation -> [E, in, out].
+        assert values.shape == (1, 4, 2)
+        assert scale.shape == (1, 1, 2)
+        # Byte 0x2E holds nibbles (low 0xE, high 0x2) -> (-4.0, 1.0): the low
+        # nibble is the earlier element. Hand decode, pre-transpose:
+        #   row 0: 0x2E, 0x71 -> [-4.0, 1.0, 0.5, 6.0]
+        #   row 1: 0x10, 0x9F -> [ 0.0, 0.5, -6.0, -0.5]
+        expected = np.array(
+            [[[-4.0, 0.0], [1.0, 0.5], [0.5, -6.0], [6.0, -0.5]]],
+            dtype=np.float32)
+        _assert_bit_equal(values, expected, "values")
+        # E8M0 bytes are exponents biased by 127: 126 -> 2^-1, 128 -> 2^1.
+        np.testing.assert_array_equal(
+            np.asarray(scale), np.array([[[0.5, 2.0]]], dtype=np.float32))
+
+    def test_host_decode_matches_numpy_reference_on_random_data(self):
+        rng = np.random.RandomState(7)
+        num_experts, out, in_, gs = 3, 4, 16, 8
+        packed = rng.randint(0, 256, (num_experts, out, in_ // 2), np.uint8)
+        scales = rng.randint(100, 150, (num_experts, out, in_ // gs), np.uint8)
+
+        values, scale = \
+            mxfp4.CompressedTensorsMxfp4MoEMethod._decode_on_host(
+                [jnp.asarray(packed[e:e + 1]) for e in range(num_experts)],
+                [jnp.asarray(scales[e:e + 1]) for e in range(num_experts)],
+                (None, None, None), self._mesh())
+
+        _assert_bit_equal(values, np.swapaxes(_ref_unpack_e2m1(packed), 1, 2),
+                          "values")
+        np.testing.assert_array_equal(
+            np.asarray(scale), np.swapaxes(_ref_e8m0_to_fp32(scales), 1, 2))
+
+
+class TestCompressedTensorsMxfp4ShardVsHostParity:
+    """`_decode_sharded` must be bit-equal to the host decode.
+
+    The sharded path exists purely as a memory/traffic optimization, so for
+    the same synthetic MXFP4 bytes it must assemble exactly the array
+    `_decode_on_host` produces -- same values (down to -0.0), same scales,
+    same sharding -- for shards cut along each of the three axes.
+    """
+
+    E, OUT, IN, GS = 4, 6, 64, 32
+
+    def _mesh(self):
+        devices = jax.devices()[:2]
+        if len(devices) < 2:
+            pytest.skip(f"needs 2 devices, have {len(devices)}")
+        return Mesh(np.array(devices).reshape(1, 2), ("data", "model"))
+
+    @pytest.mark.parametrize(
+        "sharding",
+        [
+            (None, None, "model"),  # output axis
+            (None, "model", None),  # decoded (packed) input axis
+            ("model", None, None),  # expert axis
+        ])
+    def test_shard_decode_bit_equals_host_decode(self, sharding):
+        mesh = self._mesh()
+        rng = np.random.RandomState(11)
+        staged_packed = [
+            jnp.asarray(
+                rng.randint(0, 256, (1, self.OUT, self.IN // 2), np.uint8))
+            for _ in range(self.E)
+        ]
+        staged_scale = [
+            jnp.asarray(
+                rng.randint(96, 160, (1, self.OUT, self.IN // self.GS),
+                            np.uint8)) for _ in range(self.E)
+        ]
+
+        host_values, host_scale = \
+            mxfp4.CompressedTensorsMxfp4MoEMethod._decode_on_host(
+                staged_packed, staged_scale, sharding, mesh)
+        shard_values = mxfp4._decode_sharded(staged_packed,
+                                             mxfp4.u8_unpack_e2m1, 2, sharding,
+                                             mesh)
+        shard_scale = mxfp4._decode_sharded(staged_scale, mxfp4.e8m0_to_fp32,
+                                            1, sharding, mesh)
+
+        for name, host, shard in (("values", host_values, shard_values),
+                                  ("scale", host_scale, shard_scale)):
+            assert shard.shape == host.shape, name
+            assert shard.dtype == host.dtype, name
+            assert shard.sharding == host.sharding, (
+                f"{name}: {shard.sharding} vs {host.sharding}")
+            _assert_bit_equal(shard, np.asarray(host.astype(jnp.float32)),
+                              name)
