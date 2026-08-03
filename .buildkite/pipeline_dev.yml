@@ -13,8 +13,6 @@
 # limitations under the License.
 
 # Dev pipeline for tpu-inference-dev.
-# Demo/sample steps showing how to run custom tests on tpu7x.
-# Copy and adapt any step for your own experiments.
 #
 # HOW TO TRIGGER THIS PIPELINE
 # ─────────────────────────────
@@ -28,121 +26,73 @@
 #     -H "Content-Type: application/json" \
 #     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-dev/builds" \
 #     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
-#
-# HOW TO CUSTOMIZE
-# ─────────────────
-# 1. On your branch, edit this file — use any demo step below as a starting point.
-# 2. Change the command, model, env vars, or queue as needed.
-# 3. Trigger the pipeline — only your branch's file is used.
 
 steps:
 
   # -----------------------------------------------------------------
-  # Build Step (required by all demo steps below)
+  # DEV ONLY (carries the env-gated platform-check downgrade).
+  # Kimi-K3 attempt 13: the perf series + sharded expert streaming, on
+  # 4 hosts, DP attention OFF, experts split expert=4 x model=8 = 32.
+  #
+  # Deltas vs the attempt-12 recipe that served:
+  #   * K3_SHARDED_EXPERT_STREAMING=1 -- each host streams only the
+  #     experts its own devices keep (~1/4 of the ~1.4 TB of expert
+  #     bytes; the [sharded-stream] log line on each host reports the
+  #     exact per-host expert count and bytes skipped). This is the pod
+  #     payoff measurement for the filtered read.
+  #   * enable_continue_decode=true -- the fused decode loop, now able
+  #     to run hybrid (multi-kv-group) flax_nnx models.
+  #   * --max-num-seqs 8 -> 64 and --max-num-batched-tokens 512 -> 2048,
+  #     with NO --num-gpu-blocks-override: the decode-branch fix sizes
+  #     per-token state gathers by slot count instead of token bucket,
+  #     which is what killed this exact config before; with dp=1 the top
+  #     token bucket is 2048 and its compile temporaries measured
+  #     ~1.4 GiB, so the pool can be left to size itself at util 0.8.
+  #   * bench phases: BS=1 8k/1k decode rate (3 prompts), then the 2x2
+  #     matrix {1k/1k, 8k/1k} x {conc 8/32 prompts, conc 64/128
+  #     prompts}, each capped 60 min. NO gsm8k here (--skip-acc): the
+  #     accuracy run for this code is covered separately.
   # -----------------------------------------------------------------
-  - label: ":docker: Build and Push Base Image (tpu7x)"
-    key: tpu7x_build_docker
-    agents:
-      queue: cpu_64_core
+  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13: perf series + sharded streaming"
+    key: tpu7x_k3_attempt13
+    timeout_in_minutes: 420
     env:
       TPU_VERSION: "tpu7x"
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-
-  # -----------------------------------------------------------------
-  # Demo 1: offline_inference.py
-  # Shows the simplest pattern: run a Python script inside Docker.
-  # Use this as a starting point for any offline batch inference test.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] offline_inference.py"
-    key: tpu7x_demo_offline_inference
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
+      MODEL_IMPL_TYPE: "flax_nnx"
+      NEW_MODEL_DESIGN: "1"
+      TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION: "1"
+      # The CI image sets this to 1, which makes any compile at request time
+      # fatal. This run serves request shapes the warmup sweep does not
+      # cover; allow the compile.
+      VLLM_XLA_CHECK_RECOMPILATION: "0"
+      # Streaming the checkpoint dominates startup. With the sharded read
+      # each host pulls ~0.4 TB instead of 1.45 TB, but keep attempt 12's
+      # four-hour health wait so a regression fails with worker-side logs
+      # rather than a launcher timeout.
+      SERVE_STARTUP_TIMEOUT_SECONDS: "14400"
+      # Shard-then-decode MXFP4 (default on, named to self-describe) is
+      # also a hard requirement of the sharded expert streaming below.
+      MXFP4_SHARD_THEN_DECODE: "1"
+      K3_SHARDED_EXPERT_STREAMING: "1"
     agents:
-      queue: tpu_v7x_2_queue
-    commands:
-      - |
-        # Run offline inference with a small model.
-        # --tensor-parallel-size 2: tp=1 is currently unsupported on tpu7x.
-        # Customize --model, --max-model-len, --max-tokens as needed.
-        .buildkite/scripts/run_in_docker.sh bash -c '
-          python3 examples/offline_inference.py \
-            --model Qwen/Qwen3-0.6B \
-            --tensor-parallel-size 2 \
-            --max-model-len 1024 \
-            --max-tokens 128'
-
-  # -----------------------------------------------------------------
-  # Demo 2: vllm serve + vllm bench serve
-  # Shows how to start a server and run a benchmark against it.
-  # Uses --dataset-name random so no dataset file is needed.
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] vllm serve + vllm bench serve"
-    key: tpu7x_demo_serve_bench
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_2_queue
+      queue: tpu_v7x_32_queue
     commands:
       - |
-        # Customize behaviour via env vars: MODEL, PORT, TENSOR_PARALLEL_SIZE,
-        # MAX_MODEL_LEN, RANDOM_INPUT_LEN, RANDOM_OUTPUT_LEN, NUM_PROMPTS, NUM_WARMUPS.
-        .buildkite/scripts/run_in_docker.sh bash .buildkite/scripts/run_benchmark_demo.sh
-
-  # -----------------------------------------------------------------
-  # Demo 3: DCN-based P/D disaggregation
-  # Mirrors test_25 in pipeline_jax.yml.
-  # Uses run_disagg.sh which delegates to examples/disagg/.
-  # Requires a multi-chip queue (tpu_v7x_8_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] E2E disaggregation (DCN P/D)"
-    key: tpu7x_demo_disagg
-    depends_on: tpu7x_build_docker
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu7x"
-      # Customize these to change the disagg benchmark behaviour.
-      MODEL: "Qwen/Qwen3-0.6B"
-      INPUT_LEN: 1024
-      OUTPUT_LEN: 128
-      NUM_PROMPTS: 5
-      RANDOM_SEED: 10
-      MAX_CONCURRENCY: 4
-      TEST_MODE: 1
-    agents:
-      queue: tpu_v7x_8_queue
-    commands:
-      - .buildkite/scripts/run_disagg.sh
-
-  # -----------------------------------------------------------------
-  # Demo 4: Ray-based multi-host inference
-  # Mirrors test_26 in pipeline_jax.yml.
-  # Uses run_multihost.sh to serve a large model across 16 chips (2 hosts).
-  # Requires a 16-chip queue (tpu_v7x_16_queue).
-  # -----------------------------------------------------------------
-  - label: "tpu7x [demo] Ray-based multi-host"
-    key: tpu7x_demo_multihost
-    env:
-      TPU_VERSION: "tpu7x"
-    agents:
-      queue: tpu_v7x_16_queue
-    commands:
-      - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
         .buildkite/scripts/run_multihost.sh \
-          "vllm serve \${MODEL} \
+          "vllm serve gs://tpu-commons-ci/moonshootai/kimi/k3 \
             --port 8000 \
-            --tensor-parallel-size 16 \
+            --tensor-parallel-size 32 \
             --trust-remote-code \
-            --max-model-len 1024 \
+            --max-model-len 10240 \
+            --max-num-seqs 64 \
+            --max-num-batched-tokens 2048 \
             --no-async-scheduling \
             --load-format=runai_streamer \
-            --no-enable-prefix-caching" \
-          "curl http://localhost:8000/v1/completions \
-            -X POST \
-            -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+            --no-enable-prefix-caching \
+            --gpu-memory-utilization 0.8 \
+            --additional-config '{\"enable_continue_decode\":true,\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
+          "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
+            --concurrency 4 \
+            --long-tokens 256 \
+            --needle-tokens 8000 \
+          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --skip-acc --bs1-bench --matrix-bench"
