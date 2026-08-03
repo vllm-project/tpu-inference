@@ -422,10 +422,7 @@ class DPScheduler(SchedulerInterface):
         # DP state
         self.dp_size = vllm_config.sharding_config.total_dp_size
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
-        # Rank routing policy, see DP_SCHED_ROUTING.
-        self._routing: str = envs.DP_SCHED_ROUTING
-        self._makespan_decode_weight: int = (
-            envs.DP_SCHED_MAKESPAN_DECODE_WEIGHT)
+        # Rotates the tie-break in _find_best_rank_for_request.
         self._rr_start = 0
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
@@ -689,39 +686,7 @@ class DPScheduler(SchedulerInterface):
                 rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
         return result
 
-    def _get_rank_routing_state(
-            self) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, int]]:
-        """Per-rank (pending_prefill_tokens, inflight_reqs,
-        min_remaining_output) collected in a single round-trip.
-
-        Send all comments first and collect all results after to
-        allow pipelinening across ranks, minimizing the overhead."""
-        for rank in range(self.dp_size):
-            self._send_command(rank,
-                               SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
-            self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
-            self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
-
-        pending: Dict[int, int] = {}
-        inflight: Dict[int, int] = {}
-        min_remaining: Dict[int, int] = {}
-        for rank in range(self.dp_size):
-            pending[rank] = self._get_result(
-                rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
-            running, waiting = self._get_result(
-                rank, SchedulerCommand.GET_REQUEST_COUNTS)
-            inflight[rank] = running + waiting
-            min_remaining[rank] = self._get_result(
-                rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
-        return pending, inflight, min_remaining
-
     def _find_best_rank_for_request(self, request: Request) -> int:
-        """Route a new request to a DP rank, per DP_SCHED_ROUTING."""
-        if self._routing == "makespan":
-            return self._find_rank_by_makespan(request)
-        return self._find_rank_by_cache_affinity(request)
-
-    def _find_rank_by_makespan(self, request: Request) -> int:
         """Pick the rank minimising the resulting maximum load.
 
         The DP ranks advance in lockstep, so a step costs whatever the most
@@ -729,21 +694,20 @@ class DPScheduler(SchedulerInterface):
         maximum, not this request's own prefill. For each rank estimate the
         prefill work it would hold after taking the request::
 
-            load(r) = pending_prefill[r]
-                      + (num_tokens - cached_on_rank[r])
-                      + running[r] * DP_SCHED_MAKESPAN_DECODE_WEIGHT
+            load(r) = pending_prefill[r] + (num_tokens - cached_on_rank[r])
 
-        and take the argmin. The two leading terms are token counts on the
-        same rank, so they add directly with no relative weight to tune.
+        and take the argmin. Both terms are token counts on the same rank, so
+        they add directly with no relative weight to tune.
 
         Cache locality lowers a rank's score because it removes work, not
         because it is privileged. A rank holding this conversation's history
         wins while it is idle, and loses once it is busy enough that the
-        saved prefill no longer compensates -- the decision that pure cache
-        affinity cannot make.
+        saved prefill no longer compensates.
+
+        With prefix caching disabled every rank reports zero cached tokens,
+        so this reduces to picking the rank with the least queued prefill.
         """
         enable_cache = self.vllm_config.cache_config.enable_prefix_caching
-        decode_weight = self._makespan_decode_weight
 
         # Send every query first, then collect, so ranks answer in parallel.
         for rank in range(self.dp_size):
@@ -753,8 +717,6 @@ class DPScheduler(SchedulerInterface):
                                    request)
             self._send_command(rank,
                                SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
-            if decode_weight:
-                self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
 
         num_tokens = request.num_tokens
         loads: Dict[int, int] = {}
@@ -765,12 +727,7 @@ class DPScheduler(SchedulerInterface):
                     rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
             pending = self._get_result(
                 rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
-            running = 0
-            if decode_weight:
-                running, _ = self._get_result(
-                    rank, SchedulerCommand.GET_REQUEST_COUNTS)
-            loads[rank] = (pending + max(0, num_tokens - cached) +
-                           running * decode_weight)
+            loads[rank] = pending + max(0, num_tokens - cached)
 
         # Rotate the scan start so ties do not always favour rank 0.
         order = [(self._rr_start + i) % self.dp_size
@@ -778,42 +735,6 @@ class DPScheduler(SchedulerInterface):
         rank = min(order, key=lambda r: loads[r])
         self._rr_start = (self._rr_start + 1) % self.dp_size
         return rank
-
-    def _find_rank_by_cache_affinity(self, request: Request) -> int:
-        """Find the best DP rank for a new request based on load balancing.
-
-        Two-tier strategy:
-        1. Prefix cache hit: assign to rank with best cache hit.
-        2. Otherwise:
-           - Primary key: fewest pending prefill tokens (keeps prefill
-             balanced across ranks).
-           - Secondary key: fewest in-flight reqs (balances decode load
-             across ranks under DP lockstep once prefills finish).
-           - Tertiary key: rank whose running req is closest to its
-             max_tokens (smallest remaining output tokens), which is
-             most likely to free a slot soon.
-        """
-        # First, try to find a rank with prefix cache hit.
-        if self.vllm_config.cache_config.enable_prefix_caching:
-            for rank in range(self.dp_size):
-                self._send_command(rank,
-                                   SchedulerCommand.PROBE_COMPUTED_BLOCKS,
-                                   request)
-
-            best_cache_rank = None
-            best_cache_tokens = 0
-            for rank in range(self.dp_size):
-                cached_tokens = self._get_result(
-                    rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
-                if cached_tokens > best_cache_tokens:
-                    best_cache_tokens = cached_tokens
-                    best_cache_rank = rank
-            if best_cache_tokens > 0:
-                return best_cache_rank
-
-        pending, inflight, min_remaining = self._get_rank_routing_state()
-        return min(range(self.dp_size),
-                   key=lambda r: (pending[r], inflight[r], min_remaining[r]))
 
     def add_request(self, request: Request) -> None:
         """
