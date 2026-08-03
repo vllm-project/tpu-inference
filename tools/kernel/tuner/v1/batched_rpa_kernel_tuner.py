@@ -167,6 +167,7 @@ def _generate_batched_rpa_inputs(tuning_key: TuningKey,
     if tuning_key.case == 'prefill':
         assert total_q_tokens % prefill_input_len == 0, f'Expect prefill_input_len to align with total_q_tokens, got {prefill_input_len=} and {total_q_tokens=} '
         max_prefill_seqs = min(num_seqs, total_q_tokens // prefill_input_len)
+        assert max_prefill_seqs * pages_per_seq <= num_page_indices, f'Expect max_prefill_seqs * pages_per_seq <= num_page_indices, got {total_q_tokens=}, {prefill_input_len=}, {num_seqs=} and {pages_per_seq=} and {num_page_indices=}'
         max_decode_seqs = 0
         kv_lens = jnp.pad(jnp.full((max_prefill_seqs, ),
                                    prefill_input_len,
@@ -176,7 +177,7 @@ def _generate_batched_rpa_inputs(tuning_key: TuningKey,
         cu_q_lens = jnp.pad(jnp.arange(max_prefill_seqs + 1) *
                             prefill_input_len,
                             (0, num_seqs - max_prefill_seqs),
-                            constant_values=total_q_tokens)
+                            constant_values=max_prefill_seqs * prefill_input_len)
     else:
         max_prefill_seqs = 0
         max_decode_seqs = min(num_seqs, total_q_tokens)
@@ -187,7 +188,7 @@ def _generate_batched_rpa_inputs(tuning_key: TuningKey,
                           constant_values=0)
         cu_q_lens = jnp.pad(jnp.arange(max_decode_seqs + 1),
                             (0, num_seqs - max_decode_seqs),
-                            constant_values=total_q_tokens)
+                            constant_values=max_decode_seqs)
 
     distribution = jnp.array(
         [max_decode_seqs, max_decode_seqs, max_decode_seqs + max_prefill_seqs],
@@ -248,9 +249,14 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         seen_keys: set[TuningKey] = set()
         unique_keys: list[TuningKey] = []
         for case in tuning_case_logger.get_logged_tuning_cases():
-            if (case.tuning_key.total_q_tokens >= 16 * 1024
-                    and case.tuning_key.case == 'prefill'
-                    and case.tuning_key not in seen_keys):
+            if (#case.tuning_key.total_q_tokens == 128
+                    # and 
+                    case.tuning_key.case == 'decode'
+                    and 
+                    case.tuning_key not in seen_keys
+                    # and 
+                    # case.tuning_key.sliding_window is not None
+                    ):
                 seen_keys.add(case.tuning_key)
                 unique_keys.append(case.tuning_key)
         # Build the full Cartesian product of the search space for every key.
@@ -280,9 +286,9 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             v for v in range(256, 2049, 256) if v % tuning_key.page_size == 0
         ]
         return {
-            'batch_size': [1, 2, 3, 4],
-            'bq_sz': list(range(256, 2049, 256)),
-            'bq_c_sz': [8, 16, 32, 64, 128],
+            'batch_size': [1, 2, 3, 4] if tuning_key.case == 'prefill' else [1,2,4,8,16,32],
+            'bq_sz': list(range(256, 2049, 256)) if tuning_key.case == 'prefill' else [1],
+            'bq_c_sz': [8, 16, 32, 64, 128] if tuning_key.case == 'prefill' else [1],
             'bkv_sz': bkv_sz_list,
             'n_buffer': [2, 3],
         }

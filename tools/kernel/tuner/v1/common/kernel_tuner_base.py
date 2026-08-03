@@ -293,7 +293,7 @@ class KernelTunerBase(ABC):
                     'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
-                    'pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow && '
+                    'pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
                     f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
                     f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
