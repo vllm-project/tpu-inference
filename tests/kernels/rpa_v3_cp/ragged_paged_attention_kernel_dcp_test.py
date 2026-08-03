@@ -25,15 +25,24 @@ USE_BATCHED_RPA_KERNEL = (os.environ.get("USE_BATCHED_RPA_KERNEL",
 
 if USE_BATCHED_RPA_KERNEL:
     print('Use batched RPA kernel')
+    from tpu_inference.kernels.experimental.batched_rpa import configs as brpa_configs
     from tpu_inference.kernels.experimental.batched_rpa.utils import (
         align_to, get_dtype_packing)
     from tpu_inference.kernels.experimental.batched_rpa.wrapper import \
         ragged_paged_attention
+    _new_tokens_only_kwargs = {
+        "attention_scope": brpa_configs.AttentionScope.NEW_TOKENS_ONLY
+    }
+    _cache_only_kwargs = {
+        "attention_scope": brpa_configs.AttentionScope.CACHE_ONLY
+    }
 else:
     from tpu_inference.kernels.experimental.batched_rpa.utils import (
         align_to, get_dtype_packing)
     from tpu_inference.kernels.experimental.rpa_v3_cp.kernel import \
         ragged_paged_attention
+    _new_tokens_only_kwargs = {"skip_cache_attn": True}
+    _cache_only_kwargs = {"skip_current_attn": True}
 
 
 def cdiv(a, b):
@@ -369,7 +378,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
                 update_kv_cache=True,
                 cp_rank=jnp.array([rank], dtype=jnp.int32),
                 cp_group_size=cp_group_size,
-                skip_cache_attn=True,
+                **_new_tokens_only_kwargs,
                 return_lse=True,
                 # debug_mode=True,
                 **kwargs,
@@ -431,7 +440,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
                 cp_rank=jnp.array([rank], dtype=jnp.int32),
                 cp_group_size=cp_group_size,
                 return_lse=True,
-                skip_current_attn=True,
+                **_cache_only_kwargs,
                 # debug_mode=True,
             )
             context_outs.append(context_out)

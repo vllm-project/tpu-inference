@@ -51,6 +51,19 @@ class ModelConfigs:
         return self.num_q_heads // self.num_kv_heads
 
 
+class AttentionScope(enum.StrEnum):
+    """Which KV positions to attend to.
+
+    FULL:            attend all positions (default).
+    CACHE_ONLY:      attend only cached tokens, skip new tokens.
+    NEW_TOKENS_ONLY: attend only new tokens, skip cached tokens.
+    """
+
+    FULL = enum.auto()
+    CACHE_ONLY = enum.auto()
+    NEW_TOKENS_ONLY = enum.auto()
+
+
 class KVLayout(enum.StrEnum):
     """Represents the different layouts for KV cache.
 
@@ -78,8 +91,7 @@ class ServingConfigs:
     scale_v: int | None = None
     kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
     cp_group_size: int | None = None
-    skip_cache_attn: bool = False
-    skip_current_attn: bool = False
+    attention_scope: AttentionScope = AttentionScope.FULL
     return_lse: bool = False
     update_kv_cache: bool = True
 

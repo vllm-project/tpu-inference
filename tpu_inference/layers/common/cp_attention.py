@@ -75,10 +75,24 @@ def _rpa_cp_call(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
-    return_lse = True,
+    return_lse: bool = True,
+    skip_cache_attn: bool = False,
+    skip_current_attn: bool = False,
     **flags,
 ):
     """Call with shared CP params"""
+    if envs.USE_BATCHED_RPA_KERNEL:
+        from tpu_inference.kernels.experimental.batched_rpa import configs as brpa_configs
+        if skip_cache_attn:
+            scope = brpa_configs.AttentionScope.NEW_TOKENS_ONLY
+        elif skip_current_attn:
+            scope = brpa_configs.AttentionScope.CACHE_ONLY
+        else:
+            scope = brpa_configs.AttentionScope.FULL
+        flags['attention_scope'] = scope
+    else:
+        flags['skip_cache_attn'] = skip_cache_attn
+        flags['skip_current_attn'] = skip_current_attn
     return rpa_cp.ragged_paged_attention(
         q,
         k,

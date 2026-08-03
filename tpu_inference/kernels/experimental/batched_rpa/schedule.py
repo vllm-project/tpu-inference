@@ -482,7 +482,7 @@ def compute_metadata(
         if (sliding_window := cfgs.model.sliding_window) is not None:
             sw_start_idx = k_len - q_len + q_idx * cfgs.bq_sz - sliding_window + 1
             start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
-        if cfgs.serve.skip_cache_attn:
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
             # Skip pure-cache blocks; start at the first block containing new tokens.
             start_k_idx = jnp.maximum(start_k_idx,
                                       (k_len - q_len) // cfgs.bkv_sz)
@@ -490,7 +490,7 @@ def compute_metadata(
         end_k_idx_causal = (k_len - q_len + q_idx * cfgs.bq_sz + q_sz_task -
                             1) // cfgs.bkv_sz + 1
         end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
-        if cfgs.serve.skip_current_attn:
+        if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
             # Skip pure-new-token blocks; only process blocks containing cache.
             # For prefill sequences (local_cache_len=0) this gives end_k_idx=0.
             end_k_idx = jnp.minimum(end_k_idx,
@@ -692,12 +692,6 @@ def generate_rpa_metadata(
     update_kv_cache: bool = True,
 ) -> RpaSchedule:
     schedule_shaped_dtype = RpaSchedule.create_shape_dtype(cfgs)
-    # Same reason as rpa_kernel: None has 0 pytree leaves, so pallas would steal
-    # the first schedule output leaf as the 4th scalar. Use a dummy array instead.
-    _cp_rank_scalar = cp_rank if cp_rank is not None else jnp.zeros(
-        1, jnp.int32)
-    scalar_prefetches = (cu_q_lens, kv_lens, distribution, _cp_rank_scalar)
-    num_scalar_prefetch = len(scalar_prefetches)  # always 4
 
     return pl.pallas_call(
         functools.partial(rpa_metadata_schedule_kernel,
@@ -705,7 +699,7 @@ def generate_rpa_metadata(
                           update_kv_cache=update_kv_cache),
         out_shape=schedule_shaped_dtype,
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=num_scalar_prefetch,
+            num_scalar_prefetch=4,
             in_specs=[],
             out_specs=schedule_shaped_dtype.out_specs(),
             scratch_shapes=[
@@ -716,4 +710,4 @@ def generate_rpa_metadata(
         ),
         interpret=interpret,
         name="rpa_metadata_schedule",
-    )(*scalar_prefetches)
+    )(cu_q_lens, kv_lens, distribution, cp_rank)
