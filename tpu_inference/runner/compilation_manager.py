@@ -54,44 +54,6 @@ logger = init_logger(__name__)
 # Constants for block bucketing in disaggregated utilities
 BLOCK_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
 
-_GIB = float(1 << 30)
-
-
-def _log_executable_memory(name: str, compiled: Any) -> None:
-    """Log XLA's per-device memory budget for one compiled executable.
-
-    `temp` is the scratch buffer XLA reserves for the whole program; it has to
-    fit in the HBM left over after weights and the KV cache pool, and it is
-    what the runtime means by "the total memory required for HLO temporaries
-    (X) exceeds available HBM (Y)". Logging it per shape makes an OOM during
-    warmup attributable to a specific precompiled bucket instead of to
-    "warmup", and gives a measured number to size the KV pool's warmup
-    reserve against (see `KVCacheManager._warmup_reserve_bytes`). `out` well
-    above `alias` means XLA could not write a donated buffer in place and the
-    program pays for a second copy of it -- for the KV cache that is the
-    difference between a fraction of a GiB and tens of them.
-
-    Only covers executables that `_run_compilation` lowers ahead of time. A
-    `model_fn` that is not a top-level jit takes the "AOT lower skipped"
-    path, compiles inside the warmup call, and reports nothing here.
-    """
-    try:
-        stats = compiled.memory_analysis()
-    except Exception as exc:  # noqa: BLE001
-        # `memory_analysis` is best-effort across backends; never let a
-        # diagnostic break compilation.
-        logger.debug("[precompile-mem] %s: memory_analysis unavailable (%s)",
-                     name, exc)
-        return
-    if stats is None:
-        return
-    logger.info(
-        "[precompile-mem] %s: temp=%.3f GiB | args=%.3f GiB | "
-        "out=%.3f GiB | alias=%.3f GiB | code=%.1f MiB", name,
-        stats.temp_size_in_bytes / _GIB, stats.argument_size_in_bytes / _GIB,
-        stats.output_size_in_bytes / _GIB, stats.alias_size_in_bytes / _GIB,
-        stats.generated_code_size_in_bytes / (1 << 20))
-
 
 class CompilationManager:
 
@@ -236,7 +198,6 @@ class CompilationManager:
                 elapsed = time.perf_counter() - start
                 logger.info("Compilation of %s finished in %.2f [secs].", name,
                             elapsed)
-                _log_executable_memory(name, compiled)
                 return compiled
 
         if self._compile_executor is None:

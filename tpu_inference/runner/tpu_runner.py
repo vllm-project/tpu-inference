@@ -3086,6 +3086,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
+        # Static per-executable decode-only selector for recurrent-layer ops
+        # (see AttentionMetadata.decode_only_bucket). Host-authoritative: the
+        # same predicate the execute path branches on. Only set for models
+        # with mamba layers so attention-only models keep their existing jit
+        # cache keys.
+        decode_only_bucket = bool(self.kv_cache_config.has_mamba_layers
+                                  and self.input_batch.request_distribution[0]
+                                  == self.input_batch.num_reqs)
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -3097,6 +3106,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 has_initial_state=has_initial_state,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
+                decode_only_bucket=decode_only_bucket,
             )
 
             return attention_metadata_gid

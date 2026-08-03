@@ -799,7 +799,9 @@ class KimiDeltaAttention(JaxModule):
                                        kernel_size=self.conv_kernel_size,
                                        gate_lower_bound=self.gate_lower_bound,
                                        rms_norm_eps=self.rms_norm_eps,
-                                       mesh=self.mesh)
+                                       mesh=self.mesh,
+                                       decode_only_bucket=getattr(
+                                           md, "decode_only_bucket", False))
         return tuple(new_state), out
 
 

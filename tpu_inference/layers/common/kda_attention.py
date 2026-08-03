@@ -172,6 +172,7 @@ def _kda_ragged_core(
     kernel_size: int,
     gate_lower_bound: float | None,
     chunk_size: int,
+    decode_only_bucket: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """The state-carrying part of KDA: convs, recurrent scan, state writeback.
 
@@ -194,7 +195,8 @@ def _kda_ragged_core(
                                   state_indices,
                                   distribution,
                                   has_initial_state,
-                                  kernel_size=kernel_size)
+                                  kernel_size=kernel_size,
+                                  decode_only_bucket=decode_only_bucket)
     k, new_conv_k = ragged_conv1d(k,
                                   conv_k,
                                   k_conv_weight,
@@ -203,7 +205,8 @@ def _kda_ragged_core(
                                   state_indices,
                                   distribution,
                                   has_initial_state,
-                                  kernel_size=kernel_size)
+                                  kernel_size=kernel_size,
+                                  decode_only_bucket=decode_only_bucket)
     v, new_conv_v = ragged_conv1d(v,
                                   conv_v,
                                   v_conv_weight,
@@ -212,7 +215,8 @@ def _kda_ragged_core(
                                   state_indices,
                                   distribution,
                                   has_initial_state,
-                                  kernel_size=kernel_size)
+                                  kernel_size=kernel_size,
+                                  decode_only_bucket=decode_only_bucket)
     q = jax.nn.silu(q.astype(jnp.float32))
     k = jax.nn.silu(k.astype(jnp.float32))
     v = jax.nn.silu(v.astype(jnp.float32))
@@ -223,8 +227,12 @@ def _kda_ragged_core(
     v = v.reshape(num_tokens, num_heads, head_dim)
     g_raw = g_raw.reshape(num_tokens, num_heads, head_dim)
 
-    is_decode_only = distribution[0] == distribution[2]
-
+    # TRACE-time branch selection (see AttentionMetadata.decode_only_bucket):
+    # each executable contains exactly one path, so the state pool never
+    # crosses a `lax.cond` boundary and its in-place update aliases. The
+    # mixed path is correct for every batch shape, decode-only included; the
+    # decode path is an optimization the runner dispatches only when its own
+    # host-side decode-only predicate holds.
     def decode_branch(_):
         return ragged_kda_decode_only(q,
                                       k,
@@ -255,8 +263,10 @@ def _kda_ragged_core(
                                         chunk_size=chunk_size,
                                         gate_lower_bound=gate_lower_bound)
 
-    new_recurrent, o = jax.lax.cond(is_decode_only, decode_branch,
-                                    mixed_branch, None)
+    if decode_only_bucket:
+        new_recurrent, o = decode_branch(None)
+    else:
+        new_recurrent, o = mixed_branch(None)
     return (new_conv_q, new_conv_k, new_conv_v, new_recurrent,
             o.reshape(num_tokens, num_heads, head_dim))
 
@@ -337,6 +347,7 @@ def kda_attention(
     rms_norm_eps: float = 1e-5,
     chunk_size: int = 64,
     mesh: jax.sharding.Mesh | None = None,
+    decode_only_bucket: bool = False,
 ) -> tuple[KDAState, jax.Array]:
     """Runs the KDA sublayer over a ragged token batch.
 

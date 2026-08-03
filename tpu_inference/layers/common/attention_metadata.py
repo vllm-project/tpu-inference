@@ -58,7 +58,7 @@ class PCPMetadata:
         "has_initial_state",
         "pcp",
     ],
-    meta_fields=["padded_num_reqs", "pcp_cache_pages"],
+    meta_fields=["padded_num_reqs", "pcp_cache_pages", "decode_only_bucket"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -121,6 +121,20 @@ class AttentionMetadata(object):
 
     # PCP gather-KV only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
+
+    # STATIC (meta) field: True when the runner knows on the host that this
+    # step is decode-only AND the model has recurrent (mamba/KDA) layers.
+    # Linear-attention ops branch on it at TRACE time instead of carrying a
+    # `lax.cond(decode, mixed)` in the executable: a state pool that crosses
+    # a cond boundary cannot be aliased in place, and XLA budgets a
+    # pool-sized copy per recurrent layer in HLO temporaries (with the pool
+    # unpinned, that is the entire KDA state pool a second time -- the pod's
+    # invariant ~118G precompile failure). False traces the mixed/chunked
+    # path, which is CORRECT for every batch shape including decode-only;
+    # True traces the cheap single-token path and may only be dispatched for
+    # decode-only batches. Participates in the jit cache key, so each value
+    # is its own precompiled executable.
+    decode_only_bucket: bool = False
 
 
 @functools.partial(
