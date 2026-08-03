@@ -327,3 +327,127 @@ def test_cross_impl_golden_parity(case):
                                    z[f"{case}.state_fp64"][i],
                                    atol=3e-5,
                                    rtol=3e-4)
+
+
+def test_mixed_prefill_padded_bucket_matches_exact_batch():
+    """Runner-style mixed-prefill padding: the token bucket is larger than
+    the real token count (garbage tail past query_start_loc[-1]) AND
+    distribution[2] < the number of query_start_loc segments (trailing
+    zero-length padding sequences mapped to the null state slot). Real
+    outputs and the whole state pool must be bit-identical to the
+    exactly-sized batch.
+
+    Guards the per-seq finals carry in `ragged_kda_mixed_prefill`: padded
+    tokens must stay inert in the packed stream, and zero-length padding
+    sequences never own a chunk, so their finals rows (gathered at entry)
+    write back as no-ops.
+    """
+    rng = np.random.default_rng(11)
+    H, K, V = 4, 64, 64
+    lens = [5, 63]
+    n = len(lens)
+    T = sum(lens)
+    num_pad_seqs, token_pad = 3, 60
+
+    q, k, v, g, b = _rand_inputs(rng, T + token_pad, H, K, V)
+    for arr in (q, k, v, g, b):
+        arr[T:] = 7.7  # garbage token tail: must not leak anywhere
+    A_log, dt_bias = _params(rng, H, K)
+
+    num_slots = n + num_pad_seqs + 2
+    state = jnp.asarray(rng.normal(size=(num_slots, H, K, V)),
+                        dtype=jnp.float32)
+    qsl_exact = np.cumsum([0] + lens).astype(np.int32)
+    # Runner-style padding: query_start_loc repeats the final offset
+    # (tail-only zero-length seqs), which map to null state slot 0.
+    qsl_padded = np.concatenate(
+        [qsl_exact, np.full(num_pad_seqs, qsl_exact[-1], np.int32)])
+    si_exact = np.arange(1, n + 1, dtype=np.int32)
+    si_padded = np.concatenate([si_exact, np.zeros(num_pad_seqs, np.int32)])
+    distribution = jnp.array([0, 0, n], dtype=jnp.int32)
+    his = np.arange(n + num_pad_seqs) % 2 == 0
+
+    def run(q_, k_, v_, g_, b_, qsl, si, his_):
+        return ragged_kda_mixed_prefill(jnp.asarray(q_),
+                                        jnp.asarray(k_),
+                                        jnp.asarray(v_),
+                                        jnp.asarray(b_),
+                                        jnp.asarray(g_),
+                                        jnp.asarray(A_log),
+                                        jnp.asarray(dt_bias),
+                                        jnp.asarray(qsl),
+                                        state,
+                                        jnp.asarray(si),
+                                        distribution,
+                                        has_initial_state=jnp.asarray(his_),
+                                        chunk_size=64,
+                                        gate_lower_bound=LOWER_BOUND)
+
+    state_exact, out_exact = run(q[:T], k[:T], v[:T], g[:T], b[:T], qsl_exact,
+                                 si_exact, his[:n])
+    state_padded, out_padded = run(q, k, v, g, b, qsl_padded, si_padded, his)
+
+    np.testing.assert_array_equal(np.asarray(out_padded[:T]),
+                                  np.asarray(out_exact))
+    np.testing.assert_array_equal(np.asarray(state_padded),
+                                  np.asarray(state_exact))
+
+
+def test_decode_bucket_larger_than_slots_matches_exact_batch():
+    """Decode-only tokens past the slot count are padding: a bucket 8x the
+    slot count must produce the same valid outputs and state as the
+    exactly-sized batch, with zeros in the tail.
+
+    Guards the decode-branch slicing in `ragged_kda_decode_only`: the
+    per-token [R, H, K, V] state tensors are sized by the slot count, and
+    tokens past it (which can never be real requests in a decode-only batch)
+    must neither leak into outputs nor perturb the state pool.
+    """
+    rng = np.random.default_rng(7)
+    H, K, V = 4, 64, 64
+    slots, valid, bucket = 4, 3, 32
+    q, k, v, g, b = _rand_inputs(rng, slots, H, K, V)
+    A_log, dt_bias = _params(rng, H, K)
+
+    state = jnp.asarray(rng.normal(size=(slots, H, K, V)), dtype=jnp.float32)
+    state_indices = jnp.arange(slots, dtype=jnp.int32)
+    distribution = jnp.array([valid, 0, valid], dtype=jnp.int32)
+    qsl = jnp.arange(slots + 1, dtype=jnp.int32)
+
+    def pad(x, fill=7.7):
+        widths = ((0, bucket - slots), ) + ((0, 0), ) * (x.ndim - 1)
+        return jnp.pad(jnp.asarray(x), widths, constant_values=fill)
+
+    state_exact, out_exact = ragged_kda_decode_only(
+        jnp.asarray(q),
+        jnp.asarray(k),
+        jnp.asarray(v),
+        jnp.asarray(b),
+        jnp.asarray(g),
+        state,
+        jnp.asarray(A_log),
+        jnp.asarray(dt_bias),
+        qsl,
+        state_indices,
+        distribution,
+        gate_lower_bound=LOWER_BOUND)
+    state_padded, out_padded = ragged_kda_decode_only(
+        pad(q),
+        pad(k),
+        pad(v),
+        pad(b),
+        pad(g),
+        state,
+        jnp.asarray(A_log),
+        jnp.asarray(dt_bias),
+        qsl,
+        state_indices,
+        distribution,
+        gate_lower_bound=LOWER_BOUND)
+
+    assert out_padded.shape[0] == bucket
+    np.testing.assert_allclose(np.asarray(out_padded[:slots]),
+                               np.asarray(out_exact))
+    np.testing.assert_allclose(np.asarray(out_padded[slots:]), 0.0)
+    np.testing.assert_allclose(np.asarray(state_padded),
+                               np.asarray(state_exact))

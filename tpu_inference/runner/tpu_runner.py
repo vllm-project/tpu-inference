@@ -1805,38 +1805,45 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              set_forward_context(None, self.vllm_config), \
              self.maybe_get_kv_connector_output(
                  scheduler_output) as kv_connector_output:
-            (generated_tokens, final_kv_caches, final_state, final_rng,
-             all_expert_indices, logprobs_tensors) = continue_decode(
-                 state=self.state_leaves,
-                 model_fn=getattr(self.model, "step_fn_no_options",
-                                  self.model_fn),
-                 compute_logits_fn=self.compute_logits_fn,
-                 sample_fn=sample,
-                 mesh=self.mesh,
-                 sampling_metadata=sampling_metadata,
-                 init_state=init_state,
-                 kv_caches=self.kv_caches,
-                 max_decode_steps=max_decode_steps_arr,
-                 static_max_decode_steps=self.static_max_decode_steps,
-                 eos_token_id=self.eos_token_id,
-                 padding_token_id=self.pad_token_id,
-                 rng=self.rng_params_for_sampling,
-                 inputs_embeds=None,
-                 layer_name_to_kvcache_index=tuple(
-                     self.layer_name_to_kvcache_index.items()),
-                 lora_metadata=lora_metadata,
-                 intermediate_tensors=None,
-                 is_first_rank=self.is_first_rank,
-                 is_last_rank=self.is_last_rank,
-                 dp_size=self.dp_size,
-                 collect_expert_indices=getattr(
-                     self.vllm_config.model_config,
-                     "enable_return_routed_experts", False),
-                 max_logprobs=self.model_config.max_logprobs,
-                 logprobs_mode=self.model_config.logprobs_mode,
-                 continue_decode_eos_check_interval=self.
-                 continue_decode_eos_check_interval,
-             )
+            (
+                generated_tokens, final_kv_caches, final_state, final_rng,
+                all_expert_indices, logprobs_tensors
+            ) = continue_decode(
+                state=self.state_leaves,
+                # The no-compiler-options step fn lives on the torchax
+                # wrapper (self.model) or, for flax_nnx, on the model_fn
+                # wrapper itself.
+                model_fn=getattr(
+                    self.model, "step_fn_no_options",
+                    getattr(self.model_fn, "step_fn_no_options",
+                            self.model_fn)),
+                compute_logits_fn=self.compute_logits_fn,
+                sample_fn=sample,
+                mesh=self.mesh,
+                sampling_metadata=sampling_metadata,
+                init_state=init_state,
+                kv_caches=self.kv_caches,
+                max_decode_steps=max_decode_steps_arr,
+                static_max_decode_steps=self.static_max_decode_steps,
+                eos_token_id=self.eos_token_id,
+                padding_token_id=self.pad_token_id,
+                rng=self.rng_params_for_sampling,
+                inputs_embeds=None,
+                layer_name_to_kvcache_index=tuple(
+                    self.layer_name_to_kvcache_index.items()),
+                lora_metadata=lora_metadata,
+                intermediate_tensors=None,
+                is_first_rank=self.is_first_rank,
+                is_last_rank=self.is_last_rank,
+                dp_size=self.dp_size,
+                collect_expert_indices=getattr(self.vllm_config.model_config,
+                                               "enable_return_routed_experts",
+                                               False),
+                max_logprobs=self.model_config.max_logprobs,
+                logprobs_mode=self.model_config.logprobs_mode,
+                continue_decode_eos_check_interval=self.
+                continue_decode_eos_check_interval,
+            )
 
         if self.scheduler_config.async_scheduling:
             self.rng_params_for_sampling = final_rng

@@ -57,6 +57,7 @@ def pack_inputs_single_stream(
     distribution: jnp.ndarray,
     chunk_size: int,
     compute_dtype: jnp.dtype = jnp.bfloat16,
+    g_dtype: jnp.dtype = jnp.float32,
 ) -> tuple[
         jnp.ndarray,
         jnp.ndarray,
@@ -106,6 +107,12 @@ def pack_inputs_single_stream(
         index 2.
       chunk_size: Chunk size for padding.
       compute_dtype: Dtype for computation (Q, K, V, beta).
+      g_dtype: Dtype the packed gate stream is stored in. fp32 (the default)
+        preserves the GDN behaviour of packing the post-gate log-decay; a
+        caller that packs the RAW gate input and applies the gate math
+        per-chunk (the KDA path) can keep the stream in the input dtype
+        without a numerics change (a saving only when that input is
+        narrower than fp32; the production KDA path passes fp32 inputs).
 
     Returns:
       A tuple containing:
@@ -176,10 +183,10 @@ def pack_inputs_single_stream(
     packed_value = packed_combined_qkvb[..., 2 * K_dim:2 * K_dim + V_dim]
     packed_beta = packed_combined_qkvb[..., 2 * K_dim + V_dim]
 
-    # For g (float32)
-    output_shape_f32 = (max_packed_tokens, ) + g.shape[1:]
-    packed_g = jnp.zeros(output_shape_f32, dtype=jnp.float32)
-    packed_g = packed_g.at[padded_indices_valid].set(g.astype(jnp.float32))
+    # For g (fp32 unless the caller keeps the raw-gate stream narrow)
+    output_shape_g = (max_packed_tokens, ) + g.shape[1:]
+    packed_g = jnp.zeros(output_shape_g, dtype=g_dtype)
+    packed_g = packed_g.at[padded_indices_valid].set(g.astype(g_dtype))
 
     num_chunks_total = max_packed_tokens // chunk_size
     reset_mask = jnp.zeros((num_chunks_total, ), dtype=bool)

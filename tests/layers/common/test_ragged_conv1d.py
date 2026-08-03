@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import parameterized
@@ -298,3 +301,121 @@ class RaggedConv1dJaxTest(parameterized.TestCase):
             dtype=dtype,
         )
         np.testing.assert_allclose(updated_state, expected_state, atol=1e-6)
+
+    def test_decode_bucket_larger_than_slots_matches_exact_batch(self):
+        """Decode-only tokens past the slot count are padding: a bucket 4x
+        the slot count must produce the same valid outputs and state as the
+        exactly-sized batch, with zeros in the tail."""
+        dtype = jnp.float32
+        dim = 2
+        kernel_size = 4
+        max_reqs = 6
+        num_valid_reqs = 4
+        rng = np.random.default_rng(0)
+
+        conv_state = jnp.asarray(rng.normal(size=(max_reqs, kernel_size - 1,
+                                                  dim)),
+                                 dtype=dtype)
+        conv_weight = jnp.asarray(rng.normal(size=(dim, 1, kernel_size)),
+                                  dtype=dtype)
+        conv_bias = jnp.asarray(rng.normal(size=(dim, )), dtype=dtype)
+        query_start_loc = jnp.array([0, 1, 2, 3, 4, 1, 1], dtype=jnp.int32)
+        state_indices = jnp.arange(max_reqs, dtype=jnp.int32)
+        distribution = jnp.array([num_valid_reqs] * 3, dtype=jnp.int32)
+        has_initial_state = jnp.array([True] * max_reqs, dtype=bool)
+
+        x_exact = jnp.asarray(rng.normal(size=(max_reqs, dim)), dtype=dtype)
+        # The padded bucket carries NONZERO garbage past the slot count; it
+        # must not leak into outputs or state.
+        bucket = 4 * max_reqs
+        x_padded = jnp.concatenate([
+            x_exact,
+            jnp.full((bucket - max_reqs, dim), 7.7, dtype=dtype),
+        ])
+
+        run = functools.partial(
+            ragged_conv1d_jax.ragged_conv1d,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            query_start_loc=query_start_loc,
+            state_indices=state_indices,
+            distribution=distribution,
+            has_initial_state=has_initial_state,
+            kernel_size=kernel_size,
+        )
+        # `ragged_conv1d` donates conv_state; each call gets its own copy.
+        out_exact, state_exact = run(x_exact, jnp.array(conv_state))
+        out_padded, state_padded = run(x_padded, jnp.array(conv_state))
+
+        self.assertEqual(out_padded.shape, (bucket, dim))
+        np.testing.assert_allclose(out_padded[:max_reqs], out_exact)
+        np.testing.assert_allclose(out_padded[max_reqs:],
+                                   np.zeros((bucket - max_reqs, dim)))
+        np.testing.assert_allclose(state_padded, state_exact)
+
+    def test_decode_branch_memory_scales_with_slots_not_bucket(self):
+        """The compiled decode-only executable's temporaries must be sized by
+        the state-slot count, not the token bucket.
+
+        Guards the decode-branch slicing in `ragged_conv1d`: unsliced, the
+        per-token state gathers cost O(bucket * kernel_size * dim) of HLO
+        temporaries in EVERY mixed-bucket executable (the `lax.cond` makes
+        the compiler budget for the decode branch at full bucket size). The
+        anti-vacuity control compiles the unsliced internal the old wrapper
+        used and shows it exceeds the same bound.
+        """
+        if jax.default_backend() == "cpu":
+            self.skipTest(
+                "temp_size_in_bytes bound is a TPU XLA property; CPU XLA "
+                "budgets the executable differently and blows the bound")
+        dtype = jnp.bfloat16
+        dim = 2048
+        kernel_size = 4
+        num_slots = 8
+        bucket = 4096
+
+        x = jnp.ones((bucket, dim), dtype=dtype)
+        conv_state = jnp.zeros((num_slots, kernel_size - 1, dim), dtype=dtype)
+        conv_weight = jnp.ones((dim, 1, kernel_size), dtype=dtype)
+        query_start_loc = jnp.zeros((num_slots + 1, ), dtype=jnp.int32)
+        state_indices = jnp.arange(num_slots, dtype=jnp.int32)
+        distribution = jnp.array([num_slots] * 3, dtype=jnp.int32)
+        has_initial_state = jnp.array([True] * num_slots, dtype=bool)
+
+        compiled = jax.jit(
+            functools.partial(ragged_conv1d_jax.ragged_conv1d,
+                              kernel_size=kernel_size),
+            donate_argnums=(1, ),
+        ).lower(x, conv_state, conv_weight, None, query_start_loc,
+                state_indices, distribution, has_initial_state).compile()
+        stats = compiled.memory_analysis()
+        if stats is None:
+            self.skipTest("memory_analysis unavailable on this backend")
+
+        # One [bucket, kernel_size-1, dim] gather alone is 3x this bound.
+        bound = 8 * 1024 * 1024
+        self.assertLess(
+            stats.temp_size_in_bytes, bound,
+            "decode branch temporaries scale with the token bucket again")
+
+        # Anti-vacuity: the unsliced internal (what the wrapper used to call)
+        # must blow the same bound, or the assertion above proves nothing.
+        def unsliced(x, conv_state):
+            padded_indices = jnp.pad(state_indices, (0, bucket - num_slots),
+                                     mode='constant')
+            return ragged_conv1d_jax.ragged_conv1d_decode_only(
+                x,
+                conv_state,
+                conv_weight,
+                None,
+                query_start_loc,
+                padded_indices,
+                distribution,
+                has_initial_state,
+                kernel_size=kernel_size,
+            )
+
+        unsliced_stats = jax.jit(unsliced, donate_argnums=(1, )).lower(
+            x, conv_state).compile().memory_analysis()
+        if unsliced_stats is not None:
+            self.assertGreater(unsliced_stats.temp_size_in_bytes, bound)

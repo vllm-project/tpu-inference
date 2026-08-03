@@ -102,7 +102,6 @@ def ragged_kda_mixed_prefill(
     has_initial_state: jnp.ndarray | None = None,
     chunk_size: int = 64,
     gate_lower_bound: float | None = None,
-    compute_dtype: jnp.dtype = jnp.float32,
     precision: jax.lax.Precision = jax.lax.Precision.HIGHEST,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Chunked KDA for the mixed / prefill case (ragged sequences).
@@ -115,37 +114,52 @@ def ragged_kda_mixed_prefill(
 
     Returns ``(updated_recurrent_state, output)`` with output shape
     ``[num_tokens, H * V]``.
+
+    HBM note: the memory win on the production path is the removal of the
+    per-chunk recurrent-state stacks — the ``[num_chunks, H, K, V]`` init
+    snapshots and scan-stacked finals are replaced by a
+    ``[num_seqs, H, K, V]`` carry with a single dynamic row update per
+    chunk. At 96 heads those stacks dominated the compiled step function's
+    HLO temporaries (measured ~2.3 MiB per padded token per model on
+    Kimi-K3, ~100 GiB at the largest precompile bucket). The packed
+    q/k/v/gate streams are kept in the INPUT dtype with all fp32 math
+    (l2norm, sigmoid, gate, delta rule) done per chunk inside the scan;
+    casting up per chunk is bit-identical to casting the whole stream up
+    front, so this is dtype-generic — but note it saves nothing on the
+    production KDA path, where `kda_attention` upcasts q/k/v to fp32
+    (post-conv SiLU) before calling in, so the packed streams are fp32
+    there regardless.
     """
     initial_dtype = query.dtype
 
-    beta = jax.nn.sigmoid(b_reshaped.astype(jnp.float32))
-    g = kda_gate(a_reshaped, A_log, dt_bias, gate_lower_bound)
-
-    (packed_query, packed_key, packed_value, packed_g, packed_beta, reset_mask,
+    (packed_query, packed_key, packed_value, packed_a, packed_b, reset_mask,
      new_query_start_loc, padded_indices_valid) = pack_inputs_single_stream(
          query,
          key,
          value,
-         g,
-         beta,
+         a_reshaped,
+         b_reshaped,
          query_start_loc,
          distribution,
          chunk_size,
-         compute_dtype=compute_dtype,
+         compute_dtype=initial_dtype,
+         g_dtype=initial_dtype,
      )
-
-    packed_query = l2norm(packed_query, dim=-1, eps=1e-6)
-    packed_key = l2norm(packed_key, dim=-1, eps=1e-6)
-
-    scale = jax.lax.rsqrt(jnp.array(packed_query.shape[-1],
-                                    dtype=jnp.float32)).astype(compute_dtype)
-    packed_query = packed_query * scale
 
     total_tokens = packed_query.shape[0]
     num_chunks = total_tokens // chunk_size
     H = packed_query.shape[1]
     K_dim = packed_query.shape[2]
     V_dim = packed_value.shape[2]
+    num_seqs = new_query_start_loc.shape[0] - 1
+
+    # Padded slots must behave as no-ops: k = v = 0 already makes them inert
+    # in the delta rule, but the gate computed from a zero raw input is
+    # NEGATIVE (both gate forms are <= 0), which would decay the carried
+    # state across padding. `valid` restores the packed-zero-gate behaviour.
+    valid = jnp.zeros((total_tokens, ), dtype=initial_dtype)
+    valid = valid.at[padded_indices_valid].set(1.0)
+    valid_c = valid.reshape(num_chunks, chunk_size)  # [N, BT]
 
     def to_chunk(x):
         return x.reshape(num_chunks, chunk_size, H, -1).transpose(0, 2, 1, 3)
@@ -153,43 +167,77 @@ def ragged_kda_mixed_prefill(
     q_c = to_chunk(packed_query)
     k_c = to_chunk(packed_key)
     v_c = to_chunk(packed_value)
-    g_c = to_chunk(packed_g)  # [N, H, BT, K] fp32 log-decay
-    beta_c = packed_beta.reshape(num_chunks, chunk_size,
-                                 H).transpose(0, 2, 1)  # [N, H, BT]
+    a_c = to_chunk(packed_a)  # [N, H, BT, K] raw gate input
+    b_c = packed_b.reshape(num_chunks, chunk_size,
+                           H).transpose(0, 2, 1)  # [N, H, BT] raw beta input
 
-    # Per-chunk cumulative log-decay (fp32, <= 0, decreasing in time).
-    g_cumsum = jnp.cumsum(g_c, axis=-2)  # [N, H, BT, K]
+    # Which sequence owns each chunk, and whether the chunk is that
+    # sequence's last -- this is what lets the scan write final states into a
+    # [num_seqs, ...] carry instead of stacking every chunk's state.
+    # The cumsum attribution assumes zero-length sequences appear only as a
+    # TAIL (the runner pads query_start_loc by repeating the final offset):
+    # a zero-length sequence produces no chunk-start reset, so one
+    # interleaved between real sequences would shift every later chunk's
+    # owner index. Its `finals` row keeps the state gathered at entry, and
+    # the write-back below is then a no-op for it.
+    last_chunk_indices = (new_query_start_loc[1:] // chunk_size) - 1
+    seq_of_chunk = jnp.cumsum(reset_mask.astype(jnp.int32)) - 1  # [N]
+    is_last_chunk = (jnp.arange(num_chunks) == last_chunk_indices[jnp.clip(
+        seq_of_chunk, 0, num_seqs - 1)])
 
-    # Initial states per chunk (same slot machinery as the GDN reference).
-    init_h_per_chunk = jnp.zeros((num_chunks, H, K_dim, V_dim),
-                                 dtype=recurrent_state.dtype)
-    start_chunk_indices = new_query_start_loc[:-1] // chunk_size
+    # Per-sequence initial states, gathered once ([num_seqs, H, K, V], pool
+    # dtype); the has_initial_state zero-masking happens per chunk on a
+    # single [H, K, V] slice inside the scan.
     init_states_for_seqs = recurrent_state[state_indices]
-    if has_initial_state is not None:
-        init_states_for_seqs = jnp.where(
-            has_initial_state[:, None, None, None],
-            init_states_for_seqs,
-            jnp.zeros_like(init_states_for_seqs),
-        )
-    init_h_per_chunk = init_h_per_chunk.at[start_chunk_indices].set(
-        init_states_for_seqs)
+    if has_initial_state is None:
+        has_init = jnp.ones((init_states_for_seqs.shape[0], ), dtype=bool)
+    else:
+        has_init = has_initial_state.astype(bool)
+
+    fp32_gate_scale = jnp.exp(A_log.astype(jnp.float32))[:, None, None]
+    dt_bias_f = dt_bias.astype(jnp.float32).reshape(H, 1, K_dim)
 
     h_init = jnp.zeros((H, K_dim, V_dim), dtype=jnp.float32)
+    finals_init = init_states_for_seqs.astype(jnp.float32)
     mask_strict = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool),
                            k=-1)
     mask_incl = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
     identity = jnp.eye(chunk_size, dtype=jnp.float32)
+    scale = jax.lax.rsqrt(jnp.array(K_dim, dtype=jnp.float32))
 
-    xs = (q_c, k_c, v_c, g_cumsum, beta_c, reset_mask, init_h_per_chunk)
+    xs = (q_c, k_c, v_c, a_c, b_c, valid_c, reset_mask, seq_of_chunk,
+          is_last_chunk)
 
-    def scan_body(h, args):
-        q, k, v, G, beta, reset, init_h = args
-        # q,k,v: [H, BT, D]; G: [H, BT, K]; beta: [H, BT]; h: [H, K, V].
-        h = jnp.where(reset, init_h.astype(jnp.float32), h)
+    def scan_body(carry, args):
+        h, finals = carry
+        q, k, v, a, b, chunk_valid, reset, seq_idx, is_last = args
+        # q,k,v: [H, BT, D]; a: [H, BT, K]; b: [H, BT]; h: [H, K, V];
+        # finals: [num_seqs, H, K, V] fp32.
+        seq_idx = jnp.clip(seq_idx, 0, num_seqs - 1)
+        init_h = jnp.where(
+            has_init[seq_idx],
+            jax.lax.dynamic_index_in_dim(init_states_for_seqs,
+                                         seq_idx,
+                                         axis=0,
+                                         keepdims=False).astype(jnp.float32),
+            0.0)
+        h = jnp.where(reset, init_h, h)
 
-        kf = k.astype(jnp.float32)
-        qf = q.astype(jnp.float32)
+        kf = l2norm(k.astype(jnp.float32), dim=-1, eps=1e-6)
+        qf = l2norm(q.astype(jnp.float32), dim=-1, eps=1e-6) * scale
         vf = v.astype(jnp.float32)
+
+        # Gate math (fp32, per chunk) -- identical to `kda_gate`, then zeroed
+        # on padded slots so padding neither decays nor updates the state.
+        x_gate = a.astype(jnp.float32) + dt_bias_f
+        if gate_lower_bound is None:
+            g_chunk = -fp32_gate_scale * jax.nn.softplus(x_gate)
+        else:
+            g_chunk = gate_lower_bound * jax.nn.sigmoid(
+                fp32_gate_scale * x_gate)
+        g_chunk = g_chunk * chunk_valid.astype(jnp.float32)[None, :, None]
+        G = jnp.cumsum(g_chunk, axis=-2)  # [H, BT, K]
+        beta = jax.nn.sigmoid(b.astype(jnp.float32))
 
         # Per-channel decay ratios exp(G_r - G_c) for r >= c (safe: <= 1).
         # [H, BT, BT, K]
@@ -259,27 +307,31 @@ def ragged_kda_mixed_prefill(
                                    precision=precision,
                                    preferred_element_type=jnp.float32)
 
-        return h_new, (o_c, h_new)
+        # Record the state for the owning sequence only when this chunk is
+        # its last; a single dynamic row update replaces stacking every
+        # chunk's [H, K, V] state.
+        row = jax.lax.dynamic_index_in_dim(finals,
+                                           seq_idx,
+                                           axis=0,
+                                           keepdims=False)
+        finals = jax.lax.dynamic_update_index_in_dim(finals,
+                                                     jnp.where(
+                                                         is_last, h_new, row),
+                                                     seq_idx,
+                                                     axis=0)
 
-    _, (o_chunks, h_chunks) = lax.scan(scan_body, h_init, xs)
+        return (h_new, finals), o_c.astype(initial_dtype)
+
+    (_, finals), o_chunks = lax.scan(scan_body, (h_init, finals_init), xs)
 
     o = o_chunks.transpose(0, 2, 1, 3).reshape(-1, H, V_dim)
-    o = o.astype(initial_dtype)
     output = o.reshape(-1, H * V_dim)[padded_indices_valid]
 
-    last_chunk_indices = (new_query_start_loc[1:] // chunk_size) - 1
-    final_states = h_chunks[last_chunk_indices]
-
-    num_seqs = last_chunk_indices.shape[0]
-    valid_seq_mask = jnp.arange(num_seqs) < distribution[2]
-    current_states = recurrent_state[state_indices]
-    states_to_set = jnp.where(
-        valid_seq_mask[:, None, None, None],
-        final_states.astype(recurrent_state.dtype),
-        current_states,
-    )
+    # Invalid sequences never own a chunk, so their `finals` rows still hold
+    # the states gathered at entry -- writing them back is a no-op, which is
+    # exactly what the old valid_seq_mask select achieved.
     updated_recurrent_state = recurrent_state.at[state_indices].set(
-        states_to_set)
+        finals.astype(recurrent_state.dtype))
 
     return updated_recurrent_state, output
 
@@ -348,19 +400,34 @@ def ragged_kda_decode_only(
 
     Mirrors ``ragged_gated_delta_rule_decode_only``; ``a_reshaped`` is
     ``[num_tokens, H, K]`` and the gate form follows ``gate_lower_bound``.
+
+    HBM note: decode-only means one token per sequence, so at most
+    ``state_indices.shape[0]`` (the padded request count) leading tokens can
+    be real -- everything past that is bucket padding whose output is zeroed
+    anyway. The per-token state tensors ([R, H, K, V] fp32, three of them)
+    are therefore sized by the REQUEST-slot count, not by the token bucket
+    and not by the state pool: `lax.cond` makes the compiler budget for this
+    branch at full size, so bounding by the token bucket cost ~2.3 MiB of
+    HLO temporaries per padded token, and bounding by the state-pool slot
+    count (``recurrent_state.shape[0]``) blew up to ~118 GiB the moment the
+    pool ran unpinned (thousands of slots). ``ragged_conv1d_jax`` uses the
+    same request-count bound.
     """
     num_tokens = query.shape[0]
-    max_reqs = recurrent_state.shape[0]
+    max_reqs = state_indices.shape[0]
+    num_step_tokens = min(num_tokens, max_reqs)
 
-    token_idx = jnp.arange(num_tokens)
+    token_idx = jnp.arange(num_step_tokens)
     req_indices = jnp.clip(token_idx, 0, max_reqs - 1)
     valid_mask = token_idx < distribution[2]
 
-    beta = jax.nn.sigmoid(b_reshaped.astype(jnp.float32))
-    g = kda_gate(a_reshaped, A_log, dt_bias, gate_lower_bound)
+    beta = jax.nn.sigmoid(b_reshaped[:num_step_tokens].astype(jnp.float32))
+    g = kda_gate(a_reshaped[:num_step_tokens], A_log, dt_bias,
+                 gate_lower_bound)
 
-    query = l2norm(query)
-    key = l2norm(key)
+    query = l2norm(query[:num_step_tokens])
+    key = l2norm(key[:num_step_tokens])
+    value = value[:num_step_tokens]
     scale = query.shape[-1]**-0.5
     query = query * jnp.asarray(scale, dtype=query.dtype)
 
@@ -375,7 +442,9 @@ def ragged_kda_decode_only(
                                              state=current_states)
 
     outputs = jnp.where(valid_mask[:, None, None], outputs, 0.0)
-    outputs = outputs.reshape(num_tokens, -1)
+    outputs = outputs.reshape(num_step_tokens, -1)
+    if num_step_tokens < num_tokens:
+        outputs = jnp.pad(outputs, ((0, num_tokens - num_step_tokens), (0, 0)))
 
     states_to_set = jnp.where(valid_mask[:, None, None, None], new_states,
                               current_states)

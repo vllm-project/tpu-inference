@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 import jax
@@ -22,6 +22,41 @@ from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
+from tpu_inference.models.common.compiler_options import \
+    get_step_fn_compiler_options
+
+
+def _first_group_metadata(
+    attn_metadata: AttentionMetadata | dict[str, AttentionMetadata]
+) -> AttentionMetadata:
+    """One representative group's metadata.
+
+    Hybrid models (>1 kv-cache group, e.g. attention + linear-attention
+    layers) carry a per-layer dict whose entries share every per-step field
+    (positions, seq_lens, ragged metadata, mamba fields) and differ only in
+    `block_tables`; any entry is a valid source for the shared fields.
+    """
+    if isinstance(attn_metadata, dict):
+        return next(iter(attn_metadata.values()))
+    return attn_metadata
+
+
+def _with_step_dynamics(
+    attn_metadata: AttentionMetadata | dict[str, AttentionMetadata],
+    input_positions: jax.Array,
+    seq_lens: jax.Array,
+) -> AttentionMetadata | dict[str, AttentionMetadata]:
+    """The same metadata (object or per-layer dict) with this decode step's
+    positions and seq_lens; every other field is loop-invariant."""
+    if isinstance(attn_metadata, dict):
+        return {
+            name:
+            replace(group, input_positions=input_positions, seq_lens=seq_lens)
+            for name, group in attn_metadata.items()
+        }
+    return replace(attn_metadata,
+                   input_positions=input_positions,
+                   seq_lens=seq_lens)
 
 
 @functools.partial(
@@ -92,38 +127,46 @@ def _split_rngs(rng, static_size, dynamic_size):
     return all_rngs[:static_size], all_rngs[dynamic_size]
 
 
-@functools.partial(
-    jax.jit,
-    static_argnames=(
-        "model_fn",
-        "compute_logits_fn",
-        "sample_fn",
-        "mesh",
-        "static_max_decode_steps",
-        "eos_token_id",
-        "padding_token_id",
-        "dp_size",
-        "pad_len",
-        "has_experts",
-        "expert_shape",
-        "expert_dtype",
-        "layer_name_to_kvcache_index",
-        "is_first_rank",
-        "is_last_rank",
-        "max_logprobs",
-        "logprobs_mode",
-        "continue_decode_eos_check_interval",
-    ),
-    donate_argnames=("kv_caches", ),
-    # Hoisted here from the model's step_fun: JAX forbids compiler_options on
-    # a nested jit, so they must live on this top-level loop jit instead.
-    compiler_options={
-        "xla_tpu_all_gather_collective_matmul_mode": "post_spmd_conservative",
-        "xla_tpu_reduce_scatter_collective_matmul_mode":
-        "post_spmd_conservative",
-        "xla_tpu_use_minor_sharding_for_major_trivial_input": "true"
-    },
-)
+@functools.cache
+def _get_decode_core():
+    """The jitted decode core, built lazily on first use.
+
+    The step-fn compiler options are hoisted here from the model's step_fun:
+    JAX forbids compiler_options on a nested jit, so they must live on this
+    top-level loop jit instead. They come from the same
+    `get_step_fn_compiler_options()` the standalone step fn uses (see
+    `model_loader`), so the fused loop and the per-step path always agree —
+    including the env-gated SparseCore offload flags
+    (SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES). Built lazily (not at import)
+    because resolving those options may query the TPU backend.
+    """
+    return functools.partial(
+        jax.jit,
+        static_argnames=(
+            "model_fn",
+            "compute_logits_fn",
+            "sample_fn",
+            "mesh",
+            "static_max_decode_steps",
+            "eos_token_id",
+            "padding_token_id",
+            "dp_size",
+            "pad_len",
+            "has_experts",
+            "expert_shape",
+            "expert_dtype",
+            "layer_name_to_kvcache_index",
+            "is_first_rank",
+            "is_last_rank",
+            "max_logprobs",
+            "logprobs_mode",
+            "continue_decode_eos_check_interval",
+        ),
+        donate_argnames=("kv_caches", ),
+        compiler_options=get_step_fn_compiler_options(),
+    )(_decode_core)
+
+
 def _decode_core(
     *,
     state,
@@ -133,11 +176,7 @@ def _decode_core(
     inputs_embeds,
     lora_metadata,
     intermediate_tensors,
-    block_tables,
-    query_start_loc,
-    request_distribution,
-    mamba_state_indices,
-    has_initial_state,
+    attn_template,
     current_tokens,
     active_mask,
     input_positions,
@@ -164,24 +203,18 @@ def _decode_core(
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
 
+    shared_ref = _first_group_metadata(attn_template)
+
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
-        attn_metadata = AttentionMetadata(
-            input_positions=pos,
-            block_tables=block_tables,
-            seq_lens=sl,
-            query_start_loc=query_start_loc,
-            request_distribution=request_distribution,
-            mamba_state_indices=mamba_state_indices,
-            has_initial_state=has_initial_state,
-        )
+        attn_metadata = _with_step_dynamics(attn_template, pos, sl)
         shared_attn_metadata = SharedAttentionMetadata(
             input_positions=pos,
             seq_lens=sl,
-            query_start_loc=query_start_loc,
-            request_distribution=request_distribution,
-            mamba_state_indices=mamba_state_indices,
-            has_initial_state=has_initial_state,
+            query_start_loc=shared_ref.query_start_loc,
+            request_distribution=shared_ref.request_distribution,
+            mamba_state_indices=shared_ref.mamba_state_indices,
+            has_initial_state=shared_ref.has_initial_state,
         )
         kvc, hidden_states, _, expert_indices_step = model_fn(
             state,
@@ -189,7 +222,7 @@ def _decode_core(
             ct,
             attn_metadata,
             inputs_embeds,
-            attn_metadata.input_positions,
+            pos,
             layer_name_to_kvcache_index,
             lora_metadata,
             intermediate_tensors,
@@ -407,13 +440,15 @@ def continue_decode(
     """
 
     batch_size = init_state.current_tokens.shape[0]
-    seq_lens_size = init_state.attn_metadata.seq_lens.shape[0]
+    # For hybrid models `attn_metadata` is a per-layer dict (see
+    # `_first_group_metadata`); the per-step fields are shared across groups.
+    attn_template = init_state.attn_metadata
+    attn = _first_group_metadata(attn_template)
+    seq_lens_size = attn.seq_lens.shape[0]
     pad_len = (seq_lens_size - batch_size) // dp_size
 
     step_rngs, current_rng = _split_rngs(rng, static_max_decode_steps,
                                          max_decode_steps)
-
-    attn = init_state.attn_metadata
 
     # Discover the per-step expert-indices shape without executing a step.
     # Gated by the caller's config flag so the abstract trace is skipped for
@@ -426,15 +461,7 @@ def continue_decode(
 
         def _model_experts_only(current_tokens, input_positions, seq_lens,
                                 kv_caches):
-            am = AttentionMetadata(
-                input_positions=input_positions,
-                block_tables=attn.block_tables,
-                seq_lens=seq_lens,
-                query_start_loc=attn.query_start_loc,
-                request_distribution=attn.request_distribution,
-                mamba_state_indices=attn.mamba_state_indices,
-                has_initial_state=attn.has_initial_state,
-            )
+            am = _with_step_dynamics(attn_template, input_positions, seq_lens)
             shared_am = SharedAttentionMetadata(
                 input_positions=input_positions,
                 seq_lens=seq_lens,
@@ -448,7 +475,7 @@ def continue_decode(
                                         current_tokens,
                                         am,
                                         inputs_embeds,
-                                        am.input_positions,
+                                        input_positions,
                                         layer_name_to_kvcache_index,
                                         lora_metadata,
                                         intermediate_tensors,
@@ -471,7 +498,7 @@ def continue_decode(
 
     (step_counter, current_tokens, active_mask, positions, seq_lens, kv_caches,
      token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
-     lp_ranks_buffer) = _decode_core(
+     lp_ranks_buffer) = _get_decode_core()(
          state=state,
          kv_caches=kv_caches,
          step_rngs=step_rngs,
@@ -479,11 +506,7 @@ def continue_decode(
          inputs_embeds=inputs_embeds,
          lora_metadata=lora_metadata,
          intermediate_tensors=intermediate_tensors,
-         block_tables=attn.block_tables,
-         query_start_loc=attn.query_start_loc,
-         request_distribution=attn.request_distribution,
-         mamba_state_indices=attn.mamba_state_indices,
-         has_initial_state=attn.has_initial_state,
+         attn_template=attn_template,
          current_tokens=init_state.current_tokens,
          active_mask=init_state.active_mask,
          input_positions=attn.input_positions,
@@ -512,15 +535,7 @@ def continue_decode(
     final_state = TpuSamplingState(
         current_tokens=current_tokens,
         active_mask=active_mask,
-        attn_metadata=AttentionMetadata(
-            input_positions=positions,
-            block_tables=attn.block_tables,
-            seq_lens=seq_lens,
-            query_start_loc=attn.query_start_loc,
-            request_distribution=attn.request_distribution,
-            mamba_state_indices=attn.mamba_state_indices,
-            has_initial_state=attn.has_initial_state,
-        ),
+        attn_metadata=_with_step_dynamics(attn_template, positions, seq_lens),
         step_counter=step_counter.astype(jnp.int32),
     )
 
