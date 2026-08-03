@@ -63,6 +63,7 @@ echo "--- Downloading CSV artifacts"
 buildkite-agent artifact download "v*/*.csv" "."
 
 # Iterate through v6 and v7 folders if they exist
+TARGET_DIRS=""
 for ver in v6e v7x; do
   if [ -d "$ver" ]; then
     if [ "${NIGHTLY}" = "1" ]; then
@@ -81,10 +82,24 @@ for ver in v6e v7x; do
 
     # Clean up the temporary download directory
     rmdir "${ver}"
+
+    # Collect target directories for later compression
+    TARGET_DIRS="$TARGET_DIRS $TARGET_DIR"
   else
     echo "No artifacts found for version: ${ver}. Skipping."
   fi
 done
+
+echo "--- Compressing support matrices"
+if [ -n "$TARGET_DIRS" ]; then
+  # shellcheck disable=SC2086
+  tar -czf support_matrices.tar.gz $TARGET_DIRS
+else
+  echo "No target directories to compress."
+fi
+
+echo "--- Uploading compressed support matrices to Buildkite"
+buildkite-agent artifact upload "support_matrices.tar.gz"
 
 echo "--- Staging changes"
 git add support_matrices/
