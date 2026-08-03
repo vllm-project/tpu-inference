@@ -23,7 +23,8 @@
 #   .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/run_serving_probe.sh
 #
 # Configuration is by environment variable:
-#   MODEL                 model id or gs:// snapshot to serve (required)
+#   MODEL                 model id or gs:// snapshot to serve (required;
+#                         TEST_MODEL is accepted as a fallback name)
 #   EXTRA_SERVE_FLAGS     extra flags appended to `vllm serve` verbatim
 #   PROBE_EXTRA_FLAGS     extra flags appended to the probe verbatim
 #   PORT                  default 8000
@@ -31,7 +32,9 @@
 #   MAX_MODEL_LEN         default 2048
 #   MAX_NUM_SEQS          default 16
 #   GPU_MEMORY_UTILIZATION default 0.8
-#   STARTUP_TIMEOUT_SECONDS how long to wait for /health, default 3600. Weight
+#   STARTUP_TIMEOUT_SECONDS how long to wait for /health, default 3600
+#                         (SERVE_STARTUP_TIMEOUT_SECONDS, the run_multihost.sh
+#                         name, is honored as a fallback). Weight
 #                         streaming from GCS dominates it, so scale it with the
 #                         checkpoint size, not with the model's compute.
 #   PROBE_CONCURRENCY     default 8
@@ -43,13 +46,18 @@
 
 set -uo pipefail
 
+# TEST_MODEL is the name the nightly model steps already export; accept it so
+# the same step env drives either harness.
+MODEL="${MODEL:-${TEST_MODEL:-}}"
 MODEL=${MODEL:?MODEL must be set to the model id or gs:// path to serve}
 PORT=${PORT:-8000}
 TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-8}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-2048}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
-STARTUP_TIMEOUT_SECONDS=${STARTUP_TIMEOUT_SECONDS:-3600}
+# SERVE_STARTUP_TIMEOUT_SECONDS is the run_multihost.sh name for the same
+# knob; honor either so one env block works on both rigs.
+STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-${SERVE_STARTUP_TIMEOUT_SECONDS:-3600}}"
 PROBE_CONCURRENCY=${PROBE_CONCURRENCY:-8}
 PROBE_LONG_TOKENS=${PROBE_LONG_TOKENS:-512}
 SERVE_LOG=${SERVE_LOG:-/tmp/vllm_serve.log}

@@ -398,7 +398,9 @@ docker exec \
 mh_timing serve_launched
 
 # 4. Wait for the server to be healthy
-wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "${SERVE_STARTUP_TIMEOUT_SECONDS:-7200}"
+# STARTUP_TIMEOUT_SECONDS is the run_serving_probe.sh name for the same knob;
+# honor either so one env block works on both rigs.
+wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "${SERVE_STARTUP_TIMEOUT_SECONDS:-${STARTUP_TIMEOUT_SECONDS:-7200}}"
 mh_timing serve_healthy
 
 # 5. Run Benchmarks / Validation

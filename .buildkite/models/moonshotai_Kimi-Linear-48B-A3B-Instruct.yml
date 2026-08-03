@@ -39,7 +39,9 @@ steps:
           buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_UnitTest" "unverified"
         else
           # Exports K3_TINY_*; without it every suite below skips.
-          source .buildkite/scripts/fetch_k3_tiny_fixtures.sh
+          # The script lands with the Kimi test-fixtures piece; guard so this
+          # step is safe to merge in any order relative to it.
+          [ -f .buildkite/scripts/fetch_k3_tiny_fixtures.sh ] && source .buildkite/scripts/fetch_k3_tiny_fixtures.sh || true
           .buildkite/scripts/run_in_docker.sh \
             python3 -m pytest -s -v -x \
             /workspace/tpu_inference/tests/models/jax/test_kimi_k3.py \
