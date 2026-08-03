@@ -101,6 +101,9 @@ fi
 echo "--- Uploading compressed support matrices to Buildkite"
 buildkite-agent artifact upload "support_matrices.tar.gz"
 
+echo "--- Cleaning up compressed file"
+rm -f support_matrices.tar.gz
+
 echo "--- Staging changes"
 git add support_matrices/
 
