@@ -40,6 +40,12 @@ def _literal_representer(dumper, data):
 yaml.add_representer(LiteralString, _literal_representer)
 
 
+def _resolve_kernel_pattern(tuning_key: TuningKey, kernel_pattern) -> str:
+    if callable(kernel_pattern):
+        return kernel_pattern(tuning_key)
+    else:
+        return kernel_pattern
+
 class KernelTunerBase(ABC):
     """
     Base class for kernel tuner runner. The kernel tuner runner is responsible for generating the tuning cases, partitioning the cases into buckets, generating the Buildkite pipeline, and measuring the latency of the cases. The specific kernel tuner runner should inherit from this base class and implement the generate_cases, generate_inputs, and run methods.
@@ -610,10 +616,10 @@ class KernelTunerBase(ABC):
                 from tools.kernel.tuner.v1.common.utils import \
                     find_events_by_pattern
                 matching_events, average_latency_us = find_events_by_pattern(
-                    self.xprof_dir, self.tuner_config.jit_kernel_pattern)
+                    self.xprof_dir, _resolve_kernel_pattern(tuning_key, self.tuner_config.jit_kernel_pattern))
                 if len(matching_events) != measurement_iters:
                     logger.fatal(
-                        f"Expected {measurement_iters} matching events for pattern {self.tuner_config.jit_kernel_pattern} in xprof, but found {len(matching_events)}. This may indicate an issue with the profiling or the pattern matching."
+                        f"Expected {measurement_iters} matching events for pattern {_resolve_kernel_pattern(tuning_key, self.tuner_config.jit_kernel_pattern)} in xprof, but found {len(matching_events)}. This may indicate an issue with the profiling or the pattern matching."
                     )
                     status = TuningStatus.XPROF_MEASUREMENT_ERROR
                 else:

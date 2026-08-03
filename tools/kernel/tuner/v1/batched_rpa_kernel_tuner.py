@@ -159,7 +159,7 @@ def _generate_batched_rpa_inputs(tuning_key: TuningKey,
             num_kv_heads * 2, kv_packing), kv_packing, head_dim), kv_dtype)
 
     # prefill and decode context length is from Gemma-4 1k/500 Case
-    prefill_input_len = 1024
+    prefill_input_len = 1024 if total_q_tokens >= 1024 else total_q_tokens
     decode_kv_len = 1523
 
     # The 1524 here is because in Gemma-4 1k/500 case, prefill 1024 tokens and decode 500 tokens
@@ -228,7 +228,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             kernel_tuner_name="batched_rpa_kernel_tuner",
             # (TODO) This only measure prefill case, need to refactor to support decode case as well
             # maybe make this jit_kernel_pattern a runtime TuningKey dependent attribute
-            jit_kernel_pattern=r"RPAm-",
+            jit_kernel_pattern=lambda tuning_key: r"RPAm-" if tuning_key.case == 'prefill' else r"RPAd-",
         )
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 
