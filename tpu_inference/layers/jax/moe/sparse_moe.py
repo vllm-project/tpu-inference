@@ -236,6 +236,18 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
     assert isinstance(
         weights, UnfusedMoEWeights), "Expected unfused weights for sparse MoE!"
     weights_TX, indices_TX = gating_output
+    # The (value, scale) packing below keys off w1 alone, so a partial scale
+    # set would only surface later as an opaque shard_map pytree/in_specs
+    # mismatch. Fail fast with the actual state instead.
+    scales_present = tuple(s is not None for s in (weights.w1_weight_scale,
+                                                   weights.w2_weight_scale,
+                                                   weights.w3_weight_scale))
+    assert all(scales_present) or not any(scales_present), (
+        "[moe] sparse_moe_func expects expert weight scales on all three "
+        "kernels (block-quantized checkpoint) or on none (plain weights); "
+        f"got (w1, w2, w3) scale present = {scales_present}. Each quantized "
+        "kernel is passed to shard_map as a (value, scale) pair, so a "
+        "partial set makes in_specs mismatch the argument pytree.")
     # The expert kernels reach the GMM as a (value, scale) pair whenever they
     # are block-quantized -- either by Qwix at load time, or by the checkpoint
     # itself (MXFP4 experts). Both cases shard the scale like its weight.

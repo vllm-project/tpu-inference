@@ -135,7 +135,9 @@ class MLABaseAttention(JaxModule):
 
         if self.use_nope:
             # No rotary => no YaRN mscale correction; plain 1/sqrt(d) scale.
-            assert self.rope is None or self.use_nope
+            assert self.rope is None, (
+                "[mla] use_nope=True but a rope module was provided; NoPE "
+                "attention must not apply rotary embeddings")
             self.scale = self.qk_head_dim**-0.5
         else:
             assert self.rope is not None, (

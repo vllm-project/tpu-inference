@@ -571,6 +571,12 @@ class DeepSeekV3Router(JaxEinsum):
         # activations up front and rely on `precision=HIGHEST` (set in __init__)
         # for the multiply. The gate is [hidden, num_experts], so this costs
         # nothing next to the expert matmuls.
+        #
+        # NOTE: this is a deliberate precision/behavior change to the existing
+        # DeepSeek-V3 path (it previously ran the gate matmul in bf16 and only
+        # cast the logits to fp32 afterwards): near-tie top-k routing decisions
+        # can differ, so DSv3 nightly baselines may shift slightly. A routing
+        # parity test pinning fp32 gate behavior lands with the K3 model.
         logits_TE = super().__call__(x_TD.astype(jnp.float32))
 
         # TODO(gpolovets): add back support for DeepSeek routing.
