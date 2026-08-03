@@ -422,8 +422,6 @@ class DPScheduler(SchedulerInterface):
         # DP state
         self.dp_size = vllm_config.sharding_config.total_dp_size
         self.assigned_dp_rank: Dict[str, int] = {}  # req_id -> dp_rank
-        # Rotates the tie-break in _find_best_rank_for_request.
-        self._rr_start = 0
         self.cached_schedulers_output = deque()
         self._create_per_rank_configs(kv_cache_config)
         self._schedule_step_count = 0
@@ -715,6 +713,11 @@ class DPScheduler(SchedulerInterface):
         With prefix caching disabled every rank reports zero cached tokens,
         so this reduces to (least queued prefill, fewest in-flight, smallest
         remaining output), matching the previous behaviour exactly.
+
+        No rotation is needed for fully tied ranks. ADD_REQUEST is issued
+        synchronously after routing, so a rank's queued prefill already
+        reflects the request just placed on it by the time the next one is
+        routed, and the tie is broken by load from then on.
         """
         enable_cache = self.vllm_config.cache_config.enable_prefix_caching
 
@@ -747,13 +750,8 @@ class DPScheduler(SchedulerInterface):
             min_remaining[rank] = self._get_result(
                 rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
 
-        # Rotate the scan start so remaining ties do not always favour rank 0.
-        order = [(self._rr_start + i) % self.dp_size
-                 for i in range(self.dp_size)]
-        rank = min(order,
+        return min(range(self.dp_size),
                    key=lambda r: (loads[r], inflight[r], min_remaining[r]))
-        self._rr_start = (self._rr_start + 1) % self.dp_size
-        return rank
 
     def add_request(self, request: Request) -> None:
         """
