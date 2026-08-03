@@ -88,8 +88,24 @@ def _checkpoint_tensor_names(model_name_or_path: str,
     Falls back to the shard headers for single-file checkpoints, which have no
     index.
     """
-    index = os.path.join(model_name_or_path, _SAFETENSORS_INDEX)
-    if os.path.isfile(index):
+    index = None
+    if os.path.isdir(model_name_or_path):
+        local_index = os.path.join(model_name_or_path, _SAFETENSORS_INDEX)
+        if os.path.isfile(local_index):
+            index = local_index
+    else:
+        # An HF repo id: fetch only the index (one small JSON) rather than
+        # materializing every weight shard just to read tensor names off it.
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import EntryNotFoundError
+        try:
+            index = hf_hub_download(repo_id=model_name_or_path,
+                                    filename=_SAFETENSORS_INDEX,
+                                    cache_dir=download_dir)
+        except EntryNotFoundError:
+            # Single-file repos ship no index; read the shard header below.
+            index = None
+    if index is not None:
         with open(index) as f:
             yield from json.load(f)["weight_map"]
         return
@@ -197,6 +213,20 @@ class CompressedTensorsConfig(QuantizationConfig):
             return True
         return prefix in self._compressed_modules
 
+    def _stored_plain(self, prefix: str) -> bool:
+        """True when a config-targeted ``prefix`` is stored uncompressed.
+
+        Every such demotion is logged: the config says the module should be
+        quantized, so building it unquantized must be visible in the load log
+        rather than silent.
+        """
+        if self._is_compressed_in_checkpoint(prefix):
+            return False
+        logger.info(
+            "[compressed-tensors] %s targeted by quant config but stored "
+            "plain in checkpoint; using unquantized.", prefix)
+        return True
+
     def _match_target(self, layer: JaxModule, prefix: str) -> Optional[dict]:
         """Return the config-group scheme for ``layer``, or None if unmatched.
 
@@ -223,7 +253,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                                    fused_mapping=self._fused_mapping):
                 return UnquantizedFusedMoEMethod(layer)
             scheme = self._match_target(layer, prefix)
-            if scheme is None or not self._is_compressed_in_checkpoint(prefix):
+            if scheme is None or self._stored_plain(prefix):
                 return UnquantizedFusedMoEMethod(layer)
             weight_quant = scheme.get("weights")
             input_quant = scheme.get("input_activations")
@@ -242,12 +272,12 @@ class CompressedTensorsConfig(QuantizationConfig):
                                fused_mapping=self._fused_mapping):
             return UnquantizedLinearMethod(linear_config)
 
-        if not self._is_compressed_in_checkpoint(prefix):
-            # Targeted by the config groups, but stored uncompressed.
-            return UnquantizedLinearMethod(linear_config)
-
         scheme = self._match_target(layer, prefix)
         if scheme is None:
+            return UnquantizedLinearMethod(linear_config)
+
+        if self._stored_plain(prefix):
+            # Targeted by the config groups, but stored uncompressed.
             return UnquantizedLinearMethod(linear_config)
 
         weight_quant = scheme.get("weights")

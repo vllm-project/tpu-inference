@@ -29,8 +29,8 @@ from tpu_inference import envs
 from tpu_inference.layers.common.moe import (FusedMoEMethodBase, MoEBackend,
                                              moe_apply)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, UnfusedMoEWeights, process_moe_weights,
-    quantize_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
+    shard_moe_weights)
 from tpu_inference.layers.common.quantization import (
     MXFP4_BLOCK_SIZE, MXFP4_REQUANTIZED_BLOCK_SIZE,
     dequantize_tensor_from_mxfp4_packed, e8m0_to_fp32, u8_unpack_e2m1)
@@ -108,9 +108,8 @@ class Mxfp4FusedMoEMethod(QuantizeMethodBase):
                 "Mxfp4FusedMoEMethod only handles GPT-OSS MXFP4 expert "
                 f"tensors, got unexpected checkpoint tensors: {unexpected}")
 
-        logger.debug(
-            f"Loaded {len(loaded_names)} MXFP4 tensors for {layer.prefix} MoE layer."
-        )
+        logger.debug("[mxfp4] %s: loaded %d MXFP4 tensors for the MoE layer.",
+                     layer.prefix, len(loaded_names))
 
         return loaded_names
 
@@ -435,10 +434,20 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
 
     def __init__(self, layer: JaxMoE, weight_quant=None):
         FusedMoEMethodBase.__init__(self, layer.moe_backend, "model")
+        # Methods are constructed while the model is being built, before any
+        # weights stream in, so this starts each load from a clean slot
+        # instead of measuring the first layer's wait against whatever model
+        # this process loaded previously.
+        global _LAST_LAYER_FINISHED_AT
+        _LAST_LAYER_FINISHED_AT = 0.0
         self.group_size = getattr(weight_quant, "group_size",
                                   None) or MXFP4_BLOCK_SIZE
         num_bits = getattr(weight_quant, "num_bits", 4)
         strategy = getattr(weight_quant, "strategy", "group")
+        # compressed-tensors parses `strategy` into a str-mixin enum whose
+        # `str()` is "QuantizationStrategy.TENSOR", so compare against the
+        # enum's value (raw configs hand a plain string through unchanged).
+        strategy = getattr(strategy, "value", strategy)
         if num_bits != 4 or str(strategy).endswith("tensor"):
             raise NotImplementedError(
                 f"[mxfp4-ct] {layer.prefix}: only 4-bit group-wise MXFP4 is "
@@ -505,14 +514,22 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
             packed_attr, scale_attr = _CT_STAGED_ATTRS[projection]
             attr = packed_attr if kind == "weight_packed" else scale_attr
             jax_param = getattr(layer, attr)
-            slot = int(expert_id)
+            try:
+                slot = int(expert_id)
+            except ValueError:
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: expert id '{expert_id}' in "
+                    f"checkpoint tensor '{torch_name}' is not an integer; "
+                    f"expected <...>.<expert_id>.<projection>."
+                    f"<weight_packed|weight_scale>.") from None
             # `[None] + shape` so the expert axis exists for concatenation.
             jax_param._weights_to_load[slot] = jax_array_from_reshaped_torch(
                 torch_weight, reshape_dims=(1, ) + tuple(torch_weight.shape))
             loaded_names.add(attr)
 
-        logger.debug(f"Staged {len(loaded_names)} MXFP4 tensor groups for "
-                     f"{layer.prefix} MoE layer.")
+        logger.debug(
+            "[mxfp4-ct] %s: staged %d MXFP4 tensor groups for the MoE layer.",
+            layer.prefix, len(loaded_names))
         return loaded_names
 
     def process_weights_after_loading(self, layer: JaxMoE) -> bool:
@@ -602,25 +619,17 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
 
     def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
                   router_logits) -> jax.Array:
-        x_TD = jnp.asarray(x, layer.dtype)
-        x_TD = jax.lax.with_sharding_constraint(
-            x_TD,
-            jax.sharding.NamedSharding(layer.mesh,
-                                       P(*layer.activation_ffw_td)))
-        weights = UnfusedMoEWeights(
-            w1_weight=layer.kernel_gating_EDF.value,
-            w1_weight_scale=layer.kernel_gating_EDF_weight_scale.value,
-            w1_bias=None,
-            w2_weight=layer.kernel_up_proj_EDF.value,
-            w2_weight_scale=layer.kernel_up_proj_EDF_weight_scale.value,
-            w2_bias=None,
-            w3_weight=layer.kernel_down_proj_EFD.value,
-            w3_weight_scale=layer.kernel_down_proj_EFD_weight_scale.value,
-            w3_bias=None,
-        )
-        return moe_apply(layer, x_TD, router_logits, weights,
-                         layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+        # The unfused MoE backends at this revision consume only bf16 expert
+        # kernels: DENSE_MAT einsums the raw weight arrays and MEGABLX_GMM
+        # re-reads `layer.kernel_*` itself, so the fp4 codes and the fp32
+        # group scales decoded above would be dropped on the floor and the
+        # layer would silently compute garbage. Fail loudly instead; the
+        # scale-consuming MoE backends land with the kernel layer change.
+        raise NotImplementedError(
+            f"[mxfp4-ct] {layer.prefix}: the forward pass for "
+            "compressed-tensors MXFP4 experts is not wired up at this "
+            "revision; the scale-consuming MoE backends land with the kernel "
+            "layer change.")
 
 
 class Mxfp4Config(QuantizationConfig):
