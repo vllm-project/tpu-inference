@@ -13,22 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Deploy and test disaggregated serving across two independent TPU v7x-8
-# instances. The script runs on the Prefill instance and controls the Decode
-# instance over SSH. Each instance owns a separate one-node Ray cluster and a
-# separate PJRT process; only KV cache data crosses the network.
-#
-# Select the Decode instance with DECODE_TPU_NAME. DECODE_ZONE may be omitted
-# when both instances are in the same zone. The active gcloud identity must be
-# able to access Artifact Registry and authorize SSH access to the Decode TPU
-# VM.
-#
-# Network policy must allow the Decode API port, TPUConnector transfer ports,
-# and the TPU side-channel port between the two instances.
-#
-# Prefill host KV offloading is enabled through TPU_ENABLE_D2H_TRANSFER. The
-# maximum number of requests retained by the host KV pool is controlled by
-# TPU_MAX_HOST_KV_BUFFER_SIZE.
 
 # ==============================================================================
 # Runtime safety and TPU topology

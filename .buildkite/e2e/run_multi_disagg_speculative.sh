@@ -13,22 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Deploy and test disaggregated serving across two independent TPU v7x-8
-# instances. The script runs on the Prefill instance and controls the Decode
-# instance over SSH. Each instance owns a separate one-node Ray cluster and a
-# separate PJRT process; only KV cache data crosses the network.
-#
-# Select the Decode instance with DECODE_TPU_NAME. DECODE_ZONE may be omitted
-# when both instances are in the same zone. The active gcloud identity must be
-# able to access Artifact Registry and authorize SSH access to the Decode TPU
-# VM.
-#
-# Network policy must allow the Decode API port, TPUConnector transfer ports,
-# and the TPU side-channel port between the two instances.
-#
-# Speculative decoding is enabled only on Decode. For the default n-gram
-# proposer, the script sends a repeated-token probe and verifies Decode metrics
-# to prove that speculative draft tokens were actually produced.
 
 # ==============================================================================
 # Runtime safety and TPU topology

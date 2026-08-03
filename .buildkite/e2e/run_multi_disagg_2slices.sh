@@ -13,33 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Deploy disaggregated serving across two independent TPU v7x-16 slices.
-#
-# The script runs on worker 0 of the Prefill slice. Each slice contains two TPU
-# VM workers and owns one independent two-node Ray cluster and one two-process
-# PJRT runtime:
-#
-#   Prefill slice: worker 0 (Ray head + vLLM API), worker 1 (Ray worker)
-#   Decode slice:  worker 0 (Ray head + vLLM API), worker 1 (Ray worker)
-#
-# Each role uses all four dual-core chips on both workers, for tensor parallel
-# size 16. Only HTTP traffic, TPUConnector side-channel traffic, and KV cache
-# data cross between the two slices.
-#
-# Required:
-#   DECODE_TPU_NAME=<name of the independent Decode v7x-16 slice>
-#
-# Optional:
-#   DECODE_ZONE=<Decode slice zone; defaults to the Prefill zone>
-#
-# Network policy must permit intra-slice Ray/PJRT traffic, the Decode API port,
-# and TPUConnector transfer/side-channel traffic between both slices.
+# Runs Prefill and Decode serving on separate TPU v7x-16 slices.
+# Run on Prefill worker 0; set DECODE_TPU_NAME.
 
 set -euo pipefail
 
-# ==============================================================================
-# Fixed TPU topology
-# ==============================================================================
+# Fixed TPU topology.
 
 readonly HOSTS_PER_SLICE=2
 readonly CHIPS_PER_HOST=4
@@ -51,9 +30,7 @@ readonly TPU_PROCESS_BOUNDS_VALUE="1,1,2"
 readonly JAX_NUM_PROCESSES_VALUE=2
 readonly TPU_PROCESS_PORT=8476
 
-# ==============================================================================
-# User-configurable settings
-# ==============================================================================
+# Settings.
 
 SSH_USER="${SSH_USER:-$(whoami)}"
 SSH_KEY_EXPIRE_AFTER="${SSH_KEY_EXPIRE_AFTER:-6h}"
@@ -106,9 +83,7 @@ rm -f \
   "${LOG_DIR}/proxy.txt" \
   "${LOG_DIR}/correctness.txt"
 
-# ==============================================================================
-# Metadata, slice discovery, and SSH
-# ==============================================================================
+# Discover slices and configure SSH.
 
 get_metadata_value() {
   local path=$1
@@ -250,9 +225,7 @@ authorize_slice_workers() {
     return
   fi
 
-  # A single gcloud SSH invocation propagates the public key to every worker in
-  # the slice. Connecting separately to worker 0 and worker 1 would repeat that
-  # relatively expensive propagation step.
+  # Propagate the SSH key to the slice.
   echo "--- Authorizing SSH access to all ${role} workers"
   gcloud compute tpus tpu-vm ssh \
     "${SSH_USER}@${resource}" \
@@ -348,9 +321,7 @@ echo "Prefill workers by process ID: ${PREFILL_HOSTS[*]}"
 echo "Decode workers by process ID:  ${DECODE_HOSTS[*]}"
 echo "Each role uses two PJRT processes and tensor parallel size ${TENSOR_PARALLEL_SIZE}."
 
-# ==============================================================================
-# Preflight, logs, and cleanup
-# ==============================================================================
+# Preflight, logs, and cleanup.
 
 preflight() {
   local host
@@ -421,8 +392,7 @@ cleanup_container_on_host() {
   inspect_output="$(
     run_on_host "${host}" docker inspect "${container}" 2>&1
   )" || inspect_status=$?
-  # Some Docker CLI versions print "[]" plus "No such object" while returning
-  # success. Treat the explicit missing-object message as authoritative.
+  # Some Docker versions report missing containers with success.
   if is_missing_container_error "${inspect_output}"; then
     echo "  ${label}: ${container} is already absent on ${host}; nothing to clean."
     return 0
@@ -441,8 +411,7 @@ cleanup_container_on_host() {
     remove_status=$?
   fi
 
-  # Always verify the final state. A concurrent cleanup may make docker rm
-  # return "No such container"; that is a successful cleanup outcome.
+  # A concurrent cleanup can remove the container first.
   inspect_status=0
   inspect_output="$(
     run_on_host "${host}" docker inspect "${container}" 2>&1
@@ -517,19 +486,19 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# ==============================================================================
-# Ray and vLLM lifecycle helpers
-# ==============================================================================
+# Ray and vLLM helpers.
 
-wait_for_ray_cluster() {
+wait_for_ray_nodes() {
   local head_ip=$1
   local container=$2
   local label=$3
-  local timeout=${4:-900}
+  local expected_nodes=$4
+  local comparison=$5
+  local timeout=$6
   local ready_cmd
-  ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive == ${HOSTS_PER_SLICE} else 1)"
+  ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); alive=sum(node.get('Alive', False) for node in ray.nodes()); raise SystemExit(0 if alive ${comparison} ${expected_nodes} else 1)"
 
-  echo "Waiting for ${label} Ray cluster to register ${HOSTS_PER_SLICE} nodes..."
+  echo "Waiting for ${label} Ray cluster to register ${expected_nodes} node(s)..."
   local end_time=$((SECONDS + timeout))
   while (( SECONDS < end_time )); do
     if run_on_host "${head_ip}" docker exec "${container}" \
@@ -539,28 +508,7 @@ wait_for_ray_cluster() {
     fi
     sleep 5
   done
-  echo "ERROR: ${label} Ray cluster did not register ${HOSTS_PER_SLICE} nodes." >&2
-  return 1
-}
-
-wait_for_ray_head() {
-  local head_ip=$1
-  local container=$2
-  local label=$3
-  local timeout=${4:-300}
-  local ready_cmd
-  ready_cmd="import ray; ray.init(address='auto', ignore_reinit_error=True); raise SystemExit(0 if any(node.get('Alive', False) for node in ray.nodes()) else 1)"
-
-  echo "Waiting for ${label} Ray head..."
-  local end_time=$((SECONDS + timeout))
-  while (( SECONDS < end_time )); do
-    if run_on_host "${head_ip}" docker exec "${container}" \
-      python3 -c "${ready_cmd}" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 5
-  done
-  echo "ERROR: ${label} Ray head did not become ready." >&2
+  echo "ERROR: ${label} Ray cluster did not register ${expected_nodes} node(s)." >&2
   return 1
 }
 
@@ -605,6 +553,25 @@ dump_vllm_log() {
   echo "+++ ${label} log (${host}:${log_path})" >&2
   run_on_host "${host}" docker exec "${container}" \
     cat "${log_path}" 2>&1 || true
+}
+
+build_vllm_serve_cmd() {
+  local port=$1
+  local kv_role=$2
+  local log_path=$3
+
+  printf '%s' "vllm serve ${quoted_model} \\
+  --port ${port} \\
+  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \\
+  --trust-remote-code \\
+  --load-format ${quoted_load_format} \\
+  --no-enable-prefix-caching \\
+  --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \\
+  --max-model-len ${MAX_MODEL_LEN} \\
+  --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \\
+  --max-num-seqs ${MAX_NUM_SEQS} \\
+  --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"${kv_role}\"}' \\
+  > ${log_path} 2>&1"
 }
 
 wait_for_vllm_server() {
@@ -684,9 +651,7 @@ print(json.dumps({
   fi
 }
 
-# ==============================================================================
-# Image preparation
-# ==============================================================================
+# Prepare the image.
 
 preflight
 
@@ -714,9 +679,7 @@ for host in "${ALL_HOSTS[@]}"; do
   run_on_host "${host}" docker pull "${DOCKER_IMAGE}"
 done
 
-# ==============================================================================
-# Two independent two-node Ray/PJRT clusters
-# ==============================================================================
+# Start Ray/PJRT clusters.
 
 PREFILL_PROCESS_ADDRESSES="${PREFILL_HOSTS[0]}:${TPU_PROCESS_PORT},${PREFILL_HOSTS[1]}:${TPU_PROCESS_PORT}"
 DECODE_PROCESS_ADDRESSES="${DECODE_HOSTS[0]}:${TPU_PROCESS_PORT},${DECODE_HOSTS[1]}:${TPU_PROCESS_PORT}"
@@ -811,50 +774,32 @@ launch_cluster_node() {
 }
 
 launch_cluster_node prefill "${PREFILL_HOSTS[0]}" head 0
-wait_for_ray_head "${PREFILL_HEAD_IP}" "${PREFILL_CONTAINER_NAME}" Prefill
+wait_for_ray_nodes "${PREFILL_HEAD_IP}" "${PREFILL_CONTAINER_NAME}" \
+  Prefill 1 '>=' 300
 launch_cluster_node prefill "${PREFILL_HOSTS[1]}" worker 1
-wait_for_ray_cluster "${PREFILL_HEAD_IP}" "${PREFILL_CONTAINER_NAME}" Prefill
+wait_for_ray_nodes "${PREFILL_HEAD_IP}" "${PREFILL_CONTAINER_NAME}" \
+  Prefill "${HOSTS_PER_SLICE}" '==' 900
 
 launch_cluster_node decode "${DECODE_HOSTS[0]}" head 0
-wait_for_ray_head "${DECODE_HEAD_IP}" "${DECODE_CONTAINER_NAME}" Decode
+wait_for_ray_nodes "${DECODE_HEAD_IP}" "${DECODE_CONTAINER_NAME}" \
+  Decode 1 '>=' 300
 launch_cluster_node decode "${DECODE_HOSTS[1]}" worker 1
-wait_for_ray_cluster "${DECODE_HEAD_IP}" "${DECODE_CONTAINER_NAME}" Decode
+wait_for_ray_nodes "${DECODE_HEAD_IP}" "${DECODE_CONTAINER_NAME}" \
+  Decode "${HOSTS_PER_SLICE}" '==' 900
 
 dump_ray_and_tpu_state Prefill "${PREFILL_HEAD_IP}" \
   "${PREFILL_CONTAINER_NAME}" "${PREFILL_HOSTS[@]}"
 dump_ray_and_tpu_state Decode "${DECODE_HEAD_IP}" \
   "${DECODE_CONTAINER_NAME}" "${DECODE_HOSTS[@]}"
 
-# ==============================================================================
-# vLLM Prefill and Decode servers
-# ==============================================================================
+# Start vLLM servers.
 
 printf -v quoted_model '%q' "${MODEL}"
 printf -v quoted_load_format '%q' "${LOAD_FORMAT}"
-PREFILL_SERVE_CMD="vllm serve ${quoted_model} \
-  --port ${PREFILL_PORT} \
-  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
-  --trust-remote-code \
-  --load-format ${quoted_load_format} \
-  --no-enable-prefix-caching \
-  --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
-  --max-model-len ${MAX_MODEL_LEN} \
-  --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
-  --max-num-seqs ${MAX_NUM_SEQS} \
-  --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
-  > /root/vllm_serve_prefill.log 2>&1"
-DECODE_SERVE_CMD="vllm serve ${quoted_model} \
-  --port ${DECODE_PORT} \
-  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
-  --trust-remote-code \
-  --load-format ${quoted_load_format} \
-  --no-enable-prefix-caching \
-  --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
-  --max-model-len ${MAX_MODEL_LEN} \
-  --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
-  --max-num-seqs ${MAX_NUM_SEQS} \
-  --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
-  > /root/vllm_serve_decode.log 2>&1"
+PREFILL_SERVE_CMD="$(build_vllm_serve_cmd "${PREFILL_PORT}" kv_producer \
+  /root/vllm_serve_prefill.log)"
+DECODE_SERVE_CMD="$(build_vllm_serve_cmd "${DECODE_PORT}" kv_consumer \
+  /root/vllm_serve_decode.log)"
 
 echo "--- Starting vLLM Prefill and Decode servers"
 run_on_host "${PREFILL_HEAD_IP}" docker exec -d \
@@ -867,9 +812,7 @@ wait_for_vllm_server 127.0.0.1 "${PREFILL_HEAD_IP}" "${PREFILL_PORT}" \
 wait_for_vllm_server "${DECODE_HEAD_IP}" "${DECODE_HEAD_IP}" "${DECODE_PORT}" \
   "${DECODE_CONTAINER_NAME}" /root/vllm_serve_decode.log "vLLM Decode"
 
-# ==============================================================================
-# Proxy, smoke test, benchmark, and correctness
-# ==============================================================================
+# Run the proxy and tests.
 
 echo "--- Starting Toy Proxy Server locally"
 docker run -d \

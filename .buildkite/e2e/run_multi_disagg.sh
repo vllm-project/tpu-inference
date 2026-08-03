@@ -13,18 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Deploy and test disaggregated serving across two independent TPU v7x-8
-# instances. The script runs on the Prefill instance and controls the Decode
-# instance over SSH. Each instance owns a separate one-node Ray cluster and a
-# separate PJRT process; only KV cache data crosses the network.
-#
-# Select the Decode instance with DECODE_TPU_NAME. DECODE_ZONE may be omitted
-# when both instances are in the same zone. The active gcloud identity must be
-# able to access Artifact Registry and authorize SSH access to the Decode TPU
-# VM.
-#
-# Network policy must allow the Decode API port, TPUConnector transfer ports,
-# and the TPU side-channel port between the two instances.
 
 # ==============================================================================
 # Runtime safety and TPU topology
@@ -199,6 +187,16 @@ run_decode_host() {
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HOST_IP}" "${command}"
 }
 
+run_on_host() {
+  local host=$1
+  shift
+  if [[ "${host}" == "${PREFILL_HOST_IP}" ]]; then
+    "$@"
+  else
+    run_decode_host "$@"
+  fi
+}
+
 # Direct SSH is preferred. When it is unavailable, gcloud registers the local
 # public key against the named Decode TPU VM and direct SSH is retried.
 authorize_decode_ssh_key() {
@@ -315,37 +313,28 @@ print_logs() {
 
 # Copy detached vLLM logs out of both containers before cleanup removes them.
 collect_logs() {
-  if docker inspect "${PREFILL_CONTAINER_NAME}" >/dev/null 2>&1; then
-    docker exec "${PREFILL_CONTAINER_NAME}" \
+  if run_on_host "${PREFILL_HOST_IP}" docker inspect "${PREFILL_CONTAINER_NAME}" \
+    >/dev/null 2>&1; then
+    run_on_host "${PREFILL_HOST_IP}" docker exec "${PREFILL_CONTAINER_NAME}" \
       cat /root/vllm_serve_prefill.log >"${LOG_DIR}/prefill.txt" 2>/dev/null || true
   fi
-  if run_decode_host docker inspect "${DECODE_CONTAINER_NAME}" >/dev/null 2>&1; then
-    run_decode_host docker exec "${DECODE_CONTAINER_NAME}" \
+  if run_on_host "${DECODE_HOST_IP}" docker inspect "${DECODE_CONTAINER_NAME}" \
+    >/dev/null 2>&1; then
+    run_on_host "${DECODE_HOST_IP}" docker exec "${DECODE_CONTAINER_NAME}" \
       cat /root/vllm_serve_decode.log >"${LOG_DIR}/decode.txt" 2>/dev/null || true
   fi
 }
 
-cleanup_local_container() {
-  local container=$1
-  docker rm -f "${container}" >/dev/null 2>&1 || true
-}
-
-cleanup_decode_container() {
-  local container=$1
-  run_decode_host docker rm -f "${container}" >/dev/null 2>&1 || true
+cleanup_container() {
+  local host=$1
+  local container=$2
+  run_on_host "${host}" docker rm -f "${container}" >/dev/null 2>&1 || true
 }
 
 verify_container_absent() {
   local host=$1
   local container=$2
-  if [[ "${host}" == "${PREFILL_HOST_IP}" ]]; then
-    if docker inspect "${container}" >/dev/null 2>&1; then
-      return 1
-    fi
-  elif run_decode_host docker inspect "${container}" >/dev/null 2>&1; then
-    return 1
-  fi
-  return 0
+  ! run_on_host "${host}" docker inspect "${container}" >/dev/null 2>&1
 }
 
 # Cleanup is deliberately idempotent because it runs once before startup and
@@ -360,9 +349,9 @@ cleanup() {
     collect_logs
   fi
 
-  cleanup_local_container "${PROXY_CONTAINER_NAME}"
-  cleanup_local_container "${PREFILL_CONTAINER_NAME}"
-  cleanup_decode_container "${DECODE_CONTAINER_NAME}"
+  cleanup_container "${PREFILL_HOST_IP}" "${PROXY_CONTAINER_NAME}"
+  cleanup_container "${PREFILL_HOST_IP}" "${PREFILL_CONTAINER_NAME}"
+  cleanup_container "${DECODE_HOST_IP}" "${DECODE_CONTAINER_NAME}"
 
   verify_container_absent "${PREFILL_HOST_IP}" "${PROXY_CONTAINER_NAME}" || status=1
   verify_container_absent "${PREFILL_HOST_IP}" "${PREFILL_CONTAINER_NAME}" || status=1
@@ -404,9 +393,7 @@ wait_for_ray_cluster() {
   echo "Waiting for ${label} Ray cluster on ${host}..."
   local end_time=$((SECONDS + timeout))
   while (( SECONDS < end_time )); do
-    if [[ "${host}" == "${PREFILL_HOST_IP}" ]]; then
-      docker exec "${container}" python3 -c "${ready_cmd}" >/dev/null 2>&1 && return 0
-    elif run_decode_host docker exec "${container}" \
+    if run_on_host "${host}" docker exec "${container}" \
       python3 -c "${ready_cmd}" >/dev/null 2>&1; then
       return 0
     fi
@@ -424,12 +411,8 @@ vllm_process_alive() {
   local port=$3
   local process_check="pgrep -af '[v]llm serve' | grep -q -- '--port ${port}'"
 
-  if [[ "${host}" == "${PREFILL_HOST_IP}" ]]; then
-    docker exec "${container}" bash -c "${process_check}" >/dev/null 2>&1
-  else
-    run_decode_host docker exec "${container}" \
-      bash -c "${process_check}" >/dev/null 2>&1
-  fi
+  run_on_host "${host}" docker exec "${container}" \
+    bash -c "${process_check}" >/dev/null 2>&1
 }
 
 # Print the complete role log when startup fails. Routine progress messages stay
@@ -440,11 +423,7 @@ dump_vllm_log() {
   local log_path=$3
   local label=$4
   echo "+++ ${label} log (${host}:${log_path})" >&2
-  if [[ "${host}" == "${PREFILL_HOST_IP}" ]]; then
-    docker exec "${container}" cat "${log_path}" 2>&1 || true
-  else
-    run_decode_host docker exec "${container}" cat "${log_path}" 2>&1 || true
-  fi
+  run_on_host "${host}" docker exec "${container}" cat "${log_path}" 2>&1 || true
 }
 
 # health_host is the address used by curl; node_host selects whether container
@@ -581,35 +560,35 @@ COMMON_TPU_ENV=(
   -e "TPU_VERSION=${TPU_VERSION}"
 )
 
-echo "--- Starting independent Prefill Ray head on ${PREFILL_HOST_IP}"
-docker run -d \
-  --privileged \
-  --network host \
-  --shm-size 16G \
-  --name "${PREFILL_CONTAINER_NAME}" \
-  "${COMMON_TPU_ENV[@]}" \
-  -e "TPU_KV_TRANSFER_PORT=${PREFILL_KV_TRANSFER_PORT}" \
-  -e "TPU_SIDE_CHANNEL_PORT=${TPU_SIDE_CHANNEL_PORT}" \
-  -v "${HOST_HF_HOME}:/root/hf" \
-  -v "${LOG_DIR}:/root/logs" \
-  --entrypoint /bin/bash \
-  "${DOCKER_IMAGE}" \
-  -c "ray start --block --head --port=${PREFILL_RAY_PORT}"
+start_ray_head() {
+  local host=$1
+  local label=$2
+  local container=$3
+  local ray_port=$4
+  local kv_transfer_port=$5
+  local hf_home=$6
+  local log_dir=$7
 
-echo "--- Starting independent Decode Ray head on ${DECODE_HOST_IP}"
-run_decode_host docker run -d \
-  --privileged \
-  --network host \
-  --shm-size 16G \
-  --name "${DECODE_CONTAINER_NAME}" \
-  "${COMMON_TPU_ENV[@]}" \
-  -e "TPU_KV_TRANSFER_PORT=${DECODE_KV_TRANSFER_PORT}" \
-  -e "TPU_SIDE_CHANNEL_PORT=${TPU_SIDE_CHANNEL_PORT}" \
-  -v "${DECODE_HOST_HF_HOME}:/root/hf" \
-  -v "${DECODE_LOG_DIR}:/root/logs" \
-  --entrypoint /bin/bash \
-  "${DOCKER_IMAGE}" \
-  -c "ray start --block --head --port=${DECODE_RAY_PORT}"
+  echo "--- Starting independent ${label} Ray head on ${host}"
+  run_on_host "${host}" docker run -d \
+    --privileged \
+    --network host \
+    --shm-size 16G \
+    --name "${container}" \
+    "${COMMON_TPU_ENV[@]}" \
+    -e "TPU_KV_TRANSFER_PORT=${kv_transfer_port}" \
+    -e "TPU_SIDE_CHANNEL_PORT=${TPU_SIDE_CHANNEL_PORT}" \
+    -v "${hf_home}:/root/hf" \
+    -v "${log_dir}:/root/logs" \
+    --entrypoint /bin/bash \
+    "${DOCKER_IMAGE}" \
+    -c "ray start --block --head --port=${ray_port}"
+}
+
+start_ray_head "${PREFILL_HOST_IP}" Prefill "${PREFILL_CONTAINER_NAME}" \
+  "${PREFILL_RAY_PORT}" "${PREFILL_KV_TRANSFER_PORT}" "${HOST_HF_HOME}" "${LOG_DIR}"
+start_ray_head "${DECODE_HOST_IP}" Decode "${DECODE_CONTAINER_NAME}" \
+  "${DECODE_RAY_PORT}" "${DECODE_KV_TRANSFER_PORT}" "${DECODE_HOST_HF_HOME}" "${DECODE_LOG_DIR}"
 
 wait_for_ray_cluster "${PREFILL_HOST_IP}" "${PREFILL_CONTAINER_NAME}" Prefill
 wait_for_ray_cluster "${DECODE_HOST_IP}" "${DECODE_CONTAINER_NAME}" Decode
@@ -621,36 +600,34 @@ wait_for_ray_cluster "${DECODE_HOST_IP}" "${DECODE_CONTAINER_NAME}" Decode
 # Shell-escape user-supplied values before embedding them in bash -c commands.
 printf -v quoted_model '%q' "${MODEL}"
 printf -v quoted_load_format '%q' "${LOAD_FORMAT}"
-# Prefill produces KV cache entries; Decode consumes transferred entries and
-# generates output tokens.
-PREFILL_SERVE_CMD="vllm serve ${quoted_model} \
-  --port ${PREFILL_PORT} \
-  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
-  --trust-remote-code \
-  --load-format ${quoted_load_format} \
-  --no-enable-prefix-caching \
-  --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
-  --max-model-len ${MAX_MODEL_LEN} \
-  --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
-  --max-num-seqs ${MAX_NUM_SEQS} \
-  --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}' \
-  > /root/vllm_serve_prefill.log 2>&1"
-DECODE_SERVE_CMD="vllm serve ${quoted_model} \
-  --port ${DECODE_PORT} \
-  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \
-  --trust-remote-code \
-  --load-format ${quoted_load_format} \
-  --no-enable-prefix-caching \
-  --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
-  --max-model-len ${MAX_MODEL_LEN} \
-  --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \
-  --max-num-seqs ${MAX_NUM_SEQS} \
-  --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_consumer\"}' \
-  > /root/vllm_serve_decode.log 2>&1"
+build_vllm_serve_cmd() {
+  local port=$1
+  local kv_role=$2
+  local log_path=$3
+
+  printf '%s' "vllm serve ${quoted_model} \\
+  --port ${port} \\
+  --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \\
+  --trust-remote-code \\
+  --load-format ${quoted_load_format} \\
+  --no-enable-prefix-caching \\
+  --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \\
+  --max-model-len ${MAX_MODEL_LEN} \\
+  --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} \\
+  --max-num-seqs ${MAX_NUM_SEQS} \\
+  --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"${kv_role}\"}' \\
+  > ${log_path} 2>&1"
+}
+
+PREFILL_SERVE_CMD="$(build_vllm_serve_cmd "${PREFILL_PORT}" kv_producer \
+  /root/vllm_serve_prefill.log)"
+DECODE_SERVE_CMD="$(build_vllm_serve_cmd "${DECODE_PORT}" kv_consumer \
+  /root/vllm_serve_decode.log)"
 
 echo "--- Starting vLLM Prefill and Decode servers"
-docker exec -d "${PREFILL_CONTAINER_NAME}" bash -c "${PREFILL_SERVE_CMD}"
-run_decode_host docker exec -d "${DECODE_CONTAINER_NAME}" \
+run_on_host "${PREFILL_HOST_IP}" docker exec -d "${PREFILL_CONTAINER_NAME}" \
+  bash -c "${PREFILL_SERVE_CMD}"
+run_on_host "${DECODE_HOST_IP}" docker exec -d "${DECODE_CONTAINER_NAME}" \
   bash -c "${DECODE_SERVE_CMD}"
 
 wait_for_vllm_server 127.0.0.1 "${PREFILL_HOST_IP}" "${PREFILL_PORT}" \
