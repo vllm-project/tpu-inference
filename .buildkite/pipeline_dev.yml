@@ -85,7 +85,7 @@ steps:
             --trust-remote-code \
             --max-model-len 10240 \
             --max-num-seqs 64 \
-            --max-num-batched-tokens 2048 \
+            --max-num-batched-tokens 512 \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
