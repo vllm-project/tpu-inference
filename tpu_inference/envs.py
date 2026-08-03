@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     USE_MOE_EP_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
+    MXFP4_SHARD_THEN_DECODE: bool = True
     NUM_SLICES: int = 1
     RAY_USAGE_STATS_ENABLED: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: str = "shm"
@@ -277,6 +278,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NOTE: this is a naive implementation and should not be used in production
     "USE_DENSE_MOE":
     env_bool("USE_DENSE_MOE", default=False),
+    # Decode compressed-tensors MXFP4 experts one device shard at a time, on
+    # the device that will keep the shard, instead of decoding a whole layer
+    # on the host and slicing the decoded result. Set to 0 to fall back to the
+    # host decode.
+    "MXFP4_SHARD_THEN_DECODE":
+    env_bool("MXFP4_SHARD_THEN_DECODE", default=True),
     # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),

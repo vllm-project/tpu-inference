@@ -763,7 +763,10 @@ class Fp8Config(QuantizationConfig):
 
     ACTIVATION_SCHEMES = ["dynamic", "static"]
 
-    def __init__(self, hf_quant_config: dict):
+    def __init__(self,
+                 hf_quant_config: dict,
+                 model_name_or_path: str | None = None,
+                 download_dir: str | None = None):
         # Replicating upstream https://github.com/vllm-project/vllm/blob/77c09e1130661197ccac2d968a28cd4a557922d5/vllm/model_executor/layers/quantization/fp8.py#L167-L175
 
         quant_method = self.get_from_keys(hf_quant_config, ["quant_method"])
