@@ -402,16 +402,19 @@ def ragged_kda_decode_only(
     ``[num_tokens, H, K]`` and the gate form follows ``gate_lower_bound``.
 
     HBM note: decode-only means one token per sequence, so at most
-    ``recurrent_state.shape[0]`` (the rank's state-slot count) leading tokens
-    can be real -- everything past that is bucket padding whose output is
-    zeroed anyway. The per-token state tensors ([R, H, K, V] fp32, three of
-    them) are therefore sized by the SLOT count, not by the token bucket:
-    unsliced, this branch alone contributed ~2.3 MiB of HLO temporaries per
-    padded token to every mixed-bucket executable on Kimi-K3 (96 heads),
-    because `lax.cond` makes the compiler budget for it at full bucket size.
+    ``state_indices.shape[0]`` (the padded request count) leading tokens can
+    be real -- everything past that is bucket padding whose output is zeroed
+    anyway. The per-token state tensors ([R, H, K, V] fp32, three of them)
+    are therefore sized by the REQUEST-slot count, not by the token bucket
+    and not by the state pool: `lax.cond` makes the compiler budget for this
+    branch at full size, so bounding by the token bucket cost ~2.3 MiB of
+    HLO temporaries per padded token, and bounding by the state-pool slot
+    count (``recurrent_state.shape[0]``) blew up to ~118 GiB the moment the
+    pool ran unpinned (thousands of slots). ``ragged_conv1d_jax`` uses the
+    same request-count bound.
     """
     num_tokens = query.shape[0]
-    max_reqs = recurrent_state.shape[0]
+    max_reqs = state_indices.shape[0]
     num_step_tokens = min(num_tokens, max_reqs)
 
     token_idx = jnp.arange(num_step_tokens)
