@@ -66,8 +66,18 @@ def gdn_attention_core_tpu(
     padded_num_reqs = first_attn_metadata.padded_num_reqs
     request_distribution = first_attn_metadata.request_distribution
     query_start_loc = first_attn_metadata.query_start_loc
-    seq_lens = first_attn_metadata.seq_lens
+    has_initial_state = first_attn_metadata.has_initial_state
     state_indices = first_attn_metadata.mamba_state_indices
+    if has_initial_state is None:
+        raise ValueError(
+            "[gdn] AttentionMetadata.has_initial_state is None for layer "
+            f"{layer_name}, so the kernel cannot tell which slots must resume "
+            "conv/recurrent state. The runner publishes the field for models "
+            "that register mamba kv-cache layers; a None here means this "
+            "model's GDN layers were not registered as such. Not re-deriving "
+            "it from query_start_loc on purpose -- that derivation is wrong "
+            "under attention DP (see the field docs in "
+            "layers/common/attention_metadata.py).")
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
@@ -132,8 +142,9 @@ def gdn_attention_core_tpu(
                                                    dp_size)
     query_start_loc_sliced = truncate_sharded_tensor(
         query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
-    seq_lens_sliced = truncate_sharded_tensor(seq_lens, padded_num_reqs_per_dp,
-                                              dp_size)
+    has_initial_state_sliced = truncate_sharded_tensor(has_initial_state,
+                                                       padded_num_reqs_per_dp,
+                                                       dp_size)
 
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
@@ -149,7 +160,7 @@ def gdn_attention_core_tpu(
          state_indices_sliced,
          query_start_loc_sliced,
          request_distribution,
-         seq_lens_sliced,
+         has_initial_state_sliced,
          n_kq,
          n_v,
          d_k,

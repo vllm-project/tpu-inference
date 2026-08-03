@@ -21,7 +21,7 @@ from tpu_inference.kernels.gdn.v3 import config, memory_ref
 
 def compute_batched_seq_metadata(
     cfg: config.GDNConfig,
-    seq_lens: jax.Array,
+    has_initial_state: jax.Array,
     query_start_loc: jax.Array,
     state_indices: jax.Array,
     read_offsets: jax.Array,
@@ -34,9 +34,18 @@ def compute_batched_seq_metadata(
     `cfg.window_size` of them. The initial state is read from
     `state_indices[s] + read_offsets[s]` and one state checkpoint per window
     position is written back to `state_indices[s] + t`.
+
+    `has_initial_state` is `[num_seqs]`, nonzero where the sequence resumes
+    state written by an earlier step. The caller supplies it instead of this
+    function deriving `(seq_lens - query_lens) > 0`: that derivation assumes
+    `query_start_loc` holds exactly `num_seqs + 1` entries for the same
+    sequences `seq_lens` describes, which is only true per DP rank -- the
+    runner packs the global array as one `num_seqs_per_rank + 1` block per
+    rank. Taking the flag from the runner keeps that layout knowledge in one
+    place instead of in every op.
     """
 
-    max_seqs = seq_lens.size
+    max_seqs = has_initial_state.size
     all_seqs = jnp.arange(max_seqs)
 
     # NOTE: Only supports use case where query_lens[i] <= cfg.window_size where
@@ -44,7 +53,7 @@ def compute_batched_seq_metadata(
     # TODO(kyuyeunk): Add error handling when above condition is not met.
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_valid_seqs = jnp.where(all_seqs < end_seq, True, False)
-    has_initial_state = (seq_lens - query_lens) > 0
+    has_initial_state = has_initial_state.astype(jnp.bool_)
     all_valid_seqs = jnp.where(is_valid_seqs, all_seqs, 0)
 
     return memory_ref.MetadataRef.create(
@@ -63,27 +72,33 @@ def compute_batched_seq_metadata(
 
 def compute_per_seq_metadata(
     cfg: config.GDNConfig,
-    seq_lens: jax.Array,
+    has_initial_state: jax.Array,
     query_start_loc: jax.Array,
     state_indices: jax.Array,
     start_seq: jax.Array,
     end_seq: jax.Array,
 ) -> memory_ref.MetadataRef:
-    """Metadata for computing single sequence per tile."""
+    """Metadata for computing single sequence per tile.
 
-    max_seqs = seq_lens.size
+    See `compute_batched_seq_metadata` for why `has_initial_state` is passed
+    in rather than derived from `seq_lens - query_lens`.
+    """
+
+    max_seqs = has_initial_state.size
     max_tokens = cfg.batch_size
     all_seqs = jnp.arange(max_seqs)
     all_tokens = jnp.arange(max_tokens)
 
     # Shift to ensure first element is for start_seq.
     query_start_loc = jnp.roll(query_start_loc, shift=-start_seq)
-    seq_lens = jnp.roll(seq_lens, shift=-start_seq)
+    has_initial_state = jnp.roll(has_initial_state.astype(jnp.bool_),
+                                 shift=-start_seq)
     state_indices = jnp.roll(state_indices, shift=-start_seq)
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     # NOTE: query_lens is used for calculating num_tiles. Defensive programming
-    # that masks out all the other values (seq_lens, state_indices) are not needed
+    # that masks out all the other values (has_initial_state, state_indices) are
+    # not needed
     # since they will not be visited as long as num_tiles is correct.
     num_seqs = end_seq - start_seq
     query_lens = jnp.where(all_seqs < num_seqs, query_lens, 0)
@@ -123,7 +138,6 @@ def compute_per_seq_metadata(
     # is the first tile of a sequence and the sequence had been computed before
     # (chunked prefill, decode, etc). State is written if the program id is the
     # last tile of a sequence.
-    has_initial_state = (seq_lens - query_lens) > 0
     p_id_is_first_tile = p_id_to_t_id == 0
     p_id_is_last_tile = p_id_to_t_id == (s_idx_to_num_tiles[p_id_to_s_idx] - 1)
 

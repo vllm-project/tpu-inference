@@ -284,7 +284,7 @@ def fused_conv1d_gdn(
     query_start_loc: jax.Array,  # [num_seqs + 1]
     state_indices: jax.Array,  # [num_seqs]
     distribution: jax.Array,  # [3]
-    seq_lens: jax.Array,  # [num_seqs]
+    has_initial_state: jax.Array,  # [num_seqs]
     read_offsets: jax.Array | None = None,  # [num_seqs]
     *,
     n_kq: int,
@@ -327,7 +327,11 @@ def fused_conv1d_gdn(
             mixed_end]. With `num_spec_tokens > 0`, the first segment holds
             speculative verify windows of up to `num_spec_tokens + 1` tokens
             rather than 1-token decodes.
-        seq_lens: Sequence lengths for each sequence of shape [num_seqs].
+        has_initial_state: [num_seqs], nonzero where the sequence resumes
+            conv/recurrent state written by an earlier step (chunked prefill,
+            decode) rather than starting from zeros. Supplied by the caller;
+            see `metadata.compute_batched_seq_metadata` for why it is not
+            derived from `seq_lens - query_lens` in here.
         read_offsets: Optional [num_seqs] int32 — per-sequence state read
             offset (num_accepted - 1 from the last verify step). Windowed
             sequences read their initial state from
@@ -481,7 +485,7 @@ def fused_conv1d_gdn(
         if mode != config.GDNMode.PER_SEQ:
             metadata_obj = metadata.compute_batched_seq_metadata(
                 cfg=cfg,
-                seq_lens=seq_lens,
+                has_initial_state=has_initial_state,
                 query_start_loc=query_start_loc,
                 state_indices=state_indices,
                 read_offsets=read_offsets,
@@ -490,7 +494,7 @@ def fused_conv1d_gdn(
         else:
             metadata_obj = metadata.compute_per_seq_metadata(
                 cfg=cfg,
-                seq_lens=seq_lens,
+                has_initial_state=has_initial_state,
                 query_start_loc=query_start_loc,
                 state_indices=state_indices,
                 start_seq=distribution[0],
