@@ -274,13 +274,31 @@ class TpuPlatform(Platform):
             )
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
-            if not envs.NEW_MODEL_DESIGN or not vllm_config.additional_config.get(
-                    "sharding", {}).get("sharding_strategy", {}).get(
-                        "enable_dp_attention", False):
+            dp_attention = vllm_config.additional_config.get(
+                "sharding", {}).get("sharding_strategy",
+                                    {}).get("enable_dp_attention", False)
+            # ---------------------------------------------------------------
+            # DEV-ONLY ESCAPE HATCH — DO NOT MERGE UPSTREAM.
+            # The composed expert x tensor mesh (dp attention off) is the only
+            # split whose per-device weight bytes fit K3 on 32 devices; behind
+            # this env the check warns instead of raising so the pod runs can
+            # serve it. Restore the single combined raise before any PR.
+            # ---------------------------------------------------------------
+            unsafe_no_dp_attention = (os.environ.get(
+                "TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION") == "1")
+            if not envs.NEW_MODEL_DESIGN or not (dp_attention
+                                                 or unsafe_no_dp_attention):
                 raise ValueError(
                     "MLA models require both the NEW_MODEL_DESIGN=1 environment "
                     "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
                 )
+            if not dp_attention:
+                logger.warning(
+                    "[dev-only] Serving an MLA model WITHOUT DP attention "
+                    "because TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION=1. "
+                    "This bypasses the check in check_and_update_config and is "
+                    "not a supported configuration; it exists to measure "
+                    "whether MLA works on a composed expert x tensor mesh.")
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
