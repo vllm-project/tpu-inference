@@ -180,8 +180,7 @@ class TestMoEUtils(unittest.TestCase):
                group_sizes,
                tile_size,
                moe_backend=MoEBackend.MEGABLX_GMM,
-               dtype=jnp.bfloat16,
-               quantized_dtype=None)
+               dtype=jnp.bfloat16)
 
         mock_megablox.assert_called_once()
 
@@ -204,8 +203,7 @@ class TestMoEUtils(unittest.TestCase):
                group_sizes,
                tile_size,
                moe_backend=MoEBackend.MEGABLX_GMM,
-               dtype=jnp.bfloat16,
-               quantized_dtype=jnp.float8_e4m3fn)
+               dtype=jnp.bfloat16)
 
         mock_megablox.assert_called_once()
 
