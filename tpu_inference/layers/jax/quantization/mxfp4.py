@@ -29,8 +29,8 @@ from tpu_inference import envs
 from tpu_inference.layers.common.moe import (FusedMoEMethodBase, MoEBackend,
                                              moe_apply)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, UnfusedMoEWeights, process_moe_weights,
-    quantize_moe_weights, shard_moe_weights)
+    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
+    shard_moe_weights)
 from tpu_inference.layers.common.quantization import (
     MXFP4_BLOCK_SIZE, MXFP4_REQUANTIZED_BLOCK_SIZE,
     dequantize_tensor_from_mxfp4_packed, e8m0_to_fp32, u8_unpack_e2m1)
@@ -619,25 +619,17 @@ class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
 
     def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
                   router_logits) -> jax.Array:
-        x_TD = jnp.asarray(x, layer.dtype)
-        x_TD = jax.lax.with_sharding_constraint(
-            x_TD,
-            jax.sharding.NamedSharding(layer.mesh,
-                                       P(*layer.activation_ffw_td)))
-        weights = UnfusedMoEWeights(
-            w1_weight=layer.kernel_gating_EDF.value,
-            w1_weight_scale=layer.kernel_gating_EDF_weight_scale.value,
-            w1_bias=None,
-            w2_weight=layer.kernel_up_proj_EDF.value,
-            w2_weight_scale=layer.kernel_up_proj_EDF_weight_scale.value,
-            w2_bias=None,
-            w3_weight=layer.kernel_down_proj_EFD.value,
-            w3_weight_scale=layer.kernel_down_proj_EFD_weight_scale.value,
-            w3_bias=None,
-        )
-        return moe_apply(layer, x_TD, router_logits, weights,
-                         layer.moe_backend, layer.mesh,
-                         self.extra_backend_kwargs)
+        # The unfused MoE backends at this revision consume only bf16 expert
+        # kernels: DENSE_MAT einsums the raw weight arrays and MEGABLX_GMM
+        # re-reads `layer.kernel_*` itself, so the fp4 codes and the fp32
+        # group scales decoded above would be dropped on the floor and the
+        # layer would silently compute garbage. Fail loudly instead; the
+        # scale-consuming MoE backends land with the kernel layer change.
+        raise NotImplementedError(
+            f"[mxfp4-ct] {layer.prefix}: the forward pass for "
+            "compressed-tensors MXFP4 experts is not wired up at this "
+            "revision; the scale-consuming MoE backends land with the kernel "
+            "layer change.")
 
 
 class Mxfp4Config(QuantizationConfig):

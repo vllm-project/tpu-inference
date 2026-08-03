@@ -810,3 +810,25 @@ class TestCompressedTensorsMxfp4ShardVsHostParity:
                 f"{name}: {shard.sharding} vs {host.sharding}")
             _assert_bit_equal(shard, np.asarray(host.astype(jnp.float32)),
                               name)
+
+
+class TestCompressedTensorsMxfp4ApplyGuard:
+
+    def test_apply_jax_raises_a_self_contained_error(self):
+        """The staged fp4+scales must not reach backends that drop the scales.
+
+        At this revision the unfused MoE backends consume only bf16 kernels,
+        so a forward pass would silently compute garbage; apply_jax fails
+        loudly instead until the scale-consuming backends land.
+        """
+        layer = SimpleNamespace(
+            moe_backend=MoEBackend.MEGABLX_GMM,
+            prefix="model.layers.1.block_sparse_moe.experts")
+        method = mxfp4.CompressedTensorsMxfp4MoEMethod(layer)
+
+        with pytest.raises(NotImplementedError,
+                           match=r"\[mxfp4-ct\].*scale-consuming MoE backends "
+                           r"land with the kernel layer change"):
+            method.apply_jax(layer,
+                             jnp.ones((3, 4), dtype=jnp.float32),
+                             router_logits=jnp.ones((3, 2), dtype=jnp.float32))
