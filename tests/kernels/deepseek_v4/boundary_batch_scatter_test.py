@@ -51,7 +51,11 @@ class BoundaryBatchScatterTest(parameterized.TestCase):
 
         This is the wrap canary: if the sentinel destinations are not
         discarded (e.g. wrap back into range), row 0 is the first row to
-        be silently overwritten.
+        be silently overwritten. NOTE: CPU honors drop-mode semantics for
+        out-of-bounds indices, so on CPU this canary passes even against
+        the old sentinel-scatter code — it only has teeth on the TPU
+        kernels CI job, where the wrap miscompile lives. A green CPU run
+        checks the packing contract, not the miscompile.
         """
         compress_ratio = 4
         num_reqs = 2
