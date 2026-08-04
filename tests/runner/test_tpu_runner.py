@@ -477,7 +477,7 @@ class TestTPUJaxRunner:
     @patch('jax.device_get')
     def test_execute_continue_decode_eos_check_interval_config(
             self, mock_device_get, mock_continue_decode):
-        """_execute_continue_decode() should pass continue_decode_eos_check_interval when configured in additional_config."""
+        """_execute_continue_decode() should pass continue_decode_eos_check_interval (sourced from the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var) through to continue_decode."""
         runner = MagicMock()
         runner.max_num_reqs = 8
         runner.max_model_len = 512
@@ -487,7 +487,6 @@ class TestTPUJaxRunner:
         runner.scheduler_config.async_scheduling = False
         runner.vllm_config.additional_config = {
             "enable_continue_decode": True,
-            "continue_decode_eos_check_interval": 5,
             "max_decode_steps": 5,
         }
         runner.continue_decode_eos_check_interval = 5
@@ -861,8 +860,9 @@ class TestTPUJaxRunner:
         mock_sharding_config.expert_size = 1
         mock_sharding_config.tp_size = 1
         mock_sharding_config.decode_cp_size = 1
+        mock_sharding_config.prefill_cp_size = 1
         vllm_config.sharding_config = mock_sharding_config
-        mesh_shape = (8, 1, 1, 1, 1, 1)
+        mesh_shape = (8, 1, 1, 1, 1, 1, 1)
 
         # Case A: envs.NEW_MODEL_DESIGN = True and envs.TPU_MESH_SORT_BY_COORDS = True
         with patch('tpu_inference.runner.tpu_runner.envs.NEW_MODEL_DESIGN', True), \

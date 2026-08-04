@@ -77,6 +77,15 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         pi = jnp.arange(npages, dtype=jnp.int32)
         return jnp.pad(pi, (0, self.MAX_SEQ * npages - npages))
 
+    def _pi2(self, npages):
+        """page_indices for the fused current phase: seq0 and seq1 are the SAME
+        request, so both need the request's pages. The kernel indexes them as
+        `seq_idx * pages_per_seq`, and the WRITING seq (the tail, seq1) reads its
+        own slice -- so it must be a copy of seq0's, not zeros."""
+        pi = jnp.arange(npages, dtype=jnp.int32)
+        two = jnp.concatenate([pi, pi])
+        return jnp.pad(two, (0, self.MAX_SEQ * npages - 2 * npages))
+
     def _pad1(self, xs):  # length max_num_seqs (kv_lens, kv_cache_lens, q_pos)
         return jnp.pad(jnp.array(xs, jnp.int32), (0, self.MAX_SEQ - len(xs)))
 
@@ -346,6 +355,60 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         self.assertTrue(
             saw_all_pad, "test config did not exercise an all-pad "
             "tail chunk")
+
+    @parameterized.product(P=[2, 4], aligned=[True, False])
+    def test_pcp_fused_current_phase_write(self, P, aligned):
+        """FUSED current phase: head+tail as TWO seqs in ONE ragged launch.
+
+        Both seqs are the same request (same kv_lens/kv_cache_lens), so each
+        would write the whole strided current KV; `write_last_seq_only` must
+        write it exactly once -- on the tail seq. The
+        de-strided cache must still equal merge_kv(current) in full, including
+        when the tail chunk is wholly padding (aligned=False)."""
+        dtype = jnp.float32
+        self.PAGE = 16
+        nq, nkv, hd = 8, 2, 128
+        two_p = 2 * P
+        C = 64
+        # aligned: every chunk fully real. else: num_current sits just above
+        # pcp*C, so the last tail chunk(s) are entirely padding (q_len=0).
+        S = two_p * C if aligned else P * C + 1
+        pps = cdiv(S, self.PAGE)
+        rng = np.random.default_rng(21)
+        k = self._rand(rng, (S, nkv, hd), dtype)
+        v = self._rand(rng, (S, nkv, hd), dtype)
+        q = self._rand(rng, (S, nq, hd), dtype)
+        c = self._cfg(dtype)
+        kv_merged = merge_kv(k, v)
+        for r in range(P):
+            head_off = r * C
+            tail_off = (two_p - 1 - r) * C
+            tail_real = max(0, min(S - tail_off, C))
+            # one launch, two seqs: cu=[0, C, C+tail_real]
+            _, cache = ragged_paged_attention(
+                q,
+                k,
+                v,
+                self._empty_cache(dtype),
+                self._pad1([S, S]),  # both seqs: same request
+                self._pi2(pps),
+                self._padcu([0, C, C + tail_real]),
+                jnp.array([0, 0, 2], jnp.int32),
+                cp_rank=jnp.array([r], jnp.int32),
+                cp_group_size=P,
+                kv_cache_lens=self._pad1([0, 0]),
+                q_pos_offsets=self._pad1([head_off, tail_off]),
+                update_kv_cache=True,
+                write_last_seq_only=True,
+                skip_cache_attn=True,
+                use_causal_mask=True)
+            flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
+            local_len = (S + P - 1 - r) // P
+            pi = np.arange(pps)
+            for m in range(local_len):
+                g = r + m * P
+                slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
+                self.assertArraysEqual(flat[slot], kv_merged[g])
 
     # ----------------- multi-device PCP-vs-TP equivalence --------------------
     @parameterized.product(P=[2, 4])
