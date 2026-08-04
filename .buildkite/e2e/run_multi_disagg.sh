@@ -114,6 +114,15 @@ PREFILL_HOST_IP="${PREFILL_HOST_IP:-$(get_current_internal_ip)}"
 PREFILL_ZONE="${PREFILL_ZONE:-$(get_metadata_value "instance/zone" | awk -F/ '{print $NF}')}"
 PREFILL_TPU_NAME="${PREFILL_TPU_NAME:-$(get_metadata_value "instance/description")}"
 
+if [[ -z "${PREFILL_TPU_NAME}" || -z "${PREFILL_ZONE}" ]]; then
+  echo "ERROR: Could not discover the Prefill TPU resource name or zone." >&2
+  exit 1
+fi
+
+# Decode always runs in the same zone as Prefill. It is selected automatically
+# from another ready TPU v7x-8 instance in that zone.
+readonly DECODE_ZONE="${PREFILL_ZONE}"
+
 # ==============================================================================
 # SSH bootstrap and Decode host access
 # ==============================================================================
@@ -131,19 +140,45 @@ SSH_OPTS=(
   -i "${HOME}/.ssh/id_rsa"
 )
 
+select_decode_tpu() {
+  local name accelerator_type state tpu_vms
+  local -a candidates=()
+
+  if ! tpu_vms="$(
+    gcloud compute tpus tpu-vm list \
+      --zone "${DECODE_ZONE}" \
+      --sort-by name \
+      --format='csv[no-heading](name,acceleratorType,state)'
+  )"; then
+    echo "ERROR: Could not list TPU VMs in zone ${DECODE_ZONE}." >&2
+    return 1
+  fi
+
+  while IFS=, read -r name accelerator_type state; do
+    # `tpu-vm list` uses either v7x-8 or tpu7x-8 depending on the gcloud/API
+    # version. A READY TPU VM is available for this job; exclude Prefill itself.
+    if [[ "${name}" != "${PREFILL_TPU_NAME}" &&
+          "${state}" == "READY" &&
+          ( "${accelerator_type}" == *"v7x-8"* ||
+            "${accelerator_type}" == *"tpu7x-8"* ) ]]; then
+      candidates+=("${name}")
+    fi
+  done <<< "${tpu_vms}"
+
+  if (( ${#candidates[@]} == 0 )); then
+    echo "ERROR: No other READY TPU v7x-8 instance is available in zone ${DECODE_ZONE}." >&2
+    return 1
+  fi
+
+  DECODE_TPU_NAME="${candidates[0]}"
+  echo "--- Selected Decode TPU ${DECODE_TPU_NAME} from ready v7x-8 instances in ${DECODE_ZONE}" >&2
+}
+
+select_decode_tpu
+
 discover_decode_host() {
   local endpoints_string
   local -a endpoints=()
-
-  if [[ -z "${DECODE_TPU_NAME:-}" ]]; then
-    echo "ERROR: Set DECODE_TPU_NAME for the independent Decode v7x-8 instance." >&2
-    return 1
-  fi
-  DECODE_ZONE="${DECODE_ZONE:-${PREFILL_ZONE}}"
-  if [[ -z "${DECODE_ZONE}" ]]; then
-    echo "ERROR: Set DECODE_ZONE when the local zone cannot be discovered." >&2
-    return 1
-  fi
 
   endpoints_string="$(
     gcloud compute tpus tpu-vm describe "${DECODE_TPU_NAME}" \
@@ -178,13 +213,14 @@ for host in "${PREFILL_HOST_IP}" "${DECODE_HOST_IP}"; do
   fi
 done
 
-# Serialize an argv-style command into a safely escaped remote shell command.
+# Serialize an argv-style command and execute it with Bash on Decode.
 run_decode_host() {
   local command
   printf -v command '%q ' "$@"
-  # Each argument is individually shell-escaped before SSH sends it.
+  # Feeding the command to remote Bash avoids parsing it with the remote login
+  # shell, which may be /bin/sh and does not support all Bash quoting forms.
   # shellcheck disable=SC2029
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HOST_IP}" "${command}"
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${DECODE_HOST_IP}" bash -s -- <<< "${command}"
 }
 
 run_on_host() {
@@ -204,12 +240,6 @@ authorize_decode_ssh_key() {
     >/dev/null 2>&1; then
     echo "--- SSH key is already authorized on Decode"
     return
-  fi
-
-  DECODE_ZONE="${DECODE_ZONE:-${PREFILL_ZONE}}"
-  if [[ -z "${DECODE_ZONE}" ]]; then
-    echo "ERROR: Set DECODE_ZONE so the SSH key can be registered on Decode." >&2
-    return 1
   fi
 
   echo "--- Authorizing SSH key on Decode TPU VM ${DECODE_TPU_NAME}"

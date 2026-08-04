@@ -14,7 +14,8 @@
 # limitations under the License.
 
 # Runs Prefill and Decode serving on separate TPU v7x-16 slices.
-# Run on Prefill worker 0; set DECODE_TPU_NAME.
+# Run on Prefill worker 0. Decode is selected automatically from another ready
+# TPU v7x-16 slice in the Prefill zone.
 
 set -euo pipefail
 
@@ -105,21 +106,51 @@ get_current_internal_ip() {
 PREFILL_LOCAL_IP="${PREFILL_LOCAL_IP:-$(get_current_internal_ip)}"
 PREFILL_ZONE="${PREFILL_ZONE:-$(get_metadata_value "instance/zone" | awk -F/ '{print $NF}')}"
 PREFILL_TPU_NAME="${PREFILL_TPU_NAME:-$(get_metadata_value "instance/description")}"
-DECODE_ZONE="${DECODE_ZONE:-${PREFILL_ZONE}}"
 
 if [[ -z "${PREFILL_TPU_NAME}" || -z "${PREFILL_ZONE}" ]]; then
   echo "ERROR: Could not discover the Prefill TPU resource name or zone." >&2
   exit 1
 fi
-if [[ -z "${DECODE_TPU_NAME:-}" || -z "${DECODE_ZONE}" ]]; then
-  echo "ERROR: Set DECODE_TPU_NAME and, when necessary, DECODE_ZONE." >&2
-  exit 1
-fi
-if [[ "${PREFILL_TPU_NAME}" == "${DECODE_TPU_NAME}" &&
-      "${PREFILL_ZONE}" == "${DECODE_ZONE}" ]]; then
-  echo "ERROR: Prefill and Decode must be different TPU v7x-16 slices." >&2
-  exit 1
-fi
+
+# Decode always runs in the same zone as Prefill to keep the P/D connection
+# local. It is intentionally not configurable independently.
+readonly DECODE_ZONE="${PREFILL_ZONE}"
+
+select_decode_tpu() {
+  local name accelerator_type state tpu_vms
+  local -a candidates=()
+
+  if ! tpu_vms="$(
+    gcloud compute tpus tpu-vm list \
+      --zone "${PREFILL_ZONE}" \
+      --sort-by name \
+      --format='csv[no-heading](name,acceleratorType,state)'
+  )"; then
+    echo "ERROR: Could not list TPU VMs in zone ${PREFILL_ZONE}." >&2
+    return 1
+  fi
+
+  while IFS=, read -r name accelerator_type state; do
+    # `tpu-vm list` uses either v7x-16 or tpu7x-16 depending on the gcloud/API
+    # version. A READY TPU VM is available for this job; exclude Prefill itself.
+    if [[ "${name}" != "${PREFILL_TPU_NAME}" &&
+          "${state}" == "READY" &&
+          ( "${accelerator_type}" == *"v7x-16"* ||
+            "${accelerator_type}" == *"tpu7x-16"* ) ]]; then
+      candidates+=("${name}")
+    fi
+  done <<< "${tpu_vms}"
+
+  if (( ${#candidates[@]} == 0 )); then
+    echo "ERROR: No other READY TPU v7x-16 slice is available in zone ${PREFILL_ZONE}." >&2
+    return 1
+  fi
+
+  DECODE_TPU_NAME="${candidates[0]}"
+  echo "--- Selected Decode TPU ${DECODE_TPU_NAME} from ready v7x-16 slices in ${DECODE_ZONE}"
+}
+
+select_decode_tpu
 
 if [[ ! -f "${HOME}/.ssh/id_rsa" ]]; then
   echo "--- Generating an SSH key for cross-worker orchestration"
@@ -148,8 +179,10 @@ run_on_host() {
 
   local command
   printf -v command '%q ' "$@"
+  # Feeding the command to remote Bash avoids parsing it with the remote login
+  # shell, which may be /bin/sh and does not support all Bash quoting forms.
   # shellcheck disable=SC2029
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" "${command}"
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${host}" bash -s -- <<< "${command}"
 }
 
 DISCOVERED_ENDPOINTS=()

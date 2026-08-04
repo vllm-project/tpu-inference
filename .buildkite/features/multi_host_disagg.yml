@@ -17,18 +17,26 @@ steps:
     key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_CorrectnessTest"
     soft_fail: true
     agents:
-      queue: tpu_v7x_16_queue
-      hostname: tpu7x-16-ci-0-cicd-us-central1-c
-      # queue: default
-      # hostname: tpu7x-8-ci-16-cicd-us-central1-c
+      queue: tpu_v7x_8_queue
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       TEST_MODE: 2 # only run correctness test
-      DECODE_TPU_NAME: tpu7x-16-ci-bk-1-cicd-us-central1-c
-      DECODE_ZONE: us-central1-c
+    commands:
+      - |
+        .buildkite/e2e/run_multi_disagg.sh
+
+  - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation for tpu7x-16"
+    key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_tpu7x_16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v7x_16_queue
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+      TEST_MODE: 2 # only run correctness test
     commands:
       - |
         .buildkite/e2e/run_multi_disagg_2slices.sh
+
 
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host P/D disaggregation"
     key: "${TPU_VERSION:-tpu7x}_record_multi_host_disagg_CorrectnessTest"
