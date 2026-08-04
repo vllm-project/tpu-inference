@@ -18,7 +18,7 @@
         "INPUT_LEN": 2048,
         "OUTPUT_LEN": 6144,
         "PREFIX_LEN": 0,
-        "VLLM_ENGINE_READY_TIMEOUT_S": 5400
+        "VLLM_ENGINE_READY_TIMEOUT_S": 7200
       },
       "server_command_options": {
         "command_type": "vllm_serve",
@@ -50,7 +50,7 @@
           "backend": "vllm",
           "request-rate": "inf",
           "dataset-name": "random",
-          "num-prompts": 1000,
+          "num-prompts": 500,
           "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "random-input-len": 2048,
