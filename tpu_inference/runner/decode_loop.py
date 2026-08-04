@@ -45,18 +45,37 @@ def _with_step_dynamics(
     attn_metadata: AttentionMetadata | dict[str, AttentionMetadata],
     input_positions: jax.Array,
     seq_lens: jax.Array,
+    has_initial_state: jax.Array | None = None,
 ) -> AttentionMetadata | dict[str, AttentionMetadata]:
     """The same metadata (object or per-layer dict) with this decode step's
-    positions and seq_lens; every other field is loop-invariant."""
+    positions, seq_lens and (when given) has_initial_state; every other
+    field is loop-invariant.
+
+    has_initial_state must advance inside the fused loop: a request that
+    enters the loop with num_computed_tokens == 0 (a one-token prompt whose
+    prefill IS the loop's first step) has has_initial_state == 0 in the
+    template, and a loop-invariant 0 makes every recurrent layer re-zero
+    that row's state on EVERY step. State never accumulates while the
+    fed-back token advances, and greedy decode settles into a strict
+    two-token cycle. After a row runs one step it definitively owns state,
+    so the carry promotes its flag (see `_update_loop_state`).
+    """
+    extra = ({} if has_initial_state is None else {
+        "has_initial_state": has_initial_state
+    })
     if isinstance(attn_metadata, dict):
         return {
             name:
-            replace(group, input_positions=input_positions, seq_lens=seq_lens)
+            replace(group,
+                    input_positions=input_positions,
+                    seq_lens=seq_lens,
+                    **extra)
             for name, group in attn_metadata.items()
         }
     return replace(attn_metadata,
                    input_positions=input_positions,
-                   seq_lens=seq_lens)
+                   seq_lens=seq_lens,
+                   **extra)
 
 
 @functools.partial(
@@ -89,11 +108,13 @@ def _update_loop_state(
     active_mask: jax.Array,
     input_positions: jax.Array,
     seq_lens: jax.Array,
+    has_initial_state: jax.Array,
     eos_token_id: tuple[int, ...],
     padding_token_id: int,
     dp_size: int,
     pad_len: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array,
+           jax.Array]:
     eos_arr = jnp.atleast_1d(jnp.array(eos_token_id, dtype=jnp.int32))
     is_eos = jnp.any(next_tokens[:, None] == eos_arr[None, :], axis=-1)
     new_active_mask = jnp.logical_and(active_mask, jnp.logical_not(is_eos))
@@ -110,12 +131,22 @@ def _update_loop_state(
         padded_increment_2d = increment_2d[:, :seq_lens_2d.shape[1]]
     new_seq_lens = (seq_lens_2d + padded_increment_2d).ravel()
 
+    # A row that just ran a step owns real state now, whatever its flag was
+    # at loop entry (0 for a request whose first computed chunk happened
+    # inside the loop). Padding rows contribute increment 0 and keep their
+    # flag, so the null block is never claimed to hold state. Same padded
+    # request layout as seq_lens.
+    hi_2d = has_initial_state.reshape(dp_size, -1)
+    new_has_initial_state = jnp.maximum(
+        hi_2d, padded_increment_2d.astype(hi_2d.dtype)).ravel()
+
     # Compute the token to record in generated_tokens
     step_record_tokens = jnp.where(active_mask, next_tokens, padding_token_id)
 
     any_hit_eos = jnp.any(jnp.logical_and(active_mask, is_eos))
 
-    return new_active_mask, next_input_ids, new_positions, new_seq_lens, step_record_tokens, any_hit_eos
+    return (new_active_mask, next_input_ids, new_positions, new_seq_lens,
+            new_has_initial_state, step_record_tokens, any_hit_eos)
 
 
 @functools.partial(jax.jit, static_argnums=(1, ))
@@ -205,19 +236,29 @@ def _decode_core(
 
     shared_ref = _first_group_metadata(attn_template)
 
-    def _run_one_step(step_idx, ct, am, pos, sl, kvc):
+    def _run_one_step(step_idx, ct, am, pos, sl, hi, kvc):
         step_rng = step_rngs[step_idx]
-        attn_metadata = _with_step_dynamics(attn_template, pos, sl)
+        # Tie the weights to the step counter so nothing derived from them is
+        # loop-invariant. Without this, XLA's loop-invariant code motion
+        # hoists every MoE layer's quantized-expert dequantization staging
+        # out of the while loop, and the hoisted buffers are all live for
+        # the whole loop: HLO temporaries grow with the MoE layer count
+        # (~1 GiB per layer at production expert shards) instead of being
+        # reused layer-to-layer as the standalone step executable does. The
+        # barrier makes the dequant recompute per step — the same per-call
+        # cost the non-fused decode path already pays.
+        step_state, _ = jax.lax.optimization_barrier((state, step_idx))
+        attn_metadata = _with_step_dynamics(attn_template, pos, sl, hi)
         shared_attn_metadata = SharedAttentionMetadata(
             input_positions=pos,
             seq_lens=sl,
             query_start_loc=shared_ref.query_start_loc,
             request_distribution=shared_ref.request_distribution,
             mamba_state_indices=shared_ref.mamba_state_indices,
-            has_initial_state=shared_ref.has_initial_state,
+            has_initial_state=hi,
         )
         kvc, hidden_states, _, expert_indices_step = model_fn(
-            state,
+            step_state,
             kvc,
             ct,
             attn_metadata,
@@ -230,16 +271,18 @@ def _decode_core(
             is_last_rank,
             shared_attention_metadata=shared_attn_metadata,
         )
-        logits = compute_logits_fn(state, hidden_states, None)
+        logits = compute_logits_fn(step_state, hidden_states, None)
         logits = logits.astype(jnp.float32)
         next_tokens, processed_logits = sample_fn(step_rng, mesh, logits,
                                                   sampling_metadata)
         (new_active_mask, next_input_ids, new_positions, new_seq_lens,
-         step_record_tokens, any_hit_eos) = _update_loop_state(
+         new_has_initial_state, step_record_tokens,
+         any_hit_eos) = _update_loop_state(
              next_tokens,
              am,
              pos,
              sl,
+             hi,
              eos_token_id,
              padding_token_id,
              dp_size,
@@ -261,8 +304,9 @@ def _decode_core(
             lp_ranks_step = step_logprobs.selected_token_ranks
 
         return (next_input_ids, new_active_mask, new_positions, new_seq_lens,
-                kvc, step_record_tokens, expert_indices_step, lp_ids_step,
-                lp_val_step, lp_ranks_step, any_hit_eos)
+                new_has_initial_state, kvc, step_record_tokens,
+                expert_indices_step, lp_ids_step, lp_val_step, lp_ranks_step,
+                any_hit_eos)
 
     batch_size = current_tokens.shape[0]
     token_buffer = jnp.full((static_max_decode_steps, batch_size),
@@ -286,8 +330,9 @@ def _decode_core(
         selected_token_ranks_buffer = jnp.zeros(
             (static_max_decode_steps, batch_size), dtype=jnp.int32)
 
-    def _pack(i, ct, am, pos, sl, kvc, tb, eb, lp_ids, lp_val, lp_ranks, eos):
-        base = [i, ct, am, pos, sl, kvc, tb]
+    def _pack(i, ct, am, pos, sl, hi, kvc, tb, eb, lp_ids, lp_val, lp_ranks,
+              eos):
+        base = [i, ct, am, pos, sl, hi, kvc, tb]
         if has_experts:
             base.append(eb)
         if has_logprobs:
@@ -296,8 +341,8 @@ def _decode_core(
         return tuple(base)
 
     def _unpack(carry):
-        i, ct, am, pos, sl, kvc, tb = carry[:7]
-        idx = 7
+        i, ct, am, pos, sl, hi, kvc, tb = carry[:8]
+        idx = 8
         eb = None
         if has_experts:
             eb = carry[idx]
@@ -313,7 +358,8 @@ def _decode_core(
             idx += 3
 
         eos = carry[idx]
-        return i, ct, am, pos, sl, kvc, tb, eb, lp_ids, lp_val, lp_ranks, eos
+        return (i, ct, am, pos, sl, hi, kvc, tb, eb, lp_ids, lp_val, lp_ranks,
+                eos)
 
     def cond_fn(carry):
         i = carry[0]
@@ -328,11 +374,11 @@ def _decode_core(
         )
 
     def body_fn(carry):
-        (i, ct, am, pos, sl, kvc, tb, eb, lp_ids_buf, lp_val_buf, lp_ranks_buf,
-         eos_flag) = _unpack(carry)
-        (next_ct, new_mask, new_pos, new_sl, kvc, rec_tokens, experts,
+        (i, ct, am, pos, sl, hi, kvc, tb, eb, lp_ids_buf, lp_val_buf,
+         lp_ranks_buf, eos_flag) = _unpack(carry)
+        (next_ct, new_mask, new_pos, new_sl, new_hi, kvc, rec_tokens, experts,
          lp_ids_step, lp_val_step, lp_ranks_step,
-         hit) = _run_one_step(i, ct, am, pos, sl, kvc)
+         hit) = _run_one_step(i, ct, am, pos, sl, hi, kvc)
         tb = tb.at[i].set(rec_tokens)
         if has_experts:
             eb = eb.at[i].set(experts)
@@ -340,8 +386,8 @@ def _decode_core(
             lp_ids_buf = lp_ids_buf.at[i].set(lp_ids_step)
             lp_val_buf = lp_val_buf.at[i].set(lp_val_step)
             lp_ranks_buf = lp_ranks_buf.at[i].set(lp_ranks_step)
-        return _pack(i + 1, next_ct, new_mask, new_pos, new_sl, kvc, tb, eb,
-                     lp_ids_buf, lp_val_buf, lp_ranks_buf,
+        return _pack(i + 1, next_ct, new_mask, new_pos, new_sl, new_hi, kvc,
+                     tb, eb, lp_ids_buf, lp_val_buf, lp_ranks_buf,
                      jnp.logical_or(eos_flag, hit))
 
     init_carry = _pack(
@@ -350,6 +396,7 @@ def _decode_core(
         active_mask,
         input_positions,
         seq_lens,
+        shared_ref.has_initial_state,
         kv_caches,
         token_buffer,
         expert_buffer if has_experts else None,
@@ -359,7 +406,7 @@ def _decode_core(
         jnp.array(False),
     )
     final_carry = jax.lax.while_loop(cond_fn, body_fn, init_carry)
-    (step_idx_final, current_tokens, active_mask, positions, seq_lens,
+    (step_idx_final, current_tokens, active_mask, positions, seq_lens, _,
      kv_caches, token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
      lp_ranks_buffer, _) = _unpack(final_carry)
 
