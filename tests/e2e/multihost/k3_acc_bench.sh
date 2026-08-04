@@ -105,11 +105,26 @@ else
     --model local-completions \
     --model_args "model=${MODEL},base_url=${BASE}/v1/completions,num_concurrent=8,max_retries=2,timeout=600,tokenized_requests=False,tokenizer_backend=None" \
     --tasks gsm8k ${GSM8K_LIMIT_ARGS[@]+"${GSM8K_LIMIT_ARGS[@]}"} \
+    --log_samples --output_path /root/k3_gsm8k_samples \
     2>&1 | tee /root/k3_gsm8k.log
   acc_rc=${PIPESTATUS[0]}
   echo "[k3-acc] rc=${acc_rc} (124 means the cap killed a hang)"
   grep -E "strict-match|flexible-extract|exact_match" /root/k3_gsm8k.log \
     | tail -10 || true
+  # Surface a handful of raw generations so a collapse is diagnosable
+  # from the CI log (truncation vs garbage vs wrong-context answers).
+  python3 - << 'PYEOF' || true
+import glob, json
+for f in glob.glob('/root/k3_gsm8k_samples/**/*.jsonl', recursive=True)[:1]:
+    print(f'[k3-acc-samples] from {f}')
+    with open(f) as fh:
+        for i, line in enumerate(fh):
+            if i >= 5: break
+            d = json.loads(line)
+            resp = str(d.get('resps') or d.get('filtered_resps') or '')[:400]
+            tgt = str(d.get('target'))[:80]
+            print(f'[k3-acc-samples] target={tgt} resp={resp}')
+PYEOF
 fi
 
 run_bench() {
