@@ -13,13 +13,24 @@
 # limitations under the License.
 """The static decode-only selector (AttentionMetadata.decode_only_bucket).
 
-Two contracts:
+Three contracts:
 
-1. PARITY: on a decode-only batch, `decode_only_bucket=True` (single-token
-   path) and `False` (mixed/chunked path) must agree bit-for-bit through the
-   full KDA sublayer -- the runner may dispatch either executable shape.
+1. DISPATCH: the flag must actually reach `_kda_ragged_core` — the two
+   variants must trace DIFFERENT programs. This selector once died
+   silently at the `functools.partial` boundary (the keyword-only flag
+   defaulted False in the core), which made every "parity" run compare
+   the mixed path against itself: vacuously equal, runtime-dead split.
 
-2. MEMORY: with the selector, neither traced variant carries the other
+2. PARITY: on a decode-only batch, `decode_only_bucket=True` (single-token
+   path) and `False` (mixed/chunked path) must agree numerically through
+   the full KDA sublayer -- the runner may dispatch either executable
+   shape. NOT bit-for-bit: the two paths are different-but-equivalent op
+   orders (a one-step recurrence vs the chunked scan), so low-bit fp
+   drift is expected; measured divergence on this fixture is ~8e-9 abs on
+   the output and ~4e-9 on the recurrent state, and the bound asserted
+   here is 100x that.
+
+3. MEMORY: with the selector, neither traced variant carries the other
    branch, so the compiled executable's HLO temporaries stay bounded by ONE
    path's needs even when the state pool has hundreds of slots. The old
    `lax.cond` dispatch made XLA budget a pool-sized copy per KDA layer
@@ -68,7 +79,31 @@ def _state(num_slots):
                     recurrent=jnp.zeros((num_slots, H, K, K)))
 
 
-def test_decode_bucket_variants_agree_bitwise_on_a_decode_batch():
+def test_decode_flag_reaches_the_core():
+    """The two variants must trace DIFFERENT programs. Guards the exact
+    regression this selector shipped with: the flag silently dropped at the
+    core's functools.partial, making the split runtime-dead and every
+    parity comparison vacuous."""
+    sidx = jnp.array([1], jnp.int32)
+    common = dict(num_heads=H, head_dim=K, gate_lower_bound=-5.0)
+    args = (jnp.ones((1, HID), jnp.float32), _params(np.random.default_rng(0)),
+            _state(2), sidx, jnp.array([0, 1], jnp.int32),
+            jnp.array([1, 1, 1], jnp.int32), jnp.array([1], jnp.int32))
+    jaxpr_d = str(
+        jax.make_jaxpr(
+            functools.partial(kda_attention, decode_only_bucket=True,
+                              **common))(*args))
+    jaxpr_m = str(
+        jax.make_jaxpr(
+            functools.partial(kda_attention,
+                              decode_only_bucket=False,
+                              **common))(*args))
+    assert jaxpr_d != jaxpr_m, (
+        "decode_only_bucket=True and False traced identical programs; the "
+        "flag is not reaching _kda_ragged_core")
+
+
+def test_decode_bucket_variants_agree_on_a_decode_batch():
     rng = np.random.default_rng(3)
     params = _params(rng)
     sidx = jnp.array([1], jnp.int32)
@@ -80,6 +115,10 @@ def test_decode_bucket_variants_agree_bitwise_on_a_decode_batch():
                           jnp.array([0, 8], jnp.int32),
                           jnp.array([0, 0, 1], jnp.int32),
                           jnp.array([0], jnp.int32), **common)
+    st = [np.asarray(x) for x in st]
+
+    def fresh_state():
+        return KDAState(*(jnp.array(x) for x in st))
 
     x1 = jnp.asarray(rng.normal(size=(1, HID)), jnp.float32) * 0.2
     qsl = jnp.array([0, 1], jnp.int32)
@@ -87,7 +126,7 @@ def test_decode_bucket_variants_agree_bitwise_on_a_decode_batch():
     has_init = jnp.array([1], jnp.int32)
     st_d, o_d = kda_attention(x1,
                               params,
-                              KDAState(*map(jnp.array, st)),
+                              fresh_state(),
                               sidx,
                               qsl,
                               dist,
@@ -96,16 +135,26 @@ def test_decode_bucket_variants_agree_bitwise_on_a_decode_batch():
                               **common)
     st_m, o_m = kda_attention(x1,
                               params,
-                              KDAState(*map(jnp.array, st)),
+                              fresh_state(),
                               sidx,
                               qsl,
                               dist,
                               has_init,
                               decode_only_bucket=False,
                               **common)
-    np.testing.assert_array_equal(np.asarray(o_d), np.asarray(o_m))
-    for a, b in zip(st_d, st_m):
+    # Different-but-equivalent op orders: measured divergence ~8e-9 abs
+    # (output) / ~4e-9 (recurrent state) on this fixture; bound at 100x.
+    np.testing.assert_allclose(np.asarray(o_d),
+                               np.asarray(o_m),
+                               atol=1e-6,
+                               rtol=1e-5)
+    # Conv windows are computed by the same code in both variants.
+    for a, b in zip(st_d[:3], st_m[:3]):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    np.testing.assert_allclose(np.asarray(st_d.recurrent),
+                               np.asarray(st_m.recurrent),
+                               atol=1e-6,
+                               rtol=1e-5)
 
 
 @pytest.mark.parametrize("decode_only_bucket", [True, False])

@@ -399,7 +399,8 @@ def kda_attention(
                              head_dim=head_dim,
                              kernel_size=kernel_size,
                              gate_lower_bound=gate_lower_bound,
-                             chunk_size=chunk_size)
+                             chunk_size=chunk_size,
+                             decode_only_bucket=decode_only_bucket)
     if mesh is not None:
         in_specs, out_specs = _core_specs()
         core = jax.shard_map(core,
