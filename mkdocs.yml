@@ -69,6 +69,7 @@ nav:
     - 'Code Examples':
       - 'Multi Modal Inference': api_and_code_examples/multi_modal_inference.md
       - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md
+    - 'Out-of-Tree Usage': getting_started/out-of-tree.md
   - 'Developers Guides':
     - 'Contributing to vLLM TPU': developers_guide/contributing.md
     - 'Adding a New Model to CI': developers_guide/buildkite.md
