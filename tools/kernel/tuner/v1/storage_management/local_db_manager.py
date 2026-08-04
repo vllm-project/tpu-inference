@@ -392,3 +392,48 @@ class LocalDbManager(StorageManager):
         raise NotImplementedError(
             "Not implemented in LocalDbManager. This method is intended for SpannerStorageManager used in auto-tuning scenarios."
         )
+
+    def get_case_retries(self, case_set_id, run_id, case_id):
+        """Returns the number of times a case has been retried.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            run_id: Unique integer identifier for the run.
+            case_id: Unique integer identifier for the case.
+
+        Returns:
+            Number of times the case has been retried.
+        """
+        if self.dry_run:
+            return 0
+        table = self._read_table('RetryTable')
+        for row in table:
+            if (row['CaseSetId'] == case_set_id and row['RunId'] == run_id
+                    and row['CaseId'] == case_id):
+                return row.get('n_retried', 0)
+        return 0
+
+    def increment_case_retries(self, case_set_id, run_id, case_id):
+        """Increments the number of times a case has been retried.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            run_id: Unique integer identifier for the run.
+            case_id: Unique integer identifier for the case.
+        """
+        if self.dry_run:
+            return
+        table = self._read_table('RetryTable')
+        for row in table:
+            if (row['CaseSetId'] == case_set_id and row['RunId'] == run_id
+                    and row['CaseId'] == case_id):
+                row['n_retried'] += 1
+                self._write_table('RetryTable', table)
+                return
+        self._write_table(
+            'RetryTable', table + [{
+                "CaseSetId": case_set_id,
+                "RunId": run_id,
+                "CaseId": case_id,
+                "n_retried": 1
+            }])

@@ -330,8 +330,10 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                                 if isinstance(x, jax.Array) else x,
                                 input_cache),
                             chunk_prefill_size=None,  # not used inside
-                            decode_block_sizes=block_sizes if tuning_key.case=='decode' else None,
-                            prefill_block_sizes=block_sizes if tuning_key.case=='prefill' else None,
+                            decode_block_sizes=block_sizes
+                            if tuning_key.case == 'decode' else None,
+                            prefill_block_sizes=block_sizes
+                            if tuning_key.case == 'prefill' else None,
                             vmem_limit_bytes=
                             None,  # use default vmem limit from the wrapper
                         ))

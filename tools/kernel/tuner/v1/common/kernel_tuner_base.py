@@ -623,21 +623,37 @@ class KernelTunerBase(ABC):
                     continue
                 # unknown error
                 elif last_run_status == TuningStatus.SUCCESS:
-                    # if the last run was successful but current run failed with unknown error, we need to stop
-                    # processing and assert
-                    raise RuntimeError(
-                        f"Case {cid} failed during warmup with status: {status} after a previous successful run. This may indicate an issue with the kernel or the environment. Stopping further processing."
+                    # if the last run was successful but current run failed with unknown error, we don't want to process this anymore
+                    logger.critical(
+                        f"Case {cid} failed during warmup with status: {status} after a previous successful run. Skip this case and restart the tuning process."
                     )
+                    break
                 elif last_run_status == TuningStatus.FAILED_OOM:
                     # if the last run was OOM and current run failed with unknown error, we need to restart the
                     # tuning process because the OOM may have caused the unknown error. We can break here and let the next tuning job to retry.
                     logger.warning(
                         f"Case {cid} failed during warmup with status: {status} after a previous OOM run. This may indicate an issue with the kernel or the environment. Stopping further processing to allow retry."
                     )
-                    last_processed_case_id = cid - 1  # we want to retry this case after restart the tuning process
-                    results_buffer.pop(
-                    )  # remove the last failed case from the results buffer to allow retry
-                    break
+                    retried = self.storage_manager.get_case_retries(
+                        self.run_config.case_set_id, self.run_config.run_id,
+                        cid)
+                    if retried >= 2:
+                        logger.error(
+                            f"Case {cid} has been retried {retried} times. Exceeding the maximum number of retries. Skipping this case and restart the tuning process."
+                        )
+                        break
+                    else:
+                        logger.warning(
+                            f"Case {cid} has been retried {retried} times. Incrementing the number of retries and restarting the tuning process."
+                        )
+                        self.storage_manager.increment_case_retries(
+                            self.run_config.case_set_id,
+                            self.run_config.run_id, cid)
+                        # step back for retry
+                        last_processed_case_id = cid - 1  # we want to retry this case after restart the tuning process
+                        results_buffer.pop(
+                        )  # remove the last failed case from the results buffer to allow retry
+                        break
                 else:
                     raise RuntimeError(
                         f"Case {cid} failed during warmup with status: {status} after a previous run with status: {last_run_status}. This may indicate an issue with the kernel or the environment. Stopping further processing."
@@ -668,11 +684,8 @@ class KernelTunerBase(ABC):
                     continue
                 else:
                     logger.warning(
-                        f"Case {cid} failed during eval with status: {status} after a previous OOM run. This may indicate an issue with the kernel or the environment. Stopping further processing to allow retry."
+                        f"Case {cid} failed during eval with status: {status} after a previous successful warmup, skip this case and restart the tuning process."
                     )
-                    last_processed_case_id = cid - 1  # we want to retry this case after restart the tuning process
-                    results_buffer.pop(
-                    )  # remove the last failed case from the results buffer to allow retry
                     break
             last_run_status = TuningStatus.SUCCESS
 
@@ -722,6 +735,6 @@ class KernelTunerBase(ABC):
         logger.info(
             f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
-        # self._cleanup_xprof_dir()
+        self._cleanup_xprof_dir()
         next_to_process_id = last_processed_case_id + 1
         return next_to_process_id
