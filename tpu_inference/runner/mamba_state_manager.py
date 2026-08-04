@@ -38,6 +38,28 @@ MambaGroupStates = tuple[MambaLayerStates, ...]
 MambaStates = tuple[MambaGroupStates, ...]
 
 
+def _get_copy_bucket_sizes(max_num_reqs: int) -> tuple[int, ...]:
+    """Returns power-of-two copy buckets, including the exact upper bound."""
+    if max_num_reqs < 1:
+        raise ValueError("max_num_reqs must be positive.")
+
+    buckets = []
+    bucket_size = 1
+    while bucket_size < max_num_reqs:
+        buckets.append(bucket_size)
+        bucket_size *= 2
+    buckets.append(max_num_reqs)
+    return tuple(buckets)
+
+
+def _get_copy_bucket_size(num_copies: int, max_num_reqs: int) -> int:
+    """Returns the smallest configured bucket that holds ``num_copies``."""
+    if num_copies < 1 or num_copies > max_num_reqs:
+        raise ValueError(
+            f"num_copies must be in [1, {max_num_reqs}], got {num_copies}.")
+    return min(1 << (num_copies - 1).bit_length(), max_num_reqs)
+
+
 def _copy_state_blocks(
     states_by_group: MambaStates,
     src_block_ids_by_group: tuple[jax.Array, ...],
@@ -117,7 +139,7 @@ class MambaStateManager:
                 for gid in self.mamba_groups), first_spec.block_size)
 
     def precompile_copy_state_blocks(self) -> MambaStates | None:
-        """Compiles the fixed Mamba state-copy tree before serving."""
+        """Compiles every Mamba state-copy bucket before serving."""
         if not self.enabled:
             return None
 
@@ -128,7 +150,11 @@ class MambaStateManager:
             for gid in self.mamba_groups
         }
         copies_by_group[next(iter(self.mamba_groups))] = [(1, 1, 0)]
-        return self._apply_copies(copies_by_group)
+        copied_states = None
+        for bucket_size in _get_copy_bucket_sizes(self.runner.max_num_reqs):
+            copied_states = self._apply_copies(copies_by_group,
+                                               copy_bucket_size=bucket_size)
+        return copied_states
 
     def reset(self) -> None:
         self.mamba_state_idx.clear()
@@ -281,6 +307,8 @@ class MambaStateManager:
     def _apply_copies(
         self,
         copies_by_group: dict[int, list[tuple[int, int, int]]],
+        *,
+        copy_bucket_size: int | None = None,
     ) -> MambaStates | None:
         """Copies all Mamba layer states in one compiled invocation."""
         if not any(copies_by_group.values()):
@@ -295,14 +323,32 @@ class MambaStateManager:
         dst_block_ids_by_group: list[jax.Array] = []
         seen_cache_indices: set[int] = set()
 
+        max_num_copies = 0
+        for gid in self.mamba_groups:
+            num_copies = len(copies_by_group.get(gid, ()))
+            if num_copies > max_num_reqs:
+                raise RuntimeError(
+                    f"Mamba group {gid} requested {num_copies} state copies, "
+                    f"exceeding max_num_reqs={max_num_reqs}.")
+            max_num_copies = max(max_num_copies, num_copies)
+
+        if copy_bucket_size is None:
+            copy_bucket_size = _get_copy_bucket_size(max_num_copies,
+                                                     max_num_reqs)
+        elif copy_bucket_size not in _get_copy_bucket_sizes(max_num_reqs):
+            raise ValueError(
+                f"Unsupported Mamba copy bucket {copy_bucket_size}; expected "
+                f"one of {_get_copy_bucket_sizes(max_num_reqs)}.")
+        if copy_bucket_size < max_num_copies:
+            raise ValueError(
+                f"Mamba copy bucket {copy_bucket_size} cannot hold "
+                f"{max_num_copies} copies.")
+
         # Include every configured group so the donated pytree stays fixed when
-        # only a subset of groups has copies in a given step.
+        # only a subset of groups has copies in a given step. Every group uses
+        # the same bucket to avoid compiling combinations of group-local shapes.
         for gid in self.mamba_groups:
             copies = copies_by_group.get(gid, ())
-            if len(copies) > max_num_reqs:
-                raise RuntimeError(
-                    f"Mamba group {gid} requested {len(copies)} state copies, "
-                    f"exceeding max_num_reqs={max_num_reqs}.")
             group = self.kv_cache_config.kv_cache_groups[gid]
             missing_layers = [
                 layer_name for layer_name in group.layer_names
@@ -354,8 +400,8 @@ class MambaStateManager:
                     f"{first_states[0].shape[0]} % {dp_size} != 0.")
             local_num_blocks = first_states[0].shape[0] // dp_size
             # Real copies exclude block 0, so trailing 0->0 entries are no-ops.
-            src_block_ids = np.zeros(max_num_reqs, dtype=np.int32)
-            dst_block_ids = np.zeros(max_num_reqs, dtype=np.int32)
+            src_block_ids = np.zeros(copy_bucket_size, dtype=np.int32)
+            dst_block_ids = np.zeros(copy_bucket_size, dtype=np.int32)
             for index, (src, dst, dp_rank) in enumerate(copies):
                 if src >= local_num_blocks or dst >= local_num_blocks:
                     raise IndexError(

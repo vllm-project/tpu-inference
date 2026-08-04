@@ -146,7 +146,36 @@ class TestMambaStateManager:
         assert manager.get_current_state_block_id(1, "request-0") == 4
         assert manager.mamba_state_idx["request-0"] == 2
 
-    def test_precompile_copy_state_blocks_warms_runtime_shape(self, manager):
+    @pytest.mark.parametrize(
+        ("max_num_reqs", "expected"),
+        [
+            (1, (1, )),
+            (6, (1, 2, 4, 6)),
+            (8, (1, 2, 4, 8)),
+        ],
+    )
+    def test_copy_bucket_sizes_include_exact_upper_bound(
+            self, max_num_reqs, expected):
+        assert (mamba_state_manager_module._get_copy_bucket_sizes(max_num_reqs)
+                == expected)
+
+    @pytest.mark.parametrize(
+        ("num_copies", "max_num_reqs", "expected"),
+        [
+            (1, 64, 1),
+            (2, 64, 2),
+            (3, 64, 4),
+            (33, 64, 64),
+            (5, 6, 6),
+        ],
+    )
+    def test_copy_bucket_selection_rounds_up(self, num_copies, max_num_reqs,
+                                             expected):
+        assert (mamba_state_manager_module._get_copy_bucket_size(
+            num_copies, max_num_reqs) == expected)
+
+    def test_precompile_copy_state_blocks_warms_all_runtime_buckets(
+            self, manager):
         old_caches = tuple(
             tuple(np.asarray(state).copy() for state in states)
             for states in manager.runner.kv_caches)
@@ -163,7 +192,9 @@ class TestMambaStateManager:
                 np.testing.assert_array_equal(new_state, old_state)
 
         with ForbidCompile():
-            manager._apply_copies({1: [(3, 4, 0)]})
+            for num_copies in range(1, manager.runner.max_num_reqs + 1):
+                copies = [(1, dst, 0) for dst in range(1, num_copies + 1)]
+                manager._apply_copies({1: copies})
 
         for new_states, old_states in zip(manager.runner.kv_caches,
                                           old_caches,
@@ -171,7 +202,29 @@ class TestMambaStateManager:
             for new_state, old_state in zip(new_states,
                                             old_states,
                                             strict=True):
-                np.testing.assert_array_equal(new_state[4], old_state[3])
+                np.testing.assert_array_equal(new_state[4], old_state[1])
+
+    def test_copy_uses_one_bucket_across_all_groups(self, manager):
+        second_gid = self._add_mamba_group(manager, "gdn.2", 2)
+        manager.runner.kv_caches.append(
+            tuple(state + 1000 for state in manager.runner.kv_caches[0]))
+        index_shapes = []
+
+        def record_copy_shapes(states_by_group, src_ids_by_group,
+                               dst_ids_by_group):
+            index_shapes.append((
+                tuple(ids.shape[0] for ids in src_ids_by_group),
+                tuple(ids.shape[0] for ids in dst_ids_by_group),
+            ))
+            return states_by_group
+
+        manager._copy_state_blocks_fn = record_copy_shapes
+        manager._apply_copies({
+            1: [(1, 2, 0), (1, 3, 0), (1, 4, 0)],
+            second_gid: [(1, 2, 0)],
+        })
+
+        assert index_shapes == [((4, 4), (4, 4))]
 
     def test_preprocess_keeps_current_block_without_copy(
             self, manager, monkeypatch):
