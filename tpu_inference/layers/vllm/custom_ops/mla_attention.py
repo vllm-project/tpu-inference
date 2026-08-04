@@ -29,12 +29,30 @@ from vllm.model_executor.layers.mla import (MLAModules,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import AttentionType
 
+import tpu_inference.layers.vllm.custom_ops.sparse_attn_indexer  # noqa: F401
 from tpu_inference import utils
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+
+# Patch torchax.tensor.Tensor.type_as to handle View objects without _elem
+_orig_type_as = getattr(torchax.tensor.Tensor, "type_as", None)
+if _orig_type_as is not None:
+
+    def _safe_type_as(self, other):
+        target_dtype = getattr(other, "dtype", None)
+        if target_dtype is None and hasattr(other, "_elem"):
+            target_dtype = other._elem.dtype
+        if hasattr(self, "_elem") and target_dtype is not None:
+            if isinstance(target_dtype, torch.dtype):
+                target_dtype = utils.to_jax_dtype(target_dtype)
+            self._elem = self._elem.astype(target_dtype)
+            return self
+        return self.to(target_dtype)
+
+    torchax.tensor.Tensor.type_as = _safe_type_as
 
 
 # Provides a no-op implementation for upstream MLA prefill backend.
@@ -135,9 +153,6 @@ class VllmMLAAttention(MLAAttention):
                     "'.scheme.linear_config.mesh' on the kv_b_proj layer.")
 
             sharding = NamedSharding(mesh, P(ShardingAxisName.ATTN_HEAD, ))
-            # Upstream MLA registers W_UK_T/W_UV as nn.Parameters, so the
-            # intermediate JAX values cannot be assigned to the attributes
-            # directly; stage them in locals and assign Parameters at the end.
             w_uk_t, w_uk_t_scale = quantize_tensor(
                 self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
             w_uk_t = torch_view(general_device_put(w_uk_t, sharding))
@@ -150,6 +165,15 @@ class VllmMLAAttention(MLAAttention):
             w_uv = torch_view(general_device_put(w_uv, sharding))
             w_uv_scale = torch_view(
                 general_device_put(jnp.expand_dims(w_uv_scale, 0), sharding))
+
+            if hasattr(self, "W_UK_T"):
+                del self.W_UK_T
+            if hasattr(self, "W_UK_T_scale"):
+                del self.W_UK_T_scale
+            if hasattr(self, "W_UV"):
+                del self.W_UV
+            if hasattr(self, "W_UV_scale"):
+                del self.W_UV_scale
 
             self.W_UK_T = Parameter(w_uk_t, requires_grad=False)
             self.W_UK_T_scale = Parameter(w_uk_t_scale, requires_grad=False)
@@ -223,6 +247,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         prefix: str = "",
         skip_topk: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
+        **kwargs,
     ) -> None:
         torch.nn.Module.__init__(self)
 
@@ -317,9 +342,10 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
+        topk_indices = None
         if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(hidden_states, q_c, positions,
-                                         self.indexer_rope_emb)
+            topk_indices = self.indexer(hidden_states, q_c, positions,
+                                        self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q_nope *= llama_4_scaling
@@ -331,6 +357,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             k_pe,
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim),
+            topk_indices=topk_indices,
         )
 
         return self.o_proj(attn_out)[0]

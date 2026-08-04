@@ -64,6 +64,67 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+def _apply_fp8_utils_tpu_fallback() -> None:
+    """Wraps upstream vLLM fp8_utils to use PyTorch vectorization on TPU."""
+    try:
+        import functools
+
+        import vllm.model_executor.layers.quantization.utils.fp8_utils as fp8_utils
+
+        def _is_tpu_platform() -> bool:
+            try:
+                from vllm.platforms import current_platform
+
+                return current_platform.device_type == "tpu" or not (
+                    current_platform.is_cuda_alike()
+                    or current_platform.is_xpu())
+            except Exception:
+                return True
+
+        def _tpu_per_token_group_quant_fp8(
+            x: torch.Tensor,
+            group_size: int,
+            eps: float = 1e-10,
+            dtype: torch.dtype | None = None,
+            column_major_scales: bool = False,
+            use_ue8m0: bool | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            fp8_max = torch.finfo(dtype or torch.float8_e4m3fn).max
+            x_reshaped = x.view(-1, group_size)
+            amax = torch.amax(torch.abs(x_reshaped), dim=-1,
+                              keepdim=True).clamp(min=eps)
+            x_s = amax / fp8_max
+            x_q = (x_reshaped / x_s).to(dtype
+                                        or torch.float8_e4m3fn).view_as(x)
+            if not column_major_scales:
+                x_s = x_s.view(x.shape[:-1] + (x.shape[-1] // group_size, ))
+            else:
+                x_s = x_s.view(x.shape[0], x.shape[1] // group_size)
+            return x_q, x_s
+
+        def _wrap_if_tpu(fn):
+
+            @functools.wraps(fn)
+            def wrapped(*args, **kwargs):
+                if _is_tpu_platform():
+                    return _tpu_per_token_group_quant_fp8(*args, **kwargs)
+                return fn(*args, **kwargs)
+
+            return wrapped
+
+        fp8_utils.per_token_group_quant_fp8 = _wrap_if_tpu(
+            fp8_utils.per_token_group_quant_fp8)
+        fp8_utils.silu_mul_per_token_group_quant_fp8_colmajor = _wrap_if_tpu(
+            fp8_utils.silu_mul_per_token_group_quant_fp8_colmajor)
+        fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm = _wrap_if_tpu(
+            fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm)
+    except ImportError:
+        pass
+
+
+_apply_fp8_utils_tpu_fallback()
+
+
 # TODO: Use custom op with overriding weight loading class so we will have a better
 # and cleaner interface.
 def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:

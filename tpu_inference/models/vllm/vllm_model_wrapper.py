@@ -13,9 +13,10 @@
 # limitations under the License.
 
 import copy
+import functools
 import time
 from collections.abc import Sequence
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from functools import partial
 from typing import Any, List, Optional, Tuple
 from unittest.mock import patch
@@ -72,6 +73,25 @@ from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
 logger = init_logger(__name__)
+
+
+@contextmanager
+def _tpu_safe_vllm_model_load():
+    orig_empty = torch.empty
+
+    @functools.wraps(orig_empty)
+    def wrapped_empty(*args, **kwargs):
+        dev = kwargs.get("device")
+        if dev is not None and str(dev) == "tpu":
+            kwargs["device"] = "cpu"
+        elif len(args) > 0 and str(args[-1]) == "tpu":
+            args = list(args)
+            args[-1] = "cpu"
+            args = tuple(args)
+        return orig_empty(*args, **kwargs)
+
+    with patch.object(torch, "empty", wrapped_empty):
+        yield
 
 
 class _VllmRunner(torch.nn.Module):
@@ -208,8 +228,8 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
-        with load_context, jax_context, set_current_vllm_config(
-                self.vllm_config):
+        with load_context, jax_context, _tpu_safe_vllm_model_load(
+        ), set_current_vllm_config(self.vllm_config):
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)

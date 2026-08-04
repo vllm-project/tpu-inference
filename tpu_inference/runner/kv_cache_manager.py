@@ -63,10 +63,21 @@ DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
-    return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
-        attn_module, DeepseekV4SWACache) or isinstance(
-            attn_module, DeepseekV4Attention) or isinstance(
-                attn_module, CompressorStateCache)
+    return attn_module.__class__.__name__ in (
+        "DeepseekV32IndexerCache",
+        "DeepseekV4IndexerCache",
+        "DeepseekV4SWACache",
+        "DeepseekV4Attention",
+        "CompressorStateCache",
+    ) or isinstance(
+        attn_module,
+        (
+            DeepseekV4IndexerCache,
+            DeepseekV4SWACache,
+            DeepseekV4Attention,
+            CompressorStateCache,
+        ),
+    )
 
 
 def is_ds_v4(vllm_config):
@@ -637,7 +648,8 @@ class KVCacheManager:
                     attn_module.sliding_window = None
 
                 if (kv_tgt_layer :=
-                        attn_module.kv_sharing_target_layer_name) is not None:
+                        getattr(attn_module, "kv_sharing_target_layer_name",
+                                None)) is not None:
                     # The layer doesn't need its own KV cache and will use that of
                     # the target layer. We skip creating a KVCacheSpec for it, so
                     # that KV cache management logic will act as this layer does
