@@ -108,7 +108,7 @@ _USE_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
 )
 
 _N_BAYESIAN_TRIALS = flags.DEFINE_integer(
-    'n_bayesian_trials', 100,
+    'n_bayesian_trials', None,
     'Number of Bayesian optimization trials to run per tuning key bucket. '
     'Overrides default if specified via flag or KERNEL_TUNING_N_BAYESIAN_TRIALS env var.'
 )

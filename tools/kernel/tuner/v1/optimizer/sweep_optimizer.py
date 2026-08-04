@@ -119,6 +119,10 @@ class SweepOptimizer(TuningOptimizer):
                     logger.info(
                         f'Case {cid} average latency is {average_latency_us}us from {source}'
                     )
+            if bucket_fully_processed:
+                tuner.storage_manager.mark_bucket_completed(
+                    tuner.run_config.case_set_id, tuner.run_config.run_id,
+                    bucket_id)
         except Exception as e:
             logger.error(
                 f"Error in sweeping for CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, Bucket {bucket_id}: {e}",
@@ -131,10 +135,6 @@ class SweepOptimizer(TuningOptimizer):
             tuner.storage_manager.add_bucket_processed_time_us(
                 tuner.run_config.case_set_id, tuner.run_config.run_id,
                 bucket_id, bucket_total_time_us)
-            if bucket_fully_processed:
-                tuner.storage_manager.mark_bucket_completed(
-                    tuner.run_config.case_set_id, tuner.run_config.run_id,
-                    bucket_id)
             logger.info(
                 f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
             )

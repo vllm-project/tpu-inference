@@ -104,7 +104,7 @@ class TunerConfig:
     n_bayesian_trials: int = 100
     # Minimum number of total cases for a tuning key search space required to use Bayesian Optimization.
     # If the search space has fewer cases than min_cases_for_bayesian, BO falls back to full sweep search.
-    min_cases_for_bayesian: int = 0
+    min_cases_for_bayesian: int = 200
     # Early stopping patience (number of consecutive trials without min_delta_ratio relative improvement).
     # None by default (early stopping disabled unless explicitly specified).
     bayesian_early_stopping_patience: Optional[int] = None

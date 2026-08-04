@@ -96,19 +96,7 @@ class BayesianOptimizer(TuningOptimizer):
 
         tuner = self.tuner
         worker_id = tuner.worker_id
-        bucket_id = begin_case_id
 
-        logger.info(
-            f"Worker [{worker_id}] Starting Bayesian optimization for "
-            f"CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, "
-            f"Bucket begin={begin_case_id} end={end_case_id}.")
-        tuner.storage_manager.mark_bucket_in_progress(
-            tuner.run_config.case_set_id, tuner.run_config.run_id, bucket_id)
-
-        tracker = ProcessedCasesTracker(
-            tuner.storage_manager.get_already_processed_ids(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                begin_case_id, end_case_id))
         all_configs = tuner.storage_manager.get_bucket_configs(
             tuner.run_config.case_set_id, begin_case_id, end_case_id)
 
@@ -116,6 +104,7 @@ class BayesianOptimizer(TuningOptimizer):
             logger.warning(
                 f"No configs found for [{begin_case_id}, {end_case_id}). "
                 "Nothing to optimize.")
+            bucket_id = begin_case_id
             tuner.storage_manager.mark_bucket_completed(
                 tuner.run_config.case_set_id, tuner.run_config.run_id,
                 bucket_id)
@@ -138,6 +127,19 @@ class BayesianOptimizer(TuningOptimizer):
                 SweepOptimizer
             SweepOptimizer(tuner).measure_latency(begin_case_id, end_case_id)
             return
+
+        # inital bucket tuning status
+        bucket_id = begin_case_id
+        logger.info(
+            f"Worker [{worker_id}] Starting Bayesian optimization for "
+            f"CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, "
+            f"Bucket begin={begin_case_id} end={end_case_id}.")
+        tuner.storage_manager.mark_bucket_in_progress(
+            tuner.run_config.case_set_id, tuner.run_config.run_id, bucket_id)
+        tracker = ProcessedCasesTracker(
+            tuner.storage_manager.get_already_processed_ids(
+                tuner.run_config.case_set_id, tuner.run_config.run_id,
+                begin_case_id, end_case_id))
 
         params_to_case_id: dict[TunableParams, int] = {}
         for cid, (_, _, case_kv) in all_configs.items():
@@ -268,6 +270,9 @@ class BayesianOptimizer(TuningOptimizer):
                     n_trials=1,
                     callbacks=callbacks,
                 )
+            tuner.storage_manager.mark_bucket_completed(
+                tuner.run_config.case_set_id, tuner.run_config.run_id,
+                bucket_id)
         except Exception as e:
             logger.error(
                 f"Error in Bayesian optimization for CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, Bucket {bucket_id}: {e}",
@@ -282,9 +287,6 @@ class BayesianOptimizer(TuningOptimizer):
             tuner.storage_manager.add_bucket_processed_time_us(
                 tuner.run_config.case_set_id, tuner.run_config.run_id,
                 bucket_id, bucket_total_time_us)
-            tuner.storage_manager.mark_bucket_completed(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                bucket_id)
 
         completed_trials = [
             t for t in study.trials
