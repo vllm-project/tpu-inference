@@ -80,13 +80,20 @@ For TPU pricing information, see [Cloud TPU pricing](https://cloud.google.com/tp
 
 ## Provisioning Cloud TPUs
 
-You can provision Cloud TPUs using the [Cloud TPU API](https://cloud.google.com/tpu/docs/reference/rest)
-or the [queued resources](https://cloud.google.com/tpu/docs/queued-resources)
-API. This section shows how to create TPUs using the queued resource API.
+Google Cloud supports two primary APIs for provisioning TPUs:
 
-### Provision a Cloud TPU with the queued resource API
+- **[Compute Engine API](https://cloud.google.com/tpu/docs/tpus-in-compute-engine) (`gcloud compute instances create`)**: Recommended for modern TPU generations starting with **TPU v6e (Trillium)** and **TPU v5p**.
+- **[Cloud TPU API](https://cloud.google.com/tpu/docs/queued-resources) (`gcloud alpha compute tpus queued-resources create`)**: Legacy API used for earlier generations like **TPU v5e**. Note that the Cloud TPU API is no longer under active development.
 
-Select your desired TPU hardware and number of chips to generate the exact provisioning command. Be sure to replace the placeholder variables (like `PROJECT_ID` and `SERVICE_ACCOUNT`) with your own values before running.
+!!! note "TPU v7x (Ironwood)"
+    TPU v7x (Ironwood) is in preview status and is provisioned via **Google Kubernetes Engine (GKE)** rather than standalone on-demand VM commands. Note that TPU v7x does not support Flex-start (DWS). For v7x provisioning and cluster orchestration, see [About TPUs in GKE](https://cloud.google.com/tpu/docs/tpus-in-gke) and the official [TPU v7x documentation](https://cloud.google.com/tpu/docs/tpu7x).
+
+You can also choose between two capacity models:
+
+- **Standard (On-Demand)**: Immediate allocation at standard pay-as-you-go rates.
+- **Flex-start (DWS)**: Discounted capacity via Dynamic Workload Scheduler (DWS) that runs uninterrupted for up to 7 days. Note that Flex-start is supported on **TPU v5e**, **TPU v5p**, and **TPU v6e** (**TPU v7x**, as well as older generations like **v3** and **v4**, do not support Flex-start). For more details, see [About Flex-start VMs](https://cloud.google.com/compute/docs/instances/about-flex-start-vms) and [DWS Pricing](https://cloud.google.com/products/dws/pricing#flex-start-tpu-vm-pricing).
+
+Select your desired TPU hardware, number of chips, and capacity model to generate the exact provisioning command. Be sure to replace placeholder variables (like `PROJECT_ID` and `SERVICE_ACCOUNT`) with your own values before running.
 
 <div class="command-generator-container" id="prov-generator">
   <div class="cg-options-group">
@@ -107,6 +114,11 @@ Select your desired TPU hardware and number of chips to generate the exact provi
     <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_chips" data-val="32">32</button>
     <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_chips" data-val="64">64</button>
   </div>
+  <div class="cg-options-group">
+    <span class="cg-label">Model</span>
+    <button class="cg-btn active" role="button" aria-pressed="true" data-group="prov_model" data-val="standard">Standard</button>
+    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_model" data-val="flex_start">Flex-start (DWS)</button>
+  </div>
   
   <div id="prov-output-instructions" class="cg-instructions"></div>
   <div class="cg-output-container">
@@ -114,14 +126,44 @@ Select your desired TPU hardware and number of chips to generate the exact provi
   </div>
 </div>
 
-Connect to your TPU VM using SSH:
+| Parameter | Description |
+|-----------|-------------|
+| `PROJECT_ID` | Your Google Cloud project ID. |
+| `ZONE` | The Google Cloud zone where you have TPU quota (e.g., `us-east5-a`, `europe-west4-a`, `us-central2-b`). See [TPU regions and zones](https://cloud.google.com/tpu/docs/regions-zones) for availability. |
+| `SERVICE_ACCOUNT` | The email address for your service account, found in the Cloud Console under IAM Service Accounts (e.g., `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`). Required for legacy Cloud TPU API calls. |
+| `RUNTIME_VERSION` | Automatically populated by the generator above based on your selected TPU hardware generation. |
 
-```bash
-gcloud compute tpus tpu-vm ssh my-tpu-name --project PROJECT_ID --zone ZONE
-```
+### Connecting and Checking Status
 
-!!! note
-    When configuring `RUNTIME_VERSION` ("TPU software version") for your TPU, ensure it matches the TPU generation you've selected by referencing the [TPU VM images] compatibility matrix. Using an incompatible version may prevent vLLM from running correctly.
+**Connect to your TPU VM using SSH**:
+
+- **For GCE VM Instances (TPU v6e, v5p)**:
+
+    ```bash
+    gcloud compute ssh my-tpu-vm --zone ZONE
+    ```
+
+- **For Legacy TPU VMs (TPU v5e, v4, v3)**:
+
+    ```bash
+    gcloud compute tpus tpu-vm ssh my-tpu-name --project PROJECT_ID --zone ZONE
+    ```
+
+**Check Provisioning Status**:
+
+To check whether your TPU VM or Flex-start request has been allocated and is running:
+
+- **For GCE VM Instances (TPU v6e, v5p)**:
+
+    ```bash
+    gcloud compute instances describe my-tpu-vm --zone ZONE
+    ```
+
+- **For Queued Resources (TPU v5e, v4, v3)**:
+
+    ```bash
+    gcloud alpha compute tpus queued-resources describe my-queued-resource --zone ZONE
+    ```
 
 [TPU versions]: https://cloud.google.com/tpu/docs/runtimes
 [TPU VM images]: https://cloud.google.com/tpu/docs/runtimes

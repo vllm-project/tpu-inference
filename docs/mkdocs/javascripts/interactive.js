@@ -161,14 +161,6 @@ function updateProvisionGenerator() {
     const containerEl = document.querySelector('#prov-generator .cg-output-container');
     
     if (cmdEl && instEl && data) {
-        if (data.is_gce_only) {
-            containerEl.style.display = 'none';
-            instEl.innerHTML = data.inst;
-            return;
-        }
-
-        containerEl.style.display = 'block';
-
         // Grey out invalid chip counts for this hardware
         if (data.valid_chips) {
             document.querySelectorAll('#prov-generator .cg-btn[data-group="prov_chips"]').forEach(btn => {
@@ -214,6 +206,14 @@ function updateProvisionGenerator() {
                 }
             }
         }
+
+        if (data.is_gce_only) {
+            containerEl.style.display = 'none';
+            instEl.innerHTML = data.inst;
+            return;
+        }
+
+        containerEl.style.display = 'block';
 
         if (hw === 'v6e' || hw === 'v5p') {
             const machineType = hw === 'v6e' ? `ct6e-standard-${chips}t` : `ct5p-hightpu-${chips}t`;
