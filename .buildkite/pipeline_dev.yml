@@ -31,30 +31,29 @@ steps:
 
   # -----------------------------------------------------------------
   # DEV ONLY (carries the env-gated platform-check downgrade).
-  # Kimi-K3 attempt 13: the perf series + sharded expert streaming, on
+  # Kimi-K3 attempt 13g: condfix + podfix + loop fixes, pool UNPINNED,
   # 4 hosts, DP attention OFF, experts split expert=4 x model=8 = 32.
   #
-  # Deltas vs the attempt-12 recipe that served:
-  #   * K3_SHARDED_EXPERT_STREAMING=1 -- each host streams only the
-  #     experts its own devices keep (~1/4 of the ~1.4 TB of expert
-  #     bytes; the [sharded-stream] log line on each host reports the
-  #     exact per-host expert count and bytes skipped). This is the pod
-  #     payoff measurement for the filtered read.
-  #   * enable_continue_decode=true -- the fused decode loop, now able
-  #     to run hybrid (multi-kv-group) flax_nnx models.
-  #   * --max-num-seqs 8 -> 64 and --max-num-batched-tokens 512 -> 2048,
-  #     with NO --num-gpu-blocks-override: the decode-branch fix sizes
-  #     per-token state gathers by slot count instead of token bucket,
-  #     which is what killed this exact config before; with dp=1 the top
-  #     token bucket is 2048 and its compile temporaries measured
-  #     ~1.4 GiB, so the pool can be left to size itself at util 0.8.
-  #   * bench phases: BS=1 8k/1k decode rate (3 prompts), then the 2x2
-  #     matrix {1k/1k, 8k/1k} x {conc 8/32 prompts, conc 64/128
-  #     prompts}, each capped 60 min. NO gsm8k here (--skip-acc): the
-  #     accuracy run for this code is covered separately.
+  # Deltas vs attempt 13f (778, which cleared the backbone unpinned but
+  # died compiling the fused-loop executable at 95.45G):
+  #   * enable_continue_decode=false: the loop's remaining compile-temp
+  #     term (LICM-hoisted MoE dequant staging, mitigated but not
+  #     eliminated) is a memory risk at pod layer count; the loop
+  #     returns once the KDA decode-only branch fix removes the packing
+  #     scratch. The loop correctness fixes (has_initial_state carried
+  #     per step, per-step weight pinning, flat step trace) ride along.
+  #   * --model-loader-extra-config concurrency=64: first tuning of the
+  #     runai streamer (default concurrency measured ~85 MB/s/host on
+  #     778's sharded read) — load-time A/B vs 778 comes free.
+  #   * Unpinned pool per the per-device sizing fix: expect the
+  #     compact-mamba split ~421 attn blocks / ~65 mamba slots and
+  #     backbone precompile through all buckets as in 778.
+  #   * Full phases: gsm8k full (210-min cap; post-conv-fix score),
+  #     BS=1 8k/1k, matrix {1k/1k, 8k/1k} x {conc 8, conc 64} — the
+  #     conc-64 cells get real KV capacity for the first time.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13: perf series + sharded streaming"
-    key: tpu7x_k3_attempt13
+  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13g: podfix + loop correctness fixes, loop off, unpinned pool, tuned streamer"
+    key: tpu7x_k3_attempt13g
     timeout_in_minutes: 420
     env:
       TPU_VERSION: "tpu7x"
@@ -85,14 +84,15 @@ steps:
             --trust-remote-code \
             --max-model-len 10240 \
             --max-num-seqs 64 \
-            --max-num-batched-tokens 2048 \
+            --max-num-batched-tokens 512 \
             --no-async-scheduling \
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
             --gpu-memory-utilization 0.8 \
-            --additional-config '{\"enable_continue_decode\":true,\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
+            --model-loader-extra-config '{\"concurrency\":64}' \
+            --additional-config '{\"enable_continue_decode\":false,\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
           "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
             --concurrency 4 \
             --long-tokens 256 \
             --needle-tokens 8000 \
-          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --skip-acc --bs1-bench --matrix-bench"
+          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --full-gsm8k --bs1-bench --matrix-bench"
