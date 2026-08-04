@@ -254,20 +254,19 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         # tunable_params=TunableParams(bq_sz=1, bq_c_sz=1, bkv_sz=1280, batch_size=2, n_buffer=3)
         seen_keys: set[TuningKey] = set()
         unique_keys: list[TuningKey] = []
+        cases: list[TuningCase] = []
         for case in tuning_case_logger.get_logged_tuning_cases():
             if (  #case.tuning_key.total_q_tokens == 128
                     # and
                     case.tuning_key.case == 'decode'
                     and case.tuning_key not in seen_keys
-                    # and
-                    # case.tuning_key.sliding_window is None
-                    # and
-                    # case.tuning_key.total_q_tokens == 8192
+                    # and case.tuning_key.sliding_window == 1024
+                    # and case.tuning_key.total_q_tokens == 16384
             ):
                 seen_keys.add(case.tuning_key)
                 unique_keys.append(case.tuning_key)
+                cases.append(case)
         # Build the full Cartesian product of the search space for every key.
-        cases: list[TuningCase] = []
         for tuning_key in unique_keys:
             space = self.get_search_space(tuning_key)
             param_names = list(space.keys())
@@ -276,7 +275,6 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                     TuningCase(tuning_key=tuning_key,
                                tunable_params=TunableParams(
                                    **dict(zip(param_names, combo)))))
-        cases = cases
         logger.info(f"Generated {len(cases)} tuning cases from log file.")
         return cases
 
@@ -320,7 +318,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             tunable_params: TunableParams,
             iters: int = 1) -> tuple[TuningStatus, float, float]:
         input_cache = self.generate_inputs(tuning_key)
-        prefill_block_sizes = tunable_params.to_block_sizes()
+        block_sizes = tunable_params.to_block_sizes()
         try:
             start_ns = time.perf_counter_ns()
             for _ in range(iters):
@@ -332,8 +330,8 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                                 if isinstance(x, jax.Array) else x,
                                 input_cache),
                             chunk_prefill_size=None,  # not used inside
-                            decode_block_sizes=None,
-                            prefill_block_sizes=prefill_block_sizes,
+                            decode_block_sizes=block_sizes if tuning_key.case=='decode' else None,
+                            prefill_block_sizes=block_sizes if tuning_key.case=='prefill' else None,
                             vmem_limit_bytes=
                             None,  # use default vmem limit from the wrapper
                         ))

@@ -722,6 +722,6 @@ class KernelTunerBase(ABC):
         logger.info(
             f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
-        self._cleanup_xprof_dir()
+        # self._cleanup_xprof_dir()
         next_to_process_id = last_processed_case_id + 1
         return next_to_process_id
