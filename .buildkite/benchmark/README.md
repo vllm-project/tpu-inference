@@ -62,6 +62,9 @@ The framework is driven by JSON configuration files. Each file defines one or mo
 * `server_command_options`: Controls the vLLM backend.
   * `command_type`: Must be `vllm_serve`.
   * `args`: Key-value pairs translated into CLI flags (e.g., `model`, `seed`, `max-model-len`).
+    * **`model` vs. `model-path` Resolution:** You can decouple a model's reporting name from its physical storage location by specifying both keys within `args`:
+      * **`model`**: Acts as the display name used *only* for metrics, logging, and database tracking (e.g., `"model": "deepseek-ai/DeepSeek-R1"`). *Note: If `model-path` is not provided, this value is passed normally as the `--model` flag.*
+      * **`model-path`**: The actual URI or local directory used to load the model weights. When this key is present, the script automatically overrides the execution command, passing this value as the `--model` CLI flag instead (e.g., `"model-path": "gs://tpu-commons-ci/deepseek/r1"`).
   * `env`: Server-command-specific environment variables.
 * `client_command_options`: Controls the workload generator.
   * `command_type`: Typically `vllm_bench_serve`. Can also be `lm_eval` for accuracy evaluations. When it is `lm_eval`, the dataset must be specified in the `args`, a specific shell script will be executed based on the dataset configuration, and `server_command_options` does not need to be set.
