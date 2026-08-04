@@ -14,6 +14,15 @@
 
 steps:
 
+  - label: ":docker: Build base image (tpu7x)"
+    key: tpu7x_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
   # -----------------------------------------------------------------
   # DEV ONLY — gsm8k-collapse bisect probes on the CI software stack
   # (jax 0.11 / libtpu 0.0.44, the pod's runtime). Everything here
@@ -31,9 +40,12 @@ steps:
   # -----------------------------------------------------------------
   - label: "tpu7x gsm8k-collapse bisect probes (CI stack)"
     key: tpu7x_gsmbisect
+    depends_on: tpu7x_build_docker
     agents:
       queue: tpu_v7x_8_queue
     env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
       MODEL_IMPL_TYPE: flax_nnx
       NEW_MODEL_DESIGN: "1"
       SKIP_JAX_PRECOMPILE: "1"
