@@ -40,12 +40,6 @@ def _literal_representer(dumper, data):
 yaml.add_representer(LiteralString, _literal_representer)
 
 
-def _resolve_kernel_pattern(tuning_key: TuningKey, kernel_pattern) -> str:
-    if callable(kernel_pattern):
-        return kernel_pattern(tuning_key)
-    else:
-        return kernel_pattern
-
 class KernelTunerBase(ABC):
     """
     Base class for kernel tuner runner. The kernel tuner runner is responsible for generating the tuning cases, partitioning the cases into buckets, generating the Buildkite pipeline, and measuring the latency of the cases. The specific kernel tuner runner should inherit from this base class and implement the generate_cases, generate_inputs, and run methods.
@@ -124,6 +118,12 @@ class KernelTunerBase(ABC):
             )
             return True
         return False
+
+    def _resolve_kernel_pattern(self, tuning_key: TuningKey) -> str:
+        if callable(self.tuner_config.jit_kernel_pattern):
+            return self.tuner_config.jit_kernel_pattern(tuning_key)
+        else:
+            return self.tuner_config.jit_kernel_pattern
 
     def generate_autotune_cases(self) -> list[TuningCase]:
         tuning_set = []
@@ -505,21 +505,48 @@ class KernelTunerBase(ABC):
         self.storage_manager.mark_bucket_in_progress(
             self.run_config.case_set_id, self.run_config.run_id, bucket_id)
 
-        processed_ids = self.storage_manager.get_already_processed_ids(
+        processed_ids_status = self.storage_manager.get_already_processed_ids(
             self.run_config.case_set_id, self.run_config.run_id, begin_case_id,
             end_case_id)
+        processed_ids = set([row['case_id'] for row in processed_ids_status])
+
+        def _restore_all_processed_cases_status(processed_ids_status):
+            all_processed_cases_status = []
+            all_cases_id_case_key_value = self.storage_manager.get_all_cases(
+                self.run_config.case_set_id)
+            processed_ids_status_dict = {
+                row['case_id']: row['processed_status']
+                for row in processed_ids_status
+            }
+            for case_id, case_key_value in all_cases_id_case_key_value:
+                tuning_case = TuningCase.from_string(
+                    case_key_value, self.tuner_config.tuning_key_class,
+                    self.tuner_config.tunable_params_class)
+                if case_id not in processed_ids_status_dict:
+                    continue
+                all_processed_cases_status.append([
+                    tuning_case.tuning_key, tuning_case.tunable_params,
+                    TuningStatus(processed_ids_status_dict.get(case_id))
+                ])
+            return all_processed_cases_status
+
+        all_processed_cases_status = _restore_all_processed_cases_status(
+            processed_ids_status)
+        logger.info(
+            f'Worker [{worker_id}] Retrieved {len(processed_ids)} already processed case ids in bucket {bucket_id} for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}.'
+        )
+
         all_configs = self.storage_manager.get_bucket_configs(
             self.run_config.case_set_id, begin_case_id, end_case_id)
 
         bucket_start_perf = time.perf_counter()
         results_buffer = []
-        bucket_fully_processed = True
         last_processed_case_id = begin_case_id - 1
-        all_processed_cases_status = []
+        last_run_status = None
         for cid in range(begin_case_id, end_case_id):
             time_elapsed_minutes = (time.perf_counter() -
                                     bucket_start_perf) / 60
-            logger.info(
+            logger.debug(
                 f"Worker [{worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
             )
             self._cleanup_xprof_dir()
@@ -533,7 +560,6 @@ class KernelTunerBase(ABC):
                 parent_step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{begin_case_id}_{end_case_id}'
                 self.generate_buildkite_pipeline_subbucket(
                     cid, end_case_id, parent_step_key=parent_step_key)
-                bucket_fully_processed = False
                 break
             last_processed_case_id = cid
             if cid in processed_ids:
@@ -549,8 +575,11 @@ class KernelTunerBase(ABC):
             if any(tuning_key == k and s == TuningStatus.FAILED_OOM
                    and p <= tunable_params
                    for k, p, s in all_processed_cases_status):
-                logger.warning(
-                    f"Skipping CaseId {cid} with tuning key {tuning_key} and tunable params {tunable_params} because it is expected to fail with OOM based on previous cases."
+                logger.info(
+                    f"Skipping CaseId {cid} is skipped because it is expected to be OOM based on previous cases."
+                )
+                logger.debug(
+                    f"Tuning key {tuning_key} and tunable params {tunable_params} is expected to fail with OOM based on previous cases."
                 )
                 results_buffer.append(
                     (self.run_config.case_set_id, self.run_config.run_id, cid,
@@ -588,7 +617,33 @@ class KernelTunerBase(ABC):
                 logger.warning(
                     f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
                 )
-                continue
+                if status == TuningStatus.FAILED_OOM:
+                    # it's okay to be OOM no matter what the last run status is, we can just continue
+                    last_run_status = TuningStatus.FAILED_OOM
+                    continue
+                # unknown error
+                elif last_run_status == TuningStatus.SUCCESS:
+                    # if the last run was successful but current run failed with unknown error, we need to stop
+                    # processing and assert
+                    raise RuntimeError(
+                        f"Case {cid} failed during warmup with status: {status} after a previous successful run. This may indicate an issue with the kernel or the environment. Stopping further processing."
+                    )
+                elif last_run_status == TuningStatus.FAILED_OOM:
+                    # if the last run was OOM and current run failed with unknown error, we need to restart the
+                    # tuning process because the OOM may have caused the unknown error. We can break here and let the next tuning job to retry.
+                    logger.warning(
+                        f"Case {cid} failed during warmup with status: {status} after a previous OOM run. This may indicate an issue with the kernel or the environment. Stopping further processing to allow retry."
+                    )
+                    last_processed_case_id = cid - 1  # we want to retry this case after restart the tuning process
+                    results_buffer.pop(
+                    )  # remove the last failed case from the results buffer to allow retry
+                    break
+                else:
+                    raise RuntimeError(
+                        f"Case {cid} failed during warmup with status: {status} after a previous run with status: {last_run_status}. This may indicate an issue with the kernel or the environment. Stopping further processing."
+                    )
+            last_run_status = TuningStatus.SUCCESS
+
             warmup_us = int(warmup_ns // 1000)
 
             measurement_iters = 100
@@ -607,21 +662,29 @@ class KernelTunerBase(ABC):
                     iters=measurement_iters,
                     warmup_us=warmup_us)
             if status != TuningStatus.SUCCESS:
-                logger.warning(
-                    f"Case {cid} failed during main run with status: {status}. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
-                )
-                continue
+                if status == TuningStatus.FAILED_OOM:
+                    # it's okay to be OOM no matter what the last run status is, we can just continue
+                    last_run_status = TuningStatus.FAILED_OOM
+                    continue
+                else:
+                    logger.warning(
+                        f"Case {cid} failed during eval with status: {status} after a previous OOM run. This may indicate an issue with the kernel or the environment. Stopping further processing to allow retry."
+                    )
+                    last_processed_case_id = cid - 1  # we want to retry this case after restart the tuning process
+                    results_buffer.pop(
+                    )  # remove the last failed case from the results buffer to allow retry
+                    break
+            last_run_status = TuningStatus.SUCCESS
 
             if self.tuner_config.jit_kernel_pattern is not None:
                 from tools.kernel.tuner.v1.common.utils import \
                     find_events_by_pattern
                 matching_events, average_latency_us = find_events_by_pattern(
-                    self.xprof_dir, _resolve_kernel_pattern(tuning_key, self.tuner_config.jit_kernel_pattern))
+                    self.xprof_dir, self._resolve_kernel_pattern(tuning_key))
                 if len(matching_events) != measurement_iters:
-                    logger.fatal(
-                        f"Expected {measurement_iters} matching events for pattern {_resolve_kernel_pattern(tuning_key, self.tuner_config.jit_kernel_pattern)} in xprof, but found {len(matching_events)}. This may indicate an issue with the profiling or the pattern matching."
+                    raise RuntimeError(
+                        f"Expected {measurement_iters} matching events for pattern {self._resolve_kernel_pattern(tuning_key)} in xprof, but found {len(matching_events)}. This may indicate an issue with the profiling or the pattern matching."
                     )
-                    status = TuningStatus.XPROF_MEASUREMENT_ERROR
                 else:
                     logger.info(
                         f'Case {cid} average latency is {average_latency_us}us from xprof'
@@ -642,11 +705,6 @@ class KernelTunerBase(ABC):
             all_processed_cases_status.append(
                 [tuning_key, tunable_params, status])
 
-            if self.run_config.debug:
-                logger.info(
-                    f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
-                )
-
             if len(results_buffer) >= 10:
                 self.storage_manager.save_results_batch(results_buffer)
                 results_buffer = []
@@ -658,10 +716,12 @@ class KernelTunerBase(ABC):
         self.storage_manager.add_bucket_processed_time_us(
             self.run_config.case_set_id, self.run_config.run_id, bucket_id,
             bucket_total_time_us)
-        if bucket_fully_processed:
+        if last_processed_case_id + 1 == end_case_id:
             self.storage_manager.mark_bucket_completed(
                 self.run_config.case_set_id, self.run_config.run_id, bucket_id)
         logger.info(
             f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
         self._cleanup_xprof_dir()
+        next_to_process_id = last_processed_case_id + 1
+        return next_to_process_id

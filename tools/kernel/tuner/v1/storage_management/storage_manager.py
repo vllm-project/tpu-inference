@@ -190,7 +190,9 @@ class StorageManager:
             end: End of the case ID range (inclusive).
 
         Returns:
-            A set of integer case IDs that have already been processed.
+            return a list of dicts, each containing:
+                'case_id': the case ID (int)
+                'processed_status': the processing status (int) of the case
         """
         raise NotImplementedError(
             "Subclasses must implement get_already_processed_ids")

@@ -174,10 +174,10 @@ def _generate_batched_rpa_inputs(tuning_key: TuningKey,
                                    dtype=jnp.int32),
                           (0, num_seqs - max_prefill_seqs),
                           constant_values=0)
-        cu_q_lens = jnp.pad(jnp.arange(max_prefill_seqs + 1) *
-                            prefill_input_len,
-                            (0, num_seqs - max_prefill_seqs),
-                            constant_values=max_prefill_seqs * prefill_input_len)
+        cu_q_lens = jnp.pad(
+            jnp.arange(max_prefill_seqs + 1) * prefill_input_len,
+            (0, num_seqs - max_prefill_seqs),
+            constant_values=max_prefill_seqs * prefill_input_len)
     else:
         max_prefill_seqs = 0
         max_decode_seqs = min(num_seqs, total_q_tokens)
@@ -228,7 +228,8 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             kernel_tuner_name="batched_rpa_kernel_tuner",
             # (TODO) This only measure prefill case, need to refactor to support decode case as well
             # maybe make this jit_kernel_pattern a runtime TuningKey dependent attribute
-            jit_kernel_pattern=lambda tuning_key: r"RPAm-" if tuning_key.case == 'prefill' else r"RPAd-",
+            jit_kernel_pattern=lambda tuning_key: r"RPAm-"
+            if tuning_key.case == 'prefill' else r"RPAd-",
         )
         super().__init__(tuner_config=self.tuner_config, run_config=run_config)
 
@@ -246,17 +247,23 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         # tuning_cases/batched_rpa_gemma4_tuning_cases.json file via using the TuningCaseLogger class.
         # Collect unique TuningKeys from the log (prefill cases with large
         # enough token count only).
+        # TuningKey(case='decode', num_q_heads=8, num_kv_heads=1, head_dim=512, num_seqs=818, page_size=256, total_q_tokens=8192, num_page_indices=4908, dtype_q='bfloat16', dtype_kv='float8_e4m3fn', dtype_out='bfloat16', scale_q=None, scale_k=1.0, scale_v=1.0, sliding_window=None),
+        # tunable_params=TunableParams(bq_sz=1, bq_c_sz=1, bkv_sz=256, batch_size=1, n_buffer=2)
+
+        # TuningKey(case='decode', num_q_heads=8, num_kv_heads=4, head_dim=256, num_seqs=818, page_size=256, total_q_tokens=1024, num_page_indices=4908, dtype_q='bfloat16', dtype_kv='float8_e4m3fn', dtype_out='bfloat16', scale_q=None, scale_k=1.0, scale_v=1.0, sliding_window=1024),
+        # tunable_params=TunableParams(bq_sz=1, bq_c_sz=1, bkv_sz=1280, batch_size=2, n_buffer=3)
         seen_keys: set[TuningKey] = set()
         unique_keys: list[TuningKey] = []
         for case in tuning_case_logger.get_logged_tuning_cases():
-            if (#case.tuning_key.total_q_tokens == 128
-                    # and 
+            if (  #case.tuning_key.total_q_tokens == 128
+                    # and
                     case.tuning_key.case == 'decode'
-                    and 
-                    case.tuning_key not in seen_keys
-                    # and 
-                    # case.tuning_key.sliding_window is not None
-                    ):
+                    and case.tuning_key not in seen_keys
+                    # and
+                    # case.tuning_key.sliding_window is None
+                    # and
+                    # case.tuning_key.total_q_tokens == 8192
+            ):
                 seen_keys.add(case.tuning_key)
                 unique_keys.append(case.tuning_key)
         # Build the full Cartesian product of the search space for every key.
@@ -269,6 +276,9 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                     TuningCase(tuning_key=tuning_key,
                                tunable_params=TunableParams(
                                    **dict(zip(param_names, combo)))))
+        cases = cases[
+            2015:
+            2017]  # (TODO) This is just for testing, remove this line to run all cases
         logger.info(f"Generated {len(cases)} tuning cases from log file.")
         return cases
 
@@ -286,10 +296,15 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             v for v in range(256, 2049, 256) if v % tuning_key.page_size == 0
         ]
         return {
-            'batch_size': [1, 2, 3, 4] if tuning_key.case == 'prefill' else [1,2,4,8,16,32],
-            'bq_sz': list(range(256, 2049, 256)) if tuning_key.case == 'prefill' else [1],
-            'bq_c_sz': [8, 16, 32, 64, 128] if tuning_key.case == 'prefill' else [1],
-            'bkv_sz': bkv_sz_list,
+            'batch_size': [1, 2, 3, 4]
+            if tuning_key.case == 'prefill' else [1, 2, 4, 8, 16, 32],
+            'bq_sz':
+            list(range(256, 2049, 256))
+            if tuning_key.case == 'prefill' else [1],
+            'bq_c_sz':
+            [8, 16, 32, 64, 128] if tuning_key.case == 'prefill' else [1],
+            'bkv_sz':
+            bkv_sz_list,
             'n_buffer': [2, 3],
         }
 
@@ -306,10 +321,6 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             tuning_key: TuningKey,
             tunable_params: TunableParams,
             iters: int = 1) -> tuple[TuningStatus, float, float]:
-        if iters == 1:
-            logger.info(
-                f"Running batched RPA kernel for tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}"
-            )
         input_cache = self.generate_inputs(tuning_key)
         prefill_block_sizes = tunable_params.to_block_sizes()
         try:
@@ -330,20 +341,14 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                         ))
             end_ns = time.perf_counter_ns()
             latency_ns = (end_ns - start_ns)
-            if iters > 1:
-                logger.debug(
-                    f"latency_ns={latency_ns}, average_latency_ns={latency_ns / iters}"
-                )
             return TuningStatus.SUCCESS, latency_ns // iters, latency_ns  # status, average latency, total latency
         except Exception as err:
             if "RESOURCE_EXHAUSTED:" in str(err):
-                logger.warning(
+                logger.info(
                     f"Kernel run failed with OOM for {tuning_key=}, {tunable_params=}"
                 )
                 return TuningStatus.FAILED_OOM, float("inf"), float("inf")
-            logger.warning(
-                f"Failed with {tuning_key=}, {tunable_params=}, got error: {err=}"
+            logger.critical(
+                f"Unknown exception happened for {tuning_key}, {tunable_params}, {iters=} got error: {err=}"
             )
-            raise Exception(
-                f"Kernel run failed with tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}, got error: {err=}"
-            )
+            return TuningStatus.UNKNOWN_ERROR, float("inf"), float("inf")

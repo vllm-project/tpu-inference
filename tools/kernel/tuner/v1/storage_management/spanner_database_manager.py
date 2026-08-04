@@ -251,18 +251,18 @@ class SpannerStorageManager(StorageManager):
             }))
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
-        query = "SELECT CaseId FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
+        query = "SELECT CaseId, ProcessedStatus FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
         with self.database.snapshot() as snp:
-            return {
-                row[0]
-                for row in snp.execute_sql(query,
-                                           params={
-                                               'id': cs_id,
-                                               'rid': r_id,
-                                               's': start,
-                                               'e': end
-                                           })
-            }
+            return [{
+                'case_id': row[0],
+                'processed_status': row[1]
+            } for row in snp.execute_sql(query,
+                                         params={
+                                             'id': cs_id,
+                                             'rid': r_id,
+                                             's': start,
+                                             'e': end
+                                         })]
 
     # tuner agents will save the result after completing a tuning batch
     def save_results_batch(self, results):

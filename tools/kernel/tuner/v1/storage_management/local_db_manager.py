@@ -39,7 +39,7 @@ class LocalDbManager(StorageManager):
         self.buffer = []
         self.worker_id = worker_id
         self.dry_run = dry_run
-        date_str = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+        date_str = ""  # datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
         self.db_path = f'/tmp/kernel_tuner_run_{date_str}' if db_path is None else f'{db_path}_{date_str}'
         if not self.dry_run:
             os.makedirs(self.db_path, exist_ok=True)
@@ -263,11 +263,11 @@ class LocalDbManager(StorageManager):
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
         table = self._read_table('CaseResults')
-        return {
-            row['CaseId']
-            for row in table if row['ID'] == cs_id and row['RunId'] == r_id
-            and start <= row['CaseId'] <= end
-        }
+        return [{
+            'case_id': row['CaseId'],
+            'processed_status': row['ProcessedStatus']
+        } for row in table if row['ID'] == cs_id and row['RunId'] == r_id
+                and start <= row['CaseId'] <= end]
 
     def save_results_batch(self, results):
         if not results:
