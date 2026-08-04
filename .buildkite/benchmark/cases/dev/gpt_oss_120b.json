@@ -49,7 +49,7 @@
           "backend": "vllm",
           "request-rate": "inf",
           "dataset-name": "random",
-          "num-prompts": 800,
+          "num-prompts": 1000,
           "percentile-metrics": "ttft,tpot,itl,e2el",
           "ignore-eos": true,
           "random-input-len": 2048,
