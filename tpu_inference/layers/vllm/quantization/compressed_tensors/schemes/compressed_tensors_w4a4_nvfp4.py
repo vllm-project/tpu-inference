@@ -50,6 +50,13 @@ class W4A4ActivationType(str, Enum):
 
 
 class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
+    """
+    This class deviates from upstream by adding support for W4A8 (NVFP4 weights, FP8 activations).
+    Upstream vLLM only supports a4 (nvfp4) and a16 activations with nvfp4 weights, as GPUs have
+    native nvfp4 x nvfp4 support. However, for TPU, the underlying matmul will happen in fp8,
+    so we need to keep activations in fp8. We extend this class to support a8 to avoid copy-pasting
+    too much code.
+    """
 
     def __init__(
         self,
