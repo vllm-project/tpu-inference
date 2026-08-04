@@ -543,6 +543,7 @@ class KernelTunerBase(ABC):
         results_buffer = []
         last_processed_case_id = begin_case_id - 1
         last_run_status = None
+        is_yielding = False
         for cid in range(begin_case_id, end_case_id):
             time_elapsed_minutes = (time.perf_counter() -
                                     bucket_start_perf) / 60
@@ -560,6 +561,7 @@ class KernelTunerBase(ABC):
                 parent_step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{begin_case_id}_{end_case_id}'
                 self.generate_buildkite_pipeline_subbucket(
                     cid, end_case_id, parent_step_key=parent_step_key)
+                is_yielding = True
                 break
             last_processed_case_id = cid
             if cid in processed_ids:
@@ -736,5 +738,5 @@ class KernelTunerBase(ABC):
             f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
         )
         self._cleanup_xprof_dir()
-        next_to_process_id = last_processed_case_id + 1
+        next_to_process_id = last_processed_case_id + 1 if not is_yielding else end_case_id
         return next_to_process_id
