@@ -633,7 +633,7 @@ steps:
               export TPU_CORES=\${TPU_CORES} && 
               pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow==2.21.0 &&
               python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v -rs &&
-              python -m pytest tools/kernel/tuner/v1/tests/test_tuned_params_structure.py -v -rs &&
+              python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_base.py -v -rs &&
               python -m pytest tools/kernel/tuner/v1/tests/test_optimizer.py -v -rs &&
               python -m pytest tools/kernel/tuner/v1/tests/test_tuned_params_structure.py -v -rs &&
               python -m pytest tools/kernel/tuner/v1/tests/test_inspect_result_cli.py -v -rs "
