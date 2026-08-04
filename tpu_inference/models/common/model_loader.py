@@ -408,11 +408,6 @@ def get_flax_model(
     run_model = jax.jit(_run_model_impl,
                         **_run_model_jit_kwargs,
                         compiler_options=get_step_fn_compiler_options())
-    # JAX forbids compiler_options on a jit nested inside another traced
-    # computation, so callers that inline the step function into a larger
-    # jitted program (the fused decode loop, which hoists the same options
-    # onto its own top-level jit) need this variant.
-    run_model_no_options = jax.jit(_run_model_impl, **_run_model_jit_kwargs)
 
     @jax.jit(
         out_shardings=(
@@ -510,7 +505,20 @@ def get_flax_model(
     wrapped_model_fn.lower = _lower_model_fn
 
     def _wrapped_model_fn_no_options(*args, **kwargs):
-        return run_model_no_options(*args, **_drop_unsupported_kwargs(kwargs))
+        # Only ever called from inside an enclosing jit (the fused decode
+        # loop hoists the step-fn compiler options onto its own top-level
+        # jit; JAX forbids compiler_options on a nested jit). Deliberately
+        # NOT a nested jax.jit: donation is ignored below top level, the
+        # hidden-state out_shardings would be re-imposed at every decode
+        # step, and the extra call boundary sits between the kv-cache
+        # while-loop carry and the attention kernels' must-alias updates —
+        # every boundary XLA's copy insertion cannot see through costs a
+        # pool-sized copy per layer inside the loop body. Tracing the raw
+        # impl keeps the while body flat; shardings propagate from the
+        # caches' storage shardings and the kernels' shard_map specs. The
+        # static argnums of the jitted variants are plain Python values
+        # here and participate in tracing directly.
+        return _run_model_impl(*args, **_drop_unsupported_kwargs(kwargs))
 
     # Same attribute name the torchax wrapper uses, for the same reason: the
     # fused decode loop inlines the step function into its own jit, where the
