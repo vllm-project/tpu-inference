@@ -150,6 +150,118 @@ def gdn_attention_ref(
     return (new_conv_state, new_recurrent_state), output
 
 
+def gdn_attention_spec_ref(
+    qkv: jnp.ndarray,
+    b: jnp.ndarray,
+    a: jnp.ndarray,
+    conv_state: jnp.ndarray,
+    recurrent_state: jnp.ndarray,
+    conv_weight: jnp.ndarray,
+    conv_bias: jnp.ndarray | None,
+    a_log: jnp.ndarray,
+    dt_bias: jnp.ndarray,
+    query_start_loc: jnp.ndarray,
+    state_indices: jnp.ndarray,
+    read_offsets: jnp.ndarray,
+    num_spec_seqs: int,
+    seq_lens: jnp.ndarray,
+    n_kq: int,
+    n_v: int,
+    d_k: int,
+    d_v: int,
+    kernel_size: int,
+) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
+    """Reference for SPEC mode: per-token state checkpoints with read offsets.
+
+    Sequence s reads its initial state from slot
+    `state_indices[s] + read_offsets[s]` and writes the state after window
+    position t to slot `state_indices[s] + t`.
+    """
+    num_tokens = qkv.shape[0]
+    new_conv_state = jnp.array(conv_state)
+    new_recurrent_state = jnp.array(recurrent_state)
+    output = jnp.zeros((num_tokens, n_v * d_v), dtype=qkv.dtype)
+
+    for req_idx in range(num_spec_seqs):
+        base = int(state_indices[req_idx])
+        read_slot = base + int(read_offsets[req_idx])
+        start = int(query_start_loc[req_idx])
+        end = int(query_start_loc[req_idx + 1])
+        query_len = end - start
+        if query_len <= 0:
+            continue
+
+        has_init = bool((seq_lens[req_idx] - query_len) > 0)
+        c_state = (conv_state[read_slot]
+                   if has_init else jnp.zeros_like(conv_state[read_slot]))
+        r_state = (recurrent_state[read_slot]
+                   if has_init else jnp.zeros_like(recurrent_state[read_slot]))
+
+        # Conv1D with per-token windows.
+        X = qkv[start:end]
+        x_full = jnp.concatenate([c_state, X], axis=0)
+        acc = jnp.zeros((query_len, qkv.shape[-1]), dtype=jnp.float32)
+        for k in range(kernel_size):
+            acc += (x_full[k:k + query_len].astype(jnp.float32) *
+                    conv_weight[:, 0, k].astype(jnp.float32)[None, :])
+        if conv_bias is not None:
+            acc += conv_bias.astype(jnp.float32)[None, :]
+        conv_out = jax.nn.silu(acc).astype(qkv.dtype)
+        for t in range(query_len):
+            new_conv_state = new_conv_state.at[base + t].set(
+                x_full[t + 1:t + kernel_size])
+
+        # Recurrent GDN with per-token states.
+        key_dim = n_kq * d_k
+        q_seq = conv_out[:, :key_dim].reshape(query_len, n_kq, d_k)
+        k_seq = conv_out[:, key_dim:key_dim * 2].reshape(query_len, n_kq, d_k)
+        v_seq = conv_out[:, key_dim * 2:].reshape(query_len, n_v, d_v)
+
+        repeat_factor = n_v // n_kq
+        if repeat_factor > 1:
+            q_seq = jnp.repeat(q_seq, repeat_factor, axis=1)
+            k_seq = jnp.repeat(k_seq, repeat_factor, axis=1)
+
+        q_seq = _l2_normalize(q_seq)
+        k_seq = _l2_normalize(k_seq)
+        v_seq = v_seq.astype(jnp.float32)
+
+        beta_seq = jax.nn.sigmoid(b[start:end].astype(jnp.float32))
+        g_seq = -jnp.exp(a_log.astype(jnp.float32))[None, :] * jax.nn.softplus(
+            a[start:end].astype(jnp.float32) +
+            dt_bias.astype(jnp.float32)[None, :])
+
+        def step_fn(carry_state, xs):
+            q_t, k_t, v_t, beta_t, g_t = xs
+            q_t = q_t * (d_k**-0.5)
+            exp_g = jnp.exp(g_t)
+
+            k_state = jnp.einsum("hd, hdm -> hm", k_t, carry_state)
+            v_diff = v_t - exp_g[:, None] * k_state
+            v_new = beta_t[:, None] * v_diff
+
+            q_state = jnp.einsum("hd, hdm -> hm", q_t, carry_state)
+            q_k = jnp.sum(q_t * k_t, axis=-1, keepdims=True)
+            out_step = exp_g[:, None] * q_state + q_k * v_new
+
+            k_v_new = jnp.einsum("hd, hm -> hdm", k_t, v_new)
+            new_state = carry_state * exp_g[:, None, None] + k_v_new
+            new_state = new_state.astype(recurrent_state.dtype)
+
+            return new_state, (out_step.astype(qkv.dtype), new_state)
+
+        _, (out_seq,
+            states_seq) = jax.lax.scan(step_fn, r_state,
+                                       (q_seq, k_seq, v_seq, beta_seq, g_seq))
+        for t in range(query_len):
+            new_recurrent_state = new_recurrent_state.at[base + t].set(
+                states_seq[t])
+        output = output.at[start:end].set(out_seq.reshape(
+            query_len, n_v * d_v))
+
+    return (new_conv_state, new_recurrent_state), output
+
+
 class GDNAttentionTest(parameterized.TestCase):
 
     @parameterized.named_parameters(
@@ -320,6 +432,192 @@ class GDNAttentionTest(parameterized.TestCase):
                                    new_states_ref[1],
                                    rtol=2e-2,
                                    atol=2e-2)
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="spec_windows",
+            # 3 verify windows: full (5), partial drafts (3), no drafts (1).
+            spec_lengths=[5, 3, 1],
+            read_offsets=[2, 0, 4],
+            prefill_lengths=[],
+        ),
+        dict(
+            testcase_name="spec_windows_padded",
+            # More windows than one tile (decode_tile_size=4).
+            spec_lengths=[5, 1, 3, 2, 4],
+            read_offsets=[0, 1, 2, 3, 4],
+            prefill_lengths=[],
+        ),
+        dict(
+            testcase_name="spec_and_prefill",
+            spec_lengths=[5, 2],
+            read_offsets=[3, 1],
+            prefill_lengths=[64],
+        ),
+    )
+    def test_spec_mode_checkpoints(self, spec_lengths, read_offsets,
+                                   prefill_lengths):
+        """SPEC mode: initial state comes from `base + read_offset` and one
+        state checkpoint per window position lands at `base + t`, matching a
+        token-by-token eager reference. Prefill sequences in the same batch
+        keep the original PER_SEQ behavior (read/write the base slot)."""
+        kq_head_dim = 128
+        v_head_dim = 128
+        n_kq = 2
+        n_v = 8
+        kernel_size = 4
+        num_spec_tokens = 4
+        window = num_spec_tokens + 1
+
+        lengths = list(spec_lengths) + list(prefill_lengths)
+        num_seqs = len(lengths)
+        num_spec_seqs = len(spec_lengths)
+        num_tokens = sum(lengths)
+        q_loc = jnp.array(np.concatenate([[0], np.cumsum(lengths)]),
+                          dtype=jnp.int32)
+        distribution = jnp.array([num_spec_seqs, num_spec_seqs, num_seqs],
+                                 dtype=jnp.int32)
+
+        # Slot groups of `window` consecutive slots per sequence; slot 0 is
+        # the null block.
+        state_indices = jnp.array([1 + i * window for i in range(num_seqs)],
+                                  dtype=jnp.int32)
+        num_blocks = 1 + num_seqs * window
+        read_offsets_arr = jnp.array(list(read_offsets) +
+                                     [0] * len(prefill_lengths),
+                                     dtype=jnp.int32)
+
+        rngs = iter(jax.random.split(jax.random.key(3), 12))
+        conv_dim = (n_kq * kq_head_dim) * 2 + n_v * v_head_dim
+
+        mixed_qkv = jax.random.normal(next(rngs), (num_tokens, conv_dim))
+        b = jax.random.normal(next(rngs), (num_tokens, n_v))
+        a = jax.random.normal(next(rngs), (num_tokens, n_v))
+
+        # Every slot holds a distinct random state so a read from the wrong
+        # slot (or a write to the wrong slot) is caught.
+        conv_state = jax.random.normal(next(rngs),
+                                       (num_blocks, kernel_size - 1, conv_dim))
+        recurrent_state = jax.random.normal(
+            next(rngs), (num_blocks, n_v, kq_head_dim, v_head_dim))
+
+        conv_weight = jax.random.normal(next(rngs), (conv_dim, 1, kernel_size))
+        conv_bias = jax.random.normal(next(rngs), (conv_dim, ))
+        A_log = jax.random.normal(next(rngs), (n_v, ))
+        dt_bias = jax.random.normal(next(rngs), (n_v, ))
+
+        # All sequences continue an existing context (has_initial=True) for
+        # the spec windows; prefills start fresh (context_len = 0).
+        seq_lens = jnp.array([16 + length for length in spec_lengths] +
+                             list(prefill_lengths),
+                             dtype=jnp.int32)
+
+        run_jitted = jax.jit(
+            wrapper.fused_conv1d_gdn,
+            static_argnames=[
+                "n_kq", "n_v", "d_k", "d_v", "kernel_size", "num_spec_tokens"
+            ],
+        )
+
+        (new_conv, new_rec), output = run_jitted(
+            mixed_qkv,
+            b,
+            a,
+            conv_state,
+            recurrent_state,
+            conv_weight,
+            conv_bias,
+            A_log,
+            dt_bias,
+            q_loc,
+            state_indices,
+            distribution,
+            seq_lens,
+            read_offsets_arr,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=kq_head_dim,
+            d_v=v_head_dim,
+            kernel_size=kernel_size,
+            num_spec_tokens=num_spec_tokens,
+        )
+
+        # Reference: spec windows token-by-token with checkpoints.
+        (ref_conv, ref_rec), ref_output = gdn_attention_spec_ref(
+            qkv=mixed_qkv,
+            b=b,
+            a=a,
+            conv_state=conv_state,
+            recurrent_state=recurrent_state,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            a_log=A_log,
+            dt_bias=dt_bias,
+            query_start_loc=q_loc,
+            state_indices=state_indices,
+            read_offsets=read_offsets_arr,
+            num_spec_seqs=num_spec_seqs,
+            seq_lens=seq_lens,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=kq_head_dim,
+            d_v=v_head_dim,
+            kernel_size=kernel_size,
+        )
+        # Reference for the prefill tail: original eager reference over the
+        # same buffers (spec sequences excluded via the distribution).
+        if prefill_lengths:
+            spec_token_end = int(q_loc[num_spec_seqs])
+            (ref_conv, ref_rec), prefill_output = gdn_attention_ref(
+                qkv=mixed_qkv[spec_token_end:],
+                b=b[spec_token_end:],
+                a=a[spec_token_end:],
+                conv_state=ref_conv,
+                recurrent_state=ref_rec,
+                conv_weight=conv_weight,
+                conv_bias=conv_bias,
+                a_log=A_log,
+                dt_bias=dt_bias,
+                query_start_loc=q_loc[num_spec_seqs:] - q_loc[num_spec_seqs],
+                state_indices=state_indices[num_spec_seqs:],
+                distribution=jnp.array([0, 0, num_seqs - num_spec_seqs],
+                                       dtype=jnp.int32),
+                seq_lens=seq_lens[num_spec_seqs:],
+                n_kq=n_kq,
+                n_v=n_v,
+                d_k=kq_head_dim,
+                d_v=v_head_dim,
+                kernel_size=kernel_size,
+            )
+            ref_output = ref_output.at[spec_token_end:].set(prefill_output)
+
+        np.testing.assert_allclose(output, ref_output, rtol=2e-2, atol=2e-2)
+
+        # Verify every written checkpoint slot; untouched slots must keep
+        # their original contents.
+        touched = set()
+        for i, length in enumerate(spec_lengths):
+            base = int(state_indices[i])
+            touched.update(range(base, base + length))
+        for i in range(len(prefill_lengths)):
+            touched.add(int(state_indices[num_spec_seqs + i]))
+        for slot in range(num_blocks):
+            expected_conv = ref_conv[slot] if slot in touched else conv_state[
+                slot]
+            expected_rec = ref_rec[slot] if slot in touched else (
+                recurrent_state[slot])
+            np.testing.assert_allclose(
+                new_conv[slot],
+                expected_conv,
+                rtol=2e-2,
+                atol=2e-2,
+                err_msg=f"conv checkpoint mismatch at slot {slot}")
+            np.testing.assert_allclose(
+                new_rec[slot],
+                expected_rec,
+                rtol=2e-2,
+                atol=2e-2,
+                err_msg=f"recurrent checkpoint mismatch at slot {slot}")
 
     def test_has_initial_state_zeros_stale_slot(self):
         """Ensure stale states are ignore by new request.

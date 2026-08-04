@@ -12,11 +12,34 @@ from jax.experimental.pallas import tpu as pltpu
 from torchax.ops.mappings import t2j as ref_t2j
 
 # Import the functions to be tested
-from tpu_inference.utils import (GBYTES, enable_megacore,
-                                 get_jax_dtype_from_str_dtype, get_megacore,
-                                 get_padded_head_dim, hbm_usage_bytes,
-                                 hbm_usage_gb)
+from tpu_inference.utils import (GBYTES, enable_megacore, get_device_hbm_limit,
+                                 get_device_name, get_jax_dtype_from_str_dtype,
+                                 get_megacore, get_padded_head_dim,
+                                 hbm_usage_bytes, hbm_usage_gb)
 from tpu_inference.utils import t2j as t2j
+
+
+@pytest.mark.parametrize(
+    "raw_kind,expected_name,expected_hbm",
+    [
+        ("TPU v5p", "TPU v5p", 95 * GBYTES),
+        ("TPU v5e", "TPU v5e", 16 * GBYTES),
+        ("TPU v6e", "TPU v6e", 32 * GBYTES),
+        ("TPU7x", "TPU v7", 96 * GBYTES),
+        ("TPU8i", "TPU v8i", 144 * GBYTES),
+        ("TPU v8i", "TPU v8i", 144 * GBYTES),
+    ],
+)
+@patch("jax.devices")
+def test_get_device_name_and_hbm_limit(mock_devices, raw_kind, expected_name,
+                                       expected_hbm):
+    """Tests get_device_name and get_device_hbm_limit functions."""
+    mock_dev = MagicMock()
+    mock_dev.device_kind = raw_kind
+    mock_devices.return_value = [mock_dev]
+
+    assert get_device_name() == expected_name
+    assert get_device_hbm_limit() == expected_hbm
 
 
 def test_enable_and_get_megacore():

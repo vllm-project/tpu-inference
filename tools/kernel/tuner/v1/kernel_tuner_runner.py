@@ -17,8 +17,12 @@ import os
 
 from absl import app, flags
 
+from tools.kernel.tuner.v1.batched_rpa_kernel_tuner import \
+    BatchedRpaKernelTuner
 from tools.kernel.tuner.v1.common.kernel_tuner_base import RunConfig
 from tools.kernel.tuner.v1.example_kernel_tuner import ExampleKernelTuner
+from tools.kernel.tuner.v1.flash_attention_kernel_tuner import \
+    FlashAttentionKernelTuner
 from tools.kernel.tuner.v1.mla_kernel_tuner import MlaKernelTuner
 from tools.kernel.tuner.v1.rpa_v3_kernel_tuner import RpaV3KernelTuner
 from tools.kernel.tuner.v1.utils import get_tpu_queue_by_version_and_cores
@@ -107,6 +111,8 @@ KERNEL_TUNER_REGISTRY = {
     'example_kernel_tuner': ExampleKernelTuner,
     'rpa_v3_kernel_tuner': RpaV3KernelTuner,
     'mla_kernel_tuner': MlaKernelTuner,
+    'batched_rpa_kernel_tuner': BatchedRpaKernelTuner,
+    'flash_attention_kernel_tuner': FlashAttentionKernelTuner,
 }
 
 

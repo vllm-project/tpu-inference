@@ -150,7 +150,7 @@ class QuantLinearConfig(CommonQuantLinearConfig):
                                  if c in contracting_axes)
 
         # Extract and fuse sharding per axis category.
-        sharding = _to_partition_spec(getattr(weight, "sharding", ()))
+        sharding = _to_partition_spec(getattr(weight, "out_sharding", ()))
         sharding = sharding + (None, ) * (len(weight.shape) - len(sharding))
 
         in_sharding = set(s for i, s in enumerate(sharding)
@@ -163,7 +163,7 @@ class QuantLinearConfig(CommonQuantLinearConfig):
                                  if w_axis[i] in batch_axes and s is not None)
 
         assert len(in_sharding) <= 1 and len(out_sharding) <= 1, \
-            f"Cannot fuse sharding {getattr(weight, 'sharding', ())=} into 2D weight sharding for {einsum_str}"
+            f"Cannot fuse sharding {getattr(weight, 'out_sharding', ())=} into 2D weight sharding for {einsum_str}"
 
         self.out_features = tuple(
             weight.shape[i] for i, c in enumerate(w_axis)
@@ -190,7 +190,7 @@ class QuantLinearConfig(CommonQuantLinearConfig):
         # Update weight_sharding and bias_sharding for 2D matmul compatibility
         if self.batch_features:
             self.weight_sharding = _to_partition_spec(
-                weight.get_metadata().get("sharding", ()))
+                weight.get_metadata().get("out_sharding", ()))
         else:
             self.weight_sharding = jax.sharding.PartitionSpec(
                 *(self.in_features_sharding + self.out_features_sharding))

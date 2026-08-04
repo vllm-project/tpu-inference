@@ -58,8 +58,8 @@ def test_create_kv_caches(mesh: Mesh):
                    ]), patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
         expected_sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT,
-                          ShardingAxisName.KV_CACHE_HEAD))
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD))
         expected_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks,
                                                       block_size, num_kv_heads,
                                                       head_size,
@@ -99,7 +99,8 @@ def test_create_kv_caches_mla(mesh: Mesh):
 
     # For MLA, sharding is by the 'model' axis on the token dimension.
     expected_sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.CONTEXT))
+        mesh, PartitionSpec(ShardingAxisName.BATCH,
+                            ShardingAxisName.KV_CONTEXT))
     expected_dtype = jnp.bfloat16
     expected_shape = get_kv_cache_shape_with_mesh(
         mesh,

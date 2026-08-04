@@ -17,10 +17,20 @@ import os
 import random
 import sys
 import time
+from collections import Counter
 from typing import Any, Dict, List
 
 import aiohttp
 from transformers import AutoTokenizer
+
+
+def make_client_session() -> aiohttp.ClientSession:
+    return aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=None,
+                                      sock_read=None,
+                                      sock_connect=30),
+        connector=aiohttp.TCPConnector(force_close=True, limit=0),
+    )
 
 
 def get_percentile(data: List[float], percentile: float) -> float:
@@ -114,10 +124,14 @@ async def run_grpo_stream(
         }
         if args.ignore_eos:
             payload["ignore_eos"] = True
+        # Ask the server to report the token counts it actually processed.
+        # Sent as a final chunk with an empty "choices" list.
+        payload["stream_options"] = {"include_usage": True}
 
         headers = {"Authorization": f"Bearer {os.getenv('HF_TOKEN', '')}"}
         start_time = time.perf_counter()
         ttft = None
+        usage = None
         full_response_text = []
 
         try:
@@ -141,6 +155,9 @@ async def run_grpo_stream(
                                 ttft = ((time.perf_counter() - start_time) *
                                         1000.0)
 
+                            if data.get("usage"):
+                                usage = data["usage"]
+
                             if "choices" in data and len(data["choices"]) > 0:
                                 delta = data["choices"][0].get("delta", {})
                                 content = delta.get("content", "")
@@ -153,7 +170,19 @@ async def run_grpo_stream(
             total_time_ms = (end_time - start_time) * 1000.0
 
             assistant_response = "".join(full_response_text)
-            assistant_tokens = len(tokenizer.encode(assistant_response))
+
+            # Token counts come from the server: they are what the engine
+            # actually processed. Counting client-side instead is inaccurate
+            # in both directions -- re-encoding detokenized text is not
+            # round-trip identity, and any tokens the server reports outside
+            # "content" are invisible here.
+            if not usage:
+                raise RuntimeError(
+                    "server did not report usage; it must support "
+                    "stream_options.include_usage")
+
+            prompt_tokens = usage["prompt_tokens"]
+            assistant_tokens = usage["completion_tokens"]
 
             if ttft is None:
                 ttft = total_time_ms
@@ -177,8 +206,7 @@ async def run_grpo_stream(
                 "tpot_ms": tpot,
                 "total_time_ms": total_time_ms,
                 "output_tokens": assistant_tokens,
-                "input_history_tokens":
-                len(tokenizer.encode(str(messages[:-1]))),
+                "input_history_tokens": prompt_tokens,
                 "success": True,
             }
 
@@ -197,6 +225,11 @@ async def run_grpo_stream(
 
         except Exception as e:
             total_time_ms = (time.perf_counter() - start_time) * 1000.0
+            # Include the type: some exceptions (notably asyncio.TimeoutError)
+            # have an empty str(), which would otherwise record the failure
+            # with no reason at all.
+            error_msg = f"{type(e).__name__}: {e}" if str(e) else \
+                type(e).__name__
             stats.append({
                 "group_idx": group_idx,
                 "stream_idx": stream_idx,
@@ -208,7 +241,7 @@ async def run_grpo_stream(
                 "output_tokens": 0,
                 "input_history_tokens": 0,
                 "success": False,
-                "error": str(e),
+                "error": error_msg,
             })
             # End conversation on error
             break
@@ -301,6 +334,11 @@ def print_report(
     print(f"Total Conversational Turns:{total_turns} (Success: "
           f"{successful_turns}, Failed: {failed_turns}, "
           f"Rate: {success_rate:.2f}%)")
+    if failed_turns:
+        reasons = Counter(s["error"] for s in all_stats if not s["success"])
+        print("Failure Breakdown:")
+        for reason, count in reasons.most_common():
+            print(f"  {count:6d} x {reason}")
     print(f"Total Input Tokens (Pref): {total_input_tokens:,}")
     print(f"Total Output Tokens (Dec): {total_output_tokens:,}")
     print(f"Total Tokens Processed:    {total_tokens:,}")
@@ -407,7 +445,7 @@ async def main_async(args: argparse.Namespace):
     url = f"http://{args.host}:{args.port}/v1/chat/completions"
     print(f"Connecting to vLLM server at {url}...")
 
-    async with aiohttp.ClientSession() as session:
+    async with make_client_session() as session:
         try:
             async with session.get(
                     f"http://{args.host}:{args.port}/health") as resp:
@@ -431,7 +469,7 @@ async def main_async(args: argparse.Namespace):
 
     start_time = time.perf_counter()
 
-    async with aiohttp.ClientSession() as session:
+    async with make_client_session() as session:
         group_tasks = [
             worker(i, session) for i in range(1, args.num_groups + 1)
         ]

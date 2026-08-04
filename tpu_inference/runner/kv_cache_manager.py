@@ -45,7 +45,9 @@ from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.offload.utils import get_kv_connector_cache_layout
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
-from tpu_inference.runner.kv_cache import (KVCacheMetadata, create_kv_caches,
+from tpu_inference.runner.kv_cache import (KVCacheMetadata,
+                                           create_kv_cache_of_shape,
+                                           create_kv_caches,
                                            get_attention_page_size_bytes)
 
 if TYPE_CHECKING:
@@ -452,7 +454,7 @@ class KVCacheManager:
         # TODO(xiang): this hack tricks engine core to init successfully
 
         # NOTE(weiyu0824): Pass raw block_size (size before any parallelization).
-        # vLLM applies dcp_size scaling internally; pre-multiplying block size causes a dcp_size miscalculation.
+        # vLLM applies dcp_size and pcp_size scaling internally; pre-multiplying block size causes a dcp_size * pcp_size miscalculation.
         block_size = self.runner.cache_config.block_size
         kv_cache_spec: dict[str, KVCacheSpec] = {}
 
@@ -688,9 +690,9 @@ class KVCacheManager:
         # kv_cache_spec.block_size is the raw block size.
         # The block table must use the physical size: one page covers block_size * dcp_size
         # tokens globally.
-        # Read dcp_size from the mesh (CONTEXT axis) to stay consistent with get_kv_cache_shape_with_mesh.
+        # Read dcp_size and pcp_size from the mesh (KV_CONTEXT axis) to stay consistent with get_kv_cache_shape_with_mesh.
         context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
-                                                   ShardingAxisName.CONTEXT)
+                                                   ShardingAxisName.KV_CONTEXT)
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size * context_cnt
             for kv_cache_group in kv_cache_config.kv_cache_groups
@@ -754,6 +756,20 @@ class KVCacheManager:
             "mamba": KVCacheMetadata(),
             "regular_attn": KVCacheMetadata()
         }
+
+        if is_ds_v4(self.runner.vllm_config):
+            # DSv4's packed KV cache layout needs its own array/index plan;
+            # see `_initialize_ds_v4_kv_cache` for the invariants.
+            self._initialize_ds_v4_kv_cache(kv_cache_config,
+                                            layer_name_to_spec, kv_caches,
+                                            num_blocks_list, metadata)
+            self._log_kv_cache_init(kv_cache_config,
+                                    kv_caches,
+                                    num_blocks_list,
+                                    metadata,
+                                    duplicate_shared_layers=False)
+            return
+
         # If this is true, then we'll initialize a new KV cache for each layer in "shared_by"
         # instead of the default behavior of initializing a single KV cache for each of the
         # shared layers
@@ -904,49 +920,6 @@ class KVCacheManager:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
                         block_size = layer_spec.storage_block_size
 
-                        if is_ds_v4(self.runner.vllm_config):
-                            os.environ["MLA_TRANSPOSE_KV_CACHE"] = "False"
-                            # DSV4 FP8 format is packed as unit8
-                            os.environ["MLA_KV_PACKING_SIZE"] = "4"
-
-                            contains_indexer_cache = any(
-                                "indexer" in layer
-                                for layer in kv_cache_tensor.shared_by)
-                            if contains_indexer_cache:
-                                # Indexer's compressor state cache kv cache must be overlay on
-                                # Indexer's compressed kv cache.
-                                # Main attn's compressor state cache kv cache and sliding window
-                                # cache must overlay on main attn's compressed kv cache.
-                                assert all(
-                                    "indexer" in layer
-                                    for layer in kv_cache_tensor.shared_by
-                                ), " kv_cache_tensor.shared_by: " + str(
-                                    kv_cache_tensor.shared_by)
-
-                            mla_spec = None
-                            for layer in kv_cache_tensor.shared_by:
-                                if isinstance(layer_name_to_spec[layer],
-                                              MLAAttentionSpec):
-                                    mla_spec = layer_name_to_spec[layer]
-                                    break
-                            # In DSV4, compressor-state-cache and sliding-window-cache
-                            # overlay on the same tensor as the main kv cache.
-                            # The created kv cache will based on the shape of the
-                            # main kv cache's spec.
-                            if mla_spec is not None:
-                                layer_spec = mla_spec
-                                block_size = layer_spec.storage_block_size
-                            if mla_spec is None:
-                                # Edge case handling: for DSV4 Flash,
-                                # There are 21 CSA layers, 43 SWA caches,
-                                # since 43 % 21 !=0, there is one SWA cache
-                                # not sharing a KV tensor with other caches.
-                                assert "swa_cache" in kv_cache_tensor.shared_by[
-                                    0]
-                                assert len(kv_cache_tensor.shared_by) == 1
-                                block_size = (kv_caches[-1].shape[1] *
-                                              kv_caches[-1].shape[2])
-
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
                             block_size=block_size,
@@ -982,6 +955,14 @@ class KVCacheManager:
                     layer_name] = self.runner.layer_name_to_kvcache_index[
                         target_layer_name]
 
+        self._log_kv_cache_init(kv_cache_config, kv_caches, num_blocks_list,
+                                metadata, duplicate_shared_layers)
+
+    def _log_kv_cache_init(self, kv_cache_config: KVCacheConfig,
+                           kv_caches: List[jax.Array],
+                           num_blocks_list: List[int],
+                           metadata: dict[str, KVCacheMetadata],
+                           duplicate_shared_layers: bool) -> None:
         logger.info(
             "Hybrid KV cache layout: num_kv_cache_groups=%d, "
             "num_kv_cache_tensors=%d, kv_cache_config.num_blocks=%d, "
@@ -1011,6 +992,276 @@ class KVCacheManager:
             f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
         logger.info(" | ".join(log_parts))
+
+    _DS_V4_STATE_CACHE_SUFFIX = ".compressor.state_cache"
+    _DS_V4_INDEXER_CACHE_SUFFIX = ".indexer.k_cache"
+    _DS_V4_ROPE_CACHE_SUFFIX = "_rope"
+    # Rows of every DSv4 array are `(4, lanes)` uint8 slots
+    _DS_V4_KV_PACKING = 4
+    _DS_V4_CSA_COMPRESS_RATIO = 4
+
+    @staticmethod
+    def _ds_v4_compressed_kv_layer_name(state_cache_name: str) -> str:
+        """The layer whose compressed-KV buffer a DSv4 state cache overlays.
+
+        Mirrors how vLLM wires ``DeepseekCompressor.k_cache_prefix`` (the
+        attention layer itself for the main compressor, the indexer's
+        ``k_cache`` for the indexer compressor):
+
+          ``<...>.attn.compressor.state_cache``          -> ``<...>.attn``
+          ``<...>.attn.indexer.compressor.state_cache``  ->
+              ``<...>.attn.indexer.k_cache``
+        """
+        base = state_cache_name[:-len(KVCacheManager._DS_V4_STATE_CACHE_SUFFIX
+                                      )]
+        if base.endswith(".indexer"):
+            return base + ".k_cache"
+        return base
+
+    def _initialize_ds_v4_kv_cache(
+            self, kv_cache_config: KVCacheConfig,
+            layer_name_to_spec: dict[str, KVCacheSpec],
+            kv_caches: List[jax.Array], num_blocks_list: List[int],
+            metadata: dict[str, KVCacheMetadata]) -> None:
+        """Create the JAX KV cache arrays for DeepseekV4.
+
+        Since vLLM #48993 (``_get_packed_kv_cache_layout``), DSv4's cache
+        groups are laid out densely in one shared block slab: every
+        ``KVCacheTensor`` spans the whole slab (``size == block_stride *
+        num_blocks``) and its ``shared_by`` lists the layers -- from
+        *different* cache groups -- that start at the same byte ``offset``.
+        A block ID is owned by one cache group at a time, so same-offset
+        layers may alias memory, and mixed groups (e.g. an indexer k_cache
+        with swa_caches and compressor state_caches) are normal. The
+        pre-#48993 layout instead grouped one page-size slot per tensor
+        (a main latent with its own overlay caches; indexer caches only with
+        indexer caches).
+
+        JAX arrays cannot be byte views into one slab, so the TPU port
+        ignores vLLM's byte offsets and rebuilds the overlay plan from the
+        specs, which also makes it independent of either vLLM grouping:
+
+        - Every ``MLAAttentionSpec`` layer gets its own uint8
+          ``(num_blocks, rows, 4, lanes)`` array, shaped for the kernel that
+          reads it rather than by the generic ``head_size`` formula (with
+          ``T = spec.storage_block_size`` tokens per page):
+
+            CSA ``*.attn``        NoPE ``(N, T, 4, 128)``  512B/token
+                                  RoPE ``(N, T/4, 4, 128)`` 128B/token, in a
+                                  companion ``{layer}_rope`` array
+            indexer ``k_cache``   ``(N, T/4, 4, 256)``      256B/token
+            HCA ``*.attn``        ``(N, T*2, 4, 128)``     1024B/token (raw
+                                                            bf16)
+
+        - Every CSA / indexer compressor state cache maps to the array of its
+          own compressed-KV layer; the compressor kernel writes the f32 state
+          rows and the compressed KV through one buffer there. State and
+          full-attention groups never own the same block ID, so the rows never
+          collide.
+        - The i-th *HCA* compressor state cache maps to the i-th CSA NoPE array.
+        - Every ``swa_cache`` maps to a CSA NoPE array by its position in its
+          cache group.
+        """
+        os.environ["MLA_TRANSPOSE_KV_CACHE"] = "False"
+        # DSV4 FP8 format is packed as uint8
+        os.environ["MLA_KV_PACKING_SIZE"] = "4"
+
+        # All packed tensors describe the same slab, so they must agree on
+        # the block count.
+        num_blocks_candidates = set()
+        for tensor in kv_cache_config.kv_cache_tensors:
+            if tensor.block_stride:
+                if tensor.size % tensor.block_stride:
+                    raise ValueError(
+                        "[kv-cache] DSv4 KVCacheTensor size is not a multiple "
+                        f"of block_stride: size={tensor.size}, "
+                        f"block_stride={tensor.block_stride}, "
+                        f"offset={tensor.offset}, "
+                        f"shared_by={tensor.shared_by}")
+                num_blocks_candidates.add(tensor.size // tensor.block_stride)
+            else:
+                # Legacy layout without a packed slab: the tensor is sized
+                # for its own layers' page size.
+                page_size = layer_name_to_spec[
+                    tensor.shared_by[0]].page_size_bytes
+                num_blocks_candidates.add(tensor.size // page_size)
+        if len(num_blocks_candidates) != 1:
+            raise ValueError(
+                "[kv-cache] DSv4 KVCacheTensors disagree on num_blocks: "
+                f"{sorted(num_blocks_candidates)}; expected one shared block "
+                "count across the packed slab. tensors="
+                f"{kv_cache_config.kv_cache_tensors}")
+        num_blocks = num_blocks_candidates.pop()
+
+        # Default KV cache is sharded over (BATCH=(dp, attn_dp)); num_blocks
+        # must be a multiple of the sharding divisor.
+        divisor = common_utils.get_mesh_shape_product(self.runner.mesh,
+                                                      ShardingAxisName.BATCH)
+        num_blocks = (num_blocks // divisor) * divisor
+        if self.runner.cache_config.num_gpu_blocks_override is not None:
+            num_blocks = min(num_blocks,
+                             self.runner.cache_config.num_gpu_blocks_override)
+
+        def _create_cache(shape: tuple, tag: str) -> jax.Array:
+            """Allocate one uint8 DSv4 array and register it as a new index."""
+            cache = create_kv_cache_of_shape(shape,
+                                             mesh=self.runner.mesh,
+                                             cache_dtype=jnp.uint8)
+            logger.debug("[kv-cache] DSv4 array %d for %s: shape=%s",
+                         len(kv_caches), tag, cache.shape)
+            kv_caches.append(cache)
+            num_blocks_list.append(num_blocks)
+            metadata["regular_attn"].count += 1
+            if metadata["regular_attn"].shape is None:
+                metadata["regular_attn"].shape = cache.shape
+                metadata["regular_attn"].dtype = cache.dtype
+                metadata["regular_attn"].sharding = cache.sharding
+            return cache
+
+        # Classify every layer by the consumer that reads it. Iteration is in
+        # group order so array creation and overlay assignment are
+        # deterministic.
+        mla_layer_names: list[str] = []
+        swa_layer_groups: list[list[str]] = []
+        state_layer_names: list[str] = []
+        for group in kv_cache_config.kv_cache_groups:
+            swa_layers_in_group: list[str] = []
+            for layer_name in group.layer_names:
+                spec = layer_name_to_spec[layer_name]
+                if isinstance(spec, MLAAttentionSpec):
+                    mla_layer_names.append(layer_name)
+                elif layer_name.endswith(self._DS_V4_STATE_CACHE_SUFFIX):
+                    state_layer_names.append(layer_name)
+                elif "swa_cache" in layer_name:
+                    swa_layers_in_group.append(layer_name)
+                else:
+                    raise ValueError(
+                        "[kv-cache] DSv4 layer has no known role (expected an "
+                        "MLAAttentionSpec cache, a `*.compressor.state_cache` "
+                        f"or a `*swa_cache*` layer): layer={layer_name}, "
+                        f"spec={spec}")
+            if swa_layers_in_group:
+                swa_layer_groups.append(swa_layers_in_group)
+        if not mla_layer_names:
+            raise ValueError(
+                "[kv-cache] DSv4 model has no MLAAttentionSpec layers to "
+                "anchor the KV cache overlays. groups="
+                f"{[group.layer_names for group in kv_cache_config.kv_cache_groups]}"
+            )
+
+        layer_to_index: dict[str, int] = {}
+        # CSA NoPE arrays, in layer order; the SWA caches and the HCA
+        # compressor states overlay these.
+        csa_nope_indices: list[int] = []
+        # HCA compressed-KV layers, whose own page (two token states) is far
+        # too small to host their state cache.
+        hca_layer_names: set[str] = set()
+        for layer_name in mla_layer_names:
+            spec = layer_name_to_spec[layer_name]
+            page_size = spec.storage_block_size * common_utils.get_mesh_shape_product(
+                self.runner.mesh, ShardingAxisName.KV_CONTEXT)
+            if layer_name.endswith(self._DS_V4_INDEXER_CACHE_SUFFIX):
+                # Lightning indexer: 128 fp8 values + 1 e8m0 scale per token,
+                # padded to a 256B record; 4 tokens per row.
+                shape = (num_blocks, page_size // self._DS_V4_KV_PACKING,
+                         self._DS_V4_KV_PACKING, 256)
+                _create_cache(shape, layer_name)
+                layer_to_index[layer_name] = len(kv_caches) - 1
+            elif spec.compress_ratio == self._DS_V4_CSA_COMPRESS_RATIO:
+                # CSA is split across two arrays, for nope and rope respectively.
+                shape = (num_blocks, page_size, self._DS_V4_KV_PACKING, 128)
+                _create_cache(shape, layer_name)
+                layer_to_index[layer_name] = len(kv_caches) - 1
+                csa_nope_indices.append(len(kv_caches) - 1)
+
+                rope_name = f"{layer_name}{self._DS_V4_ROPE_CACHE_SUFFIX}"
+                _create_cache((num_blocks, page_size // self._DS_V4_KV_PACKING,
+                               self._DS_V4_KV_PACKING, 128), rope_name)
+                layer_to_index[rope_name] = len(kv_caches) - 1
+            else:
+                # HCA (`mla`) keeps raw bf16 latents: 512 values = 1024B per
+                # token, i.e. two rows per token.
+                shape = (num_blocks, page_size * 2, self._DS_V4_KV_PACKING,
+                         128)
+                _create_cache(shape, layer_name)
+                layer_to_index[layer_name] = len(kv_caches) - 1
+                hca_layer_names.add(layer_name)
+
+        # Overlay swa_caches onto the CSA NoPE arrays.
+        if not csa_nope_indices:
+            raise ValueError(
+                "[kv-cache] DSv4 model has no CSA layer to host the swa_caches"
+                f" (compress_ratio={self._DS_V4_CSA_COMPRESS_RATIO}). MLA "
+                f"layers={mla_layer_names}")
+        swa_host_indices = list(csa_nope_indices)
+        for group_swa_layers in swa_layer_groups:
+            for position, layer_name in enumerate(group_swa_layers):
+                if position >= len(swa_host_indices):
+                    # Overflow: this cache group has more layers than there
+                    # are CSA arrays, so add a standalone array of the same
+                    # shape.
+                    _create_cache(kv_caches[csa_nope_indices[0]].shape,
+                                  f"swa_overflow.{position}")
+                    swa_host_indices.append(len(kv_caches) - 1)
+                layer_to_index[layer_name] = swa_host_indices[position]
+
+        # CSA and indexer compressor state caches overlay onto the compressed kv
+        # array of their own (sub)layer;
+        # HCA compressor state caches overlay onto CSA NoPE arrays.
+        hca_state_layers: list[str] = []
+        for layer_name in state_layer_names:
+            kv_layer_name = self._ds_v4_compressed_kv_layer_name(layer_name)
+            if kv_layer_name not in layer_to_index:
+                raise ValueError(
+                    "[kv-cache] DSv4 compressor state cache has no "
+                    "compressed-KV layer (its compressed records are written "
+                    f"there): state_cache={layer_name}, expected KV layer "
+                    f"{kv_layer_name}, known MLA layers={mla_layer_names}")
+            if kv_layer_name in hca_layer_names:
+                hca_state_layers.append(layer_name)
+            else:
+                layer_to_index[layer_name] = layer_to_index[kv_layer_name]
+
+        # `swa_host_indices` is CSA's NOPE + potential overflow
+        hca_state_host = swa_host_indices
+        for position, layer_name in enumerate(hca_state_layers):
+            if position < len(hca_state_host):
+                host_index = hca_state_host[position]
+            else:
+                # Overflow: more HCA layers than CSA layers, so add a
+                # standalone array of the same shape (mirrors the swa path).
+                _create_cache(kv_caches[csa_nope_indices[0]].shape,
+                              f"hca_state_overflow.{len(kv_caches)}")
+                host_index = len(kv_caches) - 1
+            layer_to_index[layer_name] = host_index
+
+        # Sanity check.
+        for group in kv_cache_config.kv_cache_groups:
+            hosts: dict[int, str] = {}
+            for layer_name in group.layer_names:
+                index = layer_to_index[layer_name]
+                if index in hosts:
+                    raise ValueError(
+                        "[kv-cache] DSv4 KV cache overlay put two layers of "
+                        "one cache group on the same array; they share a "
+                        "block table, so they would corrupt each other: "
+                        f"{layer_name} and {hosts[index]} both map to array "
+                        f"{index} (shape {kv_caches[index].shape}). Group "
+                        f"layers={group.layer_names}")
+                hosts[index] = layer_name
+
+        for layer_name, index in layer_to_index.items():
+            self.runner.layer_name_to_kvcache_index[layer_name] = index
+
+        logger.info(
+            "[kv-cache] DSv4 KV cache: %d arrays for %d layers (mla=%d of "
+            "which csa=%d with a companion rope array, swa=%d, state=%d), "
+            "num_blocks=%d", len(kv_caches),
+            len(mla_layer_names) +
+            sum(len(g) for g in swa_layer_groups) + len(state_layer_names),
+            len(mla_layer_names), len(csa_nope_indices),
+            sum(len(g) for g in swa_layer_groups), len(state_layer_names),
+            num_blocks)
 
     def delete_kv_cache(self) -> None:
         """Delete KV cache JAX arrays to free HBM.

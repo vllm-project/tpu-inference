@@ -21,8 +21,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
-from tpu_inference.kernels.collectives import \
-    hierarchical_reduce_scatter as hier_rs
+from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
@@ -304,29 +303,12 @@ def moe_gmm_local(x: jax.Array,
                 topk_weights,
                 topk,
             )
-
         if enable_rs_kernel:
-            # Fallback to psum-scatter for small token sizes to avoid Mosaic compilation.
-            # The threshold is chosen based on the tile dimension (8) in the
-            # hierarchical reduce-scatter kernel.
-            if chunk_hidden.shape[0] // scatter_axis_size < 8:
-                out = jax.lax.psum_scatter(chunk_hidden,
-                                           axis_name=reduction_axis,
-                                           scatter_dimension=0,
-                                           tiled=True).astype(x.dtype)
-            else:
-                # Determine the number of micro-batches
-                # Use 4 for large inputs to improve efficiency by maximizing the number of
-                # concurrent reduction streams, and 2 for smaller inputs to fit in ~32MB VMEM
-                num_mb = 2
-                if chunk_hidden.shape[0] // scatter_axis_size > 600:
-                    num_mb = 4
-                rs_out = hier_rs.hierarchical_reduce_scatter_local(
-                    chunk_hidden,
-                    num_devices=scatter_axis_size,
-                    num_micro_batches=num_mb,
-                    axis_name=reduction_axis)
-                out = rs_out.astype(x.dtype)
+            rs_out = hier_rs_sc.hierarchical_reduce_scatter_local(
+                chunk_hidden,
+                num_devices=scatter_axis_size,
+                axis_name=reduction_axis)
+            out = rs_out.astype(x.dtype)
         elif scatter_results:
             if reduce_axes:
                 chunk_hidden = jax.lax.psum(chunk_hidden,

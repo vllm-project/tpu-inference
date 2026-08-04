@@ -21,7 +21,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_interface import (
     attention, encoder_only_attention)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -214,6 +215,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         vllm_model_wrapper_context = get_vllm_model_wrapper_context()
         mesh = vllm_model_wrapper_context.mesh
+        shared_attn_metadata = vllm_model_wrapper_context.shared_attn_metadata
 
         # 1. Common JAX View Conversion
         q_jax = jax_view(query)
@@ -266,6 +268,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     v_jax,
                     sinks,
                     attn_metadata,
+                    shared_attn_metadata,
                     mesh,
                     self.scale,
                     self.head_size,
@@ -340,6 +343,7 @@ def _jax_attn_func(
     v: jax.Array,
     sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
+    shared_attention_metadata: SharedAttentionMetadata,
     mesh: Mesh,
     scale: float,
     head_size: int,
@@ -366,6 +370,7 @@ def _jax_attn_func(
         v_scale=v_scale,
         sinks=sinks,
         attention_chunk_size=sliding_window,
+        shared_attention_metadata=shared_attention_metadata,
     )
 
     formatted_outputs = _format_attention_output(outputs, q_len, num_heads,
