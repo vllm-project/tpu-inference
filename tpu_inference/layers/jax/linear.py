@@ -91,7 +91,16 @@ class JaxEinsum(nnx.Einsum, JaxModule):
         if self.quant_method is not None:
             return self.quant_method.apply_jax(self, inputs)
 
-        output = jax.numpy.einsum(self.einsum_str, inputs, self.weight.value)
+        # `precision` comes from nnx.Einsum's constructor (forwarded through
+        # **kwargs). It is None for every layer that does not opt in, which
+        # leaves XLA's default: on TPU an fp32 einsum is lowered to a single
+        # bf16 pass. Layers that need true fp32 arithmetic (e.g. a MoE router
+        # gate, where a bf16-rounded logit flips near-tie experts) pass
+        # `precision=jax.lax.Precision.HIGHEST`.
+        output = jax.numpy.einsum(self.einsum_str,
+                                  inputs,
+                                  self.weight.value,
+                                  precision=self.precision)
         if self.bias is not None:
             output += self.bias
         return output

@@ -23,11 +23,12 @@ from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 from tpu_inference.layers.common.process_weights.moe_weights import \
     UnfusedMoEWeights
+from tpu_inference.layers.jax.activation import (apply_gated_activation,
+                                                 situ_params)
 # yapf: disable
 from tpu_inference.layers.jax.moe.utils import (get_all_to_all_params_fn,
                                                 global_permute_fn, gmm_fn,
                                                 local_permute_fn,
-                                                modeling_flax_utils,
                                                 sort_activations_fn,
                                                 unpermute_fn)
 from tpu_inference.models.jax.utils.qwix.qwix_utils import \
@@ -148,32 +149,29 @@ def sparse_moe_distributed_fwd(
     with jax.named_scope("gating"):
         gating_TEF = gmm_fn(compute_inputs, kernel_gating, compute_group_sizes,
                             moe_instance.tile_size, moe_instance.moe_backend,
-                            moe_instance.dtype,
-                            moe_instance.qwix_quantized_weight_dtype)
+                            moe_instance.dtype)
         if moe_instance.edf_sharding[1] is not None:
             gating_TEF = jax.lax.psum(gating_TEF,
                                       axis_name=moe_instance.edf_sharding[1])
-        activated_gating_TEF = modeling_flax_utils.ACT2FN[
-            moe_instance.hidden_act](gating_TEF)
 
     with jax.named_scope("up_projection"):
         up_proj_TEF = gmm_fn(compute_inputs, kernel_up_proj,
                              compute_group_sizes, moe_instance.tile_size,
-                             moe_instance.moe_backend, moe_instance.dtype,
-                             moe_instance.qwix_quantized_weight_dtype)
+                             moe_instance.moe_backend, moe_instance.dtype)
         if moe_instance.edf_sharding[1] is not None:
             up_proj_TEF = jax.lax.psum(up_proj_TEF,
                                        axis_name=moe_instance.edf_sharding[1])
 
-    fuse_TEF = activated_gating_TEF * up_proj_TEF
+    situ_beta, situ_linear_beta = situ_params(moe_instance)
+    fuse_TEF = apply_gated_activation(moe_instance.hidden_act, gating_TEF,
+                                      up_proj_TEF, situ_beta, situ_linear_beta)
 
     with jax.named_scope("down_projection"):
         intermediate_output = gmm_fn(fuse_TEF, kernel_down_proj,
                                      compute_group_sizes,
                                      moe_instance.tile_size,
                                      moe_instance.moe_backend,
-                                     moe_instance.dtype,
-                                     moe_instance.qwix_quantized_weight_dtype)
+                                     moe_instance.dtype)
         if moe_instance.efd_sharding[1] is not None:
             intermediate_output = jax.lax.psum(
                 intermediate_output, axis_name=moe_instance.efd_sharding[1])
@@ -238,7 +236,13 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
     assert isinstance(
         weights, UnfusedMoEWeights), "Expected unfused weights for sparse MoE!"
     weights_TX, indices_TX = gating_output
-    if layer.qwix_quantized_weight_dtype:
+    # The expert kernels reach the GMM as a (value, scale) pair whenever they
+    # are block-quantized -- either by Qwix at load time, or by the checkpoint
+    # itself (MXFP4 experts). Both cases shard the scale like its weight.
+    quantized = bool(
+        layer.qwix_quantized_weight_dtype) or (weights.w1_weight_scale
+                                               is not None)
+    if quantized:
         gating_up_proj_spec = (PartitionSpec(*layer.edf_sharding),
                                PartitionSpec(*layer.edf_sharding))
         down_proj_spec = (PartitionSpec(*layer.efd_sharding),
@@ -264,36 +268,29 @@ def sparse_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                              out_specs=out_specs,
                              check_rep=False)(sparse_moe_distributed_fwd)
 
-    # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
-    # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
-    # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
-    # in the first place).
-    kernel_gating_EDF = _process_weight_for_qwix(
-        layer.qwix_quantized_weight_dtype,
-        "kernel_gating_EDF",
-        layer.kernel_gating_EDF,
-        channelwise_axes=[0, 2],
-        tiled_axes={1: 128})
-    kernel_up_proj_EDF = _process_weight_for_qwix(
-        layer.qwix_quantized_weight_dtype,
-        "kernel_up_proj_EDF",
-        layer.kernel_up_proj_EDF,
-        channelwise_axes=[0, 2],
-        tiled_axes={1: 128})
-    kernel_down_proj_EFD = _process_weight_for_qwix(
-        layer.qwix_quantized_weight_dtype,
-        "kernel_down_proj_EFD",
-        layer.kernel_down_proj_EFD,
-        channelwise_axes=[0, 2],
-        tiled_axes={1: 128})
+    if layer.qwix_quantized_weight_dtype:
+        # TODO (jacobplatin): this is needed because of issues with Qwix quantizing the `shard_map` in SpraseMatmul
+        # Basically, during the abstract pass, we need to manually quantize the weights here for Qwix, but we'll
+        # override the actual weight/scale during loading (we just need to make sure Qwix quantizes the weight
+        # in the first place).
+        kernels = tuple(
+            _process_weight_for_qwix(layer.qwix_quantized_weight_dtype,
+                                     name,
+                                     getattr(layer, name),
+                                     channelwise_axes=[0, 2],
+                                     tiled_axes={1: 128})
+            for name in ("kernel_gating_EDF", "kernel_up_proj_EDF",
+                         "kernel_down_proj_EFD"))
+    else:
+        # Weights already carry whatever the GMM needs: a plain array, or a
+        # (value, scale) pair when the checkpoint stores them block-quantized.
+        kernels = tuple(
+            (w, s) if s is not None else w
+            for w, s in ((weights.w1_weight, weights.w1_weight_scale),
+                         (weights.w2_weight, weights.w2_weight_scale),
+                         (weights.w3_weight, weights.w3_weight_scale)))
 
-    weights.w1_weight = kernel_gating_EDF
-    weights.w2_weight = kernel_up_proj_EDF
-    weights.w3_weight = kernel_down_proj_EFD
-    # TODO (jacobplatin): support quantization
-    return mapped_moe_fwd(layer, x_TD, weights_TX, indices_TX,
-                          weights.w1_weight, weights.w2_weight,
-                          weights.w3_weight)
+    return mapped_moe_fwd(layer, x_TD, weights_TX, indices_TX, *kernels)
 
 
 def _process_weight_for_qwix(

@@ -202,16 +202,22 @@ def get_all_to_all_params_fn(all_shards_group_sizes,
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
 
-def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype,
-           quantized_dtype):
-    """Stateless Grouped Matrix Multiply."""
+def gmm_fn(inputs, kernel, group_sizes, tile_size, moe_backend, dtype):
+    """Stateless Grouped Matrix Multiply.
+
+    `kernel` is either a plain `(E, K, N)` array or, when the expert weights
+    are block-quantized, a `(qvalue, scale)` pair whose scale is
+    `(E, K // block, N)`. The pair form covers both Qwix-quantized weights and
+    checkpoint-quantized ones (e.g. MXFP4 experts), so the caller does not have
+    to say which.
+    """
     num_rows = inputs.shape[0]
     pad_amount = (tile_size[0] - num_rows % tile_size[0]) % tile_size[0]
     if pad_amount > 0:
         inputs = jnp.pad(inputs, ((0, pad_amount), (0, 0)))
 
     if moe_backend == MoEBackend.MEGABLX_GMM:
-        if quantized_dtype:
+        if isinstance(kernel, tuple):
             kernel_qvalue, kernel_scale = kernel
             kernel_scale = jnp.expand_dims(kernel_scale, 2)
         else:

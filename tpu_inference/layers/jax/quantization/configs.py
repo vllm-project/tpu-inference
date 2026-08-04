@@ -26,7 +26,19 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
 class QuantizationConfig(ABC):
 
-    def __init__(self, hf_quant_config: dict):
+    def __init__(self,
+                 hf_quant_config: dict,
+                 model_name_or_path: str | None = None,
+                 download_dir: str | None = None):
+        """
+        Args:
+            hf_quant_config: the checkpoint's ``quantization_config`` block.
+            model_name_or_path: local directory or HF repo id the weights are
+                loaded from. Configs that must consult the checkpoint itself --
+                rather than trust a config regex list -- to decide which layers
+                are actually stored compressed use this.
+            download_dir: where HF weights are cached, for the same purpose.
+        """
         pass
 
     @abstractmethod
