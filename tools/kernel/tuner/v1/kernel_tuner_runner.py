@@ -331,7 +331,6 @@ def main(argv):
             buckets = [(_BEGIN_CASE_ID.value, _END_CASE_ID.value)]
         for bucket in buckets:
             begin_case_id, end_case_id = bucket
-            current_begin_case_id = begin_case_id
             next_begin_case_id = begin_case_id  # Initialize to a value less than begin_case_id
             while next_begin_case_id < end_case_id:
                 next_begin_case_id = _invoke_worker_process(
@@ -367,7 +366,7 @@ def main(argv):
                 if next_begin_case_id < end_case_id:
                     logger.info(
                         'Bucket [%d, %d) not fully processed. Retrying from case %d.',
-                        current_begin_case_id, end_case_id, next_begin_case_id)
+                        begin_case_id, end_case_id, next_begin_case_id)
                 else:
                     logger.info(
                         'Bucket [%d, %d) was fully processed in worker subprocess.',
