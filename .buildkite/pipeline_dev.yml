@@ -12,87 +12,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dev pipeline for tpu-inference-dev.
-#
-# HOW TO TRIGGER THIS PIPELINE
-# ─────────────────────────────
-# Option A — Buildkite UI:
-#   Go to https://buildkite.com/tpu-commons/tpu-inference-dev
-#   Click "New Build", set branch to your branch, click "Create Build".
-#
-# Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
-#   curl -s -X POST \
-#     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
-#     -H "Content-Type: application/json" \
-#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-dev/builds" \
-#     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
-
 steps:
 
   # -----------------------------------------------------------------
-  # DEV ONLY (carries the env-gated platform-check downgrade).
-  # Kimi-K3 attempt 13g: condfix + podfix + loop fixes, pool UNPINNED,
-  # 4 hosts, DP attention OFF, experts split expert=4 x model=8 = 32.
-  #
-  # Deltas vs attempt 13f (778, which cleared the backbone unpinned but
-  # died compiling the fused-loop executable at 95.45G):
-  #   * enable_continue_decode=false: the loop's remaining compile-temp
-  #     term (LICM-hoisted MoE dequant staging, mitigated but not
-  #     eliminated) is a memory risk at pod layer count; the loop
-  #     returns once the KDA decode-only branch fix removes the packing
-  #     scratch. The loop correctness fixes (has_initial_state carried
-  #     per step, per-step weight pinning, flat step trace) ride along.
-  #   * --model-loader-extra-config concurrency=64: first tuning of the
-  #     runai streamer (default concurrency measured ~85 MB/s/host on
-  #     778's sharded read) — load-time A/B vs 778 comes free.
-  #   * Unpinned pool per the per-device sizing fix: expect the
-  #     compact-mamba split ~421 attn blocks / ~65 mamba slots and
-  #     backbone precompile through all buckets as in 778.
-  #   * Full phases: gsm8k full (210-min cap; post-conv-fix score),
-  #     BS=1 8k/1k, matrix {1k/1k, 8k/1k} x {conc 8, conc 64} — the
-  #     conc-64 cells get real KV capacity for the first time.
+  # DEV ONLY — gsm8k-collapse bisect probes on the CI software stack
+  # (jax 0.11 / libtpu 0.0.44, the pod's runtime). Everything here
+  # passed on the local jax 0.10.2 rig; this build checks the CI
+  # stack for version-specific divergence:
+  #   1. Chunked ragged_conv1d oracle vs a direct causal conv at the
+  #      production per-device widths (incl. 1- and 2-token remainder
+  #      chunks with state continuation).
+  #   2. KDA/conv unit suites.
+  #   3. Sliced-K3 gsm8k-shape consistency probe at pod topology
+  #      (chunked ~1k prompts, concurrency 8 vs sequential).
+  #   4. Weight-integrity fingerprint of the sharded streamer load,
+  #      default vs concurrency=64 — over the GCS transport, which
+  #      the local rig (disk cache) cannot exercise.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13g: podfix + loop correctness fixes, loop off, unpinned pool, tuned streamer"
-    key: tpu7x_k3_attempt13g
-    timeout_in_minutes: 420
-    env:
-      TPU_VERSION: "tpu7x"
-      MODEL_IMPL_TYPE: "flax_nnx"
-      NEW_MODEL_DESIGN: "1"
-      TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION: "1"
-      # The CI image sets this to 1, which makes any compile at request time
-      # fatal. This run serves request shapes the warmup sweep does not
-      # cover; allow the compile.
-      VLLM_XLA_CHECK_RECOMPILATION: "0"
-      # Streaming the checkpoint dominates startup. With the sharded read
-      # each host pulls ~0.4 TB instead of 1.45 TB, but keep attempt 12's
-      # four-hour health wait so a regression fails with worker-side logs
-      # rather than a launcher timeout.
-      SERVE_STARTUP_TIMEOUT_SECONDS: "14400"
-      # Shard-then-decode MXFP4 (default on, named to self-describe) is
-      # also a hard requirement of the sharded expert streaming below.
-      MXFP4_SHARD_THEN_DECODE: "1"
-      K3_SHARDED_EXPERT_STREAMING: "1"
+  - label: "tpu7x gsm8k-collapse bisect probes (CI stack)"
+    key: tpu7x_gsmbisect
     agents:
-      queue: tpu_v7x_32_queue
+      queue: tpu_v7x_8_queue
+    env:
+      MODEL_IMPL_TYPE: flax_nnx
+      NEW_MODEL_DESIGN: "1"
+      SKIP_JAX_PRECOMPILE: "1"
+      VLLM_XLA_CHECK_RECOMPILATION: "0"
+      TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION: "1"
+      KV_CACHE_WARMUP_RESERVE_FRACTION: "0"
+      MXFP4_SHARD_THEN_DECODE: "1"
+    timeout_in_minutes: 110
     commands:
       - |
-        .buildkite/scripts/run_multihost.sh \
-          "vllm serve gs://tpu-commons-ci/moonshootai/kimi/k3 \
-            --port 8000 \
-            --tensor-parallel-size 32 \
-            --trust-remote-code \
-            --max-model-len 10240 \
-            --max-num-seqs 64 \
-            --max-num-batched-tokens 512 \
-            --no-async-scheduling \
-            --load-format=runai_streamer \
-            --no-enable-prefix-caching \
-            --gpu-memory-utilization 0.8 \
-            --model-loader-extra-config '{\"concurrency\":64}' \
-            --additional-config '{\"enable_continue_decode\":false,\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
-          "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
-            --concurrency 4 \
-            --long-tokens 256 \
-            --needle-tokens 8000 \
-          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --full-gsm8k --bs1-bench --matrix-bench"
+        .buildkite/scripts/run_in_docker.sh bash -c '
+        set -e
+        cd /workspace/tpu_inference
+        echo "=== [1/4] conv chunk oracle, production widths ==="
+        for DIM in 384 1536 6144 12288; do
+          ORACLE_TPU=1 ORACLE_DIM=$$DIM python tools/dev_bisect/conv_chunk_oracle.py | grep RESULT
+        done
+        echo "=== [2/4] KDA/conv suites ==="
+        python -m pytest tests/kernels/kda_reference_test.py tests/layers/common/test_ragged_conv1d.py -q
+        echo "=== [3/4] gsm8k-shape consistency probe (pod topology) ==="
+        SKIP_JAX_PRECOMPILE=0 PROBE_TAG=ci_779stack python tools/dev_bisect/k3_gsm8k_shape_probe.py
+        echo "=== [4/4] streamer fingerprint, GCS transport, conc default vs 64 ==="
+        SKIP_JAX_PRECOMPILE=0 python tools/dev_bisect/k3_streamer_conc_check.py | grep streamer-check | tee /tmp/fp_default.txt
+        SKIP_JAX_PRECOMPILE=0 PROBE_STREAMER_CONC=64 python tools/dev_bisect/k3_streamer_conc_check.py | grep streamer-check | tee /tmp/fp_conc64.txt
+        echo "=== fingerprint diff (empty means identical) ==="
+        diff <(sed "s/concdefault/CONC/" /tmp/fp_default.txt) <(sed "s/conc64/CONC/" /tmp/fp_conc64.txt) && echo "FINGERPRINTS IDENTICAL"
+        '
