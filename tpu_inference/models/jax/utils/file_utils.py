@@ -30,7 +30,7 @@ logger = init_logger(__name__)
 # Do not set the HuggingFace token here, it should be set via the env `HF_TOKEN`.
 hfs = HfFileSystem()
 
-LOCK_DIR = "/tmp/lock"
+DEFAULT_LOCK_DIR = os.path.join("/tmp", f"tpu_inference_lock_{os.getuid()}")
 
 #####  Local file utils  #####
 
@@ -52,9 +52,26 @@ def list_files(dir: str, pattern: str = "*") -> List[str]:
 
 
 def get_lock(model_name_or_path: str):
-    lock_dir = LOCK_DIR
+    lock_dir = os.environ.get("TPU_INFERENCE_LOCK_DIR", DEFAULT_LOCK_DIR)
     model_name_or_path = str(model_name_or_path)
-    os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
+
+    if os.path.exists(lock_dir):
+        # Verify ownership to prevent pre-creation attacks in shared directories
+        stat_info = os.stat(lock_dir)
+        if stat_info.st_uid != os.getuid():
+            raise RuntimeError(
+                f"Lock directory {lock_dir} exists but is not owned by the current user "
+                f"(owner UID: {stat_info.st_uid}, current UID: {os.getuid()}). "
+                "Refusing to run for security reasons.")
+        if os.path.islink(lock_dir):
+            raise RuntimeError(f"Lock directory {lock_dir} is a symlink. "
+                               "Refusing to run for security reasons.")
+
+    if lock_dir == DEFAULT_LOCK_DIR:
+        os.makedirs(lock_dir, mode=0o700, exist_ok=True)
+    else:
+        os.makedirs(lock_dir, exist_ok=True)
+
     model_name = model_name_or_path.replace("/", "-")
     hash_name = hashlib.sha256(model_name.encode()).hexdigest()
     # add hash to avoid conflict with old users' lock files

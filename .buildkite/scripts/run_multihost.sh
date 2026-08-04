@@ -21,7 +21,16 @@ set -x
 export SSH_USER="${SSH_USER:-$(whoami)}"
 
 # We need a valid path for run_cluster.sh's HF_HOME bind mount
-HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home}"
+HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home_$(id -u)}"
+if [[ "$HOST_HF_HOME" == /tmp/hf_home_* ]]; then
+  if ! mkdir -m 700 "$HOST_HF_HOME" 2>/dev/null; then
+    if [ ! -O "$HOST_HF_HOME" ]; then
+      echo "ERROR: $HOST_HF_HOME exists but is not owned by the current user!" >&2
+      exit 1
+    fi
+    chmod 700 "$HOST_HF_HOME"
+  fi
+fi
 
 # Automatic Worker IP Discovery
 if [[ -z "${WORKER_IPS:-}" ]]; then
@@ -113,6 +122,16 @@ cleanup() {
   fi
 
   echo "   -> Cleaning Head Node..."
+  # Securely check and remove /tmp/vllm_serve.log to prevent symlink attacks
+  if [ -L /tmp/vllm_serve.log ]; then
+    echo "ERROR: /tmp/vllm_serve.log is a symlink. Refusing to copy." >&2
+    exit 1
+  fi
+  if [ -e /tmp/vllm_serve.log ] && [ ! -O /tmp/vllm_serve.log ]; then
+    echo "ERROR: /tmp/vllm_serve.log exists but is not owned by current user. Refusing to copy." >&2
+    exit 1
+  fi
+  rm -f /tmp/vllm_serve.log
   docker cp node:/root/vllm_serve.log /tmp/vllm_serve.log >/dev/null 2>&1 || true
   if [[ -f /tmp/vllm_serve.log ]]; then
     echo "==================== START OF VLLM SERVE LOG ===================="

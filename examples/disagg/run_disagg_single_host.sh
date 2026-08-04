@@ -149,6 +149,15 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
     # os.environ[TPU_VISIBLE_CHIPS] = "0,1,2,3"
 
+    JAX_CACHE_DIR="/tmp/jax_cache_$(id -u)_$PORT"
+    if ! mkdir -m 700 "$JAX_CACHE_DIR" 2>/dev/null; then
+        if [ ! -O "$JAX_CACHE_DIR" ]; then
+            echo "ERROR: $JAX_CACHE_DIR exists but is not owned by the current user!" >&2
+            exit 1
+        fi
+        chmod 700 "$JAX_CACHE_DIR"
+    fi
+
     TPU_CHIPS_PER_PROCESS_BOUNDS=1,1,1 \
     TPU_PROCESS_BOUNDS=1,1,1 \
     TPU_VISIBLE_CHIPS=0 \
@@ -157,7 +166,7 @@ for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
     SKIP_JAX_PRECOMPILE=1 \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
-    VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
+    VLLM_XLA_CACHE_PATH="$JAX_CACHE_DIR" \
     JAX_COORDINATOR_ADDRESS="127.0.0.1:$JAX_PORT" \
     JAX_PROCESS_ID=0 \
     JAX_NUM_PROCESSES=1 \
@@ -190,6 +199,15 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # os.environ[TPU_PROCESS_BOUNDS] = "1,1,1"
     # os.environ[TPU_VISIBLE_CHIPS] = "4,5,6,7"
 
+    JAX_CACHE_DIR="/tmp/jax_cache_$(id -u)_$PORT"
+    if ! mkdir -m 700 "$JAX_CACHE_DIR" 2>/dev/null; then
+        if [ ! -O "$JAX_CACHE_DIR" ]; then
+            echo "ERROR: $JAX_CACHE_DIR exists but is not owned by the current user!" >&2
+            exit 1
+        fi
+        chmod 700 "$JAX_CACHE_DIR"
+    fi
+
     TPU_CHIPS_PER_PROCESS_BOUNDS=1,1,1 \
     TPU_PROCESS_BOUNDS=1,1,1 \
     TPU_VISIBLE_CHIPS=1 \
@@ -198,7 +216,7 @@ for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     TPU_SIDE_CHANNEL_PORT=$SIDE_PORT \
     SKIP_JAX_PRECOMPILE=1 \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
-    VLLM_XLA_CACHE_PATH="/tmp/jax_cache_$PORT" \
+    VLLM_XLA_CACHE_PATH="$JAX_CACHE_DIR" \
     JAX_COORDINATOR_ADDRESS="127.0.0.1:$JAX_PORT" \
     JAX_PROCESS_ID=0 \
     JAX_NUM_PROCESSES=1 \

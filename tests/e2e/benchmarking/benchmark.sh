@@ -30,7 +30,7 @@ fi
 root_dir=/workspace
 dataset_name=sonnet
 dataset_path="benchmarks/sonnet.txt"
-vllm_download_dir=/tmp/hf_home
+vllm_download_dir="/tmp/hf_home_$(id -u)"
 input_len=1024
 output_len=1024
 prefix_len=0
@@ -45,7 +45,7 @@ helpFunction()
     echo -e "\t-r, --root-dir-path\tThe path to your root directory (default: /workspace/, which is used in the Dockerfile)"
     echo -e "\t-d, --dataset-name\tThe name of the dataset to use (default: sonnet)"
     echo -e "\t-p, --dataset-path\tThe path to the processed dataset. This is required when using a custom model (default: benchmarks/sonnet.txt)"
-    echo -e "\t-v, --vllm-download-dir\tThe directory to download vLLM into (default: /tmp/hf_home)"
+    echo -e "\t-v, --vllm-download-dir\tThe directory to download vLLM into (default: /tmp/hf_home_$(id -u))"
     echo -e "\t-h, --help\tShow this help message"
     echo ""
     echo "================================================================"
@@ -94,6 +94,17 @@ while [[ "$#" -gt 0 ]]; do
             ;;
     esac
 done
+
+# Ensure vllm_download_dir is secure if it is in /tmp
+if [[ "$vllm_download_dir" == /tmp/* ]]; then
+  if ! mkdir -m 700 "$vllm_download_dir" 2>/dev/null; then
+    if [ ! -O "$vllm_download_dir" ]; then
+      echo "ERROR: $vllm_download_dir exists but is not owned by the current user!" >&2
+      exit 1
+    fi
+    chmod 700 "$vllm_download_dir"
+  fi
+fi
 
 if [ -n "${TEST_MODEL:-}" ]; then
     test_model="$TEST_MODEL"

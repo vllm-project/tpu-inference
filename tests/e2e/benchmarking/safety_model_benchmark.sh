@@ -53,13 +53,16 @@ OUTPUT_LEN_OVERRIDE=20 # Max tokens to generate for safety classification.
 # --- DATA PATHS ---
 # Source URL for the AILuminate CSV (Public Raw GitHub Link)
 RAW_CSV_URL="https://raw.githubusercontent.com/mlcommons/ailuminate/main/airr_official_1.0_demo_en_us_prompt_set_release.csv"
-LOCAL_CSV_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.csv"
-LOCAL_JSONL_FILE="/tmp/airr_official_1.0_demo_en_us_prompt_set_release.jsonl"
+CACHE_DIR="${HOME}/.cache/tpu_inference"
+mkdir -p "$CACHE_DIR"
+
+LOCAL_CSV_FILE="${CACHE_DIR}/airr_official_1.0_demo_en_us_prompt_set_release.csv"
+LOCAL_JSONL_FILE="${CACHE_DIR}/airr_official_1.0_demo_en_us_prompt_set_release.jsonl"
 
 # MM-SafetyBench Data Paths
 MM_SAFETYBENCH_REPO="https://github.com/isXinLiu/MM-SafetyBench.git"
 
-MM_SAFETYBENCH_DIR="/tmp/MM-SafetyBench"
+MM_SAFETYBENCH_DIR="${CACHE_DIR}/MM-SafetyBench"
 MM_SAFETYBENCH_IMAGE_DIR="${MM_SAFETYBENCH_DIR}/data/imgs"
 # ------------------
 
@@ -163,7 +166,7 @@ from pathlib import Path
 # The path to the processed_questions directory
 questions_dir = Path('$MM_SAFETYBENCH_DIR') / 'data' / 'processed_questions'
 image_dir = Path('$MM_SAFETYBENCH_IMAGE_DIR') / 'MM-SafetyBench(imgs)'
-output_file = Path('/tmp/mm_safety_bench.jsonl')
+output_file = Path('${CACHE_DIR}/mm_safety_bench.jsonl')
 num_prompts = int(os.environ['NUM_PROMPTS'])
 
 with output_file.open('w') as f:
@@ -292,7 +295,7 @@ run_multimodal_performance_benchmark() {
     vllm bench serve \
         --model "$MODEL_NAME" \
         --dataset-name custom \
-        --dataset-path /tmp/mm_safety_bench.jsonl \
+        --dataset-path "${CACHE_DIR}/mm_safety_bench.jsonl" \
         --num-prompts "$NUM_PROMPTS" \
         --backend "openai-chat" \
         --endpoint "/v1/chat/completions" \
