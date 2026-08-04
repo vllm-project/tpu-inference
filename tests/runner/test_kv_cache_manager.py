@@ -35,7 +35,8 @@ from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
 from tpu_inference.runner.input_batch import CachedRequestState
-from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
+from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
+                                           get_attention_page_size_bytes)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -930,6 +931,35 @@ class TestKVCacheManager:
             assert mamba_states[1].shape == (expected_num_blocks, 8, 64, 32)
 
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+
+    def test_reinitialize_kv_cache_reuses_mamba_allocators(self):
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        _get_mamba_cache_allocator.cache_clear()
+        try:
+            with patch('dataclasses.replace') as mock_replace:
+                mock_replaced_spec = MagicMock()
+                mock_replaced_spec.page_size_bytes = page_size_bytes
+                mock_replace.return_value = mock_replaced_spec
+
+                self.runner.initialize_kv_cache(kv_cache_config)
+                self.runner.delete_kv_cache()
+                self.runner.reinitialize_kv_cache()
+
+            cache_info = _get_mamba_cache_allocator.cache_info()
+            assert cache_info.misses == 2
+            assert cache_info.hits == 6
+        finally:
+            _get_mamba_cache_allocator.cache_clear()
 
     def test_initialize_kv_cache_no_duplicate_shared_layers(self):
         block_size = self.runner.vllm_config.cache_config.block_size

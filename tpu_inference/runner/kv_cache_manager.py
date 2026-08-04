@@ -48,6 +48,7 @@ from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.kv_cache import (KVCacheMetadata,
                                            create_kv_cache_of_shape,
                                            create_kv_caches,
+                                           create_mamba_cache,
                                            get_attention_page_size_bytes)
 
 if TYPE_CHECKING:
@@ -893,13 +894,9 @@ class KVCacheManager:
 
                         # NOTE: conv state will always be BF16 and SSM state will always be FP32
                         # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
-                        def _allocate_mamba(c_shape=cache_shape,
-                                            c_dtype=jax_dtype):
-                            return jnp.empty(shape=c_shape, dtype=c_dtype)
-
-                        mamba_allocate = jax.jit(_allocate_mamba,
-                                                 out_shardings=sharding)
-                        mamba_states.append(mamba_allocate())
+                        mamba_states.append(
+                            create_mamba_cache(cache_shape, jax_dtype,
+                                               sharding))
 
                     metadata["mamba"].count += 1
                     if metadata["mamba"].shape is None:

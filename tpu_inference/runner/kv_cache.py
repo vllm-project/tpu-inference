@@ -116,6 +116,27 @@ def _get_kv_cache_allocator(
     return _allocate
 
 
+@cache
+def _get_mamba_cache_allocator(
+        cache_shape: tuple, cache_dtype: jnp.dtype,
+        sharding: NamedSharding) -> Callable[[], jax.Array]:
+
+    @partial(jax.jit, out_shardings=sharding)
+    def _allocate() -> jax.Array:
+        return jnp.empty(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    return _allocate
+
+
+def create_mamba_cache(cache_shape: tuple, cache_dtype: jnp.dtype,
+                       sharding: NamedSharding) -> jax.Array:
+    """Creates a fresh Mamba state array with a cached allocator."""
+    return _get_mamba_cache_allocator(cache_shape, cache_dtype, sharding)()
+
+
 def create_kv_caches(
     num_blocks: int,
     block_size: int,
