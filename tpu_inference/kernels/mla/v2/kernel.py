@@ -2458,10 +2458,14 @@ def mla_ragged_paged_attention(
             topk = topk_indices.shape[-1]
             padded_topk = unsigned_align_to(topk, 128)
             topk_indices_2d = topk_indices.reshape(topk_indices.shape[0], topk)
+            topk_indices_2d = topk_indices_2d[:ql_nope.shape[1]]
+            pad_rows = max(
+                0,
+                int(ql_nope.shape[1]) - int(topk_indices_2d.shape[0]))
             topk_indices_padded = jnp.pad(
                 topk_indices_2d,
                 (
-                    (0, ql_nope.shape[1] - topk_indices_2d.shape[0]),
+                    (0, pad_rows),
                     (0, padded_topk - topk),
                 ),
                 mode="constant",

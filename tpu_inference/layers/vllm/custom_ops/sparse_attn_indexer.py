@@ -17,7 +17,7 @@ import sys
 import jax
 import torch
 from jax.sharding import PartitionSpec as P
-from torchax.interop import jax_view, torch_view
+from torchax.interop import jax_view
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 
@@ -84,24 +84,41 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
             prefix = getattr(self.k_cache, "prefix",
                              getattr(self, "prefix", ""))
 
-            def lookup_key(d, key):
+            def lookup_indexer_cache_index(d, key):
+                base_key = key.split(".k_cache")[0].split(".indexer")[0]
+                for k, idx in d.items():
+                    if ".indexer" in str(k) and (str(k).startswith(base_key) or
+                                                 base_key.startswith(str(k))):
+                        return idx
+                for k, idx in d.items():
+                    if wrapper_ctx.kv_caches[idx].shape[2] == 4 and (
+                            str(k).startswith(base_key)
+                            or base_key.startswith(str(k))):
+                        return idx
                 if key in d:
                     return d[key]
-                base_key = key.split(".k_cache")[0].split(".indexer")[0]
                 for k in d:
-                    if k == base_key or k.startswith(
-                            base_key) or base_key.startswith(k):
+                    if k == base_key or str(k).startswith(
+                            base_key) or base_key.startswith(str(k)):
                         return d[k]
                 raise KeyError(
                     f"Key {key} (base {base_key}) not found in {list(d.keys())}"
                 )
 
-            kv_cache_index = lookup_key(
+            kv_cache_index = lookup_indexer_cache_index(
                 wrapper_ctx.layer_name_to_kvcache_index, prefix)
+            print(
+                f"[DEBUG INDEXER CACHES] prefix={prefix}, selected_idx={kv_cache_index}, all_shapes=[(i, c.shape, c.dtype) for i, c in enumerate(wrapper_ctx.kv_caches)], map={wrapper_ctx.layer_name_to_kvcache_index}",
+                flush=True)
             kv_cache = wrapper_ctx.kv_caches[kv_cache_index]
             mesh = wrapper_ctx.mesh
-            attn_metadata_dict = get_forward_context().attn_metadata
-            attn_metadata = lookup_key(attn_metadata_dict, prefix)
+            try:
+                from vllm.model_executor.layers.attention.attention import \
+                    get_attention_context
+                attn_metadata, _, _, _ = get_attention_context(prefix)
+            except Exception:
+                attn_metadata_val = get_forward_context().attn_metadata
+                attn_metadata = attn_metadata_val
         except Exception as e:
             print(
                 f"[VllmSparseAttnIndexer] Warning: fallback due to exception: {e}",
@@ -128,6 +145,8 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
         out_specs = data_spec
 
         topk_tokens = self.topk_tokens
+        compression_ratio = getattr(self, "compress_ratio",
+                                    getattr(self, "compression_ratio", 1))
 
         def _streamindex_topk(q, indexer_weights, cache_kv, seq_lens,
                               page_indices, cu_q_lens, distribution):
@@ -140,8 +159,9 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
                 cu_q_lens=cu_q_lens,
                 distribution=distribution,
                 k=topk_tokens,
-                num_kv_pages_per_block=1,
-                num_queries_per_block=1,
+                compression_ratio=compression_ratio,
+                num_kv_pages_per_block=(3, 2, 2),
+                num_queries_per_block=(1, 128, 128),
             )
 
         topk_indices_jax = jax.shard_map(
@@ -159,7 +179,4 @@ class VllmSparseAttnIndexer(SparseAttnIndexer):
             attn_metadata.query_start_loc,
             attn_metadata.request_distribution,
         )
-        topk_indices_torch = torch_view(topk_indices_jax)
-        if self.topk_indices_buffer is not None:
-            self.topk_indices_buffer[:num_tokens].copy_(topk_indices_torch)
-        return topk_indices_torch
+        return topk_indices_jax

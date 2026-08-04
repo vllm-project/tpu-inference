@@ -932,16 +932,26 @@ class KVCacheManager:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
                         block_size = layer_spec.storage_block_size
 
-                        kv_cache = create_kv_caches(
-                            num_blocks=num_blocks,
-                            block_size=block_size,
-                            num_kv_heads=layer_spec.num_kv_heads,
-                            head_size=layer_spec.head_size,
-                            mesh=self.runner.mesh,
-                            layer_names=[f'kv_cache_tensor.{i}'],
-                            cache_dtype=t2j_dtype(layer_spec.dtype),
-                            use_mla=self.use_mla,
-                        )[0]
+                        if layer_name.endswith(".indexer.k_cache"):
+                            context_cnt = common_utils.get_mesh_shape_product(
+                                self.runner.mesh, ShardingAxisName.KV_CONTEXT)
+                            shape = (num_blocks,
+                                     (block_size * context_cnt) // 4, 4, 256)
+                            kv_cache = create_kv_cache_of_shape(
+                                shape,
+                                mesh=self.runner.mesh,
+                                cache_dtype=jnp.uint8)
+                        else:
+                            kv_cache = create_kv_caches(
+                                num_blocks=num_blocks,
+                                block_size=block_size,
+                                num_kv_heads=layer_spec.num_kv_heads,
+                                head_size=layer_spec.head_size,
+                                mesh=self.runner.mesh,
+                                layer_names=[f'kv_cache_tensor.{i}'],
+                                cache_dtype=t2j_dtype(layer_spec.dtype),
+                                use_mla=self.use_mla,
+                            )[0]
                         kv_caches.append(kv_cache)
 
                         # Update Regular Attention Metadata
@@ -1109,6 +1119,8 @@ class KVCacheManager:
         # must be a multiple of the sharding divisor.
         divisor = common_utils.get_mesh_shape_product(self.runner.mesh,
                                                       ShardingAxisName.BATCH)
+        # Account for XLA multiple-array HBM alignment overhead in DSv4 hybrid layout
+        num_blocks = int(num_blocks * 0.78)
         num_blocks = (num_blocks // divisor) * divisor
         if self.runner.cache_config.num_gpu_blocks_override is not None:
             num_blocks = min(num_blocks,
@@ -1179,7 +1191,10 @@ class KVCacheManager:
                          self._DS_V4_KV_PACKING, 256)
                 _create_cache(shape, layer_name)
                 layer_to_index[layer_name] = len(kv_caches) - 1
-            elif spec.compress_ratio == self._DS_V4_CSA_COMPRESS_RATIO:
+            elif spec.compress_ratio == self._DS_V4_CSA_COMPRESS_RATIO or any(
+                    "Glm" in str(a)
+                    for a in getattr(self.runner.vllm_config.model_config,
+                                     "architectures", [])):
                 # CSA is split across two arrays, for nope and rope respectively.
                 shape = (num_blocks, page_size, self._DS_V4_KV_PACKING, 128)
                 _create_cache(shape, layer_name)
