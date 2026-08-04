@@ -350,6 +350,8 @@ def main(argv):
             logger.info(
                 'Generating Buildkite pipeline YAML. No tuning jobs will be run.'
             )
+            kernel_tuner = _create_kernel_tuner(_KERNEL_TUNER_NAME.value,
+                                                run_config)
             kernel_tuner.generate_buildkite_pipeline()
         else:
             begin_case_id = _BEGIN_CASE_ID.value
