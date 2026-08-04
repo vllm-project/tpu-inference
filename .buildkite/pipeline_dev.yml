@@ -58,6 +58,12 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c '
         set -e
+        export MODEL_IMPL_TYPE=flax_nnx NEW_MODEL_DESIGN=1
+        export VLLM_XLA_CHECK_RECOMPILATION=0
+        export TPU_INFERENCE_UNSAFE_MLA_WITHOUT_DP_ATTENTION=1
+        export KV_CACHE_WARMUP_RESERVE_FRACTION=0
+        export MXFP4_SHARD_THEN_DECODE=1
+        export SKIP_JAX_PRECOMPILE=1
         cd /workspace/tpu_inference
         echo "=== [1/4] conv chunk oracle, production widths ==="
         for DIM in 384 1536 6144 12288; do
