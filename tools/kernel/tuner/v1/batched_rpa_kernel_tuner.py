@@ -276,9 +276,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                     TuningCase(tuning_key=tuning_key,
                                tunable_params=TunableParams(
                                    **dict(zip(param_names, combo)))))
-        cases = cases[
-            2015:
-            2017]  # (TODO) This is just for testing, remove this line to run all cases
+        cases = cases
         logger.info(f"Generated {len(cases)} tuning cases from log file.")
         return cases
 
