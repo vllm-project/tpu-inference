@@ -19,6 +19,8 @@ import jax
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference.layers.common.utils import general_device_put
+
 
 # TODO(xiang): move this to weight_utils.py
 def shard_put(x: jax.Array, sharding_names: Tuple[str, ...] | P,
@@ -27,4 +29,16 @@ def shard_put(x: jax.Array, sharding_names: Tuple[str, ...] | P,
     # to avoid the recursive jit error.
     if math.prod(mesh.axis_sizes) == 1:
         return jax.device_put(x, mesh.devices.flatten()[0])
-    return jax.device_put(x, NamedSharding(mesh, P(*sharding_names)))
+    # Not `jax.device_put(x, NamedSharding(mesh, ...))`: under the Ray
+    # multi-host backend a process addresses only its own devices, so naming a
+    # sharding over the whole mesh is rejected ("must be a Device or a
+    # Sharding which represents addressable devices"). `general_device_put`
+    # assembles the global array from each process's addressable shards, and
+    # falls through to a plain `device_put` when TPU_MULTIHOST_BACKEND is not
+    # "ray" (or the input is not fully addressable) -- so behaviour outside
+    # the Ray multi-host backend is unchanged.
+    source_mesh = (x.sharding.mesh if isinstance(getattr(x, "sharding", None),
+                                                 NamedSharding) else None)
+    return general_device_put(x,
+                              NamedSharding(mesh, P(*sharding_names)),
+                              source_mesh=source_mesh)

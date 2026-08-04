@@ -100,11 +100,42 @@ fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
 
+# A multi-host slot is expensive and scarce, so one run has to yield every piece
+# of evidence a diagnosis could need. These two helpers exist for that: greppable
+# phase timings, and worker-side logs on the way out (see cleanup below).
+MH_PHASE_MARK=$SECONDS
+mh_timing() {
+  local phase="$1"
+  local now=$SECONDS
+  # One line per phase, fixed prefix, so `grep '\[mh-timing\]'` on any build's
+  # log gives the whole startup profile and two builds can be diffed directly.
+  echo "[mh-timing] ${phase}=$((now - MH_PHASE_MARK)) (elapsed=${now})"
+  MH_PHASE_MARK=$now
+}
+
+# Only dump worker containers once they have actually been asked to start;
+# cleanup() also runs before the cluster is up, to clear leftovers.
+MH_CLUSTER_STARTED=0
+
 # Cleanup function that runs on exit to tear down the Ray cluster
 cleanup() {
   echo "🧹 Cleaning up containers on head and workers..."
   IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS:-}"
-  
+
+  # Worker-side evidence, on success as well as failure. Only the head's serve
+  # log used to be printed, so a crash confined to a worker (an OOM on one host,
+  # a failed image pull, a Ray registration error) left no trace in the job log
+  # at all and the run had to be repeated to see it.
+  if [[ ${MH_CLUSTER_STARTED} -eq 1 && ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
+    for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+      echo "==== WORKER ${worker_ip} docker logs ===="
+      ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
+        "docker logs --tail 200 node 2>&1 || echo '(no container named node on this worker)'" \
+        || echo "(unreachable over ssh: ${worker_ip})"
+      echo "==== END WORKER ${worker_ip} docker logs ===="
+    done
+  fi
+
   echo "   -> Cleaning workers..."
   if [[ ${#WORKER_IPS_ARRAY[@]} -gt 0 && -n "${WORKER_IPS_ARRAY[0]}" ]]; then
     for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
@@ -113,11 +144,17 @@ cleanup() {
   fi
 
   echo "   -> Cleaning Head Node..."
+  # /tmp survives between builds on a persistent agent, so delete the copy
+  # after printing it: otherwise `docker cp` failing (no container, serve never
+  # started) leaves the PREVIOUS build's serve log in place and this prints it
+  # as if it belonged to this build.
+  rm -f /tmp/vllm_serve.log || true
   docker cp node:/root/vllm_serve.log /tmp/vllm_serve.log >/dev/null 2>&1 || true
   if [[ -f /tmp/vllm_serve.log ]]; then
     echo "==================== START OF VLLM SERVE LOG ===================="
     cat /tmp/vllm_serve.log || true
     echo "==================== END OF VLLM SERVE LOG ===================="
+    rm -f /tmp/vllm_serve.log || true
   fi
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
@@ -156,6 +193,7 @@ wait_for_server() {
   echo "   -> Found PID: $pid"
 
   local end_time=$((SECONDS + timeout))
+  local polls=0
   while [[ $SECONDS -lt $end_time ]]; do
     # 2. Check health
     if curl -fs "localhost:${port}/health" > /dev/null; then
@@ -169,6 +207,15 @@ wait_for_server() {
       echo "Displaying logs from $container_name:$log_path"
       docker exec "$container_name" cat "$log_path" || true
       return 1
+    fi
+
+    # 4. Show where startup has got to. Without this the log only appears
+    # after the server is up or has died, so a large model's weight load and
+    # warmup -- tens of minutes -- look identical to a hang.
+    polls=$((polls + 1))
+    if ((polls % 12 == 0)); then
+      echo "--- $service_name still starting (${SECONDS}s of ${timeout}s); last lines of $log_path:"
+      docker exec "$container_name" tail -n 3 "$log_path" || true
     fi
 
     sleep 5
@@ -194,85 +241,44 @@ docker system prune -a --volumes -f || true
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
+
 # setup_environment traces a long tail of docker tag/build/push plumbing and
 # one line per variable it sources from /etc/environment. It echoes its own
 # progress, so the trace adds nothing; xtrace is on for this whole script, so
 # turn it off across the call and back on after.
 { set +x; } 2>/dev/null
-# Pass "true" to enable pushing to GCR
-setup_environment "${IMAGE_NAME}" "true"
-set -x
+if [[ "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
+  # An upstream cpu-builder step already built this commit's image and pushed it
+  # to the CI cache, so pull it instead of spending ~10+ minutes rebuilding it on
+  # the head node of a scarce multi-host slice. Nothing is built and nothing is
+  # pushed here: every node -- head and workers alike -- pulls the CI cache ref
+  # directly, which they can do because the whole slice shares one service
+  # account and run_cluster.sh already authenticates to that registry host.
+  setup_environment "${IMAGE_NAME}" "false"
+  if [[ -z "${PREBUILT_IMAGE_REF:-}" ]]; then
+    echo "[FATAL][run_multihost] USE_PREBUILT_IMAGE=1 but setup_environment did not" >&2
+    echo "[FATAL][run_multihost] publish PREBUILT_IMAGE_REF; refusing to guess the" >&2
+    echo "[FATAL][run_multihost] image the workers should pull." >&2
+    exit 1
+  fi
+  DOCKER_IMAGE="${PREBUILT_IMAGE_REF}"
+else
+  # Pass "true" to enable pushing to GCR
+  setup_environment "${IMAGE_NAME}" "true"
 
-DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
+  DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
+fi
+set -x
+mh_timing image_ready
 
 # Clean up potential leftovers from previous runs
 echo "--- Cleaning up previous cluster state..."
 cleanup
 
-# 1. Start Ray Head Node locally
-echo "--- Starting Ray Head Node Locally"
-# This call carries ~a dozen -e flags; its xtrace line is long and adds
-# nothing over the "Starting Ray Head Node Locally" banner above. The worker
-# start below is already quiet, since xtrace does not echo ssh heredoc bodies.
-{ set +x; } 2>/dev/null
-bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
-  "${DOCKER_IMAGE}" \
-  "${HEAD_INTERNAL_IP}" \
-  --head \
-  "${HOST_HF_HOME}" \
-  -e HF_TOKEN="${HF_TOKEN:-}" \
-  -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
-  -e TPU_BACKEND_TYPE=jax \
-  -e MODEL_IMPL_TYPE=vllm \
-  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
-  -e NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-0}" \
-  -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
-  -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
-  -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
-  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
-set -x
-
-sleep 60
-
-# 2. Distribute run_cluster.sh to workers and start them
-IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
-for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
-    echo "--- Distributing and starting Ray Worker on ${worker_ip}"
-
-    # Prune Worker Node BEFORE it tries to pull the new giant image
-    echo "   -> Pruning Docker on worker to free disk space..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
-    
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
-    # shellcheck disable=SC2002
-    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
-    
-    # shellcheck disable=SC2087
-    # shellcheck disable=SC2029
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
-bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
-  -e HF_TOKEN='${HF_TOKEN:-}' \
-  -e TPU_MULTIHOST_BACKEND=ray \
-  -e JAX_PLATFORMS='' \
-  -e TPU_BACKEND_TYPE=jax \
-  -e MODEL_IMPL_TYPE=vllm \
-  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
-  -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
-  -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
-  -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
-  -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
-  -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
-EOF
-done
-
-
-echo "--- Waiting for all worker nodes to connect"
-# Wait a few seconds for all worker nodes to connect
-sleep 120
-
-# 3. Start vLLM server on the head node
-echo "--- Starting vLLM server on head node"
+# Resolve the serve command here, before anything starts, so the config block
+# below can print it. Consuming "$1" at this point is equivalent to consuming it
+# later: nothing in between reads the positional parameters, and the remaining
+# arguments are still the benchmark command.
 MODEL="${TEST_MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
 VLLM_PORT="8000"
 
@@ -294,14 +300,108 @@ if [ "$#" -ge 1 ]; then
     shift
 fi
 
+# Everything a later reader needs to know what this run actually was, in one
+# block, before any of it can scroll past a failure. Without it a red build has
+# to be re-derived from the pipeline yml, which is a different file at a
+# different commit than the one that ran.
+echo "==== MULTIHOST CONFIG ===="
+echo "DOCKER_IMAGE          = ${DOCKER_IMAGE}"
+echo "USE_PREBUILT_IMAGE    = ${USE_PREBUILT_IMAGE:-0}"
+echo "HEAD_INTERNAL_IP      = ${HEAD_INTERNAL_IP}"
+echo "WORKER_IPS            = ${WORKER_IPS}"
+echo "TPU_VERSION           = ${TPU_VERSION:-}"
+echo "MODEL_IMPL_TYPE       = ${MODEL_IMPL_TYPE:-vllm}"
+echo "NEW_MODEL_DESIGN      = ${NEW_MODEL_DESIGN:-0}"
+echo "HOST_HF_HOME          = ${HOST_HF_HOME}"
+echo "SERVE_CMD             = ${VLLM_SERVE_CMD}"
+echo "BENCHMARK_CMD         = ${*:-<default curl test>}"
+echo "==== END MULTIHOST CONFIG ===="
+
+# 1. Start Ray Head Node locally
+echo "--- Starting Ray Head Node Locally"
+# xtrace off for this invocation: its argv carries HF_TOKEN, and `set -x`
+# would print the secret into the build log. (The worker start below goes
+# through an ssh heredoc, whose body xtrace does not echo.)
+{ set +x; } 2>/dev/null
+bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
+  "${DOCKER_IMAGE}" \
+  "${HEAD_INTERNAL_IP}" \
+  --head \
+  "${HOST_HF_HOME}" \
+  -e HF_TOKEN="${HF_TOKEN:-}" \
+  -e TPU_MULTIHOST_BACKEND=ray \
+  -e JAX_PLATFORMS='' \
+  -e TPU_BACKEND_TYPE=jax \
+  -e MODEL_IMPL_TYPE="${MODEL_IMPL_TYPE:-vllm}" \
+  -e VLLM_XLA_CHECK_RECOMPILATION="${VLLM_XLA_CHECK_RECOMPILATION:-1}" \
+  -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}" \
+  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM="${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}" \
+  -e NEW_MODEL_DESIGN="${NEW_MODEL_DESIGN:-0}" \
+  -e MOE_REQUANTIZE_BLOCK_SIZE="${MOE_REQUANTIZE_BLOCK_SIZE:-}" \
+  -e MOE_REQUANTIZE_WEIGHT_DTYPE="${MOE_REQUANTIZE_WEIGHT_DTYPE:-}" \
+  -e MOE_ALL_GATHER_ACTIVATION_DTYPE="${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}" \
+  -e FORCE_MOE_RANDOM_ROUTING="${FORCE_MOE_RANDOM_ROUTING:-}" &
+set -x
+
+sleep 60
+mh_timing head_container_up
+
+# 2. Distribute run_cluster.sh to workers and start them
+IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS}"
+# From here on a worker may hold state worth reading on the way out.
+MH_CLUSTER_STARTED=1
+for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+    echo "--- Distributing and starting Ray Worker on ${worker_ip}"
+
+    # Prune Worker Node BEFORE it tries to pull the new giant image
+    echo "   -> Pruning Docker on worker to free disk space..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+    
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
+    # shellcheck disable=SC2002
+    cat "${TOP_DIR}/scripts/multihost/run_cluster.sh" | base64 | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
+    
+    # shellcheck disable=SC2087
+    # shellcheck disable=SC2029
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" << EOF &
+bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' \
+  -e HF_TOKEN='${HF_TOKEN:-}' \
+  -e TPU_MULTIHOST_BACKEND=ray \
+  -e JAX_PLATFORMS='' \
+  -e TPU_BACKEND_TYPE=jax \
+  -e MODEL_IMPL_TYPE='${MODEL_IMPL_TYPE:-vllm}' \
+  -e VLLM_XLA_CHECK_RECOMPILATION='${VLLM_XLA_CHECK_RECOMPILATION:-1}' \
+  -e MXFP4_SHARD_THEN_DECODE='${MXFP4_SHARD_THEN_DECODE:-}' \
+  -e VLLM_DISABLE_SHARED_EXPERTS_STREAM='${VLLM_DISABLE_SHARED_EXPERTS_STREAM:-1}' \
+  -e NEW_MODEL_DESIGN='${NEW_MODEL_DESIGN:-0}' \
+  -e MOE_REQUANTIZE_BLOCK_SIZE='${MOE_REQUANTIZE_BLOCK_SIZE:-}' \
+  -e MOE_REQUANTIZE_WEIGHT_DTYPE='${MOE_REQUANTIZE_WEIGHT_DTYPE:-}' \
+  -e MOE_ALL_GATHER_ACTIVATION_DTYPE='${MOE_ALL_GATHER_ACTIVATION_DTYPE:-}' \
+  -e FORCE_MOE_RANDOM_ROUTING='${FORCE_MOE_RANDOM_ROUTING:-}'
+EOF
+done
+
+
+echo "--- Waiting for all worker nodes to connect"
+# Wait a few seconds for all worker nodes to connect
+sleep 120
+mh_timing workers_started
+
+# 3. Start vLLM server on the head node (command resolved above, with the config)
+echo "--- Starting vLLM server on head node"
+
 # Launch vllm serve in the background inside the local 'node' container
 docker exec \
   -d \
   -e HF_HOME=/root/.cache/huggingface \
   node bash -c "${VLLM_SERVE_CMD} > /root/vllm_serve.log 2>&1"
+mh_timing serve_launched
 
 # 4. Wait for the server to be healthy
-wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log"
+# STARTUP_TIMEOUT_SECONDS is the run_serving_probe.sh name for the same knob;
+# honor either so one env block works on both rigs.
+wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "${SERVE_STARTUP_TIMEOUT_SECONDS:-${STARTUP_TIMEOUT_SECONDS:-7200}}"
+mh_timing serve_healthy
 
 # 5. Run Benchmarks / Validation
 if [ "$#" -gt 0 ]; then

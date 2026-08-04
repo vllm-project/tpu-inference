@@ -56,6 +56,25 @@ ENV_VARS=(
   -e MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
   -e MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-}"
   -e USE_CHAT_TEMPLATE="${USE_CHAT_TEMPLATE:-}"
+  # Escape hatches for engine configuration a step cannot express through the
+  # named variables above; see the scripts that read them.
+  -e ACCURACY_MODEL_ARGS_JSON="${ACCURACY_MODEL_ARGS_JSON:-}"
+  -e EXTRA_SERVE_FLAGS="${EXTRA_SERVE_FLAGS:-}"
+  -e CLIENT_TRUST_REMOTE_CODE="${CLIENT_TRUST_REMOTE_CODE:-}"
+  # Read by run_serving_probe.sh: what to serve, how long to allow for weight
+  # loading, and what to pass through to the serving probe.
+  -e MODEL="${MODEL:-}"
+  -e STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-}"
+  -e PROBE_EXTRA_FLAGS="${PROBE_EXTRA_FLAGS:-}"
+  # Selects the MXFP4 expert decode path; empty means the default (decode each
+  # shard on the device that keeps it), 0 forces the whole-layer host decode.
+  -e MXFP4_SHARD_THEN_DECODE="${MXFP4_SHARD_THEN_DECODE:-}"
+  # Kimi-K3 test checkpoints, set by fetch_k3_tiny_fixtures.sh and empty
+  # everywhere else; the suites that read them skip when they are empty.
+  -e K3_TINY_CKPT="${K3_TINY_CKPT:-}"
+  -e K3_TINY_MXFP4_CKPT="${K3_TINY_MXFP4_CKPT:-}"
+  -e K3_TINY_SOFTPLUS_CKPT="${K3_TINY_SOFTPLUS_CKPT:-}"
+  -e K3_KDA_GOLDENS="${K3_KDA_GOLDENS:-}"
   -e BENCH_DATASET="${BENCH_DATASET:-}"
   -e USE_BATCHED_RPA_KERNEL="${USE_BATCHED_RPA_KERNEL:-}"
   -e GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"

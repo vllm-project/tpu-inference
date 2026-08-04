@@ -225,6 +225,14 @@ else
     exit 1
 fi
 
+if [ -n "${EXTRA_SERVE_FLAGS:-}" ]; then
+    echo "Appending EXTRA_SERVE_FLAGS: $EXTRA_SERVE_FLAGS"
+    # Whatever `vllm serve` accepts and has no variable of its own above.
+    # Split on whitespace, so no single flag or value may contain a space --
+    # pass --additional-config as compact JSON, not pretty-printed.
+    read -r -a _extra_flags <<< "$EXTRA_SERVE_FLAGS"
+    extra_serve_args+=("${_extra_flags[@]}")
+fi
 
 # Spin up the vLLM server
 echo "Spinning up the vLLM server..."
@@ -257,9 +265,17 @@ fi
 
 echo "Starting the benchmark for $test_model..."
 echo "Current working directory: $(pwd)"
+
+# The client builds a tokenizer of its own, so a model whose tokenizer ships
+# as repo code needs the same opt-in the server got.
+client_extra_args=()
+if [ -n "${CLIENT_TRUST_REMOTE_CODE:-}" ]; then
+    client_extra_args+=(--trust-remote-code)
+fi
 python benchmarks/benchmark_serving.py \
 --backend vllm \
 --model "$test_model" \
+"${client_extra_args[@]}" \
 --dataset-name "$dataset_name" \
 --dataset-path "$dataset_path" \
 "${dataset_args[@]}" 2>&1 | tee -a "$BENCHMARK_LOG_FILE"

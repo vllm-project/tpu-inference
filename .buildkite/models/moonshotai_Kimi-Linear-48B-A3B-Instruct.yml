@@ -1,0 +1,147 @@
+# Copyright 2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Kimi-Linear-48B-A3B-Instruct: the KDA + gated-MLA hybrid served by the
+# JAX-native KimiLinearForCausalLM. Every stage is tpu7x-only -- the model
+# needs the MLA and KDA kernels -- and reports "unverified" elsewhere.
+#
+# The sharding is the reason these steps look unlike the other model files.
+# The experts do not fit replicated, so they are split 8 ways, and expert
+# parallelism forces attention data parallelism with it: tensor_parallelism 1,
+# expert_parallelism 8, enable_dp_attention. `--tensor-parallel-size 8` still
+# names the device count; the strategy decides what those devices hold.
+# gpu_memory_utilization stays at 0.60 because warmup at the largest token
+# shape needs temporaries on the order of the KV pool itself, and 0.95 dies
+# compiling that shape rather than at run time.
+
+steps:
+  - label: "${TPU_VERSION:-tpu6e} Unit tests for moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_UnitTest"
+    soft_fail: true
+    agents:
+      queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_UnitTest" "unverified"
+        else
+          # Exports K3_TINY_*; without it every suite below skips.
+          # The script lands with the Kimi test-fixtures piece; guard so this
+          # step is safe to merge in any order relative to it.
+          [ -f .buildkite/scripts/fetch_k3_tiny_fixtures.sh ] && source .buildkite/scripts/fetch_k3_tiny_fixtures.sh || true
+          .buildkite/scripts/run_in_docker.sh \
+            python3 -m pytest -s -v -x \
+            /workspace/tpu_inference/tests/models/jax/test_kimi_k3.py \
+            /workspace/tpu_inference/tests/models/jax/test_kimi_k3_router.py \
+            /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4.py
+        fi
+  - label: "${TPU_VERSION:-tpu6e} Record unit test result for moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-Linear-48B_UnitTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_UnitTest"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_UnitTest
+
+  - label: "${TPU_VERSION:-tpu6e} Accuracy for moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-Linear-48B_UnitTest"
+    soft_fail: true
+    agents:
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      TEST_MODEL: moonshotai/Kimi-Linear-48B-A3B-Instruct
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      # gsm8k measured 0.8749 strict-match on this config; 0.85 leaves room
+      # for run-to-run variation without accepting a broken decode path.
+      MINIMUM_ACCURACY_THRESHOLD: "0.85"
+      MODEL_IMPL_TYPE: flax_nnx
+      NEW_MODEL_DESIGN: "1"
+      # The sharding strategy is nested, which the key=value form of
+      # lm_eval's model_args cannot express.
+      ACCURACY_MODEL_ARGS_JSON: '{"pretrained":"moonshotai/Kimi-Linear-48B-A3B-Instruct","tensor_parallel_size":8,"max_model_len":2048,"max_num_seqs":64,"gpu_memory_utilization":0.6,"trust_remote_code":true,"additional_config":{"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}}'
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Accuracy" "unverified"
+        else
+          .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+        fi
+  - label: "${TPU_VERSION:-tpu6e} Record accuracy result for moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-Linear-48B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Accuracy"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Accuracy
+
+  - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-Linear-48B_Accuracy"
+    soft_fail: true
+    agents:
+      queue: "${TPU_QUEUE_MULTI:-tpu_v6e_8_queue}"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      TEST_MODEL: moonshotai/Kimi-Linear-48B-A3B-Instruct
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      # 4.88 req/s measured on this config; guard at ~88% of it.
+      MINIMUM_THROUGHPUT_THRESHOLD: "4.3"
+      INPUT_LEN: "1800"
+      OUTPUT_LEN: "128"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "64"
+      MAX_NUM_BATCHED_TOKENS: "1024"
+      MODEL_IMPL_TYPE: flax_nnx
+      NEW_MODEL_DESIGN: "1"
+      # Compact JSON: EXTRA_SERVE_FLAGS is split on whitespace.
+      EXTRA_SERVE_FLAGS: '--trust-remote-code --gpu-memory-utilization 0.60 --additional-config {"sharding":{"sharding_strategy":{"tensor_parallelism":1,"expert_parallelism":8,"enable_dp_attention":true}}}'
+      # The tokenizer ships as repo code, so the client needs the opt-in too.
+      CLIENT_TRUST_REMOTE_CODE: "1"
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Benchmark" "unverified"
+        else
+          .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+        fi
+  - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for moonshotai/Kimi-Linear-48B-A3B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-Linear-48B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Benchmark"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-Linear-48B-A3B-Instruct"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    agents:
+      queue: cpu
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-Linear-48B_Benchmark
