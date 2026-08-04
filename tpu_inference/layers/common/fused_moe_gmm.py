@@ -638,6 +638,14 @@ def fused_moe_func(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
 
+
+    def _mask_padding_tokens(indices, weights):
+        """Zero out routing for padding tokens so they don't activate extra experts."""
+        if num_valid_tokens is None:
+            return indices, weights
+        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
+        return jnp.where(token_valid, indices, 0), jnp.where(token_valid, weights, 0.0)
+
     # Fast path for low-concurrency decode: a specialized C=N Pallas MoE kernel
     # that skips the gather/scatter permutation of the general gmm path. Only
     # engaged for small decode batches with topk == CN_MOE_TOP_K.
@@ -655,8 +663,7 @@ def fused_moe_func(
             f"threshold={low_conc_threshold}).")
 
         padded_hs = hidden_states
-        padded_topk_indices = topk_indices
-        padded_topk_weights = topk_weights
+        padded_topk_indices, padded_topk_weights = _mask_padding_tokens(topk_indices, topk_weights)
 
         def _local_low_conc_moe(hs, w1_local, w1_scale_local, w2_local,
                                 w2_scale_local, topk_ids_local,
@@ -779,10 +786,7 @@ def fused_moe_func(
     # is especially useful when we have a low number of tokens (e.g. low
     # concurrency), where padding tokens may activate unnecessary expert weights
     # and slow down the gmm kernel.
-    if num_valid_tokens is not None:
-        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
-        topk_indices = jnp.where(token_valid, topk_indices, 0)
-        topk_weights = jnp.where(token_valid, topk_weights, 0.0)
+    topk_indices, topk_weights = _mask_padding_tokens(topk_indices, topk_weights)
     # All gathering topk_indices and topk_weights if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
