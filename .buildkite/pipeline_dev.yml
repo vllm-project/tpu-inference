@@ -31,7 +31,7 @@ steps:
 
   # -----------------------------------------------------------------
   # DEV ONLY (carries the env-gated platform-check downgrade).
-  # Kimi-K3 attempt 13g: condfix + podfix + loop fixes, pool UNPINNED,
+  # Kimi-K3 attempt 13g2: condfix + podfix + loop fixes, pool UNPINNED,
   # 4 hosts, DP attention OFF, experts split expert=4 x model=8 = 32.
   #
   # Deltas vs attempt 13f (778, which cleared the backbone unpinned but
@@ -42,9 +42,9 @@ steps:
   #     returns once the KDA decode-only branch fix removes the packing
   #     scratch. The loop correctness fixes (has_initial_state carried
   #     per step, per-step weight pinning, flat step trace) ride along.
-  #   * --model-loader-extra-config concurrency=64: first tuning of the
-  #     runai streamer (default concurrency measured ~85 MB/s/host on
-  #     778's sharded read) — load-time A/B vs 778 comes free.
+  #   * SINGLE TOGGLE vs 779: NO --model-loader-extra-config (default
+  #     streamer concurrency). If gsm8k recovers, the collapse is a
+  #     transport bug; if still ~0.06, the code x pod-mesh is implicated.
   #   * Unpinned pool per the per-device sizing fix: expect the
   #     compact-mamba split ~421 attn blocks / ~65 mamba slots and
   #     backbone precompile through all buckets as in 778.
@@ -52,8 +52,8 @@ steps:
   #     BS=1 8k/1k, matrix {1k/1k, 8k/1k} x {conc 8, conc 64} — the
   #     conc-64 cells get real KV capacity for the first time.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13g: podfix + loop correctness fixes, loop off, unpinned pool, tuned streamer"
-    key: tpu7x_k3_attempt13g
+  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13g2: 779 minus ONE toggle (default streamer concurrency) - accuracy A/B, 250-sample gsm8k only"
+    key: tpu7x_k3_attempt13g2
     timeout_in_minutes: 420
     env:
       TPU_VERSION: "tpu7x"
@@ -89,10 +89,9 @@ steps:
             --load-format=runai_streamer \
             --no-enable-prefix-caching \
             --gpu-memory-utilization 0.8 \
-            --model-loader-extra-config '{\"concurrency\":64}' \
             --additional-config '{\"enable_continue_decode\":false,\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
           "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
             --concurrency 4 \
             --long-tokens 256 \
             --needle-tokens 8000 \
-          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --full-gsm8k --bs1-bench --matrix-bench"
+          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --skip-bench"
