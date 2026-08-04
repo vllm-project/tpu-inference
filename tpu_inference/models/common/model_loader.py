@@ -41,6 +41,8 @@ from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     apply_qwix_on_abstract_model, apply_qwix_quantization,
     load_random_weights_into_qwix_abstract_model,
     update_vllm_config_for_qwix_quantization)
+from tpu_inference.models.jax.utils.sharded_stream import \
+    maybe_load_with_sharded_expert_streaming
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
                                                          LoadableWithIterator)
 from tpu_inference.runner.mm_encoder_jit_manager import \
@@ -81,6 +83,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
         Gemma4ForConditionalGeneration
     from tpu_inference.models.jax.gemma4_mtp import Gemma4MTPForCausalLM
     from tpu_inference.models.jax.gpt_oss import GptOss
+    from tpu_inference.models.jax.kimi_k3 import (
+        KimiK3ForConditionalGeneration, KimiLinearForCausalLM)
     from tpu_inference.models.jax.llama3 import LlamaForCausalLM
     from tpu_inference.models.jax.llama4 import Llama4ForCausalLM
     from tpu_inference.models.jax.llama_eagle3 import EagleLlama3ForCausalLM
@@ -105,6 +109,9 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
     _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
     _MODEL_REGISTRY["DFlashDraftModel"] = DFlashForCausalLM
+    _MODEL_REGISTRY["KimiLinearForCausalLM"] = KimiLinearForCausalLM
+    _MODEL_REGISTRY[
+        "KimiK3ForConditionalGeneration"] = KimiK3ForConditionalGeneration
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -282,7 +289,13 @@ def _get_nnx_model(
             loader = get_model_loader(vllm_config.load_config)
             if isinstance(model, LoadableWithIterator):
                 assert isinstance(model, JaxModule)
-                loader.load_weights(model, model_config)
+                # Opt-in (K3_SHARDED_EXPERT_STREAMING=1): stream only the
+                # routed-expert tensors this host's devices keep instead of
+                # the whole checkpoint; returns False (and logs why) when it
+                # does not apply, leaving the stock path untouched.
+                if not maybe_load_with_sharded_expert_streaming(
+                        loader, model, model_config):
+                    loader.load_weights(model, model_config)
             elif isinstance(loader, RunaiModelStreamerLoader):
                 model_weights = model_config.model
                 if hasattr(model_config, "model_weights"):
@@ -372,7 +385,12 @@ def get_flax_model(
     # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
     _state_treedef = jax.tree_util.tree_structure(state)
 
-    @jax.jit(
+    def _run_model_impl(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
+        model = nnx.merge(graphdef, state)
+        return model(*args)
+
+    _run_model_jit_kwargs = dict(
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
@@ -383,12 +401,16 @@ def get_flax_model(
         static_argnums=(
             6, 9, 10
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
-        compiler_options=get_step_fn_compiler_options(),
     )
-    def run_model(state_leaves, *args):
-        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
-        model = nnx.merge(graphdef, state)
-        return model(*args)
+
+    run_model = jax.jit(_run_model_impl,
+                        **_run_model_jit_kwargs,
+                        compiler_options=get_step_fn_compiler_options())
+    # JAX forbids compiler_options on a jit nested inside another traced
+    # computation, so callers that inline the step function into a larger
+    # jitted program (the fused decode loop, which hoists the same options
+    # onto its own top-level jit) need this variant.
+    run_model_no_options = jax.jit(_run_model_impl, **_run_model_jit_kwargs)
 
     @jax.jit(
         out_shardings=(
@@ -464,11 +486,34 @@ def get_flax_model(
     model_supports_spec_step = supports_kw(model_class.__call__,
                                            "spec_step_idx")
 
-    def wrapped_model_fn(*args, **kwargs):
+    def _drop_unsupported_kwargs(kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
         kwargs.pop("shared_attention_metadata", None)
-        return jitted_model_fn(*args, **kwargs)
+        return kwargs
+
+    def wrapped_model_fn(*args, **kwargs):
+        return jitted_model_fn(*args, **_drop_unsupported_kwargs(kwargs))
+
+    def _lower_model_fn(*args, **kwargs):
+        return jitted_model_fn.lower(*args, **_drop_unsupported_kwargs(kwargs))
+
+    # Expose `lower` so the precompile pass can AOT-lower the backbone (and so
+    # report `memory_analysis` for it) instead of taking the "not a jit"
+    # warmup-only path: the wrapper hides the underlying jit from
+    # `_run_compilation`'s `hasattr(fn, 'lower')` check.
+    wrapped_model_fn.lower = _lower_model_fn
+
+    def _wrapped_model_fn_no_options(*args, **kwargs):
+        return run_model_no_options(*args, **_drop_unsupported_kwargs(kwargs))
+
+    # Same attribute name the torchax wrapper uses, for the same reason: the
+    # fused decode loop inlines the step function into its own jit, where the
+    # compiler_options-carrying `run_model` is rejected as a nested jit. The
+    # draft model's jit carries no compiler options, so it is its own
+    # no-options variant.
+    wrapped_model_fn.step_fn_no_options = (wrapped_model_fn if is_draft_model
+                                           else _wrapped_model_fn_no_options)
 
     compute_logits_fn = run_compute_logits
     embed_input_ids_fn = run_embed_input_ids
@@ -658,6 +703,28 @@ def get_model(
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
 
 
+def _jax_model_can_stream_weights(model_class: Any) -> bool:
+    """Whether a flax_nnx model class can load from a weights iterator.
+
+    `get_flax_model` feeds streamed weights to a model in one of two ways, and
+    a model that supports either one can be served with `--load-format
+    runai_streamer`:
+
+    - it subclasses `LoadableWithIterator`, whose `load_weights` takes the
+      iterator directly (the path most flax_nnx models use); or
+    - it declares a `WeightLoader` deriving from `BaseWeightLoader`, which the
+      loader drives instead.
+
+    Checking only for `WeightLoader` sends every `LoadableWithIterator` model
+    to the vLLM implementation under `MODEL_IMPL_TYPE=auto`, which is a silent
+    change of implementation rather than an error.
+    """
+    if issubclass(model_class, LoadableWithIterator):
+        return True
+    return issubclass(getattr(model_class, "WeightLoader", object),
+                      BaseWeightLoader)
+
+
 def resolve_model_architecture(vllm_config: VllmConfig,
                                is_draft_model: bool) -> str:
     """Resolves the model implementation type.
@@ -666,9 +733,9 @@ def resolve_model_architecture(vllm_config: VllmConfig,
     architecture and whether the RunAI model streamer is active.
 
     When the RunAI model streamer is used, this function explicitly checks if
-    the JAX model supports the streaming capability. It returns 'vllm' if:
-    1. The JAX model class is found but does not have a `WeightLoader`.
-    2. The JAX model's `WeightLoader` is not a subclass of `BaseWeightLoader`.
+    the JAX model supports the streaming capability. It returns 'vllm' if the
+    JAX model class is found but supports neither of the two ways a flax_nnx
+    model can consume streamed weights (see `_jax_model_can_stream_weights`).
 
     If the architecture is not registered in JAX (UnsupportedArchitectureError),
     this function returns the default implementation ('flax_nnx'), allowing
@@ -694,10 +761,8 @@ def resolve_model_architecture(vllm_config: VllmConfig,
             # Try to get the JAX model class
             model_class = _get_model_architecture(hf_config)
 
-            # If found, check for WeightLoader capability
-            if not hasattr(model_class, "WeightLoader") or not issubclass(
-                    getattr(model_class, "WeightLoader", object),
-                    BaseWeightLoader):
+            # If found, check that it can actually consume streamed weights.
+            if not _jax_model_can_stream_weights(model_class):
                 return "vllm"
 
         except UnsupportedArchitectureError:

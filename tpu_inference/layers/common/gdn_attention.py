@@ -15,7 +15,6 @@
 Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
-import functools
 from typing import Optional, Tuple
 
 import jax
@@ -23,7 +22,8 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from tpu_inference.kernels.gdn.v3 import wrapper
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  rank_local_slot_indices)
 from tpu_inference.utils import get_mesh_shape_product
 
 
@@ -40,7 +40,7 @@ def run_jax_gdn_attention(
     state_indices: jnp.ndarray,
     query_start_loc: jnp.ndarray,
     distribution: jnp.ndarray,
-    seq_lens: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -71,9 +71,13 @@ def run_jax_gdn_attention(
           each sequence.
         distribution: Tensor of shape `(3,)` int32 — `(decode_end, prefill_end,
           mixed_end)`.
-        seq_lens: Tensor of shape `(max_reqs,)` with the total sequence length
-          per request (computed + scheduled). Used inside the local function
-          to derive ``has_initial_state``.
+        has_initial_state: Tensor of shape `(max_reqs,)`, nonzero where the
+          request resumes conv/recurrent state written by an earlier step.
+          Published by the runner in ``AttentionMetadata``; it is passed in
+          rather than derived from ``seq_lens - query_lens`` so that the
+          per-DP-rank layout of ``query_start_loc`` is accounted for in
+          exactly one place (see the field docs in
+          ``layers/common/attention_metadata.py``).
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Dimension of key.
@@ -106,7 +110,7 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # state_indices
         P(ShardingAxisName.ATTN_DATA),  # distribution
-        P(ShardingAxisName.ATTN_DATA),  # seq_lens
+        P(ShardingAxisName.ATTN_DATA),  # has_initial_state
     )
 
     out_specs = (
@@ -121,17 +125,34 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    p_run_jax_gdn_attention_local = functools.partial(
-        wrapper.fused_conv1d_gdn,
-        n_kq=n_kq // tp_size,
-        n_v=n_v // tp_size,
-        d_k=d_k,
-        d_v=d_v,
-        kernel_size=kernel_size,
-    )
+    def _local(qkv, b, a, conv_state, recurrent_state, conv_weight, conv_bias,
+               a_log, dt_bias, qsl, state_indices, dist, has_init):
+        # `state_indices` are global slot ids while `conv_state` /
+        # `recurrent_state` here are this rank's shard of the pool, so rebase
+        # before the kernel indexes them (identity at dp_size == 1).
+        return wrapper.fused_conv1d_gdn(
+            qkv,
+            b,
+            a,
+            conv_state,
+            recurrent_state,
+            conv_weight,
+            conv_bias,
+            a_log,
+            dt_bias,
+            qsl,
+            rank_local_slot_indices(state_indices, conv_state.shape[0]),
+            dist,
+            has_init,
+            n_kq=n_kq // tp_size,
+            n_v=n_v // tp_size,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+        )
 
     mapped_fn = jax.shard_map(
-        p_run_jax_gdn_attention_local,
+        _local,
         mesh=mesh,
         in_specs=in_specs,
         out_specs=out_specs,
@@ -151,7 +172,7 @@ def run_jax_gdn_attention(
         query_start_loc,
         state_indices,
         distribution,
-        seq_lens,
+        has_initial_state,
     )
 
     return (new_conv_state, new_recurrent_state), output

@@ -15,7 +15,7 @@ import os
 import threading
 
 import pytest
-from lm_eval_accuracy import evaluate_with_vllm
+from lm_eval_accuracy import evaluate_with_vllm, parse_model_args
 from vllm.platforms import current_platform
 
 MODEL_NAMES = []
@@ -27,9 +27,26 @@ RTOL = 0.03
 _JSON_WRITE_LOCK = threading.Lock()
 
 
-def run_test(model_name, expected_value, more_args=None):
-    """Run the end to end accuracy test."""
-    print(f"Running test for model: {model_name}")
+def build_model_args(model_name, more_args=None):
+    """The lm_eval `model_args` for this model.
+
+    Normally a `key=value` string built from the model name. A model whose
+    engine configuration cannot be written that way -- anything needing a
+    nested value, such as a sharding strategy under `additional_config` --
+    supplies the whole thing as a JSON object in ACCURACY_MODEL_ARGS_JSON
+    instead, and lm_eval takes it through `create_from_arg_obj`.
+
+    `more_args` is comma-separated string syntax, so it applies only to the
+    string form; appending it to a JSON override would produce neither valid
+    JSON nor a valid arg string. A caller that sets the override owns the
+    whole configuration, `more_args` included.
+    """
+    override = os.environ.get("ACCURACY_MODEL_ARGS_JSON")
+    if override:
+        model_args = parse_model_args(override)
+        print(f"[accuracy] model_args from ACCURACY_MODEL_ARGS_JSON: "
+              f"{model_args}")
+        return model_args
 
     if model_name in ["Qwen/Qwen3-30B-A3B", "Qwen/Qwen2.5-VL-7B-Instruct"]:
         model_args = f"pretrained={model_name},max_model_len=4096,max_num_batched_tokens=16384"
@@ -43,6 +60,14 @@ def run_test(model_name, expected_value, more_args=None):
 
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
+    return model_args
+
+
+def run_test(model_name, expected_value, more_args=None):
+    """Run the end to end accuracy test."""
+    print(f"Running test for model: {model_name}")
+
+    model_args = build_model_args(model_name, more_args)
 
     apply_chat_template = os.environ.get("USE_CHAT_TEMPLATE", "0") == "1"
     if apply_chat_template:

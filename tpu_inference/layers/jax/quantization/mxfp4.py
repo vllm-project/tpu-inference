@@ -12,20 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+import functools
+import time
+from typing import Callable, Iterable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 from flax import nnx
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from jax.sharding import SingleDeviceSharding
 
-from tpu_inference.layers.common.moe import MoEBackend, moe_apply
+from tpu_inference import envs
+from tpu_inference.layers.common.moe import (FusedMoEMethodBase, MoEBackend,
+                                             moe_apply)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_moe_weights, quantize_moe_weights,
-    shard_moe_weights)
+    FusedMoEWeights, UnfusedMoEWeights, process_moe_weights,
+    quantize_moe_weights, shard_moe_weights)
 from tpu_inference.layers.common.quantization import (
-    MXFP4_REQUANTIZED_BLOCK_SIZE, dequantize_tensor_from_mxfp4_packed)
+    MXFP4_BLOCK_SIZE, MXFP4_REQUANTIZED_BLOCK_SIZE,
+    dequantize_tensor_from_mxfp4_packed, e8m0_to_fp32, u8_unpack_e2m1)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import cpu_mesh, cpu_mesh_context
 from tpu_inference.layers.jax import JaxModule
@@ -33,8 +41,8 @@ from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.configs import QuantizationConfig
 from tpu_inference.logger import init_logger
-from tpu_inference.models.jax.utils.weight_utils import \
-    jax_array_from_reshaped_torch
+from tpu_inference.models.jax.utils.weight_utils import (
+    jax_array_from_reshaped_torch, shard_put)
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
@@ -254,6 +262,459 @@ class Mxfp4FusedMoEMethod(QuantizeMethodBase):
                 f"Unsupported moe backend: {layer.moe_backend}! Currently supported: {MXFP4_QUANT_METHOD_SUPPORTED_MOE_BACKENDS}"
             )
 
+        return moe_apply(layer, x_TD, router_logits, weights,
+                         layer.moe_backend, layer.mesh,
+                         self.extra_backend_kwargs)
+
+
+MXFP4_PACK_QUANTIZED_FORMAT = "mxfp4-pack-quantized"
+
+# When the previous MoE layer's decode finished, so each layer can report how
+# long it waited for its own weights to stream in. Loading is single-threaded
+# per process, so one module-level slot is enough.
+_LAST_LAYER_FINISHED_AT = 0.0
+
+# Compiled per-shard decodes, keyed by (decode fn, shard shape, device); see
+# `_decode_executable`.
+_DECODE_EXECUTABLES: dict = {}
+
+# compressed-tensors names each expert projection separately, and checkpoints
+# use either the HF `wN` spelling or the expanded one. `w1`/`gate_proj` is the
+# gate branch, `w3`/`up_proj` the up branch, `w2`/`down_proj` the down branch.
+_CT_EXPERT_PROJECTIONS = {
+    "w1": "gating",
+    "gate_proj": "gating",
+    "w3": "up_proj",
+    "up_proj": "up_proj",
+    "w2": "down_proj",
+    "down_proj": "down_proj",
+}
+
+# Staging attribute names, keyed by the projection above.
+_CT_STAGED_ATTRS = {
+    "gating": ("gate_packed", "gate_scale"),
+    "up_proj": ("up_packed", "up_scale"),
+    "down_proj": ("down_packed", "down_scale"),
+}
+
+# Final parameter names, keyed by the projection above.
+_CT_FINAL_ATTRS = {
+    "gating": "kernel_gating_EDF",
+    "up_proj": "kernel_up_proj_EDF",
+    "down_proj": "kernel_down_proj_EFD",
+}
+
+# Attribute set by the sharded-expert-streaming loader (see
+# `models/jax/utils/sharded_stream.py`) naming the expert ids this host's
+# devices keep. When present, only those staging slots can ever be filled --
+# the checkpoint filter dropped the rest before their bytes were read -- so
+# the completeness gate below waits on the local set instead of all experts.
+_SHARDED_STREAM_NEEDED_ATTR = "_sharded_stream_needed_experts"
+
+
+def _staging_complete(layer, staged_attrs: list[str]) -> bool:
+    """Whether every expert slot this decode will touch has been staged.
+
+    Full-read loading (the default) requires every expert of every staging
+    attribute: expert weights can be split across safetensors files, so an
+    unfilled slot just means a later file has not streamed in yet. Under
+    sharded expert streaming, non-local experts are filtered out of the read
+    entirely and their slots stay `None` forever; the gate then requires
+    exactly the host's needed set, which `_decode_sharded` alone touches.
+    """
+    needed = getattr(layer, _SHARDED_STREAM_NEEDED_ATTR, None)
+    for attr in staged_attrs:
+        staged = getattr(layer, attr)._weights_to_load
+        if needed is None:
+            if any(w is None for w in staged):
+                return False
+        else:
+            if any(staged[i] is None for i in needed):
+                return False
+    return True
+
+
+def _named_sharding(sharding, mesh: Mesh) -> NamedSharding:
+    """Normalize the spellings `shard_put` accepts into a `NamedSharding`."""
+    if isinstance(sharding, NamedSharding):
+        return sharding
+    if isinstance(sharding, P):
+        return NamedSharding(mesh, sharding)
+    return NamedSharding(mesh, P(*(sharding or ())))
+
+
+def _full_slice(s: slice | None, size: int) -> slice:
+    """A concrete `[start, stop)` for one axis of a device's index tuple."""
+    if s is None:
+        return slice(0, size)
+    assert s.step in (None, 1), f"unexpected strided shard index {s}"
+    return slice(0 if s.start is None else s.start,
+                 size if s.stop is None else s.stop)
+
+
+@functools.lru_cache(maxsize=None)
+def _one_device_mesh(device: jax.Device) -> Mesh:
+    """A mesh holding just `device`.
+
+    Each shard is decoded by itself, but the loader runs inside a
+    `jax.set_mesh` of the *whole* model mesh, and jitting a single-device
+    computation under that context is rejected ("Received incompatible
+    devices ... jit's context mesh with device ids [0..N]"). Entering this
+    mesh for the decode says which single device the computation belongs to.
+    """
+    return Mesh(np.array([device]).reshape(1), ("mxfp4_shard", ))
+
+
+def _decode_executable(decode: Callable, shape: tuple[int, ...],
+                       device: jax.Device):
+    """A compiled `[e, out, in_] -> [e, in, out]` decode for one device.
+
+    Held as an already-compiled executable rather than a `jax.jit` wrapper
+    because the loader calls `jax.clear_caches()` after every module, which
+    would otherwise re-trace and re-compile these for each of the model's
+    layers -- the shard shapes repeat, so one compile per shape is enough.
+    """
+    key = (decode, shape, device.id)
+    executable = _DECODE_EXECUTABLES.get(key)
+    if executable is None:
+        aval = jax.ShapeDtypeStruct(shape,
+                                    jnp.uint8,
+                                    sharding=SingleDeviceSharding(device))
+        with jax.set_mesh(_one_device_mesh(device)):
+            executable = jax.jit(lambda source: jnp.swapaxes(
+                decode(source), 1, 2)).lower(aval).compile()
+        _DECODE_EXECUTABLES[key] = executable
+    return executable
+
+
+def _staged_expert_bytes(staged: list, cache: dict, expert_id: int):
+    """The staged packed bytes of one expert, as numpy, materialized lazily.
+
+    With sharded expert streaming only this host's experts are staged (the
+    rest stay `None`), so the numpy views are built per expert as a shard
+    loop first touches it rather than for the whole list up front -- an
+    absent non-local expert must never be converted. Touching a `None` slot
+    means a shard needs an expert that never arrived; fail with the ids so
+    the log alone identifies what is missing.
+    """
+    arr = cache.get(expert_id)
+    if arr is None:
+        w = staged[expert_id]
+        if w is None:
+            present = [i for i, s in enumerate(staged) if s is not None]
+            raise ValueError(
+                f"[mxfp4-ct] expert {expert_id} is needed by a local device "
+                f"shard but was never staged; {len(present)} of "
+                f"{len(staged)} experts arrived "
+                f"(first staged ids: {present[:8]}). With sharded expert "
+                f"streaming this means the checkpoint filter dropped an "
+                f"expert this host's devices keep.")
+        # numpy view of the staged tensor: the per-shard gather is pure
+        # slicing and concatenation, which numpy does without a jax dispatch
+        # per expert (there are hundreds of experts per shard).
+        arr = np.asarray(w)
+        cache[expert_id] = arr
+    return arr
+
+
+def _staged_layer_shape(staged: list, expansion: int) -> tuple[int, int, int]:
+    """The decoded `[E, in_ * expansion, out]` shape of one staged layer.
+
+    Derived from the first staged expert rather than `staged[0]`: under
+    sharded expert streaming only this host's experts are staged and expert
+    0 need not be one of them.
+    """
+    template = next((w for w in staged if w is not None), None)
+    if template is None:
+        raise ValueError(
+            "[mxfp4-ct] no experts staged for this layer at all; cannot "
+            "infer the expert tensor shape. The weights iterator yielded "
+            "nothing for this projection.")
+    _, out, packed_in = template.shape
+    return (len(staged), packed_in * expansion, out)
+
+
+def _decode_one_shard(staged: list, source_cache: dict, decode: Callable,
+                      expansion: int, shape: tuple[int, int, int],
+                      device: jax.Device, index) -> jax.Array:
+    """Gather one device's packed slice out of `staged` and decode it there.
+
+    `index` is the device's entry in the sharding's device->index map over
+    the decoded `shape`. Only the experts in the device's expert slice are
+    touched, so staged slots no local device needs may be `None`.
+    """
+    num_experts, in_total, out = shape
+    expert_slice = _full_slice(index[0], num_experts)
+    in_slice = _full_slice(index[1], in_total)
+    out_slice = _full_slice(index[2], out)
+    if in_slice.start % expansion or in_slice.stop % expansion:
+        raise ValueError(
+            f"[mxfp4-ct] shard {in_slice} of the {shape} decoded tensor "
+            f"splits a packed uint8 word ({expansion} values each); "
+            f"cannot decode this shard on its own.")
+    packed_slice = slice(in_slice.start // expansion,
+                         in_slice.stop // expansion)
+    # `[e, out, in_]` for the experts this device keeps, still packed.
+    local = np.concatenate([
+        _staged_expert_bytes(staged, source_cache, e)[:, out_slice,
+                                                      packed_slice]
+        for e in range(expert_slice.start, expert_slice.stop)
+    ],
+                           axis=0)
+    executable = _decode_executable(decode, local.shape, device)
+    with jax.set_mesh(_one_device_mesh(device)):
+        return executable(jax.device_put(local, device))
+
+
+def _decode_sharded(staged: list[jax.Array], decode: Callable, expansion: int,
+                    sharding, mesh: Mesh) -> jax.Array:
+    """Build one decoded, sharded expert tensor a device shard at a time.
+
+    `staged` holds this layer's per-expert checkpoint tensors, each
+    `[1, out, in_]` uint8, where `decode` expands the last axis by
+    `expansion` (2 for the fp4 nibble unpack, 1 for the E8M0 scales). The
+    result is `[E, in_ * expansion, out]` laid out over `mesh` as `sharding`
+    -- the same array the host decode produces, assembled shard by shard:
+    each device's slice is cut out of the *packed* bytes, sent to that
+    device, and decoded there.
+
+    Doing it in this order is what makes it cheap. The decode is elementwise
+    along the packed axis and every shard boundary below falls on a whole
+    uint8 word, so a shard decoded on its own is bit-for-bit the shard the
+    whole-layer decode would have produced -- while the host never
+    materializes the ~4.5x-larger decoded layer, only packed bytes cross the
+    host/device boundary, and each process touches just the experts its own
+    devices keep instead of all of them. Under sharded expert streaming,
+    `staged` may hold `None` for experts no local device keeps; the shard
+    loop below never reaches them.
+    """
+    shape = _staged_layer_shape(staged, expansion)
+    sharding = _named_sharding(sharding, mesh)
+
+    source: dict = {}
+    shards = [
+        _decode_one_shard(staged, source, decode, expansion, shape, device,
+                          index) for device, index in
+        sharding.addressable_devices_indices_map(shape).items()
+    ]
+    return jax.make_array_from_single_device_arrays(shape, sharding, shards)
+
+
+class CompressedTensorsMxfp4MoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
+    """MXFP4 routed experts stored in compressed-tensors `mxfp4-pack-quantized`.
+
+    Unlike the GPT-OSS MXFP4 path above, this decode is **lossless**: the
+    checkpoint's fp4 codes and E8M0 group scales are carried through unchanged
+    (nibbles bitcast to `float4_e2m1fn`, exponents expanded to the exact
+    powers of two they denote) instead of being dequantized to fp32 and
+    re-quantized at a larger block size. Kimi-K3's experts are
+    quantization-aware-trained, so recomputing the scales would move the
+    weights away from the values training converged on.
+
+    Layout differences from GPT-OSS handled here:
+      * one tensor per expert per projection (`experts.<i>.w1.weight_packed`)
+        rather than one stacked `gate_up_proj_blocks` per layer, so the expert
+        axis is built by concatenation while loading;
+      * the checkpoint stores `[out, in]` with the *input* axis packed, while
+        the expert kernels are `(E, in, out)`, so the decoded values and their
+        scales are transposed once at the end of loading.
+    """
+
+    def __init__(self, layer: JaxMoE, weight_quant=None):
+        FusedMoEMethodBase.__init__(self, layer.moe_backend, "model")
+        self.group_size = getattr(weight_quant, "group_size",
+                                  None) or MXFP4_BLOCK_SIZE
+        num_bits = getattr(weight_quant, "num_bits", 4)
+        strategy = getattr(weight_quant, "strategy", "group")
+        if num_bits != 4 or str(strategy).endswith("tensor"):
+            raise NotImplementedError(
+                f"[mxfp4-ct] {layer.prefix}: only 4-bit group-wise MXFP4 is "
+                f"supported, got num_bits={num_bits} strategy={strategy}.")
+        if layer.moe_backend in MoEBackend.fused_moe_backends():
+            # The fused GMM backends pick experts from the raw router logits
+            # themselves, which drops the router's expert-score correction
+            # bias, and they have no `situ` activation branch -- both of which
+            # the Kimi models need. Fail loudly rather than serve wrong tokens.
+            raise NotImplementedError(
+                f"[mxfp4-ct] {layer.prefix}: compressed-tensors MXFP4 experts "
+                f"are wired for the unfused MoE backends (DENSE_MAT, "
+                f"MEGABLX_GMM), got {layer.moe_backend}.")
+
+    def create_weights_jax(self, layer: JaxMoE, *weight_args, rngs,
+                           **extra_weight_attrs) -> None:
+        """Replace the bf16 expert kernels with packed MXFP4 staging tensors."""
+        E = layer.num_local_experts
+        D = layer.hidden_size
+        F = layer.intermediate_size_moe
+        gs = self.group_size
+        for dim, name in ((D, "hidden_size"), (F, "intermediate_size_moe")):
+            if dim % gs:
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: {name}={dim} is not a "
+                    f"multiple of the MXFP4 group size {gs}.")
+
+        for param_name in _CT_FINAL_ATTRS.values():
+            delattr(layer, param_name)
+
+        # Checkpoint orientation, expert axis prepended: [E, out, in].
+        for projection, (out, in_) in (("gating", (F, D)), ("up_proj", (F, D)),
+                                       ("down_proj", (D, F))):
+            packed_attr, scale_attr = _CT_STAGED_ATTRS[projection]
+            for attr, shape in ((packed_attr, (E, out, in_ // 2)),
+                                (scale_attr, (E, out, in_ // gs))):
+                param = nnx.Param(jnp.zeros(shape, dtype=jnp.uint8),
+                                  eager_sharding=False)
+                param.set_metadata('mesh', cpu_mesh())
+                param.set_metadata('_weights_to_load', [None] * E)
+                setattr(layer, attr, param)
+
+    def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
+                     weights: Iterable[tuple[str, torch.Tensor]]) -> set:
+        """Stage per-expert `weight_packed` / `weight_scale` tensors."""
+        loaded_names = set()
+        for torch_name, torch_weight in weights:
+            parts = torch_name.split(".")
+            if len(parts) < 3:
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: cannot parse expert tensor "
+                    f"name '{torch_name}'; expected "
+                    f"<...>.<expert_id>.<projection>.<weight_packed|weight_scale>."
+                )
+            kind, projection_name, expert_id = parts[-1], parts[-2], parts[-3]
+            projection = _CT_EXPERT_PROJECTIONS.get(projection_name)
+            if projection is None or kind not in ("weight_packed",
+                                                  "weight_scale"):
+                raise ValueError(
+                    f"[mxfp4-ct] {layer.prefix}: unexpected checkpoint tensor "
+                    f"'{torch_name}'. Expected one of "
+                    f"{sorted(_CT_EXPERT_PROJECTIONS)} carrying weight_packed "
+                    f"or weight_scale.")
+            packed_attr, scale_attr = _CT_STAGED_ATTRS[projection]
+            attr = packed_attr if kind == "weight_packed" else scale_attr
+            jax_param = getattr(layer, attr)
+            slot = int(expert_id)
+            # `[None] + shape` so the expert axis exists for concatenation.
+            jax_param._weights_to_load[slot] = jax_array_from_reshaped_torch(
+                torch_weight, reshape_dims=(1, ) + tuple(torch_weight.shape))
+            loaded_names.add(attr)
+
+        logger.debug(f"Staged {len(loaded_names)} MXFP4 tensor groups for "
+                     f"{layer.prefix} MoE layer.")
+        return loaded_names
+
+    def process_weights_after_loading(self, layer: JaxMoE) -> bool:
+        """Decode the staged tensors into device-resident fp4 + fp32 scales."""
+        staged_attrs = [a for pair in _CT_STAGED_ATTRS.values() for a in pair]
+        needed = getattr(layer, _SHARDED_STREAM_NEEDED_ATTR, None)
+        if needed is not None and not envs.MXFP4_SHARD_THEN_DECODE:
+            # `_decode_on_host` concatenates every expert; with only the
+            # local set staged it would crash on the `None` slots (or worse,
+            # silently mis-index). The streaming loader refuses to filter
+            # when the host decode is selected, so reaching here means the
+            # two flags changed between marking and decoding.
+            raise ValueError(
+                f"[mxfp4-ct] {layer.prefix}: sharded expert streaming staged "
+                f"only {len(needed)} local experts, but "
+                f"MXFP4_SHARD_THEN_DECODE=0 selects the host decode, which "
+                f"needs all of them. Unset K3_SHARDED_EXPERT_STREAMING or "
+                f"set MXFP4_SHARD_THEN_DECODE=1.")
+        if not _staging_complete(layer, staged_attrs):
+            # Expert weights can be split across safetensors files, so this is
+            # called more than once; wait until every expert has arrived.
+            return False
+
+        started = time.perf_counter()
+        global _LAST_LAYER_FINISHED_AT
+        # How long this layer's weights took to stream in, for everything
+        # after the first: loading is a single pass, so the gap since the
+        # previous layer's decode is time spent reading the checkpoint.
+        streamed_in = (f"{started - _LAST_LAYER_FINISHED_AT:.1f}s"
+                       if _LAST_LAYER_FINISHED_AT else "the first layer")
+
+        mesh = layer.mesh
+        shard_then_decode = envs.MXFP4_SHARD_THEN_DECODE
+        for projection, (packed_attr, scale_attr) in _CT_STAGED_ATTRS.items():
+            final_attr = _CT_FINAL_ATTRS[projection]
+            sharding = (layer.efd_sharding
+                        if projection == "down_proj" else layer.edf_sharding)
+            staged_packed = getattr(layer, packed_attr)._weights_to_load
+            staged_scale = getattr(layer, scale_attr)._weights_to_load
+            if shard_then_decode:
+                # [E, out, in//2] uint8 -> [E, in, out] fp4, and
+                # [E, out, in//group] E8M0 -> [E, in//group, out] fp32, one
+                # device shard at a time.
+                values = _decode_sharded(staged_packed, u8_unpack_e2m1, 2,
+                                         sharding, mesh)
+                scale = _decode_sharded(staged_scale, e8m0_to_fp32, 1,
+                                        sharding, mesh)
+            else:
+                values, scale = self._decode_on_host(staged_packed,
+                                                     staged_scale, sharding,
+                                                     mesh)
+            setattr(layer, final_attr, nnx.Param(values))
+            setattr(layer, f"{final_attr}_weight_scale", nnx.Param(scale))
+            delattr(layer, packed_attr)
+            delattr(layer, scale_attr)
+
+        _LAST_LAYER_FINISHED_AT = time.perf_counter()
+        logger.info(
+            "[mxfp4-ct] %s: decoded %d MXFP4 expert projections losslessly "
+            "(group size %d, checkpoint scales passed through) in %.1fs "
+            "[shard_then_decode=%s; waited %s for these weights to stream "
+            "in].", layer.prefix, len(_CT_STAGED_ATTRS), self.group_size,
+            _LAST_LAYER_FINISHED_AT - started, shard_then_decode, streamed_in)
+        return True
+
+    @staticmethod
+    def _decode_on_host(staged_packed: list[jax.Array],
+                        staged_scale: list[jax.Array], sharding,
+                        mesh) -> tuple[jax.Array, jax.Array]:
+        """Decode a whole layer on the host, then cut it into shards.
+
+        Materializes ~4.5x the packed bytes per projection (fp4 values are a
+        byte each on the host and the E8M0 scales expand to fp32) and decodes
+        every expert on every process, so `_decode_sharded` above is the
+        default. Kept as a fallback for the same numbers by a second route.
+        """
+        # Keep the decode off device until the sharding is applied.
+        with cpu_mesh_context():
+            packed = jnp.concatenate(staged_packed, axis=0)
+            scale_u8 = jnp.concatenate(staged_scale, axis=0)
+            # [E, out, in//2] uint8 -> [E, out, in] fp4 -> [E, in, out].
+            values = jnp.swapaxes(u8_unpack_e2m1(packed), 1, 2)
+            # [E, out, in//group] E8M0 -> exact fp32 powers of two, then
+            # [E, in//group, out] to match the kernel's (E, K, N) weights.
+            scale = jnp.swapaxes(e8m0_to_fp32(scale_u8), 1, 2)
+        # `shard_put`, not `jax.device_put(x, NamedSharding(mesh, ...))`.
+        # Under the Ray multi-host backend a process addresses only its own
+        # devices, so naming a sharding over the whole mesh is rejected ("must
+        # be a Device or a Sharding which represents addressable devices").
+        # `shard_put` routes to `general_device_put`, which assembles the
+        # global array out of each process's addressable shards instead. The
+        # decode above runs under `cpu_mesh_context`, so `values`/`scale` are
+        # process-local and fully addressable -- exactly the case that needs
+        # it. Same helper the unquantized expert path already uses.
+        return (shard_put(values, sharding,
+                          mesh=mesh), shard_put(scale, sharding, mesh=mesh))
+
+    def apply_jax(self, layer: JaxMoE, x: jax.Array, *,
+                  router_logits) -> jax.Array:
+        x_TD = jnp.asarray(x, layer.dtype)
+        x_TD = jax.lax.with_sharding_constraint(
+            x_TD,
+            jax.sharding.NamedSharding(layer.mesh,
+                                       P(*layer.activation_ffw_td)))
+        weights = UnfusedMoEWeights(
+            w1_weight=layer.kernel_gating_EDF.value,
+            w1_weight_scale=layer.kernel_gating_EDF_weight_scale.value,
+            w1_bias=None,
+            w2_weight=layer.kernel_up_proj_EDF.value,
+            w2_weight_scale=layer.kernel_up_proj_EDF_weight_scale.value,
+            w2_bias=None,
+            w3_weight=layer.kernel_down_proj_EFD.value,
+            w3_weight_scale=layer.kernel_down_proj_EFD_weight_scale.value,
+            w3_bias=None,
+        )
         return moe_apply(layer, x_TD, router_logits, weights,
                          layer.moe_backend, layer.mesh,
                          self.extra_backend_kwargs)

@@ -156,6 +156,37 @@ steps:
             rm -f .coverage.part* .coveragerc pex coverage.pex .coverage
             exit $EXIT_CODE
 
+      # Kimi-K3 runs in its own step rather than in part2. Its suites each
+      # build a model, so they add ~15 minutes that the JAX compilation cache
+      # does not pay back on a second run, and part2 is already the longest
+      # step in this pipeline. They stay collected-and-skipped in part2 --
+      # nothing there exports K3_TINY_* -- so they run exactly once.
+      - label: "${TPU_VERSION:-tpu6e} JAX unit tests - Kimi-K3"
+        key: ${TPU_VERSION:-tpu6e}_test_7_4
+        soft_fail: true
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+        agents:
+          queue: ${TPU_QUEUE_SINGLE:-tpu_v6e_queue}
+        # Kimi-K3 needs the MLA and KDA kernels, so every suite below skips
+        # off tpu7x and the step would provision a TPU to report skips.
+        if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+        commands:
+          - |
+            # Exports K3_TINY_* for the Kimi suites; without it they skip.
+            source .buildkite/scripts/fetch_k3_tiny_fixtures.sh
+            .buildkite/scripts/run_in_docker.sh \
+              python3 -m pytest -s -v -x \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_router.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4_real_layer.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_mxfp4_shard_decode.py \
+              /workspace/tpu_inference/tests/models/jax/test_kimi_k3_sharded_stream.py \
+              /workspace/tpu_inference/tests/layers/common/test_kda_attention.py \
+              /workspace/tpu_inference/tests/layers/common/test_kda_attention_dp.py
+
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
         key: ${TPU_VERSION:-tpu6e}_test_8
         soft_fail: true
@@ -169,6 +200,8 @@ steps:
         if: build.env("NIGHTLY") == "1" || "${RUN_KERNEL_TESTS:-0}" == "1"
         commands:
           - |
+            # Exports K3_KDA_GOLDENS for the KDA reference test; no-op off tpu7x.
+            source .buildkite/scripts/fetch_k3_tiny_fixtures.sh
             .buildkite/scripts/run_in_docker.sh \
               python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
               --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \

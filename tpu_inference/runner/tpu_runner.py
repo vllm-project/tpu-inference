@@ -1805,38 +1805,45 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              set_forward_context(None, self.vllm_config), \
              self.maybe_get_kv_connector_output(
                  scheduler_output) as kv_connector_output:
-            (generated_tokens, final_kv_caches, final_state, final_rng,
-             all_expert_indices, logprobs_tensors) = continue_decode(
-                 state=self.state_leaves,
-                 model_fn=getattr(self.model, "step_fn_no_options",
-                                  self.model_fn),
-                 compute_logits_fn=self.compute_logits_fn,
-                 sample_fn=sample,
-                 mesh=self.mesh,
-                 sampling_metadata=sampling_metadata,
-                 init_state=init_state,
-                 kv_caches=self.kv_caches,
-                 max_decode_steps=max_decode_steps_arr,
-                 static_max_decode_steps=self.static_max_decode_steps,
-                 eos_token_id=self.eos_token_id,
-                 padding_token_id=self.pad_token_id,
-                 rng=self.rng_params_for_sampling,
-                 inputs_embeds=None,
-                 layer_name_to_kvcache_index=tuple(
-                     self.layer_name_to_kvcache_index.items()),
-                 lora_metadata=lora_metadata,
-                 intermediate_tensors=None,
-                 is_first_rank=self.is_first_rank,
-                 is_last_rank=self.is_last_rank,
-                 dp_size=self.dp_size,
-                 collect_expert_indices=getattr(
-                     self.vllm_config.model_config,
-                     "enable_return_routed_experts", False),
-                 max_logprobs=self.model_config.max_logprobs,
-                 logprobs_mode=self.model_config.logprobs_mode,
-                 continue_decode_eos_check_interval=self.
-                 continue_decode_eos_check_interval,
-             )
+            (
+                generated_tokens, final_kv_caches, final_state, final_rng,
+                all_expert_indices, logprobs_tensors
+            ) = continue_decode(
+                state=self.state_leaves,
+                # The no-compiler-options step fn lives on the torchax
+                # wrapper (self.model) or, for flax_nnx, on the model_fn
+                # wrapper itself.
+                model_fn=getattr(
+                    self.model, "step_fn_no_options",
+                    getattr(self.model_fn, "step_fn_no_options",
+                            self.model_fn)),
+                compute_logits_fn=self.compute_logits_fn,
+                sample_fn=sample,
+                mesh=self.mesh,
+                sampling_metadata=sampling_metadata,
+                init_state=init_state,
+                kv_caches=self.kv_caches,
+                max_decode_steps=max_decode_steps_arr,
+                static_max_decode_steps=self.static_max_decode_steps,
+                eos_token_id=self.eos_token_id,
+                padding_token_id=self.pad_token_id,
+                rng=self.rng_params_for_sampling,
+                inputs_embeds=None,
+                layer_name_to_kvcache_index=tuple(
+                    self.layer_name_to_kvcache_index.items()),
+                lora_metadata=lora_metadata,
+                intermediate_tensors=None,
+                is_first_rank=self.is_first_rank,
+                is_last_rank=self.is_last_rank,
+                dp_size=self.dp_size,
+                collect_expert_indices=getattr(self.vllm_config.model_config,
+                                               "enable_return_routed_experts",
+                                               False),
+                max_logprobs=self.model_config.max_logprobs,
+                logprobs_mode=self.model_config.logprobs_mode,
+                continue_decode_eos_check_interval=self.
+                continue_decode_eos_check_interval,
+            )
 
         if self.scheduler_config.async_scheduling:
             self.rng_params_for_sampling = final_rng
@@ -2691,6 +2698,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             (self.max_num_reqs + dp_size, ), key="query_start_loc")
         seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
                                                     key="seq_lens")
+        # Only hybrid attn+mamba models consume `has_initial_state`; leaving it
+        # out of the blob for pure-attention models keeps their metadata layout
+        # (and so the primed HLO) unchanged.
+        has_initial_state_view = None
+        if self.kv_cache_config.has_mamba_layers:
+            has_initial_state_view = self.device_buffer.get_view(
+                (self.max_num_reqs, ), key="has_initial_state")
 
         if self.speculative_config:
             padded_logits_length = None
@@ -2772,6 +2786,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 dp_rank + 1]
             seq_lens_cpu = seq_lens_view[req_offset:req_offset +
                                          max_num_reqs_per_dp_rank]
+            has_initial_state_cpu = (
+                None if has_initial_state_view is None else
+                has_initial_state_view[req_offset:req_offset +
+                                       max_num_reqs_per_dp_rank])
             _num_reqs = num_req_per_dp_rank[dp_rank]
             req_indices = req_indices_dp[dp_rank]
             num_scheduled_tokens_per_req = scheduled_tokens_per_dp_rank[
@@ -2780,6 +2798,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if _num_reqs == 0:
                 query_start_loc_cpu[:] = 0
                 seq_lens_cpu[:] = 0
+                if has_initial_state_cpu is not None:
+                    has_initial_state_cpu[:] = 0
                 continue
 
             # After buffer.reset(), the buffer is still dirty, so we need to zero
@@ -2796,6 +2816,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.input_batch.num_computed_tokens_cpu[req_indices] +
                 num_scheduled_tokens_per_req)
             seq_lens_cpu[_num_reqs:] = 0
+
+            if has_initial_state_cpu is not None:
+                # A request resumes state iff it already has computed tokens.
+                # Computed here, per DP rank, because this is the only place
+                # the rank -> persistent-batch-position mapping is known; ops
+                # downstream see only the packed arrays. Padded positions get
+                # 0 so their slot (index 0, the null block) is zero-filled
+                # rather than resumed.
+                has_initial_state_cpu[:_num_reqs] = (
+                    self.input_batch.num_computed_tokens_cpu[req_indices] > 0)
+                has_initial_state_cpu[_num_reqs:] = 0
 
         # populate logits_indices
         for dp_rank in range(dp_size):
@@ -3045,6 +3076,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         input_ids = metadata["input_ids"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
+        has_initial_state = metadata.get("has_initial_state")
         logits_indices = metadata["logits_indices"]
 
         # The host-side `num_computed_tokens_cpu` assumes all speculatively
@@ -3062,6 +3094,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                has_initial_state=has_initial_state,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
             )
@@ -3075,6 +3108,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                has_initial_state=has_initial_state,
                 padded_num_reqs=attn_padded_num_reqs,
             )
 

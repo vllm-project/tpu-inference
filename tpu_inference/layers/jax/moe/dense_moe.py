@@ -22,13 +22,56 @@ from jaxtyping import Float
 
 from tpu_inference.layers.common.process_weights.moe_weights import \
     UnfusedMoEWeights
-from tpu_inference.layers.jax.moe.utils import modeling_flax_utils
+from tpu_inference.layers.common.quantization import dequantize_tensor
+from tpu_inference.layers.jax.activation import (SITU_BETA, SITU_LINEAR_BETA,
+                                                 apply_gated_activation)
 
 
-def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
-                  cast_dtype: jnp.dtype, activation_ffw_td: Sharding,
-                  hidden_act: str, full_weights_TE: jax.Array,
-                  mesh: Mesh) -> jax.Array:
+def dequantize_unfused_moe_weights(weights: UnfusedMoEWeights,
+                                   cast_dtype: jnp.dtype) -> UnfusedMoEWeights:
+    """Materialize block-quantized expert kernels at `cast_dtype`.
+
+    DENSE_MAT is the reference/testing backend and multiplies the expert
+    kernels with plain einsums, so quantized weights (e.g. MXFP4 experts held
+    as `float4_e2m1fn` plus per-group scales) are expanded here rather than
+    inside the matmul. Weights whose scale is None are passed through.
+
+    Each kernel is `(E, K, N)` with the contracting axis blocked, so its scale
+    is `(E, K // block, N)` and dequantization runs along axis 1.
+    """
+    if all(s is None
+           for s in (weights.w1_weight_scale, weights.w2_weight_scale,
+                     weights.w3_weight_scale)):
+        return weights
+
+    def expand(weight, scale):
+        if scale is None:
+            return weight
+        return dequantize_tensor(weight, scale, axis=1, out_dtype=cast_dtype)
+
+    return UnfusedMoEWeights(
+        w1_weight=expand(weights.w1_weight, weights.w1_weight_scale),
+        w1_weight_scale=None,
+        w1_bias=weights.w1_bias,
+        w2_weight=expand(weights.w2_weight, weights.w2_weight_scale),
+        w2_weight_scale=None,
+        w2_bias=weights.w2_bias,
+        w3_weight=expand(weights.w3_weight, weights.w3_weight_scale),
+        w3_weight_scale=None,
+        w3_bias=weights.w3_bias,
+    )
+
+
+def dense_moe_fwd(
+        weights: UnfusedMoEWeights,
+        x_TD: Float,
+        cast_dtype: jnp.dtype,
+        activation_ffw_td: Sharding,
+        hidden_act: str,
+        full_weights_TE: jax.Array,
+        mesh: Mesh,
+        situ_beta: float = SITU_BETA,
+        situ_linear_beta: float | None = SITU_LINEAR_BETA) -> jax.Array:
     """Forward pass of the dense Moe layer where we don't pre-apply the weights.
 
     TODO (jacobplatin): we probably want to support quantization at some point.
@@ -40,6 +83,9 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
         activation_ffw_td: The sharding of the activation.
         hidden_act: The activation function to use.
         full_weights_TE: The full weights of the dense Moe layer.
+        situ_beta: Gate-branch soft clamp, only used when hidden_act is "situ".
+        situ_linear_beta: Up-branch soft clamp, only used when hidden_act is
+            "situ".
 
     Returns:
         The output of the dense Moe layer.
@@ -49,11 +95,10 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
         x_TD, NamedSharding(mesh, P(*activation_ffw_td)))
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TD,EDF -> TEF', x_TD, weights.w1_weight)
-        activated_gating_TEF = modeling_flax_utils.ACT2FN[hidden_act](
-            gating_TEF)
     with jax.named_scope("up_projection"):
         up_proj_TEF = jnp.einsum('TD,EDF -> TEF', x_TD, weights.w2_weight)
-    fuse_TEF = activated_gating_TEF * up_proj_TEF
+    fuse_TEF = apply_gated_activation(hidden_act, gating_TEF, up_proj_TEF,
+                                      situ_beta, situ_linear_beta)
     with jax.named_scope("down_projection"):
         down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
                                    weights.w3_weight)
@@ -62,12 +107,16 @@ def dense_moe_fwd(weights: UnfusedMoEWeights, x_TD: Float,
     return output_TD.astype(cast_dtype)
 
 
-def dense_moe_fwd_preapply_router_weights(weights: UnfusedMoEWeights,
-                                          x_TD: Float, cast_dtype: jnp.dtype,
-                                          activation_ffw_ted: Sharding,
-                                          hidden_act: str,
-                                          full_weights_TE: jax.Array,
-                                          mesh: Mesh) -> jax.Array:
+def dense_moe_fwd_preapply_router_weights(
+        weights: UnfusedMoEWeights,
+        x_TD: Float,
+        cast_dtype: jnp.dtype,
+        activation_ffw_ted: Sharding,
+        hidden_act: str,
+        full_weights_TE: jax.Array,
+        mesh: Mesh,
+        situ_beta: float = SITU_BETA,
+        situ_linear_beta: float | None = SITU_LINEAR_BETA) -> jax.Array:
     """
     Forward pass of the dense Moe layer where we pre-apply the weights.
 
@@ -80,6 +129,9 @@ def dense_moe_fwd_preapply_router_weights(weights: UnfusedMoEWeights,
         activation_ffw_td: The sharding of the activation.
         hidden_act: The activation function to use.
         full_weights_TE: The weights of the router.
+        situ_beta: Gate-branch soft clamp, only used when hidden_act is "situ".
+        situ_linear_beta: Up-branch soft clamp, only used when hidden_act is
+            "situ".
 
     Returns:
         The output of the dense Moe layer.
@@ -93,29 +145,37 @@ def dense_moe_fwd_preapply_router_weights(weights: UnfusedMoEWeights,
 
     with jax.named_scope("gating"):
         gating_TEF = jnp.einsum('TED,EDF -> TEF', x_TED, weights.w1_weight)
-        activated_gating_TEF = modeling_flax_utils.ACT2FN[hidden_act](
-            gating_TEF)
     with jax.named_scope("up_projection"):
         up_proj_TEF = jnp.einsum('TED,EDF -> TEF', x_TED, weights.w2_weight)
 
-    fuse_TEF = activated_gating_TEF * up_proj_TEF
+    fuse_TEF = apply_gated_activation(hidden_act, gating_TEF, up_proj_TEF,
+                                      situ_beta, situ_linear_beta)
     with jax.named_scope("down_projection"):
         down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
                                    weights.w3_weight)
     return down_proj_TED.sum(axis=1).astype(cast_dtype)
 
 
-def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
-                   gating_output: Tuple[jax.Array, jax.Array],
-                   cast_dtype: jnp.dtype, num_local_experts: int,
-                   apply_expert_weight_before_computation: bool,
-                   activation_ffw_td: Sharding, activation_ffw_ted: Sharding,
-                   hidden_act: str, mesh: Mesh) -> jax.Array:
+def dense_moe_func(
+        weights: UnfusedMoEWeights,
+        x_TD: jax.Array,
+        gating_output: Tuple[jax.Array, jax.Array],
+        cast_dtype: jnp.dtype,
+        num_local_experts: int,
+        apply_expert_weight_before_computation: bool,
+        activation_ffw_td: Sharding,
+        activation_ffw_ted: Sharding,
+        hidden_act: str,
+        mesh: Mesh,
+        situ_beta: float = SITU_BETA,
+        situ_linear_beta: float | None = SITU_LINEAR_BETA) -> jax.Array:
     """
     Forward pass of the dense MoE layer.  This is a naive implementation
     and thus should not be used in production.
 
-    TODO (jacobplatin): we probably want to support quantization at some point.
+    Block-quantized expert kernels are dequantized to `cast_dtype` up front
+    (see `dequantize_unfused_moe_weights`); the einsums below always run on
+    unquantized weights.
 
     Args:
         weights: The weights of the dense Moe layer.
@@ -129,6 +189,9 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
         activation_ffw_ted: The sharding of the activation, used for the
             pre-apply weights case.
         hidden_act: The activation function to use.
+        situ_beta: Gate-branch soft clamp, only used when hidden_act is "situ".
+        situ_linear_beta: Up-branch soft clamp, only used when hidden_act is
+            "situ".
 
     Returns:
         The output of the dense Moe layer.
@@ -136,6 +199,7 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
     assert isinstance(
         weights,
         UnfusedMoEWeights), "Expected unfused weights for DENSE_MAT backend"
+    weights = dequantize_unfused_moe_weights(weights, cast_dtype)
 
     weights_TX, indices_TX = gating_output
     one_hot_indices_TXE = jax.nn.one_hot(indices_TX,
@@ -154,7 +218,9 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                 activation_ffw_ted=activation_ffw_ted,
                 hidden_act=hidden_act,
                 full_weights_TE=full_weights_TE,
-                mesh=mesh)
+                mesh=mesh,
+                situ_beta=situ_beta,
+                situ_linear_beta=situ_linear_beta)
     else:
         return dense_moe_fwd(weights=weights,
                              x_TD=x_TD,
@@ -162,4 +228,6 @@ def dense_moe_func(weights: UnfusedMoEWeights, x_TD: jax.Array,
                              activation_ffw_td=activation_ffw_td,
                              hidden_act=hidden_act,
                              full_weights_TE=full_weights_TE,
-                             mesh=mesh)
+                             mesh=mesh,
+                             situ_beta=situ_beta,
+                             situ_linear_beta=situ_linear_beta)

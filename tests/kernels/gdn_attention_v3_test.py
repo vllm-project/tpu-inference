@@ -39,7 +39,7 @@ def gdn_attention_ref(
     query_start_loc: jnp.ndarray,
     state_indices: jnp.ndarray,
     distribution: jnp.ndarray,
-    seq_lens: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -68,7 +68,7 @@ def gdn_attention_ref(
         if query_len <= 0:
             continue
 
-        has_init = bool((seq_lens[req_idx] - query_len) > 0)
+        has_init = bool(has_initial_state[req_idx])
         if has_init:
             c_state = new_conv_state[s]
         else:
@@ -164,7 +164,7 @@ def gdn_attention_spec_ref(
     state_indices: jnp.ndarray,
     read_offsets: jnp.ndarray,
     num_spec_seqs: int,
-    seq_lens: jnp.ndarray,
+    has_initial_state: jnp.ndarray,
     n_kq: int,
     n_v: int,
     d_k: int,
@@ -191,7 +191,7 @@ def gdn_attention_spec_ref(
         if query_len <= 0:
             continue
 
-        has_init = bool((seq_lens[req_idx] - query_len) > 0)
+        has_init = bool(has_initial_state[req_idx])
         c_state = (conv_state[read_slot]
                    if has_init else jnp.zeros_like(conv_state[read_slot]))
         r_state = (recurrent_state[read_slot]
@@ -385,11 +385,9 @@ class GDNAttentionTest(parameterized.TestCase):
 
         # All sequences in this test start from a fresh slot; the existing
         # parametrizations don't exercise prefix-cache-hit / chunked-prefill
-        # continuation. ``seq_lens == query_lens`` (context_len = 0)
-        # reproduces the prior behavior (zero initial state regardless of
-        # slot contents).
-        seq_lens = jnp.asarray(q_loc[1:max_reqs + 1] - q_loc[:max_reqs],
-                               dtype=jnp.int32)
+        # continuation. An all-zero ``has_initial_state`` reproduces the
+        # prior behavior (zero initial state regardless of slot contents).
+        has_initial_state = jnp.zeros((max_reqs, ), dtype=jnp.int32)
 
         common_kwargs = dict(
             qkv=mixed_qkv,
@@ -404,7 +402,7 @@ class GDNAttentionTest(parameterized.TestCase):
             query_start_loc=q_loc,
             state_indices=state_indices,
             distribution=distribution,
-            seq_lens=seq_lens,
+            has_initial_state=has_initial_state,
             n_kq=n_kq,
             n_v=n_v,
             d_k=kq_head_dim,
@@ -506,11 +504,11 @@ class GDNAttentionTest(parameterized.TestCase):
         A_log = jax.random.normal(next(rngs), (n_v, ))
         dt_bias = jax.random.normal(next(rngs), (n_v, ))
 
-        # All sequences continue an existing context (has_initial=True) for
-        # the spec windows; prefills start fresh (context_len = 0).
-        seq_lens = jnp.array([16 + length for length in spec_lengths] +
-                             list(prefill_lengths),
-                             dtype=jnp.int32)
+        # The spec windows continue an existing context; the prefills start
+        # fresh.
+        has_initial_state = jnp.array([1] * len(spec_lengths) +
+                                      [0] * len(prefill_lengths),
+                                      dtype=jnp.int32)
 
         run_jitted = jax.jit(
             wrapper.fused_conv1d_gdn,
@@ -532,7 +530,7 @@ class GDNAttentionTest(parameterized.TestCase):
             q_loc,
             state_indices,
             distribution,
-            seq_lens,
+            has_initial_state,
             read_offsets_arr,
             n_kq=n_kq,
             n_v=n_v,
@@ -557,7 +555,7 @@ class GDNAttentionTest(parameterized.TestCase):
             state_indices=state_indices,
             read_offsets=read_offsets_arr,
             num_spec_seqs=num_spec_seqs,
-            seq_lens=seq_lens,
+            has_initial_state=has_initial_state,
             n_kq=n_kq,
             n_v=n_v,
             d_k=kq_head_dim,
@@ -582,7 +580,7 @@ class GDNAttentionTest(parameterized.TestCase):
                 state_indices=state_indices[num_spec_seqs:],
                 distribution=jnp.array([0, 0, num_seqs - num_spec_seqs],
                                        dtype=jnp.int32),
-                seq_lens=seq_lens[num_spec_seqs:],
+                has_initial_state=has_initial_state[num_spec_seqs:],
                 n_kq=n_kq,
                 n_v=n_v,
                 d_k=kq_head_dim,
@@ -682,9 +680,8 @@ class GDNAttentionTest(parameterized.TestCase):
             static_argnames=["n_kq", "n_v", "d_k", "d_v", "kernel_size"],
         )
 
-        # Both requests are brand new — no prior context. seq_lens equals
-        # query_lens so context_len = 0 → has_initial_state = False.
-        seq_lens_new = jnp.asarray(lengths, dtype=jnp.int32)
+        # Both requests are brand new — no prior context.
+        has_initial_state_new = jnp.zeros((len(lengths), ), dtype=jnp.int32)
 
         common_kwargs = dict(
             qkv=mixed_qkv,
@@ -697,7 +694,7 @@ class GDNAttentionTest(parameterized.TestCase):
             query_start_loc=q_loc,
             state_indices=state_indices,
             distribution=distribution,
-            seq_lens=seq_lens_new,
+            has_initial_state=has_initial_state_new,
             n_kq=n_kq,
             n_v=n_v,
             d_k=kq_head_dim,
@@ -805,8 +802,7 @@ class GDNAttentionTest(parameterized.TestCase):
             kernel_size=kernel_size,
         )
 
-        # Single-shot reference (all 64 tokens, zero state, has_initial=False
-        # encoded as seq_lens == query_lens == [full]).
+        # Single-shot reference (all 64 tokens, zero state, has_initial=0).
         (_, _), output_ref = run_jitted(
             qkv=mixed_qkv_full,
             b=b,
@@ -815,11 +811,11 @@ class GDNAttentionTest(parameterized.TestCase):
             recurrent_state=recurrent_state_zero,
             query_start_loc=jnp.array([0, full]),
             distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
-            seq_lens=jnp.array([full], dtype=jnp.int32),
+            has_initial_state=jnp.array([0], dtype=jnp.int32),
             **common_static,
         )
 
-        # Step A: first 32 tokens, zero state, has_initial=False.
+        # Step A: first 32 tokens, zero state, has_initial=0.
         (conv_after_a, rec_after_a), output_a = run_jitted(
             qkv=mixed_qkv_a,
             b=b[:half],
@@ -828,13 +824,12 @@ class GDNAttentionTest(parameterized.TestCase):
             recurrent_state=recurrent_state_zero,
             query_start_loc=jnp.array([0, half]),
             distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
-            seq_lens=jnp.array([half], dtype=jnp.int32),
+            has_initial_state=jnp.array([0], dtype=jnp.int32),
             **common_static,
         )
 
-        # Step B: next 32 tokens, slot now holds Step A's state.
-        # seq_lens=[full] with query_lens=[half] gives context_len=half>0,
-        # i.e., has_initial=True so the kernel continues from that state.
+        # Step B: next 32 tokens, slot now holds Step A's state, so
+        # has_initial=1 and the kernel continues from that state.
         (_, _), output_b = run_jitted(
             qkv=mixed_qkv_b,
             b=b[half:],
@@ -843,7 +838,7 @@ class GDNAttentionTest(parameterized.TestCase):
             recurrent_state=rec_after_a,
             query_start_loc=jnp.array([0, half]),
             distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
-            seq_lens=jnp.array([full], dtype=jnp.int32),
+            has_initial_state=jnp.array([1], dtype=jnp.int32),
             **common_static,
         )
 
