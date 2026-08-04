@@ -45,6 +45,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (KVCacheSpec, MLAAttentionSpec,
                                         SlidingWindowMLASpec)
 
+from tpu_inference.kernels.experimental.deepseek_v4 import rope as rope_kernel
 from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla import \
     mla_ragged_paged_attention
 from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla_swa import \
@@ -79,6 +80,21 @@ def _largest_divisor(x: int, cap: int) -> int:
         if x % candidate == 0:
             return candidate
     return 1
+
+
+def sharded_rope(rope_fn, mesh, x, positions, cos_sin_cache, **kwargs):
+    data_spec = P(ShardingAxisName.ATTN_DATA)
+
+    def _rope(x, positions, cos_sin_cache):
+        return rope_fn(x, positions, cos_sin_cache, **kwargs)
+
+    return jax.shard_map(
+        _rope,
+        mesh=mesh,
+        in_specs=(data_spec, data_spec, P()),
+        out_specs=data_spec,
+        check_vma=False,
+    )(x, positions, cos_sin_cache)
 
 
 class VllmDeepseekV4SWACache(DeepseekV4SWACache):
@@ -212,9 +228,17 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
         """Inverse-RoPE + wo_a (per-group bmm) + wo_b output projection.
         """
         t = o.shape[0]
-        o_f = o.to(torch.float32).view(t, self.n_local_heads, self.head_dim)
-        o_ref, _ = self.rotary_emb(positions, o_f, inverse=True)
-        o_ref = o_ref.to(torch.bfloat16)
+        o_f = o.view(t, self.n_local_heads, self.head_dim)
+        mesh = get_vllm_model_wrapper_context().mesh
+        o_ref = torch_view(
+            sharded_rope(
+                rope_kernel.rope,
+                mesh,
+                jax_view(o_f),
+                jax_view(positions),
+                jax_view(self.rotary_emb.cos_sin_cache),
+                inverse=True,
+            ))
 
         # --- wo_a: per-group batched matmul [t, g, d] x [d, g, r] -> [t, g, r].
         o_ref = o_ref.view(t, self.n_local_groups, -1)  # [t, g, d]
@@ -259,24 +283,31 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
     ) -> torch.Tensor:
         """Per-head RMSNorm (no weight) + GPT-J interleaved RoPE on q.
         """
-        orig_dtype = q.dtype
-        qf = q.to(torch.float32)
-
-        # Per-head RMSNorm (no weight) over the full head_dim.
-        rms = torch.rsqrt(qf.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        qf = qf * rms
-
-        # GPT-J interleaved RoPE on the trailing rope slice (NoPE passed through).
-        q_out, _ = self.rotary_emb(positions, qf)
-        return q_out.to(orig_dtype)
+        mesh = get_vllm_model_wrapper_context().mesh
+        return torch_view(
+            sharded_rope(
+                rope_kernel.qnorm_rope,
+                mesh,
+                jax_view(q),
+                jax_view(positions),
+                jax_view(self.rotary_emb.cos_sin_cache),
+                eps=self.eps,
+            ))
 
     def kv_rope(
             self,
             kv: torch.Tensor,  # [num_tokens, head_dim]
             positions: torch.Tensor,  # [num_tokens], int64
     ) -> torch.Tensor:
-        kv, _ = self.rotary_emb(positions, kv.unsqueeze(1))
-        return kv.squeeze(1)
+        mesh = get_vllm_model_wrapper_context().mesh
+        return torch_view(
+            sharded_rope(
+                rope_kernel.rope,
+                mesh,
+                jax_view(kv),
+                jax_view(positions),
+                jax_view(self.rotary_emb.cos_sin_cache),
+            ))
 
     def attention_impl(
             self,
