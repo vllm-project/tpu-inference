@@ -513,10 +513,10 @@ run_benchmark(){
     fi
   fi
 
-  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
+  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]}" >&2
   set +e
   # Execute the array directly, preserving strict argument boundaries
-  env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
+  env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}"
   local client_exit_code=$?
   set -e
 
