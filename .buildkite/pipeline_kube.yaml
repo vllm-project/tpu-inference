@@ -91,8 +91,8 @@ steps:
     agents:
       queue: "kube"
     commands:
-      - echo "=== v6e-1 Job acquired TPU chip. Holding for 600 seconds ==="
-      - sleep 600
+      - echo "=== v6e-1 Job acquired TPU chip. Holding for 3600 seconds ==="
+      - sleep 3600
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
@@ -102,8 +102,8 @@ steps:
     agents:
       queue: "kube"
     commands:
-      - echo "=== v6e-1 Job acquired TPU chip. Holding for 600 seconds ==="
-      - sleep 600
+      - echo "=== v6e-1 Job acquired TPU chip. Holding for 3600 seconds ==="
+      - sleep 3600
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
@@ -113,8 +113,8 @@ steps:
     agents:
       queue: "kube"
     commands:
-      - echo "=== v6e-1 Job 3 BORROWED 3rd chip from v6e-cohort! Holding for 600 seconds ==="
-      - sleep 600
+      - echo "=== v6e-1 Job 3 BORROWED 3rd chip from v6e-cohort! Holding for 3600 seconds ==="
+      - sleep 3600
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
