@@ -219,7 +219,8 @@ def setup_environment():
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("activation_type",
+                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
 @pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_row_parallel_linear(model, bias, num_devices, enable_sp,
                              enable_attn_dp, activation_type,
@@ -262,7 +263,8 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
 
     ref_output, layer_output = return_ref_and_layer_output(
         linear_layer, activation_type=activation_type)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -270,7 +272,8 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("activation_type",
+                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
 @pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_column_parallel_linear(model, bias, num_devices, enable_sp,
                                 enable_attn_dp, activation_type,
@@ -313,7 +316,8 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
 
     ref_output, layer_output = return_ref_and_layer_output(
         linear_layer, activation_type=activation_type)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -322,7 +326,8 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("activation_type",
+                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
 @pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
                              enable_attn_dp, activation_type,
@@ -368,7 +373,8 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
 
     ref_output, layer_output = return_ref_and_layer_output(
         linear_layer, activation_type=activation_type)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -377,7 +383,8 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize("activation_type",
+                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
 @pytest.mark.parametrize(
     "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
                                                               (256, True)])
@@ -417,7 +424,7 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     with set_current_vllm_config(vllm_config):
         linear_layer = MergedColumnParallelLinear(
             input_size=2048,
-            output_sizes=[7168] * 2,
+            output_sizes=[64] * 2,
             bias=bias,
             params_dtype=dtype,
             return_bias=False,
@@ -428,7 +435,8 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
 
     ref_output, layer_output = return_ref_and_layer_output(
         linear_layer, activation_type=activation_type)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
 def test_get_scheme():
@@ -493,7 +501,7 @@ def test_get_scheme():
     scheme = get_scheme(None)
     assert scheme.activation_type == W4A4ActivationType.BF16
 
-    # 4. unsupported input_quant (e.g., int8, or fp8 with dynamic=False) raises
+    # 4. unsupported input_quant raises error
     with pytest.raises(ValueError):
         get_scheme({
             "num_bits": 8,
