@@ -325,8 +325,8 @@ class RpaConfigs:
     def dma_kv_new_size(self) -> int:
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return 5
-        # HEAD_ALONG_SUBLANE
-        if self.serve.cp_group_size is not None:
+        if (self.serve.kv_layout == KVLayout.HEAD_ALONG_SUBLANE
+            and self.serve.cp_group_size is not None):
             return 5
         return 4
 
@@ -441,10 +441,12 @@ class RpaConfigs:
                 )
             if self.serve.attention_scope == AttentionScope.FULL:
                 raise ValueError(
-                    "Context Parallel does not support AttentionScope.FULL where cache is sharded but current tokens is sequential"
+                    "Context Parallel does not support AttentionScope.FULL"
+                    " where cache is sharded but current tokens is sequential"
                 )
         # Attention Scope
-        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE and self.serve.attention_scope != AttentionScope.FULL:
+        if (self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE 
+            and self.serve.attention_scope != AttentionScope.FULL):
             raise ValueError(
                 f"SEQ_ALONG_LANE do not supports {self.serve.attention_scope} yet."
             )
