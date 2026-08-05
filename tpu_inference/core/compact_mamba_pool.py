@@ -28,6 +28,12 @@ configurable through ``TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER``; values above
 two reserve additional LRU retention capacity. Cached states whose reference
 count reaches zero remain in the private pool's normal free/LRU queue, so
 prefix hits and eviction retain vLLM's native semantics.
+
+By default every alignment-compatible Mamba boundary is eligible for caching.
+``TPU_MAMBA_CACHED_POSITIONS`` can restrict insertion and lookup to a
+comma-separated set of exact, hybrid-aligned prefix lengths, in tokens. A
+position inside an atomic multimodal placeholder is skipped for that request;
+positions at either placeholder edge remain eligible.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ from tpu_inference.logger import init_logger
 logger = init_logger(__name__)
 
 _PRIVATE_POOLS_ATTR = "_tpu_compact_mamba_pools"
+_CACHED_POSITIONS_ATTR = "_tpu_mamba_cached_positions"
 
 
 def get_mamba_prefix_cache_block_multiplier() -> int:
@@ -60,6 +67,18 @@ def get_mamba_prefix_cache_num_blocks(max_num_seqs: int) -> int:
     if max_num_seqs <= 0:
         raise ValueError(f"max_num_seqs must be positive, got {max_num_seqs}")
     return 1 + get_mamba_prefix_cache_block_multiplier() * max_num_seqs
+
+
+def get_mamba_cached_positions() -> frozenset[int] | None:
+    """Return selected Mamba prefix lengths, or ``None`` for every boundary."""
+    positions = envs.TPU_MAMBA_CACHED_POSITIONS
+    if not positions:
+        return None
+    if any(position <= 0 for position in positions):
+        raise ValueError(
+            "TPU_MAMBA_CACHED_POSITIONS must contain positive token positions, "
+            f"got {positions}")
+    return frozenset(positions)
 
 
 def is_mamba_prefix_cache_enabled(vllm_config: Any) -> bool:
@@ -88,6 +107,7 @@ def validate_mamba_prefix_cache_config(vllm_config: Any) -> None:
             "Compact Mamba prefix-cache pools do not support speculative "
             "decoding.")
     get_mamba_prefix_cache_block_multiplier()
+    get_mamba_cached_positions()
 
 
 def _new_block_pool(block_pool_cls: type, main_pool: Any,
@@ -151,6 +171,18 @@ def _attach_private_mamba_pools(
     if not mamba_managers:
         return
 
+    cached_positions = get_mamba_cached_positions()
+    alignment_tokens = coordinator.lcm_block_size
+    if cached_positions is not None:
+        misaligned_positions = sorted(position for position in cached_positions
+                                      if position % alignment_tokens != 0)
+        if misaligned_positions:
+            raise ValueError(
+                "TPU_MAMBA_CACHED_POSITIONS values must be multiples of the "
+                f"hybrid cache alignment ({alignment_tokens} tokens), got "
+                f"{misaligned_positions}")
+    setattr(scheduler, _CACHED_POSITIONS_ATTR, cached_positions)
+
     vllm_config = getattr(scheduler, "vllm_config", None)
     if vllm_config is not None:
         validate_mamba_prefix_cache_config(vllm_config)
@@ -171,6 +203,7 @@ def _attach_private_mamba_pools(
         manager.block_pool = pool
         # SingleTypeKVCacheManager caches the null block at construction.
         manager._null_block = pool.null_block
+        setattr(manager, _CACHED_POSITIONS_ATTR, cached_positions)
 
     if not private_pools:
         return
@@ -180,6 +213,7 @@ def _attach_private_mamba_pools(
     # the Mamba classmethod. Tag it so that method can route each group lookup
     # to the corresponding private pool.
     setattr(main_pool, _PRIVATE_POOLS_ATTR, private_pools)
+    setattr(main_pool, _CACHED_POSITIONS_ATTR, cached_positions)
     setattr(kv_cache_manager, _PRIVATE_POOLS_ATTR, private_pools)
     logger.info(
         "Installed compact scheduler pools for Mamba groups %s: "
@@ -191,6 +225,9 @@ def _attach_private_mamba_pools(
             for group_id, pool in private_pools.items()
         },
     )
+    if cached_positions is not None:
+        logger.info("Mamba prefix caching restricted to token positions %s",
+                    sorted(cached_positions))
 
 
 def _all_block_pools(kv_cache_manager: Any) -> tuple[Any, ...]:
@@ -214,6 +251,7 @@ def _find_private_mamba_cache_hit(
     pools: Mapping[int, Any],
     kv_cache_spec: Any,
     alignment_tokens: int,
+    cached_positions: frozenset[int] | None = None,
     dcp_world_size: int = 1,
     pcp_world_size: int = 1,
 ) -> tuple[list[Any], ...]:
@@ -228,8 +266,11 @@ def _find_private_mamba_cache_hit(
     block_size = kv_cache_spec.block_size
     max_num_blocks = max_length // block_size
     for index in range(max_num_blocks - 1, -1, -1):
+        position = (index + 1) * block_size
+        if (cached_positions is not None and position not in cached_positions):
+            continue
         if (block_size != alignment_tokens
-                and (index + 1) * block_size % alignment_tokens != 0):
+                and position % alignment_tokens != 0):
             continue
 
         hits: list[Any] = []
@@ -380,11 +421,70 @@ def _patch_compact_mamba_pool_classes(
                 pools=private_pools,
                 kv_cache_spec=kv_cache_spec,
                 alignment_tokens=alignment_tokens,
+                cached_positions=getattr(main_pool, _CACHED_POSITIONS_ATTR,
+                                         None),
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
             )
 
         mamba_manager_cls.find_longest_cache_hit = find_longest_cache_hit
+
+    if not hasattr(mamba_manager_cls, "_tpu_orig_compact_mamba_cache_blocks"):
+        original_cache_blocks = mamba_manager_cls.cache_blocks
+        mamba_manager_cls._tpu_orig_compact_mamba_cache_blocks = (
+            original_cache_blocks)
+        supports_alignment_tokens = (
+            "alignment_tokens"
+            in inspect.signature(original_cache_blocks).parameters)
+
+        @wraps(original_cache_blocks)
+        def cache_blocks(self, request, num_tokens, alignment_tokens=None):
+            cached_positions = getattr(self, _CACHED_POSITIONS_ATTR, None)
+            if cached_positions is None:
+                if supports_alignment_tokens:
+                    return original_cache_blocks(
+                        self,
+                        request,
+                        num_tokens,
+                        alignment_tokens=alignment_tokens,
+                    )
+                return original_cache_blocks(self, request, num_tokens)
+
+            num_cached_blocks = self.num_cached_block.get(
+                request.request_id, 0)
+            num_full_blocks = num_tokens // self.block_size
+            if num_cached_blocks >= num_full_blocks:
+                return
+
+            blocks = self.req_to_blocks[request.request_id]
+            blocks_to_cache = list(blocks)
+            for block_index in range(num_cached_blocks, num_full_blocks):
+                position = (block_index + 1) * self.block_size
+                selected = position in cached_positions
+                if alignment_tokens is not None:
+                    selected &= position % alignment_tokens == 0
+                if not selected:
+                    # Older vLLM BlockPool versions do not accept block_mask.
+                    # A shallow list copy with nulls preserves the same sparse
+                    # insertion semantics without mutating request ownership.
+                    blocks_to_cache[block_index] = self._null_block
+
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=blocks_to_cache,
+                num_cached_blocks=num_cached_blocks,
+                num_full_blocks=num_full_blocks,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+            )
+            self.num_cached_block[request.request_id] = num_full_blocks
+
+            for block in blocks[num_cached_blocks:num_full_blocks]:
+                if block.is_null or block.block_hash is None:
+                    continue
+                self.cached_blocks_this_step.add(block.block_hash)
+
+        mamba_manager_cls.cache_blocks = cache_blocks
 
     if not hasattr(kv_cache_manager_cls,
                    "_tpu_orig_compact_mamba_reset_prefix_cache"):

@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_METRICS_LOG_INTERVAL: int = 5
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER: int = 2
+    TPU_MAMBA_CACHED_POSITIONS: list[int] = []
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
@@ -350,6 +351,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # retain more unreferenced prefix states in the private pool.
     "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER":
     lambda: int(os.getenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "2")),
+    # Optional comma-separated prefix lengths. When configured, Mamba prefix
+    # states are inserted and looked up only at these exact token positions.
+    "TPU_MAMBA_CACHED_POSITIONS":
+    env_int_list("TPU_MAMBA_CACHED_POSITIONS"),
     "AGGREGATED_STATS_DIR":
     lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
     # MoE: whether to use approximate top-k for expert selection.

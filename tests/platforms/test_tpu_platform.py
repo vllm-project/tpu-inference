@@ -82,6 +82,7 @@ class TestTpuPlatform:
     def test_mamba_pool_multiplier_is_forwarded_to_ray_workers(self):
         assert ("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER"
                 in TpuPlatform.additional_env_vars)
+        assert "TPU_MAMBA_CACHED_POSITIONS" in TpuPlatform.additional_env_vars
 
     def test_get_infinity_values(self):
         min_val, max_val = TpuPlatform.get_infinity_values(jnp.float32)

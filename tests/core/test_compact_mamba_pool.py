@@ -17,7 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from tpu_inference.core.compact_mamba_pool import (
-    _patch_compact_mamba_pool_classes, get_mamba_prefix_cache_num_blocks)
+    _CACHED_POSITIONS_ATTR, _patch_compact_mamba_pool_classes,
+    get_mamba_cached_positions, get_mamba_prefix_cache_num_blocks)
 
 
 def _fake_vllm_classes():
@@ -27,6 +28,7 @@ def _fake_vllm_classes():
         def __init__(self, block_id, *, is_null=False):
             self.block_id = block_id
             self.is_null = is_null
+            self.block_hash = None
 
     class BlockPool:
 
@@ -62,6 +64,26 @@ def _fake_vllm_classes():
                 blocks.append(block)
             return blocks
 
+        def cache_full_blocks(
+            self,
+            request,
+            blocks,
+            num_cached_blocks,
+            num_full_blocks,
+            block_size,
+            kv_cache_group_id,
+            block_mask=None,
+        ):
+            del block_size
+            for offset, block in enumerate(
+                    blocks[num_cached_blocks:num_full_blocks]):
+                if block.is_null or (block_mask is not None
+                                     and not block_mask[offset]):
+                    continue
+                block_hash = request.block_hashes[num_cached_blocks + offset]
+                block.block_hash = (block_hash, kv_cache_group_id)
+                self.cached[(block_hash, kv_cache_group_id)] = block
+
         def evict_blocks(self, block_ids):
             self.evicted.append(set(block_ids))
 
@@ -86,6 +108,9 @@ def _fake_vllm_classes():
             self.last_state_block_idx = {}
             self._allocated_block_reqs = set()
             self.cached_blocks_this_step = set()
+            self.block_size = 128
+            self.kv_cache_group_id = 0
+            self.original_cache_calls = []
 
         def get_num_blocks_to_allocate(
             self,
@@ -97,6 +122,10 @@ def _fake_vllm_classes():
             apply_admission_cap=False,
         ):
             return self.needed
+
+        def cache_blocks(self, request, num_tokens, alignment_tokens=None):
+            self.original_cache_calls.append(
+                (request, num_tokens, alignment_tokens))
 
         @classmethod
         def find_longest_cache_hit(
@@ -135,6 +164,7 @@ def _fake_vllm_classes():
         def __init__(self, block_pool, managers):
             self.block_pool = block_pool
             self.single_type_managers = tuple(managers)
+            self.lcm_block_size = 128
 
         def get_num_blocks_to_allocate(
             self,
@@ -215,6 +245,24 @@ def _install(classes):
 
 class TestCompactMambaPool:
 
+    def test_unset_cached_positions_preserves_all_boundaries(
+            self, monkeypatch):
+        monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
+
+        assert get_mamba_cached_positions() is None
+
+    def test_cached_positions_are_deduplicated(self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "4096,8192,4096")
+
+        assert get_mamba_cached_positions() == frozenset({4096, 8192})
+
+    @pytest.mark.parametrize("positions", ["0", "-128", "128,-256"])
+    def test_cached_positions_must_be_positive(self, monkeypatch, positions):
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", positions)
+
+        with pytest.raises(ValueError, match="positive token positions"):
+            get_mamba_cached_positions()
+
     def test_block_count_uses_configured_multiplier(self, monkeypatch):
         monkeypatch.setenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "4")
 
@@ -272,6 +320,7 @@ class TestCompactMambaPool:
         scheduler = classes.Scheduler(coordinator, max_num_seqs=4)
 
         pools = scheduler.kv_cache_manager._tpu_compact_mamba_pools
+        assert getattr(scheduler, _CACHED_POSITIONS_ATTR) is None
         assert set(pools) == {1, 2}
         assert pools[1].num_gpu_blocks == 1 + 2 * 4
         assert pools[2].num_gpu_blocks == 1 + 2 * 4
@@ -282,6 +331,130 @@ class TestCompactMambaPool:
         assert mamba_0._null_block is pools[1].null_block
         assert mamba_1.block_pool is pools[2]
         assert mamba_1._null_block is pools[2].null_block
+
+    def test_rejects_cached_position_outside_hybrid_alignment(
+            self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "128,384")
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        coordinator.lcm_block_size = 256
+
+        with pytest.raises(ValueError, match="hybrid cache alignment"):
+            classes.Scheduler(coordinator, max_num_seqs=4)
+
+        assert mamba.block_pool is main_pool
+
+    def test_cache_insertion_keeps_only_selected_positions(self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "128,384")
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        scheduler = classes.Scheduler(coordinator, max_num_seqs=4)
+        assert getattr(scheduler,
+                       _CACHED_POSITIONS_ATTR) == frozenset({128, 384})
+        first_state = classes.Block(1)
+        current_state = classes.Block(3)
+        blocks = [first_state, mamba._null_block, current_state]
+        mamba.req_to_blocks["request-0"] = [first_state]
+        request = SimpleNamespace(
+            request_id="request-0",
+            block_hashes=["hash-0", "hash-1", "hash-2"],
+        )
+
+        mamba.cache_blocks(request, mamba.block_size, alignment_tokens=128)
+        mamba.req_to_blocks["request-0"] = blocks
+        mamba.cache_blocks(request, 3 * mamba.block_size, alignment_tokens=128)
+
+        assert first_state.block_hash == ("hash-0", 0)
+        assert blocks[1].block_hash is None
+        assert current_state.block_hash == ("hash-2", 0)
+        assert mamba.num_cached_block["request-0"] == 3
+        assert mamba.cached_blocks_this_step == {
+            ("hash-0", 0),
+            ("hash-2", 0),
+        }
+
+    def test_cache_insertion_uses_native_path_when_positions_unset(
+            self, monkeypatch):
+        monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        request = SimpleNamespace(request_id="request-0")
+
+        mamba.cache_blocks(request, 128, alignment_tokens=128)
+
+        assert mamba.original_cache_calls == [(request, 128, 128)]
+
+    def test_native_cache_path_supports_legacy_vllm_signature(
+            self, monkeypatch):
+        monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
+        classes = _fake_vllm_classes()
+
+        def legacy_cache_blocks(self, request, num_tokens):
+            self.original_cache_calls.append((request, num_tokens))
+
+        classes.MambaManager.cache_blocks = legacy_cache_blocks
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        request = SimpleNamespace(request_id="request-0")
+
+        mamba.cache_blocks(request, 128)
+
+        assert mamba.original_cache_calls == [(request, 128)]
+
+    def test_selected_cache_path_supports_legacy_block_pool_signature(
+            self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "128")
+        classes = _fake_vllm_classes()
+        cache_full_blocks = classes.BlockPool.cache_full_blocks
+
+        def legacy_cache_full_blocks(
+            self,
+            request,
+            blocks,
+            num_cached_blocks,
+            num_full_blocks,
+            block_size,
+            kv_cache_group_id,
+        ):
+            return cache_full_blocks(
+                self,
+                request,
+                blocks,
+                num_cached_blocks,
+                num_full_blocks,
+                block_size,
+                kv_cache_group_id,
+            )
+
+        classes.BlockPool.cache_full_blocks = legacy_cache_full_blocks
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        state = classes.Block(1)
+        mamba.req_to_blocks["request-0"] = [state]
+        request = SimpleNamespace(
+            request_id="request-0",
+            block_hashes=["hash-0"],
+        )
+
+        mamba.cache_blocks(request, 128)
+
+        assert state.block_hash == ("hash-0", 0)
 
     def test_pool_installation_preflights_every_mamba_group(self):
         classes = _fake_vllm_classes()
@@ -360,6 +533,33 @@ class TestCompactMambaPool:
             False,
             128,
         ) == ([], [])
+
+    def test_cache_lookup_keeps_only_selected_positions(self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "2048,6144")
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        pool = main_pool._tpu_compact_mamba_pools[0]
+        unselected = classes.Block(3)
+        selected = classes.Block(5)
+        pool.cached[("hash-3", 0)] = unselected
+        pool.cached[("hash-2", 0)] = selected
+        spec = SimpleNamespace(block_size=2048)
+
+        hit = classes.MambaManager.find_longest_cache_hit(
+            ["hash-0", "hash-1", "hash-2", "hash-3"],
+            4 * spec.block_size,
+            [0],
+            main_pool,
+            spec,
+            False,
+            128,
+        )
+
+        assert hit == ([pool.null_block, pool.null_block, selected], )
 
     def test_global_lifecycle_operations_keep_pool_local_ids_separate(self):
         classes = _fake_vllm_classes()
