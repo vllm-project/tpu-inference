@@ -29,7 +29,7 @@ _GEMV_NBUF = max(2, int(_os.getenv("MOE_GEMV_NBUF", "2")))
 _FUSE_NBUF = max(2, int(_os.getenv("MOE_FUSE_NBUF", str(_GEMV_NBUF))))
 _CN_K_TILE = int(_os.getenv("MOE_CN_K_TILE", "4096"))
 _CN_I_TILE = int(_os.getenv("MOE_CN_I_TILE", "2048"))
-_CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "3")))
+_CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "4")))
 
 # ── Semaphore layout ────────────────────────────────────────────────
 #   [0                            .. NBUF_W1)           w1 weight DMAs
