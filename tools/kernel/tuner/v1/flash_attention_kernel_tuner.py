@@ -45,7 +45,7 @@ class FlashAttentionKernelTuner(KernelTunerBase):
                          run_config=self.run_config)
 
     def generate_cases(self) -> list[TuningCase]:
-        tuning_key = TuningKey(batch_size=16,
+        tuning_key = TuningKey(batch_size=8,
                                num_heads=16,
                                q_seq_len=2560,
                                kv_seq_len=2560,
@@ -53,7 +53,7 @@ class FlashAttentionKernelTuner(KernelTunerBase):
 
         block_q_values = [32, 64, 128, 256, 512, 640]
         block_k_values = [128, 256, 512, 640, 1280, 2560]
-        block_b_values = [1, 2, 4, 8, 16]
+        block_b_values = [1, 2, 4, 8]
 
         cases = []
         for bq, bk, bb in itertools.product(block_q_values, block_k_values,
