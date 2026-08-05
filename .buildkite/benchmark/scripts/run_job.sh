@@ -77,6 +77,10 @@ PROFILE_FOLDER="${LOG_FOLDER}/profile"
 
 # Do cleanup before create config
 cleanup_artifact_log() {
+  if [ -d "$ARTIFACT_FOLDER" ]; then
+    echo "--- Reclaiming artifact folder ownership for CI cleanup..."
+    sudo -n chown -R "$(id -u):$(id -g)" "$ARTIFACT_FOLDER" || true
+  fi
   echo "deleting artifacts: $ARTIFACT_FOLDER"
   rm -rf "$ARTIFACT_FOLDER"
 }
@@ -122,29 +126,83 @@ declare -a BENCHMARK_DOCKER_ARGS=(
 BENCHMARK_DOCKER_ARGS_STR="$(printf '%s\n' "${BENCHMARK_DOCKER_ARGS[@]}")"
 export BENCHMARK_DOCKER_ARGS_STR
 
-echo "--- Running job in docker via run_in_docker.sh"
-BM_JOB_STATUS=$EXIT_SUCCESS
+# Determine if it is a multi-host run.
+IS_MULTI_HOST_BENCH="${IS_MULTI_HOST_BENCH:-false}"
+if [[ ( "${VERSION:-}" == "7x" && ${COUNT:-0} -gt 8 ) || "${TPU_MULTIHOST_BACKEND:-}" == "ray" ]]; then
+    IS_MULTI_HOST_BENCH="true"
+fi
+export IS_MULTI_HOST_BENCH
 
+BM_JOB_STATUS=$EXIT_SUCCESS
 export BM_INFRA="true"
 
-.buildkite/scripts/run_in_docker.sh bash -c "
-  if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\" ]]; then
-    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
-    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
-    update_all_tuned_params_py || exit 1
-  fi && \
-  if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"POST_KERNEL_AUTOTUNE_BM_RERUN\" ]]; then
-    pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
-    source .buildkite/benchmark/scripts/kernel_autotune.sh && \
-    checkout_updated_tuned_params_py_branch || exit 1
-  fi && \
-  echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
-  chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
-  .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {
-    echo "Error running benchmark job in docker."
-    BM_JOB_STATUS=$EXIT_FAILURE
-}
+if [[ "${IS_MULTI_HOST_BENCH:-false}" == "true" ]]; then
+    echo "--- Multi-host environment detected. Running via run_multihost.sh on host..."
 
+    export EXTRA_DOCKER_ARGS="-v $ARTIFACT_FOLDER:/workspace/tpu_inference/artifacts \
+      -v /etc/boto.cfg:/etc/boto.cfg \
+      -e ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts \
+      -e DEVICE=$DEVICE \
+      -e RECORD_ID=$RECORD_ID \
+      -e RUN_TYPE=$RUN_TYPE \
+      -e CODE_HASH=${CODE_HASH} \
+      -e JOB_REFERENCE=${JOB_REFERENCE} \
+      -e GCP_PROJECT_ID=${GCP_PROJECT_ID:-} \
+      -e GCP_INSTANCE_ID=${GCP_INSTANCE_ID:-} \
+      -e GCP_DATABASE_ID=${GCP_DATABASE_ID:-} \
+      -e GCP_REGION=${GCP_REGION:-} \
+      -e GCS_BUCKET=${GCS_BUCKET:-} \
+      -e UPLOAD_DB=${UPLOAD_DB:-true} \
+      -e BUILDKITE=${BUILDKITE:-} \
+      -e BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME:-} \
+      -e BUILDKITE_AGENT_META_DATA_QUEUE=${BUILDKITE_AGENT_META_DATA_QUEUE:-} \
+      -e BUILDKITE_BUILD_NUMBER=${BUILDKITE_BUILD_NUMBER:-} \
+      -e BUILDKITE_JOB_ID=${BUILDKITE_JOB_ID:-} \
+      -e MLCOMPASS_EXECUTION_MODE=${MLCOMPASS_EXECUTION_MODE:-} \
+      -e MLCOMPASS_EXPORT_ENABLED=${MLCOMPASS_EXPORT_ENABLED:-} \
+      -e MLCOMPASS_TEST_NAME=${MLCOMPASS_TEST_NAME:-} \
+      -e MLCOMPASS_TRACKING_ID=${MLCOMPASS_TRACKING_ID:-} \
+      -e MLCOMPASS_SPONGE_ID=${MLCOMPASS_SPONGE_ID:-} \
+      -e IS_MULTI_HOST_BENCH=true"
+
+    echo "Executing run_multihost.sh on host..."
+    .buildkite/scripts/run_multihost.sh "$CASE_FILE" "$TARGET_CASE_NAME" || {
+        echo "Error running multihost benchmark."
+        BM_JOB_STATUS=$EXIT_FAILURE
+    }
+
+    # Source the environment variables resolved inside the container from the metadata file
+    METADATA_FILE="/tmp/multihost_run_metadata.sh"
+    if [ -f "$METADATA_FILE" ]; then
+        # shellcheck source=/dev/null
+        source "$METADATA_FILE"
+        rm -f "$METADATA_FILE"
+    fi
+
+    # Move the server log from /tmp (saved by run_multihost.sh) to artifacts folder
+    if [ -f /tmp/vllm_serve.log ]; then
+        mv -f /tmp/vllm_serve.log "$LOG_FOLDER/vllm_log.txt"
+    fi
+else
+    echo "--- Running job in docker via run_in_docker.sh (Single-Host Mode)"
+    .buildkite/scripts/run_in_docker.sh bash -c "
+      if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"PRE_KERNEL_AUTOTUNE_CASES_COLLECTION\" ]]; then
+        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+        source .buildkite/benchmark/scripts/kernel_autotune.sh && \
+        update_all_tuned_params_py || exit 1
+      fi && \
+      if [[ \"${KERNEL_AUTOTUNE_STAGE:-}\" == \"POST_KERNEL_AUTOTUNE_BM_RERUN\" ]]; then
+        pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt && \
+        source .buildkite/benchmark/scripts/kernel_autotune.sh && \
+        checkout_updated_tuned_params_py_branch || exit 1
+      fi && \
+      echo always > /sys/kernel/mm/transparent_hugepage/enabled && \
+      chmod +x .buildkite/benchmark/scripts/run_bm.sh && \
+      .buildkite/benchmark/scripts/run_bm.sh $CASE_FILE $TARGET_CASE_NAME" || {
+        echo "Error running benchmark job in docker."
+        BM_JOB_STATUS=$EXIT_FAILURE
+    }
+fi
 
 (
   # Handle log file
