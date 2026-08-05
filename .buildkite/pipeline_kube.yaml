@@ -1,0 +1,130 @@
+# Pipeline to test GKE TPU autoscaling (scale from 0 nodes) and Kueue Cohort Borrowing/Sharing.
+# Total Capacity: 10 TPU chips in v6e-cohort (v6e-1 nominalQuota=2, v6e-8 nominalQuota=8).
+
+.kube_common_env: &kube_common_env
+  PYTHONUNBUFFERED: "1"
+  VLLM_NO_USAGE_STATS: "1"
+  TPU_VERSION: "tpu6e"
+
+.kube_kueue_job_metadata_v6e_1: &kube_kueue_job_metadata_v6e_1
+  labels:
+    kueue.x-k8s.io/queue-name: "v6e-1"
+    kueue.x-k8s.io/max-exec-time-seconds: "10800"
+
+.kube_kueue_job_metadata_v6e_8: &kube_kueue_job_metadata_v6e_8
+  labels:
+    kueue.x-k8s.io/queue-name: "v6e-8"
+    kueue.x-k8s.io/max-exec-time-seconds: "10800"
+
+.kube_common_tolerations: &kube_common_tolerations
+  - key: "google.com/tpu"
+    operator: "Equal"
+    value: "present"
+    effect: "NoSchedule"
+
+.kube_tpu_v6e_1chip_plugin: &kube_tpu_v6e_1chip_plugin
+  kubernetes:
+    metadata: *kube_kueue_job_metadata_v6e_1
+    pendingTimeout: 0
+    jobActiveDeadlineSeconds: 10800
+    podSpec:
+      terminationGracePeriodSeconds: 5
+      metadata:
+        labels:
+          app: "vllm-tpu-runner"
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: "tpu-v6e-slice"
+        cloud.google.com/gke-tpu-topology: "1x1"
+      tolerations: *kube_common_tolerations
+      containers:
+        - name: vllm-tpu-runner
+          image: "debian:bookworm-slim"
+          resources:
+            limits:
+              google.com/tpu: "1"
+            requests:
+              google.com/tpu: "1"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+
+.kube_tpu_v6e_8chip_plugin: &kube_tpu_v6e_8chip_plugin
+  kubernetes:
+    metadata: *kube_kueue_job_metadata_v6e_8
+    pendingTimeout: 0
+    jobActiveDeadlineSeconds: 10800
+    podSpec:
+      terminationGracePeriodSeconds: 5
+      metadata:
+        labels:
+          app: "vllm-tpu-runner"
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: "tpu-v6e-slice"
+        cloud.google.com/gke-tpu-topology: "2x4"
+      tolerations: *kube_common_tolerations
+      containers:
+        - name: vllm-tpu-runner
+          image: "debian:bookworm-slim"
+          resources:
+            limits:
+              google.com/tpu: "8"
+            requests:
+              google.com/tpu: "8"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+
+steps:
+  # Job 1: v6e-1 (1 chip, nominal)
+  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 Job 1 (Nominal 1/2)"
+    key: "v6e_1_job_1"
+    agents:
+      queue: "kube"
+    commands:
+      - echo "=== v6e-1 Job 1 acquired TPU chip 1/2. Holding for 120 seconds ==="
+      - sleep 120
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  # Job 2: v6e-1 (1 chip, nominal)
+  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 Job 2 (Nominal 2/2)"
+    key: "v6e_1_job_2"
+    agents:
+      queue: "kube"
+    commands:
+      - echo "=== v6e-1 Job 2 acquired TPU chip 2/2. Holding for 120 seconds ==="
+      - sleep 120
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  # Job 3: v6e-1 (1 chip, borrowed from cohort!)
+  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 Job 3 (BORROWED from cohort)"
+    key: "v6e_1_job_3"
+    agents:
+      queue: "kube"
+    commands:
+      - echo "=== v6e-1 Job 3 BORROWED 3rd chip from v6e-cohort! Holding for 120 seconds ==="
+      - sleep 120
+    plugins:
+      - <<: *kube_tpu_v6e_1chip_plugin
+
+  # Job 4: v6e-8 (8 chips, queued until cohort releases capacity)
+  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-8 Job 4 (Queued until cohort capacity releases)"
+    key: "v6e_8_job_4"
+    agents:
+      queue: "kube"
+    commands:
+      - echo "=== v6e-8 Job 4 acquired 8 chips after cohort release! Holding for 30 seconds ==="
+      - sleep 30
+    plugins:
+      - <<: *kube_tpu_v6e_8chip_plugin
