@@ -251,8 +251,7 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             # Weight stays in FP8 and is used with sharded_quantized_batched_matmul.
             param_dtype = jnp.float8_e4m3
             layer.weight = nnx.Param(
-                nnx.initializers.uniform()(rngs.params(), self.kernel_shape,
-                                           param_dtype),
+                jnp.zeros(self.kernel_shape, dtype=param_dtype),
                 weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                       permute_dims=None,
                                       param_name=layer.prefix + ".weight"),
@@ -273,11 +272,9 @@ class Fp8BlockwiseLinearMethod(QuantizeMethodBase, common_fp8.Fp8LinearMethod):
             setattr(layer, self.weight_scale_name, scale_param)
             return
 
-        # Follow upstream limitation that only float8_e4m3 is supported.
-        # https://github.com/vllm-project/vllm/blob/2a99c5a6c86daef8c766ba2dbf05c385b192c64b/vllm/model_executor/layers/quantization/fp8.py#L283-L284
         param_dtype = jnp.float8_e4m3
         layer.weight = nnx.Param(
-            kernel_init(rngs.params(), self.kernel_shape, param_dtype),
+            jnp.zeros(self.kernel_shape, dtype=param_dtype),
             weight_loader=partial(load_nnx_param_from_reshaped_torch,
                                   permute_dims=(1, 0),
                                   param_name=layer.prefix + ".weight"),
@@ -591,8 +588,9 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                     ), f"Expected nnx.Param for {param_name}, got {type(param)}"
                     init_fn = param.init_fn
                     E, K, N = param[...].shape
-                    value = init_fn(rngs.params(), (E, K, N),
-                                    jnp.float8_e4m3fn)
+                    value = jnp.zeros((E, K, N),
+                                      dtype=jnp.float8_e4m3fn,
+                                      device=jax.devices('cpu')[0])
                     param.set_raw_value(value)
 
                     scale_value = jnp.zeros((E, (K + block_k - 1) // block_k,

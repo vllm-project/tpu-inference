@@ -103,10 +103,10 @@ def run_jax_gdn_attention(
         if j_conv_bias is not None else None,  # j_conv_bias
         P(ShardingAxisName.ATTN_HEAD),  # j_A_log
         P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
-        P(ShardingAxisName.ATTN_DATA),  # query_start_loc
-        P(ShardingAxisName.ATTN_DATA),  # state_indices
-        P(ShardingAxisName.ATTN_DATA),  # distribution
-        P(ShardingAxisName.ATTN_DATA),  # seq_lens
+        P(None),  # query_start_loc
+        P(None),  # state_indices
+        P(None),  # distribution
+        P(None),  # seq_lens
     )
 
     out_specs = (
@@ -121,22 +121,77 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    p_run_jax_gdn_attention_local = functools.partial(
-        wrapper.fused_conv1d_gdn,
-        n_kq=n_kq // tp_size,
-        n_v=n_v // tp_size,
-        d_k=d_k,
-        d_v=d_v,
-        kernel_size=kernel_size,
-    )
+    def local_gdn_kernel(
+        j_mixed_qkv,
+        j_b,
+        j_a,
+        conv_state,
+        recurrent_state,
+        j_conv_weight,
+        j_conv_bias,
+        j_A_log,
+        j_dt_bias,
+        query_start_loc,
+        state_indices,
+        distribution,
+        seq_lens,
+    ):
+        local_num_seqs = conv_state.shape[0]
+        global_num_seqs = state_indices.shape[0]
+        
+        # When Data Parallelism is enabled, state_indices and query_start_loc
+        # passed into run_jax_gdn_attention are global. Compute exact local metadata for this DP shard.
+        if global_num_seqs != local_num_seqs and local_num_seqs > 0:
+            local_num_tokens = j_mixed_qkv.shape[0]
+            tokens_per_seq = max(1, local_num_tokens // local_num_seqs)
+            query_start_loc = jnp.arange(0, (local_num_seqs + 1) * tokens_per_seq, tokens_per_seq, dtype=jnp.int32)
+            state_indices = jnp.arange(local_num_seqs, dtype=jnp.int32)
+            distribution = jnp.array([0, local_num_tokens, 0], dtype=jnp.int32)
+            seq_lens = jnp.full((local_num_seqs,), tokens_per_seq, dtype=jnp.int32)
+
+        return wrapper.fused_conv1d_gdn(
+            j_mixed_qkv,
+            j_b,
+            j_a,
+            conv_state,
+            recurrent_state,
+            j_conv_weight,
+            j_conv_bias,
+            j_A_log,
+            j_dt_bias,
+            query_start_loc,
+            state_indices,
+            distribution,
+            seq_lens,
+            n_kq=n_kq // tp_size,
+            n_v=n_v // tp_size,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+        )
 
     mapped_fn = jax.shard_map(
-        p_run_jax_gdn_attention_local,
+        local_gdn_kernel,
         mesh=mesh,
         in_specs=in_specs,
         out_specs=out_specs,
         check_vma=False,
     )
+
+    def apply_sharding(x, spec):
+        if x is None or spec is None:
+            return x
+        return jax.lax.with_sharding_constraint(x, jax.sharding.NamedSharding(mesh, spec))
+
+    j_mixed_qkv = apply_sharding(j_mixed_qkv, in_specs[0])
+    j_b = apply_sharding(j_b, in_specs[1])
+    j_a = apply_sharding(j_a, in_specs[2])
+    conv_state = apply_sharding(conv_state, in_specs[3])
+    recurrent_state = apply_sharding(recurrent_state, in_specs[4])
+    j_conv_weight = apply_sharding(j_conv_weight, in_specs[5])
+    j_conv_bias = apply_sharding(j_conv_bias, in_specs[6])
+    j_A_log = apply_sharding(j_A_log, in_specs[7])
+    j_dt_bias = apply_sharding(j_dt_bias, in_specs[8])
 
     (new_conv_state, new_recurrent_state), output = mapped_fn(
         j_mixed_qkv,

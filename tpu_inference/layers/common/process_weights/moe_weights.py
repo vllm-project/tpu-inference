@@ -549,6 +549,19 @@ def process_moe_weights(
     )
 
 
+def _filter_axis_spec(spec, mesh: Mesh):
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        return spec if spec in mesh.axis_names else None
+    if isinstance(spec, (tuple, list)):
+        filtered = tuple(a for a in spec if a in mesh.axis_names)
+        if not filtered:
+            return None
+        return filtered[0] if len(filtered) == 1 else filtered
+    return spec
+
+
 def _get_moe_weight_shardings(
     weights: FusedMoEWeights,
     moe_backend: MoEBackend,
@@ -560,9 +573,11 @@ def _get_moe_weight_shardings(
     Used by both shard_moe_weights (for device_put) and
     process_quantized_moe_weights (for sharding constraints inside JIT).
     """
+    mlp_tensor = _filter_axis_spec(ShardingAxisName.MLP_TENSOR, mesh)
+    expert = _filter_axis_spec(ShardingAxisName.EXPERT, mesh)
     match moe_backend:
         case MoEBackend.FUSED_MOE | MoEBackend.GMM_EP:
-            ep_sharding = NamedSharding(mesh, P(ShardingAxisName.EXPERT))
+            ep_sharding = NamedSharding(mesh, P(expert))
             return FusedMoEWeights(
                 w13_weight=ep_sharding,
                 w13_weight_scale=ep_sharding,
@@ -579,23 +594,23 @@ def _get_moe_weight_shardings(
                     and weights.w2_weight_scale.shape[1] == 1):
                 w2_weight_scale_p_spec = P()
             else:
-                w2_weight_scale_p_spec = P(None, ShardingAxisName.MLP_TENSOR)
+                w2_weight_scale_p_spec = P(None, mlp_tensor)
             return FusedMoEWeights(
                 w13_weight=NamedSharding(
                     mesh,
-                    P(None, None, ShardingAxisName.MLP_TENSOR),
+                    P(None, None, mlp_tensor),
                 ),  # (num_experts, out_dim, in_dim)
                 w13_weight_scale=NamedSharding(
                     mesh,
-                    P(None, None, None, ShardingAxisName.MLP_TENSOR),
+                    P(None, None, None, mlp_tensor),
                 ),  # (num_experts, in_dim // block_size, 1, out_dim)
                 w13_bias=NamedSharding(
                     mesh,
-                    P(None, None, ShardingAxisName.MLP_TENSOR),
+                    P(None, None, mlp_tensor),
                 ),  # (num_experts, 1, out_dim)
                 w2_weight=NamedSharding(
                     mesh,
-                    P(None, ShardingAxisName.MLP_TENSOR, None),
+                    P(None, mlp_tensor, None),
                 ),  # (num_experts, out_dim, in_dim)
                 w2_weight_scale=NamedSharding(
                     mesh, w2_weight_scale_p_spec

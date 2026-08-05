@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 from flax.typing import Sharding
 from jax.sharding import PartitionSpec as P
@@ -155,7 +156,10 @@ def create_param(rngs: nnx.Rngs,
     if random_init:
         initializer = scale_initializer if len(
             shape) == 1 else sharded_initializer
+    else:
+        initializer = nnx.initializers.zeros
 
+    if sharding and random_init:
         jitted_initializer = jax.jit(initializer,
                                      static_argnames=('shape', 'dtype'),
                                      out_shardings=P(*sharding))
@@ -164,6 +168,7 @@ def create_param(rngs: nnx.Rngs,
                          out_sharding=sharding,
                          init_fn=jitted_initializer)
     else:
-        return nnx.Param(_init_fn(key, shape, dtype),
+        return nnx.Param(np.zeros(shape, dtype=dtype),
                          out_sharding=sharding,
-                         init_fn=_init_fn)
+                         eager_sharding=False,
+                         init_fn=nnx.initializers.zeros)
