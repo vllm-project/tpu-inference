@@ -519,7 +519,6 @@ def attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
-            is_decode=md.is_decode,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
         return pcp_forward(

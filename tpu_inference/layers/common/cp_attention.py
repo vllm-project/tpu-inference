@@ -19,9 +19,13 @@ from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+from tpu_inference import envs
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
+
+logger = init_logger(__name__)
 
 if envs.USE_BATCHED_RPA_KERNEL:
     import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
@@ -29,7 +33,6 @@ if envs.USE_BATCHED_RPA_KERNEL:
 else:
     import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_cp
     logger.info_once("Using default RPA kernel")
-
 
 # ── Shared utilities ──────────────────────────────────────────────────────────
 
@@ -82,7 +85,8 @@ def _rpa_cp_call(
 ):
     """Call with shared CP params"""
     if envs.USE_BATCHED_RPA_KERNEL:
-        from tpu_inference.kernels.experimental.batched_rpa import configs as brpa_configs
+        from tpu_inference.kernels.experimental.batched_rpa import \
+            configs as brpa_configs
         if skip_cache_attn:
             scope = brpa_configs.AttentionScope.NEW_TOKENS_ONLY
         elif skip_current_attn:
@@ -90,6 +94,7 @@ def _rpa_cp_call(
         else:
             scope = brpa_configs.AttentionScope.FULL
         flags['attention_scope'] = scope
+        flags['use_causal_mask'] = True
     else:
         flags['skip_cache_attn'] = skip_cache_attn
         flags['skip_current_attn'] = skip_current_attn

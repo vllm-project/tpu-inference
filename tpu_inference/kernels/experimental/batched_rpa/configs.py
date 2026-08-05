@@ -212,11 +212,11 @@ class RpaConfigs:
         available_bytes = smem_limit_bytes - fixed_bytes
 
         # Per step per batch item:
-        # s_idx, q_idx, k_idx, is_last_k, do_writeback, new_tok_off: 6 * 4 = 24
+        # s_idx, q_idx, k_idx, is_last_k, do_writeback: 5 * 4 = 20
         # dma_q: 2 * 4 = 8
         # dma_kv_cache: bkv_p_cache * 3 * 4 = 12 * bkv_p_cache
         # dma_kv_new: bkv_p_new * self.dma_kv_new_size * 4
-        bytes_per_step = (32 + 12 * self.bkv_p_cache +
+        bytes_per_step = (28 + 12 * self.bkv_p_cache +
                           4 * self.dma_kv_new_size * self.bkv_p_new)
         bytes_per_step *= self.block.batch_size
 
@@ -287,15 +287,6 @@ class RpaConfigs:
                               kv_packing) // kv_packing
 
     @property
-    def kv_shuffle_vmem_shape(self):
-        """Shape of the CP shuffle staging buffer (n_buffer slots x batch)."""
-        if self.serve.cp_group_size is None or not self.serve.update_kv_cache:
-            return None
-        shuffle_bkv = pl.cdiv(self.bkv_sz, self.serve.cp_group_size)
-        return (self.n_buffer, self.batch_size, shuffle_bkv,
-                self.kv_hbm_stride, self.serve.packing_kv, self.model.head_dim)
-
-    @property
     def fuse_accum(self) -> bool:
         return self.mode == RpaCase.DECODE
 
@@ -333,6 +324,9 @@ class RpaConfigs:
     @property
     def dma_kv_new_size(self) -> int:
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            return 5
+        # HEAD_ALONG_SUBLANE
+        if self.serve.cp_group_size is not None:
             return 5
         return 4
 
@@ -438,3 +432,19 @@ class RpaConfigs:
                 f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},).")
         if distribution.shape != (3, ):
             raise ValueError(f"Expected {distribution.shape=} to be (3,).")
+
+        # Context Parallel Support
+        if self.serve.cp_group_size is not None:
+            if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+                raise ValueError(
+                    "Context Parallel does not support KVLayout.SEQ_ALONG_LANE yet."
+                )
+            if self.serve.attention_scope == AttentionScope.FULL:
+                raise ValueError(
+                    "Context Parallel does not support AttentionScope.FULL where cache is sharded but current tokens is sequential"
+                )
+        # Attention Scope
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE and self.serve.attention_scope != AttentionScope.FULL:
+            raise ValueError(
+                f"SEQ_ALONG_LANE do not supports {self.serve.attention_scope} yet."
+            )
