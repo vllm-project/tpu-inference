@@ -46,15 +46,23 @@ _CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "3")))
 # =====================================================================
 #  Buffer selection
 # =====================================================================
-def _select_buf(ref, cur_buf, nbuf):
+def _select_buf(ref, cur_buf, nbuf, tile_start=None, tile_size=None):
     """Read buffer slot `cur_buf` from ref[nbuf, ...].
 
     Uses a jnp.where chain — each ref[i] is a static-int index that
     Mosaic handles correctly.  Faster than lax.switch in practice.
+
+    tile_start/tile_size (static) select one tile within the slot, so
+    multiple K/I-tiles can share a buffer without aliasing.
     """
-    result = ref[0]
+    def _read(i):
+        if tile_start is None:
+            return ref[i]
+        return ref[i, pl.ds(tile_start, tile_size)]
+
+    result = _read(0)
     for i in range(1, nbuf):
-        result = jnp.where(cur_buf == i, ref[i], result)
+        result = jnp.where(cur_buf == i, _read(i), result)
     return result
 
 
@@ -67,13 +75,13 @@ def _start_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
     k_block_start = (k * K_TILE) // QB
     pltpu.make_async_copy(
         w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-        w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+        w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
         sem_ref.at[0 * NBUF_W1_ + buf]
     ).start()
     pltpu.make_async_copy(
         w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE),
                         pl.ds(0, 1), pl.ds(0, 2 * I)],
-        w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, KB_TILE),
+        w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(k_block_start, KB_TILE),
                          pl.ds(0, 1), pl.ds(0, 2 * I)],
         sem_ref.at[1 * NBUF_W1_ + buf]
     ).start()
@@ -85,13 +93,13 @@ def _wait_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
     k_block_start = (k * K_TILE) // QB
     pltpu.make_async_copy(
         w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-        w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, K_TILE), pl.ds(0, 2 * I)],
+        w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
         sem_ref.at[0 * NBUF_W1_ + buf]
     ).wait()
     pltpu.make_async_copy(
         w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE),
                         pl.ds(0, 1), pl.ds(0, 2 * I)],
-        w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, KB_TILE),
+        w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(k_block_start, KB_TILE),
                          pl.ds(0, 1), pl.ds(0, 2 * I)],
         sem_ref.at[1 * NBUF_W1_ + buf]
     ).wait()
@@ -103,13 +111,13 @@ def _start_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
     i_block_start = (m * I_TILE) // IB
     pltpu.make_async_copy(
         w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-        w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+        w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
         sem_ref.at[2 * NBUF_W1_ + buf]
     ).start()
     pltpu.make_async_copy(
         w2_scale_ref.at[pl.ds(gj, 1), pl.ds(i_block_start, IB_TILE),
                         pl.ds(0, 1), pl.ds(0, H)],
-        w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE),
+        w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(i_block_start, IB_TILE),
                          pl.ds(0, 1), pl.ds(0, H)],
         sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + buf]
     ).start()
@@ -121,13 +129,13 @@ def _wait_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
     i_block_start = (m * I_TILE) // IB
     pltpu.make_async_copy(
         w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-        w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, I_TILE), pl.ds(0, H)],
+        w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
         sem_ref.at[2 * NBUF_W1_ + buf]
     ).wait()
     pltpu.make_async_copy(
         w2_scale_ref.at[pl.ds(gj, 1), pl.ds(i_block_start, IB_TILE),
                         pl.ds(0, 1), pl.ds(0, H)],
-        w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(0, IB_TILE),
+        w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(i_block_start, IB_TILE),
                          pl.ds(0, 1), pl.ds(0, H)],
         sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + buf]
     ).wait()
@@ -174,8 +182,11 @@ def _expert_body(
         def _():
             _wait_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
 
-        w1_fp8 = _select_buf(w1_bufs_ref, cur_w1_buf, NBUF_W1_)
-        s1 = _select_buf(w1_s_bufs_ref, cur_w1_buf, NBUF_W1_)
+        w1_fp8 = _select_buf(w1_bufs_ref, cur_w1_buf, NBUF_W1_,
+                             tile_start=k * K_TILE, tile_size=K_TILE)
+        k_block_start = (k * K_TILE) // QB
+        s1 = _select_buf(w1_s_bufs_ref, cur_w1_buf, NBUF_W1_,
+                         tile_start=k_block_start, tile_size=KB_TILE)
         lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
 
         if DEQUANT_W1_AFTER_:
@@ -205,8 +216,11 @@ def _expert_body(
         def _():
             _wait_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
 
-        w2_fp8 = _select_buf(w2_bufs_ref, cur_w2_buf, NBUF_W2_)
-        s2 = _select_buf(w2_s_bufs_ref, cur_w2_buf, NBUF_W2_)
+        w2_fp8 = _select_buf(w2_bufs_ref, cur_w2_buf, NBUF_W2_,
+                             tile_start=m * I_TILE, tile_size=I_TILE)
+        i_block_start = (m * I_TILE) // IB
+        s2 = _select_buf(w2_s_bufs_ref, cur_w2_buf, NBUF_W2_,
+                         tile_start=i_block_start, tile_size=IB_TILE)
         inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
 
         if DEQUANT_W2_AFTER_:
@@ -244,28 +258,26 @@ def _cn_w1w2_fused_token_kernel_fp8(
     full_lhs_2d_ref,       # [C_PAD, K]         — 2D DMA landing pad
     full_lhs_scratch_ref,  # [C_PAD, 1, K]      — 3D for dynamic indexing
     lhs_scratch_ref,       # [M_PAD, K]
-    w1_bufs_ref,           # [NBUF_W1, K_TILE, 2I]
-    w1_s_bufs_ref,         # [NBUF_W1, KB_TILE, 1, 2I] fp32
-    w2_bufs_ref,           # [NBUF_W2, I_TILE, H]
-    w2_s_bufs_ref,         # [NBUF_W2, IB_TILE, 1, H] fp32
+    w1_bufs_ref,           # [NBUF_W1, K, 2I]     — full K range per slot
+    w1_s_bufs_ref,         # [NBUF_W1, K_BLOCKS, 1, 2I] fp32
+    w2_bufs_ref,           # [NBUF_W2, I, H]      — full I range per slot
+    w2_s_bufs_ref,         # [NBUF_W2, I_BLOCKS, 1, H] fp32
     acc_scratch_ref,       # [N_TOKENS_, 1, H] fp32
     full_out_scratch_ref,  # [C_PAD, 1, H] bf16
     out_2d_ref,            # [C_PAD, H]         — 2D DMA launch pad
     sem_ref,               # semaphores
     *,
     K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_,
-    NBUF_W1_, NBUF_W2_,
+    NBUF_W1_, NBUF_W2_, K_TILE, I_TILE,
     N_TOKENS_, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
     SKIP_ZERO_WEIGHT_, DTYPE_LHS, DTYPE_OUT,
 ):
     C_PAD = full_lhs_2d_ref.shape[0]
     N_SLOTS = N_TOKENS_ * TOP_K_
 
-    K_TILE = w1_bufs_ref.shape[1]
     NUM_K = K // K_TILE
     QB_eff = min(K_TILE, QB)
     KB_TILE = K_TILE // QB_eff
-    I_TILE = w2_bufs_ref.shape[1]
     NUM_I = I // I_TILE
     IB_TILE = I_TILE // min(I_TILE, IB)
 
@@ -618,10 +630,10 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
             pltpu.VMEM((C_PAD, K), lhs.dtype),         # full_lhs_2d (DMA pad)
             pltpu.VMEM((C_PAD, 1, K), lhs.dtype),      # full_lhs_scratch (3D)
             pltpu.VMEM((M_PAD, K), lhs.dtype),          # lhs_scratch
-            pltpu.VMEM((NBUF_W1, K_TILE, N1), w1.dtype),
-            pltpu.VMEM((NBUF_W1, KB_TILE, 1, N1), w1_scale.dtype),
-            pltpu.VMEM((NBUF_W2, I_TILE, H), w2.dtype),
-            pltpu.VMEM((NBUF_W2, IB_TILE, 1, H), w2_scale.dtype),
+            pltpu.VMEM((NBUF_W1, K, N1), w1.dtype),
+            pltpu.VMEM((NBUF_W1, K_BLOCKS, 1, N1), w1_scale.dtype),
+            pltpu.VMEM((NBUF_W2, I, H), w2.dtype),
+            pltpu.VMEM((NBUF_W2, I_BLOCKS, 1, H), w2_scale.dtype),
             pltpu.VMEM((n_tokens, 1, H), jnp.float32), # acc_scratch
             pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),   # full_out_scratch (3D)
             pltpu.VMEM((C_PAD, H), jnp.bfloat16),       # out_2d (DMA pad)
@@ -638,6 +650,7 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
                           I_BLOCKS=I_BLOCKS, IB=IB,
                           TOP_K_=TOP_K,
                           NBUF_W1_=NBUF_W1, NBUF_W2_=NBUF_W2,
+                          K_TILE=K_TILE, I_TILE=I_TILE,
                           N_TOKENS_=n_tokens,
                           DEQUANT_W1_AFTER_=(KB_TILE == 1),
                           DEQUANT_W2_AFTER_=(IB_TILE == 1),
