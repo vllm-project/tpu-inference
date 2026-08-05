@@ -18,7 +18,6 @@ import os as _os
 
 import jax
 import jax.numpy as jnp
-from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
@@ -41,8 +40,6 @@ _CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "4")))
 # ────────────────────────────────────────────────────────────────────
 
 
-
-
 # =====================================================================
 #  Buffer selection
 # =====================================================================
@@ -55,6 +52,7 @@ def _select_buf(ref, cur_buf, nbuf, tile_start=None, tile_size=None):
     tile_start/tile_size (static) select one tile within the slot, so
     multiple K/I-tiles can share a buffer without aliasing.
     """
+
     def _read(i):
         if tile_start is None:
             return ref[i]
@@ -69,80 +67,95 @@ def _select_buf(ref, cur_buf, nbuf, tile_start=None, tile_size=None):
 # =====================================================================
 #  DMA helpers
 # =====================================================================
-def _start_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
-                  w1_bufs_ref, w1_s_bufs_ref, sem_ref, *,
-                  K_TILE, KB_TILE, I, QB, NBUF_W1_):
+def _start_w1_dma(gj, buf, k, w1_ref, w1_scale_ref, w1_bufs_ref, w1_s_bufs_ref,
+                  sem_ref, *, K_TILE, KB_TILE, I, QB, NBUF_W1_):
     k_block_start = (k * K_TILE) // QB
     pltpu.make_async_copy(
-        w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-        w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-        sem_ref.at[0 * NBUF_W1_ + buf]
-    ).start()
+        w1_ref.at[pl.ds(gj, 1),
+                  pl.ds(k * K_TILE, K_TILE),
+                  pl.ds(0, 2 * I)], w1_bufs_ref.at[pl.ds(buf, 1),
+                                                   pl.ds(k * K_TILE, K_TILE),
+                                                   pl.ds(0, 2 * I)],
+        sem_ref.at[0 * NBUF_W1_ + buf]).start()
     pltpu.make_async_copy(
-        w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE),
-                        pl.ds(0, 1), pl.ds(0, 2 * I)],
-        w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(k_block_start, KB_TILE),
-                         pl.ds(0, 1), pl.ds(0, 2 * I)],
-        sem_ref.at[1 * NBUF_W1_ + buf]
-    ).start()
+        w1_scale_ref.at[pl.ds(gj, 1),
+                        pl.ds(k_block_start, KB_TILE),
+                        pl.ds(0, 1),
+                        pl.ds(0, 2 * I)],
+        w1_s_bufs_ref.at[pl.ds(buf, 1),
+                         pl.ds(k_block_start, KB_TILE),
+                         pl.ds(0, 1),
+                         pl.ds(0, 2 * I)],
+        sem_ref.at[1 * NBUF_W1_ + buf]).start()
 
 
-def _wait_w1_dma(gj, buf, k, w1_ref, w1_scale_ref,
-                 w1_bufs_ref, w1_s_bufs_ref, sem_ref, *,
-                 K_TILE, KB_TILE, I, QB, NBUF_W1_):
+def _wait_w1_dma(gj, buf, k, w1_ref, w1_scale_ref, w1_bufs_ref, w1_s_bufs_ref,
+                 sem_ref, *, K_TILE, KB_TILE, I, QB, NBUF_W1_):
     k_block_start = (k * K_TILE) // QB
     pltpu.make_async_copy(
-        w1_ref.at[pl.ds(gj, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-        w1_bufs_ref.at[pl.ds(buf, 1), pl.ds(k * K_TILE, K_TILE), pl.ds(0, 2 * I)],
-        sem_ref.at[0 * NBUF_W1_ + buf]
-    ).wait()
+        w1_ref.at[pl.ds(gj, 1),
+                  pl.ds(k * K_TILE, K_TILE),
+                  pl.ds(0, 2 * I)], w1_bufs_ref.at[pl.ds(buf, 1),
+                                                   pl.ds(k * K_TILE, K_TILE),
+                                                   pl.ds(0, 2 * I)],
+        sem_ref.at[0 * NBUF_W1_ + buf]).wait()
     pltpu.make_async_copy(
-        w1_scale_ref.at[pl.ds(gj, 1), pl.ds(k_block_start, KB_TILE),
-                        pl.ds(0, 1), pl.ds(0, 2 * I)],
-        w1_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(k_block_start, KB_TILE),
-                         pl.ds(0, 1), pl.ds(0, 2 * I)],
-        sem_ref.at[1 * NBUF_W1_ + buf]
-    ).wait()
+        w1_scale_ref.at[pl.ds(gj, 1),
+                        pl.ds(k_block_start, KB_TILE),
+                        pl.ds(0, 1),
+                        pl.ds(0, 2 * I)],
+        w1_s_bufs_ref.at[pl.ds(buf, 1),
+                         pl.ds(k_block_start, KB_TILE),
+                         pl.ds(0, 1),
+                         pl.ds(0, 2 * I)],
+        sem_ref.at[1 * NBUF_W1_ + buf]).wait()
 
 
-def _start_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
-                  w2_bufs_ref, w2_s_bufs_ref, sem_ref, *,
-                  I_TILE, IB_TILE, H, IB, NBUF_W1_, NBUF_W2_):
+def _start_w2_dma(gj, buf, m, w2_ref, w2_scale_ref, w2_bufs_ref, w2_s_bufs_ref,
+                  sem_ref, *, I_TILE, IB_TILE, H, IB, NBUF_W1_, NBUF_W2_):
     i_block_start = (m * I_TILE) // IB
     pltpu.make_async_copy(
-        w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-        w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-        sem_ref.at[2 * NBUF_W1_ + buf]
-    ).start()
+        w2_ref.at[pl.ds(gj, 1),
+                  pl.ds(m * I_TILE, I_TILE),
+                  pl.ds(0, H)], w2_bufs_ref.at[pl.ds(buf, 1),
+                                               pl.ds(m * I_TILE, I_TILE),
+                                               pl.ds(0, H)],
+        sem_ref.at[2 * NBUF_W1_ + buf]).start()
     pltpu.make_async_copy(
-        w2_scale_ref.at[pl.ds(gj, 1), pl.ds(i_block_start, IB_TILE),
-                        pl.ds(0, 1), pl.ds(0, H)],
-        w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(i_block_start, IB_TILE),
-                         pl.ds(0, 1), pl.ds(0, H)],
-        sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + buf]
-    ).start()
+        w2_scale_ref.at[pl.ds(gj, 1),
+                        pl.ds(i_block_start, IB_TILE),
+                        pl.ds(0, 1),
+                        pl.ds(0, H)],
+        w2_s_bufs_ref.at[pl.ds(buf, 1),
+                         pl.ds(i_block_start, IB_TILE),
+                         pl.ds(0, 1),
+                         pl.ds(0, H)],
+        sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + buf]).start()
 
 
-def _wait_w2_dma(gj, buf, m, w2_ref, w2_scale_ref,
-                 w2_bufs_ref, w2_s_bufs_ref, sem_ref, *,
-                 I_TILE, IB_TILE, H, IB, NBUF_W1_, NBUF_W2_):
+def _wait_w2_dma(gj, buf, m, w2_ref, w2_scale_ref, w2_bufs_ref, w2_s_bufs_ref,
+                 sem_ref, *, I_TILE, IB_TILE, H, IB, NBUF_W1_, NBUF_W2_):
     i_block_start = (m * I_TILE) // IB
     pltpu.make_async_copy(
-        w2_ref.at[pl.ds(gj, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-        w2_bufs_ref.at[pl.ds(buf, 1), pl.ds(m * I_TILE, I_TILE), pl.ds(0, H)],
-        sem_ref.at[2 * NBUF_W1_ + buf]
-    ).wait()
+        w2_ref.at[pl.ds(gj, 1),
+                  pl.ds(m * I_TILE, I_TILE),
+                  pl.ds(0, H)], w2_bufs_ref.at[pl.ds(buf, 1),
+                                               pl.ds(m * I_TILE, I_TILE),
+                                               pl.ds(0, H)],
+        sem_ref.at[2 * NBUF_W1_ + buf]).wait()
     pltpu.make_async_copy(
-        w2_scale_ref.at[pl.ds(gj, 1), pl.ds(i_block_start, IB_TILE),
-                        pl.ds(0, 1), pl.ds(0, H)],
-        w2_s_bufs_ref.at[pl.ds(buf, 1), pl.ds(i_block_start, IB_TILE),
-                         pl.ds(0, 1), pl.ds(0, H)],
-        sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + buf]
-    ).wait()
+        w2_scale_ref.at[pl.ds(gj, 1),
+                        pl.ds(i_block_start, IB_TILE),
+                        pl.ds(0, 1),
+                        pl.ds(0, H)],
+        w2_s_bufs_ref.at[pl.ds(buf, 1),
+                         pl.ds(i_block_start, IB_TILE),
+                         pl.ds(0, 1),
+                         pl.ds(0, H)],
+        sem_ref.at[2 * NBUF_W1_ + NBUF_W2_ + buf]).wait()
 
 
-def _start_all_dma(gj, buf_w1, buf_w2, *, NUM_K, NUM_I,
-                   dma_kw_w1, dma_kw_w2):
+def _start_all_dma(gj, buf_w1, buf_w2, *, NUM_K, NUM_I, dma_kw_w1, dma_kw_w2):
     """Start DMA for all tiles of expert `gj` into the given buffers."""
     for k in range(NUM_K):
         _start_w1_dma(gj, buf_w1, k, **dma_kw_w1)
@@ -154,51 +167,104 @@ def _start_all_dma(gj, buf_w1, buf_w2, *, NUM_K, NUM_I,
 #  Compute-only expert body
 # =====================================================================
 def _expert_body(
-    gj, weight, tok, lhs_scratch_ref,
-    w1_ref, w1_scale_ref, w2_ref, w2_scale_ref,
-    w1_bufs_ref, w1_s_bufs_ref, w2_bufs_ref, w2_s_bufs_ref,
-    acc_scratch_ref, sem_ref,
-    *, K, I, H, K_BLOCKS, QB, I_BLOCKS, IB,
-    NBUF_W1_, NBUF_W2_,
-    K_TILE, NUM_K, QB_eff, KB_TILE, I_TILE, NUM_I, IB_TILE,
-    DTYPE_LHS, DTYPE_OUT, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
-    is_new_expert, cur_w1_buf, cur_w2_buf,
+    gj,
+    weight,
+    tok,
+    lhs_scratch_ref,
+    w1_ref,
+    w1_scale_ref,
+    w2_ref,
+    w2_scale_ref,
+    w1_bufs_ref,
+    w1_s_bufs_ref,
+    w2_bufs_ref,
+    w2_s_bufs_ref,
+    acc_scratch_ref,
+    sem_ref,
+    *,
+    K,
+    I,
+    H,
+    K_BLOCKS,
+    QB,
+    I_BLOCKS,
+    IB,
+    NBUF_W1_,
+    NBUF_W2_,
+    K_TILE,
+    NUM_K,
+    QB_eff,
+    KB_TILE,
+    I_TILE,
+    NUM_I,
+    IB_TILE,
+    DTYPE_LHS,
+    DTYPE_OUT,
+    DEQUANT_W1_AFTER_,
+    DEQUANT_W2_AFTER_,
+    is_new_expert,
+    cur_w1_buf,
+    cur_w2_buf,
 ):
     """Process one slot: wait→w1 matmul→SwiGLU→wait→w2 matmul→accumulate."""
-    dma_kw_w1 = dict(w1_ref=w1_ref, w1_scale_ref=w1_scale_ref,
-                     w1_bufs_ref=w1_bufs_ref, w1_s_bufs_ref=w1_s_bufs_ref,
-                     sem_ref=sem_ref, K_TILE=K_TILE, KB_TILE=KB_TILE,
-                     I=I, QB=QB, NBUF_W1_=NBUF_W1_)
-    dma_kw_w2 = dict(w2_ref=w2_ref, w2_scale_ref=w2_scale_ref,
-                     w2_bufs_ref=w2_bufs_ref, w2_s_bufs_ref=w2_s_bufs_ref,
-                     sem_ref=sem_ref, I_TILE=I_TILE, IB_TILE=IB_TILE,
-                     H=H, IB=IB, NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_)
+    dma_kw_w1 = dict(w1_ref=w1_ref,
+                     w1_scale_ref=w1_scale_ref,
+                     w1_bufs_ref=w1_bufs_ref,
+                     w1_s_bufs_ref=w1_s_bufs_ref,
+                     sem_ref=sem_ref,
+                     K_TILE=K_TILE,
+                     KB_TILE=KB_TILE,
+                     I=I,
+                     QB=QB,
+                     NBUF_W1_=NBUF_W1_)
+    dma_kw_w2 = dict(w2_ref=w2_ref,
+                     w2_scale_ref=w2_scale_ref,
+                     w2_bufs_ref=w2_bufs_ref,
+                     w2_s_bufs_ref=w2_s_bufs_ref,
+                     sem_ref=sem_ref,
+                     I_TILE=I_TILE,
+                     IB_TILE=IB_TILE,
+                     H=H,
+                     IB=IB,
+                     NBUF_W1_=NBUF_W1_,
+                     NBUF_W2_=NBUF_W2_)
 
     # ---- Phase 1: K-tiled gate+up matmul ----
     gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
 
     for k in range(NUM_K):
+
         @pl.when(is_new_expert)
         def _():
             _wait_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
 
-        w1_fp8 = _select_buf(w1_bufs_ref, cur_w1_buf, NBUF_W1_,
-                             tile_start=k * K_TILE, tile_size=K_TILE)
+        w1_fp8 = _select_buf(w1_bufs_ref,
+                             cur_w1_buf,
+                             NBUF_W1_,
+                             tile_start=k * K_TILE,
+                             tile_size=K_TILE)
         k_block_start = (k * K_TILE) // QB
-        s1 = _select_buf(w1_s_bufs_ref, cur_w1_buf, NBUF_W1_,
-                         tile_start=k_block_start, tile_size=KB_TILE)
+        s1 = _select_buf(w1_s_bufs_ref,
+                         cur_w1_buf,
+                         NBUF_W1_,
+                         tile_start=k_block_start,
+                         tile_size=KB_TILE)
         lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
 
         if DEQUANT_W1_AFTER_:
             w1_cast = w1_fp8.astype(DTYPE_LHS)
-            block_acc = jnp.matmul(lhs_tile, w1_cast,
+            block_acc = jnp.matmul(lhs_tile,
+                                   w1_cast,
                                    preferred_element_type=jnp.float32)
             s1_flat = s1.reshape(KB_TILE, 1, 2 * I)
-            block_acc = block_acc * s1_flat.reshape(1, 2 * I).astype(jnp.float32)
+            block_acc = block_acc * s1_flat.reshape(1, 2 * I).astype(
+                jnp.float32)
             gate_up_acc = gate_up_acc + block_acc
         else:
-            w1_fp32 = w1_fp8.astype(jnp.float32).reshape(KB_TILE, QB_eff, 2 * I)
-            w1_dequant = (w1_fp32 * s1).reshape(K_TILE, 2 * I).astype(DTYPE_LHS)
+            w1_fp32 = w1_fp8.astype(jnp.float32).reshape(
+                KB_TILE, QB_eff, 2 * I)
+            w1_dequant = (w1_fp32 * s1).reshape(K_TILE,
+                                                2 * I).astype(DTYPE_LHS)
             gate_up_acc = gate_up_acc + jnp.matmul(
                 lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
 
@@ -212,20 +278,28 @@ def _expert_body(
     down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
 
     for m in range(NUM_I):
+
         @pl.when(is_new_expert)
         def _():
             _wait_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
 
-        w2_fp8 = _select_buf(w2_bufs_ref, cur_w2_buf, NBUF_W2_,
-                             tile_start=m * I_TILE, tile_size=I_TILE)
+        w2_fp8 = _select_buf(w2_bufs_ref,
+                             cur_w2_buf,
+                             NBUF_W2_,
+                             tile_start=m * I_TILE,
+                             tile_size=I_TILE)
         i_block_start = (m * I_TILE) // IB
-        s2 = _select_buf(w2_s_bufs_ref, cur_w2_buf, NBUF_W2_,
-                         tile_start=i_block_start, tile_size=IB_TILE)
-        inter_tile = intermediate[:, m * I_TILE : (m + 1) * I_TILE]
+        s2 = _select_buf(w2_s_bufs_ref,
+                         cur_w2_buf,
+                         NBUF_W2_,
+                         tile_start=i_block_start,
+                         tile_size=IB_TILE)
+        inter_tile = intermediate[:, m * I_TILE:(m + 1) * I_TILE]
 
         if DEQUANT_W2_AFTER_:
             w2_cast = w2_fp8.astype(DTYPE_LHS)
-            block_acc = jnp.matmul(inter_tile, w2_cast,
+            block_acc = jnp.matmul(inter_tile,
+                                   w2_cast,
                                    preferred_element_type=jnp.float32)
             s2_flat = s2.reshape(IB_TILE, 1, H)
             block_acc = block_acc * s2_flat.reshape(1, H).astype(jnp.float32)
@@ -248,29 +322,49 @@ def _expert_body(
 # =====================================================================
 def _cn_w1w2_fused_token_kernel_fp8(
     # ---- Scalar prefetch (SMEM) ----
-    ids_ref, toks_ref, topk_weights_ref,
-    seed_experts_ref, lookahead_ids_ref,
+    ids_ref,
+    toks_ref,
+    topk_weights_ref,
+    seed_experts_ref,
+    lookahead_ids_ref,
     # ---- HBM inputs ----
-    lhs_ref, w1_ref, w1_scale_ref, w2_ref, w2_scale_ref,
+    lhs_ref,
+    w1_ref,
+    w1_scale_ref,
+    w2_ref,
+    w2_scale_ref,
     # ---- HBM output ----
     o_ref,
     # ---- VMEM scratch ----
-    full_lhs_2d_ref,       # [C_PAD, K]         — 2D DMA landing pad
+    full_lhs_2d_ref,  # [C_PAD, K]         — 2D DMA landing pad
     full_lhs_scratch_ref,  # [C_PAD, 1, K]      — 3D for dynamic indexing
-    lhs_scratch_ref,       # [M_PAD, K]
-    w1_bufs_ref,           # [NBUF_W1, K, 2I]     — full K range per slot
-    w1_s_bufs_ref,         # [NBUF_W1, K_BLOCKS, 1, 2I] fp32
-    w2_bufs_ref,           # [NBUF_W2, I, H]      — full I range per slot
-    w2_s_bufs_ref,         # [NBUF_W2, I_BLOCKS, 1, H] fp32
-    acc_scratch_ref,       # [N_TOKENS_, 1, H] fp32
+    lhs_scratch_ref,  # [M_PAD, K]
+    w1_bufs_ref,  # [NBUF_W1, K, 2I]     — full K range per slot
+    w1_s_bufs_ref,  # [NBUF_W1, K_BLOCKS, 1, 2I] fp32
+    w2_bufs_ref,  # [NBUF_W2, I, H]      — full I range per slot
+    w2_s_bufs_ref,  # [NBUF_W2, I_BLOCKS, 1, H] fp32
+    acc_scratch_ref,  # [N_TOKENS_, 1, H] fp32
     full_out_scratch_ref,  # [C_PAD, 1, H] bf16
-    out_2d_ref,            # [C_PAD, H]         — 2D DMA launch pad
-    sem_ref,               # semaphores
+    out_2d_ref,  # [C_PAD, H]         — 2D DMA launch pad
+    sem_ref,  # semaphores
     *,
-    K, I, H, K_BLOCKS, QB, I_BLOCKS, IB, TOP_K_,
-    NBUF_W1_, NBUF_W2_, K_TILE, I_TILE,
-    N_TOKENS_, DEQUANT_W1_AFTER_, DEQUANT_W2_AFTER_,
-    SKIP_ZERO_WEIGHT_, DTYPE_LHS, DTYPE_OUT,
+    K,
+    I,
+    H,
+    K_BLOCKS,
+    QB,
+    I_BLOCKS,
+    IB,
+    TOP_K_,
+    NBUF_W1_,
+    NBUF_W2_,
+    K_TILE,
+    I_TILE,
+    N_TOKENS_,
+    DEQUANT_W1_AFTER_,
+    DEQUANT_W2_AFTER_,
+    DTYPE_LHS,
+    DTYPE_OUT,
 ):
     C_PAD = full_lhs_2d_ref.shape[0]
     N_SLOTS = N_TOKENS_ * TOP_K_
@@ -282,44 +376,74 @@ def _cn_w1w2_fused_token_kernel_fp8(
     IB_TILE = I_TILE // min(I_TILE, IB)
 
     # DMA helper kwargs
-    dma_kw_w1 = dict(w1_ref=w1_ref, w1_scale_ref=w1_scale_ref,
-                     w1_bufs_ref=w1_bufs_ref, w1_s_bufs_ref=w1_s_bufs_ref,
-                     sem_ref=sem_ref, K_TILE=K_TILE, KB_TILE=KB_TILE,
-                     I=I, QB=QB, NBUF_W1_=NBUF_W1_)
-    dma_kw_w2 = dict(w2_ref=w2_ref, w2_scale_ref=w2_scale_ref,
-                     w2_bufs_ref=w2_bufs_ref, w2_s_bufs_ref=w2_s_bufs_ref,
-                     sem_ref=sem_ref, I_TILE=I_TILE, IB_TILE=IB_TILE,
-                     H=H, IB=IB, NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_)
-    all_dma_kw = dict(NUM_K=NUM_K, NUM_I=NUM_I,
-                      dma_kw_w1=dma_kw_w1, dma_kw_w2=dma_kw_w2)
+    dma_kw_w1 = dict(w1_ref=w1_ref,
+                     w1_scale_ref=w1_scale_ref,
+                     w1_bufs_ref=w1_bufs_ref,
+                     w1_s_bufs_ref=w1_s_bufs_ref,
+                     sem_ref=sem_ref,
+                     K_TILE=K_TILE,
+                     KB_TILE=KB_TILE,
+                     I=I,
+                     QB=QB,
+                     NBUF_W1_=NBUF_W1_)
+    dma_kw_w2 = dict(w2_ref=w2_ref,
+                     w2_scale_ref=w2_scale_ref,
+                     w2_bufs_ref=w2_bufs_ref,
+                     w2_s_bufs_ref=w2_s_bufs_ref,
+                     sem_ref=sem_ref,
+                     I_TILE=I_TILE,
+                     IB_TILE=IB_TILE,
+                     H=H,
+                     IB=IB,
+                     NBUF_W1_=NBUF_W1_,
+                     NBUF_W2_=NBUF_W2_)
+    all_dma_kw = dict(NUM_K=NUM_K,
+                      NUM_I=NUM_I,
+                      dma_kw_w1=dma_kw_w1,
+                      dma_kw_w2=dma_kw_w2)
 
     # Compute-body kwargs
     body_kw = dict(
         lhs_scratch_ref=lhs_scratch_ref,
-        w1_ref=w1_ref, w1_scale_ref=w1_scale_ref,
-        w2_ref=w2_ref, w2_scale_ref=w2_scale_ref,
-        w1_bufs_ref=w1_bufs_ref, w1_s_bufs_ref=w1_s_bufs_ref,
-        w2_bufs_ref=w2_bufs_ref, w2_s_bufs_ref=w2_s_bufs_ref,
-        acc_scratch_ref=acc_scratch_ref, sem_ref=sem_ref,
-        K=K, I=I, H=H, K_BLOCKS=K_BLOCKS, QB=QB,
-        I_BLOCKS=I_BLOCKS, IB=IB,
-        NBUF_W1_=NBUF_W1_, NBUF_W2_=NBUF_W2_,
-        K_TILE=K_TILE, NUM_K=NUM_K, QB_eff=QB_eff, KB_TILE=KB_TILE,
-        I_TILE=I_TILE, NUM_I=NUM_I, IB_TILE=IB_TILE,
-        DTYPE_LHS=DTYPE_LHS, DTYPE_OUT=DTYPE_OUT,
+        w1_ref=w1_ref,
+        w1_scale_ref=w1_scale_ref,
+        w2_ref=w2_ref,
+        w2_scale_ref=w2_scale_ref,
+        w1_bufs_ref=w1_bufs_ref,
+        w1_s_bufs_ref=w1_s_bufs_ref,
+        w2_bufs_ref=w2_bufs_ref,
+        w2_s_bufs_ref=w2_s_bufs_ref,
+        acc_scratch_ref=acc_scratch_ref,
+        sem_ref=sem_ref,
+        K=K,
+        I=I,
+        H=H,
+        K_BLOCKS=K_BLOCKS,
+        QB=QB,
+        I_BLOCKS=I_BLOCKS,
+        IB=IB,
+        NBUF_W1_=NBUF_W1_,
+        NBUF_W2_=NBUF_W2_,
+        K_TILE=K_TILE,
+        NUM_K=NUM_K,
+        QB_eff=QB_eff,
+        KB_TILE=KB_TILE,
+        I_TILE=I_TILE,
+        NUM_I=NUM_I,
+        IB_TILE=IB_TILE,
+        DTYPE_LHS=DTYPE_LHS,
+        DTYPE_OUT=DTYPE_OUT,
         DEQUANT_W1_AFTER_=DEQUANT_W1_AFTER_,
         DEQUANT_W2_AFTER_=DEQUANT_W2_AFTER_,
     )
 
     NBUF = max(NBUF_W1_, NBUF_W2_)  # same in practice
-    MAX_DEPTH = NBUF - 1             # how far ahead we look
+    MAX_DEPTH = NBUF - 1  # how far ahead we look
 
     # ---- DMA lhs from HBM -> 2D VMEM landing pad (shape-matched) ----
     full_lhs_copy = pltpu.make_async_copy(
-        lhs_ref.at[pl.ds(0, C_PAD), pl.ds(0, K)],
-        full_lhs_2d_ref,
-        sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_]
-    )
+        lhs_ref.at[pl.ds(0, C_PAD), pl.ds(0, K)], full_lhs_2d_ref,
+        sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_])
     full_lhs_copy.start()
     full_lhs_copy.wait()
 
@@ -334,97 +458,85 @@ def _cn_w1w2_fused_token_kernel_fp8(
     acc_scratch_ref[...] = jnp.zeros((N_TOKENS_, 1, H), dtype=jnp.float32)
 
     # ---- Flat slot loop (Python-unrolled, sorted by expert) ----
-    if SKIP_ZERO_WEIGHT_:
-        # EP mode: no dedup, no cross-expert prefetch.
-        for slot in range(N_SLOTS):
-            gj = ids_ref[slot]
-            gj = pl.multiple_of(gj, 1)
-            tok = toks_ref[slot]
-            weight = topk_weights_ref[slot]
+    # Dedup + N-way cross-expert buffering apply to both TP and EP: ids_ref
+    # carries effective_ids, which forward-fills EP's non-owned-expert slots
+    # (weight==0) to whatever real expert preceded them (see
+    # _forward_fill_ids), so they never break dedup or target a bogus
+    # prefetch.  weight==0 slots still run the full matmul -- same as TP's
+    # own padding rows -- and just contribute zero via `down_acc * weight`;
+    # skipping the call outright would risk leaving a slot-0 DMA start
+    # without its matching wait when slot 0 happens to be weight==0.
+    cur_w1_buf = jnp.int32(0)
+    cur_w2_buf = jnp.int32(0)
 
-            token_row = full_lhs_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1),
-                                             pl.ds(0, K)]
-            lhs_scratch_ref[...] = token_row.reshape(1, K)
+    for slot in range(N_SLOTS):
+        gj = ids_ref[slot]
+        gj = pl.multiple_of(gj, 1)
+        tok = toks_ref[slot]
+        weight = topk_weights_ref[slot]
 
-            @pl.when(weight != 0.0)
+        # ---- Dedup: is this a new expert? ----
+        if slot == 0:
+            is_new_expert = jnp.bool_(True)
+        else:
+            prev_gj = ids_ref[slot - 1]
+            is_new_expert = (gj != prev_gj)
+
+        # ============================================================
+        #  SLOT 0 — SEED PHASE: fill all NBUF buffers from
+        #  precomputed seed_experts_ref (O(1) SMEM reads).
+        # ============================================================
+        if slot == 0:
+            # Buffer 0: current expert
+            _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
+
+            # Buffers 1..NBUF-1: precomputed seed experts
+            for d in range(1, NBUF):
+                seed_gj = seed_experts_ref[d]
+                buf_d_w1 = jnp.int32(d % NBUF_W1_)
+                buf_d_w2 = jnp.int32(d % NBUF_W2_)
+
+                @pl.when(seed_gj >= 0)
+                def _(sgj=seed_gj, bw1=buf_d_w1, bw2=buf_d_w2):
+                    _start_all_dma(pl.multiple_of(sgj, 1), bw1, bw2,
+                                   **all_dma_kw)
+
+        # ============================================================
+        #  SLOT > 0 — STEADY STATE: rotate + one prefetch from
+        #  precomputed lookahead_ids_ref (O(1) SMEM read).
+        # ============================================================
+        if slot > 0:
+            # Rotate buffer index on genuine transition
+            cur_w1_buf = jnp.where(is_new_expert, (cur_w1_buf + 1) % NBUF_W1_,
+                                   cur_w1_buf)
+            cur_w2_buf = jnp.where(is_new_expert, (cur_w2_buf + 1) % NBUF_W2_,
+                                   cur_w2_buf)
+
+            # ONE prefetch into the freed buffer.
+            target_w1 = (cur_w1_buf + MAX_DEPTH) % NBUF_W1_
+            target_w2 = (cur_w2_buf + MAX_DEPTH) % NBUF_W2_
+            ahead_gj = lookahead_ids_ref[slot]
+            should_prefetch = is_new_expert & (ahead_gj >= 0)
+
+            @pl.when(should_prefetch)
             def _():
-                _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
-                _expert_body(gj, weight, tok,
-                             is_new_expert=jnp.bool_(True),
-                             cur_w1_buf=jnp.int32(0),
-                             cur_w2_buf=jnp.int32(0),
-                             **body_kw)
-    else:
-        # TP mode: dedup + N-way cross-expert buffering.
-        cur_w1_buf = jnp.int32(0)
-        cur_w2_buf = jnp.int32(0)
+                _start_all_dma(pl.multiple_of(ahead_gj, 1), target_w1,
+                               target_w2, **all_dma_kw)
 
-        for slot in range(N_SLOTS):
-            gj = ids_ref[slot]
-            gj = pl.multiple_of(gj, 1)
-            tok = toks_ref[slot]
-            weight = topk_weights_ref[slot]
+        # ---- Load this token's lhs ----
+        token_row = full_lhs_scratch_ref[pl.ds(tok, 1),
+                                         pl.ds(0, 1),
+                                         pl.ds(0, K)]
+        lhs_scratch_ref[...] = token_row.reshape(1, K)
 
-            # ---- Dedup: is this a new expert? ----
-            if slot == 0:
-                is_new_expert = jnp.bool_(True)
-            else:
-                prev_gj = ids_ref[slot - 1]
-                is_new_expert = (gj != prev_gj)
-
-            # ============================================================
-            #  SLOT 0 — SEED PHASE: fill all NBUF buffers from
-            #  precomputed seed_experts_ref (O(1) SMEM reads).
-            # ============================================================
-            if slot == 0:
-                # Buffer 0: current expert
-                _start_all_dma(gj, jnp.int32(0), jnp.int32(0), **all_dma_kw)
-
-                # Buffers 1..NBUF-1: precomputed seed experts
-                for d in range(1, NBUF):
-                    seed_gj = seed_experts_ref[d]
-                    buf_d_w1 = jnp.int32(d % NBUF_W1_)
-                    buf_d_w2 = jnp.int32(d % NBUF_W2_)
-                    @pl.when(seed_gj >= 0)
-                    def _(sgj=seed_gj, bw1=buf_d_w1, bw2=buf_d_w2):
-                        _start_all_dma(
-                            pl.multiple_of(sgj, 1), bw1, bw2, **all_dma_kw)
-
-            # ============================================================
-            #  SLOT > 0 — STEADY STATE: rotate + one prefetch from
-            #  precomputed lookahead_ids_ref (O(1) SMEM read).
-            # ============================================================
-            if slot > 0:
-                # Rotate buffer index on genuine transition
-                cur_w1_buf = jnp.where(is_new_expert,
-                                       (cur_w1_buf + 1) % NBUF_W1_,
-                                       cur_w1_buf)
-                cur_w2_buf = jnp.where(is_new_expert,
-                                       (cur_w2_buf + 1) % NBUF_W2_,
-                                       cur_w2_buf)
-
-                # ONE prefetch into the freed buffer.
-                target_w1 = (cur_w1_buf + MAX_DEPTH) % NBUF_W1_
-                target_w2 = (cur_w2_buf + MAX_DEPTH) % NBUF_W2_
-                ahead_gj = lookahead_ids_ref[slot]
-                should_prefetch = is_new_expert & (ahead_gj >= 0)
-                @pl.when(should_prefetch)
-                def _():
-                    _start_all_dma(
-                        pl.multiple_of(ahead_gj, 1),
-                        target_w1, target_w2, **all_dma_kw)
-
-            # ---- Load this token's lhs ----
-            token_row = full_lhs_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1),
-                                             pl.ds(0, K)]
-            lhs_scratch_ref[...] = token_row.reshape(1, K)
-
-            # ---- Compute: wait + matmul + SwiGLU + matmul + accumulate ----
-            _expert_body(gj, weight, tok,
-                         is_new_expert=is_new_expert,
-                         cur_w1_buf=cur_w1_buf,
-                         cur_w2_buf=cur_w2_buf,
-                         **body_kw)
+        # ---- Compute: wait + matmul + SwiGLU + matmul + accumulate ----
+        _expert_body(gj,
+                     weight,
+                     tok,
+                     is_new_expert=is_new_expert,
+                     cur_w1_buf=cur_w1_buf,
+                     cur_w2_buf=cur_w2_buf,
+                     **body_kw)
 
     # ---- Final: copy 3D accumulator → 3D output scratch ----
     for t in range(N_TOKENS_):
@@ -439,10 +551,8 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
     # ---- DMA 2D output from VMEM -> HBM (shape-matched) ----
     out_copy = pltpu.make_async_copy(
-        out_2d_ref,
-        o_ref.at[pl.ds(0, C_PAD), pl.ds(0, H)],
-        sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_ + 1]
-    )
+        out_2d_ref, o_ref.at[pl.ds(0, C_PAD), pl.ds(0, H)],
+        sem_ref.at[2 * NBUF_W1_ + 2 * NBUF_W2_ + 1])
     out_copy.start()
     out_copy.wait()
 
@@ -472,8 +582,7 @@ def _forward_fill_ids(sorted_ids, sorted_weights):
         out_v = a_v | b_v
         return (out_id, out_v)
 
-    effective_ids, _ = jax.lax.associative_scan(
-        _fill_op, (sorted_ids, valid))
+    effective_ids, _ = jax.lax.associative_scan(_fill_op, (sorted_ids, valid))
     return effective_ids
 
 
@@ -493,10 +602,8 @@ def _build_lookahead_tables(sorted_ids, n_slots, nbuf):
 
     # ---- Group structure ----
     # is_transition[0] = True (first slot always starts a group)
-    is_transition = jnp.concatenate([
-        jnp.array([True]),
-        sorted_ids[1:] != sorted_ids[:-1]
-    ])
+    is_transition = jnp.concatenate(
+        [jnp.array([True]), sorted_ids[1:] != sorted_ids[:-1]])
     # group_id[s] = which group slot s belongs to (0-indexed)
     group_id = jnp.cumsum(is_transition.astype(jnp.int32)) - 1
     num_groups = group_id[-1] + 1  # traced; max possible = n_slots
@@ -508,8 +615,8 @@ def _build_lookahead_tables(sorted_ids, n_slots, nbuf):
     group_expert = group_expert.at[group_id].set(sorted_ids)
 
     # ---- Seed experts: groups 0..NBUF-1 ----
-    seed_experts = jnp.array(
-        [group_expert[d] for d in range(nbuf)], dtype=jnp.int32)
+    seed_experts = jnp.array([group_expert[d] for d in range(nbuf)],
+                             dtype=jnp.int32)
 
     # ---- Lookahead: for each slot, expert MAX_DEPTH groups ahead ----
     target_groups = group_id + max_depth
@@ -524,10 +631,8 @@ def _build_lookahead_tables(sorted_ids, n_slots, nbuf):
 # =====================================================================
 #  Cost estimate for compiler scheduling
 # =====================================================================
-def _get_cost_estimate(n_tokens, K, I, H, G, *,
-                       w1_dtype, w2_dtype, lhs_dtype,
-                       w1_scale_dtype, w2_scale_dtype,
-                       K_BLOCKS, I_BLOCKS):
+def _get_cost_estimate(n_tokens, K, I, H, G, *, w1_dtype, w2_dtype, lhs_dtype,
+                       w1_scale_dtype, w2_scale_dtype, K_BLOCKS, I_BLOCKS):
     """Return a pl.CostEstimate for the fused w1+SwiGLU+w2 kernel.
 
     Helps the XLA scheduler understand the kernel's cost relative to
@@ -571,9 +676,18 @@ def _get_cost_estimate(n_tokens, K, I, H, G, *,
 # =====================================================================
 #  Public entry point
 # =====================================================================
-def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
-                              sorted_ids, sorted_toks, sorted_weights, *,
-                              n_tokens, use_ep=False, interpret=False):
+def cn_gemv_w1w2_fused_mb_fp8(lhs,
+                              w1,
+                              w1_scale,
+                              w2,
+                              w2_scale,
+                              sorted_ids,
+                              sorted_toks,
+                              sorted_weights,
+                              *,
+                              n_tokens,
+                              use_ep=False,
+                              interpret=False):
     """Fused gate+up+SwiGLU+down for the C=N MoE block with expert dedup.
 
     lhs: [C_PAD, K] — native 2D input (no middle axis).
@@ -622,22 +736,22 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
     C_PAD = lhs.shape[0]
     any_spec = pl.BlockSpec(memory_space=pl.ANY)
     grid_spec = pltpu.PrefetchScalarGridSpec(
-        num_scalar_prefetch=5,        # ids, toks, weights, seed, lookahead
+        num_scalar_prefetch=5,  # ids, toks, weights, seed, lookahead
         in_specs=[any_spec] * 5,
         out_specs=any_spec,
-        grid=(1,),
+        grid=(1, ),
         scratch_shapes=[
-            pltpu.VMEM((C_PAD, K), lhs.dtype),         # full_lhs_2d (DMA pad)
-            pltpu.VMEM((C_PAD, 1, K), lhs.dtype),      # full_lhs_scratch (3D)
-            pltpu.VMEM((M_PAD, K), lhs.dtype),          # lhs_scratch
+            pltpu.VMEM((C_PAD, K), lhs.dtype),  # full_lhs_2d (DMA pad)
+            pltpu.VMEM((C_PAD, 1, K), lhs.dtype),  # full_lhs_scratch (3D)
+            pltpu.VMEM((M_PAD, K), lhs.dtype),  # lhs_scratch
             pltpu.VMEM((NBUF_W1, K, N1), w1.dtype),
             pltpu.VMEM((NBUF_W1, K_BLOCKS, 1, N1), w1_scale.dtype),
             pltpu.VMEM((NBUF_W2, I, H), w2.dtype),
             pltpu.VMEM((NBUF_W2, I_BLOCKS, 1, H), w2_scale.dtype),
-            pltpu.VMEM((n_tokens, 1, H), jnp.float32), # acc_scratch
-            pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),   # full_out_scratch (3D)
-            pltpu.VMEM((C_PAD, H), jnp.bfloat16),       # out_2d (DMA pad)
-            pltpu.SemaphoreType.DMA((2 * NBUF_W1 + 2 * NBUF_W2 + 2,)),
+            pltpu.VMEM((n_tokens, 1, H), jnp.float32),  # acc_scratch
+            pltpu.VMEM((C_PAD, 1, H), jnp.bfloat16),  # full_out_scratch (3D)
+            pltpu.VMEM((C_PAD, H), jnp.bfloat16),  # out_2d (DMA pad)
+            pltpu.SemaphoreType.DMA((2 * NBUF_W1 + 2 * NBUF_W2 + 2, )),
         ])
     compiler_params = None if interpret else pltpu.CompilerParams(
         vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9),
@@ -645,32 +759,63 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs, w1, w1_scale, w2, w2_scale,
 
     return pl.pallas_call(
         functools.partial(_cn_w1w2_fused_token_kernel_fp8,
-                          K=K, I=I, H=H,
-                          K_BLOCKS=K_BLOCKS, QB=QB,
-                          I_BLOCKS=I_BLOCKS, IB=IB,
+                          K=K,
+                          I=I,
+                          H=H,
+                          K_BLOCKS=K_BLOCKS,
+                          QB=QB,
+                          I_BLOCKS=I_BLOCKS,
+                          IB=IB,
                           TOP_K_=TOP_K,
-                          NBUF_W1_=NBUF_W1, NBUF_W2_=NBUF_W2,
-                          K_TILE=K_TILE, I_TILE=I_TILE,
+                          NBUF_W1_=NBUF_W1,
+                          NBUF_W2_=NBUF_W2,
+                          K_TILE=K_TILE,
+                          I_TILE=I_TILE,
                           N_TOKENS_=n_tokens,
                           DEQUANT_W1_AFTER_=(KB_TILE == 1),
                           DEQUANT_W2_AFTER_=(IB_TILE == 1),
-                          SKIP_ZERO_WEIGHT_=use_ep,
-                          DTYPE_LHS=lhs.dtype, DTYPE_OUT=jnp.bfloat16),
+                          DTYPE_LHS=lhs.dtype,
+                          DTYPE_OUT=jnp.bfloat16),
         out_shape=jax.ShapeDtypeStruct((C_PAD, H), jnp.bfloat16),
-        grid_spec=grid_spec, compiler_params=compiler_params,
-        interpret=interpret, name="cn_gemv_w1w2_fused_token_fp8",
-        cost_estimate=_get_cost_estimate(
-            n_tokens, K, I, H, G,
-            w1_dtype=w1.dtype, w2_dtype=w2.dtype, lhs_dtype=lhs.dtype,
-            w1_scale_dtype=w1_scale.dtype, w2_scale_dtype=w2_scale.dtype,
-            K_BLOCKS=K_BLOCKS, I_BLOCKS=I_BLOCKS),
-    )(effective_ids, sorted_toks, sorted_weights,   # scalar prefetch (5)
-      seed_experts, lookahead_ids,
-      lhs, w1, w1_scale, w2, w2_scale)              # inputs (5)
+        grid_spec=grid_spec,
+        compiler_params=compiler_params,
+        interpret=interpret,
+        name="cn_gemv_w1w2_fused_token_fp8",
+        cost_estimate=_get_cost_estimate(n_tokens,
+                                         K,
+                                         I,
+                                         H,
+                                         G,
+                                         w1_dtype=w1.dtype,
+                                         w2_dtype=w2.dtype,
+                                         lhs_dtype=lhs.dtype,
+                                         w1_scale_dtype=w1_scale.dtype,
+                                         w2_scale_dtype=w2_scale.dtype,
+                                         K_BLOCKS=K_BLOCKS,
+                                         I_BLOCKS=I_BLOCKS),
+    )(
+        effective_ids,
+        sorted_toks,
+        sorted_weights,  # scalar prefetch (5)
+        seed_experts,
+        lookahead_ids,
+        lhs,
+        w1,
+        w1_scale,
+        w2,
+        w2_scale)  # inputs (5)
 
 
-def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
-                active_ids, topk_weights, *, use_ep=False, interpret=False):
+def cn_moe_full(hidden_state,
+                w1,
+                w1_scale,
+                w2,
+                w2_scale,
+                active_ids,
+                topk_weights,
+                *,
+                use_ep=False,
+                interpret=False):
     """hidden_state [C, K]; active_ids/topk_weights [C, TOP_K].
     Returns [C, H] -- token t's MoE output at row t.
     """
@@ -684,9 +829,16 @@ def cn_moe_full(hidden_state, w1, w1_scale, w2, w2_scale,
     sorted_toks = (sort_order // TOP_K).astype(jnp.int32)
     sorted_weights = flat_weights[sort_order]
 
-    fused_out = cn_gemv_w1w2_fused_mb_fp8(
-        hidden_state, w1, w1_scale, w2, w2_scale,
-        sorted_ids, sorted_toks, sorted_weights,
-        n_tokens=C, use_ep=use_ep, interpret=interpret)
+    fused_out = cn_gemv_w1w2_fused_mb_fp8(hidden_state,
+                                          w1,
+                                          w1_scale,
+                                          w2,
+                                          w2_scale,
+                                          sorted_ids,
+                                          sorted_toks,
+                                          sorted_weights,
+                                          n_tokens=C,
+                                          use_ep=use_ep,
+                                          interpret=interpret)
 
     return fused_out[:C, :].astype(jnp.bfloat16)

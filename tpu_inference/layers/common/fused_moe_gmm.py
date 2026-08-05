@@ -620,13 +620,13 @@ def fused_moe_func(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
 
-
     def _mask_padding_tokens(indices, weights):
         """Zero out routing for padding tokens so they don't activate extra experts."""
         if num_valid_tokens is None:
             return indices, weights
         token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
-        return jnp.where(token_valid, indices, 0), jnp.where(token_valid, weights, 0.0)
+        return jnp.where(token_valid, indices,
+                         0), jnp.where(token_valid, weights, 0.0)
 
     # Fast path for low-concurrency decode: a specialized C=N Pallas MoE kernel
     # that skips the gather/scatter permutation of the general gmm path. Only
@@ -639,13 +639,13 @@ def fused_moe_func(
 
     low_conc_threshold = getattr(envs, "MOE_LOW_CONC_THRESHOLD", 8)
     if 1 <= num_tokens <= low_conc_threshold and topk == CN_MOE_TOP_K:
-        logger.info(
-            "Taking fast low-concurrency C=N Pallas MoE path for "
-            f"BS={num_tokens} decode (use_ep={use_ep}, "
-            f"threshold={low_conc_threshold}).")
+        logger.info("Taking fast low-concurrency C=N Pallas MoE path for "
+                    f"BS={num_tokens} decode (use_ep={use_ep}, "
+                    f"threshold={low_conc_threshold}).")
 
         padded_hs = hidden_states
-        padded_topk_indices, padded_topk_weights = _mask_padding_tokens(topk_indices, topk_weights)
+        padded_topk_indices, padded_topk_weights = _mask_padding_tokens(
+            topk_indices, topk_weights)
 
         def _local_low_conc_moe(hs, w1_local, w1_scale_local, w2_local,
                                 w2_scale_local, topk_ids_local,
@@ -653,16 +653,23 @@ def fused_moe_func(
             local_num_experts = w1_local.shape[0]
             if use_ep:
                 ep_shard = jax.lax.axis_index(ShardingAxisName.EXPERT)
-                is_my_expert = (topk_ids_local // local_num_experts) == ep_shard
-                local_ids = jnp.where(
-                    is_my_expert, topk_ids_local % local_num_experts, 0)
-                local_weights = jnp.where(is_my_expert, topk_weights_local, 0.0)
+                is_my_expert = (topk_ids_local //
+                                local_num_experts) == ep_shard
+                local_ids = jnp.where(is_my_expert,
+                                      topk_ids_local % local_num_experts, 0)
+                local_weights = jnp.where(is_my_expert, topk_weights_local,
+                                          0.0)
             else:
                 local_ids = topk_ids_local
                 local_weights = topk_weights_local
 
-            local_out = cn_moe_full(hs, w1_local, w1_scale_local, w2_local,
-                                    w2_scale_local, local_ids, local_weights,
+            local_out = cn_moe_full(hs,
+                                    w1_local,
+                                    w1_scale_local,
+                                    w2_local,
+                                    w2_scale_local,
+                                    local_ids,
+                                    local_weights,
                                     use_ep=use_ep)
 
             # ---- Reduction: mirror moe_gmm_local machinery ----
@@ -671,9 +678,8 @@ def fused_moe_func(
 
             if actual_enable_rs_kernel:
                 # Reduce-scatter path (when attention is pure DP)
-                reduction_axes_tuple = (
-                    reduction_axis if isinstance(reduction_axis, tuple)
-                    else (reduction_axis,))
+                reduction_axes_tuple = (reduction_axis if isinstance(
+                    reduction_axis, tuple) else (reduction_axis, ))
                 scatter_axis_size = 1
                 for a in reduction_axes_tuple:
                     scatter_axis_size *= jax.lax.axis_size(a)
@@ -685,32 +691,28 @@ def fused_moe_func(
             elif scatter_results:
                 dp_axes = ShardingAxisName.ATTN_DATA
                 if not isinstance(dp_axes, tuple):
-                    dp_axes = (dp_axes,)
+                    dp_axes = (dp_axes, )
                 if isinstance(reduction_axis, tuple):
-                    reduce_axes = tuple(
-                        a for a in reduction_axis if a not in dp_axes)
-                    scatter_axes = tuple(
-                        a for a in reduction_axis if a in dp_axes)
+                    reduce_axes = tuple(a for a in reduction_axis
+                                        if a not in dp_axes)
+                    scatter_axes = tuple(a for a in reduction_axis
+                                         if a in dp_axes)
                 else:
-                    reduce_axes = (
-                        () if reduction_axis in dp_axes
-                        else (reduction_axis,))
-                    scatter_axes = (
-                        (reduction_axis,) if reduction_axis in dp_axes
-                        else ())
+                    reduce_axes = (() if reduction_axis in dp_axes else
+                                   (reduction_axis, ))
+                    scatter_axes = ((reduction_axis, )
+                                    if reduction_axis in dp_axes else ())
                 if reduce_axes:
-                    local_out = jax.lax.psum(
-                        local_out, axis_name=reduce_axes)
+                    local_out = jax.lax.psum(local_out, axis_name=reduce_axes)
                 if scatter_axes:
-                    return jax.lax.psum_scatter(
-                        local_out,
-                        axis_name=scatter_axes,
-                        scatter_dimension=0,
-                        tiled=True).astype(hs.dtype)
+                    return jax.lax.psum_scatter(local_out,
+                                                axis_name=scatter_axes,
+                                                scatter_dimension=0,
+                                                tiled=True).astype(hs.dtype)
                 return local_out.astype(hs.dtype)
             elif not defer_all_reduce:
-                return jax.lax.psum(
-                    local_out, axis_name=reduction_axis).astype(hs.dtype)
+                return jax.lax.psum(local_out,
+                                    axis_name=reduction_axis).astype(hs.dtype)
             else:
                 return local_out.astype(hs.dtype)
 
@@ -727,8 +729,9 @@ def fused_moe_func(
             lc_w1_scale_spec = P(None, None, None, ShardingAxisName.MLP_TENSOR)
             lc_w2_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
             w2_nblocks = 1 if w2_scale is None else w2_scale.shape[1]
-            lc_w2_scale_spec = (P(None, None, None, None) if w2_nblocks == 1
-                                else P(None, ShardingAxisName.MLP_TENSOR, None, None))
+            lc_w2_scale_spec = (P(
+                None, None, None, None) if w2_nblocks == 1 else P(
+                    None, ShardingAxisName.MLP_TENSOR, None, None))
 
         if scatter_results or enable_rs_kernel:
             lc_out_spec = P(ShardingAxisName.ATTN_DATA, None)
@@ -757,7 +760,8 @@ def fused_moe_func(
     # is especially useful when we have a low number of tokens (e.g. low
     # concurrency), where padding tokens may activate unnecessary expert weights
     # and slow down the gmm kernel.
-    topk_indices, topk_weights = _mask_padding_tokens(topk_indices, topk_weights)
+    topk_indices, topk_weights = _mask_padding_tokens(topk_indices,
+                                                      topk_weights)
     # All gathering topk_indices and topk_weights if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
