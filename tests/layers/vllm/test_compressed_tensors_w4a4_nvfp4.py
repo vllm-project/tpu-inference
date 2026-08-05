@@ -378,15 +378,22 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
-@pytest.mark.parametrize("requantize_block_size", [None, 32])
+@pytest.mark.parametrize(
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
+                                                              (256, True)])
 def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
                                        enable_sp, enable_attn_dp,
-                                       activation_type, requantize_block_size):
+                                       activation_type, requantize_block_size,
+                                       enable_quantized_matmul_kernel):
     if requantize_block_size is not None:
         os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
             requantize_block_size)
     else:
         os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+    if enable_quantized_matmul_kernel:
+        os.environ["ENABLE_QUANTIZED_MATMUL_KERNEL"] = "1"
+    else:
+        os.environ.pop("ENABLE_QUANTIZED_MATMUL_KERNEL", None)
 
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
@@ -422,3 +429,84 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     ref_output, layer_output = return_ref_and_layer_output(
         linear_layer, activation_type=activation_type)
     torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+
+
+def test_get_scheme():
+
+    from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
+        VllmCompressedTensorsConfig
+
+    def get_scheme(input_quant):
+        config_dict = {
+            "quant_method": "compressed-tensors",
+            "format": "float-quantized",
+            "config_groups": {
+                "group_0": {
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "symmetric": True,
+                        "strategy": "tensor_group",
+                        "group_size": 16,
+                    }
+                }
+            }
+        }
+        if input_quant is not None:
+            config_dict["config_groups"]["group_0"][
+                "input_activations"] = input_quant
+
+        config = VllmCompressedTensorsConfig.from_config(config_dict)
+        config.vllm_config = MagicMock()
+        config.mesh = MagicMock()
+
+        # Mock layer for get_scheme
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size = 16
+        layer.output_size = 16
+        layer.weight_packed = torch.nn.Parameter(torch.empty(16, 16))
+        return config.get_scheme(layer, layer_name="Linear")
+
+    # 1. nvfp4 weights + fp8 dynamic input yields FP8
+    scheme = get_scheme({
+        "num_bits": 8,
+        "type": "float",
+        "symmetric": True,
+        "strategy": "tensor",
+        "dynamic": True,
+    })
+    assert scheme.activation_type == W4A4ActivationType.FP8
+
+    # 2. nvfp4 input yields NVFP4
+    scheme = get_scheme({
+        "num_bits": 4,
+        "type": "float",
+        "symmetric": True,
+        "strategy": "tensor_group",
+        "group_size": 16,
+        "dynamic": True,
+    })
+    assert scheme.activation_type == W4A4ActivationType.NVFP4
+
+    # 3. input_quant is None yields BF16
+    scheme = get_scheme(None)
+    assert scheme.activation_type == W4A4ActivationType.BF16
+
+    # 4. unsupported input_quant (e.g., int8, or fp8 with dynamic=False) raises
+    with pytest.raises(ValueError):
+        get_scheme({
+            "num_bits": 8,
+            "type": "int",
+            "symmetric": True,
+            "strategy": "tensor",
+            "dynamic": True,
+        })
+    with pytest.raises(ValueError):
+        get_scheme({
+            "num_bits": 8,
+            "type": "float",
+            "symmetric": True,
+            "strategy": "tensor",
+            "dynamic": False,
+        })
