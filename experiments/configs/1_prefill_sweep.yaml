@@ -1,0 +1,15 @@
+# Gemma-4 12B Prefill Roofline Sweep
+model: "google/gemma-4-12b-it"
+tensor_parallel_size: 4
+dtype: "bfloat16"
+max_model_len: 200000
+
+env_vars:
+  VLLM_ENABLE_V1_MULTIPROCESSING: "0"
+
+engine_args: {}
+
+sweep_matrix:
+  batches: [1]
+  inputs: [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072, 200000]
+  output_len: 1

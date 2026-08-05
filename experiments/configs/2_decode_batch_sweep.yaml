@@ -1,0 +1,15 @@
+# Gemma-4 12B Decode Batch Size Sweep
+model: "google/gemma-4-12b-it"
+tensor_parallel_size: 4
+dtype: "bfloat16"
+max_model_len: 131500
+
+env_vars:
+  VLLM_ENABLE_V1_MULTIPROCESSING: "0"
+
+engine_args: {}
+
+sweep_matrix:
+  batches: [1, 4, 16, 64, 128, 256]
+  inputs: [512, 8192, 32768]
+  output_len: 64

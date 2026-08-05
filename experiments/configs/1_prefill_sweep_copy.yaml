@@ -1,0 +1,16 @@
+# Gemma-4 12B Prefill Sweep (SDPA backend test)
+model: "google/gemma-4-12b-it"
+tensor_parallel_size: 4
+dtype: "bfloat16"
+max_model_len: 131500
+
+env_vars:
+  VLLM_ENABLE_V1_MULTIPROCESSING: "0"
+  VLLM_ATTENTION_BACKEND: "TORCH_SDPA"
+
+engine_args: {}
+
+sweep_matrix:
+  batches: [1]
+  inputs: [4096, 16384, 65536, 131072]
+  output_len: 1

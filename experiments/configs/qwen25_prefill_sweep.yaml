@@ -1,0 +1,16 @@
+# Qwen/Qwen2.5-7B-Instruct Prefill Sweep (100% Full Global Attention in all 28 layers)
+model: "Qwen/Qwen2.5-7B-Instruct"
+tensor_parallel_size: 4
+dtype: "bfloat16"
+max_model_len: 131500
+
+env_vars:
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+  VLLM_ENABLE_V1_MULTIPROCESSING: "0"
+
+engine_args: {}
+
+sweep_matrix:
+  batches: [1]
+  inputs: [1024, 4096, 8192, 16384, 32768, 65536, 131072]
+  output_len: 1

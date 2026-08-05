@@ -1,0 +1,16 @@
+# Llama-3.1-8B-Instruct Prefill Sweep (100% Full Global Attention)
+model: "meta-llama/Meta-Llama-3.1-8B-Instruct"
+tensor_parallel_size: 4
+dtype: "bfloat16"
+max_model_len: 131500
+
+env_vars:
+  VLLM_ENABLE_V1_MULTIPROCESSING: "0"
+  VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+engine_args: {}
+
+sweep_matrix:
+  batches: [1]
+  inputs: [1024, 8192, 32768, 65536, 131000]
+  output_len: 1
