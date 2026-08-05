@@ -103,6 +103,41 @@ class HeadAlongSublaneDmaNew:
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
+class HeadAlongSublaneDmaNewCP:
+    """Like HeadAlongSublaneDmaNew but with separate fetch/wb flags for CP.
+
+    wb_val encodes per-page ownership (dma_sz if this rank owns the page,
+    else 0), so bref_override copy_out needs no CP-specific logic.
+    """
+
+    data: Any
+    pos: Any
+
+    wb_hbm = FieldOffset(0)
+    fetch_hbm = FieldOffset(1)
+    fetch_vmem = FieldOffset(2)
+    _fetch_flags = FieldOffset(3)
+    _wb_flags = FieldOffset(4)
+
+    @property
+    def fetch_val(self):
+        return self._fetch_flags[...]
+
+    @property
+    def wb_val(self):
+        return self._wb_flags[...]
+
+    @property
+    def wb_vmem(self):
+        return self.fetch_vmem
+
+    def set_flags(self, fetch_val, wb_val):
+        self._fetch_flags[...] = fetch_val
+        self._wb_flags[...] = wb_val
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
 class SmemWrapper:
     """Maps physical 1-D data into logical N-D representation."""
 
@@ -172,10 +207,6 @@ class RpaSchedule:
     k_idx: SmemWrapper  # [steps, batch]
     is_last_k: SmemWrapper  # [steps, batch]
     do_writeback: SmemWrapper  # [steps, batch]
-    # global_cache_len % cp_group_size; 0 when CP is disabled.  Tells
-    # copy_out which rank owns the first new token in this block so the
-    # strided shuffle reads the correct interleaved offset.
-    new_tok_off: SmemWrapper  # [steps, batch]
     dma_q: SmemWrapper  # [steps, batch, 2]
     dma_kv_cache: SmemWrapper  # [steps, batch, bkv_p_cache, 3]
     dma_kv_new: SmemArrayOfStructs  # [steps, batch, bkv_p_new]
@@ -195,7 +226,6 @@ class RpaSchedule:
             k_idx=idx_wrapper,
             is_last_k=idx_wrapper,
             do_writeback=idx_wrapper,
-            new_tok_off=idx_wrapper,
             dma_q=SmemWrapper.create_shape_dtype(
                 (cfgs.max_steps_ub, cfgs.batch_size, 2)),
             dma_kv_cache=SmemWrapper.create_shape_dtype(
@@ -206,9 +236,11 @@ class RpaSchedule:
                     cfgs.batch_size,
                     cfgs.bkv_p_new,
                 ),
-                struct_cls=(SeqAlongLaneDmaNew if cfgs.serve.kv_layout
-                            == configs.KVLayout.SEQ_ALONG_LANE else
-                            HeadAlongSublaneDmaNew),
+                struct_cls=(
+                    SeqAlongLaneDmaNew
+                    if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE
+                    else HeadAlongSublaneDmaNewCP if cfgs.serve.cp_group_size
+                    is not None else HeadAlongSublaneDmaNew),
                 struct_size=cfgs.dma_kv_new_size,
             ),
             actual_steps=jax.ShapeDtypeStruct((1, ), jnp.int32),
@@ -286,6 +318,14 @@ def compute_metadata(
     is forced to 0 so the kernel doesn't overwrite the source layer's
     cache contents. Mirrors the v3 RPA kernel's `update_kv_cache=False`
     semantics.
+
+    Coordinate systems for k_idx:
+      FULL / NEW_TOKENS_ONLY: k_idx is in GLOBAL coordinates.
+        kv_len_start = k_idx * bkv_sz is a global token offset into the
+        full KV sequence shared by all CP ranks.
+      CACHE_ONLY: k_idx is in LOCAL (per-rank) coordinates.
+        end_k_idx is shrunk to cdiv(local_cache_len, bkv_sz), so k_idx
+        only reaches as far as this rank's owned cache pages.
     """
 
     @jax.named_scope("k_loop")
@@ -302,7 +342,6 @@ def compute_metadata(
         k_len,
         q_len,
         end_k_idx,
-        global_cache_len,
     ):
 
         schedule.s_idx[step, target_lane] = s_idx
@@ -355,37 +394,11 @@ def compute_metadata(
         q_wb = jnp.maximum(0, (kv_len_start - (k_len - q_len))) // cfgs.bq_sz
 
         do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb), 1, 0)
-        if cfgs.serve.cp_group_size is not None and cfgs.mode == configs.RpaCase.DECODE:
-            # For DCP decode (new_sz=1): only write back if this rank owns the
-            # new token.  global_cache_len tells us which global position the
-            # first new token occupies; its rank is global_cache_len % cp_group_size.
-            cp_cond = (global_cache_len %
-                       cfgs.serve.cp_group_size) == cp_rank_ref[0]
-            do_writeback = jnp.where(cp_cond, do_writeback, 0)
-        # For prefill CP (new_sz>1): do_writeback unchanged; copy_out handles
-        # the strided shuffle from VMEM to the local KV cache positions.
         schedule.do_writeback[step, target_lane] = do_writeback
-
         src_hbm = q_end - kv_left_frm_new
 
-        # Pre-compute CP layout quantities used in both dma_kv_new branches.
-        # j_start: new tokens before this block in [0, q_len).
-        # j_start_rank: rank's new tokens before this block.
-        # new_tok_off_block: which rank owns the first new token in this block.
         if cfgs.serve.cp_group_size is not None:
-            cp_group_size = cfgs.serve.cp_group_size
             rank = cp_rank_ref[0]
-            local_cache_len = k_len - q_len
-            j_start = jnp.maximum(0, kv_len_start - local_cache_len)
-            new_tok_off_block = (global_cache_len + j_start) % cp_group_size
-            first_idx_seq = (rank - global_cache_len % cp_group_size +
-                             cp_group_size) % cp_group_size
-            j_start_rank = jnp.maximum(
-                0,
-                (j_start - first_idx_seq + cp_group_size - 1) // cp_group_size)
-            schedule.new_tok_off[step, target_lane] = new_tok_off_block
-        else:
-            schedule.new_tok_off[step, target_lane] = 0
 
         def fill_dma_kv_new(i, dst_vmem, dma_sz, slot_start):
             dma_entry = schedule.dma_kv_new[step, target_lane, i]
@@ -422,27 +435,39 @@ def compute_metadata(
                 dma_entry.wb_vmem[...] = slot_start
                 dma_entry.set_flags(fetch_val, wb_val)
             else:
+                tok_idx = kv_len_start + dst_vmem
                 if cfgs.serve.cp_group_size is not None:
-                    # CP: tok_idx is the LOCAL cache position for this rank's
-                    # tokens. fetch_vmem is bkv_sz_cache (copy_out's strided
-                    # gather handles per-page selection from vmem).
-                    tok_idx = local_cache_len + j_start_rank + i * cfgs.serve.page_size
-                    effective_dst_vmem = bkv_sz_cache
+                    # NOTE: p_idx should be relaxed
+                    # (cfgs.serve.pages_per_seq * cfgs.serve.cp_group_size) to avoid clamp.
+                    p_idx = jnp.minimum(
+                        tok_idx >> cfgs.serve.page_size_log2,
+                        cfgs.serve.pages_per_seq * cfgs.serve.cp_group_size -
+                        1,
+                    )
+                    p_off = tok_idx & cfgs.serve.page_size_mask
+                    local_slot = jnp.minimum(
+                        p_idx // cfgs.serve.cp_group_size,
+                        cfgs.serve.pages_per_seq - 1,
+                    )
+                    dst_hbm = ((s_idx * cfgs.serve.pages_per_seq + local_slot)
+                               << cfgs.serve.page_size_log2) | p_off
+                    wb_val = jnp.where(
+                        p_idx % cfgs.serve.cp_group_size == rank, dma_sz,
+                        jnp.int32(0))
                 else:
-                    tok_idx = kv_len_start + dst_vmem
-                    effective_dst_vmem = dst_vmem
-                p_idx = jnp.minimum(
-                    tok_idx >> cfgs.serve.page_size_log2,
-                    cfgs.serve.pages_per_seq - 1,
-                )
-                p_off = tok_idx & cfgs.serve.page_size_mask
-                dst_hbm = ((s_idx * cfgs.serve.pages_per_seq + p_idx) <<
-                           cfgs.serve.page_size_log2) | p_off
+                    p_idx = jnp.minimum(
+                        tok_idx >> cfgs.serve.page_size_log2,
+                        cfgs.serve.pages_per_seq - 1,
+                    )
+                    p_off = tok_idx & cfgs.serve.page_size_mask
+                    dst_hbm = ((s_idx * cfgs.serve.pages_per_seq + p_idx) <<
+                               cfgs.serve.page_size_log2) | p_off
+                    wb_val = dma_sz
 
                 dma_entry.fetch_hbm[...] = src_hbm
-                dma_entry.fetch_vmem[...] = effective_dst_vmem
+                dma_entry.fetch_vmem[...] = dst_vmem
                 dma_entry.wb_hbm[...] = dst_hbm
-                dma_entry.set_flags(dma_sz, dma_sz)
+                dma_entry.set_flags(dma_sz, wb_val)
 
         if cfgs.bkv_p_new < cfgs.bkv_p:
             # Decode path
@@ -465,8 +490,7 @@ def compute_metadata(
         return step + 1
 
     @jax.named_scope("q_loop")
-    def q_loop(q_idx, _, *, s_idx, q_start, q_end, k_len, q_len, num_k,
-               global_cache_len):
+    def q_loop(q_idx, _, *, s_idx, q_start, q_end, k_len, q_len, num_k):
         target_lane = 0
         min_len = lane_lengths_ref[0]
         for b in range(1, cfgs.batch_size):
@@ -477,24 +501,40 @@ def compute_metadata(
         curr_ptr = lane_lengths_ref[target_lane]
         q_src = q_start + q_idx * cfgs.bq_sz
         q_sz_task = jnp.clip(q_end - q_src, 0, cfgs.bq_sz)
+        cache_len = k_len - q_len
 
         start_k_idx = 0
         if (sliding_window := cfgs.model.sliding_window) is not None:
-            sw_start_idx = k_len - q_len + q_idx * cfgs.bq_sz - sliding_window + 1
+            sw_start_idx = cache_len + q_idx * cfgs.bq_sz - sliding_window + 1
             start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
+
+        end_k_idx_causal = (cache_len + q_idx * cfgs.bq_sz + q_sz_task -
+                            1) // cfgs.bkv_sz + 1
+        end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
+
         if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
             # Skip pure-cache blocks; start at the first block containing new tokens.
             start_k_idx = jnp.maximum(start_k_idx,
                                       (k_len - q_len) // cfgs.bkv_sz)
 
-        end_k_idx_causal = (k_len - q_len + q_idx * cfgs.bq_sz + q_sz_task -
-                            1) // cfgs.bkv_sz + 1
-        end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
         if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
-            # Skip pure-new-token blocks; only process blocks containing cache.
-            # For prefill sequences (local_cache_len=0) this gives end_k_idx=0.
+            # Shrink kv_len and end_k_idx to this rank's local cache extent, switching
+            # k_idx from global to LOCAL (per-rank) coordinates. After this
+            # point every k_loop quantity derived from k_idx (kv_len_start,
+            # DMA page offsets) is in the local frame. rpa_body mirrors this
+            # by using offset = local_cache_len (not global_cache_len) when
+            # building processed_q_len / effective_kv_len.
+            local_cache_len = cache_len
+            if (cfgs.serve.cp_group_size is not None):
+                cp_group_size = cfgs.serve.cp_group_size
+                rank = cp_rank_ref[0]
+                local_cache_len = utils.cp_local_cache_len(
+                    cache_len, cp_group_size, rank, cfgs.serve.page_size)
+            # TODO: Gemma shared-kv currently implemented using update_kv_cache, in the future,
+            # we should implement it using kv_cache_len + AttentionScope.CACHE_ONLY
+            k_len = local_cache_len
             end_k_idx = jnp.minimum(end_k_idx,
-                                    pl.cdiv(k_len - q_len, cfgs.bkv_sz))
+                                    pl.cdiv(local_cache_len, cfgs.bkv_sz))
 
         k_loop_fn = functools.partial(
             k_loop,
@@ -507,7 +547,6 @@ def compute_metadata(
             k_len=k_len,
             q_len=q_len,
             end_k_idx=end_k_idx,
-            global_cache_len=global_cache_len,
         )
         lane_lengths_ref[target_lane] = jax.lax.fori_loop(
             start_k_idx, end_k_idx, k_loop_fn, curr_ptr)
@@ -516,21 +555,8 @@ def compute_metadata(
     def seq_loop(s_idx, _):
         q_start = cu_q_lens_ref[s_idx]
         q_end = cu_q_lens_ref[s_idx + 1]
-        k_len_global = kv_lens_ref[s_idx]
+        k_len = kv_lens_ref[s_idx]
         q_len = q_end - q_start
-
-        global_cache_len = k_len_global - q_len
-
-        # Convert to LOCAL kv_len for CP: cache is sharded (1/cp_group_size per rank),
-        # but new KV is NOT sharded (all ranks hold all q_len new tokens).
-        if cfgs.serve.cp_group_size is not None:
-            cp_group_size = cfgs.serve.cp_group_size
-            rank = cp_rank_ref[0]
-            local_cache_len = utils.cp_local_cache_len(global_cache_len,
-                                                       cp_group_size, rank)
-            k_len = local_cache_len + q_len
-        else:
-            k_len = k_len_global
 
         num_q = pl.cdiv(q_len, cfgs.bq_sz)
         num_k = pl.cdiv(k_len, cfgs.bkv_sz)
@@ -543,7 +569,6 @@ def compute_metadata(
             k_len=k_len,
             q_len=q_len,
             num_k=num_k,
-            global_cache_len=global_cache_len,
         )
 
         jax.lax.fori_loop(0, num_q, q_loop_fn, None)

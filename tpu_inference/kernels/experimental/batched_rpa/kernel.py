@@ -119,8 +119,8 @@ def calculate_and_store_out(
         s_idx = schedule_ref.s_idx[step_idx, b_idx]
         q_idx = schedule_ref.q_idx[step_idx, b_idx]
         q_src = cu_q_lens_ref[s_idx] + q_idx * cfgs.bq_sz
-        q_src_flat = pl.multiple_of(
-            q_src * cfgs.model.num_q_heads_per_kv_head, 8)
+        q_src_flat = pl.multiple_of(q_src * cfgs.model.num_q_heads_per_kv_head,
+                                    8)
         _, q_sz_task = schedule_ref.get_dma_q(step_idx, b_idx)
         q_sz_flat = pl.multiple_of(
             q_sz_task * cfgs.model.num_q_heads_per_kv_head, 8)
@@ -146,7 +146,7 @@ def calculate_and_store_out(
         else:
             _accum(b)
 
-        if  cfgs.serve.return_lse :
+        if cfgs.serve.return_lse:
             is_last_k = schedule_ref.is_last_k[step_idx, b] == 1
             jax.lax.cond(is_last_k, _write_lse, lambda _: None, b)
 
@@ -177,15 +177,14 @@ def rpa_body(
     # Step 1: Fetch metadata.
     processed_q_len = []
     processed_kv_len = []
-    effective_kv_len = []
+    sequence_len = []
     # Lists to hold the 2 variables needed for stitching
     bkv_sz_frm_cache_list = []
     new_kv_len_start_list = []
-    # List to hold local kv_cache_len this current TPU contain.
-    kv_cache_len_local = []
+    # List to support AttentionScope.CACHE_ONLY and AttentionScope.NEW_TOKENS_ONLY.
+    kv_new_start = []  # for new tokens.
+    cache_len = []  # for cache only.
     int_ty = cfgs.serve.int_ty
-    cp_group_size = cfgs.serve.cp_group_size
-    cp_rank = cp_rank_ref[0] if cp_group_size is not None else None
     for b_idx in range(cfgs.batch_size):
         s_idx = schedule_ref.s_idx[step, b_idx]
         is_valid = s_idx != -1
@@ -201,23 +200,24 @@ def rpa_body(
         q_start = jnp.where(is_valid, cu_q_lens_ref[safe_s_idx], 0)
         q_end = jnp.where(is_valid, cu_q_lens_ref[safe_s_idx + 1], 0)
         q_len = q_end - q_start
-        global_cache_len = kv_len - q_len
+        offset = kv_len - q_len
 
-        # Convert to local lengths for CP: KV cache is sharded (1/cp_group_size per rank)
-        # but new KV is NOT sharded (all ranks hold all q_len new tokens).
-        if cp_group_size is not None:
-            local_cache_len = utils.cp_local_cache_len(global_cache_len,
-                                                       cp_group_size, cp_rank)
-            local_kv_len = local_cache_len + q_len
-            offset = local_cache_len
-        else:
-            local_kv_len = kv_len
-            offset = global_cache_len
+        if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
+            # Mirror q_loop in schedule
+            local_cache_len = offset
+            if (cfgs.serve.cp_group_size is not None):
+                cp_group_size = cfgs.serve.cp_group_size
+                rank = cp_rank_ref[0]
+                local_cache_len = utils.cp_local_cache_len(
+                    offset, cp_group_size, rank, cfgs.serve.page_size)
+            # We add this to make sure flash_attention.py can mask non-cache tokens out.
+            cache_len.append(local_cache_len)
+        elif cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+            kv_new_start.append(kv_len - q_len)
 
         processed_q_len.append((q_idx * cfgs.bq_sz + offset).astype(int_ty))
         processed_kv_len.append(k_id.astype(int_ty))
-        effective_kv_len.append(local_kv_len.astype(int_ty))
-        kv_cache_len_local.append(offset.astype(int_ty))
+        sequence_len.append(kv_len.astype(int_ty))
 
         # Stitching metadata
         kv_left = jnp.maximum(kv_len - k_id, 0)
@@ -348,8 +348,9 @@ def rpa_body(
             l_val[:, :, q_slice],
             processed_q_len=processed_q_len,
             processed_kv_len=processed_kv_len,
-            effective_kv_len=effective_kv_len,
-            kv_cache_len_local=kv_cache_len_local,
+            sequence_len=sequence_len,
+            kv_new_start=kv_new_start,
+            cache_len=cache_len,
             cfgs=cfgs,
             bq_start=bq_start,
         )
@@ -583,15 +584,8 @@ def rpa_kernel(
                 pltpu.SemaphoreType.DMA(
                     (1, )) if return_lse else None,  # lse_sem
             ),
-            kv_shuffle_ref=pltpu.VMEM(cfgs.kv_shuffle_vmem_shape,
-                                      dtype=cfgs.serve.dtype_kv)
-            if cfgs.kv_shuffle_vmem_shape is not None else None,
         )
-        def _run(final_allocs,
-                 schedule_ref,
-                 dma_sem,
-                 scratches,
-                 kv_shuffle_ref=None):
+        def _run(final_allocs, schedule_ref, dma_sem, scratches):
 
             # Transfer schedule from HBM to SMEM --- we only copy what we need. Since
             # we almost always over-allocate schedule size, we only want to copy a
@@ -631,10 +625,8 @@ def rpa_kernel(
 
             pipeline_func(
                 (q_hbm_ref, schedule_ref),
-                (
-                    kv_cache_hbm_ref, new_kv_hbm_ref, schedule_ref,
-                    page_indices_ref, cp_rank_ref, kv_shuffle_ref
-                ),  # Pass CP-related (cp_rank and kv_shuffle_ref) to KVBufferedRef
+                (kv_cache_hbm_ref, new_kv_hbm_ref, schedule_ref,
+                 page_indices_ref),
                 (o_hbm_ref, schedule_ref),
                 scratches=(schedule_ref, ) + scratches + (cp_rank_ref, ),
                 allocations=final_allocs,

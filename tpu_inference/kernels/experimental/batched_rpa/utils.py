@@ -24,12 +24,18 @@ def align_to(a, b):
     return pl.cdiv(a, b) * b
 
 
-def cp_local_cache_len(global_cache_len, cp_group_size, cp_rank):
+def cp_local_cache_len(global_cache_len, cp_group_size, cp_rank, page_size):
     """Number of cache tokens owned by this CP rank.
-
-    Cache is interleaved across ranks: rank r owns global positions r, r+G, r+2G...
+    
+    Currently only support cp_kv_cache_interleave_size = page_size
     """
-    return (global_cache_len + cp_group_size - 1 - cp_rank) // cp_group_size
+    super_page = cp_group_size * page_size
+    full_tokens = (global_cache_len // super_page) * page_size
+    rem_tokens = jnp.maximum(
+        0,
+        jnp.minimum(page_size,
+                    (global_cache_len % super_page) - cp_rank * page_size))
+    return full_tokens + rem_tokens
 
 
 def broadcast_minor(src, shape):
