@@ -35,6 +35,8 @@ DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS = 512
 DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS = 256
 DEFAULT_MAX_NUM_BLOCKS_PER_REQ = 16
 
+# TODO(#2261): Remove Llama4 Qwix default once native JAX compressed-tensors
+# loading exists.
 DEFAULT_LLAMA4_FP8_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -58,6 +60,7 @@ DEFAULT_LLAMA4_FP8_CONFIG = {
 # - We use Qwix's abstract-model path so weights can be set directly into QArray
 #   fields during weight loading (similar to DeepSeek's flow).
 # - Activation quantization is not set but Qwix would pickup MoE sum if activated
+# TODO(#2952): Remove GPT-OSS Qwix default once native JAX MXFP4 loading exists.
 DEFAULT_GPT_OSS_FP4_CONFIG = {
     "qwix": {
         "use_abstract_model":
@@ -435,13 +438,22 @@ def apply_qwix_on_abstract_model(vllm_config: "VllmConfig") -> bool:
     Determines whether to apply Qwix quantization on the abstract model
     or the concrete model.  See `apply_qwix_quantization` for more details on the differences
     between these two approaches.
+    Deprecated as part of #1680; removal is gated on native JAX loading for
+    GPT-OSS MXFP4 (#2952) and Llama4 compressed-tensors (#2261).
     Args:
         vllm_config: the vllm config
     Returns:
         whether to apply Qwix quantization on the abstract model
     """
     quantization_config = vllm_config.additional_config.get("quantization", {})
-    return quantization_config.get("qwix", {}).get("use_abstract_model", False)
+    use_abstract_model = quantization_config.get("qwix", {}).get(
+        "use_abstract_model", False)
+    if use_abstract_model:
+        logger.warning_once(
+            "Qwix abstract-model quantization is deprecated (part of #1680). "
+            "Removal is gated on native JAX loading for GPT-OSS MXFP4 (#2952) "
+            "and Llama4 compressed-tensors (#2261).")
+    return use_abstract_model
 
 
 def get_default_qwix_quantization_config(
@@ -470,9 +482,16 @@ def get_default_qwix_quantization_config(
     # TODO (jacobplatin): remove this so that we can support various quantization types + make
     # more flexible
     if model_type == "llama4" and quant_method == "compressed-tensors":
+        logger.warning_once(
+            "Llama4 compressed-tensors is using deprecated Qwix "
+            "abstract-model loading (#1680). Remove after native JAX "
+            "compressed-tensors loading lands (#2261).")
         return DEFAULT_LLAMA4_FP8_CONFIG
     # MXFP4 (GPT-OSS): provide a default configuration to quantize MoE experts via Qwix
     elif model_type == "gpt_oss" and quant_method == "mxfp4":
+        logger.warning_once(
+            "GPT-OSS MXFP4 is using deprecated Qwix abstract-model loading "
+            "(#1680). Remove after native JAX MXFP4 loading lands (#2952).")
         return DEFAULT_GPT_OSS_FP4_CONFIG
 
 

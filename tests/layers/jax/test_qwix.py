@@ -930,6 +930,7 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         result = quantize_qwix.get_default_qwix_quantization_config(
             hf_config, False)
         self.assertIsNone(result)
+        quantize_qwix.logger.warning_once.assert_not_called()
 
     def test_llama4_success(self):
         """Test Llama 4 default config path."""
@@ -940,6 +941,9 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         result = quantize_qwix.get_default_qwix_quantization_config(
             hf_config, False)
         self.assertEqual(result, self.mock_llama_config)
+        quantize_qwix.logger.warning_once.assert_called_once()
+        self.assertIn("#2261",
+                      quantize_qwix.logger.warning_once.call_args.args[0])
 
     def test_gpt_oss_success(self):
         """Test GPT-OSS default config path."""
@@ -950,6 +954,20 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         result = quantize_qwix.get_default_qwix_quantization_config(
             hf_config, False)
         self.assertEqual(result, self.mock_gpt_oss_config)
+        quantize_qwix.logger.warning_once.assert_called_once()
+        self.assertIn("#1680",
+                      quantize_qwix.logger.warning_once.call_args.args[0])
+
+    def test_non_prequantized_config_does_not_warn(self):
+        """Test non-prequantized models do not emit deprecation warnings."""
+        hf_config = MagicMock()
+        hf_config.model_type = "llama3"
+        del hf_config.quantization_config
+
+        result = quantize_qwix.get_default_qwix_quantization_config(
+            hf_config, False)
+        self.assertIsNone(result)
+        quantize_qwix.logger.warning_once.assert_not_called()
 
     def test_missing_attributes_handled(self):
         """Test that function handles hf_config objects missing model_type safely."""
@@ -957,6 +975,35 @@ class TestGetDefaultQwixQuantizationConfig(unittest.TestCase):
         result = quantize_qwix.get_default_qwix_quantization_config(
             hf_config, False)
         self.assertIsNone(result)
+        quantize_qwix.logger.warning_once.assert_not_called()
+
+    def test_apply_qwix_on_abstract_model_warns_when_enabled(self):
+        """Test abstract-model Qwix path emits deprecation warning."""
+        vllm_config = MagicMock()
+        vllm_config.additional_config = {
+            "quantization": {
+                "qwix": {
+                    "use_abstract_model": True,
+                },
+            },
+        }
+
+        result = quantize_qwix.apply_qwix_on_abstract_model(vllm_config)
+        self.assertTrue(result)
+        quantize_qwix.logger.warning_once.assert_called_once()
+        warning_message = quantize_qwix.logger.warning_once.call_args.args[0]
+        self.assertIn("#1680", warning_message)
+        self.assertIn("#2952", warning_message)
+        self.assertIn("#2261", warning_message)
+
+    def test_apply_qwix_on_abstract_model_no_warning_when_absent(self):
+        """Test absent abstract-model Qwix config returns False without warning."""
+        vllm_config = MagicMock()
+        vllm_config.additional_config = {"quantization": {"qwix": {}}}
+
+        result = quantize_qwix.apply_qwix_on_abstract_model(vllm_config)
+        self.assertFalse(result)
+        quantize_qwix.logger.warning_once.assert_not_called()
 
 
 if __name__ == '__main__':
