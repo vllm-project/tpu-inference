@@ -1016,6 +1016,10 @@ def calculate_tiling(
             tile_k = align_to(dims.size_k,
                               num_k_tiles * num_lanes) // num_k_tiles
 
+    if (rhs_cfgs.has_scale and rhs_cfgs.quant_block_size is not None
+            and not _is_tile_k_quant_block_compatible(tile_k)):
+        tile_k = rhs_cfgs.quant_block_size
+
     if tile_n == 0 or tile_k == 0:
         final_estimate = _gmm_vmem_estimate(tile_m, tile_n, tile_k)
         raise ValueError(f"Could not find valid tile sizes for {dims=} and"

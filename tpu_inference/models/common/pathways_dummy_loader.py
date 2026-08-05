@@ -89,7 +89,7 @@ def load_dummy_weights_jax(model, mesh: Mesh) -> None:
     t0 = time.perf_counter()
 
     for param_name, param in model.named_parameters():
-        spec = param.get_metadata().get("sharding", ())
+        spec = param.get_metadata().get("out_sharding", ())
         if isinstance(spec, NamedSharding):
             spec = spec.spec
         elif isinstance(spec, SingleDeviceSharding):

@@ -84,7 +84,20 @@ def main() -> None:
     parser.add_argument("--num_fewshot", type=int)
     parser.add_argument("--limit", type=float)
     parser.add_argument("--apply_chat_template", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--output_path")
+    parser.add_argument("--include_path")
+    parser.add_argument("--log_samples", action="store_true")
+    args, unknown = parser.parse_known_args()
+
+    if args.include_path:
+        import lm_eval.tasks
+        lm_eval.tasks.include_path(args.include_path)
+
+    evaluation_tracker = None
+    if args.output_path or args.log_samples:
+        from lm_eval.loggers import EvaluationTracker
+
+        evaluation_tracker = EvaluationTracker(output_path=args.output_path, )
 
     results = evaluate_with_vllm(
         model_args=_parse_model_args(args.model_args),
@@ -95,9 +108,14 @@ def main() -> None:
         num_fewshot=args.num_fewshot,
         limit=args.limit,
         apply_chat_template=args.apply_chat_template,
+        log_samples=args.log_samples,
+        evaluation_tracker=evaluation_tracker,
     )
     if results is None:
         return
+
+    if evaluation_tracker is not None:
+        evaluation_tracker.save_results_aggregated(results=results, )
 
     from lm_eval.utils import make_table
 

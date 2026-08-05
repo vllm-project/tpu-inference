@@ -238,4 +238,12 @@ setup_environment() {
     docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker push "${IMAGE_NAME}:latest"
   fi
+
+  # Only clean up resources in setup_environment after pushing to a remote registry
+  # (e.g., standalone builder jobs in CI). When building locally to run on the same machine
+  # (push_to_ci_cache=false and should_push=false), preserve the image so the caller can run it.
+  if [[ "$push_to_ci_cache" == "true" || "$should_push" == "true" ]]; then
+    echo "--- Cleaning up Docker resources after push..."
+    cleanup_docker_resource "${IMAGE_NAME}"
+  fi
 }

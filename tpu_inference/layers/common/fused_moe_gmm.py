@@ -305,7 +305,6 @@ def moe_gmm_local(x: jax.Array,
                 topk_weights,
                 topk,
             )
-
         if enable_rs_kernel:
             rs_out = hier_rs_sc.hierarchical_reduce_scatter_local(
                 chunk_hidden,
