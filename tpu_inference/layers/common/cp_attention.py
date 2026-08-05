@@ -189,7 +189,6 @@ def dcp_forward(
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD, None, None)
-    print(f"page_size={kv_cache.shape[1]}")
 
     common = dict(sm_scale=sm_scale,
                   q_scale=q_scale,

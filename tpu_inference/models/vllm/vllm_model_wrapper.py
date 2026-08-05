@@ -134,6 +134,7 @@ class VllmModelWrapper:
                  mesh: Mesh,
                  is_draft_model: bool = False):
         self.vllm_config = vllm_config
+        self.vllm_config.compilation_config.fast_moe_cold_start = False
         self.rng = rng
         self.mesh = mesh
         self.is_draft_model = is_draft_model
