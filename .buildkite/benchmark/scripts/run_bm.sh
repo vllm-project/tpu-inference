@@ -361,6 +361,8 @@ printf "[DEBUG] Executing server_cmd: %s %s > \"%s\" 2>&1 &\n" "${SERVER_CMD_ENV
 env "${SERVER_CMD_ENVS[@]}" "${SERVER_CMD[@]}" > "$VLLM_LOG" 2>&1 &
 VLLM_PID=$!
 
+tail -f "$VLLM_LOG"
+
 # Immediate check to see if it crashed on startup
 sleep 2
 if ! kill -0 "$VLLM_PID" 2>/dev/null; then
