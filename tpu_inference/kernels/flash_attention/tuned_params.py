@@ -58,6 +58,19 @@ tuned_params_mapping: dict[TuningKey, TunableParams] = {
         block_k=512,
         block_b=1,
     ),
+    TuningKey(
+        batch_size=16,
+        num_heads=16,
+        q_seq_len=2560,
+        kv_seq_len=2560,
+        head_dim=72,
+    ):
+    TunableParams(
+        block_q=640,
+        block_k_major=2560,
+        block_k=512,
+        block_b=1,
+    ),
 }
 
 
