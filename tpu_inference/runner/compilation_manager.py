@@ -591,10 +591,9 @@ class CompilationManager:
                              spec_next_tokens_size, dp_sharding)
         else:
             for num_tokens in all_token_sizes:
-                # Precompile matching token shapes (next_tokens_size == num_tokens).
-                # Rationale: Off-diagonal shapes (where next_tokens_size differs from prompt num_tokens) are
-                # only required when speculative draft token counts vary.
-                _compile_one(num_tokens, dp_sharding, num_tokens, dp_sharding)
+                for next_tokens_size in all_token_sizes:
+                    _compile_one(num_tokens, dp_sharding, next_tokens_size,
+                                 dp_sharding)
                 for num_reqs in self.runner.num_reqs_paddings:
                     _compile_one(num_tokens, dp_sharding, num_reqs,
                                  replicated_sharding)
@@ -1099,17 +1098,8 @@ class CompilationManager:
         logger.info(
             "Compiling compute_and_gather_prompt_logprobs with different input shapes."
         )
-        # Restricting precompilation of auxiliary prompt logprobs to prompt lengths num_tokens <= 1024
-        # speeds up engine startup time by avoiding redundant host CPU JAX tracing and XLA lowering overhead
-        # for long prompt sequence lengths (> 1024 tokens).
-        MAX_PRECOMPILE_PROMPT_TOKENS = 1024
+        # Bypassed MAX_PRECOMPILE_PROMPT_TOKENS limit as ShapeDtypeStruct compilation allocates no HBM
         for num_tokens in self.runner.num_tokens_paddings:
-            if num_tokens > MAX_PRECOMPILE_PROMPT_TOKENS:
-                logger.info(
-                    f"Skipping precompilation of compute_and_gather_prompt_logprobs for {num_tokens=}, "
-                    f"as it exceeds the {MAX_PRECOMPILE_PROMPT_TOKENS=} limit to avoid redundant host CPU JAX tracing for long sequence lengths."
-                )
-                continue
             logits_sharding = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.MLP_DATA,
