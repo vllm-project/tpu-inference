@@ -24,7 +24,7 @@ def compute_batched_seq_metadata(
     seq_lens: jax.Array,
     query_start_loc: jax.Array,
     state_indices: jax.Array,
-    read_offsets: jax.Array,
+    read_offsets: jax.Array | None,
     end_seq: jax.Array,
 ) -> memory_ref.MetadataRef:
     """Metadata for computing multiple sequences per tile.
@@ -34,8 +34,10 @@ def compute_batched_seq_metadata(
     `cfg.window_size` of them. The initial state is read from
     `state_indices[s] + read_offsets[s]` and one state checkpoint per window
     position is written back to `state_indices[s] + t`.
-    """
 
+    `read_offsets` is required when `cfg.window_size > 1` and may be `None`
+    otherwise.
+    """
     max_seqs = seq_lens.size
     all_seqs = jnp.arange(max_seqs)
 
@@ -57,7 +59,7 @@ def compute_batched_seq_metadata(
         p_id_is_last_tile=is_valid_seqs,
         s_idx_has_initial_state=has_initial_state,
         s_idx_to_state_indices=state_indices,
-        s_idx_to_read_offset=read_offsets,
+        s_idx_to_read_offset=read_offsets if cfg.window_size > 1 else None,
     )
 
 
@@ -69,8 +71,10 @@ def compute_per_seq_metadata(
     start_seq: jax.Array,
     end_seq: jax.Array,
 ) -> memory_ref.MetadataRef:
-    """Metadata for computing single sequence per tile."""
+    """Metadata for computing single sequence per tile.
 
+    Only built with `cfg.window_size == 1`, so it carries no read offset.
+    """
     max_seqs = seq_lens.size
     max_tokens = cfg.batch_size
     all_seqs = jnp.arange(max_seqs)
@@ -142,6 +146,6 @@ def compute_per_seq_metadata(
         p_id_is_last_tile=p_id_is_last_tile,
         s_idx_has_initial_state=has_initial_state,
         s_idx_to_state_indices=state_indices,
-        # Prefill/mixed sequences always resume from the group's base slot.
-        s_idx_to_read_offset=jnp.zeros_like(state_indices),
+        # Prefill/mixed sequences always resume from the base slot.
+        s_idx_to_read_offset=None,
     )

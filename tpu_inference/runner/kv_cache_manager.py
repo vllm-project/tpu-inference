@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, List
 import jax
 import jax.numpy as jnp
 import vllm.envs as envs
+from jax.experimental.layout import Format
 from jax.sharding import NamedSharding, PartitionSpec
 from torchax.ops.mappings import t2j_dtype
 from vllm.config import get_layers_from_vllm_config, set_current_vllm_config
@@ -39,6 +40,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
+from tpu_inference.kernels.gdn.v3.cache_layout import conv_state_layout
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -69,6 +71,15 @@ def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
 
 def is_ds_v4(vllm_config):
     return "DeepseekV4ForCausalLM" in (vllm_config.model_config.architectures)
+
+
+# What a mamba cache spec calls itself when its layer is a gated delta net.
+# vLLM has spelled this two ways across releases: older ones answer the plain
+# string "gdn_attention" from GatedDeltaNetAttention.mamba_type, newer ones a
+# MambaAttentionBackendEnum member whose name is "GDN_ATTN". Both name the
+# same cache, so both are accepted. KDA reports its own kind and count, which
+# is why the state count is checked alongside the kind.
+GDN_MAMBA_TYPES = ("gdn_attention", "GDN_ATTN")
 
 
 class KVCacheManager:
@@ -869,6 +880,35 @@ class KVCacheManager:
                 layer_spec = layer_name_to_spec[layer_name]
                 if isinstance(layer_spec, MambaSpec):
                     mamba_states = []
+                    # The bfloat16 option below names the recurrent state of
+                    # a gated delta net cache, which holds a convolution
+                    # state and then a recurrent one. Both guards are needed
+                    # and neither is enough alone. Mamba1 and Mamba2 also
+                    # report exactly two states, and the second one is an
+                    # SSM state this option makes no promise about, so the
+                    # kind of cache is asked first. The KDA cache does
+                    # report this kind, but carries four states whose second
+                    # one is a second convolution state, so the count is
+                    # asked as well. Guessing wrong silently halves the
+                    # precision of a cache that has to stay float32, so a
+                    # spec that fails either guard is refused rather than
+                    # guessed at.
+                    mamba_kind = getattr(layer_spec.mamba_type, "name",
+                                         layer_spec.mamba_type)
+                    if tpu_envs.GDN_BF16_RECURRENT_STATE and (
+                            mamba_kind not in GDN_MAMBA_TYPES
+                            or len(layer_spec.shapes) != 2):
+                        raise ValueError(
+                            f"GDN_BF16_RECURRENT_STATE is set, and it names "
+                            f"the recurrent state of a gated delta net "
+                            f"cache, which holds a convolution state and "
+                            f"then a recurrent one. Layer {layer_name} "
+                            f"reports a {layer_spec.mamba_type!r} cache of "
+                            f"{len(layer_spec.shapes)} states, not a gated "
+                            f"delta net cache ({GDN_MAMBA_TYPES}) of 2, so "
+                            f"which state is the recurrent one is not "
+                            f"defined here. Unset GDN_BF16_RECURRENT_STATE "
+                            f"to serve this model.")
                     for state_index, (shape, dtype) in enumerate(
                             zip(layer_spec.shapes, layer_spec.dtypes)):
                         jax_dtype = t2j_dtype(dtype)
@@ -889,14 +929,46 @@ class KVCacheManager:
 
                         sharding = NamedSharding(self.runner.mesh, spec)
 
-                        # NOTE: conv state will always be BF16 and SSM state will always be FP32
-                        # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
+                        # Conv state (state_index 0): allocate in the layout
+                        # the GDN kernel's operand requires, so the donated
+                        # decode loop aliases the cache into the pallas_call
+                        # with no boundary relayout copies. This is bought,
+                        # not free. Measured on the chip, one layer's served
+                        # cache occupies 6,389,760 bytes in this layout, 65
+                        # slots with the 3-row window padded to a 4-row
+                        # tile, against 5,308,416 in the one XLA picks by
+                        # default, which pads the 65 slots to 72 and leaves
+                        # the window at 3 rows. Against the logical
+                        # 4,792,320 bytes the pin costs 4/3 and the default
+                        # costs 72/65, so the pin lands about 20% above the
+                        # default.
+                        out_shardings = sharding
+                        if (state_index == 0
+                                and mamba_kind in GDN_MAMBA_TYPES
+                                and len(layer_spec.shapes) == 2):
+                            conv_layout = conv_state_layout(
+                                cache_shape, jax_dtype)
+                            if conv_layout is not None:
+                                out_shardings = Format(conv_layout, sharding)
+
+                        # Recurrent state (state_index 1): the kernel widens
+                        # this state to float32 on load and rounds it back on
+                        # writeback, so a bfloat16 cache halves the bytes the
+                        # kernel moves per call.
+                        if (tpu_envs.GDN_BF16_RECURRENT_STATE
+                                and state_index == 1):
+                            jax_dtype = jnp.bfloat16
+
+                        # NOTE: neither state follows `kv-cache-dtype` (as is
+                        # in upstream vLLM): conv state keeps the mamba cache
+                        # dtype, and the recurrent state keeps FP32 unless the
+                        # option above downcasts it.
                         def _allocate_mamba(c_shape=cache_shape,
                                             c_dtype=jax_dtype):
                             return jnp.empty(shape=c_shape, dtype=c_dtype)
 
                         mamba_allocate = jax.jit(_allocate_mamba,
-                                                 out_shardings=sharding)
+                                                 out_shardings=out_shardings)
                         mamba_states.append(mamba_allocate())
 
                     metadata["mamba"].count += 1

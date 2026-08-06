@@ -154,7 +154,9 @@ def load_and_select_states(
         metadata_ref: Metadata reference containing grid and sequence mappings.
         p_id: Current Pallas program ID.
         conv_state_slot_ref: Convolution state read from HBM of shape
-            [seq_tile_size, window_size, prev_kernel_size, 1, dim_size].
+            [seq_tile_size, window_size, prev_kernel_size, 1, dim_size],
+            or [seq_tile_size, window_size, prev_kernel_size, dim_size]
+            when cfg.conv_cache_native is set.
         recurrent_slot_ref: Recurrent state read from HBM of shape [seq_tile_size,
             window_size, num_v_heads, kq_head_dim, v_head_dim].
         carry_conv_scratch_ref: Optional inter-tile convolution carry of shape
@@ -184,7 +186,15 @@ def load_and_select_states(
         # NOTE: The VMEM window holds one state per window position and the
         # initial state was DMA'd into position 0.
         # NOTE: Conv1D mandates fp32 due to its usage of compact layout.
-        hbm_conv_state = conv_state_slot_ref[idx, 0].astype(jnp.float32)
+        if cfg.conv_cache_native:
+            # Window position 0 holds cache-dtype [prev_ks, dim] rows: widen
+            # to f32 and restage into the compact [prev_ks, 1, dim] form.
+            hbm_conv_rows = conv_state_slot_ref[idx, 0].astype(jnp.float32)
+            hbm_conv_state = jnp.stack(
+                [hbm_conv_rows[r:r + 1] for r in range(cfg.prev_kernel_size)],
+                axis=0)
+        else:
+            hbm_conv_state = conv_state_slot_ref[idx, 0].astype(jnp.float32)
         prev_conv_state = jnp.where(has_initial_state, hbm_conv_state, 0)
 
         if carry_conv_scratch_ref is not None:
@@ -192,7 +202,10 @@ def load_and_select_states(
             prev_conv_state = jnp.where(is_first_tile, prev_conv_state,
                                         prev_tile_conv)
 
-        hbm_recurrent_state = recurrent_slot_ref[idx, 0]
+        # Widen the recurrent state to float32 for the recurrence, which is
+        # an identity where the cache is already float32. The writeback
+        # rounds it back to whatever the cache holds.
+        hbm_recurrent_state = recurrent_slot_ref[idx, 0].astype(jnp.float32)
         prev_recurrent_state = jnp.where(has_initial_state,
                                          hbm_recurrent_state, 0)
 

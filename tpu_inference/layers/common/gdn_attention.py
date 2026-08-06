@@ -128,6 +128,7 @@ def run_jax_gdn_attention(
         d_k=d_k,
         d_v=d_v,
         kernel_size=kernel_size,
+        conv_cache_native=True,
     )
 
     mapped_fn = jax.shard_map(

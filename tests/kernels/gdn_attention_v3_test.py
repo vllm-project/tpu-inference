@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 from absl.testing import parameterized
+from jax.experimental.layout import Layout
 
-from tpu_inference.kernels.gdn.v3 import wrapper
+from tpu_inference.kernels.gdn.v3 import (cache_layout, config, metadata,
+                                          wrapper)
 
 
 def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
@@ -262,6 +266,110 @@ def gdn_attention_spec_ref(
     return (new_conv_state, new_recurrent_state), output
 
 
+def gdn_local_operands(max_reqs,
+                       lengths,
+                       q_loc,
+                       distribution,
+                       context_lens=None,
+                       conv_dtype=jnp.float32,
+                       recurrent_dtype=jnp.float32,
+                       stale_states=False,
+                       seed=0):
+    """Operands for one fused_conv1d_gdn call over `lengths`.
+
+    Shared by the comparison against the reference implementation and by
+    the comparison of the two convolution state operand forms against
+    each other, so both see the same inputs.
+
+    `context_lens` gives each sequence the tokens already behind it,
+    which is what makes the kernel read the slot it is about to write.
+    The default of none leaves `seq_lens == query_lens` (context_len =
+    0), so every sequence starts from a zero state regardless of what
+    its slot holds. `stale_states` fills the slots with values instead
+    of zeros, which only matters alongside a context length.
+    """
+    kq_head_dim = 128
+    v_head_dim = 128
+    n_kq = 2
+    n_v = 8
+    kernel_size = 4
+
+    num_tokens = sum(lengths)
+
+    q_loc = jnp.array(q_loc)
+    distribution = jnp.array(distribution, dtype=jnp.int32)
+
+    # recurrent_state[0] and conv_state[0] are reserved for null blocks
+    # (invalid / padded tokens). so start with index 1
+    state_indices = jnp.arange(1, max_reqs + 1)
+    num_blocks = max_reqs + 1
+
+    rngs = iter(jax.random.split(jax.random.key(seed), 12))
+
+    query = jax.random.normal(next(rngs), (num_tokens, n_kq * kq_head_dim))
+    key = jax.random.normal(next(rngs), (num_tokens, n_kq * kq_head_dim))
+    value = jax.random.normal(next(rngs), (num_tokens, n_v * v_head_dim))
+    b = jax.random.normal(next(rngs), (num_tokens, n_v))
+    a = jax.random.normal(next(rngs), (num_tokens, n_v))
+
+    conv_weight_q = jax.random.normal(next(rngs),
+                                      (n_kq * kq_head_dim, 1, kernel_size))
+    conv_weight_k = jax.random.normal(next(rngs),
+                                      (n_kq * kq_head_dim, 1, kernel_size))
+    conv_weight_v = jax.random.normal(next(rngs),
+                                      (n_v * v_head_dim, 1, kernel_size))
+
+    conv_bias_q = jax.random.normal(next(rngs), (n_kq * kq_head_dim, ))
+    conv_bias_k = jax.random.normal(next(rngs), (n_kq * kq_head_dim, ))
+    conv_bias_v = jax.random.normal(next(rngs), (n_v * v_head_dim, ))
+
+    A_log = jax.random.normal(next(rngs), (n_v, ))
+    dt_bias = jax.random.normal(jax.random.key(0), (n_v, ))
+
+    conv_dim = (n_kq * kq_head_dim) * 2 + n_v * v_head_dim
+    conv_shape = (num_blocks, kernel_size - 1, conv_dim)
+    recurrent_shape = (num_blocks, n_v, kq_head_dim, v_head_dim)
+    if stale_states:
+        # Drawn off their own key, so the sequence above stays the one
+        # the reference comparison has always run on.
+        state_rngs = jax.random.split(jax.random.key(seed + 100), 2)
+        conv_state = jax.random.normal(state_rngs[0], conv_shape)
+        recurrent_state = jax.random.normal(state_rngs[1], recurrent_shape)
+    else:
+        conv_state = jnp.zeros(conv_shape)
+        recurrent_state = jnp.zeros(recurrent_shape)
+
+    query_lens = q_loc[1:max_reqs + 1] - q_loc[:max_reqs]
+    if context_lens is None:
+        seq_lens = jnp.asarray(query_lens, dtype=jnp.int32)
+    else:
+        seq_lens = jnp.asarray(query_lens + jnp.asarray(context_lens),
+                               dtype=jnp.int32)
+
+    return dict(
+        qkv=jnp.concatenate([query, key, value], axis=-1),
+        b=b,
+        a=a,
+        conv_state=conv_state.astype(conv_dtype),
+        recurrent_state=recurrent_state.astype(recurrent_dtype),
+        conv_weight=jnp.concatenate(
+            [conv_weight_q, conv_weight_k, conv_weight_v], axis=0),
+        conv_bias=jnp.concatenate([conv_bias_q, conv_bias_k, conv_bias_v],
+                                  axis=-1),
+        a_log=A_log,
+        dt_bias=dt_bias,
+        query_start_loc=q_loc,
+        state_indices=state_indices,
+        distribution=distribution,
+        seq_lens=seq_lens,
+        n_kq=n_kq,
+        n_v=n_v,
+        d_k=kq_head_dim,
+        d_v=v_head_dim,
+        kernel_size=kernel_size,
+    )
+
+
 class GDNAttentionTest(parameterized.TestCase):
 
     @parameterized.named_parameters(
@@ -324,92 +432,14 @@ class GDNAttentionTest(parameterized.TestCase):
     )
     def test_run_jax_gdn_attention_local(self, max_reqs, lengths, q_loc,
                                          distribution):
-        kq_head_dim = 128
-        v_head_dim = 128
-        n_kq = 2
-        n_v = 8
-        kernel_size = 4
-
-        num_tokens = sum(lengths)
-
-        q_loc = jnp.array(q_loc)
-        distribution = jnp.array(distribution, dtype=jnp.int32)
-
-        # recurrent_state[0] and conv_state[0] are reserved for null blocks
-        # (invalid / padded tokens). so start with index 1
-        state_indices = jnp.arange(1, max_reqs + 1)
-        num_blocks = max_reqs + 1
-
-        rngs = iter(jax.random.split(jax.random.key(0), 12))
-
-        query = jax.random.normal(next(rngs), (num_tokens, n_kq * kq_head_dim))
-        key = jax.random.normal(next(rngs), (num_tokens, n_kq * kq_head_dim))
-        value = jax.random.normal(next(rngs), (num_tokens, n_v * v_head_dim))
-        b = jax.random.normal(next(rngs), (num_tokens, n_v))
-        a = jax.random.normal(next(rngs), (num_tokens, n_v))
-
-        conv_state_q = jnp.zeros(
-            (num_blocks, kernel_size - 1, n_kq * kq_head_dim))
-        conv_state_k = jnp.zeros(
-            (num_blocks, kernel_size - 1, n_kq * kq_head_dim))
-        conv_state_v = jnp.zeros(
-            (num_blocks, kernel_size - 1, n_v * v_head_dim))
-        recurrent_state = jnp.zeros((num_blocks, n_v, kq_head_dim, v_head_dim))
-
-        conv_weight_q = jax.random.normal(next(rngs),
-                                          (n_kq * kq_head_dim, 1, kernel_size))
-        conv_weight_k = jax.random.normal(next(rngs),
-                                          (n_kq * kq_head_dim, 1, kernel_size))
-        conv_weight_v = jax.random.normal(next(rngs),
-                                          (n_v * v_head_dim, 1, kernel_size))
-
-        conv_bias_q = jax.random.normal(next(rngs), (n_kq * kq_head_dim, ))
-        conv_bias_k = jax.random.normal(next(rngs), (n_kq * kq_head_dim, ))
-        conv_bias_v = jax.random.normal(next(rngs), (n_v * v_head_dim, ))
-
-        A_log = jax.random.normal(next(rngs), (n_v, ))
-        dt_bias = jax.random.normal(jax.random.key(0), (n_v, ))
-
-        mixed_qkv = jnp.concatenate([query, key, value], axis=-1)
-        conv_state = jnp.concatenate(
-            [conv_state_q, conv_state_k, conv_state_v], axis=-1)
-        conv_weight = jnp.concatenate(
-            [conv_weight_q, conv_weight_k, conv_weight_v], axis=0)
-        conv_bias = jnp.concatenate([conv_bias_q, conv_bias_k, conv_bias_v],
-                                    axis=-1)
+        common_kwargs = gdn_local_operands(max_reqs, lengths, q_loc,
+                                           distribution)
 
         gdn_attention_jitted = jax.jit(
             wrapper.fused_conv1d_gdn,
-            static_argnames=["n_kq", "n_v", "d_k", "d_v", "kernel_size"],
-        )
-
-        # All sequences in this test start from a fresh slot; the existing
-        # parametrizations don't exercise prefix-cache-hit / chunked-prefill
-        # continuation. ``seq_lens == query_lens`` (context_len = 0)
-        # reproduces the prior behavior (zero initial state regardless of
-        # slot contents).
-        seq_lens = jnp.asarray(q_loc[1:max_reqs + 1] - q_loc[:max_reqs],
-                               dtype=jnp.int32)
-
-        common_kwargs = dict(
-            qkv=mixed_qkv,
-            b=b,
-            a=a,
-            conv_state=conv_state,
-            recurrent_state=recurrent_state,
-            conv_weight=conv_weight,
-            conv_bias=conv_bias,
-            a_log=A_log,
-            dt_bias=dt_bias,
-            query_start_loc=q_loc,
-            state_indices=state_indices,
-            distribution=distribution,
-            seq_lens=seq_lens,
-            n_kq=n_kq,
-            n_v=n_v,
-            d_k=kq_head_dim,
-            d_v=v_head_dim,
-            kernel_size=kernel_size,
+            static_argnames=[
+                "n_kq", "n_v", "d_k", "d_v", "kernel_size", "conv_cache_native"
+            ],
         )
 
         # Run ref
@@ -432,6 +462,120 @@ class GDNAttentionTest(parameterized.TestCase):
                                    new_states_ref[1],
                                    rtol=2e-2,
                                    atol=2e-2)
+
+    @parameterized.named_parameters(
+        dict(testcase_name="decode",
+             max_reqs=8,
+             lengths=[1] * 8,
+             q_loc=list(range(9)),
+             distribution=[8, 8, 8],
+             context_lens=[3] * 8),
+        dict(testcase_name="prefill",
+             max_reqs=2,
+             lengths=[64, 64],
+             q_loc=[0, 64, 128],
+             distribution=[0, 2, 2],
+             context_lens=[0, 0]),
+        dict(testcase_name="conv_window_boundary",
+             max_reqs=3,
+             lengths=[2, 3, 4],
+             q_loc=[0, 2, 5, 9],
+             distribution=[0, 3, 3],
+             context_lens=[5, 5, 5]),
+    )
+    def test_conv_cache_native_matches_converted_operand(
+            self, max_reqs, lengths, q_loc, distribution, context_lens):
+        """The two convolution state operand forms give the same answer.
+
+        The cache here is bfloat16, which is what the serving path
+        allocates. The converted form widens the whole cache outside the
+        kernel and narrows it again on the way out; the cache-native
+        form does both inside the kernel, on the slot being read. It is
+        the same rounding either way, so this is an equality and not a
+        tolerance.
+
+        The window-boundary case runs sequences of two, three and four
+        tokens against a convolution window of kernel_size - 1 = 3
+        rows, which is where how much of the stored window survives
+        into the new one changes.
+        """
+
+        def operands():
+            # Built twice: the wrapper donates the two state caches, so
+            # the second call cannot be given the first call's arrays.
+            return gdn_local_operands(max_reqs,
+                                      lengths,
+                                      q_loc,
+                                      distribution,
+                                      context_lens=context_lens,
+                                      conv_dtype=jnp.bfloat16,
+                                      stale_states=True,
+                                      seed=5)
+
+        (conv_native, rec_native
+         ), out_native = wrapper.fused_conv1d_gdn(**operands(),
+                                                  conv_cache_native=True)
+        (conv_plain, rec_plain
+         ), out_plain = wrapper.fused_conv1d_gdn(**operands(),
+                                                 conv_cache_native=False)
+
+        np.testing.assert_array_equal(np.asarray(conv_native),
+                                      np.asarray(conv_plain))
+        np.testing.assert_array_equal(np.asarray(rec_native),
+                                      np.asarray(rec_plain))
+        np.testing.assert_array_equal(np.asarray(out_native),
+                                      np.asarray(out_plain))
+
+    def test_bf16_recurrent_state_tracks_float32_reference(self):
+        """A bfloat16 recurrent state cache against the float32 one.
+
+        The recurrence still runs in float32 and only the stored
+        checkpoint is narrower, so the difference is one rounding per step
+        and it compounds along the trajectory. The bound comes from a
+        2048-step decode trajectory: over those steps the largest relative
+        L2 difference against the float32 reference is 0.0020121, while a
+        deliberately broken widening used as a negative control diverges
+        to 0.9191. The bound below sits between the two, five times the
+        observed figure and about ninety times under the control, so it
+        answers a real regression rather than the step count.
+        """
+        steps = 32
+        bound = 0.01
+        max_reqs = 4
+
+        def final_recurrent_state(recurrent_dtype):
+            operands = gdn_local_operands(max_reqs, [1] * max_reqs,
+                                          list(range(max_reqs + 1)),
+                                          [max_reqs] * 3,
+                                          context_lens=[1] * max_reqs,
+                                          conv_dtype=jnp.bfloat16,
+                                          recurrent_dtype=recurrent_dtype,
+                                          stale_states=True,
+                                          seed=3)
+            conv_state = operands.pop("conv_state")
+            recurrent_state = operands.pop("recurrent_state")
+            qkv_shape = operands.pop("qkv").shape
+            b_shape = operands.pop("b").shape
+            a_shape = operands.pop("a").shape
+            for step in range(steps):
+                # Both arms draw the same tokens, so the only difference
+                # between them is the width the checkpoint is kept at.
+                rngs = jax.random.split(jax.random.key(900 + step), 3)
+                (conv_state, recurrent_state), _ = wrapper.fused_conv1d_gdn(
+                    qkv=jax.random.normal(rngs[0], qkv_shape),
+                    b=jax.random.normal(rngs[1], b_shape),
+                    a=jax.random.normal(rngs[2], a_shape),
+                    conv_state=conv_state,
+                    recurrent_state=recurrent_state,
+                    conv_cache_native=True,
+                    **operands)
+            return np.asarray(recurrent_state.astype(jnp.float32))
+
+        reference = final_recurrent_state(jnp.float32)
+        narrow = final_recurrent_state(jnp.bfloat16)
+        rel_l2 = (np.linalg.norm(narrow - reference) /
+                  np.linalg.norm(reference))
+        self.assertLess(rel_l2, bound)
 
     @parameterized.named_parameters(
         dict(
@@ -857,3 +1001,303 @@ class GDNAttentionTest(parameterized.TestCase):
                                    output_ref[half:],
                                    rtol=2e-2,
                                    atol=2e-2)
+
+
+# The smallest operand set the wrapper's argument checks will look at.
+# Two key/query projections and one value projection make up DIM.
+N_KQ = N_V = 1
+D_K = D_V = 128
+KERNEL_SIZE = 4
+DIM = N_KQ * D_K * 2 + N_V * D_V
+BATCH = 2
+NUM_SEQS = 2
+NUM_SLOTS = NUM_SEQS + 1
+NATIVE_CACHE_SHAPE = (NUM_SLOTS, KERNEL_SIZE - 1, DIM)
+CACHE_LAYOUT_LOGGER = "vllm.tpu_inference.kernels.gdn.v3.cache_layout"
+
+
+def boundary_operands(conv_state_shape=NATIVE_CACHE_SHAPE):
+    """Abstract operands for one smallest-possible call.
+
+    Shared by both suites below, which ask the wrapper's argument checks
+    questions and never reach any arithmetic.
+    """
+    sds = jax.ShapeDtypeStruct
+    return dict(
+        qkv=sds((BATCH, DIM), jnp.bfloat16),
+        b=sds((BATCH, N_V), jnp.bfloat16),
+        a=sds((BATCH, N_V), jnp.bfloat16),
+        conv_state=sds(conv_state_shape, jnp.bfloat16),
+        recurrent_state=sds((NUM_SLOTS, N_V, D_K, D_V), jnp.float32),
+        conv_weight=sds((DIM, 1, KERNEL_SIZE), jnp.bfloat16),
+        conv_bias=sds((DIM, ), jnp.bfloat16),
+        a_log=sds((N_V, ), jnp.float32),
+        dt_bias=sds((N_V, ), jnp.float32),
+        query_start_loc=sds((NUM_SEQS + 1, ), jnp.int32),
+        state_indices=sds((NUM_SEQS, ), jnp.int32),
+        distribution=sds((3, ), jnp.int32),
+        seq_lens=sds((NUM_SEQS, ), jnp.int32),
+    )
+
+
+def gdn_config(mode=config.GDNMode.PER_SEQ,
+               window_size=1,
+               conv_cache_native=False):
+    """The smallest config the two suites at the end read fields off."""
+    dtypes = config.Dtypes(act_in=jnp.bfloat16,
+                           act_out=jnp.bfloat16,
+                           compute=jnp.float32,
+                           recurrent_state=jnp.float32,
+                           conv_state=jnp.bfloat16)
+    return config.GDNConfig(mode=mode,
+                            dtypes=dtypes,
+                            batch_size=BATCH,
+                            dim_size=DIM,
+                            kernel_size=KERNEL_SIZE,
+                            tile_size=1,
+                            num_kq_heads=N_KQ,
+                            num_v_heads=N_V,
+                            kq_head_dim=D_K,
+                            v_head_dim=D_V,
+                            window_size=window_size,
+                            conv_cache_native=conv_cache_native)
+
+
+def trace_boundary(operands, **kwargs):
+    """Abstract evaluation only: no program is built and none is run."""
+    return jax.eval_shape(
+        lambda **kw: wrapper.fused_conv1d_gdn(**kw,
+                                              n_kq=N_KQ,
+                                              n_v=N_V,
+                                              d_k=D_K,
+                                              d_v=D_V,
+                                              kernel_size=KERNEL_SIZE,
+                                              **kwargs), **operands)
+
+
+class BoundaryTestCase(parameterized.TestCase):
+
+    def assert_accepted(self, operands, **kwargs):
+        """The argument checks let this call through.
+
+        A machine with no chip cannot answer the lane-count question the
+        wrapper asks a few lines past those checks, so that one refusal is
+        recognised by its own words and the case then makes the same
+        assertion wherever it runs. If jax rewords it, this fails rather
+        than passing on a refusal it did not mean to allow.
+        """
+        try:
+            trace_boundary(operands, **kwargs)
+        except ValueError as refusal:
+            self.assertIn("Unsupported TPU device kind", str(refusal))
+
+
+class ReadOffsetGateTest(BoundaryTestCase):
+    """Where a state read offset is accepted, and where it is refused.
+
+    These cases stop at the wrapper's argument handling:
+
+        pytest tests/kernels/gdn_attention_v3_test.py -k ReadOffsetGateTest
+    """
+
+    def test_read_offset_without_spec_decoding_refused(self):
+        """It used to be accepted and ignored, which a caller cannot see."""
+        offsets = jax.ShapeDtypeStruct((NUM_SEQS, ), jnp.int32)
+        with self.assertRaises(ValueError) as refusal:
+            trace_boundary(boundary_operands(),
+                           read_offsets=offsets,
+                           num_spec_tokens=0)
+        message = str(refusal.exception)
+        self.assertIn("read_offsets", message)
+        self.assertIn("num_spec_tokens", message)
+        self.assertIn(str(offsets.shape), message)
+
+    def test_missing_read_offset_with_spec_decoding_refused(self):
+        with self.assertRaises(ValueError) as refusal:
+            trace_boundary(boundary_operands(), num_spec_tokens=4)
+        self.assertIn("read_offsets is required", str(refusal.exception))
+
+    def test_read_offset_of_the_wrong_length_refused(self):
+        with self.assertRaises(ValueError) as refusal:
+            trace_boundary(boundary_operands(),
+                           read_offsets=jax.ShapeDtypeStruct((NUM_SEQS + 1, ),
+                                                             jnp.int32),
+                           num_spec_tokens=4)
+        message = str(refusal.exception)
+        self.assertIn("one offset per sequence", message)
+        self.assertIn(f"({NUM_SEQS},)", message)
+
+    @parameterized.named_parameters(
+        ("with_spec_decoding", True, 4),
+        ("with_one_speculative_token", True, 1),
+        ("without_spec_decoding", False, 0),
+    )
+    def test_read_offset_accepted(self, pass_offsets, num_spec_tokens):
+        """The serving path passes none; speculative decoding passes one.
+
+        A single speculative token already gives a sequence two state
+        checkpoints and an offset that says which of them it resumes
+        from, so the gate is on there being any window at all and not on
+        the window being wide.
+        """
+        offsets = (jax.ShapeDtypeStruct(
+            (NUM_SEQS, ), jnp.int32) if pass_offsets else None)
+        self.assert_accepted(boundary_operands(),
+                             read_offsets=offsets,
+                             num_spec_tokens=num_spec_tokens)
+
+
+class NativeConvStateBoundaryTest(BoundaryTestCase):
+    """What the wrapper does with a cache the kernel cannot read."""
+
+    @parameterized.named_parameters(
+        ("rank_two", (NUM_SLOTS, DIM)),
+        ("rank_four", (NUM_SLOTS, KERNEL_SIZE - 1, DIM, 1)),
+        ("whole_window_instead_of_the_carry_over",
+         (NUM_SLOTS, KERNEL_SIZE, DIM)),
+        ("another_models_channel_count",
+         (NUM_SLOTS, KERNEL_SIZE - 1, 2 * DIM)),
+    )
+    def test_unreadable_conv_cache_refused(self, shape):
+        with self.assertRaises(ValueError) as refusal:
+            trace_boundary(boundary_operands(shape), conv_cache_native=True)
+        message = str(refusal.exception)
+        self.assertIn("is not the cache-native", message)
+        self.assertIn(str(shape), message)
+        self.assertIn(f"[slots, {KERNEL_SIZE - 1}, {DIM}]", message)
+
+    def test_served_conv_cache_accepted(self):
+        self.assert_accepted(boundary_operands(), conv_cache_native=True)
+
+
+class ConvStateLayoutTest(parameterized.TestCase):
+    """The layout a rank-3 convolution state cache is allocated in."""
+
+    CACHE_SHAPE = (17, 3, 512)
+
+    def setUp(self):
+        super().setUp()
+        # The derivation warns once per message, because it is asked once
+        # per mamba layer and every layer of a model carries the same
+        # cache. That record is process-global and lives in vllm, so a case
+        # expecting a warning starts from an empty one rather than
+        # depending on which case ran first. Named rather than caught: if
+        # vllm moves this, the cases expecting a warning fail loudly.
+        from vllm.logger import _print_warning_once
+        _print_warning_once.cache_clear()
+
+    @parameterized.named_parameters(
+        ("bfloat16", (17, 3, 512), jnp.bfloat16, ((4, 128), (2, 1))),
+        ("float16", (17, 3, 512), jnp.float16, ((4, 128), (2, 1))),
+        ("float32", (17, 3, 512), jnp.float32, ((8, 128), )),
+        ("int8", (17, 3, 512), jnp.int8, ((2, 128), (4, 1))),
+        ("float8_e4m3fn", (17, 3, 512), jnp.float8_e4m3fn, ((2, 128), (4, 1))),
+        ("wider_channels", (129, 3, 4096), jnp.bfloat16, ((4, 128), (2, 1))),
+        ("single_row_window", (5, 1, 128), jnp.bfloat16, ((4, 128), (2, 1))),
+    )
+    def test_tiling_follows_element_width(self, shape, dtype, tiling):
+        layout = cache_layout.conv_state_layout(shape, dtype)
+        self.assertIsInstance(layout, Layout)
+        self.assertEqual(layout.major_to_minor, (0, 1, 2))
+        self.assertEqual(layout.tiling, tiling)
+
+    @parameterized.named_parameters(
+        ("rank_two", (17, 512)),
+        ("rank_four", (17, 3, 512, 1)),
+        ("rank_one", (512, )),
+    )
+    def test_cache_that_is_not_rank_three_declines(self, shape):
+        """The pin is an optimization, so an odd cache still allocates."""
+        with self.assertLogs(CACHE_LAYOUT_LOGGER, level="WARNING") as logs:
+            self.assertIsNone(
+                cache_layout.conv_state_layout(shape, jnp.bfloat16))
+        printed = "\n".join(logs.output)
+        self.assertIn("is not the rank-3", printed)
+        self.assertIn(str(shape), printed)
+
+    @parameterized.named_parameters(
+        ("float64", jnp.float64),
+        ("complex64", jnp.complex64),
+    )
+    def test_element_width_with_no_defined_layout_declines(self, dtype):
+        with self.assertLogs(CACHE_LAYOUT_LOGGER, level="WARNING") as logs:
+            self.assertIsNone(
+                cache_layout.conv_state_layout(self.CACHE_SHAPE, dtype))
+        self.assertIn("bytes per element", "\n".join(logs.output))
+
+    def test_channels_first_cache_declines(self):
+        """vLLM can be asked to store [blocks, channels, window] instead.
+
+        The layout here describes the other order, and pinning it onto this
+        one pads a three-wide minor dimension out to a full tile of 128,
+        which is the whole cache over again more than forty times.
+        """
+        transposed = (17, 512, 3)
+        with mock.patch.object(cache_layout,
+                               "_stored_channels_first",
+                               return_value=True):
+            with self.assertLogs(CACHE_LAYOUT_LOGGER, level="WARNING") as logs:
+                self.assertIsNone(
+                    cache_layout.conv_state_layout(transposed, jnp.bfloat16))
+        printed = "\n".join(logs.output)
+        self.assertIn("DS", printed)
+        self.assertIn(str(transposed), printed)
+
+    @parameterized.named_parameters(
+        ("channels_first", (17, 512, 3), True),
+        ("channels_last", (17, 3, 512), False),
+    )
+    def test_order_read_off_the_shape_where_vllm_cannot_be_asked(
+            self, shape, declines):
+        """A vLLM predating the setting has no answer to give."""
+        with mock.patch.object(cache_layout,
+                               "_stored_channels_first",
+                               return_value=None):
+            layout = cache_layout.conv_state_layout(shape, jnp.bfloat16)
+        if declines:
+            self.assertIsNone(layout)
+        else:
+            self.assertIsInstance(layout, Layout)
+
+    def test_decline_warns_once_per_model(self):
+        """An unfamiliar cache is one fact about the model, and this is asked
+        once per mamba layer, so it must not print per layer."""
+        with self.assertLogs(CACHE_LAYOUT_LOGGER, level="WARNING") as logs:
+            for _ in range(8):
+                self.assertIsNone(
+                    cache_layout.conv_state_layout((17, 512), jnp.bfloat16))
+        self.assertEqual(len(logs.output), 1)
+
+
+class KernelNameTest(parameterized.TestCase):
+    """The profile name tells the two convolution operand forms apart."""
+
+    def test_kernel_name_carries_the_operand_form(self):
+        self.assertIn("_convnative",
+                      gdn_config(conv_cache_native=True).get_kernel_name())
+        self.assertNotIn("_convnative", gdn_config().get_kernel_name())
+
+
+class MetadataOperandCountTest(parameterized.TestCase):
+    """How many kernel operands the metadata flattens to.
+
+    The wrapper keys `input_output_aliases` by position in the flattened
+    operand list, counted off this number, so a single-checkpoint call
+    has to lose the read-offset leaf from it.
+    """
+
+    def test_per_seq_metadata_carries_one_operand_fewer(self):
+        arrays = dict(seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+                      query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+                      state_indices=jnp.array([1, 2], dtype=jnp.int32))
+        per_seq = metadata.compute_per_seq_metadata(cfg=gdn_config(),
+                                                    start_seq=jnp.int32(0),
+                                                    end_seq=jnp.int32(2),
+                                                    **arrays)
+        windowed = metadata.compute_batched_seq_metadata(
+            cfg=gdn_config(mode=config.GDNMode.BATCHED, window_size=5),
+            read_offsets=jnp.zeros((2, ), dtype=jnp.int32),
+            end_seq=jnp.int32(2),
+            **arrays)
+        self.assertIsNone(per_seq.s_idx_to_read_offset)
+        self.assertEqual(len(per_seq), len(windowed) - 1)
