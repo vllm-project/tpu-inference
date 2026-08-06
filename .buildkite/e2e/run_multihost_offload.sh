@@ -19,7 +19,9 @@ SSH_USER="${SSH_USER:-$(whoami)}"
 # can still set HOST_HF_HOME explicitly.
 HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home}"
 LOG_DIR="${LOG_DIR:-${HOME}/logs}"
-MODEL="${MODEL:-Qwen/Qwen3-30B-A3B}"
+# Match .buildkite/scripts/run_multihost.sh: Runai Streamer reads this
+# checkpoint directly from GCS instead of first materializing it in HF_HOME.
+MODEL="${MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
 INPUT_LEN="${INPUT_LEN:-128}"
 OUTPUT_LEN="${OUTPUT_LEN:-20}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
@@ -30,7 +32,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-128}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
-LOAD_FORMAT="${LOAD_FORMAT:-auto}"
+LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
 SKIP_JAX_PRECOMPILE="${SKIP_JAX_PRECOMPILE:-1}"
 TPU_ENABLE_D2H_TRANSFER="${TPU_ENABLE_D2H_TRANSFER:-true}"
 TPU_MAX_HOST_KV_BUFFER_SIZE="${TPU_MAX_HOST_KV_BUFFER_SIZE:-128}"
@@ -162,16 +164,21 @@ run_offload_correctness() {
   kv_transfer_config='{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
 
   echo "--- Verifying deterministic output with actual TPU KV-cache offload"
-  timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
+  if ! timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
     docker exec "${CONTAINER_NAME}" bash -c \
     "python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \\
       --model $(printf '%q' "${MODEL}") \\
       --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \\
+      --load-format ${LOAD_FORMAT} \\
       --max-model-len ${MAX_MODEL_LEN} \\
       --max-tokens ${OUTPUT_LEN} \\
       --seed ${RANDOM_SEED} \\
       --kv-transfer-config $(printf '%q' "${kv_transfer_config}")" \
-    >"${LOG_DIR}/correctness.txt" 2>&1
+    >"${LOG_DIR}/correctness.txt" 2>&1; then
+    echo "ERROR: Offload correctness verification failed; showing ${LOG_DIR}/correctness.txt" >&2
+    cat "${LOG_DIR}/correctness.txt" >&2 || true
+    return 1
+  fi
   cat "${LOG_DIR}/correctness.txt"
 }
 
