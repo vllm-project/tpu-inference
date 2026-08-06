@@ -257,8 +257,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         cases: list[TuningCase] = []
         for case in tuning_case_logger.get_logged_tuning_cases():
             if (  #case.tuning_key.total_q_tokens == 128
-                    case.tuning_key not in seen_keys
-            ):
+                    case.tuning_key not in seen_keys):
                 seen_keys.add(case.tuning_key)
                 unique_keys.append(case.tuning_key)
                 cases.append(case)

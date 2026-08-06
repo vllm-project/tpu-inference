@@ -49,9 +49,11 @@ class RetryTable:
         Supports both Spanner schema column names (e.g. 'CaseSetId') and
         snake_case attribute names (e.g. 'case_set_id').
         """
-        case_set_id = data.get('CaseSetId') if 'CaseSetId' in data else data.get('case_set_id')
+        case_set_id = data.get(
+            'CaseSetId') if 'CaseSetId' in data else data.get('case_set_id')
         run_id = data.get('RunId') if 'RunId' in data else data.get('run_id')
-        case_id = data.get('CaseId') if 'CaseId' in data else data.get('case_id')
+        case_id = data.get('CaseId') if 'CaseId' in data else data.get(
+            'case_id')
         n_retried = data.get('n_retried')
 
         return cls(

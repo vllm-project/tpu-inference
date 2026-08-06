@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import tempfile
 import unittest
 
 from tools.kernel.tuner.v1.inspect_result_cli import (FilterResult,
-                                                      _matches_filter)
+                                                      _matches_filter,
+                                                      dump_tuned_params_mapping
+                                                      )
 
 
 class TestMatchesFilter(unittest.TestCase):
@@ -137,6 +141,44 @@ class TestMatchesFilter(unittest.TestCase):
         self.assertEqual(
             _matches_filter(self.sample_kv, ["block_sizes=not_a_list"]),
             FilterResult.INVALID_FILTER)
+
+
+class TestDumpTunedParamsMapping(unittest.TestCase):
+
+    def test_dump_tuned_params_mapping(self):
+        sample_results = [{
+            'tuning_key': {
+                'case': 'batched_decode',
+                'max_num_tokens': 4,
+            },
+            'tunable_params': {
+                'decode_batch_size': 8,
+                'num_kv_pages_per_block': 3,
+            },
+            'Latency': 100.5,
+            'WarmupTime': 10.0,
+            'CaseId': 'case_1',
+        }]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'tuned_params.py')
+            result_path = dump_tuned_params_mapping(sample_results,
+                                                    output_path=output_path)
+            self.assertEqual(result_path, output_path)
+            self.assertTrue(os.path.exists(output_path))
+
+            with open(output_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            self.assertIn(
+                'tuned_params_mapping: dict[TuningKey, TunableParams] = {',
+                content)
+            self.assertIn('TuningKey(', content)
+            self.assertIn("case='batched_decode'", content)
+            self.assertIn('max_num_tokens=4', content)
+            self.assertIn('TunableParams(', content)
+            self.assertIn('decode_batch_size=8', content)
+            self.assertIn('num_kv_pages_per_block=3', content)
 
 
 if __name__ == '__main__':
