@@ -34,7 +34,7 @@ steps:
       TEST_MODE: 2 # only run correctness test
     commands:
       - |
-        bash .buildkite/e2e/run_multi_pooling_decoding.sh
+        bash .buildkite/e2e/run_multi_step_decoding.sh
 
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host step pooling and structured decoding"
     key: "${TPU_VERSION:-tpu7x}_record_multi_host_pooling_structured_decoding_CorrectnessTest"

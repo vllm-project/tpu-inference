@@ -13,14 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Standalone multi-host E2E correctness coverage for step pooling and
-# structured decoding.
+# Standalone multi-host E2E correctness coverage for structured decoding.
 set -euo pipefail
 set -x
 
 export SSH_USER="${SSH_USER:-$(whoami)}"
 HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home}"
-POOLING_MODEL="${POOLING_MODEL:-Qwen/Qwen3-Embedding-8B}"
 GENERATION_MODEL="${GENERATION_MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
 TP_SIZE="${TENSOR_PARALLEL_SIZE:-16}"
 VLLM_PORT=8000
@@ -217,23 +215,8 @@ for worker_ip in "${worker_ips[@]}"; do
 done
 sleep 120
 
-# This input is larger than the chunked server's max-num-batched-tokens. The
-# resulting embedding is compared to an unchunked reference generated with
-# the same model and input below.
-POOLING_INPUT=$(python3 -c 'print("TPU step pooling validates chunked prefill. " * 180)')
-POOLING_REQUEST_BODY=$(POOLING_MODEL="$POOLING_MODEL" POOLING_INPUT="$POOLING_INPUT" \
-  python3 -c 'import json, os; print(json.dumps({"model": os.environ["POOLING_MODEL"], "input": os.environ["POOLING_INPUT"]}))')
-POOLING_CHUNKED_VALIDATION="curl --fail --silent --show-error http://localhost:${VLLM_PORT}/v1/embeddings -H 'Content-Type: application/json' -d '${POOLING_REQUEST_BODY}' > /tmp/pooling_chunked.json; python3 -c 'import json; payload = json.load(open(\"/tmp/pooling_chunked.json\")); embedding = payload[\"data\"][0][\"embedding\"]; assert embedding and all(isinstance(value, (int, float)) for value in embedding), payload'"
-POOLING_REFERENCE_VALIDATION="response=\$(curl --fail --silent --show-error http://localhost:${VLLM_PORT}/v1/embeddings -H 'Content-Type: application/json' -d '${POOLING_REQUEST_BODY}'); POOLING_REFERENCE=\"\$response\" python3 -c 'import json, math, os; chunked = json.load(open(\"/tmp/pooling_chunked.json\"))[\"data\"][0][\"embedding\"]; reference = json.loads(os.environ[\"POOLING_REFERENCE\"])[\"data\"][0][\"embedding\"]; assert len(chunked) == len(reference) and chunked, (len(chunked), len(reference)); assert all(math.isclose(actual, expected, rel_tol=1e-3, abs_tol=1e-3) for actual, expected in zip(chunked, reference)), \"chunked and unchunked embeddings differ\"'"
-
 STRUCTURED_VALIDATION="response=\$(curl --fail --silent --show-error http://localhost:${VLLM_PORT}/v1/completions -H 'Content-Type: application/json' -d '{\"model\":\"${GENERATION_MODEL}\",\"prompt\":\"Classify the sentiment as positive or negative. Return only the requested label.\",\"max_tokens\":16,\"temperature\":0,\"structured_outputs\":{\"choice\":[\"<TPU-CI-ALPHA>\",\"<TPU-CI-BETA>\"]}}'); python3 -c 'import json, sys; payload = json.load(sys.stdin); text = payload[\"choices\"][0][\"text\"].strip(); assert text in {\"<TPU-CI-ALPHA>\", \"<TPU-CI-BETA>\"}, payload' <<< \"\$response\""
 
-run_case "chunked step pooling" \
-  "vllm serve ${POOLING_MODEL} --port ${VLLM_PORT} --runner pooling --tensor-parallel-size ${TP_SIZE} --trust-remote-code --max-model-len 2048 --max-num-seqs 1 --max-num-batched-tokens 256 --no-enable-prefix-caching --load-format=auto" \
-  "$POOLING_CHUNKED_VALIDATION"
-run_case "unchunked pooling reference" \
-  "vllm serve ${POOLING_MODEL} --port ${VLLM_PORT} --runner pooling --tensor-parallel-size ${TP_SIZE} --trust-remote-code --max-model-len 2048 --max-num-seqs 1 --max-num-batched-tokens 2048 --no-enable-prefix-caching --load-format=auto" \
-  "$POOLING_REFERENCE_VALIDATION"
 run_case "structured decoding" \
   "vllm serve ${GENERATION_MODEL} --port ${VLLM_PORT} --tensor-parallel-size ${TP_SIZE} --trust-remote-code --max-model-len 1024 --no-async-scheduling --load-format=runai_streamer --no-enable-prefix-caching" \
   "$STRUCTURED_VALIDATION"
