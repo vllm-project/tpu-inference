@@ -31,6 +31,7 @@ class InferenceConfig:
     max_num_seqs: int = 8
     gpu_memory_utilization: float = 0.85
     additional_config: dict = field(default_factory=dict)
+    async_scheduling: bool = False
 
 
 def _run_inference_and_return_outputs(
@@ -51,7 +52,7 @@ def _run_inference_and_return_outputs(
         max_num_seqs=config.max_num_seqs,
         enable_expert_parallel=config.enable_expert_parallel,
         additional_config=config.additional_config,
-        async_scheduling=False,
+        async_scheduling=config.async_scheduling,
     )
 
     if enable_export:
@@ -234,6 +235,7 @@ def sampling_params(request):
             "dp": 1,
             "max_model_len": 1024,
             "max_num_batched_tokens": 8192,
+            "async_scheduling": False,
         },
         {
             "id": "correctness_DP_torchax",
@@ -243,6 +245,27 @@ def sampling_params(request):
             "dp": 8,
             "max_model_len": 1024,
             "max_num_batched_tokens": 8192,
+            "async_scheduling": False,
+        },
+        {
+            "id": "correctness_non_DP_torchax_async",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "impl": "vllm",
+            "tp": 8,
+            "dp": 1,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 8192,
+            "async_scheduling": True,
+        },
+        {
+            "id": "correctness_DP_torchax_async",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "impl": "vllm",
+            "tp": 1,
+            "dp": 8,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 8192,
+            "async_scheduling": True,
         },
     ],
     ids=lambda x: x["id"],
@@ -259,6 +282,7 @@ def test_continue_decode_correctness_matrix(matrix_case, sampling_params):
         data_parallel_size=matrix_case["dp"],
         max_model_len=matrix_case["max_model_len"],
         max_num_batched_tokens=matrix_case["max_num_batched_tokens"],
+        async_scheduling=matrix_case.get("async_scheduling", False),
         additional_config={},
     )
 

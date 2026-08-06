@@ -205,6 +205,8 @@ setup_environment() {
     verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
+    # Export the computed CI cache image name so calling scripts can use it.
+    export EXPORTED_CI_CACHE_IMAGE="${CI_IMAGE_REPO}:${CACHE_TAG}"
     return 0
   fi
 
@@ -229,6 +231,7 @@ setup_environment() {
     echo "Pushing Docker image to CI Image Registry..."
     docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${CI_IMAGE_REPO}:${CACHE_TAG}"
     docker push "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    export EXPORTED_CI_CACHE_IMAGE="${CI_IMAGE_REPO}:${CACHE_TAG}"
   fi
 
   # Push logic if requested
@@ -237,5 +240,13 @@ setup_environment() {
     gcloud auth configure-docker us-central1-docker.pkg.dev
     docker push "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker push "${IMAGE_NAME}:latest"
+  fi
+
+  # Only clean up resources in setup_environment after pushing to a remote registry
+  # (e.g., standalone builder jobs in CI). When building locally to run on the same machine
+  # (push_to_ci_cache=false and should_push=false), preserve the image so the caller can run it.
+  if [[ "$push_to_ci_cache" == "true" || "$should_push" == "true" ]]; then
+    echo "--- Cleaning up Docker resources after push..."
+    cleanup_docker_resource "${IMAGE_NAME}"
   fi
 }

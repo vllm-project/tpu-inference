@@ -21,11 +21,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tools.kernel.tuner.v1.common.kernel_tuner_base import (KernelTunerBase,
-                                                            RunConfig,
-                                                            TunerConfig,
-                                                            TuningCase,
-                                                            TuningStatus)
+from tools.kernel.tuner.v1.common.kernel_tuner_base import KernelTunerBase
+from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
+                                                          TunerConfig,
+                                                          TuningCase,
+                                                          TuningStatus)
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import (
     dynamic_validate_inputs, get_kv_cache_shape, get_smem_estimate_bytes,
     get_vmem_estimate_bytes, ragged_paged_attention)

@@ -33,12 +33,20 @@ from vllm import LLM, SamplingParams
 @pytest.fixture(scope="module")
 def llm():
     """Create a shared LLM instance for all tests in this module."""
-    return LLM(
+    instance = LLM(
         model='meta-llama/Llama-3.2-1B-Instruct',
         max_model_len=1024,
         max_num_seqs=4,
         enable_prefix_caching=False,
     )
+    try:
+        yield instance
+    finally:
+        # vLLM's synchronous LLM client stops EngineCore from a weakref
+        # finalizer, so a reference cycle can defer it indefinitely and leave
+        # the worker subprocess holding the container open until the CI job
+        # times out. Shut the engine down explicitly instead.
+        instance.llm_engine.engine_core.shutdown()
 
 
 class TestTemperature:

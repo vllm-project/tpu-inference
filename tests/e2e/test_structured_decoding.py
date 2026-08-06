@@ -35,12 +35,19 @@ def test_structured_decoding():
               max_num_seqs=1,
               enable_prefix_caching=False)
 
-    choices = ['Positive', 'Negative']
-    structured_outputs_params = StructuredOutputsParams(choice=choices)
-    sampling_params = SamplingParams(
-        structured_outputs=structured_outputs_params)
-    outputs = llm.generate(
-        prompts="Classify this sentiment: tpu-inference is wonderful!",
-        sampling_params=sampling_params,
-    )
-    assert outputs[0].outputs[0].text in choices
+    try:
+        choices = ['Positive', 'Negative']
+        structured_outputs_params = StructuredOutputsParams(choice=choices)
+        sampling_params = SamplingParams(
+            structured_outputs=structured_outputs_params)
+        outputs = llm.generate(
+            prompts="Classify this sentiment: tpu-inference is wonderful!",
+            sampling_params=sampling_params,
+        )
+        assert outputs[0].outputs[0].text in choices
+    finally:
+        # vLLM's synchronous LLM client stops EngineCore from a weakref
+        # finalizer, so a reference cycle can defer it indefinitely and leave
+        # the worker subprocess holding the container open until the CI job
+        # times out. Shut the engine down explicitly instead.
+        llm.llm_engine.engine_core.shutdown()

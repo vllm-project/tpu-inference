@@ -10,13 +10,13 @@
 * @vipannalla @kyuyeunk @QiliangCui
 
 # CI/CD and Build Configuration
-/.buildkite/ @QiliangCui @yiw-wang @CienetStingLin
-/.github/ @QiliangCui @yiw-wang @CienetStingLin
+/.buildkite/ @QiliangCui @yiw-wang @CienetStingLin @yunyao-gg @theminghuang
+/.github/ @QiliangCui @yiw-wang @CienetStingLin @theminghuang
 
 # Documentation
-/docs/ @bvrockwell @vipannalla
-/README.md @bvrockwell @vipannalla
-/CONTRIBUTING.md @jrplatin @bvrockwell
+/docs/ @bvrockwell @RobMulla @vipannalla @QiliangCui
+/README.md @bvrockwell @RobMulla @vipannalla @QiliangCui
+/CONTRIBUTING.md @jrplatin @bvrockwell @RobMulla @QiliangCui
 
 # Distributed Computing
 /tpu_inference/distributed/ @mrjunwan-lang @sixiang-google
@@ -66,10 +66,10 @@
 /tpu_inference/runner/lora_utils.py @vanbasten23 @kyuyeunk
 
 # Docker Configuration
-/docker/ @jrplatin @QiliangCui @yiw-wang
+/docker/ @jrplatin @QiliangCui @yiw-wang QiliangCui
 
 # Tools (kernel tuner, etc.)
-/tools/ @vipannalla @kyuyeunk @patrickji2014 @yiw-wang @qiliangcui
+/tools/ @vipannalla @kyuyeunk @patrickji2014 @yiw-wang @qiliangcui @yunyao-gg
 
 # Unowned: scripts, examples, and bot-updated support_matrices —
 # anyone can approve, no required CODEOWNER review. Bot pushes to

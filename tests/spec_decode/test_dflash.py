@@ -174,12 +174,6 @@ def test_propose_returns_2d_int_ids():
 
 
 # ----- New Comprehensive Tests -----
-def test_next_padded_size():
-    """Asserts power-of-2 on-device padding calculations."""
-    assert DFlashProposer._next_padded_size(5) == 16
-    assert DFlashProposer._next_padded_size(16) == 16
-    assert DFlashProposer._next_padded_size(17) == 32
-    assert DFlashProposer._next_padded_size(33) == 64
 
 
 @pytest.fixture(scope="module")

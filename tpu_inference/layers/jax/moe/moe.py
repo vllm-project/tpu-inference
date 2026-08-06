@@ -332,7 +332,7 @@ class JaxMoE(JaxModule):
                 with cpu_mesh_context():
                     weights = jnp.concatenate(param._weights_to_load, axis=0)
                 try:
-                    param.value = shard_put(weights, param.sharding, mesh)
+                    param.value = shard_put(weights, param.out_sharding, mesh)
                     loaded_names.add(param_name)
                 except Exception as e:
                     raise RuntimeError(
@@ -495,7 +495,7 @@ class JaxRoutedExperts(JaxModule):
                 with cpu_mesh_context():
                     concatenated = jnp.concatenate(param._weights_to_load,
                                                    axis=0)
-                param.value = shard_put(concatenated, param.sharding, mesh)
+                param.value = shard_put(concatenated, param.out_sharding, mesh)
                 loaded_names.add(name)
         return loaded_names
 

@@ -31,6 +31,9 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Basic DP configuration
         self.runner.dp_size = 2
+        # PCP is off in these DP tests; without this the MagicMock auto-attr
+        # fails the `prefill_cp_size > 1` comparison in _prepare_inputs.
+        self.runner.vllm_config.sharding_config.prefill_cp_size = 1
         self.runner.max_num_tokens = 64
         self.runner.max_num_reqs = 8
         self.runner.max_num_blocks_per_req = 8
@@ -183,7 +186,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         result = self.runner._prepare_inputs(scheduler_output)
 
-        assert len(result) == 11
+        assert len(result) == 12
 
     @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
@@ -210,11 +213,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 11
+        assert len(result) == 12
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
          padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
-         tokens_indices_selector) = result
+         tokens_indices_selector, shared_attn_metadata) = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -275,11 +278,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         result = self.runner._prepare_inputs(scheduler_output)
 
         # Basic assertions
-        assert len(result) == 11
+        assert len(result) == 12
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
          padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
-         tokens_indices_selector) = result
+         tokens_indices_selector, shared_attn_metadata) = result
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
@@ -600,7 +603,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
          padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
-         tokens_indices_selector) = result
+         tokens_indices_selector, shared_attn_metadata) = result
         # 1. Verify input_ids content
         expected_input_ids = np.zeros(16, dtype=np.int32)
         expected_input_ids[:2] = [1006, 1007]
@@ -697,7 +700,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
          padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
-         tokens_indices_selector) = result
+         tokens_indices_selector, shared_attn_metadata) = result
 
         # 1. Verify input_ids
         expected_input_ids = np.zeros(16, dtype=np.int32)
@@ -791,7 +794,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
          padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
-         tokens_indices_selector) = result
+         tokens_indices_selector, shared_attn_metadata) = result
 
         # Verify request_distribution
         # DP rank 0: req1 (decode), req2 (decode) -> [2, 2, 2]
@@ -854,7 +857,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         (input_ids, positions, attention_metadata, sampling_metadata,
          logits_indices, spec_decode_metadata, logits_indices_selector,
          padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank,
-         tokens_indices_selector) = result
+         tokens_indices_selector, shared_attn_metadata) = result
 
         # Verify request_distribution
         # Both ranks have only decode requests
@@ -1009,6 +1012,84 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Verify placeholder_num
         assert call_args[4] == 2  # Number of actual substitutions
+
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('jax.lax.with_sharding_constraint',
+           side_effect=lambda x, *args, **kwargs: x)
+    @patch('tpu_inference.runner.tpu_runner.device_array')
+    def test_apply_async_token_substitution_sharding(
+            self, mock_device_array, mock_with_sharding_constraint,
+            mock_named_sharding):
+        """Test that _apply_async_token_substitution uses correct sharding for device_array."""
+
+        # Bind the actual method
+        self.runner._apply_async_token_substitution = TPUModelRunner._apply_async_token_substitution.__get__(
+            self.runner)
+
+        input_ids = np.array([1, 2, 3, 4, 5, 6, 7, 8])
+        next_tokens_in_tpu = np.array([100, 200, 300])
+        token_in_tpu_cur_input_indices = np.array([2, 5])
+        token_in_tpu_pre_next_tokens_indices = np.array([0, 1])
+
+        # Mock the device_array calls to return their inputs
+        def device_array_side_effect(mesh, tensor, sharding=None):
+            return tensor
+
+        mock_device_array.side_effect = device_array_side_effect
+
+        # Setup _pre_async_results
+        self.runner._pre_async_results = MagicMock()
+        self.runner._pre_async_results.next_tokens = next_tokens_in_tpu
+
+        # Use a non-mock class name for mesh so NamedSharding is instantiated
+        class RealMeshStub:
+            pass
+
+        fake_mesh = RealMeshStub()
+        self.runner.mesh = fake_mesh
+        self.runner.maybe_forbid_compile = nullcontext()
+
+        # Mock the substitute function
+        mock_substitute_fn = MagicMock(
+            return_value=np.array([1, 2, 100, 4, 5, 200, 7, 8]))
+        self.runner._substitute_placeholder_token_fn = mock_substitute_fn
+
+        # 1. Test Non-Speculative path (self.speculative_config is None)
+        self.runner.speculative_config = None
+        mock_named_sharding.return_value = "non_spec_sharding"
+
+        _ = self.runner._apply_async_token_substitution(
+            input_ids, next_tokens_in_tpu, token_in_tpu_cur_input_indices,
+            token_in_tpu_pre_next_tokens_indices)
+
+        # Verify device_array was called on next_tokens_in_tpu with correct non-speculative sharding
+        found_call = False
+        for args, kwargs in mock_device_array.call_args_list:
+            if len(args) >= 2 and np.array_equal(
+                    args[1], next_tokens_in_tpu) and kwargs.get(
+                        'sharding') == "non_spec_sharding":
+                found_call = True
+                break
+        assert found_call, "Could not find expected device_array call in non-speculative path"
+
+        # 2. Test Speculative path (self.speculative_config is not None)
+        self.runner.speculative_config = MagicMock()
+        mock_device_array.reset_mock()
+        mock_named_sharding.return_value = "spec_sharding"
+
+        _ = self.runner._apply_async_token_substitution(
+            input_ids, next_tokens_in_tpu, token_in_tpu_cur_input_indices,
+            token_in_tpu_pre_next_tokens_indices)
+
+        # Verify device_array was called on next_tokens_in_tpu with correct speculative sharding
+        found_call = False
+        for args, kwargs in mock_device_array.call_args_list:
+            if len(args) >= 2 and np.array_equal(
+                    args[1], next_tokens_in_tpu) and kwargs.get(
+                        'sharding') == "spec_sharding":
+                found_call = True
+                break
+        assert found_call, "Could not find expected device_array call in speculative path"
 
     @patch('jax.device_put', side_effect=lambda x, y: x)
     @patch('tpu_inference.runner.tpu_runner.NamedSharding')
@@ -1285,6 +1366,7 @@ class TestSamplingMetadataPassthrough:
 
         runner = MagicMock()
         runner.dp_size = 2
+        runner.vllm_config.sharding_config.prefill_cp_size = 1
         runner.max_num_reqs = 8
         runner.max_num_blocks_per_req = 8
         runner.speculative_config = None

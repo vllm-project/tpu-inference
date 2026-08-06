@@ -22,7 +22,8 @@ from jax.sharding import Mesh
 
 from tpu_inference.layers.common.attention_interface import (
     attention, mla_attention, sharded_ragged_paged_attention)
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh
 
@@ -113,6 +114,12 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
     )
+    shared_attention_metadata = SharedAttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+    )
 
     # 2. Act
     final_kv_cache, output = attention(
@@ -124,6 +131,7 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         mesh=mesh,
         head_dim_original=head_dim,
         sinks=sinks,
+        shared_attention_metadata=shared_attention_metadata,
     )
 
     # 3. Assert
@@ -489,4 +497,5 @@ def test_mla_attention(monkeypatch, mesh):
     _, kernel_kwargs = mock_mla_kernel.call_args
     assert kernel_kwargs["num_kv_pages_per_block"] == (3, 1, 1)
     assert kernel_kwargs["num_queries_per_block"] == (1, 16, 16)
+    assert kernel_kwargs["mixed_q_split"] == 1
     assert kernel_kwargs["sm_scale"] == 0.1

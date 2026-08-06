@@ -25,7 +25,13 @@ def causal_conv1d(
     conv_bias: jax.Array | None,  # [dim_size]
     cfg: config.GDNConfig,
 ) -> tuple[jax.Array, jax.Array]:
-    """Perform causal Conv1D. Returns Conv1D output and convolution states."""
+    """Perform causal Conv1D. Returns Conv1D output and convolution states.
+
+    States are [seq, window_size, prev_kernel_size, q, dim_size]: checkpoint
+    w holds the last prev_kernel_size inputs ending at token
+    `chunk_size - window_size + w`, clamped to the last real token, i.e. the
+    state a sequence resuming right after that token must start from.
+    """
 
     assert lhs.ndim == 4
 
@@ -51,16 +57,21 @@ def causal_conv1d(
     # kernel iterate each rows and perform masking to fetch correct values.
     # NOTE: lhs[:, : prev_kernel_size] can be skipped since they were loaded from
     # previous conv states.
-    new_conv_state = lhs[:, 1:cfg.kernel_size]
     real_sizes = real_sizes.reshape(-1, 1, 1, 1)
-    # NOTE: Even though for loop is invoked twice, since they are static loops,
-    # compiler will perform loop fusion.
-    for c_idx in range(2, cfg.chunk_size + 1):
-        row_end = c_idx + cfg.prev_kernel_size
-        new_conv_state = jnp.where(
-            c_idx == real_sizes,
-            lhs[:, c_idx:row_end],
-            new_conv_state,
-        )
+    state_list = []
+    # NOTE: Even though for loop is invoked multiple times, since they are
+    # static loops, compiler will perform loop fusion.
+    for w_idx in range(cfg.window_size):
+        last_row = 1 + cfg.chunk_size - cfg.window_size + w_idx
+        # Checkpoint of sequences whose last real token is at or past this
+        # window position; shorter ones are picked by the masking loop below.
+        new_conv_state = lhs[:, last_row:last_row + cfg.prev_kernel_size]
+        for c_idx in range(1, last_row):
+            new_conv_state = jnp.where(
+                c_idx == real_sizes,
+                lhs[:, c_idx:c_idx + cfg.prev_kernel_size],
+                new_conv_state,
+            )
+        state_list.append(new_conv_state)
 
-    return jnp.stack(out_list, axis=1), new_conv_state
+    return jnp.stack(out_list, axis=1), jnp.stack(state_list, axis=1)
