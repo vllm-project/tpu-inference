@@ -274,13 +274,29 @@ class TpuPlatform(Platform):
             )
 
         if vllm_config.model_config and vllm_config.model_config.use_mla:
-            if not envs.NEW_MODEL_DESIGN or not vllm_config.additional_config.get(
-                    "sharding", {}).get("sharding_strategy", {}).get(
-                        "enable_dp_attention", False):
+            sharding_strategy = vllm_config.additional_config.get(
+                "sharding", {}).get("sharding_strategy", {})
+            # DP attention is the validated default for MLA models, but very
+            # large MoE+MLA models may not fit it: every device spent on an
+            # attention-DP shard holds no expert weights, so the
+            # expert-parallel x tensor-parallel weight capacity shrinks and
+            # can exceed per-device HBM in every dp-attention layout. An
+            # EXPLICIT `enable_dp_attention: false` in the user's config is
+            # therefore honored as an opt-out; an absent key still raises so
+            # default behavior is unchanged.
+            if (not envs.NEW_MODEL_DESIGN
+                    or "enable_dp_attention" not in sharding_strategy):
                 raise ValueError(
                     "MLA models require both the NEW_MODEL_DESIGN=1 environment "
                     "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
                 )
+            if not sharding_strategy["enable_dp_attention"]:
+                logger.warning(
+                    "[platform] Serving an MLA model WITHOUT DP attention "
+                    "because additional_config sharding.sharding_strategy."
+                    "enable_dp_attention is explicitly set to false. This is "
+                    "an explicit user opt-out from the recommended MLA "
+                    "configuration; attention will not be data-parallel.")
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
