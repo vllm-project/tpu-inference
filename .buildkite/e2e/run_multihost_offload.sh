@@ -15,7 +15,9 @@ readonly CHIPS_PER_HOST=4
 readonly CORES_PER_CHIP=2
 
 SSH_USER="${SSH_USER:-$(whoami)}"
-HOST_HF_HOME="${HOST_HF_HOME:-/mnt/disks/persist/models}"
+# Use a writable local cache by default. CI jobs with a persistent model disk
+# can still set HOST_HF_HOME explicitly.
+HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home}"
 LOG_DIR="${LOG_DIR:-${HOME}/logs}"
 MODEL="${MODEL:-Qwen/Qwen3-30B-A3B}"
 INPUT_LEN="${INPUT_LEN:-128}"
@@ -236,7 +238,8 @@ sleep "${HEAD_STARTUP_WAIT_SECONDS:-60}"
 IFS=',' read -r -a worker_ips <<< "${WORKER_IPS}"
 for worker_ip in "${worker_ips[@]}"; do
   [[ -n "${worker_ip}" ]] || continue
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost"
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
+    "mkdir -p ~/tpu-inference/scripts/multihost $(printf '%q' "${HOST_HF_HOME}")"
   base64 < "${CLUSTER_SCRIPT}" | \
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
       "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
