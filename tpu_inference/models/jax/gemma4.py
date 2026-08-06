@@ -864,7 +864,8 @@ class Gemma4Model(JaxModule):
             self.per_layer_projection_scale = 0.0
 
         spec_config = getattr(vllm_config, "speculative_config", None)
-        decode_query_size = (spec_config.num_speculative_tokens + 1) if spec_config else 1
+        decode_query_size = (spec_config.num_speculative_tokens +
+                             1) if spec_config else 1
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,

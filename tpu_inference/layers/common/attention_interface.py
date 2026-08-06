@@ -485,7 +485,7 @@ def attention(
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
     shared_attention_metadata: SharedAttentionMetadata | None = None,
-    decode_query_size:int = 1,
+    decode_query_size: int = 1,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
