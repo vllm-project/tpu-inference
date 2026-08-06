@@ -222,6 +222,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        non_causal_multi_token_decode: bool = False,
         allow_short_prefill_indexer_scoring_skip: bool = False,
     ) -> None:
         torch.nn.Module.__init__(self)
@@ -246,6 +247,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
+        self.g_proj = getattr(mla_modules, "g_proj", None)
         self.skip_topk = skip_topk
 
         if self.indexer is not None and not self.skip_topk:
@@ -267,6 +269,7 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
 
         self.prefix = prefix
@@ -317,9 +320,8 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         if self.rotary_emb is not None:
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
-        if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(hidden_states, q_c, positions,
-                                         self.indexer_rope_emb)
+        if self.indexer and self.is_sparse and not self.skip_topk:
+            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q_nope *= llama_4_scaling
@@ -332,5 +334,8 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim),
         )
+
+        if self.g_proj is not None:
+            attn_out = attn_out * self.g_proj(hidden_states)[0].sigmoid()
 
         return self.o_proj(attn_out)[0]
