@@ -7,7 +7,8 @@
     "MODELTAG": "NEW",
     "EXPECTED_ETEL": 43200000,
     "USE_MOE_EP_KERNEL": 0,
-    "MODEL_IMPL_TYPE": "vllm"
+    "MODEL_IMPL_TYPE": "vllm",
+    "SERVER_WAIT_MINS": 1
   },
   "benchmark_cases": [
     {
