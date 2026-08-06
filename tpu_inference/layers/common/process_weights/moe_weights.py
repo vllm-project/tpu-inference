@@ -249,6 +249,11 @@ def process_w13_for_gmm(tensor,
 
     # Apply padding
     padded_w1 = _pad_tensor(w1)
+    # Non-gated MoE (is_act_and_mul=False, e.g. Nemotron-H ReLU²): w13 holds only
+    # w1 (up projection), so the w3 (gate) half is empty. Return the padded w1
+    # alone — there is no gate half to pad, concatenate, or reorder.
+    if w3.shape[-1] == 0:
+        return padded_w1
     padded_w3 = _pad_tensor(w3)
 
     logger.info(f"{name}_w1 shape after padding: {padded_w1.shape}")
