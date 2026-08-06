@@ -25,6 +25,13 @@ from jax.experimental.pallas import tpu as pltpu
 
 # Util.
 
+# Contracting-dimension step the lhs is quantized in. Input quantization
+# reads every element of a block to compute its scale, which is memory
+# intensive, so the block is small enough to keep that overhead down and
+# large enough to keep the per-block compute overhead down. The k loop of
+# the quantized matmul walks in this step.
+LHS_QUANT_BLOCK_SIZE = 512
+
 
 def swigluoai(gate: jax.Array,
               up: jax.Array,
@@ -1157,6 +1164,7 @@ def make_gmm_configs(
         block_size = dims.size_k // num_blocks
     else:
         has_scale = False
+        num_blocks = 1
         rhs_quant_dtype = None
         block_size = dims.size_k
 
@@ -1187,13 +1195,29 @@ def make_gmm_configs(
 
     lhs_cfgs = InputConfigs(
         quant_dtype=lhs_q_dtype,
-        # Input quantization involves reading all elements in a block to compute
-        # scale value. Since this operation is very memory intensive, we use a
-        # block size that is small enough to minimize memory overhead but large
-        # enough to minimize compute overhead of quantization.
-        quant_block_size=512,
+        quant_block_size=LHS_QUANT_BLOCK_SIZE,
         dtype=lhs.dtype,
     )
+
+    # The quantized-lhs matmul walks the contracting dimension in lhs
+    # quantization blocks but reads the rhs scale as start_k // rhs_block,
+    # so an rhs block that is not a whole number of lhs blocks has scales
+    # that are never read: with an lhs block of 512 and an rhs block of
+    # 256, the matmul applies the scale of every second rhs block and
+    # drops the other. The output is finite, correctly shaped and wrong,
+    # so refuse the combination rather than compute it. The unquantized
+    # matmul beside it walks in rhs blocks and reads every scale, which is
+    # why this asks whether the lhs is quantized and not only whether the
+    # scale is applied after the matmul.
+    if (lhs_cfgs.should_quantize and num_blocks > 1
+            and block_size % LHS_QUANT_BLOCK_SIZE != 0):
+        raise ValueError(
+            f"rhs scale block size {block_size} ({num_blocks} blocks "
+            f"over size_k {dims.size_k}) must be a multiple of the lhs "
+            f"quantization block size ({LHS_QUANT_BLOCK_SIZE}) when the "
+            "lhs is quantized; the k loop would otherwise skip scale "
+            "blocks. Pass maybe_quantize_lhs=False to run this shape on "
+            "the unquantized path")
 
     if out_dtype is None:
         out_dtype = lhs.dtype

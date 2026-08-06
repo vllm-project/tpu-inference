@@ -22,6 +22,10 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
+from tpu_inference.kernels.megablox.gmm_fused import (GMM_FUSED_BUCKET_BASE,
+                                                      gmm_fused)
+from tpu_inference.kernels.megablox.gmm_fused import \
+    unsupported_reason as gmm_fused_unsupported_reason
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
@@ -108,6 +112,11 @@ def gmm_wrapper(lhs,
                 group_offset,
                 fuse_act=None,
                 preferred_element_type=None):
+    """One grouped matmul over this shard's slice of the experts.
+
+    zero_initialize=False: output rows outside the shard's expert window
+    are left unwritten, so consumers must read in-window rows only.
+    """
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -120,6 +129,23 @@ def gmm_wrapper(lhs,
         preferred_element_type=preferred_element_type,
     )
     return gmm_res
+
+
+def down_bias_added_once(w2_bias: jax.Array | None,
+                         parallelism: Literal["tp", "ep"]):
+    """The down-projection bias, held by one shard only.
+
+    Under tensor parallelism w2 is split along its contraction and every
+    shard's partial result is summed, so a bias each shard held would be
+    added once per shard. Zeroing it everywhere but the first leaves it
+    added exactly once. Under expert parallelism the bias is already split
+    on the leading expert axis, so every row's bias lives on one shard and
+    nothing has to be zeroed.
+    """
+    if parallelism != "tp" or w2_bias is None:
+        return w2_bias
+    shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
+    return jnp.where(shard_id == 0, w2_bias, 0)
 
 
 def valid_rows_mask(batch_size: int, group_sizes: jax.Array,
@@ -182,31 +208,80 @@ def moe_gmm_local(x: jax.Array,
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
+
+    The GMM1->act->GMM2 pair runs as one fused kernel (gmm_fused), keeping
+    the intermediate VMEM-resident. It matches the two-gmm_v2 pair bit for
+    bit at the fused kernel's own tiling; against the pair as this layer
+    would otherwise have called it, the same computation but not the same
+    bits. Behind USE_MOE_FUSED_GMM_KERNEL; with the flag off this layer
+    calls the same grouped matmul pair as before, and the pair itself now
+    refuses a quantized lhs whose weight scale block is not a multiple of
+    512 rather than computing a wrong result.
     """
 
     assert parallelism in ["tp", "ep"]
 
-    # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
-    gmm1_res = gmm_wrapper(
-        x,
-        w1,
-        w1_scale,
-        w1_bias,
-        group_sizes,
-        group_offset,
-        fuse_act=activation,
-        preferred_element_type=x.dtype,
-    )
+    # Both FFN programs below add this bias inside the shard, so the
+    # single-add correction has to happen before either of them is chosen.
+    w2_bias = down_bias_added_once(w2_bias, parallelism)
 
-    # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
-    # once, not applying to every shard. So we set w2_bias to 0 to all shards other than
-    # shard 0. For EP, it is not needed since bias is sharded on leading expert axis.
-    if parallelism == "tp" and w2_bias is not None:
-        shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
-        w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
-    gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
-    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset)
+    if not envs.USE_MOE_FUSED_GMM_KERNEL:
+        fuse_gmm_pair = False
+        logger.info_once(
+            "The fused MoE FFN kernel is off (USE_MOE_FUSED_GMM_KERNEL); "
+            "running the two grouped matmuls.")
+    else:
+        fuse_reason = gmm_fused_unsupported_reason(x, w1, w2, w1_scale,
+                                                   w2_scale, w1_bias, w2_bias)
+        fuse_gmm_pair = fuse_reason is None
+        if not fuse_gmm_pair:
+            logger.info_once(
+                "The fused MoE FFN kernel cannot take this layer (%s); "
+                "running the two grouped matmuls instead.", fuse_reason)
+    if fuse_gmm_pair:
+        # The intermediate is never materialized, so there is no padded mid
+        # to trim; the selector above only picks this branch for an
+        # unpadded one.
+        gmm2_res = gmm_fused(
+            lhs=x,
+            w1=w1,
+            w2=w2,
+            group_sizes=group_sizes,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            group_offset=group_offset[0],
+            fuse_act=activation,
+            # Rows outside the shard's expert window must be zeros, not
+            # uninitialized HBM: the one-hot combine contracts over all rows
+            # and 0 * NaN poisons the batch.
+            zero_initialize=True,
+            # The unconditional_pipeline=True default merges the per-tile
+            # body into one basic block, which does not finish compiling
+            # with the fp4 unpack loop. Scheduling only, so numerically
+            # identical.
+            unconditional_pipeline=False,
+            bucket_base=GMM_FUSED_BUCKET_BASE,
+        )
+        gmm1_rows = x.shape[0]
+    else:
+        # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
+        gmm1_res = gmm_wrapper(
+            x,
+            w1,
+            w1_scale,
+            w1_bias,
+            group_sizes,
+            group_offset,
+            fuse_act=activation,
+            preferred_element_type=x.dtype,
+        )
+
+        gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
+        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
+                               group_offset)
+        gmm1_rows = gmm1_res.shape[0]
 
     batch_size = gmm2_res.shape[0]
     local_group_size = w1.shape[0]
@@ -263,7 +338,7 @@ def moe_gmm_local(x: jax.Array,
 
     if local_group_size < group_sizes.size:
         mask = valid_rows_mask(
-            gmm1_res.shape[0],
+            gmm1_rows,
             group_sizes,
             group_offset,
             group_offset + local_group_size,
@@ -445,6 +520,12 @@ def expert_parallel_gmm(
     ep_data_p_spec = P(ShardingAxisName.EXPERT_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
     num_experts = w1.shape[0]
+    if num_experts % ep_size != 0:
+        raise ValueError(
+            f"expert count {num_experts} is not divisible by the "
+            f"expert-parallel width {ep_size}; each shard owns "
+            "num_experts // ep experts and every expert has to land on "
+            "exactly one shard")
     num_experts_per_shard = num_experts // ep_size
     group_offset = jnp.arange(0, num_experts, num_experts_per_shard)
 

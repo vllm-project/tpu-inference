@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     TPU_MESH_SORT_BY_COORDS: bool = False
     USE_MOE_FUSED_EP_KERNEL: bool = False
     MOE_FUSED_EP_KERNEL_MIN_TOKENS: int = 1024
+    USE_MOE_FUSED_GMM_KERNEL: bool = False
     LOGITS_ALL_GATHER_CONSERVATIVE: bool = True
 
 
@@ -639,6 +640,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Use the fused MoE feed-forward kernel, both grouped matmuls and the
+    # activation as one program, where it supports the shape. Off, the
+    # grouped matmul pair runs unchanged.
+    "USE_MOE_FUSED_GMM_KERNEL":
+    env_bool("USE_MOE_FUSED_GMM_KERNEL", default=False),
     # Use the fused expert-parallel kernel for MoE. On, a model whose layers
     # it cannot take is an error at build time. Distinct from
     # USE_MOE_EP_KERNEL, which selects a different expert-parallel program.
