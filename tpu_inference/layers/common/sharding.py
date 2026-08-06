@@ -236,7 +236,17 @@ class ShardingConfigManager:
                 f"tensor_parallelism ({tensor_parallelism}) must be divisible by "
                 f"decode_context_parallelism ({decode_context_parallelism})")
         # DCP reused TP axis
+        user_tensor_parallelism = tensor_parallelism
         tensor_parallelism = tensor_parallelism // decode_context_parallelism
+        if decode_context_parallelism > 1:
+            # Used in error messages so users can trace the effective TP back
+            # to the value they configured.
+            tp_origin_note = (
+                f" (user-specified tensor_parallelism="
+                f"{user_tensor_parallelism} divided by "
+                f"decode_context_parallelism={decode_context_parallelism})")
+        else:
+            tp_origin_note = ""
 
         if enable_dp_attention:
             # Replicate attention layer when num_kv_heads < TP
@@ -270,8 +280,23 @@ class ShardingConfigManager:
                         num_kv_heads_per_device_in_kv_cache), 1)
                 tensor_parallelism = tensor_parallelism // attn_dp
             else:
+                if attn_dp_size <= 0:
+                    raise ValueError(
+                        f"[sharding] invalid sharding_strategy: "
+                        f"attn_dp_size={attn_dp_size} must be a positive "
+                        f"integer. Remove attn_dp_size to derive it "
+                        f"automatically, or set it to a positive divisor of "
+                        f"tensor_parallelism="
+                        f"{tensor_parallelism}{tp_origin_note}.")
+                if tensor_parallelism % attn_dp_size != 0:
+                    raise ValueError(
+                        f"[sharding] invalid sharding_strategy: "
+                        f"attn_dp_size={attn_dp_size} does not evenly divide "
+                        f"tensor_parallelism="
+                        f"{tensor_parallelism}{tp_origin_note}. Remove "
+                        f"attn_dp_size to derive it automatically, or set it "
+                        f"to a divisor of tensor_parallelism.")
                 attn_dp = attn_dp_size
-                assert tensor_parallelism % attn_dp_size == 0
                 tensor_parallelism = tensor_parallelism // attn_dp
 
             # If Attention DP is active or TP perfectly saturates the KV heads limit,
@@ -286,6 +311,33 @@ class ShardingConfigManager:
                 # Otherwise, shard KV heads over the expert axis.
                 # Use the remaining KV heads per device as the divisor.
                 shard_divisor = num_kv_heads_per_device_in_kv_cache // tensor_parallelism
+                if shard_divisor < 1:
+                    kv_head_capacity = int(num_kv_heads_per_device_in_kv_cache)
+                    if attn_dp_size is not None:
+                        # attn_dp_size was set explicitly in the sharding
+                        # strategy, so the fix is to adjust or drop it.
+                        advice = (
+                            f"Remove attn_dp_size to derive attn_dp "
+                            f"automatically, or choose attn_dp_size so that "
+                            f"tensor_parallelism / attn_dp_size <= "
+                            f"{kv_head_capacity}.")
+                    else:
+                        # attn_dp was auto-derived, so the fix is to adjust
+                        # tensor parallelism itself.
+                        advice = (
+                            f"Choose a tensor_parallelism that does not "
+                            f"exceed the per-device KV-head capacity "
+                            f"({kv_head_capacity}) or is an integer multiple "
+                            f"of it.")
+                    raise ValueError(
+                        f"[sharding] invalid sharding_strategy: "
+                        f"enable_dp_attention=True with attn_dp={attn_dp} and "
+                        f"tensor_parallelism={tensor_parallelism}"
+                        f"{tp_origin_note} — tensor_parallelism exceeds the "
+                        f"per-device KV-head capacity of the KV cache "
+                        f"(num_kv_heads_per_device_in_kv_cache="
+                        f"{kv_head_capacity}), so TP would duplicate KV heads "
+                        f"instead of sharding them. {advice}")
                 attn_dp_expert = max(1,
                                      int(expert_parallelism // shard_divisor))
                 expert_parallelism //= attn_dp_expert
