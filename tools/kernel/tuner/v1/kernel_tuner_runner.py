@@ -21,11 +21,6 @@ import sys
 
 from absl import app, flags
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-
 from tools.kernel.tuner.v1.common.kernel_tuner_base import RunConfig
 from tools.kernel.tuner.v1.utils import get_tpu_queue_by_version_and_cores
 
@@ -39,9 +34,10 @@ _AUTOTUNE_MODE = flags.DEFINE_bool(
     'autotune_mode', False,
     'If true, runs the kernel tuner in autotune mode, which reads tuning cases from Spanner and generates Buildkite pipeline YAML for tuning jobs. '
 )
-_KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
-                                         'example_kernel_tuner',
-                                         'Name of the kernel tuner to run, support RpaV3KernelTuner, RpaV3KernelTuner, MlaKernelTuner, BatchedRpaKernelTuner, FlashAttentionKernelTuner and an ExampleKernelTuner so far.')
+_KERNEL_TUNER_NAME = flags.DEFINE_string(
+    'kernel_tuner_name', 'example_kernel_tuner',
+    'Name of the kernel tuner to run, support RpaV3KernelTuner, RpaV3KernelTuner, MlaKernelTuner, BatchedRpaKernelTuner, FlashAttentionKernelTuner and an ExampleKernelTuner so far.'
+)
 _CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
                                    'The case set ID to use for this run.')
 _RUN_ID = flags.DEFINE_string(
@@ -279,8 +275,7 @@ def _worker_main():
                            spanner_instance_id=_SPANNER_INSTANCE_ID.value,
                            spanner_database_id=_SPANNER_DATABASE_ID.value,
                            worker_id=_WORKER_ID.value,
-                           autotune_mode=_AUTOTUNE_MODE.value,
-                           debug=_DEBUG.value)
+                           autotune_mode=_AUTOTUNE_MODE.value)
     kernel_tuner = _create_kernel_tuner(_KERNEL_TUNER_NAME.value, run_config)
     begin_case_id = _BEGIN_CASE_ID.value
     end_case_id = _END_CASE_ID.value
@@ -317,20 +312,21 @@ def main(argv):
     tpu_queue_multi = get_tpu_queue_by_version_and_cores(
         tpu_version, tpu_cores, tpu_queue_multi)
 
-    run_config = RunConfig(case_set_id=case_set_id,
-                           run_id=run_id,
-                           case_set_desc=case_set_desc,
-                           tpu_version=tpu_version,
-                           tpu_cores=tpu_cores,
-                           tpu_queue_multi=tpu_queue_multi,
-                           run_locally=_RUN_LOCALLY.value,
-                           job_priority=_JOB_PRIORITY.value,
-                           max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
-                           gcp_project_id=_GCP_PROJECT_ID.value,
-                           spanner_instance_id=_SPANNER_INSTANCE_ID.value,
-                           spanner_database_id=_SPANNER_DATABASE_ID.value,
-                           worker_id=_WORKER_ID.value,
-                           autotune_mode=_AUTOTUNE_MODE.value,
+    run_config = RunConfig(
+        case_set_id=case_set_id,
+        run_id=run_id,
+        case_set_desc=case_set_desc,
+        tpu_version=tpu_version,
+        tpu_cores=tpu_cores,
+        tpu_queue_multi=tpu_queue_multi,
+        run_locally=_RUN_LOCALLY.value,
+        job_priority=_JOB_PRIORITY.value,
+        max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
+        gcp_project_id=_GCP_PROJECT_ID.value,
+        spanner_instance_id=_SPANNER_INSTANCE_ID.value,
+        spanner_database_id=_SPANNER_DATABASE_ID.value,
+        worker_id=_WORKER_ID.value,
+        autotune_mode=_AUTOTUNE_MODE.value,
         use_bayesian_optimization=_USE_BAYESIAN_OPTIMIZATION.value,
         n_bayesian_trials=_N_BAYESIAN_TRIALS.value)
 

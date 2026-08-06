@@ -283,26 +283,11 @@ def calculate_block_sizes(
     return decode_block_sizes, prefill_block_sizes
 
 
-from datetime import datetime
-
-from tools.kernel.tuner.v1.common.tuning_case_logger import TuningCaseLogger
-
-tuning_case_logger = None
-
-
 def get_tuned_params(
         model_config: configs.ModelConfigs,
         serve_config: configs.ServingConfigs,
         vmem_limit_bytes: int | None = None,
         case: Literal['decode', 'prefill'] = 'decode') -> configs.BlockSizes:
-    global tuning_case_logger
-    if tuning_case_logger is None:
-        tuning_case_logger = TuningCaseLogger(
-            log_file_path=
-            f'/tmp/gemma-4-rpa-cases-{int(datetime.now().timestamp())}.json',
-            key_class=TuningKey,
-            params_class=TunableParams)
-
     if vmem_limit_bytes is None:
         vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
     tuning_key = TuningKey.from_config(model_config, serve_config, case=case)
@@ -310,11 +295,7 @@ def get_tuned_params(
         decode_block_sizes, prefill_block_sizes = calculate_block_sizes(
             model_config, serve_config, vmem_limit_bytes)
         block_sizes = decode_block_sizes if case == 'decode' else prefill_block_sizes
-        tuning_case_logger.log_tuning_case(
-            tuning_key, TunableParams.from_block_sizes(block_sizes))
     else:
-        tuning_case_logger.log_tuning_case(tuning_key,
-                                           tuned_params_mapping[tuning_key])
         block_sizes = tuned_params_mapping[tuning_key].to_block_sizes()
     return block_sizes
 

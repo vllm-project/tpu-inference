@@ -260,6 +260,7 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
 
     def test_gmm_v2_kernel_tuner(self):
         self._run_tuner_smoke_test("gmm_v2_kernel_tuner")
+
     def test_flash_attention_kernel_tuner(self):
         self._run_tuner_smoke_test("flash_attention_kernel_tuner")
 
