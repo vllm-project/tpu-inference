@@ -12,17 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Runs the vllm-torchtpu multi-host slice probe on the tpu7x-32 pod.
+# Multi-host bring-up for vllm-torchtpu, run from THIS pipeline on purpose.
 #
-# It lives here, not on vllm-torchtpu-dev, because that pipeline's repository
-# is git@github.com:... and the multi-host agents have no ssh key authorized
-# for it -- checkout fails before any command runs. This pipeline's repository
-# is https, which works on the same agent, so the step clones vllm-torchtpu
-# over https itself. That clone succeeding is also the evidence that pointing
-# vllm-torchtpu-dev at the https URL is all that pipeline needs.
+# vllm-torchtpu-dev cannot place a job on tpu_v7x_16_queue / tpu_v7x_32_queue
+# at all: vllm-torchtpu is a private repo, those pod agents have no credential
+# for it, and checkout fails 6/6 before any command runs (vllm-torchtpu-dev
+# builds 71-73). BUILDKITE_REPO is agent-protected, so no pipeline or build env
+# can redirect it. tpu-inference is public, so this pipeline checks out fine on
+# the very same agent.
 #
-# The probe is read-only: it never imports jax/torch_tpu and never opens a TPU
-# device, so it cannot disturb anything else on the pod.
+# Two things to establish here:
+#   1. what a pod agent can see of its slice (probe, read-only: never imports
+#      jax/torch_tpu, never opens a device -- initializing the runtime on one VM
+#      of a multi-host slice blocks until every peer joins),
+#   2. whether that agent can pull the vllm-torchtpu CI image from Artifact
+#      Registry. If it can, the whole multi-host test can run out of the image
+#      (which carries a copy of the repo) and never needs GitHub access.
 
 steps:
   - label: ":mag: tt multi-host slice probe on tpu7x-32 (read-only)"
@@ -30,6 +35,24 @@ steps:
     agents:
       queue: tpu_v7x_32_queue
     commands:
-      - rm -rf /tmp/tt-probe
-      - git clone --depth 1 --branch cuiq-tt-multihost https://github.com/vllm-project/vllm-torchtpu.git /tmp/tt-probe
-      - python3 /tmp/tt-probe/.buildkite/scripts/multihost_probe.py
+      - python3 .buildkite/scripts/multihost_probe.py
+
+  - label: ":whale: tt image pull from pod agent"
+    key: tt_image_pull
+    depends_on: tt_multihost_probe
+    allow_dependency_failure: true
+    agents:
+      queue: tpu_v7x_32_queue
+    env:
+      # A recent vllm-torchtpu-ci image; tags are the tt commit sha.
+      TT_IMAGE: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/vllm-torchtpu-ci/vllm-torchtpu:081bd9a72a258609cf98ba25a3f960209f3fba9f"
+    commands:
+      - |
+        set -x
+        gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+        docker pull "$$TT_IMAGE"
+        # The image carries a copy of the repo, so the multi-host driver
+        # scripts are available without cloning the private repo.
+        docker run --rm --entrypoint /bin/bash "$$TT_IMAGE" -c \
+          'ls -la /root/torchtpu-vllm/scripts/multihost/ && pip show vllm-torchtpu | head -3'
+        docker rmi "$$TT_IMAGE" || true
