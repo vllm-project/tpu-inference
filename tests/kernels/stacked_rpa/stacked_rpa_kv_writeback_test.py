@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tpu_inference.kernels.experimental.stacked_rpa import configs, wrapper
+from tpu_inference.kernels.experimental.stacked_rpa import wrapper
 
 NUM_KV_HEADS = 1
 NUM_Q_HEADS = 8
@@ -68,7 +68,6 @@ def _build(kv_lens, seed=0):
         actual_num_kv_heads=NUM_KV_HEADS,
         actual_head_dim=HEAD_DIM,
         kv_dtype=kv_dtype,
-        kv_layout=configs.KVLayout.SEQ_ALONG_LANE,
     )
     kv_cache = jnp.asarray(rng.standard_normal(shape) * 0.3, kv_dtype)
 
@@ -206,7 +205,6 @@ def _build_multi(q_lens, prev_lens, seed=3):
         actual_num_kv_heads=NUM_KV_HEADS,
         actual_head_dim=HEAD_DIM,
         kv_dtype=kv_dtype,
-        kv_layout=configs.KVLayout.SEQ_ALONG_LANE,
     )
     cu = np.zeros(num_seqs + 1, dtype=np.int32)
     np.cumsum(q_lens, out=cu[1:])
