@@ -1317,6 +1317,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def reinitialize_kv_cache(self) -> None:
         self.kv_cache_manager.reinitialize_kv_cache()
 
+    def reset_encoder_cache(self) -> None:
+        """Drop cached encoder outputs.
+
+        Called after a weight update so that vision embeddings computed under
+        the old weights are not reused. `EngineCore._reset_caches()` reaches
+        this through `collective_rpc("reset_encoder_cache")`, so it must exist
+        even for text-only models -- the RPC resolves by name.
+        """
+        self.encoder_cache.clear()
+
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
 

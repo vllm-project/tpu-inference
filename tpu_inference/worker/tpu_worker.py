@@ -776,6 +776,30 @@ class TPUWorker(WorkerBase):
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
 
+    def reset_encoder_cache(self) -> None:
+        """Drop cached encoder outputs on this worker.
+
+        vLLM defines this on `gpu_worker.Worker` rather than `WorkerBase`, so
+        `TPUWorker` inherits nothing. `EngineCore._reset_caches()` -- reached by
+        every `pause_generation(clear_cache=True)` and every `sleep(level>=1)`
+        -- calls `collective_rpc("reset_encoder_cache")`, which resolves by
+        name and would otherwise raise AttributeError on TPU.
+        """
+        self.model_runner.reset_encoder_cache()
+
+    def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU: there is no analogue of "
+            "CUDA's virtual-memory allocator for offloading weights. Use "
+            "`pause_generation()` to stop scheduling (equivalent to sleep "
+            "level 0), and the weight-update session "
+            "(`start_weight_update`/`finish_weight_update`) to release and "
+            "restore KV cache memory.")
+
+    def wake_up(self, tags: list[str] | None = None) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU; see TPUWorker.sleep.")
+
     def add_lora(self, lora_request: Any) -> bool:
         return self.model_runner.add_lora(lora_request)
 

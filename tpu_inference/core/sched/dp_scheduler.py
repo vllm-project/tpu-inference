@@ -25,7 +25,7 @@ from enum import Enum
 from multiprocessing import Process
 from multiprocessing.connection import Connection, wait
 from time import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import cloudpickle
 import numpy as np
@@ -74,6 +74,17 @@ class SchedulerCommand(Enum):
     SET_PAUSE_STATE = "set_pause_state"
     GET_PAUSE_STATE = "get_pause_state"
     SHUTDOWN = "shutdown"
+
+
+class FinishedRequestInfo(NamedTuple):
+    """The part of a finished `Request` that has to cross the DP boundary.
+
+    `EngineCoreProc._send_abort_outputs` reads exactly these two attributes, so
+    this is a drop-in stand-in for `Request` there without pickling the whole
+    object back from a rank scheduler process.
+    """
+    request_id: str
+    client_index: int
 
 
 class SchedulerWorkerError(Exception):
@@ -203,8 +214,14 @@ def _scheduler_worker_process(
 
                 case SchedulerCommand.FINISH_REQUESTS:
                     request_ids, finished_status = data
-                    scheduler.finish_requests(request_ids, finished_status)
-                    _send_result(None)  # Signal completion
+                    finished = scheduler.finish_requests(
+                        request_ids, finished_status)
+                    # Return the request ids rather than the Request objects:
+                    # the caller only needs `request_id` and `client_index` to
+                    # build abort outputs, and Request is not cheap (or always
+                    # safe) to send back over the command channel.
+                    _send_result([(r.request_id, r.client_index)
+                                  for r in (finished or [])])
 
                 case SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
                     draft_token_ids = data
@@ -1300,8 +1317,21 @@ class DPScheduler(SchedulerInterface):
         for req_id in finished_req_ids:
             self.assigned_dp_rank.pop(req_id, None)
 
-    def finish_requests(self, request_ids, finished_status) -> None:
-        """Forward request finish signals to the appropriate DP rank schedulers."""
+    def finish_requests(self, request_ids,
+                        finished_status) -> List[FinishedRequestInfo]:
+        """Forward request finish signals to the appropriate DP rank schedulers.
+
+        Returns the requests that were actually finished by this call. vLLM's
+        `Scheduler.finish_requests` returns `list[Request]`, and
+        `EngineCoreProc.pause_scheduler` relies on it: it feeds the result to
+        `_send_abort_outputs`, which is what tells each client its request was
+        aborted. Returning nothing here makes `pause_generation(mode="abort")`
+        hang every caller under DP.
+
+        The per-rank schedulers live in separate processes, so we return
+        `FinishedRequestInfo` rather than pickling whole `Request` objects
+        back -- `_send_abort_outputs` only reads `request_id`/`client_index`.
+        """
         if isinstance(request_ids, str):
             request_ids = [request_ids]
         elif request_ids is None:
@@ -1309,13 +1339,20 @@ class DPScheduler(SchedulerInterface):
                 r.request_id for r in self._pending_new_requests
             ]
 
-        # If any request is still held in the pending queue, drop it.
+        # If any request is still held in the pending queue, drop it. Those
+        # never reached a rank scheduler, so report them as finished here --
+        # nobody else will.
+        finished: List[FinishedRequestInfo] = []
         if self._pending_new_requests:
             request_id_set = set(request_ids)
-            self._pending_new_requests = [
-                r for r in self._pending_new_requests
-                if r.request_id not in request_id_set
-            ]
+            kept = []
+            for r in self._pending_new_requests:
+                if r.request_id in request_id_set:
+                    finished.append(
+                        FinishedRequestInfo(r.request_id, r.client_index))
+                else:
+                    kept.append(r)
+            self._pending_new_requests = kept
 
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
@@ -1329,7 +1366,12 @@ class DPScheduler(SchedulerInterface):
         for rank, req_ids in rank_request_ids.items():
             self._send_command(rank, SchedulerCommand.FINISH_REQUESTS,
                                (req_ids, finished_status))
-            self._get_result(rank, SchedulerCommand.FINISH_REQUESTS)
+        for rank in rank_request_ids:
+            finished.extend(
+                FinishedRequestInfo(req_id, client_index)
+                for req_id, client_index in self._get_result(
+                    rank, SchedulerCommand.FINISH_REQUESTS))
+        return finished
 
     def get_num_unfinished_requests(self) -> int:
         """Get total number of unfinished requests across all DP ranks.
