@@ -75,6 +75,36 @@ if [[ ! -f ~/.ssh/id_rsa ]]; then
   ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa -q
 fi
 SSH_OPTS=(-o StrictHostKeyChecking=no -o BatchMode=yes -o UserKnownHostsFile=/dev/null -o IPQoS=none -i ~/.ssh/id_rsa)
+CLUSTER_LAUNCH_PIDS=()
+
+# run_cluster.sh blocks for the lifetime of its Ray node.  Start each launcher
+# in its own session so cleanup can stop its whole process group (including an
+# SSH child) instead of leaving a detached remote command behind.
+start_cluster_launcher() {
+  setsid "$@" &
+  CLUSTER_LAUNCH_PIDS+=("$!")
+}
+
+stop_cluster_launcher() {
+  local pid=$1
+
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM -- "-$pid" 2>/dev/null || true
+
+  # A remote SSH command can keep its parent alive after SIGTERM.  Escalate
+  # after a short grace period so CI cleanup cannot consume the step timeout.
+  for _ in {1..10}; do
+    kill -0 "$pid" 2>/dev/null || {
+      wait "$pid" 2>/dev/null || true
+      return 0
+    }
+    sleep 1
+  done
+
+  echo "Launcher process group ${pid} did not stop after SIGTERM; sending SIGKILL."
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
 
 cleanup() {
   local worker_ip
@@ -93,6 +123,13 @@ cleanup() {
   fi
   docker stop node >/dev/null 2>&1 || true
   docker rm -f node >/dev/null 2>&1 || true
+
+  # Do this last: stopping the containers normally lets the launchers return,
+  # while the bounded process-group cleanup covers a stuck SSH/log stream.
+  local pid
+  for pid in "${CLUSTER_LAUNCH_PIDS[@]}"; do
+    stop_cluster_launcher "$pid"
+  done
 }
 trap cleanup EXIT
 
@@ -159,13 +196,13 @@ setup_environment "${IMAGE_NAME}" true
 DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 
 cleanup
-bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
+start_cluster_launcher bash "${TOP_DIR}/scripts/multihost/run_cluster.sh" \
   "${DOCKER_IMAGE}" "${HEAD_INTERNAL_IP}" --head "${HOST_HF_HOME}" \
   -e HF_TOKEN="${HF_TOKEN:-}" \
   -e TPU_MULTIHOST_BACKEND=ray \
   -e JAX_PLATFORMS='' \
   -e TPU_BACKEND_TYPE=jax \
-  -e MODEL_IMPL_TYPE=vllm &
+  -e MODEL_IMPL_TYPE=vllm
 sleep 60
 
 IFS=',' read -r -a worker_ips <<< "${WORKER_IPS}"
@@ -175,8 +212,8 @@ for worker_ip in "${worker_ips[@]}"; do
   base64 < "${TOP_DIR}/scripts/multihost/run_cluster.sh" | \
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "base64 -d > ~/tpu-inference/scripts/multihost/run_cluster.sh"
   # shellcheck disable=SC2029
-  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
-    "bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' -e HF_TOKEN='${HF_TOKEN:-}' -e TPU_MULTIHOST_BACKEND=ray -e JAX_PLATFORMS='' -e TPU_BACKEND_TYPE=jax -e MODEL_IMPL_TYPE=vllm" &
+  start_cluster_launcher ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
+    "bash ~/tpu-inference/scripts/multihost/run_cluster.sh '${DOCKER_IMAGE}' '${HEAD_INTERNAL_IP}' --worker '${HOST_HF_HOME}' -e HF_TOKEN='${HF_TOKEN:-}' -e TPU_MULTIHOST_BACKEND=ray -e JAX_PLATFORMS='' -e TPU_BACKEND_TYPE=jax -e MODEL_IMPL_TYPE=vllm"
 done
 sleep 120
 
