@@ -610,3 +610,107 @@ class TestTpuPlatform:
         with pytest.raises(ValueError, match=expected_error):
             TpuPlatform.check_and_update_config(vllm_config)
         mock_patch.assert_not_called()
+
+
+class TestAdditionalEnvVars:
+    """The roster the Ray executor copies to each worker.
+
+    The worker process builds the model, so a setting the driver reads and
+    the worker does not is a setting that does nothing where it matters.
+    """
+
+    def test_fused_ep_moe_settings_reach_the_worker(self):
+        from tpu_inference import envs
+
+        family = {
+            name
+            for name in envs.environment_variables if "MOE_FUSED_EP" in name
+        }
+        assert family, "the fused EP MoE settings have been renamed again"
+        missing = sorted(family - set(TpuPlatform.additional_env_vars))
+        assert not missing, (
+            f"{missing} are read where the model is built but are not in "
+            "TpuPlatform.additional_env_vars, so the Ray executor does not "
+            "copy them to its workers: the driver would see the switch and "
+            "every worker would quietly run the general MoE path")
+
+    def test_every_moe_setting_read_at_build_time_reaches_the_worker(self):
+        """The check above catches a third setting only if its name happens
+        to contain MOE_FUSED_EP, and this family already carries both word
+        orders -- the settings say MOE_FUSED_EP, the kernel entry point says
+        fused_ep_moe_v2, the doc page is fused_ep_moe.md -- so the next one
+        has a real chance of landing outside the substring and the test
+        would pass while the switch's sibling never reached a worker.
+
+        This asks the question the substring was standing in for: every
+        setting these two modules read is read where the model is BUILT,
+        which is the worker, so every one of them has to be on the roster.
+        """
+        import inspect
+        import re
+
+        from tpu_inference import envs
+        from tpu_inference.layers.common import moe as moe_module
+        from tpu_inference.layers.common import moe_fused_ep
+
+        read = set()
+        for module in (moe_module, moe_fused_ep):
+            source = inspect.getsource(module)
+            read |= set(re.findall(r"\benvs\.([A-Z][A-Z0-9_]*)", source))
+        # The backend selectors are read through getattr off this table, so
+        # a regex over the source cannot see them.
+        read |= {name for name, _ in moe_module._BACKEND_SELECTED_BY}
+        # Only names this repository declares: a VLLM_-prefixed setting is
+        # forwarded by vLLM's own executor rather than by this roster.
+        read = {
+            name
+            for name in read if name in envs.environment_variables
+            and not name.startswith("VLLM_")
+        }
+        assert read, "the MoE modules read no settings; the scan is broken"
+        missing = sorted(read - set(TpuPlatform.additional_env_vars))
+        assert not missing, (
+            f"{missing} are read where the model is built but are not in "
+            "TpuPlatform.additional_env_vars, so a Ray executor does not "
+            "copy them to its workers. The driver would answer on them and "
+            "every worker would build against an environment that does not "
+            "carry them -- which for a refusal means the run silently "
+            "becomes the thing the refusal exists to prevent")
+
+    # The settings each feature reads in the worker process, named one at
+    # a time. The scan above answers the MoE family by reading its
+    # modules; a family whose setting is read in a module full of other
+    # settings has no such scan to run, so both are answered here the same
+    # way. A name that lands outside any prefix or substring is still
+    # covered, because nothing here is matched on a pattern.
+    WORKER_READ_SETTINGS = {
+        "fused expert-parallel MoE": (
+            "USE_MOE_FUSED_EP_KERNEL",
+            "MOE_FUSED_EP_KERNEL_MIN_TOKENS",
+        ),
+        "gated delta net state caches": ("GDN_BF16_RECURRENT_STATE", ),
+    }
+
+    def test_worker_read_settings_reach_the_worker(self):
+        """Both families at once, so neither can be added without the other.
+
+        The worker process builds the model and allocates the KV caches,
+        so a setting the driver reads and the worker does not is a
+        setting that does nothing where it matters.
+        """
+        from tpu_inference import envs
+
+        roster = set(TpuPlatform.additional_env_vars)
+        declared = set(envs.environment_variables)
+        for family, settings in self.WORKER_READ_SETTINGS.items():
+            unknown = sorted(set(settings) - declared)
+            assert not unknown, (
+                f"{unknown} are not settings any more, so this list names "
+                f"something the {family} roster cannot be checked against")
+            missing = sorted(set(settings) - roster)
+            assert not missing, (
+                f"{missing} are read in the worker process for {family} but "
+                "are not in TpuPlatform.additional_env_vars, so the Ray "
+                "executor does not copy them to its workers: the driver "
+                "would answer on the setting and every worker would run as "
+                "if it were unset")

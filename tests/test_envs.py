@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the tpu-inference project
 
+import sys
+
 import pytest
 
 import tpu_inference.envs as envs
@@ -8,6 +10,12 @@ from tpu_inference.envs import enable_envs_cache, environment_variables
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
+    # The test reads each of these before setting it, so it is asserting the
+    # default rather than whatever the shell running pytest happened to
+    # export. JAX_PLATFORMS in particular is set by every host-only run.
+    for name in ("JAX_PLATFORMS", "PHASED_PROFILING_DIR", "TPU_NAME",
+                 "TPU_ACCELERATOR_TYPE"):
+        monkeypatch.delenv(name, raising=False)
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")
@@ -322,3 +330,237 @@ def test_cache_preserves_values_across_env_changes(
 
     # Now it should reflect the new value
     assert envs.JAX_PLATFORMS == "cpu"
+
+
+def test_gdn_bf16_recurrent_state_env_var(monkeypatch: pytest.MonkeyPatch):
+    """Read unset first, so the default is the reader's rather than
+    whatever the shell running pytest happened to export.
+
+    A value the reader cannot parse is refused by name, which env_bool
+    does for every setting and is covered above.
+    """
+    monkeypatch.delenv("GDN_BF16_STATE", raising=False)
+    monkeypatch.delenv("GDN_BF16_RECURRENT_STATE", raising=False)
+    assert envs.GDN_BF16_RECURRENT_STATE is False
+    monkeypatch.setenv("GDN_BF16_RECURRENT_STATE", "1")
+    assert envs.GDN_BF16_RECURRENT_STATE is True
+    monkeypatch.setenv("GDN_BF16_RECURRENT_STATE", "0")
+    assert envs.GDN_BF16_RECURRENT_STATE is False
+
+
+def test_retired_switch_spelling_is_refused(monkeypatch: pytest.MonkeyPatch):
+    """The old spelling of a renamed setting is an error, not a no-op."""
+    monkeypatch.delenv("USE_MOE_FUSED_EP_KERNEL", raising=False)
+    monkeypatch.setenv("MOE_FUSED_EP", "1")
+    with pytest.raises(ValueError, match="USE_MOE_FUSED_EP_KERNEL"):
+        envs.USE_MOE_FUSED_EP_KERNEL
+
+
+def test_retired_threshold_spelling_is_refused(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", raising=False)
+    monkeypatch.setenv("MOE_FUSED_EP_MIN_TOKENS", "2048")
+    with pytest.raises(ValueError, match="MOE_FUSED_EP_KERNEL_MIN_TOKENS"):
+        envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS
+
+
+def test_a_retired_name_turned_off_warns_and_the_boot_continues(
+        monkeypatch: pytest.MonkeyPatch, caplog):
+    """MOE_FUSED_EP=0 is the most conservative thing a deployment could have
+    written -- it pinned the feature off -- and refusing it made that the one
+    config that could not start. The values that ask for nothing warn."""
+    monkeypatch.delenv("USE_MOE_FUSED_EP_KERNEL", raising=False)
+    for off in ("0", "", "false", "False", " 0 "):
+        monkeypatch.setenv("MOE_FUSED_EP", off)
+        assert envs.USE_MOE_FUSED_EP_KERNEL is False
+
+
+def test_a_retired_name_turned_off_names_the_rename(
+        monkeypatch: pytest.MonkeyPatch):
+    """The warning has to carry the new spelling and the value that was
+    written, so the operator can find the line and rewrite it."""
+    monkeypatch.delenv("USE_MOE_FUSED_EP_KERNEL", raising=False)
+    monkeypatch.setenv("MOE_FUSED_EP", "0")
+    said = []
+
+    class _Recorder:
+
+        def warning_once(self, msg, *args):
+            said.append(msg % args)
+
+    # tpu_inference.logger the ATTRIBUTE is a Logger instance, so the module
+    # this patches has to be reached through sys.modules rather than by
+    # dotted name.
+    monkeypatch.setattr(sys.modules["tpu_inference.logger"], "init_logger",
+                        lambda name: _Recorder())
+    assert envs.USE_MOE_FUSED_EP_KERNEL is False
+    assert len(said) == 1
+    assert "USE_MOE_FUSED_EP_KERNEL" in said[0]
+    assert "MOE_FUSED_EP='0'" in said[0]
+
+
+def test_a_retired_name_asking_for_something_still_refuses(
+        monkeypatch: pytest.MonkeyPatch):
+    """The half worth keeping: a value the deployment meant to act on would
+    silently not be honoured, so the boot stops and quotes it."""
+    monkeypatch.delenv("USE_MOE_FUSED_EP_KERNEL", raising=False)
+    for asking in ("1", "true", "True", "not-a-bool"):
+        monkeypatch.setenv("MOE_FUSED_EP", asking)
+        with pytest.raises(ValueError, match="USE_MOE_FUSED_EP_KERNEL") as e:
+            envs.USE_MOE_FUSED_EP_KERNEL
+        assert repr(asking) in str(e.value)
+
+
+def test_a_retired_threshold_turned_off_warns_rather_than_refusing(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", raising=False)
+    monkeypatch.setenv("MOE_FUSED_EP_MIN_TOKENS", "")
+    assert envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS == 1024
+
+
+def test_a_retired_switch_beside_the_current_one_boots(
+        monkeypatch: pytest.MonkeyPatch):
+    """A config that has to start trees from both sides of the rename writes
+    the switch under both spellings, because a tree reads only the spelling
+    it knows. Whatever the old name carries, this tree reads the new one."""
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", "1")
+    for anything in ("1", "0", "", "true", "False", " 1 ", "not-a-bool"):
+        monkeypatch.setenv("MOE_FUSED_EP", anything)
+        assert envs.USE_MOE_FUSED_EP_KERNEL is True
+    # And the tree reads the new spelling even when the two disagree: the
+    # old one is ignored, not merged.
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", "0")
+    monkeypatch.setenv("MOE_FUSED_EP", "1")
+    assert envs.USE_MOE_FUSED_EP_KERNEL is False
+
+
+def test_a_retired_threshold_beside_the_current_one_boots(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", "2048")
+    for anything in ("2048", "1024", "0", "", "not-an-int"):
+        monkeypatch.setenv("MOE_FUSED_EP_MIN_TOKENS", anything)
+        assert envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS == 2048
+
+
+def test_the_dual_spelling_warning_names_both_spellings(
+        monkeypatch: pytest.MonkeyPatch):
+    """The operator has to be able to tell from the line which spelling ran
+    the boot and that the other one did nothing."""
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", "1")
+    monkeypatch.setenv("MOE_FUSED_EP", "1")
+    said = []
+
+    class _Recorder:
+
+        def warning_once(self, msg, *args):
+            said.append(msg % args)
+
+    monkeypatch.setattr(sys.modules["tpu_inference.logger"], "init_logger",
+                        lambda name: _Recorder())
+    assert envs.USE_MOE_FUSED_EP_KERNEL is True
+    assert len(said) == 1
+    assert "MOE_FUSED_EP='1'" in said[0]
+    assert "USE_MOE_FUSED_EP_KERNEL" in said[0]
+    assert "ignored" in said[0]
+
+
+def test_a_retired_name_beside_an_empty_current_one_still_refuses(
+        monkeypatch: pytest.MonkeyPatch):
+    """The readers below take an empty value as unset, so a switch turned on
+    under the old name with the new one blank is the silent-inert case the
+    refusal is for, not the compatibility idiom."""
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", "")
+    monkeypatch.setenv("MOE_FUSED_EP", "1")
+    with pytest.raises(ValueError, match="USE_MOE_FUSED_EP_KERNEL"):
+        envs.USE_MOE_FUSED_EP_KERNEL
+
+
+def test_the_retired_recurrent_state_spelling_is_refused(
+        monkeypatch: pytest.MonkeyPatch):
+    """GDN_BF16_STATE is the spelling every config written before the
+    rename carries, and nothing reads it now."""
+    monkeypatch.delenv("GDN_BF16_RECURRENT_STATE", raising=False)
+    monkeypatch.setenv("GDN_BF16_STATE", "1")
+    with pytest.raises(ValueError, match="GDN_BF16_RECURRENT_STATE") as e:
+        envs.GDN_BF16_RECURRENT_STATE
+    assert "GDN_BF16_STATE='1'" in str(e.value)
+
+
+def test_the_retired_recurrent_state_spelling_turned_off_boots(
+        monkeypatch: pytest.MonkeyPatch):
+    """A config that pinned the cache to float32 under the old name asked
+    for nothing it is not already getting, so it warns and continues."""
+    monkeypatch.delenv("GDN_BF16_RECURRENT_STATE", raising=False)
+    for off in ("0", "", "false", "False", " 0 "):
+        monkeypatch.setenv("GDN_BF16_STATE", off)
+        assert envs.GDN_BF16_RECURRENT_STATE is False
+
+
+def test_the_retired_recurrent_state_spelling_beside_the_current_one_boots(
+        monkeypatch: pytest.MonkeyPatch):
+    """One config often has to start trees from both sides of the rename,
+    and this tree reads the new spelling."""
+    monkeypatch.setenv("GDN_BF16_RECURRENT_STATE", "1")
+    for anything in ("1", "0", "", "true", "False", " 1 ", "not-a-bool"):
+        monkeypatch.setenv("GDN_BF16_STATE", anything)
+        assert envs.GDN_BF16_RECURRENT_STATE is True
+    monkeypatch.setenv("GDN_BF16_RECURRENT_STATE", "0")
+    monkeypatch.setenv("GDN_BF16_STATE", "1")
+    assert envs.GDN_BF16_RECURRENT_STATE is False
+
+
+def test_both_readers_of_one_feature_take_the_same_leading_sign(
+        monkeypatch: pytest.MonkeyPatch):
+    """They had opposite tolerances for one typo: the integer reader took
+    '+512' and the boolean beside it refused '+1' by name."""
+    monkeypatch.delenv("MOE_FUSED_EP", raising=False)
+    monkeypatch.setenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", "+2048")
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", "+1")
+    assert envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS == 2048
+    assert envs.USE_MOE_FUSED_EP_KERNEL is True
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", "+0")
+    assert envs.USE_MOE_FUSED_EP_KERNEL is False
+
+
+def test_a_bounds_refusal_quotes_what_was_written(
+        monkeypatch: pytest.MonkeyPatch):
+    """'+0' and '-0' both parse to 0, and a report of '=0' alone loses the
+    spelling the operator has to go and find in their config."""
+    monkeypatch.delenv("MOE_FUSED_EP_MIN_TOKENS", raising=False)
+    monkeypatch.setenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", "-0")
+    with pytest.raises(ValueError, match="'-0'"):
+        envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS
+
+
+def test_current_switch_spelling_is_unaffected(
+        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("MOE_FUSED_EP", raising=False)
+    monkeypatch.delenv("MOE_FUSED_EP_MIN_TOKENS", raising=False)
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", "1")
+    monkeypatch.setenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", "2048")
+    assert envs.USE_MOE_FUSED_EP_KERNEL is True
+    assert envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS == 2048
+
+
+def test_the_integer_reader_takes_one_spelling_of_an_integer(
+        monkeypatch: pytest.MonkeyPatch):
+    """Python's int() takes any Unicode decimal digit, underscore separators
+    and a leading sign, so a fullwidth numeral pasted out of a document
+    configured a setting with no signal that anything was unusual."""
+    for bad in ("\uff11\uff10\uff12\uff14", "\u0661\u0660\u0662\u0664",
+                "1_024", "0x400", "1.0", "1e3"):
+        monkeypatch.setenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", bad)
+        with pytest.raises(ValueError, match="Invalid integer value"):
+            envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS
+    monkeypatch.setenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", "+512")
+    assert envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS == 512
+
+
+def test_both_readers_of_one_feature_take_the_same_whitespace(
+        monkeypatch: pytest.MonkeyPatch):
+    """They had opposite tolerances for the same typo: the integer stripped
+    it and the boolean beside it hard-failed on a single trailing space."""
+    monkeypatch.setenv("MOE_FUSED_EP_KERNEL_MIN_TOKENS", " 2048 ")
+    monkeypatch.setenv("USE_MOE_FUSED_EP_KERNEL", " 1 ")
+    assert envs.MOE_FUSED_EP_KERNEL_MIN_TOKENS == 2048
+    assert envs.USE_MOE_FUSED_EP_KERNEL is True

@@ -24,7 +24,7 @@ from tpu_inference import envs
 from tpu_inference.kernels.megablox.gmm import gmm as megablox_gmm
 from tpu_inference.kernels.megablox.tuned_block_sizes import \
     round_up_to_multiple_of_128_within_limit
-from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.moe import MoEBackend, announce_moe_backend
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.logger import init_logger
 
@@ -258,6 +258,13 @@ def get_expert_parallelism(expert_axis_name: str, mesh: Mesh) -> int:
 
 # TODO(#3041): Unify with torchax `select_moe_backend_from_fused_moe_config()`
 def select_moe_backend(use_ep: bool) -> MoEBackend:
+    """Select the backend, then say so and refuse a contradiction."""
+    moe_backend = _select_moe_backend(use_ep)
+    announce_moe_backend(moe_backend)
+    return moe_backend
+
+
+def _select_moe_backend(use_ep: bool) -> MoEBackend:
     """
     Selects the MoE backend for the JAX path.
 
@@ -271,6 +278,9 @@ def select_moe_backend(use_ep: bool) -> MoEBackend:
         if use_ep:
             logger.info_once("[MoE]: Using fused MoE EP kernel")
             return MoEBackend.FUSED_MOE
+        logger.warning_once(
+            "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
+            "enabled. Falling back to gmm implementation.")
 
     if envs.USE_UNFUSED_MEGABLOCKS:
         logger.info_once(
@@ -278,9 +288,6 @@ def select_moe_backend(use_ep: bool) -> MoEBackend:
         return MoEBackend.MEGABLX_GMM
 
     if use_ep:
-        logger.warning_once(
-            "USE_MOE_EP_KERNEL=1 but expert parallelism is not "
-            "enabled. Falling back to gmm implementation.")
         logger.info_once("[MoE]: Using GMM EP kernel")
         return MoEBackend.GMM_EP
 

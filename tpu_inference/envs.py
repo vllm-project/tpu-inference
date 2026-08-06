@@ -3,6 +3,7 @@
 
 import functools
 import os
+import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -74,10 +75,14 @@ if TYPE_CHECKING:
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     SLICE_ROPE_CACHE: bool = False
+    GDN_BF16_RECURRENT_STATE: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     TPU_MESH_SORT_BY_COORDS: bool = False
+    USE_MOE_FUSED_EP_KERNEL: bool = False
+    MOE_FUSED_EP_KERNEL_MIN_TOKENS: int = 1024
+    LOGITS_ALL_GATHER_CONSERVATIVE: bool = True
 
 
 def env_with_choices(
@@ -127,9 +132,108 @@ def env_with_choices(
     return _get_validated_env
 
 
+# One spelling of a decimal integer, for env_int.
+_DECIMAL_INTEGER = re.compile(r"[+-]?[0-9]+")
+
+# Values a retired name can carry that ask for nothing. Compared after the
+# same strip and lowercase the two readers apply to a live value.
+_RETIRED_OFF_VALUES = ("", "0", "false")
+
+
+def refuse_retired_names(env_name: str, retired: list[str] | None) -> None:
+    """Answer a name this setting used to have and no longer reads.
+
+    An environment name nothing reads is inert and silent: the server boots,
+    the setting does nothing, and no log line distinguishes that from a
+    deployment that set nothing. A renamed setting leaves the old spelling in
+    circulation in every config written before the rename, so the old
+    spelling is answered by name here rather than ignored.
+
+    The first question is whether the CURRENT spelling is set too, because a
+    retired name standing beside its own successor is not a mistake. One
+    config often has to start trees from both sides of a rename, and a tree
+    reads only the spelling it knows, so the config writes the setting twice
+    -- once under each name -- and every tree it starts reads the one it has.
+    On this tree the current spelling is the one that is read and the old one
+    is ignored, which is exactly what the config intended; refusing it would
+    make the deliberate compatibility idiom the one thing that cannot boot.
+    So that case warns, names both spellings, says which one this tree reads,
+    and continues, whatever value the old name carries.
+
+    With no current spelling set, the answer depends on the VALUE, because
+    the two cases are not the same failure. A retired name carrying a value
+    the deployment meant to act on -- the switch turned on, a threshold
+    chosen -- would silently not be honoured, so that one raises and the boot
+    stops. A retired name carrying nothing, or carrying "off", asked for
+    nothing and gets nothing: refusing it costs a boot and buys no
+    correctness, and blanking a variable is the ordinary way to neutralize an
+    inherited one in a compose file or a launch script that cannot delete a
+    key. Those warn and the boot continues. The live readers beside this one
+    already treat an empty value as unset, so the empty case also brings the
+    two policies back together.
+
+    A current spelling set to an empty value is not counted as set, for the
+    same reason: the readers below take it as unset, so a deployment that
+    wrote the switch on under the old name only and left the new one blank is
+    the silent-inert hazard rather than the compatibility idiom.
+
+    The value is quoted in all three answers, so the report says what the
+    deployment thought it was setting rather than only that something was
+    set.
+    """
+    if not retired:
+        return
+    present = [(name, os.getenv(name)) for name in retired
+               if os.getenv(name) is not None]
+    if not present:
+        return
+    quoted = ", ".join(f"{name}={value!r}" for name, value in present)
+    plural = len(present) > 1
+
+    # Imported inside rather than at module scope: these are the only lines
+    # in the file that log, and they are reached only by a deployment
+    # carrying a retired name, so the import graph of an ordinary read is
+    # unchanged.
+    def warn(message: str, *args: object) -> None:
+        from tpu_inference.logger import init_logger
+        init_logger(__name__).warning_once(message, *args)
+
+    successor = os.getenv(env_name)
+    if successor is not None and successor.strip() != "":
+        warn(
+            "%s %s set beside %s=%r. A config that has to start trees from "
+            "both sides of a rename writes the setting under both spellings, "
+            "because a tree reads only the spelling it knows. This tree "
+            "reads %s, so the old %s ignored here rather than honoured, and "
+            "the boot continues. Drop the old spelling once every tree this "
+            "config starts is past the rename.", quoted,
+            "are" if plural else "is", env_name, successor, env_name,
+            "spellings are" if plural else "spelling is")
+        return
+
+    asking = [(name, value) for name, value in present
+              if value.strip().lower().removeprefix("+") not in
+              _RETIRED_OFF_VALUES]
+    if asking:
+        raise ValueError(
+            f"{', '.join(f'{n}={v!r}' for n, v in asking)} "
+            f"{'are' if len(asking) > 1 else 'is'} set, and nothing reads "
+            f"{'them' if len(asking) > 1 else 'it'} any more: this setting "
+            f"is now spelled {env_name}. Rename it, or unset it, or set "
+            f"{env_name} beside it, so the deployment says what it means.")
+    warn(
+        "%s %s set to a value that asks for nothing, and nothing reads "
+        "%s any more: this setting is now spelled %s. The boot continues "
+        "because the value turns the feature off and %s already off, but "
+        "the line is doing nothing where it is -- rename it or drop it.",
+        quoted, "are" if plural else "is", "them" if plural else "it",
+        env_name, "they are" if plural else "it is")
+
+
 def env_bool(env_name: str,
              default: bool | None = False,
-             requires: list[str] | None = None) -> Callable[[], bool | None]:
+             requires: list[str] | None = None,
+             retired: list[str] | None = None) -> Callable[[], bool | None]:
     """
     Accepts both numeric strings ("0", "1") and boolean strings
     ("true", "false", "True", "False").
@@ -139,14 +243,29 @@ def env_bool(env_name: str,
         default: Default value if not set. Pass None for a tri-state flag
             (unset -> None) that callers resolve themselves.
         requires: List of environment variables that must be set if this is True.
+        retired: Names this setting used to carry. Setting one on its own is
+            an error naming the current spelling, rather than a silent no-op;
+            setting one beside the current spelling warns and continues.
     """
 
     def _get_bool_env() -> bool | None:
+        refuse_retired_names(env_name, retired)
         value = os.getenv(env_name)
+        # The same whitespace policy the integer reader uses, so the two
+        # settings of one feature do not have opposite tolerances for the
+        # same typo.
+        if value is not None:
+            value = value.strip()
         if value is None or value == "":
             parsed_value = default
         else:
-            value_lower = value.lower()
+            # A leading plus is the same typo on both readers, and the
+            # integer reader beside this one takes it ("+512" is 512), so
+            # "+1" reads as 1 here rather than failing by name. A leading
+            # MINUS is deliberately not stripped: it is not a spelling of a
+            # boolean, and the integer reader refuses a negative on its own
+            # minimum, so the two agree on that one too.
+            value_lower = value.lower().removeprefix("+")
             if value_lower in ("true", "1"):
                 parsed_value = True
             elif value_lower in ("false", "0"):
@@ -166,6 +285,60 @@ def env_bool(env_name: str,
         return parsed_value
 
     return _get_bool_env
+
+
+def env_int(env_name: str,
+            default: int,
+            minimum: int | None = None,
+            maximum: int | None = None,
+            retired: list[str] | None = None) -> Callable[[], int]:
+    """
+    Accepts a decimal integer and reports a bad value by name.
+
+    Args:
+        env_name: Name of the environment variable
+        default: Value if unset or empty
+        minimum: Smallest accepted value, if there is one
+        maximum: Largest accepted value, if there is one
+        retired: Names this setting used to carry. Setting one on its own is
+            an error naming the current spelling, rather than a silent no-op;
+            setting one beside the current spelling warns and continues.
+    """
+
+    def _get_int_env() -> int:
+        refuse_retired_names(env_name, retired)
+        value = os.getenv(env_name)
+        if value is not None:
+            value = value.strip()
+        if value is None or value == "":
+            return default
+        # One spelling of "an integer", strictly. Python's int() takes any
+        # Unicode decimal digit, underscore separators and a leading sign,
+        # so a fullwidth or Arabic-Indic numeral pasted out of a document
+        # configures the setting with no signal that anything was unusual --
+        # while the boolean reader beside it hard-fails on a single trailing
+        # space. The two readers now agree on what a value is.
+        if not _DECIMAL_INTEGER.fullmatch(value):
+            raise ValueError(
+                f"Invalid integer value {value!r} for {env_name}. Expected "
+                "decimal digits, optionally signed.")
+        try:
+            parsed_value = int(value)
+        except ValueError:
+            raise ValueError(
+                f"Invalid integer value {value!r} for {env_name}.") from None
+        # Both bounds quote what was WRITTEN as well as what it parsed to:
+        # "+0" and "-0" both parse to 0, and a report of "=0" alone loses
+        # the spelling the operator has to go and find in their config.
+        if minimum is not None and parsed_value < minimum:
+            raise ValueError(f"{env_name}={value!r} is {parsed_value}, below "
+                             f"the smallest accepted value {minimum}.")
+        if maximum is not None and parsed_value > maximum:
+            raise ValueError(f"{env_name}={value!r} is {parsed_value}, above "
+                             f"the largest accepted value {maximum}.")
+        return parsed_value
+
+    return _get_int_env
 
 
 def env_str_list(env_name: str) -> Callable[[], list[str]]:
@@ -436,6 +609,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("SLICE_ROPE_CACHE", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    # Allocate the linear-attention (gated delta net) recurrent state cache in
+    # bfloat16 instead of float32. The kernel widens the state to float32 on
+    # load and rounds it back on writeback, so only the stored checkpoint is
+    # narrower. It names the recurrent state of a two-state mamba cache; a
+    # cache reporting any other number of states is an error where the cache
+    # is built. The convolution state cache keeps its own dtype either way.
+    "GDN_BF16_RECURRENT_STATE":
+    env_bool("GDN_BF16_RECURRENT_STATE",
+             default=False,
+             retired=["GDN_BF16_STATE"]),
     # Minimum max num of batched tokens.
     "MIN_TOKEN_BUCKET":
     lambda: int(os.getenv("MIN_TOKEN_BUCKET") or "16"),
@@ -456,6 +639,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Use the fused expert-parallel kernel for MoE. On, a model whose layers
+    # it cannot take is an error at build time. Distinct from
+    # USE_MOE_EP_KERNEL, which selects a different expert-parallel program.
+    "USE_MOE_FUSED_EP_KERNEL":
+    env_bool("USE_MOE_FUSED_EP_KERNEL",
+             default=False,
+             retired=["MOE_FUSED_EP"]),
+    # Token count at or above which a call takes that kernel; below it the
+    # general MoE path is faster, which is routing rather than a refusal.
+    "MOE_FUSED_EP_KERNEL_MIN_TOKENS":
+    env_int("MOE_FUSED_EP_KERNEL_MIN_TOKENS",
+            default=1024,
+            minimum=1,
+            maximum=1 << 20,
+            retired=["MOE_FUSED_EP_MIN_TOKENS"]),
+    # Compile the logits program with the conservative all-gather
+    # collective-matmul mode. Default on.
+    "LOGITS_ALL_GATHER_CONSERVATIVE":
+    env_bool("LOGITS_ALL_GATHER_CONSERVATIVE", default=True),
 }
 
 

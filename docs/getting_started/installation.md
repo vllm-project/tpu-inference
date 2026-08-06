@@ -122,3 +122,16 @@ print(f"jax backends: {jax.devices()}")
 # vllm platform: TPU V6E (or your specific TPU architecture)
 # jax backends: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), ...]
 ```
+
+## The vLLM This Tree Needs
+
+`tpu_inference.layers.common.moe` imports
+`vllm.model_executor.layers.fused_moe.RoutedExperts` at module level, so a
+vLLM without that symbol cannot import the MoE path at all. The revision
+pinned in `.buildkite/vllm_lkg.version` carries it. Do not gate on a
+version-number compare, a development build of 0.25.1 sorts below 0.25.1
+yet carries the symbol. `requirements.txt` carries no vLLM entry, the
+version comes from the source build above, from the wheel you installed,
+or from `VLLM_COMMIT_HASH` when building the container, so if the MoE
+tests report that the installed vLLM lacks `RoutedExperts`, move vLLM to
+the pinned revision rather than skipping them.

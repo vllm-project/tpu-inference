@@ -517,7 +517,6 @@ def sharded_ragged_paged_attention_experimental(
     # [total_num_pages, page_size, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
     kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD, None, None)
-    print(f"page_size={kv_cache.shape[1]}")
 
     # Build a global cp_rank array of shape (dcp_size,) sharded along 'dcp'.
     # Inside shard_map each device receives a (1,) slice containing its rank.

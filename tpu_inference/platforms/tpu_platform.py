@@ -124,6 +124,11 @@ class TpuPlatform(Platform):
         "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND",
         "VLLM_MLA_DISABLE",
+        # The worker process allocates the KV caches, so a cache dtype the
+        # driver reads and the worker does not inverts the setting: the
+        # operator asks for the half-width recurrent state cache and every
+        # worker allocates the float32 one.
+        "GDN_BF16_RECURRENT_STATE",
         "TPU_BACKEND_TYPE",
         "NEW_MODEL_DESIGN",
         "MODEL_IMPL_TYPE",
@@ -134,6 +139,33 @@ class TpuPlatform(Platform):
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        # The fused expert-parallel MoE switch and its token threshold. The
+        # worker process is the one that builds the model, so a switch the
+        # driver reads and the worker does not inverts the switch's promise:
+        # the operator asks for the kernel and every worker quietly runs the
+        # general path instead.
+        "USE_MOE_FUSED_EP_KERNEL",
+        "MOE_FUSED_EP_KERNEL_MIN_TOKENS",
+        # The same rule, for every other setting that feature's acceptance
+        # check reads. Two of these are refusals whose whole point is that a
+        # run cannot silently be something other than what was asked for:
+        # with MOE_APPROX_TOPK set the driver would refuse, the worker would
+        # never see the variable, the build would succeed, and the
+        # deployment would serve EXACT top-k while the operator asked for
+        # approximate -- and FORCE_MOE_RANDOM_ROUTING exists so that a run
+        # with it set cannot measure real routing and report random. The
+        # three backend selectors are read in the worker too, so the
+        # conflict check meant to catch a contradiction would otherwise be
+        # evaluated against an environment that does not carry it. And
+        # USE_2D_TP is named in the mesh refusal's own remedy, which cannot
+        # work for a spelling the worker never receives.
+        "MOE_APPROX_TOPK",
+        "FORCE_MOE_RANDOM_ROUTING",
+        "USE_MOE_EP_KERNEL",
+        "USE_UNFUSED_MEGABLOCKS",
+        "USE_DENSE_MOE",
+        "USE_2D_TP",
+        "ONEHOT_MOE_PERMUTE_THRESHOLD",
     ]
 
     @classmethod
