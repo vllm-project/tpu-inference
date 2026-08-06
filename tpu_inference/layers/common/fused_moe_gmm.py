@@ -22,6 +22,7 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
+from tpu_inference.kernels.fused_moe.topk import iterative_top_k_kernel
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
@@ -85,6 +86,18 @@ def all_gather_topk_indices_and_weights(
     topk_weights = topk_weights.reshape(-1, top_k).astype(dtype)
 
     return topk_indices, topk_weights
+
+
+def _resolve_topk_backend(backend: str) -> tuple[str, float]:
+    """Parse envs.MOE_TOPK_BACKEND into (name, recall_target).
+    recall_target is only meaningful for "approx_topk" and defaults to 0.9.
+    """
+    name, _, suffix = backend.partition(":")
+    recall_target = 0.9
+    if suffix:
+        _, _, value = suffix.partition("=")
+        recall_target = float(value)
+    return name, recall_target
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -597,24 +610,43 @@ def fused_moe_func(
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
+    topk_backend, approx_topk_recall_target = _resolve_topk_backend(
+        envs.MOE_TOPK_BACKEND)
     topk_weights = apply_scoring_fn(scoring_fn, gating_output)
+    data_p_spec = P(ShardingAxisName.MLP_DATA, None)
     if hash_based_topk_indices is not None:
         topk_indices = hash_based_topk_indices
         topk_weights = jnp.take_along_axis(topk_weights, topk_indices, axis=-1)
-    elif envs.MOE_APPROX_TOPK:
+    elif topk_backend == "approx_topk":
         topk_weights, topk_indices = jax.lax.approx_max_k(
-            topk_weights,
-            k=topk,
-            recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
+            topk_weights, k=topk, recall_target=approx_topk_recall_target)
     else:
+        if topk_backend == "pallas_topk":
+            # k must be bound before shard_map wraps the kernel: the
+            # shard_map wrapper's call signature only accepts the array
+            # args from in_specs, not arbitrary kwargs like k=topk below.
+            data_p_spec_t = P(None, ShardingAxisName.MLP_DATA)
+
+            def topk_fn(x, k):
+                vals, idxs = jax.shard_map(
+                    functools.partial(iterative_top_k_kernel, k=k, axis=0),
+                    mesh=mesh,
+                    in_specs=(data_p_spec_t, ),
+                    out_specs=(data_p_spec_t, data_p_spec_t),
+                    check_vma=False,
+                )(x.T)
+                return vals.T, idxs.T
+        else:
+            topk_fn = jax.lax.top_k
         if expert_score_correction_bias is not None:
-            _, topk_indices = jax.lax.top_k(
-                topk_weights + expert_score_correction_bias[None, :], k=topk)
+            _, topk_indices = topk_fn(topk_weights +
+                                      expert_score_correction_bias[None, :],
+                                      k=topk)
             topk_weights = jnp.take_along_axis(topk_weights,
                                                topk_indices,
                                                axis=-1)
         else:
-            topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
+            topk_weights, topk_indices = topk_fn(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
     # Route padding tokens to expert 0 instead of picking a selected expert. This
@@ -631,7 +663,7 @@ def fused_moe_func(
             topk_indices, topk_weights, dtype, mesh)
     topk_weights = topk_weights.astype(dtype)
     topk_weights = jax.lax.with_sharding_constraint(
-        topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+        topk_weights, NamedSharding(mesh, data_p_spec))
 
     # Only enable Reduce-Scatter if flag is on and Attention is pure DP
     total_num_devices = mesh.devices.size
