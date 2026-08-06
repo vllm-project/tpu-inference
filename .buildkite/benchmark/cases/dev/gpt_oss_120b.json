@@ -4,7 +4,7 @@
     "GCS_BUCKET": "vllm-cb-storage2",
     "GCP_INSTANCE_ID": "vllm-bm-inst",
     "GCP_DATABASE_ID": "vllm-bm-bk-runs",
-    "SERVER_WAIT_MINS": 1
+    "BK_TIMEOUT_IN_MINUTES": 1
   },
   "benchmark_cases": [
     {
