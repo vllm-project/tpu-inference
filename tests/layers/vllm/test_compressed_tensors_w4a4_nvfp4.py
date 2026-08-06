@@ -439,8 +439,8 @@ def merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
 @pytest.mark.parametrize(
-    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
-                                                              (256, True)])
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, True),
+                                                              (256, False)])
 def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
                                        fuse_matmuls, enable_sp, enable_attn_dp,
                                        activation_type, requantize_block_size,
@@ -452,7 +452,7 @@ def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
                                          enable_quantized_matmul_kernel)
 
 
-# W4A4ActivationType.FP8 + 256 block size would trigger the quantized matmul
+# gmmv2 + 256 block size would trigger the quantized matmul
 # path in gmm_v2, which would need to cast packed f4e2m1 to fp8. This operation
 # would lead to a Mosaic error on v6e
 # https://screenshot-v2.corp.google.com/0o6oukm5252h8
