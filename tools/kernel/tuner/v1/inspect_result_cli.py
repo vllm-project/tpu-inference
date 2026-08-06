@@ -1005,15 +1005,6 @@ def _build_parser():
         default='/tmp/tuned_params.py',
         help='Output file path (default: /tmp/tuned_params.py).',
     )
-    p.add_argument(
-        '--show-baseline',
-        dest='show_baseline',
-        action='store_true',
-        help=('Add baseline_latency and latency_improvement%% columns. '
-              'The baseline is the is_baseline=True case measured for the '
-              'same TuningKey. Shows N/A when no baseline exists for a key '
-              'or when the row itself is not a SUCCESS.'),
-    )
 
     return parser
 

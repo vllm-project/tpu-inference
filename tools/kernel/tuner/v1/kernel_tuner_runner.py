@@ -95,6 +95,7 @@ _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
     'max_execution_minutes', 20,
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
 )
+
 _USE_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
     'use_bayesian_optimization', False,
     ' whether to use Bayesian optimization (optuna) instead of sweeping '
@@ -190,7 +191,6 @@ def _invoke_worker_process(kernel_tuner_name: str, run_config: RunConfig,
                            run_config.spanner_database_id),
         _format_flag_value('worker_id', run_config.worker_id),
         _format_flag_value('autotune_mode', run_config.autotune_mode),
-        _format_flag_value('debug', run_config.debug),
         _format_flag_value('_worker_process', True),
     ]
 
@@ -232,16 +232,26 @@ def _invoke_worker_process(kernel_tuner_name: str, run_config: RunConfig,
         logger.info('Worker subprocess output: %s', text_output)
         result = json.loads(text_output)
     except json.JSONDecodeError:
-        logger.info(
-            'Failed to find next_begin_case_id in worker subprocess output, set it to 0'
-        )
-        result = {'next_begin_case_id': 0}
-
-    if not isinstance(result, dict):
         raise RuntimeError(
             f'Worker subprocess returned invalid result: {result}')
 
     return result.get('next_begin_case_id')
+
+
+def _run_bucket(run_config: RunConfig, begin_case_id: int, end_case_id: int):
+    next_begin_case_id = begin_case_id
+    while next_begin_case_id < end_case_id:
+        next_begin_case_id = _invoke_worker_process(_KERNEL_TUNER_NAME.value,
+                                                    run_config, begin_case_id,
+                                                    end_case_id)
+        if next_begin_case_id < end_case_id:
+            logger.info(
+                f'Bucket [{begin_case_id}, {end_case_id}) was partially processed. Retrying from case {next_begin_case_id}.'
+            )
+        else:
+            logger.info(
+                f'Bucket [{begin_case_id}, {end_case_id}) was fully processed.'
+            )
 
 
 def _create_kernel_tuner(kernel_tuner_name: str, run_config: RunConfig):
@@ -249,53 +259,7 @@ def _create_kernel_tuner(kernel_tuner_name: str, run_config: RunConfig):
     return kernel_tuner_cls(run_config=run_config)
 
 
-def _worker_main():
-    case_set_id = _CASE_SET_ID.value
-    run_id = _RUN_ID.value
-    case_set_desc = _CASE_SET_DESC.value
-    assert case_set_id, 'case_set_id is required. Please specify it through --case_set_id flag.'
-    assert run_id, 'run_id is required. Please specify it through --run_id flag.'
-
-    tpu_version = _TPU_VERSION.value
-    tpu_cores = _TPU_CORES.value
-    tpu_queue_multi = _TPU_QUEUE_MULTI.value
-    tpu_queue_multi = get_tpu_queue_by_version_and_cores(
-        tpu_version, tpu_cores, tpu_queue_multi)
-
-    run_config = RunConfig(case_set_id=case_set_id,
-                           run_id=run_id,
-                           case_set_desc=case_set_desc,
-                           tpu_version=tpu_version,
-                           tpu_cores=tpu_cores,
-                           tpu_queue_multi=tpu_queue_multi,
-                           run_locally=_RUN_LOCALLY.value,
-                           job_priority=_JOB_PRIORITY.value,
-                           max_execution_minutes=_MAX_EXECUTION_MINUTES.value,
-                           gcp_project_id=_GCP_PROJECT_ID.value,
-                           spanner_instance_id=_SPANNER_INSTANCE_ID.value,
-                           spanner_database_id=_SPANNER_DATABASE_ID.value,
-                           worker_id=_WORKER_ID.value,
-                           autotune_mode=_AUTOTUNE_MODE.value)
-    kernel_tuner = _create_kernel_tuner(_KERNEL_TUNER_NAME.value, run_config)
-    begin_case_id = _BEGIN_CASE_ID.value
-    end_case_id = _END_CASE_ID.value
-    next_begin_case_id = kernel_tuner.measure_latency(
-        begin_case_id=begin_case_id, end_case_id=end_case_id)
-    sys.stdout.write(
-        json.dumps({
-            'next_begin_case_id': next_begin_case_id,
-        }) + '\n')
-    sys.stdout.flush()
-    sys.exit(0)
-
-
-def main(argv):
-    del argv  # Unused.
-
-    if _WORKER_PROCESS.value:
-        _worker_main()
-        return
-
+def _create_run_config(args=None) -> RunConfig:
     case_set_id = _CASE_SET_ID.value
     run_id = _RUN_ID.value
     case_set_desc = _CASE_SET_DESC.value
@@ -329,6 +293,32 @@ def main(argv):
         autotune_mode=_AUTOTUNE_MODE.value,
         use_bayesian_optimization=_USE_BAYESIAN_OPTIMIZATION.value,
         n_bayesian_trials=_N_BAYESIAN_TRIALS.value)
+    return run_config
+
+
+def _worker_main():
+    run_config = _create_run_config()
+    kernel_tuner = _create_kernel_tuner(_KERNEL_TUNER_NAME.value, run_config)
+    begin_case_id = _BEGIN_CASE_ID.value
+    end_case_id = _END_CASE_ID.value
+    next_begin_case_id = kernel_tuner.measure_latency(
+        begin_case_id=begin_case_id, end_case_id=end_case_id)
+    sys.stdout.write(
+        json.dumps({
+            'next_begin_case_id': next_begin_case_id,
+        }) + '\n')
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def main(argv):
+    del argv  # Unused.
+
+    if _WORKER_PROCESS.value:
+        _worker_main()
+        return
+
+    run_config = _create_run_config()
 
     if _RUN_LOCALLY.value:
         if _BEGIN_CASE_ID.value is None:
@@ -338,21 +328,8 @@ def main(argv):
             del kernel_tuner  # Free up memory before running tuning jobs.
         else:
             buckets = [(_BEGIN_CASE_ID.value, _END_CASE_ID.value)]
-        for bucket in buckets:
-            begin_case_id, end_case_id = bucket
-            next_begin_case_id = begin_case_id  # Initialize to a value less than begin_case_id
-            while next_begin_case_id < end_case_id:
-                next_begin_case_id = _invoke_worker_process(
-                    _KERNEL_TUNER_NAME.value, run_config, begin_case_id,
-                    end_case_id)
-                if next_begin_case_id < end_case_id:
-                    logger.info(
-                        'Local bucket [%d, %d) partially processed. Retrying from case %d.',
-                        begin_case_id, end_case_id, next_begin_case_id)
-                else:
-                    logger.info(
-                        'Local bucket [%d, %d) fully processed in worker subprocess.',
-                        begin_case_id, end_case_id)
+        for begin_case_id, end_case_id in buckets:
+            _run_bucket(run_config, begin_case_id, end_case_id)
     else:
         if _GENERATE_BUILDKITE_PIPELINE.value:
             logger.info(
@@ -365,21 +342,9 @@ def main(argv):
             begin_case_id = _BEGIN_CASE_ID.value
             end_case_id = _END_CASE_ID.value
             logger.debug(
-                'Running tuning jobs directly. Skipping Buildkite pipeline generation. Bucket [%d, %d)',
-                begin_case_id, end_case_id)
-            next_begin_case_id = begin_case_id
-            while next_begin_case_id < end_case_id:
-                next_begin_case_id = _invoke_worker_process(
-                    _KERNEL_TUNER_NAME.value, run_config, begin_case_id,
-                    end_case_id)
-                if next_begin_case_id < end_case_id:
-                    logger.info(
-                        'Bucket [%d, %d) not fully processed. Retrying from case %d.',
-                        begin_case_id, end_case_id, next_begin_case_id)
-                else:
-                    logger.info(
-                        'Bucket [%d, %d) was fully processed in worker subprocess.',
-                        begin_case_id, end_case_id)
+                f'Running tuning jobs directly. Skipping Buildkite pipeline generation. Bucket [{begin_case_id}, {end_case_id}).'
+            )
+            _run_bucket(run_config, begin_case_id, end_case_id)
 
 
 if __name__ == '__main__':

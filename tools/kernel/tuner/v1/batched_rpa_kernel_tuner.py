@@ -228,8 +228,6 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             kernel_tuner_name="batched_rpa_kernel_tuner",
             support_bayesian_optimization=True,
             n_bayesian_trials=100,
-            # (TODO) This only measure prefill case, need to refactor to support decode case as well
-            # maybe make this jit_kernel_pattern a runtime TuningKey dependent attribute
             jit_kernel_pattern=lambda tuning_key: r"RPAm-"
             if tuning_key.case == 'prefill' else r"RPAd-",
         )
@@ -247,19 +245,11 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         # This is just a setup for tuning for Gemma4 Specific Prefill Case Only.
         # For tuning more cases, modify this and add more tuning cases to the
         # tuning_cases/batched_rpa_gemma4_tuning_cases.json file via using the TuningCaseLogger class.
-        # Collect unique TuningKeys from the log (prefill cases with large
-        # enough token count only).
-        # TuningKey(case='decode', num_q_heads=8, num_kv_heads=1, head_dim=512, num_seqs=818, page_size=256, total_q_tokens=8192, num_page_indices=4908, dtype_q='bfloat16', dtype_kv='float8_e4m3fn', dtype_out='bfloat16', scale_q=None, scale_k=1.0, scale_v=1.0, sliding_window=None),
-        # tunable_params=TunableParams(bq_sz=1, bq_c_sz=1, bkv_sz=256, batch_size=1, n_buffer=2)
-
-        # TuningKey(case='decode', num_q_heads=8, num_kv_heads=4, head_dim=256, num_seqs=818, page_size=256, total_q_tokens=1024, num_page_indices=4908, dtype_q='bfloat16', dtype_kv='float8_e4m3fn', dtype_out='bfloat16', scale_q=None, scale_k=1.0, scale_v=1.0, sliding_window=1024),
-        # tunable_params=TunableParams(bq_sz=1, bq_c_sz=1, bkv_sz=1280, batch_size=2, n_buffer=3)
         seen_keys: set[TuningKey] = set()
         unique_keys: list[TuningKey] = []
         cases: list[TuningCase] = []
         for case in tuning_case_logger.get_logged_tuning_cases():
-            if (  #case.tuning_key.total_q_tokens == 128
-                    case.tuning_key not in seen_keys):
+            if (case.tuning_key not in seen_keys):
                 seen_keys.add(case.tuning_key)
                 unique_keys.append(case.tuning_key)
                 cases.append(case)
@@ -284,7 +274,6 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         bkv_sz values are filtered to multiples of page_size as required by the
         scheduler.
         """
-        # TODO: This is only for PREFILL Case. Refactor this when support DECODE Case
         bkv_sz_list = [
             v for v in range(256, 2049, 256) if v % tuning_key.page_size == 0
         ]
