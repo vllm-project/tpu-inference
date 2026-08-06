@@ -46,20 +46,14 @@ if not hasattr(_vllm_fused_moe, "RoutedExperts"):
         "tpu_inference.layers.common.moe imports at module level, so "
         "nothing in this suite can run. This is the only suite that "
         "exercises moe_apply routing into the fused expert-parallel kernel "
-        "-- the switch, the threshold, the refusal-versus-fallback split -- "
-        "so a green run here proves nothing about the thing it is named "
-        "for. RoutedExperts is present from vllm 0.25.1 onwards; upgrade "
-        "vllm rather than letting this suite report green.")
-    # Said loudly, then skipped. A skip is green and pytest reports it as one
-    # letter, which is why this used to raise -- but a module-scope raise is
-    # a COLLECTION error, and CI runs pytest over the whole tests/ tree with
-    # -x, so one suite's environment floor took down every other suite in
-    # the session, including tests from changes that have nothing to do with
-    # this one. The banner is the half of the raise worth keeping: nobody
-    # reads a skip letter, and everybody reads this.
-    print(f"\n{'=' * 78}\nSKIPPING {__name__}: {_FLOOR}\n{'=' * 78}\n",
-          file=sys.stderr,
-          flush=True)
+        "(the switch, the threshold, the refusal-versus-fallback split), "
+        "so a skipped run leaves that path unexercised. RoutedExperts is "
+        "present from vllm 0.25.1 onwards; upgrade vllm to run this suite.")
+    # A module-scope raise would be a collection error, and CI runs pytest
+    # over the whole tests/ tree with -x, so an environment floor raised here
+    # would take down unrelated suites. Reported as a module-level skip with
+    # the reason printed once to stderr.
+    print(f"\nSKIPPING {__name__}: {_FLOOR}\n", file=sys.stderr, flush=True)
     pytest.skip(_FLOOR, allow_module_level=True)
 
 from tpu_inference.layers.common import moe as moe_module  # noqa: E402
