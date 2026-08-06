@@ -13,17 +13,6 @@
 # limitations under the License.
 
 steps:
-  # - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host P/D disaggregation for tpu7x-16"
-  #   key: "${TPU_VERSION:-tpu7x}_multi_host_disagg_tpu7x_16_CorrectnessTest"
-  #   soft_fail: true
-  #   agents:
-  #     queue: tpu_v7x_16_queue
-  #   env:
-  #     TPU_VERSION: "${TPU_VERSION:-tpu7x}"
-  #     TEST_MODE: 2 # only run correctness test
-  #   commands:
-  #     - |
-  #       .buildkite/e2e/run_multi_disagg_2slices.sh
   - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host step pooling and structured decoding"
     key: "${TPU_VERSION:-tpu7x}_multi_host_pooling_structured_decoding_tpu7x_16_CorrectnessTest"
     soft_fail: true
@@ -35,6 +24,18 @@ steps:
     commands:
       - |
         bash .buildkite/e2e/run_multi_step_decoding.sh
+
+  - label: "${TPU_VERSION:-tpu7x} Correctness tests for Multi-host KVcache Offloading"
+    key: "${TPU_VERSION:-tpu7x}_multi_host_kvcache_offloading_tpu7x_16_CorrectnessTest"
+    soft_fail: true
+    agents:
+      queue: tpu_v7x_16_queue
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu7x}"
+      TEST_MODE: 2 # only run correctness test
+    commands:
+      - |
+        bash .buildkite/e2e/run_multihost_offload.sh
 
   - label: "${TPU_VERSION:-tpu7x} Record correctness test result for Multi-host step pooling and structured decoding"
     key: "${TPU_VERSION:-tpu7x}_record_multi_host_pooling_structured_decoding_CorrectnessTest"
