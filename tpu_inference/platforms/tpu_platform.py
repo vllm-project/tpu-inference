@@ -24,6 +24,7 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
                 raise e
 
     torch.accelerator.empty_cache = _patched_empty_cache
+
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -311,6 +312,55 @@ class TpuPlatform(Platform):
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
                         "tpu_inference.worker.tpu_worker.TPUWorker"
+
+        # Upstream vllm forces the V2 model runner when
+        # prefill_context_parallel_size > 1, but V2's own unsupported-feature
+        # list rejects PCP unless the model uses MLA -- the two rules
+        # contradict, so a non-MLA model with PCP > 1 cannot be configured.
+        # Neither applies on TPU: worker_cls above swaps in TPUWorker, so
+        # vllm's V1/V2 GPU model runners never execute and PCP is implemented
+        # by tpu_inference.  Drop just the PCP entry, keeping every other V2
+        # check.  Done here (not at import) because vllm.config.vllm is only
+        # partially initialised while this module is being imported, and
+        # because vllm calls this hook before _validate_v2_model_runner.
+        try:
+            from vllm.config.vllm import VllmConfig as _VllmConfig
+            _fn = "_get_v2_model_runner_unsupported_features"
+            if not getattr(getattr(_VllmConfig, _fn, None), "_tpu_pcp_patched",
+                           False):
+                _orig = getattr(_VllmConfig, _fn)
+
+                def _drop_pcp(self, _orig=_orig):
+                    return [
+                        f for f in _orig(self)
+                        if f != "prefill context parallelism"
+                    ]
+
+                _drop_pcp._tpu_pcp_patched = True
+                setattr(_VllmConfig, _fn, _drop_pcp)
+
+            # The same V2 validation also hard-requires Triton, which is
+            # disabled on TPU hosts (installed, but 0 active drivers).  TPU
+            # never runs Triton kernels, so suppress just that check for the
+            # duration of the call, leaving the rest of the validation intact.
+            _vfn = "_validate_v2_model_runner"
+            if not getattr(getattr(_VllmConfig, _vfn, None),
+                           "_tpu_pcp_patched", False):
+                _orig_validate = getattr(_VllmConfig, _vfn)
+
+                def _validate_without_triton(self, _orig=_orig_validate):
+                    import vllm.config.vllm as _vmod
+                    _saved = _vmod.HAS_TRITON
+                    _vmod.HAS_TRITON = True
+                    try:
+                        return _orig(self)
+                    finally:
+                        _vmod.HAS_TRITON = _saved
+
+                _validate_without_triton._tpu_pcp_patched = True
+                setattr(_VllmConfig, _vfn, _validate_without_triton)
+        except (ImportError, AttributeError):
+            pass
 
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if not multihost_backend:  # Single host
