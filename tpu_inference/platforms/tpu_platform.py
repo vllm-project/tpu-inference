@@ -339,6 +339,19 @@ class TpuPlatform(Platform):
                 parallel_config.distributed_executor_backend = RayDistributedExecutor
                 logger.info(
                     "Force using RayDistributedExecutor for JAX on multihost.")
+        elif multihost_backend == "spmd":
+            # Bare jax.distributed (SPMD / multi-controller): the surrounding
+            # program has already called jax.distributed.initialize(), so every
+            # host runs this same process and owns only its locally-addressable
+            # devices. We must NOT spawn a Ray worker group (it would try to
+            # re-acquire devices already held by this process, e.g. a colocated
+            # jax.distributed RL trainer). Keep the per-process UniProcExecutor;
+            # the multi-host device-placement helpers (general_device_put,
+            # weight loading) key off TPU_MULTIHOST_BACKEND to fill only the
+            # locally-addressable shards via jax.make_array_from_callback.
+            logger.info("Using UniProcExecutor for JAX SPMD multi-host "
+                        "(bare jax.distributed, no Ray).")
+            parallel_config.distributed_executor_backend = "uni"
         else:
             logger.warning(
                 f"Unknown TPU multihost backend: {multihost_backend}. "
