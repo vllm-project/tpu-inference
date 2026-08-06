@@ -30,7 +30,9 @@ class SpannerStorageManager(StorageManager):
                  spanner_instance_id,
                  spanner_database_id,
                  worker_id=None,
-                 dry_run=False):
+                 dry_run=False,
+                 results_batch_size=10):
+        super().__init__(results_batch_size=results_batch_size)
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
@@ -46,7 +48,11 @@ class SpannerStorageManager(StorageManager):
             self.database = None
 
     def close(self):
-        """Safely closes the Spanner client connection."""
+        """Safely closes the Spanner client connection after flushing pending data."""
+        if getattr(self, '_closed', False):
+            return
+        self.flush()
+        self._closed = True
         if not self.dry_run and self.client:
             self.client.close()
             self.client = None
@@ -145,6 +151,7 @@ class SpannerStorageManager(StorageManager):
 
     @retry.Retry(predicate=retry.if_transient_error)
     def flush(self):
+        self.flush_results()
         if not self.buffer or self.dry_run:
             return
         with self.database.batch() as b:
@@ -264,17 +271,31 @@ class SpannerStorageManager(StorageManager):
                                            })
             }
 
-    # tuner agents will save the result after completing a tuning batch
-    def save_results_batch(self, results):
-        if not results:
+    def save_results_batch(self):
+        if not self.results_buffer:
             return
+        values = []
+        for r in self.results_buffer:
+            values.append((
+                r.case_set_id,
+                r.run_id,
+                r.case_id,
+                r.processed_status,
+                r.worker_id,
+                r.latency,
+                r.warmup_time,
+                r.total_time,
+                r.processed_at,
+                r.tpu,
+            ))
         with self.database.batch() as b:
             b.insert_or_update(table='CaseResults',
                                columns=('ID', 'RunId', 'CaseId',
                                         'ProcessedStatus', 'WorkerID',
                                         'Latency', 'WarmupTime', 'TotalTime',
                                         'ProcessedAt', 'TPU'),
-                               values=results)
+                               values=values)
+        self.results_buffer.clear()
 
     # tuner agents will query from the KernelTuningCases table and run the cases
     def get_bucket_configs(self, cs_id, start, end):

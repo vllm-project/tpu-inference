@@ -13,7 +13,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.activation import (SiluAndMul,
                                                    SiluAndMulWithClamp)
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE, GateLinear, fused_moe_make_expert_params_mapping)
+    GateLinear, fused_moe_make_expert_params_mapping)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -35,6 +35,7 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
     VllmDeepseekV4MLAAttention
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 
 
 class DeepseekV4MLP(nn.Module):
@@ -167,7 +168,7 @@ class DeepseekV4MoE(nn.Module):
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             gate=self.gate,
             num_experts=config.n_routed_experts,
@@ -201,7 +202,7 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
+            # In this case, the gate/router runs inside the MoE runner.
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 router_logits=hidden_states,

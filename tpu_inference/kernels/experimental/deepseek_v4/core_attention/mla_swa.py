@@ -571,16 +571,6 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
         # hi byte). `pltpu.bitcast` fuses consecutive sublanes little-endian, so the
         # reconstruction is a plain bitcast + reshape.
         bkv = pltpu.bitcast(bkv_u8, jnp.bfloat16).reshape(bkv_sz, head_dim)
-
-        # In vLLM, multiple caches may overlay on the same KV Tensor. For example,
-        # compressor state cache write data in bfloat16 / float32 format, certain
-        # byte pattern are interpreted as NaN in FP8, e.g. float8_e8m0fnu byte 0xFF
-        # decodes to NaN.
-        # We need to mask out the data by the actual kv_len to avoid NaN propagting
-        # to the downstream computation.
-        k_span = (start_offset + bkv_idx * bkv_sz +
-                  lax.broadcasted_iota(jnp.int32, bkv.shape, 0))
-        bkv = jnp.where(k_span < kv_len, bkv, 0)
         return bkv
 
     def broadcast_minor(src, shape):
@@ -764,8 +754,14 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
     @pl.when(seq_idx == start_seq_idx)
     def prologue():
         start_fetch_bq(start_seq_idx, 0, 0)
+
+        # Initialize bkv_x2_ref to avoid NaN issues from accessing uninitialized
+        # memory
+        bkv_zeros = jnp.zeros(bkv_x2_ref.shape[1:], bkv_x2_ref.dtype)
+        bkv_x2_ref[0] = bkv_zeros
         # bq_idx=0, relative bkv_idx=0 (page-aligned base via _start_offset).
         start_fetch_bkv(start_seq_idx, 0, 0, _start_offset(start_seq_idx, 0))
+        bkv_x2_ref[1] = bkv_zeros
 
     process()
 
@@ -1116,8 +1112,16 @@ def mla_sliding_window_ragged_paged_attention(
 
     # Decode-only
     num_l_heads = align_to(num_q_heads, 128)
-    l_sum = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
-    m = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+    if unnormalized_output:
+        # output of swa attn is consumed by csa, hca attn, padding tokens'
+        # data won't be used downstream at all, so un-initialized buffer is fine.
+        l_sum = jnp.empty((q.shape[0], num_l_heads), dtype=jnp.float32)
+        m = jnp.empty((q.shape[0], num_l_heads), dtype=jnp.float32)
+        in_output = jnp.empty_like(q)
+    else:
+        l_sum = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+        m = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+        in_output = jnp.zeros_like(q)
     output, updated_kv, out_l, out_m = run_mla_kernel(
         q,
         new_kv,
@@ -1129,9 +1133,7 @@ def mla_sliding_window_ragged_paged_attention(
         num_queries_per_block=num_queries_per_blocks[0],
         start_seq_idx=jnp.array(0),
         end_seq_idx=distribution[0],
-        # TODO: the jnp.zeros_like is quite expensive, optimize while not have
-        # the NaN output issue of jnp.empty_like.
-        in_output=jnp.zeros_like(q),
+        in_output=in_output,
         in_l=l_sum,
         in_m=m,
         attention_sinks=attention_sinks,
