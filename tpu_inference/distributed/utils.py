@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import ipaddress
 
 from vllm.utils.network_utils import get_ip
 
@@ -61,6 +62,18 @@ def get_host_ip() -> str:
 def get_kv_transfer_port() -> str:
     port = os.getenv("TPU_KV_TRANSFER_PORT", "9100")
     return port
+
+
+def format_ip_address_port(ip: str, port: int | str) -> str:
+    """Formats an IP address and port, wrapping IPv6 addresses in brackets."""
+    raw_ip = ip.strip("[]")
+    try:
+        if ipaddress.ip_address(raw_ip).version == 6:
+            return f"[{raw_ip}]:{port}"
+    except ValueError:
+        if ":" in raw_ip:
+            return f"[{raw_ip}]:{port}"
+    return f"{raw_ip}:{port}"
 
 
 def get_side_channel_port() -> str:

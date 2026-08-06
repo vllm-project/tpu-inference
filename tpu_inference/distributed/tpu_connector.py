@@ -570,8 +570,8 @@ class TPUConnectorWorker:
     def _maybe_start_p2p_server(self):
         if self.kv_transfer_server is not None:
             return
-        server_addr = f"{self.host_ip}:{self.kv_transfer_port}"
-        transport_addr = f'{self.host_ip}:0'
+        server_addr = dist_utils.format_ip_address_port(self.host_ip, self.kv_transfer_port)
+        transport_addr = dist_utils.format_ip_address_port(self.host_ip, 0)
         self.kv_transfer_server = start_transfer_server(
             jax.local_devices()[0].client,
             server_addr,
@@ -795,9 +795,15 @@ class TPUConnectorWorker:
     def _maybe_build_kv_connection(self, req_meta: LoadMeta) -> Any:
         if isinstance(req_meta.remote_host, list):
             assert len(req_meta.remote_host) == len(req_meta.remote_port)
-            remote_addr = f"{req_meta.remote_host[self.node_id]}:{req_meta.remote_port[self.node_id]}"
+            remote_addr = dist_utils.format_ip_address_port(
+                req_meta.remote_host[self.node_id],
+                req_meta.remote_port[self.node_id]
+            )
         else:
-            remote_addr = f"{req_meta.remote_host}:{req_meta.remote_port}"
+            remote_addr = dist_utils.format_ip_address_port(
+                req_meta.remote_host,
+                req_meta.remote_port
+            )
 
         if remote_addr in self.pull_conns:
             conn = self.pull_conns[remote_addr]
@@ -831,7 +837,7 @@ class TPUConnectorWorker:
                     request_id=trim_request_id_suffix(req_id),
                     bytes=expected_bytes,
                     dimensions=dims_str,
-                    source=f"{req_meta.remote_host}:{req_meta.remote_port}"):
+                    source=dist_utils.format_ip_address_port(req_meta.remote_host, req_meta.remote_port)):
                 kv = conn.pull(req_meta.uuid, kv_spec)
         else:
             kv = conn.pull(req_meta.uuid, kv_spec)
