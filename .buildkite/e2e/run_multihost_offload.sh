@@ -127,14 +127,30 @@ stop_launcher() {
 }
 
 cleanup() {
-  local worker_ip pid
+  local worker_ip pid remote_check_status
   docker cp "${CONTAINER_NAME}:/root/vllm_serve.log" "${LOG_DIR}/vllm_serve.log" 2>/dev/null || true
   docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+  if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+    echo "WARNING: ${CONTAINER_NAME} still exists on the head host after cleanup." >&2
+  fi
   IFS=',' read -r -a worker_ips <<< "${WORKER_IPS}"
   for worker_ip in "${worker_ips[@]}"; do
     [[ -n "${worker_ip}" ]] || continue
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
-      "docker rm -f '${CONTAINER_NAME}' >/dev/null 2>&1 || true" || true
+    if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
+      "docker rm -f '${CONTAINER_NAME}' >/dev/null 2>&1 || true"; then
+      echo "WARNING: Could not request cleanup of ${CONTAINER_NAME} on worker ${worker_ip}." >&2
+    fi
+    if ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
+      "if docker inspect '${CONTAINER_NAME}' >/dev/null 2>&1; then exit 10; fi"; then
+      :
+    else
+      remote_check_status=$?
+      if (( remote_check_status == 10 )); then
+        echo "WARNING: ${CONTAINER_NAME} still exists on worker ${worker_ip} after cleanup." >&2
+      else
+        echo "WARNING: Could not verify cleanup of ${CONTAINER_NAME} on worker ${worker_ip}." >&2
+      fi
+    fi
   done
   for pid in "${CLUSTER_LAUNCH_PIDS[@]}"; do stop_launcher "${pid}"; done
 }
