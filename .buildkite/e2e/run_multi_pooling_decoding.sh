@@ -163,7 +163,7 @@ wait_for_server() {
 stop_server() {
   docker exec node pkill -f "vllm serve" || true
   for _ in {1..30}; do
-    docker exec node pgrep -f "vllm serve" >/dev/null 2>&1 || return
+    docker exec node pgrep -f "vllm serve" >/dev/null 2>&1 || return 0
     sleep 1
   done
   echo "vLLM server did not stop cleanly."
