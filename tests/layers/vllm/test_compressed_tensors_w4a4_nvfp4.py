@@ -20,6 +20,7 @@ import jax
 import pytest
 import torch
 import torchax
+from jax._src import test_util as jtu
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -377,21 +378,11 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
     torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("num_devices", [1, min(4, jax.local_device_count())])
-@pytest.mark.parametrize("fuse_matmuls", [False, True])
-@pytest.mark.parametrize("enable_sp", [False, True])
-@pytest.mark.parametrize("enable_attn_dp", [False, True])
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("activation_type",
-                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
-@pytest.mark.parametrize(
-    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
-                                                              (256, True)])
-def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
-                                       fuse_matmuls, enable_sp, enable_attn_dp,
-                                       activation_type, requantize_block_size,
-                                       enable_quantized_matmul_kernel):
+def merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
+                                         fuse_matmuls, enable_sp,
+                                         enable_attn_dp, activation_type,
+                                         requantize_block_size,
+                                         enable_quantized_matmul_kernel):
     if requantize_block_size is not None:
         monkeypatch.setenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE",
                            str(requantize_block_size))
@@ -438,6 +429,55 @@ def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
         linear_layer, activation_type=activation_type)
     atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
     torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
+
+
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("num_devices", [1, min(4, jax.local_device_count())])
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+@pytest.mark.parametrize("enable_sp", [False, True])
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize(
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
+                                                              (256, True)])
+def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
+                                       fuse_matmuls, enable_sp, enable_attn_dp,
+                                       activation_type, requantize_block_size,
+                                       enable_quantized_matmul_kernel):
+    merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
+                                         fuse_matmuls, enable_sp,
+                                         enable_attn_dp, activation_type,
+                                         requantize_block_size,
+                                         enable_quantized_matmul_kernel)
+
+
+# W4A4ActivationType.FP8 + 256 block size would trigger the quantized matmul
+# path in gmm_v2, which would need to cast packed f4e2m1 to fp8. This operation
+# would lead to a Mosaic error on v6e
+# https://screenshot-v2.corp.google.com/0o6oukm5252h8
+@pytest.mark.skipif(not jtu.is_device_tpu_at_least(version=7),
+                    reason="Expect TPUv7+")
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("num_devices", [1, min(4, jax.local_device_count())])
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+@pytest.mark.parametrize("enable_sp", [False, True])
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.FP8])
+@pytest.mark.parametrize(
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
+                                                              (256, True)])
+def test_merged_column_parallel_linear_v7(monkeypatch, model, bias,
+                                          num_devices, fuse_matmuls, enable_sp,
+                                          enable_attn_dp, activation_type,
+                                          requantize_block_size,
+                                          enable_quantized_matmul_kernel):
+    merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
+                                         fuse_matmuls, enable_sp,
+                                         enable_attn_dp, activation_type,
+                                         requantize_block_size,
+                                         enable_quantized_matmul_kernel)
 
 
 def test_get_scheme():
