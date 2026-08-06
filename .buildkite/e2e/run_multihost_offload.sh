@@ -154,17 +154,43 @@ wait_for_server() {
   return 1
 }
 
+stream_ray_vllm_logs() {
+  # vLLM workers run as Ray processes, so their stdout/stderr is written under
+  # the Ray session directory rather than to `docker logs`. Track each file's
+  # line offset to stream only newly emitted output to Buildkite.
+  docker exec "${CONTAINER_NAME}" bash -c '
+    set -u
+    log_dir=/tmp/ray/session_latest/logs
+    declare -A emitted_lines=()
+    while true; do
+      while IFS= read -r -d "" log_file; do
+        line_count=$(wc -l < "${log_file}")
+        start_line=${emitted_lines["${log_file}"]:-1}
+        if (( line_count >= start_line )); then
+          echo "--- Ray/vLLM log: ${log_file} ---"
+          sed -n "${start_line},${line_count}p" "${log_file}"
+        fi
+        emitted_lines["${log_file}"]=$((line_count + 1))
+      done < <(find "${log_dir}" -maxdepth 1 -type f \
+        \( -name "*worker*.out" -o -name "*worker*.err" -o -name "*driver*.log" \) -print0 2>/dev/null)
+      sleep 1
+    done
+  '
+}
+
 # The verification helper first generates with no connector, then uses the
 # TPUOffloadConnector twice with a prefix-cache reset in between. It compares
 # generated text bit-for-bit. The reset makes the second
 # connector run load saved KV blocks from host memory rather than relying on
 # HBM-resident prefix cache.
 run_offload_correctness() {
-  local kv_transfer_config
+  local kv_transfer_config verification_pid correctness_tail_pid ray_log_pid
+  local verification_status=0 elapsed_seconds=0
   kv_transfer_config='{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
 
   echo "--- Verifying deterministic output with actual TPU KV-cache offload"
-  if ! timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
+  : >"${LOG_DIR}/correctness.txt"
+  timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
     docker exec "${CONTAINER_NAME}" bash -c \
     "python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \\
       --model $(printf '%q' "${MODEL}") \\
@@ -174,10 +200,34 @@ run_offload_correctness() {
       --max-tokens ${OUTPUT_LEN} \\
       --seed ${RANDOM_SEED} \\
       --kv-transfer-config $(printf '%q' "${kv_transfer_config}")" \
-    >"${LOG_DIR}/correctness.txt" 2>&1; then
+    >"${LOG_DIR}/correctness.txt" 2>&1 &
+  verification_pid=$!
+
+  tail -n 0 -F "${LOG_DIR}/correctness.txt" &
+  correctness_tail_pid=$!
+  stream_ray_vllm_logs &
+  ray_log_pid=$!
+
+  while kill -0 "${verification_pid}" 2>/dev/null; do
+    sleep 5
+    elapsed_seconds=$((elapsed_seconds + 5))
+    echo "--- Offload correctness is still running (${elapsed_seconds}s elapsed)"
+    docker exec "${CONTAINER_NAME}" ray status --address=auto 2>&1 | sed -n '1,12p' || true
+  done
+
+  if wait "${verification_pid}"; then
+    :
+  else
+    verification_status=$?
+  fi
+  kill "${correctness_tail_pid}" "${ray_log_pid}" 2>/dev/null || true
+  wait "${correctness_tail_pid}" 2>/dev/null || true
+  wait "${ray_log_pid}" 2>/dev/null || true
+
+  if (( verification_status != 0 )); then
     echo "ERROR: Offload correctness verification failed; showing ${LOG_DIR}/correctness.txt" >&2
     cat "${LOG_DIR}/correctness.txt" >&2 || true
-    return 1
+    return "${verification_status}"
   fi
   cat "${LOG_DIR}/correctness.txt"
 }
