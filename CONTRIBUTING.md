@@ -32,7 +32,7 @@ We choose to follow a similar directory structure as vLLM:
 We prefer enabling Pytorch based vLLM models via Torchax first and then following up with integrating JAX-Native/FLAX implementation of the models.
 
 ## Testing
-When checking in a new feature, we expect that you you add relevant unit tests as well as CI tests.  You can read more about the latter [here](https://github.com/vllm-project/tpu-inference/tree/main/.buildkite#adding-a-new-feature-to-ci).
+When checking in a new feature, we expect that you add relevant unit tests as well as CI tests.  You can read more about the latter [here](https://github.com/vllm-project/tpu-inference/tree/main/.buildkite#adding-a-new-feature-to-ci).
 
 ## Setting up linting, formatting, and static type checking
 
@@ -47,4 +47,4 @@ pre-commit run --all-files
 ```
 
 ## Thank You!
-We wanted to thank you for taking the time to read these guidelines and for your interest in contributing to TPU Inference. All of your contributions help make TPU Infernece a great tool and community for everyone!
+We wanted to thank you for taking the time to read these guidelines and for your interest in contributing to TPU Inference. All of your contributions help make TPU Inference a great tool and community for everyone!

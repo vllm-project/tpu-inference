@@ -478,7 +478,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
     def load_weights(self, *, layer: JaxMoE, original_load_weights_fn,
                      weights: Iterable) -> set:
-        """Load scale paramters and delegate the weight paramters to `original_load_weights_fn`"""
+        """Load scale parameters and delegate the weight parameters to `original_load_weights_fn`"""
 
         # Remaining non-scale parameters will be loaded using original load_weights function.
         remaining_weights = dict()
