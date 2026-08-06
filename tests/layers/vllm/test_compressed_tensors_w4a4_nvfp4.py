@@ -388,19 +388,20 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
 @pytest.mark.parametrize(
     "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
                                                               (256, True)])
-def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
-                                       enable_sp, enable_attn_dp,
+def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
+                                       fuse_matmuls, enable_sp, enable_attn_dp,
                                        activation_type, requantize_block_size,
                                        enable_quantized_matmul_kernel):
     if requantize_block_size is not None:
-        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
-            requantize_block_size)
+        monkeypatch.setenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE",
+                           str(requantize_block_size))
     else:
-        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+        monkeypatch.delenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE",
+                           raising=False)
     if enable_quantized_matmul_kernel:
-        os.environ["ENABLE_QUANTIZED_MATMUL_KERNEL"] = "1"
+        monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "1")
     else:
-        os.environ.pop("ENABLE_QUANTIZED_MATMUL_KERNEL", None)
+        monkeypatch.delenv("ENABLE_QUANTIZED_MATMUL_KERNEL", raising=False)
 
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
