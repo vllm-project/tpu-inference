@@ -147,6 +147,8 @@ class TpuPlatform(Platform):
         "USE_MOE_FUSED_EP_KERNEL",
         "MOE_FUSED_EP_KERNEL_MIN_TOKENS",
         "USE_MOE_FUSED_GMM_KERNEL",
+        "LOGITS_ALL_GATHER_CONSERVATIVE",
+        "SLICE_ROPE_CACHE",
         # The same rule, for every other setting that feature's acceptance
         # check reads. Two of these are refusals whose whole point is that a
         # run cannot silently be something other than what was asked for:

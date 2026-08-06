@@ -258,8 +258,23 @@ class VllmModelWrapper:
         # positions are 1-D and bounded by max_model_len (standard text RoPE);
         # MRoPE video positions are structural and can exceed max_model_len, so
         # skip the slice there to avoid an out-of-bounds cos_sin_cache gather.
-        if envs.SLICE_ROPE_CACHE and \
-                not self.vllm_config.model_config.uses_mrope:
+        _uses_mrope = self.vllm_config.model_config.uses_mrope
+        _slice_rope = envs.SLICE_ROPE_CACHE and not _uses_mrope
+        # MRoPE models slice only when multimodal inputs are impossible for
+        # this instance: the text-only positions are the 1-D text positions
+        # replicated across the three sections, so the slice is the same.
+        if envs.SLICE_ROPE_CACHE and _uses_mrope:
+            _mm_cfg = self.vllm_config.model_config.multimodal_config
+            # A vllm without this field reads as "multimodal is possible".
+            if (_mm_cfg is None
+                    or getattr(_mm_cfg, "language_model_only", False)):
+                _slice_rope = True
+            else:
+                logger.warning(
+                    "MRoPE model: multimodal inputs are not provably "
+                    "disabled (multimodal_config.language_model_only is "
+                    "not set), keeping the full rope cache")
+        if _slice_rope:
             max_len = self.vllm_config.model_config.max_model_len
             for key, val in list(params_and_buffers.items()):
                 if key.endswith("rotary_emb.cos_sin_cache"):
@@ -269,8 +284,9 @@ class VllmModelWrapper:
                         logger.info(
                             "Sliced rope cache %s rows %d -> %d. Assumes "
                             "positions are 1-D and bounded by max_model_len "
-                            "(%d); MRoPE (video) can exceed it and is excluded",
-                            key, arr.shape[0], max_len, max_len)
+                            "(%d); MRoPE slices only under language-model-"
+                            "only serving (text positions)", key, arr.shape[0],
+                            max_len, max_len)
 
         self._pooler: Pooler | None = self.model.pooler
 
@@ -601,12 +617,26 @@ class VllmModelWrapper:
 
     def jit_compute_logits_func(self):
 
+        # The conservative all-gather collective-matmul mode declines the
+        # rewrite that retiles the lm_head weight, which would cost a
+        # per-step relayout of the full weight shard at decode width.
+        # TPU-only: the XLA CPU compiler rejects xla_tpu_* options, and
+        # CPU parity harnesses jit this same function.
+        logits_options = None
+        if (envs.LOGITS_ALL_GATHER_CONSERVATIVE
+                and jax.default_backend() == "tpu"):
+            logits_options = {
+                "xla_tpu_all_gather_collective_matmul_mode":
+                "post_spmd_conservative",
+            }
+
         # TODO(gxd3): revisit if the sharding below is the best way to shard the
         # output logits.
-        @jax.jit(out_shardings=(NamedSharding(
+        out_shardings = NamedSharding(
             self.mesh,
             PartitionSpec(ShardingAxisName.MLP_DATA,
-                          ShardingAxisName.MLP_TENSOR))))
+                          ShardingAxisName.MLP_TENSOR))
+
         def compute_logits_func(
             params_and_buffers: Any,
             hidden_states: jax.Array,
@@ -629,7 +659,14 @@ class VllmModelWrapper:
                                       self.vllm_config.lora_config)
             return jax_view(logits)
 
-        return compute_logits_func
+        # The returned function must BE a jax.jit: ahead-of-time
+        # precompilation calls .lower() on it, so a plain callable would
+        # fail the boot.
+        if logits_options is None:
+            return jax.jit(compute_logits_func, out_shardings=out_shardings)
+        return jax.jit(compute_logits_func,
+                       out_shardings=out_shardings,
+                       compiler_options=logits_options)
 
     def jit_combine_hidden_states_func(self):
 

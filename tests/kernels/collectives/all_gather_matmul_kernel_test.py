@@ -26,6 +26,8 @@ class AllGatherMatmulTest(jtu.JaxTestCase):
         rhs_transpose=[True, False],
     )
     def test_all_gather_matmul(self, grid_k, grid_n, rhs_transpose):
+        if not jtu.test_device_matches(['tpu']):
+            self.skipTest('the all-gather matmul kernel needs real chips')
         if jax.device_count() != 8:
             self.skipTest('Not enough devices for test')
 
