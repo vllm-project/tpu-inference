@@ -15,11 +15,11 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
-from tools.kernel.tuner.v1.inspect_result_cli import (FilterResult,
-                                                      _matches_filter,
-                                                      dump_tuned_params_mapping
-                                                      )
+from tools.kernel.tuner.v1.inspect_result_cli import (
+    FilterResult, _build_parser, _matches_filter, _might_add_baseline_latency,
+    _print_case_latency, _print_min_latency, local_get_baseline_latency_map, dump_tuned_params_mapping)
 
 
 class TestMatchesFilter(unittest.TestCase):

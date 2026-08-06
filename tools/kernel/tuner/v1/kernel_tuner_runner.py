@@ -32,8 +32,6 @@ from tools.kernel.tuner.v1.utils import get_tpu_queue_by_version_and_cores
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_DEBUG = flags.DEFINE_bool(
-    'debug', False, 'If true, prints results after each case iteration.')
 _RUN_LOCALLY = flags.DEFINE_bool(
     'run_locally', False,
     'If true, uses local storage instead of cloud storage.')
@@ -43,7 +41,7 @@ _AUTOTUNE_MODE = flags.DEFINE_bool(
 )
 _KERNEL_TUNER_NAME = flags.DEFINE_string('kernel_tuner_name',
                                          'example_kernel_tuner',
-                                         'Name of the kernel tuner to run.')
+                                         'Name of the kernel tuner to run, support RpaV3KernelTuner, RpaV3KernelTuner, MlaKernelTuner, BatchedRpaKernelTuner, FlashAttentionKernelTuner and an ExampleKernelTuner so far.')
 _CASE_SET_ID = flags.DEFINE_string('case_set_id', '',
                                    'The case set ID to use for this run.')
 _RUN_ID = flags.DEFINE_string(
@@ -100,6 +98,20 @@ _JOB_PRIORITY = flags.DEFINE_integer(
 _MAX_EXECUTION_MINUTES = flags.DEFINE_integer(
     'max_execution_minutes', 20,
     'Only used when the kernel tuning job is scheduled through Buildkite. The maximum execution time in minutes for each kernel tuning job. If the job exceeds this time, it will save the job progresss, generate a new job to be scheduled by Buildkite and exit.'
+)
+_USE_BAYESIAN_OPTIMIZATION = flags.DEFINE_boolean(
+    'use_bayesian_optimization', False,
+    ' whether to use Bayesian optimization (optuna) instead of sweeping '
+    'all tuning cases.  When True, the kernel tuner uses optuna to intelligently '
+    'select which tunable-parameter combinations to evaluate.  When False, every '
+    'case is evaluated (full sweep).  When not specified (None), the default set '
+    'by each kernel tuner\'s TunerConfig.support_bayesian_optimization is used.'
+)
+
+_N_BAYESIAN_TRIALS = flags.DEFINE_integer(
+    'n_bayesian_trials', None,
+    'Number of Bayesian optimization trials to run per tuning key bucket. '
+    'Overrides default if specified via flag or KERNEL_TUNING_N_BAYESIAN_TRIALS env var.'
 )
 
 _WORKER_PROCESS = flags.DEFINE_bool(
@@ -319,7 +331,8 @@ def main(argv):
                            spanner_database_id=_SPANNER_DATABASE_ID.value,
                            worker_id=_WORKER_ID.value,
                            autotune_mode=_AUTOTUNE_MODE.value,
-                           debug=_DEBUG.value)
+        use_bayesian_optimization=_USE_BAYESIAN_OPTIMIZATION.value,
+        n_bayesian_trials=_N_BAYESIAN_TRIALS.value)
 
     if _RUN_LOCALLY.value:
         if _BEGIN_CASE_ID.value is None:

@@ -107,8 +107,13 @@ markdown_extensions:
   - mdx_math:
       enable_dollar_delimiter: true
 
+extra_css:
+  - mkdocs/stylesheets/extra.css
+  - mkdocs/stylesheets/interactive.css
+
 extra_javascript:
   - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - mkdocs/javascripts/interactive.js
 
 use_directory_urls: true
 

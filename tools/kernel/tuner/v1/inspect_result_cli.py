@@ -984,6 +984,15 @@ def _build_parser():
         help=('Include unsuccessful case results as well. '
               'By default, only successful results are shown.'),
     )
+    p.add_argument(
+        '--show-baseline',
+        dest='show_baseline',
+        action='store_true',
+        help=('Add baseline_latency and latency_improvement%% columns. '
+              'The baseline is the is_baseline=True case measured for the '
+              'same TuningKey. Shows N/A when no baseline exists for a key '
+              'or when the row itself is not a SUCCESS.'),
+    )
 
     p = sub.add_parser(
         'dump_tuned_params_mapping',

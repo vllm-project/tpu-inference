@@ -15,18 +15,29 @@
 import json
 from dataclasses import asdict, dataclass
 from enum import Enum
+from typing import Any, Optional, Protocol, Type, runtime_checkable
 
 
-@dataclass
-class TuningKey:
-    # Specify the key for tuning case
-    pass
+@runtime_checkable
+class TuningKey(Protocol):
+    """Protocol for any frozen, hashable tuning key dataclass."""
+
+    def __hash__(self) -> int:
+        ...
 
 
-@dataclass
-class TunableParams:
-    # Specify the tiles for tuning case
-    pass
+@runtime_checkable
+class TunableParams(Protocol):
+    """Protocol for any frozen tunable parameters dataclass with comparison operators."""
+
+    def __hash__(self) -> int:
+        ...
+
+    def __le__(self, other: Any) -> bool:
+        ...
+
+    def __ge__(self, other: Any) -> bool:
+        ...
 
 
 class TuningStatus(Enum):
@@ -35,6 +46,20 @@ class TuningStatus(Enum):
     XPROF_MEASUREMENT_ERROR = 'XPROF_MEASUREMENT_ERROR'
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
     SKIPPED = 'SKIPPED'
+
+
+@dataclass
+class CaseResult:
+    case_set_id: str
+    run_id: str
+    case_id: int
+    processed_status: str
+    worker_id: str
+    latency: int
+    warmup_time: int
+    total_time: int
+    processed_at: int
+    tpu: str
 
 
 class TuningCase:
@@ -66,31 +91,44 @@ class TuningCase:
 
 @dataclass
 class TunerConfig:
-    tuning_key_class: any = None
-    tunable_params_class: any = None
-    kernel_tuner_name: str = None
+    tuning_key_class: Type[TuningKey]
+    tunable_params_class: Type[TunableParams]
+    kernel_tuner_name: str
     # When support autotune and run_config.autotune_mode is True,
     # the kernel tuner will read the cases from spanner using the case_set_id and kernel_tuner_name
     support_autotune: bool = False
     support_bayesian_optimization: bool = False
-    jit_kernel_pattern: str = None
+    jit_kernel_pattern: Optional[str] = None
+    # Number of Bayesian optimization trials (optuna) to run per tuning key bucket.
+    # Only used when support_bayesian_optimization is True.
+    n_bayesian_trials: int = 100
+    # Minimum number of total cases for a tuning key search space required to use Bayesian Optimization.
+    # If the search space has fewer cases than min_cases_for_bayesian, BO falls back to full sweep search.
+    min_cases_for_bayesian: int = 200
+    # Early stopping patience (number of consecutive trials without min_delta_ratio relative improvement).
+    # None by default (early stopping disabled unless explicitly specified).
+    bayesian_early_stopping_patience: Optional[int] = None
+    # Early stopping relative improvement threshold ratio (e.g., 0.05 for 5% improvement).
+    bayesian_early_stopping_min_delta_ratio: float = 0.10
 
 
 @dataclass
 class RunConfig:
-    case_set_id: str = None
-    run_id: str = None
-    case_set_desc: str = None
-    tpu_version: str = None
-    tpu_cores: int = None
-    tpu_queue_multi: str = None
+    case_set_id: Optional[str] = None
+    run_id: Optional[str] = None
+    case_set_desc: Optional[str] = None
+    tpu_version: Optional[str] = None
+    tpu_cores: Optional[int] = None
+    tpu_queue_multi: Optional[str] = None
     run_locally: bool = False
     job_priority: int = -10
     max_execution_minutes: int = 20
     job_bucket_size: int = 500
-    gcp_project_id: str = None
-    spanner_instance_id: str = None
-    spanner_database_id: str = None
-    worker_id: str = None
+    gcp_project_id: Optional[str] = None
+    spanner_instance_id: Optional[str] = None
+    spanner_database_id: Optional[str] = None
+    worker_id: Optional[str] = None
     autotune_mode: bool = False
-    debug: bool = False
+    use_bayesian_optimization: bool = False
+    # Runtime override for number of Bayesian trials per tuning key bucket.
+    n_bayesian_trials: Optional[int] = None

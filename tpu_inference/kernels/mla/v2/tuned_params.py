@@ -43,7 +43,7 @@ class TuningKey:
     p_same_dtype_as_v: bool = True  # Whether the softmax input should have the same data type as V, fixed at True for now
 
 
-@dataclass
+@dataclass(frozen=True)
 class TunableParams:
     num_kv_pages_per_block: int  # Number of KV pages to process per block. Range from 1 to as high as possible before OOM,
     # with steps of powers of two.
