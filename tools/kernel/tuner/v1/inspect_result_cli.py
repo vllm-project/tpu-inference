@@ -22,21 +22,25 @@ Commands:
     count_buckets       Count buckets (--case_set_id ID --run_id ID)
     list_bucket_status  Show completed vs pending counts (--case_set_id ID --run_id ID)
     query_run_status    Show timing info for a run (--case_set_id ID --run_id ID)
-    query_min_latency   Show best latency per TuningKey (--case_set_id ID --run_id ID [--show FIELD ...])
+    query_min_latency   Show best latency per TuningKey (--case_set_id ID --run_id ID [--show FIELD ...] [--show-baseline])
     query_case_latency  Query latency for tuning cases with optional field filters
-                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all])
+                        (--case_set_id ID --run_id ID [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all] [--show-baseline])
                         FIELD can be any key in tuning_key or tunable_params. show_all includes unsuccessful cases;
-                        By default only successful cases are shown.
+                        By default only successful cases are shown. --show-baseline adds baseline_latency and
+                        latency_improvement%% columns (baseline is the is_baseline=True case for each TuningKey).
 """
 
 import argparse
 import ast
 import atexit
 import json
+import logging
 import math
 import os
 from collections import defaultdict
 from enum import Enum
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Local backend helpers
@@ -186,6 +190,41 @@ def local_query_min_latency(db_path, case_set_id, run_id):
                   key=lambda x: json.dumps(x['tuning_key'], sort_keys=True))
 
 
+def local_get_baseline_latency_map(db_path, case_set_id, run_id):
+    """Return {tk_json_str: baseline_latency_us} for baseline cases that have a SUCCESS result.
+
+    A baseline case is any KernelTuningCase whose stored CaseKeyValue has
+    ``is_baseline == True``.  The latency is looked up from CaseResults for the
+    same (case_set_id, run_id).  If a TuningKey has no baseline case, or its
+    baseline case was not measured successfully, it will not appear in the map.
+    """
+    results = _read_json(db_path, 'CaseResults')
+    cases = _read_json(db_path, 'KernelTuningCases')
+
+    latency_by_case = {
+        r['CaseId']: r['Latency']
+        for r in results
+        if r['ID'] == case_set_id and str(r['RunId']) == str(run_id)
+        and r.get('ProcessedStatus') == 'SUCCESS' and r.get('Latency')
+    }
+
+    baseline_map = {}
+    for c in cases:
+        if c['ID'] != case_set_id:
+            continue
+        try:
+            kv = json.loads(c.get('CaseKeyValue') or '{}')
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not kv.get('is_baseline'):
+            continue
+        lat = latency_by_case.get(c['CaseId'])
+        if lat is not None:
+            tk_str = json.dumps(kv.get('tuning_key', {}), sort_keys=True)
+            baseline_map[tk_str] = lat
+    return baseline_map
+
+
 # ---------------------------------------------------------------------------
 # Filtering helpers
 # ---------------------------------------------------------------------------
@@ -210,16 +249,16 @@ def _matches_filter(kv: dict, filter_keys: list) -> FilterResult:
 
     for kv_str in filter_keys:
         if '=' not in kv_str:
-            print(
-                f'Warning: invalid filter "{kv_str}" ignored (expected format FIELD=VALUE)'
+            logger.warning(
+                f'Invalid filter "{kv_str}" ignored (expected format FIELD=VALUE)'
             )
             return FilterResult.INVALID_FILTER
         field, raw = kv_str.split('=', 1)
         field = field.strip()
         raw = raw.strip()
         if field not in combined:
-            print(
-                f'Warning: Filter field "{field}" not found in tuning_key or tunable_params'
+            logger.warning(
+                f'Filter field "{field}" not found in tuning_key or tunable_params'
             )
             return FilterResult.INVALID_FILTER
         stored = combined[field]
@@ -228,9 +267,8 @@ def _matches_filter(kv: dict, filter_keys: list) -> FilterResult:
                 return FilterResult.NO_MATCH
         elif isinstance(stored, bool):
             if raw.lower() not in ('true', 'false', '1', '0', 'yes', 'no'):
-                print(
-                    f'Warning: Invalid boolean value "{raw}" for field "{field}"'
-                )
+                logger.warning(
+                    f'Invalid boolean value "{raw}" for field "{field}"')
                 return FilterResult.INVALID_FILTER
             if stored != (raw.lower() in ('true', '1', 'yes')):
                 return FilterResult.NO_MATCH
@@ -298,21 +336,20 @@ def local_query_case_latency(db_path,
     for r in relevant:
         kv_str = case_kv_map.get((r['ID'], r['CaseId']))
         if not kv_str:
-            print(
-                f'Warning: no CaseKeyValue found for CaseId={r["CaseId"]}; skipping'
-            )
+            logger.warning(
+                f'No CaseKeyValue found for CaseId={r["CaseId"]}; skipping')
             continue
         try:
             kv = json.loads(kv_str)
         except (json.JSONDecodeError, TypeError):
-            print(
-                f'Warning: failed to decode CaseKeyValue for CaseId={r["CaseId"]}; skipping'
+            logger.warning(
+                f'Failed to decode CaseKeyValue for CaseId={r["CaseId"]}; skipping'
             )
             continue
         if filter_keys:
             result = _matches_filter(kv, filter_keys)
             if result == FilterResult.INVALID_FILTER:
-                print('One or more invalid filters; aborting query.')
+                logger.warning('One or more invalid filters; aborting query.')
                 return []
             if result != FilterResult.MATCH:
                 continue
@@ -507,6 +544,44 @@ def spanner_query_min_latency(db, case_set_id, run_id):
                   key=lambda x: json.dumps(x['tuning_key'], sort_keys=True))
 
 
+def spanner_get_baseline_latency_map(db, case_set_id, run_id):
+    """Return {tk_json_str: baseline_latency_us} for baseline cases that have a SUCCESS result.
+
+    A baseline case is any KernelTuningCase whose stored CaseKeyValue has
+    ``is_baseline == True``.  The latency is looked up from CaseResults for the
+    same (case_set_id, run_id).
+    """
+    from google.cloud import \
+        spanner as gspanner  # pylint: disable=import-outside-toplevel
+    query = """
+        SELECT cr.CaseId, cr.Latency, ktc.CaseKeyValue
+        FROM CaseResults cr
+        JOIN KernelTuningCases ktc ON cr.ID = ktc.ID AND cr.CaseId = ktc.CaseId
+        WHERE cr.ID = @id AND cr.RunId = @rid AND cr.ProcessedStatus = 'SUCCESS'
+    """
+    baseline_map = {}
+    with db.snapshot() as snap:
+        for _case_id, lat, kv_str in snap.execute_sql(
+                query,
+                params={
+                    'id': case_set_id,
+                    'rid': run_id
+                },
+                param_types={
+                    'id': gspanner.param_types.STRING,
+                    'rid': gspanner.param_types.STRING
+                }):
+            try:
+                kv = json.loads(kv_str)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not kv.get('is_baseline') or lat is None:
+                continue
+            tk_str = json.dumps(kv.get('tuning_key', {}), sort_keys=True)
+            baseline_map[tk_str] = lat
+    return baseline_map
+
+
 def spanner_query_case_latency(db,
                                case_set_id,
                                run_id,
@@ -650,41 +725,100 @@ def _print_flattened_table(rows,
     print(f'  ({len(rows)} result(s){count_suffix})')
 
 
-def _print_min_latency(rows, show_fields=None):
-    """Print query_min_latency results as a table."""
-    _print_flattened_table(
-        rows,
-        builtin_cols=['case_id', 'latency_us', 'warmup_us'],
-        row_builder=lambda r: {
+def _prepare_baseline_cols(baseline_map: dict, show_fields: list):
+    """Return extra_cols and updated show_fields when baseline_map is provided."""
+    extra_cols = ['baseline_latency', 'latency_improvement%'
+                  ] if baseline_map is not None else []
+    if baseline_map is not None and show_fields is not None:
+        extra_to_add = [c for c in extra_cols if c not in show_fields]
+        if extra_to_add:
+            show_fields = list(show_fields) + extra_to_add
+    return extra_cols, show_fields
+
+
+def _might_add_baseline_latency(baseline_map: dict, row: dict,
+                                formated_row: dict):
+    if baseline_map is not None:
+        tk_str = json.dumps(row.get('tuning_key', {}), sort_keys=True)
+        base_lat = baseline_map.get(tk_str)
+        if base_lat is not None:
+            formated_row['baseline_latency'] = base_lat
+            lat = row.get('Latency')
+            if lat is not None and base_lat > 0:
+                improvement = (base_lat - lat) / base_lat * 100
+                formated_row['latency_improvement%'] = f'{improvement:+.1f}%'
+            else:
+                formated_row['latency_improvement%'] = 'N/A'
+        else:
+            formated_row['baseline_latency'] = 'N/A'
+            formated_row['latency_improvement%'] = 'N/A'
+
+
+def _print_min_latency(rows, show_fields=None, baseline_map=None):
+    """Print query_min_latency results as a table.
+
+    When *baseline_map* is provided (a dict mapping TuningKey JSON strings to
+    their baseline latency), two extra columns are appended:
+      - ``baseline_latency``     – latency of the is_baseline=True case for the
+                                   same TuningKey, or 'N/A' if absent.
+      - ``latency_improvement%`` – percentage improvement vs. the baseline
+                                   (positive means our tuned result is faster).
+    """
+    extra_cols, show_fields = _prepare_baseline_cols(baseline_map, show_fields)
+
+    def _build_row(r):
+        row = {
             'case_id': r['CaseId'],
             'latency_us': r['Latency'],
             'warmup_us': r['WarmupTime'],
-        },
+        }
+        _might_add_baseline_latency(baseline_map=baseline_map,
+                                    row=r,
+                                    formated_row=row)
+        return row
+
+    _print_flattened_table(
+        rows,
+        builtin_cols=['case_id', 'latency_us', 'warmup_us'] + extra_cols,
+        row_builder=_build_row,
         show_fields=show_fields,
         empty_msg='  (no successful results)',
     )
 
 
-def _print_case_latency(rows, show_fields=None):
-    """Print query_case_latency results as a table."""
+def _print_case_latency(rows, show_fields=None, baseline_map=None):
+    """Print query_case_latency results as a table.
+
+    When *baseline_map* is provided (a dict mapping TuningKey JSON strings to
+    their baseline latency), two extra columns are appended:
+      - ``baseline_latency``     – latency of the is_baseline=True case for the
+                                   same TuningKey, or 'N/A' if absent or if
+                                   this row itself is not a SUCCESS.
+      - ``latency_improvement%`` – percentage improvement vs. the baseline.
+    """
+    extra_cols, show_fields = _prepare_baseline_cols(baseline_map, show_fields)
 
     def _build_row(r):
         status = r.get('ProcessedStatus')
         is_success = status == 'SUCCESS'
-        return {
+        row = {
             'case_id': r['CaseId'],
             'processed_status': status,
             'latency_us': r['Latency'] if is_success else 'FAILURE',
             'warmup_us': r['WarmupTime'] if is_success else 'FAILURE',
             'total_time_us': r.get('TotalTime'),
         }
+        _might_add_baseline_latency(baseline_map=baseline_map,
+                                    row=r,
+                                    formated_row=row)
+        return row
 
     _print_flattened_table(
         rows,
         builtin_cols=[
             'case_id', 'processed_status', 'latency_us', 'warmup_us',
             'total_time_us'
-        ],
+        ] + extra_cols,
         row_builder=_build_row,
         show_fields=show_fields,
         empty_msg='  (no matching results)',
@@ -764,6 +898,14 @@ def _build_parser():
               'Any tuning_key or tunable_params field name is also valid. '
               'Example: --show latency_us --show max_num_tokens'),
     )
+    p.add_argument(
+        '--show-baseline',
+        dest='show_baseline',
+        action='store_true',
+        help=('Add baseline_latency and latency_improvement%% columns. '
+              'The baseline is the is_baseline=True case measured for the '
+              'same TuningKey. Shows N/A when no baseline exists.'),
+    )
 
     p = sub.add_parser(
         'query_case_latency',
@@ -813,6 +955,15 @@ def _build_parser():
         action='store_true',
         help=('Include unsuccessful case results as well. '
               'By default, only successful results are shown.'),
+    )
+    p.add_argument(
+        '--show-baseline',
+        dest='show_baseline',
+        action='store_true',
+        help=('Add baseline_latency and latency_improvement%% columns. '
+              'The baseline is the is_baseline=True case measured for the '
+              'same TuningKey. Shows N/A when no baseline exists for a key '
+              'or when the row itself is not a SUCCESS.'),
     )
 
     return parser
@@ -910,19 +1061,27 @@ def _run_command(args, source, db_path=None, spanner_db=None):
                     print(f'  {k}: {v}')
 
         elif args.command == 'query_min_latency':
+            baseline_map = (local_get_baseline_latency_map(
+                db_path, args.case_set_id, args.run_id) if getattr(
+                    args, 'show_baseline', False) else None)
             _print_min_latency(local_query_min_latency(db_path,
                                                        args.case_set_id,
                                                        args.run_id),
-                               show_fields=args.show_fields)
+                               show_fields=args.show_fields,
+                               baseline_map=baseline_map)
 
         elif args.command == 'query_case_latency':
+            baseline_map = (local_get_baseline_latency_map(
+                db_path, args.case_set_id, args.run_id) if getattr(
+                    args, 'show_baseline', False) else None)
             _print_case_latency(local_query_case_latency(
                 db_path,
                 args.case_set_id,
                 args.run_id,
                 filter_keys=args.filter_keys,
                 show_all=args.show_all),
-                                show_fields=args.show_fields)
+                                show_fields=args.show_fields,
+                                baseline_map=baseline_map)
 
     else:  # spanner
         if args.command == 'list_case_sets':
@@ -961,18 +1120,26 @@ def _run_command(args, source, db_path=None, spanner_db=None):
                 print(f'  {k}: {v}')
 
         elif args.command == 'query_min_latency':
+            baseline_map = (spanner_get_baseline_latency_map(
+                spanner_db, args.case_set_id, args.run_id) if getattr(
+                    args, 'show_baseline', False) else None)
             _print_min_latency(spanner_query_min_latency(
                 spanner_db, args.case_set_id, args.run_id),
-                               show_fields=args.show_fields)
+                               show_fields=args.show_fields,
+                               baseline_map=baseline_map)
 
         elif args.command == 'query_case_latency':
+            baseline_map = (spanner_get_baseline_latency_map(
+                spanner_db, args.case_set_id, args.run_id) if getattr(
+                    args, 'show_baseline', False) else None)
             _print_case_latency(spanner_query_case_latency(
                 spanner_db,
                 args.case_set_id,
                 args.run_id,
                 filter_keys=args.filter_keys,
                 show_all=args.show_all),
-                                show_fields=args.show_fields)
+                                show_fields=args.show_fields,
+                                baseline_map=baseline_map)
 
 
 # ---------------------------------------------------------------------------
@@ -988,13 +1155,15 @@ Commands:
   count_buckets [--case_set_id ID] [--run_id ID]
   list_bucket_status [--case_set_id ID] [--run_id ID]
   query_run_status [--case_set_id ID] [--run_id ID]
-  query_min_latency [--case_set_id ID] [--run_id ID] [--show FIELD ...]
+  query_min_latency [--case_set_id ID] [--run_id ID] [--show FIELD ...] [--show-baseline]
       --show: columns to display (default: all). Built-ins: case_id, latency_us, warmup_us
-  query_case_latency [--case_set_id ID] [--run_id ID] [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all]
+      --show-baseline: add baseline_latency and latency_improvement% columns
+  query_case_latency [--case_set_id ID] [--run_id ID] [--filter_key FIELD=VALUE ...] [--show FIELD ...] [--show_all] [--show-baseline]
       --filter_key: any key in tuning_key or tunable_params (varies by case set type)
       --show: columns to display (default: all). Built-ins: case_id, processed_status,
               latency_us, warmup_us, total_time_us
       --show_all: include unsuccessful rows (default shows only successful rows)
+      --show-baseline: add baseline_latency and latency_improvement% columns
       Example: query_case_latency --show_all --show processed_status --show latency_us
   Use Up/Down arrows to recall command history
   help

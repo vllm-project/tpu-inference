@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import io
+import json
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from tools.kernel.tuner.v1.inspect_result_cli import (FilterResult,
-                                                      _matches_filter)
+from tools.kernel.tuner.v1.inspect_result_cli import (
+    FilterResult, _build_parser, _matches_filter, _might_add_baseline_latency,
+    _print_case_latency, _print_min_latency, local_get_baseline_latency_map)
 
 
 class TestMatchesFilter(unittest.TestCase):
@@ -137,6 +143,211 @@ class TestMatchesFilter(unittest.TestCase):
         self.assertEqual(
             _matches_filter(self.sample_kv, ["block_sizes=not_a_list"]),
             FilterResult.INVALID_FILTER)
+
+
+class TestMightAddBaselineLatency(unittest.TestCase):
+
+    def test_none_baseline_map(self):
+        row = {"tuning_key": {"max_tokens": 4}, "Latency": 80.0}
+        formatted = {"case_id": "c1"}
+        _might_add_baseline_latency(None, row, formatted)
+        self.assertEqual(formatted, {"case_id": "c1"})
+
+    def test_key_not_in_baseline_map(self):
+        baseline_map = {json.dumps({"max_tokens": 8}, sort_keys=True): 100.0}
+        row = {"tuning_key": {"max_tokens": 4}, "Latency": 80.0}
+        formatted = {"case_id": "c1"}
+        _might_add_baseline_latency(baseline_map, row, formatted)
+        self.assertEqual(formatted["baseline_latency"], "N/A")
+        self.assertEqual(formatted["latency_improvement%"], "N/A")
+
+    def test_positive_improvement(self):
+        baseline_map = {json.dumps({"max_tokens": 4}, sort_keys=True): 100.0}
+        row = {"tuning_key": {"max_tokens": 4}, "Latency": 80.0}
+        formatted = {"case_id": "c1"}
+        _might_add_baseline_latency(baseline_map, row, formatted)
+        self.assertEqual(formatted["baseline_latency"], 100.0)
+        self.assertEqual(formatted["latency_improvement%"], "+20.0%")
+
+    def test_negative_improvement_regression(self):
+        baseline_map = {json.dumps({"max_tokens": 4}, sort_keys=True): 100.0}
+        row = {"tuning_key": {"max_tokens": 4}, "Latency": 125.0}
+        formatted = {"case_id": "c1"}
+        _might_add_baseline_latency(baseline_map, row, formatted)
+        self.assertEqual(formatted["baseline_latency"], 100.0)
+        self.assertEqual(formatted["latency_improvement%"], "-25.0%")
+
+    def test_none_latency_in_row(self):
+        baseline_map = {json.dumps({"max_tokens": 4}, sort_keys=True): 100.0}
+        row = {"tuning_key": {"max_tokens": 4}, "Latency": None}
+        formatted = {"case_id": "c1"}
+        _might_add_baseline_latency(baseline_map, row, formatted)
+        self.assertEqual(formatted["baseline_latency"], 100.0)
+        self.assertEqual(formatted["latency_improvement%"], "N/A")
+
+    def test_zero_or_negative_baseline_latency(self):
+        baseline_map = {json.dumps({"max_tokens": 4}, sort_keys=True): 0.0}
+        row = {"tuning_key": {"max_tokens": 4}, "Latency": 50.0}
+        formatted = {"case_id": "c1"}
+        _might_add_baseline_latency(baseline_map, row, formatted)
+        self.assertEqual(formatted["baseline_latency"], 0.0)
+        self.assertEqual(formatted["latency_improvement%"], "N/A")
+
+
+class TestLocalGetBaselineLatencyMap(unittest.TestCase):
+
+    def test_local_get_baseline_latency_map(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cases = [
+                {
+                    "ID":
+                    "cs1",
+                    "CaseId":
+                    "c1",
+                    "CaseKeyValue":
+                    json.dumps({
+                        "tuning_key": {
+                            "m": 128
+                        },
+                        "is_baseline": True
+                    }),
+                },
+                {
+                    "ID":
+                    "cs1",
+                    "CaseId":
+                    "c2",
+                    "CaseKeyValue":
+                    json.dumps({
+                        "tuning_key": {
+                            "m": 128
+                        },
+                        "is_baseline": False
+                    }),
+                },
+                {
+                    "ID":
+                    "cs1",
+                    "CaseId":
+                    "c3",
+                    "CaseKeyValue":
+                    json.dumps({
+                        "tuning_key": {
+                            "m": 256
+                        },
+                        "is_baseline": True
+                    }),
+                },
+            ]
+            results = [
+                {
+                    "ID": "cs1",
+                    "RunId": "r1",
+                    "CaseId": "c1",
+                    "ProcessedStatus": "SUCCESS",
+                    "Latency": 150.0,
+                },
+                {
+                    "ID": "cs1",
+                    "RunId": "r1",
+                    "CaseId": "c2",
+                    "ProcessedStatus": "SUCCESS",
+                    "Latency": 100.0,
+                },
+                {
+                    "ID": "cs1",
+                    "RunId": "r1",
+                    "CaseId": "c3",
+                    "ProcessedStatus": "FAILED",
+                    "Latency": None,
+                },
+            ]
+
+            with open(os.path.join(tmpdir, "KernelTuningCases.json"),
+                      "w") as f:
+                json.dump(cases, f)
+            with open(os.path.join(tmpdir, "CaseResults.json"), "w") as f:
+                json.dump(results, f)
+
+            baseline_map = local_get_baseline_latency_map(tmpdir, "cs1", "r1")
+            expected_key = json.dumps({"m": 128}, sort_keys=True)
+            self.assertIn(expected_key, baseline_map)
+            self.assertEqual(baseline_map[expected_key], 150.0)
+
+            # c3 is FAILED, so m: 256 shouldn't be in baseline_map
+            missing_key = json.dumps({"m": 256}, sort_keys=True)
+            self.assertNotIn(missing_key, baseline_map)
+
+            # Different case_set_id/run_id returns empty map
+            empty_map = local_get_baseline_latency_map(tmpdir, "cs2", "r1")
+            self.assertEqual(empty_map, {})
+
+
+class TestBaselineDisplayAndParser(unittest.TestCase):
+
+    def test_parser_show_baseline_query_min_latency(self):
+        parser = _build_parser()
+        args = parser.parse_args([
+            "query_min_latency", "--case_set_id", "cs1", "--run_id", "r1",
+            "--show-baseline"
+        ])
+        self.assertTrue(args.show_baseline)
+
+    def test_parser_show_baseline_query_case_latency(self):
+        parser = _build_parser()
+        args = parser.parse_args([
+            "query_case_latency", "--case_set_id", "cs1", "--run_id", "r1",
+            "--show-baseline"
+        ])
+        self.assertTrue(args.show_baseline)
+
+    def test_print_min_latency_with_baseline(self):
+        tk = {"m": 128}
+        tk_str = json.dumps(tk, sort_keys=True)
+        baseline_map = {tk_str: 100.0}
+        rows = [{
+            "CaseId": "c2",
+            "Latency": 80.0,
+            "WarmupTime": 10.0,
+            "tuning_key": tk,
+            "tunable_params": {
+                "tile": 16
+            },
+        }]
+
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            _print_min_latency(rows, baseline_map=baseline_map)
+            output = mock_stdout.getvalue()
+
+        self.assertIn("baseline_latency", output)
+        self.assertIn("latency_improvement%", output)
+        self.assertIn("100.0", output)
+        self.assertIn("+20.0%", output)
+
+    def test_print_case_latency_with_baseline(self):
+        tk = {"m": 128}
+        tk_str = json.dumps(tk, sort_keys=True)
+        baseline_map = {tk_str: 100.0}
+        rows = [{
+            "CaseId": "c2",
+            "ProcessedStatus": "SUCCESS",
+            "Latency": 80.0,
+            "WarmupTime": 10.0,
+            "TotalTime": 90.0,
+            "tuning_key": tk,
+            "tunable_params": {
+                "tile": 16
+            },
+        }]
+
+        with patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+            _print_case_latency(rows, baseline_map=baseline_map)
+            output = mock_stdout.getvalue()
+
+        self.assertIn("baseline_latency", output)
+        self.assertIn("latency_improvement%", output)
+        self.assertIn("100.0", output)
+        self.assertIn("+20.0%", output)
 
 
 if __name__ == '__main__':
