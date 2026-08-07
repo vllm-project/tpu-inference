@@ -14,6 +14,7 @@
 
 import functools
 import math
+import os
 from typing import Any, Callable, Optional, Tuple
 
 import jax
@@ -52,8 +53,10 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 # for details
 if envs.USE_BATCHED_RPA_KERNEL:
     import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
     logger.info_once("Using experimental batched RPA kernel")
 else:
+    import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_cp
     import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
     logger.info_once("Using default RPA kernel")
 
@@ -519,6 +522,7 @@ def attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            is_decode=md.is_decode,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
         return pcp_forward(
