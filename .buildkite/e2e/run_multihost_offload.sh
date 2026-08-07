@@ -184,7 +184,6 @@ stream_ray_vllm_logs() {
         line_count=$(wc -l < "${log_file}")
         start_line=${emitted_lines["${log_file}"]:-1}
         if (( line_count >= start_line )); then
-          echo "--- Ray/vLLM log: ${log_file} ---"
           sed -n "${start_line},${line_count}p" "${log_file}"
         fi
         emitted_lines["${log_file}"]=$((line_count + 1))
@@ -206,6 +205,11 @@ run_offload_correctness() {
 
   echo "--- Verifying deterministic output with actual TPU KV-cache offload"
   : >"${LOG_DIR}/correctness.txt"
+  # Metrics are kept in the Ray worker processes and their interval counters
+  # are cleared after each snapshot. Preserve snapshots while the child LLM is
+  # still running; it shuts down its Ray placement group before returning.
+  : >"${LOG_DIR}/offload_metrics.txt"
+  : >"${LOG_DIR}/ray_vllm_logs.txt"
   timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
     docker exec "${CONTAINER_NAME}" bash -c \
     "python3 /workspace/tpu_inference/.buildkite/e2e/verify_multihost_offload.py \\
@@ -223,7 +227,7 @@ run_offload_correctness() {
 
   tail -n 0 -F "${LOG_DIR}/correctness.txt" &
   correctness_tail_pid=$!
-  stream_ray_vllm_logs &
+  stream_ray_vllm_logs | tee -a "${LOG_DIR}/ray_vllm_logs.txt" &
   ray_log_pid=$!
 
   while kill -0 "${verification_pid}" 2>/dev/null; do
@@ -231,6 +235,7 @@ run_offload_correctness() {
     elapsed_seconds=$((elapsed_seconds + 5))
     echo "--- Offload correctness is still running (${elapsed_seconds}s elapsed)"
     docker exec "${CONTAINER_NAME}" ray status --address=auto 2>&1 | sed -n '1,12p' || true
+    collect_offload_metrics >>"${LOG_DIR}/offload_metrics.txt"
   done
 
   if wait "${verification_pid}"; then
@@ -238,6 +243,8 @@ run_offload_correctness() {
   else
     verification_status=$?
   fi
+  # Take one final snapshot before stopping the live Ray log stream.
+  collect_offload_metrics >>"${LOG_DIR}/offload_metrics.txt"
   kill "${correctness_tail_pid}" "${ray_log_pid}" 2>/dev/null || true
   wait "${correctness_tail_pid}" 2>/dev/null || true
   wait "${ray_log_pid}" 2>/dev/null || true
@@ -256,33 +263,34 @@ run_offload_correctness() {
 
 collect_offload_metrics() {
   local worker_ip
-  : > "${LOG_DIR}/offload_metrics.txt"
   docker exec "${CONTAINER_NAME}" bash -c \
     'grep -R -h "Offload Metrics Snapshot:" /tmp/ray/session_latest/logs 2>/dev/null || true' \
-    >>"${LOG_DIR}/offload_metrics.txt"
+    || true
   IFS=',' read -r -a worker_ips <<< "${WORKER_IPS}"
   for worker_ip in "${worker_ips[@]}"; do
     [[ -n "${worker_ip}" ]] || continue
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
       "docker exec '${CONTAINER_NAME}' bash -c 'grep -R -h \"Offload Metrics Snapshot:\" /tmp/ray/session_latest/logs 2>/dev/null || true'" \
-      >>"${LOG_DIR}/offload_metrics.txt" || true
+      || true
   done
-  cat "${LOG_DIR}/offload_metrics.txt"
 }
 
 assert_actual_offload() {
   # The stats logger clears interval counters, so D2H and H2D can appear in
-  # separate snapshots. Require a positive operation count for each.
-  sleep "$((TPU_OFFLOAD_METRICS_LOG_INTERVAL + 1))"
-  collect_offload_metrics
+  # separate snapshots. `run_offload_correctness` saved snapshots from every
+  # host before it shut down the LLM engine.
   grep -Eq 'Offload Metrics Snapshot:.*d2h=[1-9][0-9]*' "${LOG_DIR}/offload_metrics.txt" || {
     echo "ERROR: No D2H offload operation was observed." >&2
+    tail -n 50 "${LOG_DIR}/offload_metrics.txt" >&2 || true
     return 1
   }
   grep -Eq 'Offload Metrics Snapshot:.*h2d=[1-9][0-9]*' "${LOG_DIR}/offload_metrics.txt" || {
     echo "ERROR: No H2D reload operation was observed after the cache reset." >&2
+    tail -n 50 "${LOG_DIR}/offload_metrics.txt" >&2 || true
     return 1
   }
+  grep -E 'Offload Metrics Snapshot:.*(d2h=[1-9][0-9]*|h2d=[1-9][0-9]*)' \
+    "${LOG_DIR}/offload_metrics.txt" | tail -n 20
 }
 
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
