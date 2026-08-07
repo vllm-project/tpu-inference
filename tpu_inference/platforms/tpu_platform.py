@@ -134,6 +134,7 @@ class TpuPlatform(Platform):
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        "MOE_RAGGED_GATHER_FP8",
     ]
 
     @classmethod

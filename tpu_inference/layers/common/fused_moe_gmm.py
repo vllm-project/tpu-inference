@@ -107,7 +107,8 @@ def gmm_wrapper(lhs,
                 group_sizes,
                 group_offset,
                 fuse_act=None,
-                preferred_element_type=None):
+                preferred_element_type=None,
+                lhs_scale_packed=False):
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -115,6 +116,7 @@ def gmm_wrapper(lhs,
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
         group_offset=group_offset[0],
+        lhs_scale_packed=lhs_scale_packed,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
@@ -171,6 +173,8 @@ def moe_gmm_local(x: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
                   topk_weights: jax.Array,
                   *,
+                  lhs_scale_packed: bool = False,
+                  lhs_scale_dtype: jnp.dtype | None = None,
                   activation: str,
                   topk: int,
                   parallelism: Literal["tp", "ep"],
@@ -182,9 +186,22 @@ def moe_gmm_local(x: jax.Array,
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
+
+    When lhs_scale_packed is set, x is already quantized (e.g. fp8) and carries
+    its per-token dequant scale in its trailing columns; GMM1 reads the scale
+    from x and dequantizes internally.
     """
 
     assert parallelism in ["tp", "ep"]
+
+    # Output/compute dtype. With a packed scale there is no scale array to read
+    # the original (bf16) dtype off, so it must be supplied explicitly.
+    if lhs_scale_packed:
+        assert lhs_scale_dtype is not None, (
+            "lhs_scale_packed=True requires lhs_scale_dtype")
+        compute_dtype = lhs_scale_dtype
+    else:
+        compute_dtype = x.dtype
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
     gmm1_res = gmm_wrapper(
@@ -195,7 +212,8 @@ def moe_gmm_local(x: jax.Array,
         group_sizes,
         group_offset,
         fuse_act=activation,
-        preferred_element_type=x.dtype,
+        preferred_element_type=compute_dtype,
+        lhs_scale_packed=lhs_scale_packed,
     )
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
@@ -308,7 +326,9 @@ def moe_gmm_local(x: jax.Array,
                 chunk_hidden,
                 num_devices=scatter_axis_size,
                 axis_name=reduction_axis)
-            out = rs_out.astype(x.dtype)
+            # compute_dtype (not x.dtype): on the fp8 path x is fp8, so the
+            # reduce-scatter output must be cast to the compute (bf16) dtype.
+            out = rs_out.astype(compute_dtype)
         elif scatter_results:
             if reduce_axes:
                 chunk_hidden = jax.lax.psum(chunk_hidden,
@@ -317,15 +337,16 @@ def moe_gmm_local(x: jax.Array,
                 out = jax.lax.psum_scatter(chunk_hidden,
                                            axis_name=scatter_axes,
                                            scatter_dimension=0,
-                                           tiled=True).astype(x.dtype)
+                                           tiled=True).astype(compute_dtype)
             else:
-                out = chunk_hidden.astype(x.dtype)
+                out = chunk_hidden.astype(compute_dtype)
         else:
             if not defer_all_reduce:
-                out = jax.lax.psum(chunk_hidden,
-                                   axis_name=reduction_axis).astype(x.dtype)
+                out = jax.lax.psum(
+                    chunk_hidden,
+                    axis_name=reduction_axis).astype(compute_dtype)
             else:
-                out = chunk_hidden.astype(x.dtype)
+                out = chunk_hidden.astype(compute_dtype)
         out_list.append(out)
 
     return jnp.concatenate(out_list,
@@ -438,6 +459,8 @@ def expert_parallel_gmm(
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
     defer_all_reduce: bool = False,
+    lhs_scale_packed: bool = False,
+    lhs_scale_dtype: jnp.dtype | None = None,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -471,6 +494,8 @@ def expert_parallel_gmm(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            lhs_scale_packed=lhs_scale_packed,
+            lhs_scale_dtype=lhs_scale_dtype,
         ),
         mesh=mesh,
         in_specs=(
@@ -648,8 +673,7 @@ def fused_moe_func(
         topk_indices = _override_token_indices_for_random_routing(
             topk_indices, global_num_experts)
 
-    def _process_tokens_locally(hidden_states_local, topk_indices_local):
-        num_tokens_local = hidden_states_local.shape[0]
+    def _sort_tokens_by_expert(topk_indices_local, num_tokens_local):
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
         token_indices = jnp.arange(num_tokens_local,
@@ -661,7 +685,12 @@ def fused_moe_func(
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
         topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        return (token_indices_sorted, group_sizes_local,
+                topk_argsort_revert_indices)
 
+    def _permute_tokens_by_expert(hidden_states_local, token_indices_sorted,
+                                  group_sizes_local):
+        """Gather tokens into expert-sorted order, preserving input dtype."""
         if use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,
                                                   ShardingAxisName.EXPERT)
@@ -681,36 +710,134 @@ def fused_moe_func(
                 onehot = jax.nn.one_hot(token_indices_sorted,
                                         hidden_states_local.shape[0],
                                         dtype=hidden_states_local.dtype)
-                x = onehot @ hidden_states_local
-            else:
-                x = ragged_gather(
-                    hidden_states_local,
-                    token_indices_sorted,
-                    shard_output_start,
-                    shard_output_end,
-                )
-        else:
-            x = hidden_states_local[token_indices_sorted]
+                return onehot @ hidden_states_local
+            return ragged_gather(
+                hidden_states_local,
+                token_indices_sorted,
+                shard_output_start,
+                shard_output_end,
+            )
+        return hidden_states_local[token_indices_sorted]
 
+    def _process_tokens_locally(hidden_states_local, topk_indices_local):
+        num_tokens_local = hidden_states_local.shape[0]
+        (token_indices_sorted, group_sizes_local,
+         topk_argsort_revert_indices) = _sort_tokens_by_expert(
+             topk_indices_local, num_tokens_local)
+        x = _permute_tokens_by_expert(hidden_states_local,
+                                      token_indices_sorted, group_sizes_local)
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    if all_gather_fp8:
-        hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+    def _process_tokens_locally_fp8(combined_local, topk_indices_local):
+        # fp8 ragged-gather path: pack the per-token scale into fp8-typed
+        # transport bytes appended to the fp8 activations and permute both in a
+        # SINGLE SparseCore gather. The gather is row-bound, so the few extra
+        # columns are ~free, and one gather avoids serializing a second gather
+        # on the SparseCore.
+        #
+        # Crucially, the FULL gathered buffer is handed to GMM1 as its lhs --
+        # GMM1 contracts only the first hidden_size columns (size_k comes from
+        # w1), so the trailing scale/pad columns are never read. That means NO
+        # unpack slice/re-tile of the [expanded, hidden] tensor (slicing the
+        # codes back out forced a T(8,128)->T(32,128) re-layout copy) AND no
+        # second gather. GMM1 reads the scale from the trailing columns and
+        # dequantizes internally.
+        #
+        # The combined [tokens, hidden + scale + pad] buffer is built by the
+        # CALLER, before the P(MLP_DATA) reshard. Building it here instead cost
+        # 48us per MoE call: the reshard all-gathers to a replicated
+        # [8192, hidden] first, so the concat+pad copy ran on the full replicated
+        # tensor (~118MB touched) rather than on the local token shard.
+        #
+        # GMM1 unpacks the scale itself from the trailing lane tile of this same
+        # buffer (lhs_scale_packed), so nothing is extracted here: the host-side
+        # slice+or that used to rebuild a [P, 1] bf16 scale cost 18.9us per MoE
+        # call and is gone.
+        num_tokens_local = combined_local.shape[0]
+        (token_indices_sorted, group_sizes_local,
+         topk_argsort_revert_indices) = _sort_tokens_by_expert(
+             topk_indices_local, num_tokens_local)
+        gathered = _permute_tokens_by_expert(combined_local,
+                                             token_indices_sorted,
+                                             group_sizes_local)
+        # Pass the full buffer to GMM1 (it reads only [:, :hidden] for the
+        # contraction and the trailing lane tile for the scale); no slice.
+        return gathered, group_sizes_local, topk_argsort_revert_indices
 
-    x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
-        _process_tokens_locally,
-        mesh=mesh,
-        in_specs=(
-            P(ShardingAxisName.MLP_DATA, None),
-            P(ShardingAxisName.MLP_DATA, None),
-        ),
-        out_specs=(
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-            P(ShardingAxisName.MLP_DATA),
-        ),
-        check_vma=False,
-    )(hidden_states, topk_indices)
+    ragged_gather_fp8 = (all_gather_fp8 and envs.MOE_RAGGED_GATHER_FP8
+                         and use_ep)
+
+    if ragged_gather_fp8:
+        # Quantize once; the fp8 all-gather is folded into the shard_map reshard
+        # below (the P(MLP_DATA) in-spec), and the fp8 activations flow straight
+        # into GMM1 with their per-token scale (no intermediate dequant).
+        logger.info("Keep fp8 across ragged gather (MOE_RAGGED_GATHER_FP8)")
+        hidden_states_q, scale = quantize_tensor(jnp.float8_e4m3fn,
+                                                 hidden_states,
+                                                 axis=-1)
+        # quantize_tensor squeezes the scale when axis is int; expand it back.
+        # Cast to the compute dtype so it also drives GMM1's output dtype.
+        scale = jnp.expand_dims(scale, -1).astype(dtype)
+        # Build the combined [tokens, hidden + scale + pad] buffer HERE, before
+        # the P(MLP_DATA) reshard below all-gathers to a replicated tensor.
+        # Doing it inside the shard_map meant the concat+pad copy ran on the
+        # full replicated [8192, hidden] (~118MB touched, 48us per MoE call);
+        # here it runs on the local token shard and the reshard then moves the
+        # already-wide buffer in a single all-gather (1.8% more bytes) instead
+        # of all-gathering the codes and the scale separately.
+        # bf16 scale -> fp8-typed transport bytes (the gather only moves bits).
+        scale_f8 = jax.lax.bitcast_convert_type(scale,
+                                                jnp.float8_e4m3fn).reshape(
+                                                    scale.shape[0], -1)
+        # GMM1's packed-scale unpack assumes exactly two transport bytes
+        # (bf16); a wider compute dtype would need the kernel updated too.
+        assert scale_f8.shape[-1] == 2, (
+            f"packed scale expects 2 fp8 transport bytes, got "
+            f"{scale_f8.shape[-1]} (compute dtype {dtype})")
+        combined = jnp.concatenate([hidden_states_q, scale_f8], axis=1)
+        # ragged_gather needs a 128-multiple-divisor width; pad up to 128.
+        w = combined.shape[-1]
+        aligned_w = ((w + 127) // 128) * 128
+        if aligned_w != w:
+            combined = jnp.pad(combined, ((0, 0), (0, aligned_w - w)))
+        # Pin it to the token-sharded input layout so the copy happens on the
+        # local shard rather than after the reshard.
+        if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
+            combined = jax.lax.with_sharding_constraint(
+                combined,
+                NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+        (x, group_sizes, topk_argsort_revert_indices) = jax.shard_map(
+            _process_tokens_locally_fp8,
+            mesh=mesh,
+            in_specs=(
+                P(ShardingAxisName.MLP_DATA, None),
+                P(ShardingAxisName.MLP_DATA, None),
+            ),
+            out_specs=(
+                P(ShardingAxisName.MLP_DATA),
+                P(ShardingAxisName.MLP_DATA),
+                P(ShardingAxisName.MLP_DATA),
+            ),
+            check_vma=False,
+        )(combined, topk_indices)
+    else:
+        if all_gather_fp8:
+            hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+
+        x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
+            _process_tokens_locally,
+            mesh=mesh,
+            in_specs=(
+                P(ShardingAxisName.MLP_DATA, None),
+                P(ShardingAxisName.MLP_DATA, None),
+            ),
+            out_specs=(
+                P(ShardingAxisName.MLP_DATA),
+                P(ShardingAxisName.MLP_DATA),
+                P(ShardingAxisName.MLP_DATA),
+            ),
+            check_vma=False,
+        )(hidden_states, topk_indices)
 
     try:
         x = jnp.pad(x, ((0, 0), (0, padded_hidden_size - hidden_size)))
@@ -739,6 +866,8 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            lhs_scale_packed=ragged_gather_fp8,
+            lhs_scale_dtype=dtype if ragged_gather_fp8 else None,
         )
     else:
         x = tensor_parallel_gmm(
