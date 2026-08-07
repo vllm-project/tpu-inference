@@ -1,3 +1,8 @@
+# Goal: Benchmark Prefill Phase Latency/Throughput
+# Importance: By constraining output_len to 1 and sweeping across an exponentially 
+# increasing input_len, this config measures how efficiently the TPU processes 
+# growing context windows during the initial Attention-Prefill phase.
+
 tensor_parallel_size: 4
 dtype: bfloat16
 max_model_len: 200000
