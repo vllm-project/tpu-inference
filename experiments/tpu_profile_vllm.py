@@ -1,3 +1,12 @@
+"""
+Standalone execution and profiling script for vLLM on TPUs.
+
+Initializes a HuggingFace model using vLLM, manages JAX profiler toggles, and
+generates textual outputs. It measures raw tokens-per-second throughput and
+optionally exports JAX XProf traces for analysis in TensorBoard.
+Results are appended to a central CSV alongside the reproduction command.
+"""
+
 import argparse
 import time
 import os
@@ -27,6 +36,10 @@ def main(args):
     if len(prompts) < args.batch_size:
         prompts.extend(["Fill"] * (args.batch_size - len(prompts)))
 
+    # Temperature controls shape of sampling probability distribution 
+    #   higher temperature -> more deterministic sampling
+    # Top p controls the size of the token candidate pool 
+    #   0.95 keeps the top tokens whose probabilities add up to 95% of the total probability pool
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=args.output_len)
 
     # Warmup
@@ -98,14 +111,15 @@ if __name__ == "__main__":
     parser.add_argument("--input-len", type=int, default=128)
     parser.add_argument("--output-len", type=int, default=64)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--tensor-parallel-size", type=int, default=4)
+    # default tensor-parallel-size to 4 for 4 TPU devices
+    parser.add_argument("--tensor-parallel-size", type=int, default=4) 
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--profile-result-dir", type=str, default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"))
     parser.add_argument("--csv-file", type=str, default=None, help="Explicit path to target CSV file")
     parser.add_argument("--engine-args", type=str, default="{}", help="JSON string of extra kwargs for LLM()")
-    parser.add_argument("--jax-advanced-configuration", type=str, default="{}", help="Stringified JSON array explicitly overriding profile configuration")
+    parser.add_argument("--jax-advanced-configuration", type=str, default="{}", help="Stringified JSON array to specify GFC counter options")
     parser.add_argument("--sweep-metadata", type=str, default="{}", help="JSON dict outlining precise configuration limits extracted dynamically for output dump")
     args = parser.parse_args()
     main(args)

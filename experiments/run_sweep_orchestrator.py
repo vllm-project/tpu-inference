@@ -1,3 +1,13 @@
+"""
+Orchestrates systematic parameter sweeps for TPU vLLM profiling
+
+Reads a YAML configuration detailing grid search parameters (like batch sizes,
+input/output lengths, and model kwargs) and iteratively launches the underlying
+ script. It handles checkpointing/resuming from failed runs,
+skips already-completed configurations by checking the resulting CSV, and manages
+the trace configuration mappings.
+"""
+
 import yaml
 import subprocess
 import argparse
@@ -20,7 +30,8 @@ def main():
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
-    
+
+    # Set tensor_parallel_size default to 4 to split model weights between 4 TPU devices. 
     tp_size = config.get("tensor_parallel_size", 4)
     dtype = config.get("dtype", "bfloat16")
     max_model_len = config.get("max_model_len", None)
@@ -28,22 +39,7 @@ def main():
     engine_args = config.get("engine_args", {})
     
     sweep = config.get("sweep_matrix", {})
-    
-    if "model" in config and "model" not in sweep:
-        sweep["model"] = [config["model"]]
-        
     trace_configs = config.get("trace_configs", [])
-
-    # Backward compatibility mapping for older yaml formats
-    if "batches" in sweep: sweep["batch_size"] = sweep.pop("batches")
-    elif "batch_size" not in sweep: sweep["batch_size"] = config.get("batches", [1])
-    
-    if "inputs" in sweep: sweep["input_len"] = sweep.pop("inputs")
-    elif "input_lens" in sweep: sweep["input_len"] = sweep.pop("input_lens")
-    elif "input_len" not in sweep: sweep["input_len"] = config.get("inputs", [128])
-    
-    if "output_lens" in sweep: sweep["output_len"] = sweep.pop("output_lens")
-    elif "output_len" not in sweep: sweep["output_len"] = config.get("output_len", [64])
 
     # Enforce all values as iterables natively 
     for k, v in sweep.items():
@@ -69,14 +65,17 @@ def main():
                 print(f"❌ ERROR: Trace config {tc} is invalid. {k}={v} is not in the generated sweep matrix boundaries.")
                 return
 
+    # Ensure that result directory exists for current experiments
     exp_id = args.experiment_id if args.experiment_id else datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_dir = os.path.join(args.result_dir, exp_id)
     os.makedirs(exp_dir, exist_ok=True)
     
+    # Ensure that csv file and trace directory exists to store experiment results
     csv_file = os.path.join(exp_dir, "results.csv")
     traces_dir = os.path.join(exp_dir, "traces")
     os.makedirs(traces_dir, exist_ok=True)
     
+    # Check if sweep has been done before, if so which experiment runs were completed.
     completed_configs = []
     if os.path.exists(csv_file):
         with open(csv_file, 'r') as f:
@@ -84,9 +83,11 @@ def main():
             for row in reader:
                 completed_configs.append(row)
     
+    # Iterate through each experiment run in experiment sweep
     for combo in cross_product:
         current_config = dict(zip(sweep_keys, combo))
-        
+
+        # skip if experiment run has been done before
         skip = False
         for completed_row in completed_configs:
             if all(str(completed_row.get(k)) == str(v) for k, v in current_config.items()):
@@ -96,7 +97,8 @@ def main():
         if skip:
             print(f">>> [SKIPPED] Coordinate {current_config} already logged in {csv_file}.")
             continue
-            
+
+        # build script command
         print(f">>> Running iteration: {current_config}")
         cmd = [
             "/mnt/pd/shen/vllm_env/bin/python3", SCRIPT_PATH,
