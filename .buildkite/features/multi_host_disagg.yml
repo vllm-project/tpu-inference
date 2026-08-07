@@ -30,7 +30,6 @@ steps:
     soft_fail: true
     agents:
       queue: tpu_v7x_16_queue
-      hostname: tpu7x-16-ci-0-cicd-us-central1-c
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu7x}"
       TEST_MODE: 2 # only run correctness test
