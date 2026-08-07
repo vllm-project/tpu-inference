@@ -245,11 +245,13 @@ def main():
         srv_resolved_args = resolve_device_args(srv_opts.get("args", {}), current_machine)
         cli_resolved_args = resolve_device_args(cli_opts.get("args", {}), current_machine)
 
+        is_multihost = str(merged_env.get("IS_MULTI_HOST_BENCH", "false")).lower() == "true"
         gcs_gen_config = srv_resolved_args.get("generation-config")
         if gcs_gen_config and isinstance(gcs_gen_config, str) and gcs_gen_config.startswith("gs://"):
-            print(f"export GCS_GEN_CONFIG={shlex.quote(gcs_gen_config)}")
-            artifact_folder = os.environ.get("ARTIFACT_FOLDER", "/workspace/tpu_inference/artifacts")
-            srv_resolved_args["generation-config"] = f"{artifact_folder}/generation_configs"
+            if not is_multihost:
+                print(f"export GCS_GEN_CONFIG={shlex.quote(gcs_gen_config)}")
+                artifact_folder = os.environ.get("ARTIFACT_FOLDER", "/workspace/tpu_inference/artifacts")
+                srv_resolved_args["generation-config"] = f"{artifact_folder}/generation_configs"
 
         srv_cmd = build_command(srv_cmd_type, srv_resolved_args)
         cli_cmd = build_command(cli_cmd_type, cli_resolved_args)
