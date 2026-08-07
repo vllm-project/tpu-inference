@@ -439,7 +439,7 @@ def merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
 @pytest.mark.parametrize(
-    "requantize_block_size, enable_quantized_matmul_kernel", [(None, True),
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
                                                               (256, False)])
 def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
                                        fuse_matmuls, enable_sp, enable_attn_dp,
@@ -466,7 +466,7 @@ def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("activation_type", [W4A4ActivationType.FP8])
 @pytest.mark.parametrize(
-    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, True),
                                                               (256, True)])
 def test_merged_column_parallel_linear_v7(monkeypatch, model, bias,
                                           num_devices, fuse_matmuls, enable_sp,
