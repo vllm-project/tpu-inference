@@ -628,7 +628,7 @@ run_benchmark(){
     fi
   fi
 
-  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]}" >&2
+  echo "[DEBUG] Executing client_cmd: ${CLIENT_CMD_ENVS[*]} ${CLIENT_CMD[*]} > $BM_LOG" >&2
   set +e
   # Execute the array directly, preserving strict argument boundaries
   timeout "$BENCHMARK_TIMEOUT" env "${CLIENT_CMD_ENVS[@]}" "${CLIENT_CMD[@]}" > "$BM_LOG" 2>&1
