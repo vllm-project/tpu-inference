@@ -8,7 +8,8 @@
     "EXPECTED_ETEL": 43200000,
     "USE_MOE_EP_KERNEL": 0,
     "MODEL_IMPL_TYPE": "vllm",
-    "BK_TIMEOUT_IN_MINUTES": 300
+    "BK_TIMEOUT_IN_MINUTES": 300,
+    "BENCHMARK_TIMEOUT": "3h"
   },
   "benchmark_cases": [
     {
