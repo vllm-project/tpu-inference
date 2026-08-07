@@ -21,6 +21,8 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
+from tpu_inference.kernels.cn_moe_kernels import TOP_K as CN_MOE_TOP_K
+from tpu_inference.kernels.cn_moe_kernels import cn_moe_full
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
@@ -617,14 +619,149 @@ def fused_moe_func(
             topk_weights, topk_indices = jax.lax.top_k(topk_weights, k=topk)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(axis=-1, keepdims=True)
+
+    def _mask_padding_tokens(indices, weights):
+        """Zero out routing for padding tokens so they don't activate extra experts."""
+        if num_valid_tokens is None:
+            return indices, weights
+        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
+        return jnp.where(token_valid, indices,
+                         0), jnp.where(token_valid, weights, 0.0)
+
+    # Fast path for low-concurrency decode: a specialized C=N Pallas MoE kernel
+    # that skips the gather/scatter permutation of the general gmm path. Only
+    # engaged for small decode batches with topk == CN_MOE_TOP_K.
+    # Compute reduce-scatter eligibility before the CN fast path
+    total_num_devices = mesh.devices.size
+    is_attn_dp = get_mesh_shape_product(
+        mesh, ShardingAxisName.ATTN_DATA) == total_num_devices
+    actual_enable_rs_kernel = enable_rs_kernel and is_attn_dp
+
+    low_conc_threshold = getattr(envs, "MOE_LOW_CONC_THRESHOLD", 8)
+    if 1 <= num_tokens <= low_conc_threshold and topk == CN_MOE_TOP_K:
+        logger.info("Taking fast low-concurrency C=N Pallas MoE path for "
+                    f"BS={num_tokens} decode (use_ep={use_ep}, "
+                    f"threshold={low_conc_threshold}).")
+
+        padded_hs = hidden_states
+        padded_topk_indices, padded_topk_weights = _mask_padding_tokens(
+            topk_indices, topk_weights)
+
+        def _local_low_conc_moe(hs, w1_local, w1_scale_local, w2_local,
+                                w2_scale_local, topk_ids_local,
+                                topk_weights_local):
+            local_num_experts = w1_local.shape[0]
+            if use_ep:
+                ep_shard = jax.lax.axis_index(ShardingAxisName.EXPERT)
+                is_my_expert = (topk_ids_local //
+                                local_num_experts) == ep_shard
+                local_ids = jnp.where(is_my_expert,
+                                      topk_ids_local % local_num_experts, 0)
+                local_weights = jnp.where(is_my_expert, topk_weights_local,
+                                          0.0)
+            else:
+                local_ids = topk_ids_local
+                local_weights = topk_weights_local
+
+            local_out = cn_moe_full(hs,
+                                    w1_local,
+                                    w1_scale_local,
+                                    w2_local,
+                                    w2_scale_local,
+                                    local_ids,
+                                    local_weights,
+                                    use_ep=use_ep)
+
+            # ---- Reduction: mirror moe_gmm_local machinery ----
+            reduction_axis = (ShardingAxisName.EXPERT
+                              if use_ep else ShardingAxisName.MLP_TENSOR)
+
+            if actual_enable_rs_kernel:
+                # Reduce-scatter path (when attention is pure DP)
+                reduction_axes_tuple = (reduction_axis if isinstance(
+                    reduction_axis, tuple) else (reduction_axis, ))
+                scatter_axis_size = 1
+                for a in reduction_axes_tuple:
+                    scatter_axis_size *= jax.lax.axis_size(a)
+
+                return hier_rs_sc.hierarchical_reduce_scatter_local(
+                    local_out,
+                    num_devices=scatter_axis_size,
+                    axis_name=reduction_axis).astype(hs.dtype)
+            elif scatter_results:
+                dp_axes = ShardingAxisName.ATTN_DATA
+                if not isinstance(dp_axes, tuple):
+                    dp_axes = (dp_axes, )
+                if isinstance(reduction_axis, tuple):
+                    reduce_axes = tuple(a for a in reduction_axis
+                                        if a not in dp_axes)
+                    scatter_axes = tuple(a for a in reduction_axis
+                                         if a in dp_axes)
+                else:
+                    reduce_axes = (() if reduction_axis in dp_axes else
+                                   (reduction_axis, ))
+                    scatter_axes = ((reduction_axis, )
+                                    if reduction_axis in dp_axes else ())
+                if reduce_axes:
+                    local_out = jax.lax.psum(local_out, axis_name=reduce_axes)
+                if scatter_axes:
+                    return jax.lax.psum_scatter(local_out,
+                                                axis_name=scatter_axes,
+                                                scatter_dimension=0,
+                                                tiled=True).astype(hs.dtype)
+                return local_out.astype(hs.dtype)
+            elif not defer_all_reduce:
+                return jax.lax.psum(local_out,
+                                    axis_name=reduction_axis).astype(hs.dtype)
+            else:
+                return local_out.astype(hs.dtype)
+
+        # TP vs EP weight/scale sharding. EP shards the expert axis; TP shards
+        # the intermediate dim (N for w1, I for w2), matching
+        # tensor_parallel_gmm.
+        if use_ep:
+            lc_w1_spec = P(ShardingAxisName.EXPERT, None, None)
+            lc_w1_scale_spec = P(ShardingAxisName.EXPERT, None, None, None)
+            lc_w2_spec = P(ShardingAxisName.EXPERT, None, None)
+            lc_w2_scale_spec = P(ShardingAxisName.EXPERT, None, None, None)
+        else:
+            lc_w1_spec = P(None, None, ShardingAxisName.MLP_TENSOR)
+            lc_w1_scale_spec = P(None, None, None, ShardingAxisName.MLP_TENSOR)
+            lc_w2_spec = P(None, ShardingAxisName.MLP_TENSOR, None)
+            w2_nblocks = 1 if w2_scale is None else w2_scale.shape[1]
+            lc_w2_scale_spec = (P(
+                None, None, None, None) if w2_nblocks == 1 else P(
+                    None, ShardingAxisName.MLP_TENSOR, None, None))
+
+        if scatter_results or enable_rs_kernel:
+            lc_out_spec = P(ShardingAxisName.ATTN_DATA, None)
+        else:
+            lc_out_spec = P(None, None)
+
+        out = jax.shard_map(
+            _local_low_conc_moe,
+            mesh=mesh,
+            in_specs=(
+                P(None, None),  # hs
+                lc_w1_spec,  # w1
+                lc_w1_scale_spec,  # w1_scale
+                lc_w2_spec,  # w2
+                lc_w2_scale_spec,  # w2_scale
+                P(None, None),  # topk_ids
+                P(None, None),  # topk_weights
+            ),
+            out_specs=lc_out_spec,
+            check_vma=False,
+        )(padded_hs, w1, w1_scale, w2, w2_scale, padded_topk_indices,
+          padded_topk_weights)
+
+        return out[:num_tokens, :hidden_size]
     # Route padding tokens to expert 0 instead of picking a selected expert. This
     # is especially useful when we have a low number of tokens (e.g. low
     # concurrency), where padding tokens may activate unnecessary expert weights
     # and slow down the gmm kernel.
-    if num_valid_tokens is not None:
-        token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
-        topk_indices = jnp.where(token_valid, topk_indices, 0)
-        topk_weights = jnp.where(token_valid, topk_weights, 0.0)
+    topk_indices, topk_weights = _mask_padding_tokens(topk_indices,
+                                                      topk_weights)
     # All gathering topk_indices and topk_weights if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
@@ -633,11 +770,7 @@ def fused_moe_func(
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
-    # Only enable Reduce-Scatter if flag is on and Attention is pure DP
-    total_num_devices = mesh.devices.size
-    is_attn_dp = get_mesh_shape_product(
-        mesh, ShardingAxisName.ATTN_DATA) == total_num_devices
-    actual_enable_rs_kernel = enable_rs_kernel and is_attn_dp
+    # actual_enable_rs_kernel already computed above (before CN fast path)
 
     if envs.FORCE_MOE_RANDOM_ROUTING:
         logger.warning(
