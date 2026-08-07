@@ -55,7 +55,8 @@ TOP_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 CLUSTER_SCRIPT="${TOP_DIR}/scripts/multihost/run_cluster.sh"
 mkdir -p "${LOG_DIR}" "${HOST_HF_HOME}"
 rm -f "${LOG_DIR}/vllm_serve.log" "${LOG_DIR}/benchmark.txt" \
-  "${LOG_DIR}/correctness.txt" "${LOG_DIR}/offload_metrics.txt"
+  "${LOG_DIR}/correctness.txt" "${LOG_DIR}/offload_metrics.txt" \
+  "${LOG_DIR}/baseline.json" "${LOG_DIR}/offload.json"
 
 metadata() {
   curl -fs -H 'Metadata-Flavor: Google' \
@@ -200,22 +201,23 @@ stream_ray_vllm_logs() {
 # connector run load saved KV blocks from host memory rather than relying on
 # HBM-resident prefix cache.
 run_offload_correctness() {
-  local kv_transfer_config verification_pid correctness_tail_pid ray_log_pid
+  local verification_pid correctness_tail_pid ray_log_pid
   local verification_status=0 elapsed_seconds=0
-  kv_transfer_config='{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
 
   echo "--- Verifying deterministic output with actual TPU KV-cache offload"
   : >"${LOG_DIR}/correctness.txt"
   timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
     docker exec "${CONTAINER_NAME}" bash -c \
-    "python3 /workspace/tpu_inference/examples/offload/offline_inference_kv_cache_verification.py \\
+    "python3 /workspace/tpu_inference/.buildkite/e2e/verify_multihost_offload.py \\
       --model $(printf '%q' "${MODEL}") \\
       --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \\
       --load-format ${LOAD_FORMAT} \\
       --max-model-len ${MAX_MODEL_LEN} \\
       --max-tokens ${OUTPUT_LEN} \\
       --seed ${RANDOM_SEED} \\
-      --kv-transfer-config $(printf '%q' "${kv_transfer_config}")" \
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \\
+      --baseline-output /tmp/multihost_offload_verification/baseline.json \\
+      --offload-output /tmp/multihost_offload_verification/offload.json" \
     >"${LOG_DIR}/correctness.txt" 2>&1 &
   verification_pid=$!
 
@@ -245,6 +247,10 @@ run_offload_correctness() {
     cat "${LOG_DIR}/correctness.txt" >&2 || true
     return "${verification_status}"
   fi
+  docker cp "${CONTAINER_NAME}:/tmp/multihost_offload_verification/baseline.json" \
+    "${LOG_DIR}/baseline.json" 2>/dev/null || true
+  docker cp "${CONTAINER_NAME}:/tmp/multihost_offload_verification/offload.json" \
+    "${LOG_DIR}/offload.json" 2>/dev/null || true
   cat "${LOG_DIR}/correctness.txt"
 }
 
