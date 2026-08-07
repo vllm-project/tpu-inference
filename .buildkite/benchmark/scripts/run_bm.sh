@@ -412,7 +412,7 @@ fi
 
 # Prep specialized configurations (DeepSeek)
 if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" && "${IS_MULTI_HOST_BENCH:-false}" == "false" ]]; then
-  if [[ -n "$GCS_GEN_CONFIG" ]]; then
+  if [[ -n "${GCS_GEN_CONFIG:-}" ]]; then
     if command -v gsutil &> /dev/null; then
       echo "Syncing generation configs for DeepSeek-R1 from GCS: $GCS_GEN_CONFIG"
       GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
