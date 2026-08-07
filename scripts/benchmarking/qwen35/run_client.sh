@@ -59,6 +59,7 @@ if [ -f "$SERVER_LOG" ]; then
   grep -q "Sliced rope cache" "$SERVER_LOG" || OK=0
   grep -q "USE_MOE_FUSED_EP_KERNEL=1" "$SERVER_LOG" || OK=0
   grep -q "fused MoE FFN kernel is off" "$SERVER_LOG" && OK=0
+  grep -q "batch prefills ENABLED" "$SERVER_LOG" || OK=0
   if [ "$OK" != 1 ]; then
     echo "the server log at $SERVER_LOG is missing the branch's engagement" >&2
     echo "lines, refusing to measure." >&2

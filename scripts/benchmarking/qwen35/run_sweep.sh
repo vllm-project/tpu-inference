@@ -61,6 +61,7 @@ export GDN_BF16_RECURRENT_STATE=1
 export SLICE_ROPE_CACHE=1
 export LOGITS_ALL_GATHER_CONSERVATIVE=1
 export DP_SCHED_BATCH_PREFILL=1
+export DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS=5000
 if [ "$WEIGHTS" = fp4 ]; then
   export MOE_REQUANTIZE_WEIGHT_DTYPE=float4_e2m1fn
   export MOE_REQUANTIZE_BLOCK_SIZE=512
@@ -158,6 +159,7 @@ for CONC in 64 128 256 512; do
   grep -q "Sliced rope cache" "$PD/server.log" || OK=0
   grep -q "USE_MOE_FUSED_EP_KERNEL=1" "$PD/server.log" || OK=0
   grep -q "fused MoE FFN kernel is off" "$PD/server.log" && OK=0
+  grep -q "batch prefills ENABLED" "$PD/server.log" || OK=0
   if [ "$WEIGHTS" = fp8 ]; then
     grep -q "re-quantizing MoE weights to float8_e4m3fn" "$PD/server.log" || OK=0
     grep -q "re-quantizing MoE weights to float4_e2m1fn" "$PD/server.log" && OK=0

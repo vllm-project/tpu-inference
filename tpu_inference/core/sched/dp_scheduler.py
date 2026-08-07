@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from enum import Enum
 from multiprocessing import Process
 from multiprocessing.connection import Connection, wait
-from time import time
+from time import monotonic, time
 from typing import Any, Dict, List, Optional, Tuple
 
 import cloudpickle
@@ -427,15 +427,23 @@ class DPScheduler(SchedulerInterface):
         self._schedule_step_count = 0
         self._prev_schedule_start = 0.0
 
-        # Hold incoming requests until `dp_size` of them accumulate,
-        # then dispatch all together, or when elapsed time since the
-        # last flush exceeds the threshold.
+        # Hold incoming requests until `dp_size` of them accumulate, then
+        # dispatch all together. A partial buffer is released early when a
+        # rank is idle or its oldest request has waited past the deadline.
         self._batch_prefills: bool = envs.DP_SCHED_BATCH_PREFILL
         self._batch_prefill_threshold: int = max(1, self.dp_size)
         self._batch_prefill_flush_timeout_ms: int = (
             envs.DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS)
-        self._batch_prefill_last_flush: float = time()
+        # Age reference for the flush deadline, stamped in add_request on
+        # the empty-to-nonempty transition. Monotonic, so a stepped wall
+        # clock cannot stretch the deadline.
+        self._batch_prefill_oldest_pending: float = monotonic()
         self._pending_new_requests: List[Request] = []
+        # The most recent schedule's per-rank outputs, kept for the idle
+        # check. cached_schedulers_output cannot serve that role: it is
+        # consumed by update_from_output, so under synchronous scheduling
+        # it is empty whenever the flush triggers run.
+        self._last_rank_outputs: Optional[List[SchedulerOutput]] = None
 
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
@@ -519,8 +527,10 @@ class DPScheduler(SchedulerInterface):
         if self._batch_prefills:
             logger.info(
                 "DPScheduler batch prefills ENABLED "
-                "(threshold=%d, flush when %d pending or any rank idle).",
-                self._batch_prefill_threshold, self._batch_prefill_threshold)
+                "(threshold=%d, flush when %d pending, any rank idle, or "
+                "oldest pending exceeds %d ms).",
+                self._batch_prefill_threshold, self._batch_prefill_threshold,
+                self._batch_prefill_flush_timeout_ms)
 
         # Register an atexit handler that runs *before* multiprocessing's
         # _exit_function (atexit handlers run LIFO). This kills workers
@@ -760,6 +770,11 @@ class DPScheduler(SchedulerInterface):
             f"assigned to rank {self.assigned_dp_rank[request.request_id]})")
 
         if self._batch_prefills:
+            # The flush deadline is the age of the oldest waiting request,
+            # so the clock starts when the buffer goes from empty to
+            # holding one, not when something else last flushed.
+            if not self._pending_new_requests:
+                self._batch_prefill_oldest_pending = monotonic()
             self._pending_new_requests.append(request)
             self._try_flush_pending()
             return
@@ -778,15 +793,18 @@ class DPScheduler(SchedulerInterface):
         """Drain the pending reqs."""
         pending = self._pending_new_requests
         self._pending_new_requests = []
-        self._batch_prefill_last_flush = time()
         for req in pending:
             self._route_and_forward_request(req)
 
     def _count_idle_ranks(self) -> int:
-        """Number of idle ranks reported in most recent schedule"""
-        if not self.cached_schedulers_output:
+        """Number of ranks that scheduled nothing in the newest schedule.
+
+        Reads the outputs of the most recent ``schedule()`` call. Before
+        the first one every rank counts as idle.
+        """
+        if self._last_rank_outputs is None:
             return self.dp_size
-        return sum(1 for out in self.cached_schedulers_output[-1]
+        return sum(1 for out in self._last_rank_outputs
                    if out.total_num_scheduled_tokens == 0)
 
     def _try_flush_pending(self) -> None:
@@ -794,11 +812,11 @@ class DPScheduler(SchedulerInterface):
 
         Triggers (any one of the following):
           - Threshold: pending count reached threshold (= dp_size).
-          - Timeout: time since the last flush exceeds
+          - Deadline: the oldest pending request has waited longer than
             ``DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS``.
-          - Idle ranks: at least as many ranks reported idle in the
-            previous step as we have pending requests, so the
-            admissions can land without piling up.
+          - Idle rank: some rank scheduled nothing in the newest step, so
+            the lockstep has spare capacity. The whole buffer is released
+            and the routing spreads it by least pending work.
         """
         if not self._pending_new_requests:
             return
@@ -807,11 +825,11 @@ class DPScheduler(SchedulerInterface):
         if n >= self._batch_prefill_threshold:
             self._flush_pending()
             return
-        elapsed_ms = (time() - self._batch_prefill_last_flush) * 1000.0
+        elapsed_ms = (monotonic() - self._batch_prefill_oldest_pending) * 1e3
         if elapsed_ms >= self._batch_prefill_flush_timeout_ms:
             self._flush_pending()
             return
-        if self._count_idle_ranks() >= n:
+        if self._count_idle_ranks() >= 1:
             self._flush_pending()
             return
 
@@ -847,6 +865,7 @@ class DPScheduler(SchedulerInterface):
 
         # Cache scheduler outputs to use in `update_from_output`
         self.cached_schedulers_output.append(rank_outputs)
+        self._last_rank_outputs = rank_outputs
 
         # Return combined scheduler outputs
         combined_output = self._combine_scheduler_outputs(rank_outputs)

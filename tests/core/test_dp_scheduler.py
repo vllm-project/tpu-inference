@@ -1127,6 +1127,148 @@ class TestDPScheduler:
         # num_scheduled_tokens should remain 100 for prefill, not overwritten with len(sampled_token_ids) == 1
         assert scheduler_output.num_scheduled_tokens["req1"] == 100
 
+    def _create_buffering_scheduler(self,
+                                    monkeypatch,
+                                    mock_vllm_config,
+                                    mock_kv_cache_config,
+                                    mock_structured_output_manager,
+                                    dp_size=4):
+        """Create a DPScheduler that buffers new requests, IPC mocked."""
+        monkeypatch.setenv("DP_SCHED_BATCH_PREFILL", "1")
+        mock_vllm_config.sharding_config.total_dp_size = dp_size
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        assert scheduler._batch_prefills
+        assert scheduler._batch_prefill_threshold == dp_size
+        scheduler._find_best_rank_for_request = MagicMock(return_value=0)
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(return_value=None)
+        return scheduler
+
+    @staticmethod
+    def _rank_outputs(scheduled_tokens_per_rank):
+        """Per-rank outputs carrying only the field the idle check reads."""
+        outputs = []
+        for tokens in scheduled_tokens_per_rank:
+            out = MagicMock(spec=SchedulerOutput)
+            out.total_num_scheduled_tokens = tokens
+            outputs.append(out)
+        return outputs
+
+    @staticmethod
+    def _pending_request(request_id):
+        request = MagicMock(spec=Request)
+        request.request_id = request_id
+        return request
+
+    def test_one_idle_rank_releases_a_partial_buffer(
+        self,
+        monkeypatch,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test a single idle rank flushes a buffer below the threshold."""
+        scheduler = self._create_buffering_scheduler(
+            monkeypatch,
+            mock_vllm_config,
+            mock_kv_cache_config,
+            mock_structured_output_manager,
+            dp_size=4)
+
+        # Every rank had work in the newest step, so two requests wait.
+        scheduler._last_rank_outputs = self._rank_outputs([8, 8, 8, 8])
+        scheduler.add_request(self._pending_request("req1"))
+        scheduler.add_request(self._pending_request("req2"))
+        assert len(scheduler._pending_new_requests) == 2
+        assert scheduler._send_command.call_count == 0
+
+        # One rank scheduled nothing: two pending against one idle rank
+        # is enough, the requests no longer wait for more arrivals.
+        scheduler._last_rank_outputs = self._rank_outputs([8, 8, 0, 8])
+        scheduler._try_flush_pending()
+
+        assert scheduler._pending_new_requests == []
+        add_requests = [
+            call for call in scheduler._send_command.call_args_list
+            if call[0][1] == SchedulerCommand.ADD_REQUEST
+        ]
+        assert len(add_requests) == 2
+
+    def test_a_busy_step_holds_the_buffer_until_the_threshold(
+        self,
+        monkeypatch,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test a fully busy step holds the buffer, the threshold drains it."""
+        scheduler = self._create_buffering_scheduler(
+            monkeypatch,
+            mock_vllm_config,
+            mock_kv_cache_config,
+            mock_structured_output_manager,
+            dp_size=4)
+        scheduler._last_rank_outputs = self._rank_outputs([8, 8, 8, 8])
+
+        for i in range(3):
+            scheduler.add_request(self._pending_request(f"req{i}"))
+        scheduler._try_flush_pending()
+        assert len(scheduler._pending_new_requests) == 3
+        assert scheduler._send_command.call_count == 0
+
+        # The fourth request reaches the threshold and takes all four out.
+        scheduler.add_request(self._pending_request("req3"))
+        assert scheduler._pending_new_requests == []
+        assert scheduler._send_command.call_count == 4
+
+    def test_the_flush_deadline_ages_from_the_oldest_pending_request(
+        self,
+        monkeypatch,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test the deadline measures the oldest waiting request's own age.
+
+        A flush that happened just before the request arrived must not
+        shorten or extend that request's deadline.
+        """
+        scheduler = self._create_buffering_scheduler(
+            monkeypatch,
+            mock_vllm_config,
+            mock_kv_cache_config,
+            mock_structured_output_manager,
+            dp_size=4)
+        scheduler._batch_prefill_flush_timeout_ms = 5000
+        scheduler._last_rank_outputs = self._rank_outputs([8, 8, 8, 8])
+
+        now = [1000.0]
+        with patch('tpu_inference.core.sched.dp_scheduler.monotonic',
+                   lambda: now[0]):
+            # A threshold flush at t=1000.
+            for i in range(4):
+                scheduler.add_request(self._pending_request(f"early{i}"))
+            assert scheduler._pending_new_requests == []
+
+            # One request lands in the empty buffer two seconds later.
+            now[0] = 1002.0
+            scheduler.add_request(self._pending_request("stranded"))
+            assert len(scheduler._pending_new_requests) == 1
+            assert scheduler._batch_prefill_oldest_pending == 1002.0
+
+            # 5.5 s after the last flush but 3.5 s into this request's
+            # own wait: it stays.
+            now[0] = 1005.5
+            scheduler._try_flush_pending()
+            assert len(scheduler._pending_new_requests) == 1
+
+            # Past its own five-second deadline: it goes out.
+            now[0] = 1007.1
+            scheduler._try_flush_pending()
+            assert scheduler._pending_new_requests == []
+
 
 class TestUpdateVllmConfigForDPScheduler:
     """Test the update_vllm_config_for_dp_scheduler function."""

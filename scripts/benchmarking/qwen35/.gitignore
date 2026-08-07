@@ -2,4 +2,4 @@ jax-cache/
 results/
 sweep-results/
 InferenceX/
-server.log
+server.log*

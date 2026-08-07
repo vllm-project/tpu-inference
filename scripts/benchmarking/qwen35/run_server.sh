@@ -50,6 +50,14 @@ export SLICE_ROPE_CACHE=1
 export LOGITS_ALL_GATHER_CONSERVATIVE=1
 export DP_SCHED_BATCH_PREFILL=1
 
+# The flush deadline for the prefill-batching buffer, the age of its
+# oldest waiting request. Five seconds sits above the time a group takes
+# to refill after a batch of completions and far below a full pass over
+# the running requests, so a stranded request is released promptly
+# without breaking up forming groups. The published numbers reproduce
+# at this value.
+export DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS=5000
+
 case "$WEIGHTS" in
   fp4)
     # MoE expert weights requantized to four-bit e2m1 at load, quantization

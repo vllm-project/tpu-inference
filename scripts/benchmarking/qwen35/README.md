@@ -48,12 +48,15 @@ weights, and each row names its workload and tier.
 Before is the previous build measured on the same workloads, and the
 MMLU-Pro pair shows quality held.
 
-Run-to-run spread. Cells at this workload occasionally read 4 to 5
-percent low. The scheduler collects incoming requests into groups of
-eight, one per rank, and a group that forms late in the opening burst waits for its
-eighth member, costing the run one extra drain wave while per-token
-speed is unchanged. The tell is the worst first-token time, near 8
-seconds on a clean cell and 15 to 25 on a stalled one.
+Run-to-run spread. The scheduler collects incoming requests into groups
+of eight, one per rank. Cells at this workload once read 4 to 5 percent
+low when a group formed late in the opening burst and waited for its
+eighth member. The release rules now free a waiting group at the first
+idle rank or after the pinned five-second deadline, and the
+prefill-heavy cell holds within about half a percent, with the worst
+first-token time near 8 seconds. A run far outside that band means the
+batching settings did not engage, and the engagement checks refuse such
+a server.
 
 Reproducing each row.
 
@@ -116,7 +119,7 @@ through 512.
 The two styles measure the same serving speed. In matched pairs on the
 same server the template and warmup knobs each move the number by under
 half a percent, so the table above reads the same under either style
-within the run-to-run spread the Serving Results section describes.
+within the half-percent band the Serving Results section describes.
 
 ## Serving Recipe
 
