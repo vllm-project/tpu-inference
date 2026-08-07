@@ -22,9 +22,12 @@ from jax.sharding import PartitionSpec as P
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 # ── Shared utilities ──────────────────────────────────────────────────────────
+
+logger = init_logger(__name__)
 
 
 def merge_attn_states(
@@ -314,6 +317,7 @@ def pcp_forward(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    cache_phase: str | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward.
 
@@ -359,6 +363,11 @@ def pcp_forward(
     comm_q = 2 * padded_q_len * q.shape[1] * q.shape[2]
     comm_kv = 2 * (cache_pages * kv_cache.shape[1]) * k.shape[1] * q.shape[2]
     use_gather_kv = comm_kv < _GATHER_Q_OVERHEAD * comm_q
+    phase = (("gather_kv" if use_gather_kv else "gather_q")
+             if cache_phase is None else cache_phase.lower())
+    assert phase in ("gather_kv", "gather_q", "ring"), (
+        f"cache_phase must be 'gather_kv', 'gather_q' or 'ring', got {phase!r}"
+    )
 
     def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
                   kv_cache_lens_local, page_indices_local, distribution_local,
@@ -393,13 +402,28 @@ def pcp_forward(
             # phase would attend an empty cache, be fully masked, and have its
             # -inf result discarded by merge_attn_states.  Skip it outright.
             context_out = context_lse = None
-        elif use_gather_kv:
-            # Compact to this request's live pages, then all_gather with the
-            # pcp axis INNERMOST: for local page p, offset o, rank j the cache
-            # holds global token (p*page_l + o)*pcp + j, so flattening
-            # (p, o, j) is already global token order.  Regroup into pages of
-            # the ORIGINAL width (a pure reshape) and the cache phase becomes
-            # plain paged attention with cp_group_size=1.
+        elif phase == "ring":
+            cu_ring = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(
+                q_local.shape[0])
+            context_out, _, context_lse = _rpa_cp_call(
+                q_local,
+                k_local,
+                v_local,
+                kv_cache_local,
+                kv_lens_local,
+                page_indices_local,
+                cu_ring,
+                jnp.array([0, 0, 1], jnp.int32),
+                cp_rank=cp_rank,
+                cp_group_size=pcp_size,
+                kv_cache_lens=kv_cache_lens_local,
+                pcp_ring_axis_name=pcp_axis,
+                pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
+                skip_current_attn=True,
+                use_causal_mask=False,
+                update_kv_cache=False,
+                **common)
+        elif phase == "gather_kv":
             local_q = q_local.shape[0]
             cu_kv = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(local_q)
             max_seqs = kv_lens_local.shape[0]
