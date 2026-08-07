@@ -1,0 +1,21 @@
+tensor_parallel_size: 4
+dtype: bfloat16
+max_model_len: 8192
+env_vars:
+  VLLM_ENABLE_V1_MULTIPROCESSING: '0'
+trace_configs:
+- batch_size: 2
+  input_len: 1024
+  output_len: 16
+  jax_advanced_configuration:
+    tpu_enable_periodic_counter_sampling: true
+    tpu_tc_perf_counter_sampling_options: interval_us:10 scaling:0 counter_size_bits:1
+      indices:56 indices:57 indices:58 indices:38 indices:105
+    tpu_cmn_perf_counter_sampling_options: interval_us:32 scaling:0 counter_size_bits:2
+      indices:1 indices:2 indices:58
+    num_tensor_cores_to_trace_per_device: 1
+sweep_matrix:
+  batch_size: [1, 2]
+  input_len: [1024]
+  output_len: [16]
+  model: [meta-llama/Meta-Llama-3.1-8B-Instruct]

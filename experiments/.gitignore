@@ -1,0 +1,4 @@
+results/
+*.csv
+*.log
+scratch/
