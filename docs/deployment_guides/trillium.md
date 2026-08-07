@@ -1,4 +1,4 @@
-# v6e setup (Trillium)
+# v6e Recipes (Trillium)
 
 We provide tested end-to-end recipes for deploying various models on v6e (Trillium) TPUs using Google Compute Engine (GCE).
 

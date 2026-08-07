@@ -98,7 +98,6 @@ Select your desired TPU hardware, number of chips, and capacity model to generat
 <div class="command-generator-container" id="prov-generator">
   <div class="cg-options-group">
     <span class="cg-label">Hardware</span>
-    <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v7x">TPU v7x</button>
     <button class="cg-btn active" role="button" aria-pressed="true" data-group="prov_hw" data-val="v6e">TPU v6e</button>
     <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v5e">TPU v5e</button>
     <button class="cg-btn" role="button" aria-pressed="false" data-group="prov_hw" data-val="v5p">TPU v5p</button>

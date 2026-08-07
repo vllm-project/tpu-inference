@@ -62,10 +62,10 @@ nav:
     - 'Quickstart': getting_started/quickstart.md
   - 'Features & Usage':
     - 'Recommended Models': recommended_models.md
-    - 'Recommended Features': recommended_features.md
-    - 'Deploying on GCE':
-      - 'v7x setup (Ironwood)': deployment_guides/ironwood.md
-      - 'v6e setup (Trillium)': deployment_guides/trillium.md
+    - 'Feature Matrix': features.md
+    - 'Deployment Recipes':
+      - 'v7x Recipes (Ironwood)': deployment_guides/ironwood.md
+      - 'v6e Recipes (Trillium)': deployment_guides/trillium.md
     - 'Code Examples':
       - 'Multi Modal Inference': api_and_code_examples/multi_modal_inference.md
       - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md

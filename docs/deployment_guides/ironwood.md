@@ -1,6 +1,6 @@
-# v7x setup (Ironwood)
+# v7x Recipes (Ironwood)
 
-We provide tested end-to-end recipes for deploying various models on v7x (Ironwood) TPUs using Google Compute Engine (GCE).
+We provide tested end-to-end recipes for deploying various models on v7x (Ironwood) TPUs using Google Kubernetes Engine (GKE).
 
 Due to the variety of models and specific setup instructions for each, these recipes are maintained in our external `tpu-recipes` repository.
 

@@ -36,9 +36,9 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 
     Guides on infrastructure setup, deployment recipes, and hardware capabilities.
 
-    [:octicons-arrow-right-24: Deploying on GCE (Ironwood)](deployment_guides/ironwood.md)
+    [:octicons-arrow-right-24: v7x Recipes (Ironwood)](deployment_guides/ironwood.md)
 
-    [:octicons-arrow-right-24: Deploying on GCE (Trillium)](deployment_guides/trillium.md)
+    [:octicons-arrow-right-24: v6e Recipes (Trillium)](deployment_guides/trillium.md)
 
     [:octicons-arrow-right-24: Supported Models](recommended_models.md)
 

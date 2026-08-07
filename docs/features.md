@@ -1,6 +1,17 @@
-# Recommended Features
+# Feature Matrix
 
-This table shows the features currently tested for accuracy and performance.
+This page details the features, kernels, parallelism schemes, and quantization methods currently tested for accuracy and performance.
+
+<details open markdown="1">
+<summary> <b>🚦 <i>Status Legend</i> </b> </summary>
+
+> - ✅ **Passing:** Tested and works as expected. Ready for use.
+> - ❌ **Failing:** Known to be broken or not functional. Help is wanted to fix this!
+> - 🧪 **Experimental:** Works, but unoptimized or pending community validation.
+> - 📝 **Planned:** Not yet implemented, but on the official roadmap.
+> - ⛔️ **Unplanned:** There is no benefit to adding this.
+> - ❓ **Untested:** The functionality exists but has not been recently or thoroughly verified.
+</details>
 
 === "Release"
 

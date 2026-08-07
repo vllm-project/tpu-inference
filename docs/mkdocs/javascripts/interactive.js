@@ -99,10 +99,6 @@ function updateCommandGenerator() {
 }
 
 const PROVISION_DATA = {
-    "v7x": {
-        is_gce_only: true,
-        inst: "TPU v7x (Ironwood) is provisioned directly via Google Compute Engine (GCE) or GKE, not through the legacy Cloud TPU API. Please see the <a href='../../deployment_guides/ironwood/'>Deploying on GCE -> v7x setup</a> guide for exact provisioning instructions."
-    },
     "v6e": {
         runtime: "v2-alpha-tpuv6e",
         zone: "us-east5-a",
@@ -205,12 +201,6 @@ function updateProvisionGenerator() {
                     }
                 }
             }
-        }
-
-        if (data.is_gce_only) {
-            containerEl.style.display = 'none';
-            instEl.innerHTML = data.inst;
-            return;
         }
 
         containerEl.style.display = 'block';
