@@ -36,6 +36,8 @@ from tpu_inference.layers.jax.quantization.configs import (QuantizationConfig,
 from tpu_inference.layers.jax.quantization.fp8 import (
     Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod,
     Fp8TensorwiseMergedLinearMethod)
+from tpu_inference.layers.jax.quantization.int8 import \
+    Int8ChannelwiseLinearMethod
 from tpu_inference.layers.jax.quantization.unquantized import (
     UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 
@@ -141,6 +143,18 @@ class CompressedTensorsConfig(QuantizationConfig):
             if isinstance(layer, JaxMergedColumnParallelLinear):
                 return Fp8TensorwiseMergedLinearMethod(layer, linear_config)
             return Fp8TensorwiseLinearMethod(layer, linear_config)
+
+        # int8 W8A8 (int-quantized): channelwise/tensorwise symmetric int8
+        # weights + dynamic per-token int8 activations (llm-compressor style).
+        # QuantizationType is a str enum, so a plain string compare is safe.
+        if (weight_quant is not None and input_quant is not None
+                and getattr(weight_quant, "type", None) == "int" and
+                self._ct._is_dynamic_token_w8a8(weight_quant, input_quant)):
+            if isinstance(layer, JaxMergedColumnParallelLinear):
+                raise NotImplementedError(
+                    "compressed-tensors int8 W8A8 is not yet supported for "
+                    "JaxMergedColumnParallelLinear layers in the JAX path.")
+            return Int8ChannelwiseLinearMethod(layer, linear_config)
 
         # TODO: w4a8 / wNa16 schemes need their own JAX methods (not yet ported).
         raise NotImplementedError(

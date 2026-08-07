@@ -31,7 +31,16 @@ logger = init_logger(__name__)
 # Define singleton initializers to avoid re-compilation.
 scale_initializer = nnx.initializers.ones
 sharded_initializer = nnx.initializers.xavier_normal()
-_init_fn = nnx.initializers.uniform()
+_uniform_init_fn = nnx.initializers.uniform()
+
+
+def _init_fn(key, shape, dtype=jnp.float32):
+    # jax.random.uniform only supports floating dtypes; integer params
+    # (e.g. int8 quantized weights, overwritten by the weight loader)
+    # are zero-initialized instead.
+    if jnp.issubdtype(jnp.dtype(dtype), jnp.integer):
+        return jnp.zeros(shape, dtype)
+    return _uniform_init_fn(key, shape, dtype)
 
 
 @dataclass
