@@ -65,6 +65,7 @@ class InputBatch:
         dp_size: int = 1,
     ):
         self.is_spec_decode = is_spec_decode
+        self.num_speculative_tokens = num_speculative_tokens
         self.max_num_reqs = max_num_reqs
         self.dp_size = dp_size
         self.max_model_len = max_model_len

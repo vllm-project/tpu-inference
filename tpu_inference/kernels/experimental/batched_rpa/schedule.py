@@ -400,11 +400,22 @@ def compute_metadata(
                 dma_entry.set_flags(dma_sz, dma_sz)
 
         if cfgs.bkv_p_new < cfgs.bkv_p:
-            # Decode path
-            assert cfgs.bkv_p_new == 1
-            slot_start = (bkv_sz_cache //
-                          cfgs.serve.page_size) * cfgs.serve.page_size
-            fill_dma_kv_new(0, bkv_sz_cache, new_sz, slot_start)
+            # General decode path for any bkv_p_new (1, 2, 3, etc.)
+            curr_vmem = bkv_sz_cache
+            curr_rem = new_sz
+
+            for i in range(cfgs.bkv_p_new):
+                slot_start = (curr_vmem //
+                              cfgs.serve.page_size) * cfgs.serve.page_size
+                slot_end = slot_start + cfgs.serve.page_size
+
+                dma_sz = jnp.minimum(curr_rem, slot_end - curr_vmem)
+                dma_sz = jnp.where(curr_rem > 0, dma_sz, 0)
+
+                fill_dma_kv_new(i, curr_vmem, dma_sz, slot_start)
+
+                curr_vmem += dma_sz
+                curr_rem = jnp.maximum(0, curr_rem - dma_sz)
         else:
             iters = max(cfgs.bkv_p, cfgs.bkv_p_new)
             for i in range(iters):
