@@ -8,7 +8,7 @@
 # with host-side KV-cache offload enabled. Unlike run_multi_disagg_offload.sh,
 # this script has no Prefill/Decode split or proxy. It verifies both actual
 # D2H/H2D transfers and deterministic output equality against a no-offload
-# baseline before running the optional serving benchmark.
+# baseline through the serving API before running the optional benchmark.
 set -euo pipefail
 
 readonly CHIPS_PER_HOST=4
@@ -194,32 +194,30 @@ stream_ray_vllm_logs() {
   '
 }
 
-# The verification helper first generates with no connector, then uses the
-# TPUOffloadConnector twice with a prefix-cache reset in between. It compares
-# generated text bit-for-bit. The reset makes the second
-# connector run load saved KV blocks from host memory rather than relying on
-# HBM-resident prefix cache.
+# Run the same long, shared-prefix requests through a baseline vLLM server and
+# an offload-enabled vLLM server. The helper compares the API responses
+# bit-for-bit. For the offload server, the helper clears only the local prefix
+# cache through vLLM's test-only API; the metric assertion then proves the
+# second request reloaded saved KV blocks from host memory.
 run_offload_correctness() {
   local verification_pid correctness_tail_pid ray_log_pid
   local verification_status=0 elapsed_seconds=0
 
   echo "--- Verifying deterministic output with actual TPU KV-cache offload"
   : >"${LOG_DIR}/correctness.txt"
-  # Metrics are kept in the Ray worker processes and their interval counters
-  # are cleared after each snapshot. Preserve snapshots while the child LLM is
-  # still running; it shuts down its Ray placement group before returning.
+  # Metrics are kept in Ray worker processes and their interval counters are
+  # cleared after each snapshot. Preserve snapshots while the API requests are
+  # in flight, before the server is stopped.
   : >"${LOG_DIR}/offload_metrics.txt"
   : >"${LOG_DIR}/ray_vllm_logs.txt"
   timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
     docker exec "${CONTAINER_NAME}" bash -c \
     "python3 /workspace/tpu_inference/.buildkite/e2e/verify_multihost_offload.py \\
+      --phase ${CORRECTNESS_PHASE} \\
+      --url http://127.0.0.1:${VLLM_PORT}/v1/completions \\
       --model $(printf '%q' "${MODEL}") \\
-      --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} \\
-      --load-format ${LOAD_FORMAT} \\
-      --max-model-len ${MAX_MODEL_LEN} \\
       --max-tokens ${OUTPUT_LEN} \\
       --seed ${RANDOM_SEED} \\
-      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \\
       --baseline-output /tmp/multihost_offload_verification/baseline.json \\
       --offload-output /tmp/multihost_offload_verification/offload.json" \
     >"${LOG_DIR}/correctness.txt" 2>&1 &
@@ -261,6 +259,32 @@ run_offload_correctness() {
   cat "${LOG_DIR}/correctness.txt"
 }
 
+start_server() {
+  local mode=$1 kv_transfer_arg=''
+  if [[ "${mode}" == "offload" ]]; then
+    kv_transfer_arg=" --kv-transfer-config '${KV_TRANSFER_CONFIG}'"
+  fi
+  echo "--- Starting multi-host vLLM server (${mode})"
+  # This isolated CI server enables /reset_prefix_cache so the test can clear
+  # only HBM prefix state while retaining connector-managed CPU blocks.
+  docker exec -d -e HF_HOME=/root/.cache/huggingface -e VLLM_SERVER_DEV_MODE=1 "${CONTAINER_NAME}" \
+    bash -c "${SERVE_BASE_CMD}${kv_transfer_arg} > /root/vllm_serve.log 2>&1"
+  wait_for_server
+}
+
+stop_server() {
+  echo "--- Stopping vLLM server"
+  docker exec "${CONTAINER_NAME}" bash -c "pkill -TERM -f '[v]llm serve' || true"
+  for _ in {1..60}; do
+    if ! docker exec "${CONTAINER_NAME}" pgrep -f '[v]llm serve' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  echo "ERROR: vLLM server did not stop within 300 seconds." >&2
+  return 1
+}
+
 collect_offload_metrics() {
   local worker_ip
   docker exec "${CONTAINER_NAME}" bash -c \
@@ -278,14 +302,14 @@ collect_offload_metrics() {
 assert_actual_offload() {
   # The stats logger clears interval counters, so D2H and H2D can appear in
   # separate snapshots. `run_offload_correctness` saved snapshots from every
-  # host before it shut down the LLM engine.
+  # host before the server is stopped.
   grep -Eq 'Offload Metrics Snapshot:.*d2h=[1-9][0-9]*' "${LOG_DIR}/offload_metrics.txt" || {
     echo "ERROR: No D2H offload operation was observed." >&2
     tail -n 50 "${LOG_DIR}/offload_metrics.txt" >&2 || true
     return 1
   }
   grep -Eq 'Offload Metrics Snapshot:.*h2d=[1-9][0-9]*' "${LOG_DIR}/offload_metrics.txt" || {
-    echo "ERROR: No H2D reload operation was observed after the cache reset." >&2
+    echo "ERROR: No H2D reload operation was observed for the shared prefix." >&2
     tail -n 50 "${LOG_DIR}/offload_metrics.txt" >&2 || true
     return 1
   }
@@ -336,17 +360,30 @@ for worker_ip in "${worker_ips[@]}"; do
 done
 sleep "${WORKER_STARTUP_WAIT_SECONDS:-120}"
 
-run_offload_correctness
-assert_actual_offload
-
 printf -v quoted_model '%q' "${MODEL}"
 printf -v quoted_load_format '%q' "${LOAD_FORMAT}"
 KV_TRANSFER_CONFIG='{"kv_connector":"TPUOffloadConnector","kv_connector_module_path":"tpu_inference.offload.tpu_offload_connector","kv_role":"kv_both"}'
-SERVE_CMD="vllm serve ${quoted_model} --port ${VLLM_PORT} --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} --trust-remote-code --load-format ${quoted_load_format} --enable-prefix-caching --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} --max-model-len ${MAX_MODEL_LEN} --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} --max-num-seqs ${MAX_NUM_SEQS} --kv-transfer-config '${KV_TRANSFER_CONFIG}'"
-echo "--- Starting one multi-host vLLM server with host KV-cache offload enabled"
-docker exec -d -e HF_HOME=/root/.cache/huggingface "${CONTAINER_NAME}" \
-  bash -c "${SERVE_CMD} > /root/vllm_serve.log 2>&1"
-wait_for_server
+SERVE_BASE_CMD="vllm serve ${quoted_model} --port ${VLLM_PORT} --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} --trust-remote-code --load-format ${quoted_load_format} --enable-prefix-caching --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} --max-model-len ${MAX_MODEL_LEN} --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} --max-num-seqs ${MAX_NUM_SEQS}"
+
+if [[ "${TEST_MODE}" == 2 || "${TEST_MODE}" == 3 ]]; then
+  start_server baseline
+  CORRECTNESS_PHASE=baseline run_offload_correctness
+  stop_server
+  # The baseline server owns the whole Ray TPU slice. Wait until shutdown has
+  # released it before starting the offload server.
+  timeout "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}" docker exec "${CONTAINER_NAME}" \
+    python3 /workspace/tpu_inference/.buildkite/e2e/verify_multihost_offload.py \
+      --phase wait --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+      --resource-wait-seconds "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}"
+
+  start_server offload
+  CORRECTNESS_PHASE=offload run_offload_correctness
+  assert_actual_offload
+fi
+
+if [[ "${TEST_MODE}" == 1 ]]; then
+  start_server offload
+fi
 
 if [[ "${TEST_MODE}" == 1 || "${TEST_MODE}" == 3 ]]; then
   echo "--- Running multi-host host-KV-offload benchmark"
