@@ -9,7 +9,7 @@
     "USE_MOE_EP_KERNEL": 0,
     "MODEL_IMPL_TYPE": "vllm",
     "BK_TIMEOUT_IN_MINUTES": 300,
-    "BENCHMARK_TIMEOUT": "3h"
+    "BENCHMARK_TIMEOUT": "5h"
   },
   "benchmark_cases": [
     {
