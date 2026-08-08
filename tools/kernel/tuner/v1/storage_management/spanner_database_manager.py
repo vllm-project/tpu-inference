@@ -36,7 +36,7 @@ class SpannerStorageManager(StorageManager):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
-        self.worker_id = worker_id
+        self.worker_id = worker_id if worker_id is not None else '0'
         self.dry_run = dry_run
         if not self.dry_run:
             self.client = spanner.Client(project=gcp_project_id,

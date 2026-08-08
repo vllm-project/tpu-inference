@@ -69,14 +69,18 @@ class TunableParams:
 
 class GmmV2KernelTuner(KernelTunerBase):
 
-    def __init__(self, run_config: RunConfig):
+    def __init__(self, run_config: RunConfig, lightweight: bool = False):
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
             kernel_tuner_name="gmm_v2_kernel_tuner",
             jit_kernel_pattern=r"^jit_gmm_v2",
         )
-        super().__init__(tuner_config=self.tuner_config, run_config=run_config)
+        super().__init__(tuner_config=self.tuner_config,
+                         run_config=run_config,
+                         lightweight=lightweight)
+        if lightweight:
+            return
 
     def get_search_space(self, tuning_key: TuningKey) -> dict[str, list[int]]:
         tm_values = [t for t in [64, 128, 256] if tuning_key.m % t == 0]

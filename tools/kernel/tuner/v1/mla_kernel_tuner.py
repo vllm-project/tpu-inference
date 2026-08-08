@@ -159,7 +159,7 @@ def _generate_mla_inputs(
 
 class MlaKernelTuner(KernelTunerBase):
 
-    def __init__(self, run_config: RunConfig):
+    def __init__(self, run_config: RunConfig, lightweight: bool = False):
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
@@ -172,7 +172,11 @@ class MlaKernelTuner(KernelTunerBase):
             # letting optuna exploit the model after the initial warm-up.
             n_bayesian_trials=50,
         )
-        super().__init__(tuner_config=self.tuner_config, run_config=run_config)
+        super().__init__(tuner_config=self.tuner_config,
+                         run_config=run_config,
+                         lightweight=lightweight)
+        if lightweight:
+            return
 
     def get_search_space(self, tuning_key: TuningKey) -> dict:
         """Return the tunable-parameter search space for a given TuningKey.

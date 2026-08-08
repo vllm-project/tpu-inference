@@ -85,19 +85,41 @@ class BayesianOptimizer(TuningOptimizer):
                 buckets[-1] = (buckets[-1][0], idx + 1)
         return buckets
 
-    def measure_latency(self, begin_case_id: int, end_case_id: int) -> None:
+    def _evaluate_single_case(self,
+                              cid,
+                              tuning_key,
+                              tunable_params,
+                              tracker,
+                              log_prefix=""):
+        """Evaluates a single tuning case via the executor subprocess.
+
+        Delegates to SweepOptimizer._evaluate_single_case which contains
+        the shared warmup + measurement + xprof logic.
+        """
+        from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
+            SweepOptimizer
+
+        # Create a temporary sweep optimizer with the same dependencies
+        # to reuse the _evaluate_single_case implementation.
+        # TODO: Create a new class that contains this method so we don't need to
+        # import SweepOptimizer here.
+        sweep = SweepOptimizer(self.tuner, self.storage_manager,
+                               self.executor_mgr)
+        return sweep._evaluate_single_case(cid, tuning_key, tunable_params,
+                                           tracker, log_prefix)
+
+    def measure_latency(self, begin_case_id: int, end_case_id: int) -> int:
         import optuna
 
         from tools.kernel.tuner.v1.common.kernel_tuner_base import \
             ProcessedCasesTracker
-        from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
-            SweepOptimizer
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         tuner = self.tuner
+        storage_manager = self.storage_manager
         worker_id = tuner.worker_id
 
-        all_configs = tuner.storage_manager.get_bucket_configs(
+        all_configs = storage_manager.get_bucket_configs(
             tuner.run_config.case_set_id, begin_case_id, end_case_id)
 
         if not all_configs:
@@ -105,10 +127,10 @@ class BayesianOptimizer(TuningOptimizer):
                 f"No configs found for [{begin_case_id}, {end_case_id}). "
                 "Nothing to optimize.")
             bucket_id = begin_case_id
-            tuner.storage_manager.mark_bucket_completed(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                bucket_id)
-            return
+            storage_manager.mark_bucket_completed(tuner.run_config.case_set_id,
+                                                  tuner.run_config.run_id,
+                                                  bucket_id)
+            return end_case_id
 
         first_cid = min(all_configs.keys())
         _, _, first_case_kv = all_configs[first_cid]
@@ -125,8 +147,9 @@ class BayesianOptimizer(TuningOptimizer):
             )
             from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
                 SweepOptimizer
-            SweepOptimizer(tuner).measure_latency(begin_case_id, end_case_id)
-            return
+            return SweepOptimizer(tuner, storage_manager,
+                                  self.executor_mgr).measure_latency(
+                                      begin_case_id, end_case_id)
 
         # inital bucket tuning status
         bucket_id = begin_case_id
@@ -134,12 +157,12 @@ class BayesianOptimizer(TuningOptimizer):
             f"Worker [{worker_id}] Starting Bayesian optimization for "
             f"CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, "
             f"Bucket begin={begin_case_id} end={end_case_id}.")
-        tuner.storage_manager.mark_bucket_in_progress(
-            tuner.run_config.case_set_id, tuner.run_config.run_id, bucket_id)
-        tracker = ProcessedCasesTracker(
-            tuner.storage_manager.get_already_processed_ids(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                begin_case_id, end_case_id))
+        storage_manager.mark_bucket_in_progress(tuner.run_config.case_set_id,
+                                                tuner.run_config.run_id,
+                                                bucket_id)
+        tracker = ProcessedCasesTracker(storage_manager, tuner.tuner_config,
+                                        tuner.run_config, begin_case_id,
+                                        end_case_id)
 
         params_to_case_id: dict[TunableParams, int] = {}
         for cid, (_, _, case_kv) in all_configs.items():
@@ -157,8 +180,9 @@ class BayesianOptimizer(TuningOptimizer):
                 "Falling back to sequential sweep.")
             from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
                 SweepOptimizer
-            SweepOptimizer(tuner).measure_latency(begin_case_id, end_case_id)
-            return
+            return SweepOptimizer(tuner, storage_manager,
+                                  self.executor_mgr).measure_latency(
+                                      begin_case_id, end_case_id)
 
         bucket_start_perf = time.perf_counter()
 
@@ -195,7 +219,7 @@ class BayesianOptimizer(TuningOptimizer):
                     f"Trial {trial.number}: Skipping {tunable_params} "
                     "due to expected OOM from a smaller configuration.")
                 if cid not in tracker:
-                    tuner.storage_manager.save_result(
+                    storage_manager.save_result(
                         CaseResult(
                             case_set_id=tuner.run_config.case_set_id,
                             run_id=tuner.run_config.run_id,
@@ -205,8 +229,7 @@ class BayesianOptimizer(TuningOptimizer):
                             latency=0,
                             warmup_time=0,
                             total_time=0,
-                            processed_at=tuner.storage_manager.
-                            get_timestamp_sec(),
+                            processed_at=storage_manager.get_timestamp_sec(),
                             tpu=tuner.run_config.tpu_queue_multi,
                         ))
                     tracker.record(cid, tuning_key, tunable_params,
@@ -219,7 +242,7 @@ class BayesianOptimizer(TuningOptimizer):
                 )
                 raise optuna.exceptions.TrialPruned()
 
-            status, average_latency_us = tuner._evaluate_single_case(
+            status, average_latency_us = self._evaluate_single_case(
                 cid=cid,
                 tuning_key=tuning_key,
                 tunable_params=tunable_params,
@@ -270,9 +293,9 @@ class BayesianOptimizer(TuningOptimizer):
                     n_trials=1,
                     callbacks=callbacks,
                 )
-            tuner.storage_manager.mark_bucket_completed(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                bucket_id)
+            storage_manager.mark_bucket_completed(tuner.run_config.case_set_id,
+                                                  tuner.run_config.run_id,
+                                                  bucket_id)
         except Exception as e:
             logger.error(
                 f"Error in Bayesian optimization for CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, Bucket {bucket_id}: {e}",
@@ -280,11 +303,11 @@ class BayesianOptimizer(TuningOptimizer):
             )
             raise
         finally:
-            tuner.storage_manager.flush_results()
+            storage_manager.flush_results()
 
             bucket_total_time_us = int(
                 (time.perf_counter() - bucket_start_perf) * 1_000_000)
-            tuner.storage_manager.add_bucket_processed_time_us(
+            storage_manager.add_bucket_processed_time_us(
                 tuner.run_config.case_set_id, tuner.run_config.run_id,
                 bucket_id, bucket_total_time_us)
 
@@ -305,3 +328,5 @@ class BayesianOptimizer(TuningOptimizer):
             f"{tuner.tuner_config.n_bayesian_trials} requested. "
             f"{best_info}"
             f"Total time: {bucket_total_time_us/1e6:.2f}s.")
+
+        return end_case_id
