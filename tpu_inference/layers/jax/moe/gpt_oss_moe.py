@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import InitVar, dataclass
+from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
@@ -21,20 +21,14 @@ from flax.typing import Sharding
 from jax import lax
 from jaxtyping import Float
 
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.jax.base import create_param
-from tpu_inference.layers.jax.layers import FlaxUtils
-from tpu_inference.layers.jax.moe.moe import Router
-
-modeling_flax_utils = FlaxUtils()
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts, Router
 
 
 @dataclass(kw_only=True)
 class GptOssRouter(Router):
-    """Router module for Mixture-of-Experts (MoE) layers.
-
-    This module determines which experts each token should be routed.
-
-    """
+    """Router for GPT-OSS MoE that adds a per-expert bias to the logits."""
     e_sharding: Sharding = ()
 
     def __post_init__(self, rngs: nnx.Rngs):
@@ -49,7 +43,7 @@ class GptOssRouter(Router):
                                    sharding=self.e_sharding,
                                    random_init=self.random_init)
 
-    def __call__(self, x_TD: Float) -> tuple[Float, jax.Array]:
+    def __call__(self, x_TD: Float):
         """
         Overrides the parent's forward pass to include the bias.
         """
@@ -61,6 +55,9 @@ class GptOssRouter(Router):
 
         router_logits_TE += self.bias_E.value
 
+        if self.moe_backend in MoEBackend.fused_moe_backends():
+            return router_logits_TE
+
         weights_TX, selected_experts_TX = jax.lax.top_k(
             router_logits_TE, self.num_experts_per_tok)
 
@@ -70,164 +67,44 @@ class GptOssRouter(Router):
         return normalized_weights_TX, selected_experts_TX
 
 
-def _swiglu_split(gate: Float, up: Float, alpha: Float, limit: Float) -> Float:
-    """Implements SwiGLU using separate Gate and Up projections."""
-    # Clip both inputs
-    x_glu = jnp.clip(gate, max=limit)
-    x_linear = jnp.clip(up, min=-limit, max=limit)
+class GptOssMoE(JaxRoutedExperts):
+    """Mixture of Experts for GPT-OSS using FusedMoE.
 
-    # Compute Activation: (Gate * Sigmoid(Alpha * Gate)) * (Up + 1)
-    gated_activation = x_glu * jax.nn.sigmoid(alpha * x_glu)
-
-    return gated_activation * (x_linear + 1)
-
-
-@dataclass(kw_only=True)
-class CombineExperts(nnx.Module):
-    """Module for combining expert outputs with weighted sum."""
-    dtype: jnp.dtype
-
-    def __call__(self, down_proj_TED: Float, weights_TX: Float,
-                 indices_TX: jax.Array) -> Float:
-        """Combines expert outputs using weighted sum.
-
-        Args:
-            down_proj_TED: Expert outputs, shape (tokens, experts, hidden_dim)
-            weights_TX: Router weights, shape (tokens, experts_per_token)
-            indices_TX: Selected expert indices, shape (tokens, experts_per_token)
-
-        Returns:
-            Combined output, shape (tokens, hidden_dim)
-        """
-        with jax.named_scope("combine_experts"):
-            indices_for_gather = indices_TX[..., None]
-            gathered_down_proj_TED = jnp.take_along_axis(down_proj_TED,
-                                                         indices_for_gather,
-                                                         axis=1)
-            output_TD = jnp.einsum('TXD,TX -> TD', gathered_down_proj_TED,
-                                   weights_TX)
-
-        return output_TD.astype(self.dtype)
-
-
-@dataclass(kw_only=True)
-class GptOssMoE(nnx.Module):
+    The router projection is external (GptOssRouter); this class only
+    handles expert dispatch. use_ep and moe_backend are derived from
+    the vLLM parallel config by JaxRoutedExperts, so the EP/TP backend
+    matches the torchax path automatically.
     """
-    JAX implementation of the GPT-OSS Mixture-of-Experts MLP block.
-    """
-    dtype: jnp.dtype
-    hidden_size: int
-    intermediate_size_moe: int
-    num_local_experts: int
-    router: GptOssRouter
-    rngs: InitVar[nnx.Rngs]
 
-    swiglu_limit: float = 7.0
-    swiglu_alpha: float = 1.702
-
-    # Sharding specifications
-    activation_ffw_td: Sharding
-    edf_sharding: Sharding
-    efd_sharding: Sharding
-    ed_sharding: Sharding
-
-    random_init: bool = False
-    enable_return_routed_experts: bool = False
-
-    def __call__(self, x_TD: Float):
-        """Performs the forward pass for the GPT-OSS MoE layer."""
-        x_TD = jnp.asarray(x_TD, self.dtype)
-        x_TD = lax.with_sharding_constraint(x_TD, self.activation_ffw_td)
-
-        weights_TX, indices_TX = self.router(x_TD)
-
-        # First MLP layer (Split Gate + Up)
-        with jax.named_scope("MLP #1"):
-            # Independent Computation (Lazy Weaving)
-
-            # Compute Gate
-            gate_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
-                                  self.gate_proj_kernel.value)
-            gate_TEF += self.gate_proj_bias.value
-
-            # Compute Up
-            up_TEF = jnp.einsum('TD,EDF -> TEF', x_TD,
-                                self.up_proj_kernel.value)
-            up_TEF += self.up_proj_bias.value
-
-            # Fuse via SwiGLU (using split helper)
-            fuse_TEF = _swiglu_split(gate_TEF,
-                                     up_TEF,
-                                     alpha=self.swiglu_alpha,
-                                     limit=self.swiglu_limit)
-
-        # Second MLP layer (down-projection)
-        with jax.named_scope("MLP #2"):
-            down_proj_TED = jnp.einsum('TEF,EFD -> TED', fuse_TEF,
-                                       self.mlp2_weight_EFD.value)
-            down_proj_TED += self.mlp2_bias_ED.value
-
-        # Weighted sum of expert outputs
-        output_TD = self.combine_experts(down_proj_TED, weights_TX, indices_TX)
-
-        if self.enable_return_routed_experts:
-            return output_TD, indices_TX
-        else:
-            return output_TD, None
-
-    def __post_init__(self, rngs: nnx.Rngs):
-        """Initializes all weights and biases for the MoE block."""
-        D, F, E = self.hidden_size, self.intermediate_size_moe, self.num_local_experts
-
-        self.combine_experts = CombineExperts(dtype=self.dtype)
-
-        # Split MLP #1 into Gate and Up Projections
-        # This matches MaxText's structure (wi_0 and wi_1) 1-to-1.
-
-        # Gate Projection (wi_0)
-        self.gate_proj_kernel = create_param(
-            rngs,
-            shape=(E, D, F),
-            dtype=self.dtype,
-            sharding=self.edf_sharding,
-            random_init=self.random_init,
-        )
-        self.gate_proj_bias = create_param(
-            rngs,
-            shape=(E, F),
-            dtype=self.dtype,
-            sharding=self.ed_sharding,
-            random_init=self.random_init,
-        )
-
-        # Up Projection (wi_1)
-        self.up_proj_kernel = create_param(
-            rngs,
-            shape=(E, D, F),
-            dtype=self.dtype,
-            sharding=self.edf_sharding,
-            random_init=self.random_init,
-        )
-        self.up_proj_bias = create_param(
-            rngs,
-            shape=(E, F),
-            dtype=self.dtype,
-            sharding=self.ed_sharding,
-            random_init=self.random_init,
-        )
-
-        # MLP #2 Weights (Down-projection) and Bias
-        self.mlp2_weight_EFD = create_param(
-            rngs,
-            shape=(E, F, D),
-            dtype=self.dtype,
-            sharding=self.efd_sharding,
-            random_init=self.random_init,
-        )
-        self.mlp2_bias_ED = create_param(
-            rngs,
-            shape=(E, D),
-            dtype=self.dtype,
-            sharding=self.ed_sharding,
-            random_init=self.random_init,
+    def __init__(
+        self,
+        *,
+        dtype: jnp.dtype,
+        mesh,
+        rngs: nnx.Rngs,
+        quant_config=None,
+        num_local_experts: int,
+        hidden_size: int,
+        intermediate_size_moe: int,
+        num_experts_per_tok: int,
+        random_init: bool = False,
+        enable_return_routed_experts: bool = False,
+        prefix: str = "",
+    ) -> None:
+        JaxRoutedExperts.__init__(
+            self,
+            dtype=dtype,
+            num_local_experts=num_local_experts,
+            hidden_size=hidden_size,
+            intermediate_size_moe=intermediate_size_moe,
+            hidden_act="swigluoai",
+            rngs=rngs,
+            mesh=mesh,
+            top_k=num_experts_per_tok,
+            scoring_func="softmax",
+            renormalize=True,
+            random_init=random_init,
+            enable_return_routed_experts=enable_return_routed_experts,
+            quant_config=quant_config,
+            prefix=prefix,
         )
