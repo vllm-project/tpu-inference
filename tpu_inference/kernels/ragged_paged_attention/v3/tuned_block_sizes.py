@@ -32,6 +32,17 @@ logger = init_logger(__name__)
 #   - (num_kv_pages_per_block, num_queries_per_block)
 TUNED_BLOCK_SIZES = {
     'TPU v7': {
+        64: {
+            'q_bfloat16_kv_float8_e4m3fn': {
+                'q_head-16_kv_head-2_head-128': {
+                    'max_model_len-1024-sw-None': (8, 64),
+                    'max_model_len-2048-sw-None': (8, 64),
+                    'max_model_len-4096-sw-None': (16, 64),
+                    'max_model_len-8192-sw-None': (32, 32),
+                    'max_model_len-16384-sw-None': (32, 32),
+                },
+            },
+        },
         128: {
             'q_bfloat16_kv_float8_e4m3fn': {
                 'q_head-8_kv_head-4_head-256': {
