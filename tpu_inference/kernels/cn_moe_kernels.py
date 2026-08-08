@@ -206,7 +206,7 @@ def _expert_body(
     cur_w1_buf,
     cur_w2_buf,
 ):
-    """Process one slot: wait→w1 matmul→SwiGLU→wait→w2 matmul→accumulate."""
+    """Process one slot: wait (if new expert) -> compute (if weight != 0)."""
     dma_kw_w1 = dict(w1_ref=w1_ref,
                      w1_scale_ref=w1_scale_ref,
                      w1_bufs_ref=w1_bufs_ref,
@@ -229,53 +229,12 @@ def _expert_body(
                      NBUF_W1_=NBUF_W1_,
                      NBUF_W2_=NBUF_W2_)
 
-    # ---- Phase 1: K-tiled gate+up matmul ----
-    gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
-
+    # ---- Waits: tied to is_new_expert, independent of this slot's weight ----
     for k in range(NUM_K):
 
         @pl.when(is_new_expert)
         def _():
             _wait_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
-
-        w1_fp8 = _select_buf(w1_bufs_ref,
-                             cur_w1_buf,
-                             NBUF_W1_,
-                             tile_start=k * K_TILE,
-                             tile_size=K_TILE)
-        k_block_start = (k * K_TILE) // QB
-        s1 = _select_buf(w1_s_bufs_ref,
-                         cur_w1_buf,
-                         NBUF_W1_,
-                         tile_start=k_block_start,
-                         tile_size=KB_TILE)
-        lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD), pl.ds(k * K_TILE, K_TILE)]
-
-        if DEQUANT_W1_AFTER_:
-            w1_cast = w1_fp8.astype(DTYPE_LHS)
-            block_acc = jnp.matmul(lhs_tile,
-                                   w1_cast,
-                                   preferred_element_type=jnp.float32)
-            s1_flat = s1.reshape(KB_TILE, 1, 2 * I)
-            block_acc = block_acc * s1_flat.reshape(1, 2 * I).astype(
-                jnp.float32)
-            gate_up_acc = gate_up_acc + block_acc
-        else:
-            w1_fp32 = w1_fp8.astype(jnp.float32).reshape(
-                KB_TILE, QB_eff, 2 * I)
-            w1_dequant = (w1_fp32 * s1).reshape(K_TILE,
-                                                2 * I).astype(DTYPE_LHS)
-            gate_up_acc = gate_up_acc + jnp.matmul(
-                lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
-
-    # ---- SwiGLU ----
-    gate = gate_up_acc[:, :I]
-    up = gate_up_acc[:, I:]
-    silu_gate = gate * jax.nn.sigmoid(gate)
-    intermediate = (silu_gate * up).astype(DTYPE_LHS)
-
-    # ---- Phase 2: I-tiled down matmul ----
-    down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
 
     for m in range(NUM_I):
 
@@ -283,38 +242,89 @@ def _expert_body(
         def _():
             _wait_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
 
-        w2_fp8 = _select_buf(w2_bufs_ref,
+    # ---- Compute: skip entirely for masked/padding slots (weight == 0) ----
+    @pl.when(weight != 0.0)
+    def _():
+        # ---- Phase 1: K-tiled gate+up matmul ----
+        gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
+
+        for k in range(NUM_K):
+            w1_fp8 = _select_buf(w1_bufs_ref,
+                                 cur_w1_buf,
+                                 NBUF_W1_,
+                                 tile_start=k * K_TILE,
+                                 tile_size=K_TILE)
+            k_block_start = (k * K_TILE) // QB
+            s1 = _select_buf(w1_s_bufs_ref,
+                             cur_w1_buf,
+                             NBUF_W1_,
+                             tile_start=k_block_start,
+                             tile_size=KB_TILE)
+            lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD),
+                                       pl.ds(k * K_TILE, K_TILE)]
+
+            if DEQUANT_W1_AFTER_:
+                w1_cast = w1_fp8.astype(DTYPE_LHS)
+                block_acc = jnp.matmul(lhs_tile,
+                                       w1_cast,
+                                       preferred_element_type=jnp.float32)
+                s1_flat = s1.reshape(KB_TILE, 1, 2 * I)
+                block_acc = block_acc * s1_flat.reshape(1, 2 * I).astype(
+                    jnp.float32)
+                gate_up_acc = gate_up_acc + block_acc
+            else:
+                w1_fp32 = w1_fp8.astype(jnp.float32).reshape(
+                    KB_TILE, QB_eff, 2 * I)
+                w1_dequant = (w1_fp32 * s1).reshape(K_TILE,
+                                                    2 * I).astype(DTYPE_LHS)
+                gate_up_acc = gate_up_acc + jnp.matmul(
+                    lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
+
+        # ---- SwiGLU ----
+        gate = gate_up_acc[:, :I]
+        up = gate_up_acc[:, I:]
+        silu_gate = gate * jax.nn.sigmoid(gate)
+        intermediate = (silu_gate * up).astype(DTYPE_LHS)
+
+        # ---- Phase 2: I-tiled down matmul ----
+        down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
+
+        for m in range(NUM_I):
+            w2_fp8 = _select_buf(w2_bufs_ref,
+                                 cur_w2_buf,
+                                 NBUF_W2_,
+                                 tile_start=m * I_TILE,
+                                 tile_size=I_TILE)
+            i_block_start = (m * I_TILE) // IB
+            s2 = _select_buf(w2_s_bufs_ref,
                              cur_w2_buf,
                              NBUF_W2_,
-                             tile_start=m * I_TILE,
-                             tile_size=I_TILE)
-        i_block_start = (m * I_TILE) // IB
-        s2 = _select_buf(w2_s_bufs_ref,
-                         cur_w2_buf,
-                         NBUF_W2_,
-                         tile_start=i_block_start,
-                         tile_size=IB_TILE)
-        inter_tile = intermediate[:, m * I_TILE:(m + 1) * I_TILE]
+                             tile_start=i_block_start,
+                             tile_size=IB_TILE)
+            inter_tile = intermediate[:, m * I_TILE:(m + 1) * I_TILE]
 
-        if DEQUANT_W2_AFTER_:
-            w2_cast = w2_fp8.astype(DTYPE_LHS)
-            block_acc = jnp.matmul(inter_tile,
-                                   w2_cast,
-                                   preferred_element_type=jnp.float32)
-            s2_flat = s2.reshape(IB_TILE, 1, H)
-            block_acc = block_acc * s2_flat.reshape(1, H).astype(jnp.float32)
-            down_acc = down_acc + block_acc
-        else:
-            w2_fp32 = w2_fp8.astype(jnp.float32).reshape(
-                IB_TILE, min(I_TILE, IB), H)
-            w2_dequant = (w2_fp32 * s2).reshape(I_TILE, H).astype(DTYPE_LHS)
-            down_acc = down_acc + jnp.matmul(
-                inter_tile, w2_dequant, preferred_element_type=jnp.float32)
+            if DEQUANT_W2_AFTER_:
+                w2_cast = w2_fp8.astype(DTYPE_LHS)
+                block_acc = jnp.matmul(inter_tile,
+                                       w2_cast,
+                                       preferred_element_type=jnp.float32)
+                s2_flat = s2.reshape(IB_TILE, 1, H)
+                block_acc = block_acc * s2_flat.reshape(1, H).astype(
+                    jnp.float32)
+                down_acc = down_acc + block_acc
+            else:
+                w2_fp32 = w2_fp8.astype(jnp.float32).reshape(
+                    IB_TILE, min(I_TILE, IB), H)
+                w2_dequant = (w2_fp32 * s2).reshape(I_TILE,
+                                                    H).astype(DTYPE_LHS)
+                down_acc = down_acc + jnp.matmul(
+                    inter_tile, w2_dequant, preferred_element_type=jnp.float32)
 
-    # ---- Accumulate weighted expert contribution to this token's row ----
-    result = (down_acc * weight).reshape(1, 1, H)
-    current = acc_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1), pl.ds(0, H)]
-    acc_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1), pl.ds(0, H)] = current + result
+        # ---- Accumulate weighted expert contribution to this token's row ----
+        result = (down_acc * weight).reshape(1, 1, H)
+        current = acc_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1), pl.ds(0, H)]
+        acc_scratch_ref[pl.ds(tok, 1), pl.ds(0, 1),
+                        pl.ds(0, H)] = current + result
 
 
 # =====================================================================
