@@ -225,6 +225,14 @@ class ShardingConfigManager:
         decode_context_parallelism = parallel_config.decode_context_parallel_size
         prefill_context_parallelism = parallel_config.prefill_context_parallel_size
 
+        # In upstream vLLM, KV cache block size scaling by PCP was removed (PR #46570),
+        # so scaling KV block size on prefill requires passing DCP == PCP.
+        # However, tpu-inference shards KV cache along KV_CONTEXT = ('pcp', 'dcp').
+        # When PCP > 1 and PCP == DCP, override decode_context_parallelism to 1
+        # so the KV cache is sharded along the PCP axis only (avoiding 4-way sharding).
+        if prefill_context_parallelism > 1 and decode_context_parallelism == prefill_context_parallelism:
+            decode_context_parallelism = 1
+
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
