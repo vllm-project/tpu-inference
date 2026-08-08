@@ -130,6 +130,80 @@ class SegmentIds(NamedTuple):
     kv: jax.Array
 
 
+class Gemma4ClippableEinsum(JaxEinsum):
+    """Checkpoint-defined clipped linear for the Gemma-4 vision tower.
+
+    Subclasses ``JaxEinsum`` so the projection weight stays the module's own
+    ``self.weight`` leaf (checkpoint key ``<proj>.linear.weight`` -> ``<proj>.weight``
+    via the existing ``orig_to_new_suffix`` remap; the weights loader's
+    reshape/permute hooks continue to match ``q_proj.weight``/``k_proj.weight``/...).
+
+    Mirrors HF transformers ``Gemma4ClippableLinear``: when the vision config sets
+    ``use_clipped_linears=True`` the forward is
+
+        x = clamp(x, input_min, input_max)   # activation input clamp
+        y = einsum(x, weight)                 # the plain JaxEinsum projection
+        y = clamp(y, output_min, output_max)  # activation output clamp
+
+    The four bounds are per-projection, non-trainable, checkpoint-resident scalars
+    (checkpoint keys ``<proj>.input_min/.input_max/.output_min/.output_max``). When
+    ``use_clipped_linears`` is False no bound state is created and this is an exact
+    no-op relative to the plain einsum. MODEL-LOCAL: does not change generic JaxEinsum.
+
+    M1 (required-bound hard failure): bounds initialize to a NON-FINITE NaN sentinel;
+    ``validate_clip_bounds`` hard-fails if any required bound is missing (still at the
+    sentinel), non-finite, or not scalar-compatible — refusing a silent identity clamp.
+    """
+
+    def __init__(self, einsum_str, kernel_shape, *, use_clipped_linears, **kwargs):
+        super().__init__(einsum_str, kernel_shape, **kwargs)
+        self.use_clipped_linears = bool(use_clipped_linears)
+        if self.use_clipped_linears:
+            def _b():
+                return nnx.Param(jnp.asarray(jnp.nan, dtype=jnp.float32))
+            self.input_min = _b()
+            self.input_max = _b()
+            self.output_min = _b()
+            self.output_max = _b()
+
+    def validate_clip_bounds(self):
+        """M1 hard-fail: every required bound must be finite and scalar. No-op when off."""
+        if not self.use_clipped_linears:
+            return
+        pfx = getattr(self, "prefix", "")
+        for nm in ("input_min", "input_max", "output_min", "output_max"):
+            p = getattr(self, nm, None)
+            if p is None:
+                raise ValueError(
+                    f"Gemma4ClippableEinsum[{pfx}]: required clip bound '{nm}' is absent "
+                    f"while use_clipped_linears=True.")
+            v = p.get_value()
+            if v.shape not in ((), (1,)):
+                raise ValueError(
+                    f"Gemma4ClippableEinsum[{pfx}]: clip bound '{nm}' has non-scalar shape "
+                    f"{v.shape}; expected scalar.")
+            fv = float(jnp.reshape(v, (-1,))[0])
+            if not bool(jnp.isfinite(jnp.asarray(fv))):
+                raise ValueError(
+                    f"Gemma4ClippableEinsum[{pfx}]: required clip bound '{nm}'={fv} is "
+                    f"non-finite (missing/NaN/Inf). The E2B/E4B checkpoint declares a FINITE "
+                    f"clipped model when vision_config.use_clipped_linears is True; refusing "
+                    f"to fall back to an identity clamp.")
+
+    def __call__(self, inputs):
+        if not self.use_clipped_linears:
+            return super().__call__(inputs)
+        xd = inputs.dtype
+        inputs = jnp.clip(inputs, self.input_min.get_value().astype(xd),
+                          self.input_max.get_value().astype(xd))
+        y = super().__call__(inputs)
+        yd = y.dtype
+        y = jnp.clip(y, self.output_min.get_value().astype(yd),
+                     self.output_max.get_value().astype(yd))
+        return y
+
+
+
 class Gemma4VisionFlashAttention(JaxModule):
     """
     Gemma 4 Vision Attention using TPU sharded_flash_attention.
@@ -155,40 +229,49 @@ class Gemma4VisionFlashAttention(JaxModule):
                               {}).get("full_attention", {})
         self.rope_base_frequency = rope_params.get("rope_theta", 100.0)
 
-        self.q_proj = JaxEinsum("BTD,DNH->BTNH",
-                                (self.features, self.num_heads, self.head_dim),
-                                param_dtype=dtype,
-                                kernel_init=nnx.with_partitioning(
-                                    init_fn,
-                                    (None, ShardingAxisName.VIT_MODEL, None)),
-                                rngs=rng,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.q_proj.linear")
-        self.k_proj = JaxEinsum(
+        # Vision uses checkpoint-defined clipped linears (vision_config.use_clipped_linears).
+        _ucl = bool(getattr(config, "use_clipped_linears", False))
+
+        self.q_proj = Gemma4ClippableEinsum(
+            "BTD,DNH->BTNH",
+            (self.features, self.num_heads, self.head_dim),
+            use_clipped_linears=_ucl,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                init_fn,
+                (None, ShardingAxisName.VIT_MODEL, None)),
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=f"{prefix}.q_proj.linear")
+        self.k_proj = Gemma4ClippableEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
+            use_clipped_linears=_ucl,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=f"{prefix}.k_proj.linear")
-        self.v_proj = JaxEinsum(
+        self.v_proj = Gemma4ClippableEinsum(
             "BTD,DKH->BTKH", (self.features, self.num_kv_heads, self.head_dim),
+            use_clipped_linears=_ucl,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=f"{prefix}.v_proj.linear")
-        self.o_proj = JaxEinsum("BTNH,NHD->BTD",
-                                (self.num_heads, self.head_dim, self.features),
-                                param_dtype=dtype,
-                                kernel_init=nnx.with_partitioning(
-                                    init_fn,
-                                    (ShardingAxisName.VIT_MODEL, None, None)),
-                                rngs=rng,
-                                quant_config=quant_config,
-                                prefix=f"{prefix}.o_proj.linear")
+        self.o_proj = Gemma4ClippableEinsum(
+            "BTNH,NHD->BTD",
+            (self.num_heads, self.head_dim, self.features),
+            use_clipped_linears=_ucl,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(
+                init_fn,
+                (ShardingAxisName.VIT_MODEL, None, None)),
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj.linear")
 
         self.q_norm = JaxRmsNorm(self.head_dim,
                                  param_dtype=dtype,
@@ -355,9 +438,13 @@ class Gemma4VisionMLP(JaxModule):
         self.features = config.hidden_size
         self.hidden_dim = config.intermediate_size
 
-        self.gate_proj = JaxEinsum(
+        # Vision uses checkpoint-defined clipped linears (vision_config.use_clipped_linears).
+        _ucl = bool(getattr(config, "use_clipped_linears", False))
+
+        self.gate_proj = Gemma4ClippableEinsum(
             "...d,df->...f",
             (self.features, self.hidden_dim),
+            use_clipped_linears=_ucl,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, ShardingAxisName.VIT_MODEL)),
@@ -367,9 +454,10 @@ class Gemma4VisionMLP(JaxModule):
             prefix=f"{prefix}.gate_proj.linear",
         )
 
-        self.up_proj = JaxEinsum(
+        self.up_proj = Gemma4ClippableEinsum(
             "...d,df->...f",
             (self.features, self.hidden_dim),
+            use_clipped_linears=_ucl,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (None, ShardingAxisName.VIT_MODEL)),
@@ -379,9 +467,10 @@ class Gemma4VisionMLP(JaxModule):
             prefix=f"{prefix}.up_proj.linear",
         )
 
-        self.down_proj = JaxEinsum(
+        self.down_proj = Gemma4ClippableEinsum(
             "...f,fd->...d",
             (self.hidden_dim, self.features),
+            use_clipped_linears=_ucl,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
                 init_fn, (ShardingAxisName.VIT_MODEL, None)),
@@ -722,15 +811,60 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             skip_prefixes=(["lm_head"]
                            if not hasattr(self, 'lm_head') else []),
             skip_substrs=[
+                # Audio tower is OUT_OF_SCOPE for this serving submodel: skip its weights
+                # AND its clip bounds (all 480 audio clip keys contain "audio_tower").
                 "audio_tower",
                 "embed_audio",
-                ".input_max",
-                ".input_min",
-                ".output_max",
-                ".output_min",
+                # VISION clip bounds (.input_min/.input_max/.output_min/.output_max under
+                # model.vision_tower) are NO LONGER skipped: they are checkpoint-defined,
+                # non-trainable scalars consumed by Gemma4ClippableEinsum and REQUIRED when
+                # vision_config.use_clipped_linears is True. Keys <proj>.input_min/... map
+                # 1:1 to the wrapper leaves <proj>.input_min/... (no .linear in bound keys).
             ],
         )
-        return loader.load_weights(mapper.apply(weights))
+        loaded = loader.load_weights(mapper.apply(weights))
+        # M1 (required-bound hard failure): after load, validate every vision
+        # Gemma4ClippableEinsum has finite, scalar clip bounds. A missing bound
+        # (still at the NaN sentinel), a non-finite bound, or a non-scalar bound
+        # raises ValueError instead of silently degrading to an identity clamp.
+        self._validate_vision_clip_bounds()
+        return loaded
+
+    def _validate_vision_clip_bounds(self):
+        """Walk the vision tower and call validate_clip_bounds() on every
+        Gemma4ClippableEinsum. No-op for modules whose use_clipped_linears is False.
+        Hard-fails (ValueError) on the first missing/non-finite/non-scalar bound."""
+        vt = getattr(getattr(self, "model", None), "vision_tower", None)
+        if vt is None:
+            return
+        seen = set()
+        n_checked = [0]
+
+        def walk(mod, depth=0):
+            if depth > 14 or id(mod) in seen:
+                return
+            seen.add(id(mod))
+            d = getattr(mod, "__dict__", None)
+            if not d:
+                return
+            for nm, ch in list(d.items()):
+                if nm.startswith("_"):
+                    continue
+                if isinstance(ch, Gemma4ClippableEinsum):
+                    ch.validate_clip_bounds()
+                    n_checked[0] += 1
+                elif isinstance(ch, (list, tuple)):
+                    for c in ch:
+                        if isinstance(c, Gemma4ClippableEinsum):
+                            c.validate_clip_bounds()
+                            n_checked[0] += 1
+                        elif hasattr(c, "__dict__"):
+                            walk(c, depth + 1)
+                elif hasattr(ch, "__dict__") and not isinstance(
+                        ch, (jnp.ndarray, )):
+                    walk(ch, depth + 1)
+
+        walk(vt)
 
     def embed_input_ids(self,
                         input_ids: jax.Array,
