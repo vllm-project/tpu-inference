@@ -21,7 +21,8 @@ from unittest.mock import patch
 
 from tools.kernel.tuner.v1.inspect_result_cli import (
     FilterResult, _build_parser, _matches_filter, _might_add_baseline_latency,
-    _print_case_latency, _print_min_latency, local_get_baseline_latency_map)
+    _print_case_latency, _print_min_latency, dump_tuned_params_mapping,
+    local_get_baseline_latency_map)
 
 
 class TestMatchesFilter(unittest.TestCase):
@@ -348,6 +349,44 @@ class TestBaselineDisplayAndParser(unittest.TestCase):
         self.assertIn("latency_improvement%", output)
         self.assertIn("100.0", output)
         self.assertIn("+20.0%", output)
+
+
+class TestDumpTunedParamsMapping(unittest.TestCase):
+
+    def test_dump_tuned_params_mapping(self):
+        sample_results = [{
+            'tuning_key': {
+                'case': 'batched_decode',
+                'max_num_tokens': 4,
+            },
+            'tunable_params': {
+                'decode_batch_size': 8,
+                'num_kv_pages_per_block': 3,
+            },
+            'Latency': 100.5,
+            'WarmupTime': 10.0,
+            'CaseId': 'case_1',
+        }]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, 'tuned_params.py')
+            result_path = dump_tuned_params_mapping(sample_results,
+                                                    output_path=output_path)
+            self.assertEqual(result_path, output_path)
+            self.assertTrue(os.path.exists(output_path))
+
+            with open(output_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            self.assertIn(
+                'tuned_params_mapping: dict[TuningKey, TunableParams] = {',
+                content)
+            self.assertIn('TuningKey(', content)
+            self.assertIn("case='batched_decode'", content)
+            self.assertIn('max_num_tokens=4', content)
+            self.assertIn('TunableParams(', content)
+            self.assertIn('decode_batch_size=8', content)
+            self.assertIn('num_kv_pages_per_block=3', content)
 
 
 if __name__ == '__main__':

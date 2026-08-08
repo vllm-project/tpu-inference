@@ -36,7 +36,7 @@ class SpannerStorageManager(StorageManager):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
-        self.worker_id = worker_id
+        self.worker_id = worker_id if worker_id is not None else '0'
         self.dry_run = dry_run
         if not self.dry_run:
             self.client = spanner.Client(project=gcp_project_id,
@@ -258,18 +258,18 @@ class SpannerStorageManager(StorageManager):
             }))
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
-        query = "SELECT CaseId FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
+        query = "SELECT CaseId, ProcessedStatus FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
         with self.database.snapshot() as snp:
-            return {
-                row[0]
-                for row in snp.execute_sql(query,
-                                           params={
-                                               'id': cs_id,
-                                               'rid': r_id,
-                                               's': start,
-                                               'e': end
-                                           })
-            }
+            return [{
+                'case_id': row[0],
+                'processed_status': row[1]
+            } for row in snp.execute_sql(query,
+                                         params={
+                                             'id': cs_id,
+                                             'rid': r_id,
+                                             's': start,
+                                             'e': end
+                                         })]
 
     def save_results_batch(self):
         if not self.results_buffer:
@@ -395,3 +395,53 @@ class SpannerStorageManager(StorageManager):
                 "KernelTunerName": row[1],
                 "TPU": row[2]
             } for row in snp.execute_sql(query, params=params)]
+
+    def get_case_retries(self, case_set_id, run_id, case_id):
+        """Returns the number of times a case has been retried.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            run_id: Unique integer identifier for the run.
+            case_id: Unique integer identifier for the case.
+
+        Returns:
+            Number of times the case has been retried.
+        """
+        query = "SELECT n_retried FROM RetryTable WHERE CaseSetId = @csid AND RunId = @rid AND CaseId = @cid"
+        params = {'csid': case_set_id, 'rid': run_id, 'cid': case_id}
+        with self.database.snapshot() as snp:
+            result = list(snp.execute_sql(query, params=params))
+            return result[0][0] if result else 0
+
+    def increment_case_retries(self, case_set_id, run_id, case_id):
+        """Increments the number of times a case has been retried.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            run_id: Unique integer identifier for the run.
+            case_id: Unique integer identifier for the case.
+        """
+        if self.dry_run:
+            return
+
+        def _transactional_increment(transaction):
+            query = (
+                "UPDATE RetryTable SET n_retried = n_retried + 1 "
+                "WHERE CaseSetId = @csid AND RunId = @rid AND CaseId = @cid")
+            params = {'csid': case_set_id, 'rid': run_id, 'cid': case_id}
+            param_types = {
+                'csid': spanner.param_types.STRING,
+                'rid': spanner.param_types.STRING,
+                'cid': spanner.param_types.INT64,
+            }
+            row_count = transaction.execute_update(query,
+                                                   params=params,
+                                                   param_types=param_types)
+            if row_count == 0:
+                transaction.insert(
+                    table='RetryTable',
+                    columns=('CaseSetId', 'RunId', 'CaseId', 'n_retried'),
+                    values=[(case_set_id, run_id, case_id, 1)],
+                )
+
+        self.database.run_in_transaction(_transactional_increment)

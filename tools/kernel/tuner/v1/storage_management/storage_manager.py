@@ -222,7 +222,9 @@ class StorageManager:
             end: End of the case ID range (inclusive).
 
         Returns:
-            A set of integer case IDs that have already been processed.
+            return a list of dicts, each containing:
+                'case_id': the case ID (int)
+                'processed_status': the processing status (int) of the case
         """
         raise NotImplementedError(
             "Subclasses must implement get_already_processed_ids")
@@ -328,3 +330,27 @@ class StorageManager:
             A list of all cases in the case set in the formate of [CaseId, CaseKeyValue].
         """
         raise NotImplementedError("Subclasses must implement get_all_cases")
+
+    def get_case_retries(self, case_set_id, run_id, case_id):
+        """Returns the number of times a case has been retried.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            run_id: Unique integer identifier for the run.
+            case_id: Unique integer identifier for the case.
+
+        Returns:
+            Number of times the case has been retried.
+        """
+        raise NotImplementedError("Subclasses must implement get_case_retries")
+
+    def increment_case_retries(self, case_set_id, run_id, case_id):
+        """Increments the number of times a case has been retried.
+
+        Args:
+            case_set_id: Unique string identifier for the case set.
+            run_id: Unique integer identifier for the run.
+            case_id: Unique integer identifier for the case.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement increment_case_retries")

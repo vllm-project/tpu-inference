@@ -127,8 +127,10 @@ class RunConfig:
     gcp_project_id: Optional[str] = None
     spanner_instance_id: Optional[str] = None
     spanner_database_id: Optional[str] = None
-    worker_id: Optional[str] = None
+    worker_id: Optional[int] = 0
     autotune_mode: bool = False
     use_bayesian_optimization: bool = False
     # Runtime override for number of Bayesian trials per tuning key bucket.
     n_bayesian_trials: Optional[int] = None
+    # Local database directory path (used when run_locally=True).
+    local_db_path: Optional[str] = None

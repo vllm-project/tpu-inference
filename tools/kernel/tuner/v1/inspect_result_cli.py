@@ -28,6 +28,8 @@ Commands:
                         FIELD can be any key in tuning_key or tunable_params. show_all includes unsuccessful cases;
                         By default only successful cases are shown. --show-baseline adds baseline_latency and
                         latency_improvement%% columns (baseline is the is_baseline=True case for each TuningKey).
+    dump_tuned_params_mapping Dump best tunable_param for each TuningKey to /tmp/tuned_params.py
+                        (--case_set_id ID --run_id ID [--output_path PATH])
 """
 
 import argparse
@@ -188,6 +190,32 @@ def local_query_min_latency(db_path, case_set_id, run_id):
 
     return sorted(key_best.values(),
                   key=lambda x: json.dumps(x['tuning_key'], sort_keys=True))
+
+
+def dump_tuned_params_mapping(results, output_path='/tmp/tuned_params.py'):
+    """Dump query_min_latency results to output_path as a Python dictionary mapping TuningKey to TunableParams."""
+    chunks = ["tuned_params_mapping: dict[TuningKey, TunableParams] = {\n"]
+    for item in results:
+        tk = item.get('tuning_key') or {}
+        tp = item.get('tunable_params') or {}
+        chunks.append("    TuningKey(\n")
+        for k, v in tk.items():
+            chunks.append(f"        {k}={repr(v)},\n")
+        chunks.append("    ): TunableParams(\n")
+        for k, v in tp.items():
+            chunks.append(f"        {k}={repr(v)},\n")
+        chunks.append("    ),\n")
+    chunks.append("}\n")
+
+    content = "".join(chunks)
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    print(f"Wrote tuned params mapping to {output_path}")
+    return output_path
 
 
 def local_get_baseline_latency_map(db_path, case_set_id, run_id):
@@ -966,6 +994,18 @@ def _build_parser():
               'or when the row itself is not a SUCCESS.'),
     )
 
+    p = sub.add_parser(
+        'dump_tuned_params_mapping',
+        help='Dump best tunable_param for each TuningKey to a Python file.',
+    )
+    p.add_argument('--case_set_id', required=True)
+    p.add_argument('--run_id', required=True)
+    p.add_argument(
+        '--output_path',
+        default='/tmp/tuned_params.py',
+        help='Output file path (default: /tmp/tuned_params.py).',
+    )
+
     return parser
 
 
@@ -1140,6 +1180,10 @@ def _run_command(args, source, db_path=None, spanner_db=None):
                 show_all=args.show_all),
                                 show_fields=args.show_fields,
                                 baseline_map=baseline_map)
+        elif args.command == 'dump_tuned_params_mapping':
+            results = spanner_query_min_latency(spanner_db, args.case_set_id,
+                                                args.run_id)
+            dump_tuned_params_mapping(results, output_path=args.output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1209,7 @@ Commands:
       --show_all: include unsuccessful rows (default shows only successful rows)
       --show-baseline: add baseline_latency and latency_improvement% columns
       Example: query_case_latency --show_all --show processed_status --show latency_us
+  dump_tuned_params_mapping [--case_set_id ID] [--run_id ID] [--output_path PATH]
   Use Up/Down arrows to recall command history
   help
   exit / quit
@@ -1272,11 +1317,13 @@ def _console_loop(source, db_path, spanner_db, global_args):
         # that actually accept those flags.
         _cmds_with_case_set_id = {
             'list_runs', 'count_buckets', 'list_bucket_status',
-            'query_run_status', 'query_min_latency', 'query_case_latency'
+            'query_run_status', 'query_min_latency', 'query_case_latency',
+            'dump_tuned_params_mapping'
         }
         _cmds_with_run_id = {
             'count_buckets', 'list_bucket_status', 'query_run_status',
-            'query_min_latency', 'query_case_latency'
+            'query_min_latency', 'query_case_latency',
+            'dump_tuned_params_mapping'
         }
         cmd = tokens[0]
         if '--case_set_id' not in line and session_case_set_id is not None \
