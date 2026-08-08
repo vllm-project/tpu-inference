@@ -69,6 +69,7 @@ nav:
     - 'v7x (Ironwood)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/ironwood/vLLM
     - 'v6e (Trillium)': https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM
   - 'Profiling' : profiling.md
+  - 'Environment Variables': environment_variables.md
 plugins:
   - search
   - same-dir
