@@ -65,6 +65,8 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
+    VISION_PRECOMPILE_FRAMES: list[int] = []
+    VISION_MIN_SHIFT: int = 6
     ENABLE_RS_KERNEL: bool = False
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
@@ -405,6 +407,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("DISABLE_WEIGHT_REQUANTIZATION", default=False),
     "VLLM_TPU_PATCH_MM_EMBEDDINGS":
     env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
+    "VISION_PRECOMPILE_FRAMES":
+    env_int_list("VISION_PRECOMPILE_FRAMES"),
+    "VISION_MIN_SHIFT":
+    lambda: int(os.getenv("VISION_MIN_SHIFT", "6")),
     "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
     env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
     # Enable hierarchical reduce-scatter kernel for MoE

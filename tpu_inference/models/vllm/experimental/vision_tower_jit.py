@@ -24,9 +24,12 @@ import torch
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
     Qwen3OmniMoeConfig
 from vllm.config import VllmConfig
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5ForConditionalGeneration, Qwen3_5MoeForConditionalGeneration)
 from vllm.model_executor.models.qwen3_omni_moe_thinker import \
     Qwen3OmniMoeThinkerForConditionalGeneration
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
 
@@ -35,6 +38,8 @@ logger = init_logger(__name__)
 # Architectures whose embed_multimodal function is safe to wrap with jax.jit.
 JITTABLE_ARCHS = {
     Qwen3OmniMoeThinkerForConditionalGeneration,
+    Qwen3_5MoeForConditionalGeneration,
+    Qwen3_5ForConditionalGeneration,
 }
 
 
@@ -82,6 +87,7 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         return embed_multimodal_func_jax
 
 
+@jax.tree_util.register_pytree_node_class
 class GridTHW(tuple):
     """Tensor-like wrapper for image/video grid_thw arguments.
 
@@ -103,6 +109,12 @@ class GridTHW(tuple):
         flat: tuple = _nested_to_tuple(values)
         return super().__new__(cls, flat)
 
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        if isinstance(key, slice):
+            return type(self)(val)
+        return val
+
     # ---- tensor-like API expected by _process_image_input ----
 
     @property
@@ -123,6 +135,13 @@ class GridTHW(tuple):
 
     def __repr__(self):
         return f"GridTHW({tuple(self)})"
+
+    def tree_flatten(self):
+        return (), tuple(self)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(aux_data)
 
 
 def maybe_precompile_vision_encoder_fn(
@@ -151,7 +170,12 @@ def maybe_precompile_vision_encoder_fn(
     spatial_merge_unit = vc.spatial_merge_size**2
     max_patches = (vllm_config.scheduler_config.max_num_batched_tokens //
                    spatial_merge_unit)
-    min_shift = 4  # 1 << 4 = 16 patches minimum
+    min_shift = envs.VISION_MIN_SHIFT
+    if min_shift < 6:
+        logger.warning(
+            f"VISION_MIN_SHIFT is set to {min_shift} (< 6). "
+            "This may cause JAX divisibility errors on TPUs with 8+ devices "
+            "if spatial merging is active.")
     max_shift = max(min_shift, (max(max_patches, 1) - 1).bit_length())
     num_patches_paddings = [1 << i for i in range(min_shift, max_shift + 1)]
 
@@ -165,20 +189,49 @@ def maybe_precompile_vision_encoder_fn(
             h = 1 << (k // 2)
             w = 1 << (k - k // 2)
 
-            dummy_pixel_values = jnp.ones((num_patches, patch_input_dim),
-                                          dtype=jax_dtype)
-            dummy_image_grid_thw = GridTHW([(1, h, w)])
+            # By default, we precompile for common small frame counts to balance startup time.
+            # Users can override this via the VISION_PRECOMPILE_FRAMES environment variable
+            # (e.g., VISION_PRECOMPILE_FRAMES="1,2,4,8,16,64") to support specific video lengths.
+            #
+            # ⚠️ WARNING: Adding more frames or larger buckets here will significantly increase
+            # server startup time (XLA compilation) and can cause Host CPU OOMs during boot.
+            frame_counts = [1, 2, 4, 8, 16]
+            if envs.VISION_PRECOMPILE_FRAMES:
+                frame_counts = envs.VISION_PRECOMPILE_FRAMES
+                logger.info(
+                    f"Using custom vision precompile frames: {frame_counts}")
 
-            run_compilation_fn(
-                f"vllm embed_multimodal {dummy_image_grid_thw}",
-                embed_multimodal_fn,
-                params,
-                call_kwargs={
-                    "pixel_values": dummy_pixel_values,
-                    "image_grid_thw": dummy_image_grid_thw,
-                },
-                num_patches=num_patches,
-            )
+            for t_val in frame_counts:
+                # Limit batch sizes to prevent astronomical compilation time and host OOMs.
+                # If users submit larger batches, they will incur a one-time compilation cost at runtime.
+                batch_sizes = [1, 2] if t_val == 1 else [1]
+                for b in batch_sizes:
+                    dummy_pixel_values = jnp.ones(
+                        (b * t_val * num_patches, patch_input_dim),
+                        dtype=jax_dtype)
+                    dummy_image_grid_thw = GridTHW([(t_val, h, w)] * b)
+
+                    model_type = getattr(vllm_config.model_config.hf_config,
+                                         "model_type", "")
+                    if model_type in ("qwen2_vl", "qwen2_5_vl", "qwen",
+                                      "qwen3_5_moe", "qwen3_5", "qwen3_vl"):
+                        grid_keys = ("image_grid_thw", "video_grid_thw")
+                    else:
+                        grid_keys = ("image_grid_thw", "video_grid_thw",
+                                     "grid_thw")
+
+                    for grid_key in grid_keys:
+                        pixel_key = "pixel_values_videos" if grid_key == "video_grid_thw" else "pixel_values"
+                        run_compilation_fn(
+                            f"vllm embed_multimodal {grid_key}={dummy_image_grid_thw}",
+                            embed_multimodal_fn,
+                            params,
+                            call_kwargs={
+                                pixel_key: dummy_pixel_values,
+                                grid_key: dummy_image_grid_thw,
+                            },
+                            num_patches=num_patches,
+                        )
 
     return precompile_fn
 
@@ -198,5 +251,11 @@ def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
 
         elif k == "audio_feature_lengths" and isinstance(v, torch.Tensor):
             kwargs[k] = tuple(v.tolist())
+
+        elif k == "timestamps":
+            if isinstance(v, list):
+                kwargs[k] = torch.tensor(v, dtype=torch.float32)
+            elif isinstance(v, (float, int)):
+                kwargs[k] = torch.tensor([v], dtype=torch.float32)
 
     return kwargs
