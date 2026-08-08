@@ -31,16 +31,15 @@ import sys
 import tempfile
 import threading
 import time
-
 from typing import TYPE_CHECKING
 
 from tools.kernel.tuner.v1.common.tuner_datatypes import (RunConfig,
-                                                           TuningStatus)
+                                                          TuningStatus)
 from tools.kernel.tuner.v1.kernel_tuner_factory import run_config_to_json
 
 if TYPE_CHECKING:
     from tools.kernel.tuner.v1.common.tuner_datatypes import (TunableParams,
-                                                               TuningKey)
+                                                              TuningKey)
 
 logger = logging.getLogger(__name__)
 
@@ -118,8 +117,7 @@ class ExecutorProcessManager:
             self._kill()
             return TuningStatus.UNKNOWN_ERROR, 0, 0
         except TimeoutError:
-            logger.error(
-                "Executor timed out after %d seconds", timeout)
+            logger.error("Executor timed out after %d seconds", timeout)
             self._kill()
             return TuningStatus.UNKNOWN_ERROR, 0, 0
 
@@ -169,7 +167,9 @@ class ExecutorProcessManager:
 
         executor_module = "tools.kernel.tuner.v1.kernel_tuner_executor"
         command = [
-            sys.executable, "-m", executor_module,
+            sys.executable,
+            "-m",
+            executor_module,
             f"--kernel_tuner_name={self._kernel_tuner_name}",
             f"--run_config_path={self._run_config_path}",
         ]
@@ -180,7 +180,9 @@ class ExecutorProcessManager:
         pythonpath = env.get('PYTHONPATH', '')
         env['PYTHONPATH'] = f'{cwd}:{pythonpath}' if pythonpath else cwd
 
-        logger.info(f'Starting {executor_module} as subprocess for evaluate single case...')
+        logger.info(
+            f'Starting {executor_module} as subprocess for evaluate single case...'
+        )
         logger.debug(f"Command: {' '.join(command)}")
         self._proc = subprocess.Popen(
             command,
@@ -194,8 +196,8 @@ class ExecutorProcessManager:
         )
 
         # Stream executor stderr to our logger in a background thread.
-        self._stderr_thread = threading.Thread(
-            target=self._stream_stderr, daemon=True)
+        self._stderr_thread = threading.Thread(target=self._stream_stderr,
+                                               daemon=True)
         self._stderr_thread.start()
 
         # Wait for the executor to signal readiness.
@@ -224,7 +226,8 @@ class ExecutorProcessManager:
             elapsed = time.time() - start_time
             remaining_timeout = max(1, int(timeout - elapsed))
             if elapsed >= timeout:
-                raise TimeoutError(f"Executor did not respond within {timeout} seconds.")
+                raise TimeoutError(
+                    f"Executor did not respond within {timeout} seconds.")
 
             line = self._read_with_timeout(remaining_timeout)
             if not line:
@@ -240,7 +243,9 @@ class ExecutorProcessManager:
             try:
                 return json.loads(line_str)
             except json.JSONDecodeError:
-                logger.debug("Ignoring non-JSON output from executor stdout: %s", line_str)
+                logger.debug(
+                    "Ignoring non-JSON output from executor stdout: %s",
+                    line_str)
 
     def _read_with_timeout(self, timeout: int) -> str:
         """Read a single line from executor stdout with a timeout.

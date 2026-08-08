@@ -20,8 +20,7 @@ import yaml
 
 # isort: off
 from tools.kernel.tuner.v1.common.tuner_datatypes import (
-    RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey,
-    TuningStatus)
+    RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey, TuningStatus)
 # isort: on
 
 logger = logging.getLogger(__name__)

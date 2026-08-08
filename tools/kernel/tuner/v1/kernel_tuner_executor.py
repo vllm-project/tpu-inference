@@ -24,16 +24,16 @@ Communication protocol:
   - Exits cleanly on ``{"cmd": "shutdown"}`` or EOF on stdin.
 """
 
-import dataclasses
 import json
 import logging
 import sys
 
 import jax
-from absl import app, flags, logging as absl_logging
+from absl import app, flags
+from absl import logging as absl_logging
 
-from tools.kernel.tuner.v1.kernel_tuner_factory import (
-    create_kernel_tuner, run_config_from_json)
+from tools.kernel.tuner.v1.kernel_tuner_factory import (create_kernel_tuner,
+                                                        run_config_from_json)
 from tools.kernel.tuner.v1.kernel_tuner_flags import KERNEL_TUNER_NAME
 
 _RUN_CONFIG_PATH = flags.DEFINE_string(
@@ -49,15 +49,15 @@ def main(argv):
         logging.Formatter(
             '%(levelname).1s%(asctime)s %(filename)s:%(lineno)d] %(message)s',
             datefmt='%m%d %H:%M:%S',
-        )
-    )
+        ))
 
     # ---- Load RunConfig and create kernel tuner (full init) ----
     with open(_RUN_CONFIG_PATH.value, 'r') as f:
         run_config = run_config_from_json(f.read())
 
-    kernel_tuner = create_kernel_tuner(KERNEL_TUNER_NAME.value, run_config,
-                                        lightweight=False)
+    kernel_tuner = create_kernel_tuner(KERNEL_TUNER_NAME.value,
+                                       run_config,
+                                       lightweight=False)
 
     # Signal readiness to the parent (worker) process.
     sys.stdout.write("__JSON__" + json.dumps({"status": "ready"}) + "\n")
@@ -111,7 +111,8 @@ def main(argv):
             }
         except Exception as e:
             logger.error("Executor run() raised an exception: %s",
-                         e, exc_info=True)
+                         e,
+                         exc_info=True)
             result = {
                 "status": "UNKNOWN_ERROR",
                 "avg_latency_ns": 0,

@@ -231,7 +231,8 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             jit_kernel_pattern=lambda tuning_key: r"RPAm-"
             if tuning_key.case == 'prefill' else r"RPAd-",
         )
-        super().__init__(tuner_config=self.tuner_config, run_config=run_config,
+        super().__init__(tuner_config=self.tuner_config,
+                         run_config=run_config,
                          lightweight=lightweight)
         if lightweight:
             return
@@ -252,7 +253,8 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         unique_keys: list[TuningKey] = []
         cases: list[TuningCase] = []
         for case in tuning_case_logger.get_logged_tuning_cases():
-            if (case.tuning_key not in seen_keys and case.tuning_key.case == 'decode'):
+            if (case.tuning_key not in seen_keys
+                    and case.tuning_key.case == 'decode'):
                 seen_keys.add(case.tuning_key)
                 unique_keys.append(case.tuning_key)
                 cases.append(case)
@@ -266,7 +268,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
                                tunable_params=TunableParams(
                                    **dict(zip(param_names, combo)))))
         logger.info(f"Generated {len(cases)} tuning cases from log file.")
-        return cases[2000:]
+        return cases
 
     def get_search_space(self, tuning_key: TuningKey) -> dict[str, list]:
         """Returns independent lists of candidate values for each tunable param.

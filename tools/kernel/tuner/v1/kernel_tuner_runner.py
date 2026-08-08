@@ -84,9 +84,6 @@ def _invoke_worker_process(kernel_tuner_name: str, run_config: RunConfig,
     than embedding it in stdout, so log output can never interfere with
     result parsing.
     """
-    worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                 'kernel_tuner_worker.py')
-
     # --- Serialize RunConfig to a temp file ---
     run_config_fd, run_config_path = tempfile.mkstemp(prefix='run_config_',
                                                       suffix='.json')
@@ -332,6 +329,7 @@ def _handle_buildkite_pipeline_generation(run_config: RunConfig):
     assert BEGIN_CASE_ID.value is None and END_CASE_ID.value is None, \
         'When GENERATE_BUILDKITE_PIPELINE is true, BEGIN_CASE_ID and END_CASE_ID should never be set.'
     storage_manager = create_storage_manager(run_config)
+    kernel_tuner = create_kernel_tuner(KERNEL_TUNER_NAME.value, run_config)
     buckets = _get_tuning_buckets(run_config, storage_manager)
     kernel_tuner.generate_buildkite_pipeline(buckets, storage_manager)
 
