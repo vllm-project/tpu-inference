@@ -171,7 +171,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         return Mesh(
             np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
 
-    def _run(self, pcp, L, num_current, padded_s):
+    def _run(self, pcp, L, num_current, padded_s, cache_phase=None):
         """Drive the wrapper; return (out_rank_order, kv_cache, exp_token_order).
 
         L = num_computed (already in the strided cache), num_current = the real
@@ -253,7 +253,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                                      md,
                                      sm_scale=SM_SCALE,
                                      update_kv_cache=True,
-                                     use_causal_mask=True)
+                                     use_causal_mask=True,
+                                     cache_phase=cache_phase)
         return np.asarray(out), np.asarray(new_cache), exp, C
 
     def _assert_matches(self, out, exp, pcp, C, num_current):
@@ -269,6 +270,21 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         self.assertAllClose(got, exp, atol=2e-2, rtol=2e-2)
 
     # ------------------------------ tests ------------------------------------
+    @parameterized.product(pcp=[2, 4], phase=["ring", "gather_kv", "gather_q"])
+    def test_cache_phase_strategies_agree(self, pcp, phase):
+        """All three cache-phase strategies must produce the same answer.
+
+        They differ only in how each rank gets to see the whole cache -- ring
+        streams it, gather_kv materializes it, gather_q moves the queries
+        instead -- so any divergence is a bug in one of them, not a modelling
+        choice.
+        """
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S = 512, 128
+        out, _, exp, C = self._run(pcp, L, S, S, cache_phase=phase)
+        self._assert_matches(out, exp, pcp, C, S)
+
     @parameterized.product(pcp=[2, 4])
     def test_chunked_prefill(self, pcp):
         """Wrapper output == full-causal reference, for a chunked prefill: L
