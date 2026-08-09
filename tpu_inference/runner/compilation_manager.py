@@ -411,23 +411,15 @@ class CompilationManager:
                                             sharding=metadata_attn_sharding)
         pcp = None
         if pcp_size > 1:
+            # Multi-request PCP derives the per-rank cu_q_lens / q_pos_offsets
+            # inside pcp_forward, so only the per-request cache boundary is
+            # passed here.
             n_reqs = self.runner.max_num_reqs
-            pcp_spec = NamedSharding(
-                self.runner.mesh,
-                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
             repl = NamedSharding(self.runner.mesh, PartitionSpec())
             pcp = PCPMetadata(
-                query_start_loc=device_array(self.runner.mesh,
-                                             np.zeros((pcp_size, n_reqs + 1),
-                                                      dtype=np.int32),
-                                             sharding=pcp_spec),
                 kv_cache_lens=device_array(self.runner.mesh,
                                            np.zeros(n_reqs, dtype=np.int32),
                                            sharding=repl),
-                q_pos_offsets=device_array(self.runner.mesh,
-                                           np.zeros((pcp_size, n_reqs),
-                                                    dtype=np.int32),
-                                           sharding=pcp_spec),
                 cache_pages=pcp_cache_pages,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only

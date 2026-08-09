@@ -22,27 +22,31 @@ from vllm.utils.math_utils import cdiv
 
 @functools.partial(
     jax.tree_util.register_dataclass,
-    data_fields=["query_start_loc", "kv_cache_lens", "q_pos_offsets"],
+    data_fields=["kv_cache_lens"],
     meta_fields=["cache_pages"],
 )
 @dataclass
 class PCPMetadata:
-    """Prefill Context Parallelism metadata, passed via AttentionMetadata.pcp."""
-    # (pcp_size, max_num_reqs+1) int32 — per-rank cumulative query lengths.
-    # Sharded as P('pcp', None); each rank slice is its own cu_q_lens.
-    query_start_loc: jax.Array
-    # (max_num_reqs,) int32 — num_computed tokens per virtual seq (cache
+    """Prefill Context Parallelism metadata, passed via AttentionMetadata.pcp.
+
+    Multi-request PCP packs the token buffer into `padded_num_reqs` fixed
+    request LANES. The per-rank cu_q_lens / q_pos_offsets are NOT carried here:
+    each lane is presented to the kernel as two seqs (head, tail), which a
+    single `(pcp_size, max_num_reqs+1)` array cannot express, and they are
+    fully determined by the (static) chunk size, the pcp rank, and this
+    request's `seq_len`/`kv_cache_lens` -- so `pcp_forward` derives them
+    per lane inside the shard_map instead.
+    """
+    # (max_num_reqs,) int32 — num_computed tokens per REQUEST (cache
     # boundary). Replicated (P()). The kernel derives new KV length as
     # seq_lens - kv_cache_lens so only real tokens are attended/written.
     kv_cache_lens: jax.Array
-    # (pcp_size, max_num_reqs) int32 — per-rank, per-seq Q position offsets.
-    # Sharded as P('pcp', None).
-    q_pos_offsets: jax.Array
     # STATIC (meta field): a rung of `pcp_cache_page_buckets` giving an UPPER
-    # bound on the KV pages this request's cached tokens occupy, used to bound
-    # the gather-KV cache all-gather.  0 means nothing is cached, in which case
-    # the cache phase is elided entirely.  REQUIRED: a default would silently
-    # elide the cache phase for any caller that forgot to set it.
+    # bound on the KV pages a request's cached tokens occupy (the MAX over the
+    # batch's requests), used to bound the gather-KV cache all-gather.  0 means
+    # nothing is cached anywhere in the batch, in which case the cache phase is
+    # elided entirely.  REQUIRED: a default would silently elide the cache
+    # phase for any caller that forgot to set it.
     cache_pages: int
 
 
