@@ -44,6 +44,7 @@ class TestTpuPlatform:
         vllm_config.cache_config = cache_config
         vllm_config.model_config = MagicMock(dtype='bfloat16')
         vllm_config.model_config.use_mla = False
+        vllm_config.model_config.is_hybrid = False
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
         vllm_config.parallel_config.data_parallel_size = 1
@@ -190,6 +191,34 @@ class TestTpuPlatform:
         with pytest.raises(AssertionError,
                            match="VLLM_ENABLE_V1_MULTIPROCESSING must be 0"):
             TpuPlatform.check_and_update_config(vllm_config)
+
+    @pytest.mark.parametrize("is_hybrid,expected_prefix_caching", [
+        (True, False),
+        (False, True),
+    ])
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_hybrid_prefix_caching(
+            self, mock_update, mock_sharding, vllm_config, is_hybrid,
+            expected_prefix_caching):
+        """Prefix caching is force-disabled for hybrid (mamba/linear-attention)
+        models on TPU — cached-prefix reuse garbles GDN outputs — and left
+        untouched for non-hybrid models."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = is_hybrid
+        vllm_config.cache_config.enable_prefix_caching = True
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        assert (vllm_config.cache_config.enable_prefix_caching ==
+                expected_prefix_caching)
 
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
