@@ -22,9 +22,9 @@
 # cannot disturb a workload that is running or starting up.
 
 steps:
-  - label: ":mag: tpu7x-32 disk + checkpoint probe (read-only)"
-    key: tpu7x_32_disk_probe
+  - label: ":mag: tpu7x-32 mount checkpoint disk + inventory"
+    key: tpu7x_32_mount_k3_disk
     agents:
       queue: tpu_v7x_32_queue
     commands:
-      - bash .buildkite/scripts/disk_probe.sh
+      - bash .buildkite/scripts/mount_k3_disk.sh
