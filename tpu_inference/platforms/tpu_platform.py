@@ -298,6 +298,19 @@ class TpuPlatform(Platform):
                 "(mamba/linear-attention) models do not support cached "
                 "prefixes on TPU yet (accuracy garbles on cache hits).")
             cache_config.enable_prefix_caching = False
+            # Mirror vLLM's prefix-caching-off defaults for the mamba cache
+            # fields, which vLLM's hybrid config-verify may already have
+            # derived from the enabled state (mamba_cache_mode="align",
+            # mamba_block_size=block_size). Leaving them would trip the
+            # "--mamba-block-size can only be set with
+            # --enable-prefix-caching" validator.
+            if getattr(cache_config, "mamba_cache_mode", "none") != "none":
+                cache_config.mamba_cache_mode = "none"
+            if (getattr(cache_config, "mamba_block_size", None) is not None
+                    and not getattr(cache_config,
+                                    "user_specified_mamba_block_size", False)):
+                cache_config.mamba_block_size = (
+                    vllm_config.model_config.max_model_len)
 
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:

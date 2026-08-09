@@ -213,12 +213,24 @@ class TestTpuPlatform:
         vllm_config.compilation_config.mode = "dummy"
         vllm_config.compilation_config.backend = ""
         vllm_config.model_config.is_hybrid = is_hybrid
+        vllm_config.model_config.max_model_len = 4096
         vllm_config.cache_config.enable_prefix_caching = True
+        # Simulate vLLM's hybrid config-verify having derived the mamba cache
+        # fields from the prefix-caching-enabled state (post-init assignment
+        # keeps user_specified_mamba_block_size False).
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 256
 
         TpuPlatform.check_and_update_config(vllm_config)
 
         assert (vllm_config.cache_config.enable_prefix_caching ==
                 expected_prefix_caching)
+        if is_hybrid:
+            # Derived mamba fields must be reset to their prefix-caching-off
+            # defaults or vLLM's "--mamba-block-size can only be set with
+            # --enable-prefix-caching" validator rejects the config.
+            assert vllm_config.cache_config.mamba_cache_mode == "none"
+            assert vllm_config.cache_config.mamba_block_size == 4096
 
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
