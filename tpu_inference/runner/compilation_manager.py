@@ -962,8 +962,11 @@ class CompilationManager:
             # function.
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+            # Like the sharding above, the dummy's dtype must match the
+            # logits that compute_logits_fn produces at serving time -- the
+            # jit cache is keyed on dtype as well.
             logits = self._create_dummy_tensor((num_reqs, hsize),
-                                               jnp.float32,
+                                               self.runner.model_config.dtype,
                                                sharding=logits_sharding)
             for do_sampling in (True, False):
                 for logprobs in (True, False):

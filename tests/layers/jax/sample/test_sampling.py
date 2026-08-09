@@ -242,6 +242,51 @@ class TestProcessedLogprobs:
 
         assert np.allclose(raw_logprobs, processed, atol=1e-6)
 
+    def test_sample_greedy_native_dtype_matches_f32(self):
+        """Greedy sampling is dtype-invariant: bf16 -> f32 widening is exact,
+        so feeding logits in the model's native dtype (#3127) cannot change
+        the selected tokens, and the returned logits stay f32."""
+        logits_bf16 = jax.random.normal(jax.random.PRNGKey(42), (8, 64),
+                                        dtype=jnp.float32).astype(jnp.bfloat16)
+        logits_f32 = logits_bf16.astype(jnp.float32)
+
+        metadata = self._make_sampling_metadata(8, do_sampling=False)
+        fake_mesh = self._get_fake_mesh()
+        tokens_native, ret_logits_native = sample(jax.random.PRNGKey(0),
+                                                  fake_mesh, logits_bf16,
+                                                  metadata)
+        tokens_wide, ret_logits_wide = sample(jax.random.PRNGKey(0), fake_mesh,
+                                              logits_f32, metadata)
+
+        assert np.array_equal(np.array(tokens_native), np.array(tokens_wide))
+        assert ret_logits_native.dtype == jnp.float32
+        assert ret_logits_wide.dtype == jnp.float32
+        assert np.array_equal(np.array(ret_logits_native),
+                              np.array(ret_logits_wide))
+
+    def test_sample_do_sampling_native_dtype_matches_f32(self):
+        """Same dtype-invariance for the sampled path: the transforms and
+        categorical draw run on the f32-widened logits either way, so a bf16
+        input with the same key selects identical tokens and returns
+        identical f32 processed logits."""
+        logits_bf16 = jax.random.normal(jax.random.PRNGKey(42), (8, 64),
+                                        dtype=jnp.float32).astype(jnp.bfloat16)
+        logits_f32 = logits_bf16.astype(jnp.float32)
+
+        metadata = self._make_sampling_metadata(8, do_sampling=True)
+        fake_mesh = self._get_fake_mesh()
+        tokens_native, ret_logits_native = sample(jax.random.PRNGKey(0),
+                                                  fake_mesh, logits_bf16,
+                                                  metadata)
+        tokens_wide, ret_logits_wide = sample(jax.random.PRNGKey(0), fake_mesh,
+                                              logits_f32, metadata)
+
+        assert np.array_equal(np.array(tokens_native), np.array(tokens_wide))
+        assert ret_logits_native.dtype == jnp.float32
+        assert ret_logits_wide.dtype == jnp.float32
+        assert np.array_equal(np.array(ret_logits_native),
+                              np.array(ret_logits_wide))
+
 
 class TestComputePromptLogprobs:
 

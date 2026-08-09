@@ -123,6 +123,10 @@ def sample(
             logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
 
     greedy_tokens = jnp.argmax(logits, axis=-1)
+    # Widen only after the argmax: bf16 -> f32 widening is exact so the
+    # argmax result is unchanged, and placing the convert here makes it the
+    # output materialization on the greedy path -- without it XLA must insert
+    # a full-vocab copy of the aliased input (see #3127).
     logits = logits.astype(jnp.float32)
     if not tpu_sampling_metadata.do_sampling:
         ret_tokens = greedy_tokens
