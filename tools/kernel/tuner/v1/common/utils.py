@@ -24,6 +24,10 @@ def find_events_by_pattern(pb_file_path, event_pattern_string):
     # for example: r"(jit_ragged_paged_attention\()"
     pattern = re.compile(event_pattern_string, re.IGNORECASE)
 
+    if not os.path.exists(pb_file_path):
+        raise FileNotFoundError(
+            f"xprof directory or file does not exist: {pb_file_path}")
+
     if os.path.isdir(pb_file_path):
         # walk the directory to find the .xplane.pb and expect only one file
         pb_files = []

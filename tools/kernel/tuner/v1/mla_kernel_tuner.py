@@ -241,8 +241,7 @@ class MlaKernelTuner(KernelTunerBase):
                 kv_dtype=_get_flag_value("mla_kv_dtype"),
                 q_dtype=_get_flag_value("mla_q_dtype"),
                 page_size_per_kv_packing=_get_flag_value(
-                    "mla_page_size_per_kv_packing"
-                ),
+                    "mla_page_size_per_kv_packing"),
                 kv_packing=_get_flag_value("mla_kv_packing"),
                 max_num_seqs=_get_flag_value("mla_max_num_seqs"),
                 pages_per_seq=_get_flag_value("mla_pages_per_seq"),

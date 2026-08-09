@@ -59,14 +59,24 @@ _ACCEPTABLE_STATUSES = frozenset({
 })
 
 
-def _make_optimizer(kernel_tuner, storage_manager, executor_mgr=None):
-    """Helper to create the appropriate optimizer for a kernel tuner."""
-    if kernel_tuner.use_bayesian_optimization:
-        from tools.kernel.tuner.v1.optimizer import BayesianOptimizer
-        return BayesianOptimizer(kernel_tuner, storage_manager, executor_mgr)
-    else:
-        from tools.kernel.tuner.v1.optimizer import SweepOptimizer
-        return SweepOptimizer(kernel_tuner, storage_manager, executor_mgr)
+def _make_mock_executor(kernel_tuner):
+    from unittest import mock
+
+    import jax
+
+    def _execute_run(tk, tp, iters, **kw):
+        use_xprof = kw.get("use_xprof", False)
+        if use_xprof and kernel_tuner.tuner_config.jit_kernel_pattern:
+            kernel_tuner._cleanup_xprof_dir()
+            with jax.profiler.trace(kernel_tuner.xprof_dir,
+                                    create_perfetto_link=False):
+                return kernel_tuner.run(tk, tp, iters)
+        else:
+            return kernel_tuner.run(tk, tp, iters)
+
+    mock_executor = mock.MagicMock()
+    mock_executor.execute_run.side_effect = _execute_run
+    return mock_executor
 
 
 class KernelTunerRunnerSmokeTest(absltest.TestCase):
@@ -141,10 +151,7 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
             storage_manager = LocalDbManager(
                 db_path=os.path.join(tmp_dir, "db"))
 
-            from unittest import mock
-            mock_executor = mock.MagicMock()
-            mock_executor.execute_run.side_effect = lambda tk, tp, iters, **kw: kernel_tuner.run(
-                tk, tp, iters)
+            mock_executor = _make_mock_executor(kernel_tuner)
 
             from tools.kernel.tuner.v1.optimizer import SweepOptimizer
             optimizer = SweepOptimizer(kernel_tuner, storage_manager,
@@ -196,10 +203,7 @@ class KernelTunerRunnerSmokeTest(absltest.TestCase):
             storage_manager = LocalDbManager(
                 db_path=os.path.join(tmp_dir, "db"))
 
-            from unittest import mock
-            mock_executor = mock.MagicMock()
-            mock_executor.execute_run.side_effect = lambda tk, tp, iters, **kw: kernel_tuner.run(
-                tk, tp, iters)
+            mock_executor = _make_mock_executor(kernel_tuner)
 
             from tools.kernel.tuner.v1.optimizer import BayesianOptimizer
             optimizer = BayesianOptimizer(kernel_tuner, storage_manager,
