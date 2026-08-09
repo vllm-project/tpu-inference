@@ -284,11 +284,9 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
-        # vLLM (>= vllm#50991) enables prefix caching by default for hybrid
-        # (mamba / linear-attention) models, but the TPU hybrid path does not
-        # support reusing cached prefixes yet: Qwen3.5-397B gsm8k drops from
-        # 0.97 to 0.01 exact-match with prefix caching on (same vLLM commit,
-        # flag-level A/B). Keep it disabled on TPU until the GDN/mamba
+        # The TPU hybrid (mamba/linear-attention) path does not support
+        # reusing cached prefixes yet — cache hits garble the output. Keep
+        # prefix caching disabled for hybrid models until the GDN/mamba
         # kernels handle cached prefixes.
         if (cache_config and cache_config.enable_prefix_caching
                 and vllm_config.model_config is not None
@@ -298,10 +296,8 @@ class TpuPlatform(Platform):
                 "(mamba/linear-attention) models do not support cached "
                 "prefixes on TPU yet (accuracy garbles on cache hits).")
             cache_config.enable_prefix_caching = False
-            # Mirror vLLM's prefix-caching-off defaults for the mamba cache
-            # fields, which vLLM's hybrid config-verify may already have
-            # derived from the enabled state (mamba_cache_mode="align",
-            # mamba_block_size=block_size). Leaving them would trip the
+            # Reset the mamba cache fields derived from the enabled state to
+            # their prefix-caching-off defaults; stale values trip vLLM's
             # "--mamba-block-size can only be set with
             # --enable-prefix-caching" validator.
             if getattr(cache_config, "mamba_cache_mode", "none") != "none":

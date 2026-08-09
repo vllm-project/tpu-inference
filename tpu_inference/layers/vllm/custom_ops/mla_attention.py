@@ -93,9 +93,8 @@ class VllmMLAAttention(MLAAttention):
         self.attn_type = AttentionType.DECODER
         self.sliding_window = None
 
-        # vLLM removed the runtime KV-scale calculation (and with it the
-        # calculate_kv_scales attribute set by MLAAttention.__init__) in
-        # vllm#49389; our forward still branches on it for older vLLM.
+        # forward() branches on this; default it when the vLLM parent
+        # __init__ does not set it.
         if not hasattr(self, "calculate_kv_scales"):
             self.calculate_kv_scales = False
 
