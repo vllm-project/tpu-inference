@@ -24,6 +24,10 @@ Gemma-4 E2B / E4B) can use this helper. New JAX models that introduce
 KV-share via the same HF convention pick it up automatically.
 """
 
+import re
+from collections.abc import Iterable
+from typing import Any
+
 
 def compute_kv_share_map(text_config) -> dict:
     """Return `{shared_layer_idx: source_layer_idx}` for KV-shared layers.
@@ -64,6 +68,49 @@ def compute_kv_share_map(text_config) -> dict:
         src = len(prev_types) - 1 - prev_types[::-1].index(ctype)
         mapping[i] = src
     return mapping
+
+
+# K/V-side params of a *text* decoder layer, as named in an HF checkpoint.
+# Anchored on "language_model.layers." rather than matched loosely, because a
+# multimodal checkpoint also contains
+# "model.vision_tower.encoder.layers.{i}.self_attn.k_proj.linear.weight" — the
+# vision tower has its own per-layer K/V projections, they are unrelated to
+# text KV-share, and dropping them would silently load a partly-random encoder.
+_SHARED_KV_WEIGHT_RE = re.compile(
+    r"(?:^|\.)language_model\.layers\.(\d+)\.self_attn\."
+    r"(?:k_proj|v_proj|k_norm)\.")
+
+
+def drop_shared_kv_weights(
+    text_config,
+    weights: Iterable[tuple[str, Any]],
+) -> Iterable[tuple[str, Any]]:
+    """Drop the K/V weights of KV-shared text layers from a weight stream.
+
+    KV-shared layers read their K/V from the source layer's cache slot and so
+    allocate no `k_proj`/`v_proj`/`k_norm` at all. Gemma-4 QAT exports omit
+    those tensors to match; BF16 exports still ship them, and feeding them to
+    the loader raises "is not a valid param path". Filtering here lets one
+    model definition load both (vllm-project/tpu-inference#3225).
+
+    Apply to the raw checkpoint stream, before any `WeightsMapper` prefix
+    rewriting: the pattern accepts the name with or without a leading
+    "model." but assumes the `language_model.layers.{i}.self_attn.*` layout.
+
+    Returns `weights` unchanged when the config declares no KV-share.
+    """
+    shared = set(compute_kv_share_map(text_config))
+    if not shared:
+        return weights
+
+    def _filtered():
+        for name, weight in weights:
+            m = _SHARED_KV_WEIGHT_RE.search(name)
+            if m and int(m.group(1)) in shared:
+                continue
+            yield name, weight
+
+    return _filtered()
 
 
 def compute_mtp_kv_share_map(draft_config, target_config) -> dict[str, str]:

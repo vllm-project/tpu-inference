@@ -35,7 +35,8 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Gemma4TextConfig
 
-from tpu_inference.models.common.kv_share import compute_kv_share_map
+from tpu_inference.models.common.kv_share import (compute_kv_share_map,
+                                                  drop_shared_kv_weights)
 from tpu_inference.models.jax.gemma4 import Gemma4Model
 
 
@@ -323,3 +324,171 @@ def test_double_wide_mlp_off(mesh, rng=jax.random.PRNGKey(0)):
     for layer in model.layers:
         assert layer.mlp.gate_up_proj.weight.shape == (32,
                                                        2 * intermediate_size)
+
+
+# --------------------------------------------------------------------------
+# KV-shared layers own no K/V parameters (vllm-project/tpu-inference#3225).
+#
+# Gemma 4 QAT exports omit self_attn.{k_proj,v_proj,k_norm} on KV-shared
+# layers, because those layers never use their own K/V — they read the source
+# layer's from the redirected cache slot. Allocating the parameters anyway
+# made every QAT checkpoint fail to load.
+# --------------------------------------------------------------------------
+
+
+def test_shared_layers_allocate_no_kv_params(mesh, rng=jax.random.PRNGKey(0)):
+    """Shared layers get a standalone q_proj and no K/V params at all."""
+    text_config = _make_text_config(num_hidden_layers=4,
+                                    num_kv_shared_layers=2,
+                                    layer_types=["full_attention"] * 4)
+    vllm_config = _make_vllm_config(text_config)
+    with jax.set_mesh(mesh):
+        model = Gemma4Model(vllm_config, nnx.Rngs(rng), mesh)
+
+    for idx in (0, 1):  # non-shared: fused QKV, K norm present
+        attn = model.layers[idx].self_attn
+        assert attn.qkv_proj is not None
+        assert attn.k_norm is not None
+
+    for idx in (2, 3):  # shared: q only, nothing K/V-side
+        attn = model.layers[idx].self_attn
+        assert attn.qkv_proj is None, f"layer {idx} allocated a fused QKV"
+        assert attn.q_proj is not None, f"layer {idx} needs its own q_proj"
+        assert attn.k_proj is None, f"layer {idx} allocated k_proj"
+        assert attn.v_proj is None, f"layer {idx} allocated v_proj"
+        assert attn.k_norm is None, f"layer {idx} allocated k_norm"
+
+
+def _attn_weight_names(num_layers):
+    """Checkpoint-shaped names for every text attention param, all layers."""
+    names = []
+    for i in range(num_layers):
+        p = f"model.language_model.layers.{i}.self_attn"
+        for leaf in ("q_proj", "k_proj", "v_proj", "o_proj"):
+            names.append(f"{p}.{leaf}.weight")
+        for leaf in ("q_norm", "k_norm"):
+            names.append(f"{p}.{leaf}.weight")
+    return names
+
+
+def _kept(text_config, names):
+    return [
+        n for n, _ in drop_shared_kv_weights(text_config, ((n, None)
+                                                           for n in names))
+    ]
+
+
+def _shared_config():
+    return _make_text_config(num_hidden_layers=4,
+                             num_kv_shared_layers=2,
+                             layer_types=["full_attention"] * 4)
+
+
+def test_drop_shared_kv_weights_filters_only_shared_layers():
+    """A BF16 export ships K/V weights for shared layers; they must be
+    dropped, or the loader raises "is not a valid param path". Non-shared
+    layers must keep every tensor."""
+    kept = set(_kept(_shared_config(), _attn_weight_names(4)))
+
+    for i in (0, 1):  # non-shared: untouched
+        p = f"model.language_model.layers.{i}.self_attn"
+        for leaf in ("q_proj", "k_proj", "v_proj", "o_proj", "q_norm",
+                     "k_norm"):
+            assert f"{p}.{leaf}.weight" in kept
+
+    for i in (2, 3):  # shared: K/V-side dropped, the rest kept
+        p = f"model.language_model.layers.{i}.self_attn"
+        for leaf in ("k_proj", "v_proj", "k_norm"):
+            assert f"{p}.{leaf}.weight" not in kept, f"layer {i}.{leaf} kept"
+        for leaf in ("q_proj", "o_proj", "q_norm"):
+            assert f"{p}.{leaf}.weight" in kept, f"layer {i}.{leaf} dropped"
+
+
+def test_drop_shared_kv_weights_is_noop_for_qat_checkpoint():
+    """A QAT export already omits those tensors — filtering must not disturb
+    the remaining stream (this is the #3225 checkpoint shape)."""
+    shared_kv = {
+        f"model.language_model.layers.{i}.self_attn.{leaf}.weight"
+        for i in (2, 3)
+        for leaf in ("k_proj", "v_proj", "k_norm")
+    }
+    qat_names = [n for n in _attn_weight_names(4) if n not in shared_kv]
+
+    assert _kept(_shared_config(), qat_names) == qat_names
+
+
+def test_drop_shared_kv_weights_noop_without_sharing():
+    """num_kv_shared_layers=0 (26B/31B path): nothing is filtered."""
+    text_config = _make_text_config(num_hidden_layers=4,
+                                    num_kv_shared_layers=0,
+                                    layer_types=["full_attention"] * 4)
+    names = _attn_weight_names(4)
+
+    assert _kept(text_config, names) == names
+
+
+def test_drop_shared_kv_weights_spares_the_vision_tower():
+    """The vision encoder has its own per-layer self_attn.k_proj/v_proj at
+    the same layer indices. They have nothing to do with text KV-share, and
+    `Gemma4ForConditionalGeneration` really does load them — dropping them
+    would quietly leave a partly-random encoder rather than raise."""
+    vision = [
+        f"model.vision_tower.encoder.layers.{i}.self_attn.{leaf}.linear.weight"
+        for i in range(4) for leaf in ("q_proj", "k_proj", "v_proj", "o_proj")
+    ]
+    audio = [
+        f"model.audio_tower.layers.{i}.self_attn.{leaf}.weight"
+        for i in range(4) for leaf in ("k_proj", "v_proj")
+    ]
+
+    assert _kept(_shared_config(), vision + audio) == vision + audio
+
+
+def test_drop_shared_kv_weights_matches_unprefixed_names():
+    """Applied before a WeightsMapper strips "model.", or after — the
+    pattern must anchor either way."""
+    unprefixed = [n.removeprefix("model.") for n in _attn_weight_names(4)]
+    kept = set(_kept(_shared_config(), unprefixed))
+
+    assert "language_model.layers.2.self_attn.k_proj.weight" not in kept
+    assert "language_model.layers.2.self_attn.q_proj.weight" in kept
+    assert "language_model.layers.0.self_attn.k_proj.weight" in kept
+
+
+@pytest.mark.parametrize(
+    "variant,num_hidden_layers,num_kv_shared_layers,period",
+    [
+        # Read from the released config.json + safetensors headers: both QAT
+        # exports ship K/V-side tensors for exactly the non-shared layers.
+        ("E2B", 35, 20, 5),  # layer_types = (4x sliding + full) x 7
+        ("E4B", 42, 18, 6),  # layer_types = (5x sliding + full) x 7
+    ])
+def test_drop_shared_kv_weights_on_released_geometries(variant,
+                                                       num_hidden_layers,
+                                                       num_kv_shared_layers,
+                                                       period):
+    """The two shipped Gemma 4 KV-share geometries, not just a synthetic one.
+
+    E2B drops layers 15-34, E4B drops 24-41 — matching what
+    `google/gemma-4-{E2B,E4B}-it-qat-q4_0-unquantized` actually contain.
+    """
+    layer_types = (["sliding_attention"] * (period - 1) +
+                   ["full_attention"]) * (num_hidden_layers // period)
+    assert len(layer_types) == num_hidden_layers
+    text_config = _make_text_config(num_hidden_layers=num_hidden_layers,
+                                    num_kv_shared_layers=num_kv_shared_layers,
+                                    layer_types=layer_types)
+
+    first_shared = num_hidden_layers - num_kv_shared_layers
+    assert sorted(compute_kv_share_map(text_config)) == list(
+        range(first_shared, num_hidden_layers))
+
+    kept = set(_kept(text_config, _attn_weight_names(num_hidden_layers)))
+    for i in range(num_hidden_layers):
+        p = f"model.language_model.layers.{i}.self_attn"
+        shared = i >= first_shared
+        for leaf in ("k_proj", "v_proj", "k_norm"):
+            present = f"{p}.{leaf}.weight" in kept
+            assert present is not shared, f"{variant} layer {i}.{leaf}"
+        for leaf in ("q_proj", "o_proj", "q_norm"):
+            assert f"{p}.{leaf}.weight" in kept, f"{variant} layer {i}.{leaf}"
