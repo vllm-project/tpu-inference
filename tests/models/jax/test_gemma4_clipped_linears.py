@@ -183,8 +183,13 @@ class _FakeBlock(nnx.Module):
 
 class _FakeVisionTower(nnx.Module):
     def __init__(self, num_blocks, finite=True, use_clipped=True):
+        # config carried as a non-data attribute (mirrors the real tower's vt.config).
         self.config = _FakeVisionConfig(num_blocks, use_clipped)
-        self.layers = [_FakeBlock(finite=finite) for _ in range(num_blocks)]
+        # Store blocks as individual attributes (layers_0 .. layers_{n-1}) so the nnx pytree
+        # accepts them as data submodules (a plain Python list of modules is rejected as a
+        # static attribute by this flax nnx variant). nnx.iter_graph still traverses them.
+        for i in range(num_blocks):
+            setattr(self, f"layers_{i}", _FakeBlock(finite=finite))
 
 
 class _FakeModel(nnx.Module):
@@ -224,7 +229,7 @@ def test_walker_partial_bounds_fails():
     # 16 blocks but one bound left at the NaN sentinel -> validate_clip_bounds raises.
     h = _Harness(num_blocks=2, finite=True)
     # Corrupt one projection's bound back to NaN.
-    h.model.vision_tower.layers[0].q_proj.input_min = nnx.Param(
+    h.model.vision_tower.layers_0.q_proj.input_min = nnx.Param(
         jnp.asarray(jnp.nan, dtype=jnp.float32))
     with pytest.raises(ValueError, match="non-finite"):
         h._validate_vision_clip_bounds()
