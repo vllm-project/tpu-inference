@@ -167,10 +167,12 @@ class Gemma4ClippableEinsum(JaxEinsum):
             self.output_max = _b()
 
     def validate_clip_bounds(self):
-        """M1 hard-fail: every required bound must be finite and scalar. No-op when off."""
+        """M1 hard-fail: every required bound must be finite, scalar, and correctly ordered
+        (input_min<=input_max, output_min<=output_max). No-op when off."""
         if not self.use_clipped_linears:
             return
         pfx = getattr(self, "prefix", "")
+        vals = {}
         for nm in ("input_min", "input_max", "output_min", "output_max"):
             p = getattr(self, nm, None)
             if p is None:
@@ -189,6 +191,17 @@ class Gemma4ClippableEinsum(JaxEinsum):
                     f"non-finite (missing/NaN/Inf). The E2B/E4B checkpoint declares a FINITE "
                     f"clipped model when vision_config.use_clipped_linears is True; refusing "
                     f"to fall back to an identity clamp.")
+            vals[nm] = fv
+        # Ordering: a clamp with min>max would empty the interval (jnp.clip would return the max
+        # for all inputs), which is never a valid checkpoint state.
+        if vals["input_min"] > vals["input_max"]:
+            raise ValueError(
+                f"Gemma4ClippableEinsum[{pfx}]: input_min={vals['input_min']} > "
+                f"input_max={vals['input_max']} (a clamp with min>max would empty the interval).")
+        if vals["output_min"] > vals["output_max"]:
+            raise ValueError(
+                f"Gemma4ClippableEinsum[{pfx}]: output_min={vals['output_min']} > "
+                f"output_max={vals['output_max']} (a clamp with min>max would empty the interval).")
 
     def __call__(self, inputs):
         if not self.use_clipped_linears:
@@ -831,40 +844,52 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         return loaded
 
     def _validate_vision_clip_bounds(self):
-        """Walk the vision tower and call validate_clip_bounds() on every
-        Gemma4ClippableEinsum. No-op for modules whose use_clipped_linears is False.
-        Hard-fails (ValueError) on the first missing/non-finite/non-scalar bound."""
+        """Post-load, fail-closed validation of EVERY vision Gemma4ClippableEinsum.
+
+        Uses an NNX graph traversal (``nnx.iter_graph``) over the vision tower to collect every
+        ``Gemma4ClippableEinsum`` and calls ``validate_clip_bounds()`` on each (finite, scalar,
+        min<=max). Then asserts the EXACT expected module count, derived from the vision config:
+        ``num_hidden_layers`` encoder blocks x 7 clipped projections per block (q/k/v/o attention +
+        gate/up/down MLP). A missing/NaN/non-scalar/unordered bound raises inside validate_clip_bounds();
+        an unexpected module count (including ZERO — e.g. a traversal that walks nothing because the
+        module structure changed) raises here. This closes the hole where a hand-written __dict__ walk
+        could silently find zero modules and still "pass".
+        """
         vt = getattr(getattr(self, "model", None), "vision_tower", None)
         if vt is None:
+            raise ValueError(
+                "Gemma-4 vision clip validation: model.vision_tower is None; cannot validate the "
+                "checkpoint-defined clip bounds. Refusing to serve a use_clipped_linears model with an "
+                "unvalidated (possibly all-NaN-sentinel) vision tower.")
+        # If clipping is disabled the bounds do not exist; nothing to validate.
+        if not bool(getattr(vt.config, "use_clipped_linears", False)):
             return
-        seen = set()
-        n_checked = [0]
 
-        def walk(mod, depth=0):
-            if depth > 14 or id(mod) in seen:
-                return
-            seen.add(id(mod))
-            d = getattr(mod, "__dict__", None)
-            if not d:
-                return
-            for nm, ch in list(d.items()):
-                if nm.startswith("_"):
-                    continue
-                if isinstance(ch, Gemma4ClippableEinsum):
-                    ch.validate_clip_bounds()
-                    n_checked[0] += 1
-                elif isinstance(ch, (list, tuple)):
-                    for c in ch:
-                        if isinstance(c, Gemma4ClippableEinsum):
-                            c.validate_clip_bounds()
-                            n_checked[0] += 1
-                        elif hasattr(c, "__dict__"):
-                            walk(c, depth + 1)
-                elif hasattr(ch, "__dict__") and not isinstance(
-                        ch, (jnp.ndarray, )):
-                    walk(ch, depth + 1)
+        # Expected accounting derived from the vision config (single source of truth, not a magic 112):
+        #   num_hidden_layers encoder blocks x 7 clipped projections (q,k,v,o,gate,up,down).
+        _CLIPPED_PROJS_PER_BLOCK = 7
+        num_blocks = int(getattr(vt.config, "num_hidden_layers", 0))
+        expected_modules = num_blocks * _CLIPPED_PROJS_PER_BLOCK
+        if expected_modules <= 0:
+            raise ValueError(
+                "Gemma-4 vision clip validation: could not derive a positive expected clip-module count "
+                f"from vision_config.num_hidden_layers={num_blocks!r}. Refusing to validate against an "
+                "unknown expected count.")
 
-        walk(vt)
+        n_checked = 0
+        for _, node in nnx.iter_graph(vt):
+            if isinstance(node, Gemma4ClippableEinsum) and node.use_clipped_linears:
+                node.validate_clip_bounds()
+                n_checked += 1
+
+        if n_checked != expected_modules:
+            raise ValueError(
+                f"Gemma-4 vision clip validation found {n_checked} clipped Gemma4ClippableEinsum modules, "
+                f"expected exactly {expected_modules} ({num_blocks} encoder blocks x "
+                f"{_CLIPPED_PROJS_PER_BLOCK} projections). A mismatch (especially zero) means the traversal "
+                "did not reach the vision projections or the checkpoint mapped bounds onto the wrong modules; "
+                "refusing to serve a partially-clipped vision tower.")
+        return n_checked
 
     def embed_input_ids(self,
                         input_ids: jax.Array,
