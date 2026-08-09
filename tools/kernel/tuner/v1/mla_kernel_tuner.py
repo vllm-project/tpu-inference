@@ -50,6 +50,13 @@ flags.DEFINE_string("mla_kv_dtype", "float8_e4m3fn", "KV cache data type.")
 flags.DEFINE_string("mla_q_dtype", "float8_e4m3fn", "Q activation dtype.")
 
 
+def _get_flag_value(name: str):
+    """Safely retrieves a flag's value if flags are parsed, otherwise its default."""
+    if flags.FLAGS.is_parsed():
+        return getattr(flags.FLAGS, name)
+    return flags.FLAGS[name].default
+
+
 def _generate_mla_inputs(
     seq_lens,  # List[(q_len, kv_len)]
     num_heads,
@@ -228,16 +235,17 @@ class MlaKernelTuner(KernelTunerBase):
         ]:
             tuning_key = TuningKey(
                 max_num_tokens=max_num_tokens,
-                actual_num_q_heads=flags.FLAGS.mla_actual_num_q_heads,
-                actual_lkv_dim=flags.FLAGS.mla_actual_lkv_dim,
-                actual_r_dim=flags.FLAGS.mla_actual_r_dim,
-                kv_dtype=flags.FLAGS.mla_kv_dtype,
-                q_dtype=flags.FLAGS.mla_q_dtype,
-                page_size_per_kv_packing=flags.FLAGS.
-                mla_page_size_per_kv_packing,
-                kv_packing=flags.FLAGS.mla_kv_packing,
-                max_num_seqs=flags.FLAGS.mla_max_num_seqs,
-                pages_per_seq=flags.FLAGS.mla_pages_per_seq,
+                actual_num_q_heads=_get_flag_value("mla_actual_num_q_heads"),
+                actual_lkv_dim=_get_flag_value("mla_actual_lkv_dim"),
+                actual_r_dim=_get_flag_value("mla_actual_r_dim"),
+                kv_dtype=_get_flag_value("mla_kv_dtype"),
+                q_dtype=_get_flag_value("mla_q_dtype"),
+                page_size_per_kv_packing=_get_flag_value(
+                    "mla_page_size_per_kv_packing"
+                ),
+                kv_packing=_get_flag_value("mla_kv_packing"),
+                max_num_seqs=_get_flag_value("mla_max_num_seqs"),
+                pages_per_seq=_get_flag_value("mla_pages_per_seq"),
                 s_dtype="bfloat16",
                 case="batched_decode",
                 soft_cap=None,
@@ -275,7 +283,7 @@ class MlaKernelTuner(KernelTunerBase):
             tuning_key.kv_packing,
             q_dtype=jnp.dtype(tuning_key.q_dtype),
             kv_dtype=jnp.dtype(tuning_key.kv_dtype),
-            num_pages=flags.FLAGS.mla_total_num_pages,
+            num_pages=_get_flag_value("mla_total_num_pages"),
             rng=rng,
         )
 
