@@ -22,9 +22,9 @@
 # cannot disturb a workload that is running or starting up.
 
 steps:
-  - label: ":mag: tpu7x-32 occupancy probe (read-only)"
-    key: tpu7x_32_occupancy_probe
+  - label: ":mag: tpu7x-32 disk + checkpoint probe (read-only)"
+    key: tpu7x_32_disk_probe
     agents:
       queue: tpu_v7x_32_queue
     commands:
-      - python3 .buildkite/scripts/tpu_occupancy_probe.py
+      - bash .buildkite/scripts/disk_probe.sh
