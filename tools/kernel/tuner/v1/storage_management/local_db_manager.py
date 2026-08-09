@@ -18,8 +18,11 @@ import os
 import time
 from datetime import datetime
 
+from tools.kernel.tuner.v1.common.tuner_datatypes import (BucketStatus,
+                                                          ProcessedCaseStatus)
 from tools.kernel.tuner.v1.storage_management.storage_manager import \
     StorageManager
+from tools.kernel.tuner.v1.utils import get_worker_id
 
 logger = logging.getLogger(__name__)
 BATCH_SIZE = 1000
@@ -42,13 +45,16 @@ class LocalDbManager(StorageManager):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
-        self.worker_id = worker_id
+        self.worker_id = get_worker_id(worker_id)
         self.dry_run = dry_run
-        date_str = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
-        self.db_path = f'/tmp/kernel_tuner_run_{date_str}' if db_path is None else f'{db_path}_{date_str}'
+        if db_path is None:
+            date_str = datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+            self.db_path = f'/tmp/kernel_tuner_run_{date_str}'
+        else:
+            self.db_path = db_path
         if not self.dry_run:
             os.makedirs(self.db_path, exist_ok=True)
-            logger.info(f'Database initialized at {self.db_path}')
+            logger.debug(f'Database initialized at {self.db_path}')
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -85,7 +91,7 @@ class LocalDbManager(StorageManager):
         table = self._read_table('CaseSet')
         table.append(row)
         self._write_table('CaseSet', table)
-        logger.info(f'Initialized case set: {row}')
+        logger.debug(f'Initialized case set: {row}')
 
     def case_set_id_exists(self, case_set_id) -> bool:
         if self.dry_run:
@@ -119,7 +125,7 @@ class LocalDbManager(StorageManager):
                 })
                 break
         self._write_table('CaseSet', table)
-        logger.info(
+        logger.debug(
             f'Finished case set: ID={case_set_id}, valid={valid}, invalid={invalid}, duration={duration}s'
         )
 
@@ -149,7 +155,7 @@ class LocalDbManager(StorageManager):
                 'TPU': tpu
             })
         self._write_table('KernelTuningCases', table)
-        logger.info(
+        logger.debug(
             f'Flushed: wrote {len(self.buffer)} cases to KernelTuningCases')
         self.buffer = []
 
@@ -206,17 +212,17 @@ class LocalDbManager(StorageManager):
             'TPU': tpu
         })
         self._write_table('WorkBuckets', table)
-        logger.info(
+        logger.debug(
             f'Created bucket: cs_id={cs_id}, r_id={r_id}, bucket_id={bucket_id}, start_case_id={start_case_id}, end_case_id={end_case_id}, tpu={tpu}'
         )
 
-    def mark_bucket_in_progress(self, cs_id, r_id, b_id):
+    def update_bucket_status(self, cs_id, r_id, b_id, status: BucketStatus):
         table = self._read_table('WorkBuckets')
         for row in table:
             if row['ID'] == cs_id and row['RunId'] == r_id and row[
                     'BucketId'] == b_id:
                 row.update({
-                    'Status': 'IN_PROGRESS',
+                    'Status': status.value,
                     'WorkerID': self.worker_id,
                     'UpdatedAt': datetime.now().isoformat()
                 })
@@ -227,29 +233,13 @@ class LocalDbManager(StorageManager):
                 'ID': cs_id,
                 'RunId': r_id,
                 'BucketId': b_id,
-                'Status': 'IN_PROGRESS',
+                'Status': status.value,
                 'WorkerID': self.worker_id,
                 'UpdatedAt': datetime.now().isoformat()
             })
         self._write_table('WorkBuckets', table)
-        logger.info(
-            f'Marked bucket as in progress: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, worker={self.worker_id}'
-        )
-
-    def mark_bucket_completed(self, cs_id, r_id, b_id):
-        table = self._read_table('WorkBuckets')
-        for row in table:
-            if row['ID'] == cs_id and row['RunId'] == r_id and row[
-                    'BucketId'] == b_id:
-                update = {
-                    'Status': 'COMPLETED',
-                    'UpdatedAt': datetime.now().isoformat()
-                }
-                row.update(update)
-                break
-        self._write_table('WorkBuckets', table)
-        logger.info(
-            f'Marked bucket as completed: cs_id={cs_id}, r_id={r_id}, b_id={b_id}'
+        logger.debug(
+            f'Update bucket status: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, worker={self.worker_id}, status={status.value}'
         )
 
     def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
@@ -263,17 +253,18 @@ class LocalDbManager(StorageManager):
                 row['UpdatedAt'] = datetime.now().isoformat()
                 break
         self._write_table('WorkBuckets', table)
-        logger.info(
+        logger.debug(
             f'Added processed time: cs_id={cs_id}, r_id={r_id}, b_id={b_id}, processed_time_us={processed_time_us}'
         )
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
         table = self._read_table('CaseResults')
-        return {
-            row['CaseId']
-            for row in table if row['ID'] == cs_id and row['RunId'] == r_id
+        return [
+            ProcessedCaseStatus(case_id=row['CaseId'],
+                                status=row['ProcessedStatus']) for row in table
+            if row['ID'] == cs_id and row['RunId'] == r_id
             and start <= row['CaseId'] <= end
-        }
+        ]
 
     def save_results_batch(self):
         if not self.results_buffer:
@@ -307,7 +298,8 @@ class LocalDbManager(StorageManager):
                 index[key] = len(table)
                 table.append(row)
         self._write_table('CaseResults', table)
-        logger.info(f'Saved {len(self.results_buffer)} results to CaseResults')
+        logger.debug(
+            f'Saved {len(self.results_buffer)} results to CaseResults')
         self.results_buffer.clear()
 
     def get_bucket_configs(self, cs_id, start, end):
@@ -321,13 +313,13 @@ class LocalDbManager(StorageManager):
     def __del__(self):
         # Ensure any remaining buffered cases are flushed to disk on destruction.
         self.flush()
-        logger.info(
+        logger.debug(
             f'Database at {self.db_path} finalized with {self.current_case_id} cases, {self.invalid_count} invalid cases.'
         )
         # Log the full path of all the files under the self.db_path for debugging and visibility
         for root, dirs, files in os.walk(self.db_path):
             for file in files:
-                logger.info(f'Final DB file: {os.path.join(root, file)}')
+                logger.debug(f'Final DB file: {os.path.join(root, file)}')
 
     def get_total_cases_in_case_set(self, case_set_id):
         """Returns the total number of cases in the given case set.
@@ -360,7 +352,7 @@ class LocalDbManager(StorageManager):
             return
         self.flush()
         self._closed = True
-        logger.info(
+        logger.debug(
             f'Database at {self.db_path} closed with {self.current_case_id} cases, {self.invalid_count} invalid cases.'
         )
 

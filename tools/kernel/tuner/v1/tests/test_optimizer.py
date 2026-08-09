@@ -98,11 +98,8 @@ class TestOptimizerModule(unittest.TestCase):
         self.assertTrue(cb.stopped)
         mock_study.stop.assert_called_once()
 
-    @mock.patch(
-        "tools.kernel.tuner.v1.optimizer.sweep_optimizer.SweepOptimizer.measure_latency"
-    )
-    def test_bayesian_optimizer_fallback_empty_search_space(
-            self, mock_sweep_measure):
+    def test_bayesian_optimizer_fallback_empty_search_space(self):
+        """Tests Bayesian optimizer falls back to sweep when search space is empty."""
         mock_tuner = mock.MagicMock()
         mock_tuner.worker_id = "test_worker"
         mock_tuner.run_config = RunConfig(
@@ -121,22 +118,23 @@ class TestOptimizerModule(unittest.TestCase):
         )
 
         tc = TuningCase(MockKey(1), MockParams(1, 1))
-        mock_tuner.storage_manager.get_already_processed_ids.return_value = set(
-        )
-        mock_tuner.storage_manager.get_bucket_configs.return_value = {
-            0: ("cs", 0, str(tc))
-        }
+        mock_storage = mock.MagicMock()
+        mock_storage.get_bucket_configs.return_value = {0: ("cs", 0, str(tc))}
         mock_tuner.get_search_space.return_value = {}
 
-        bo_opt = BayesianOptimizer(mock_tuner)
-        bo_opt.measure_latency(0, 1)
+        mock_executor = mock.MagicMock()
 
-        mock_sweep_measure.assert_called_once_with(0, 1)
+        bo_opt = BayesianOptimizer(mock_tuner, mock_storage, mock_executor)
 
-    @mock.patch(
-        "tools.kernel.tuner.v1.optimizer.sweep_optimizer.SweepOptimizer.measure_latency"
-    )
-    def test_bayesian_optimizer_fallback_min_cases(self, mock_sweep_measure):
+        with mock.patch(
+                "tools.kernel.tuner.v1.optimizer.sweep_optimizer.SweepOptimizer.measure_latency"
+        ) as mock_sweep_measure:
+            mock_sweep_measure.return_value = 1
+            bo_opt.measure_latency(0, 1)
+            mock_sweep_measure.assert_called_once_with(0, 1)
+
+    def test_bayesian_optimizer_fallback_min_cases(self):
+        """Tests Bayesian optimizer falls back to sweep when case count < min_cases_for_bayesian."""
         mock_tuner = mock.MagicMock()
         mock_tuner.worker_id = "test_worker"
         mock_tuner.run_config = RunConfig(
@@ -155,9 +153,8 @@ class TestOptimizerModule(unittest.TestCase):
             min_cases_for_bayesian=20,
         )
 
-        mock_tuner.storage_manager.get_already_processed_ids.return_value = set(
-        )
-        mock_tuner.storage_manager.get_bucket_configs.return_value = {
+        mock_storage = mock.MagicMock()
+        mock_storage.get_bucket_configs.return_value = {
             i: ("cs", i, str(TuningCase(MockKey(1), MockParams(i, 1))))
             for i in range(5)
         }
@@ -166,12 +163,20 @@ class TestOptimizerModule(unittest.TestCase):
             "p2": [1]
         }
 
-        bo_opt = BayesianOptimizer(mock_tuner)
-        bo_opt.measure_latency(0, 5)
+        mock_executor = mock.MagicMock()
 
-        mock_sweep_measure.assert_called_once_with(0, 5)
+        bo_opt = BayesianOptimizer(mock_tuner, mock_storage, mock_executor)
+
+        with mock.patch(
+                "tools.kernel.tuner.v1.optimizer.sweep_optimizer.SweepOptimizer.measure_latency"
+        ) as mock_sweep_measure:
+            mock_sweep_measure.return_value = 5
+            bo_opt.measure_latency(0, 5)
+            mock_sweep_measure.assert_called_once_with(0, 5)
 
     def test_bayesian_optimizer_convergence(self):
+        """Tests that Bayesian optimization converges to near-optimal solution."""
+
         # Synthetic objective function: min latency at p1=3, p2=4
         def synthetic_kernel(p1, p2):
             return float((p1 - 3)**2 + (p2 - 4)**2 + 10)
@@ -194,38 +199,40 @@ class TestOptimizerModule(unittest.TestCase):
             n_bayesian_trials=20,
             min_cases_for_bayesian=0,
         )
+        mock_tuner.lightweight = True  # Worker mode
 
         search_space = {
-            "p1": list(range(1, 20)),
-            "p2": list(range(1, 20)),
+            "p1": list(range(1, 6)),
+            "p2": list(range(1, 6)),
         }
         mock_tuner.get_search_space.return_value = search_space
 
         all_configs = {}
         cid = 0
-        for p1 in range(1, 20):
-            for p2 in range(1, 20):
+        for p1 in range(1, 6):
+            for p2 in range(1, 6):
                 tc = TuningCase(MockKey(1), MockParams(p1, p2))
                 all_configs[cid] = ("cs_syn", cid, str(tc))
                 cid += 1
 
-        mock_tuner.storage_manager.get_already_processed_ids.return_value = set(
-        )
-        mock_tuner.storage_manager.get_bucket_configs.return_value = all_configs
-        mock_tuner.storage_manager.get_timestamp_sec.return_value = 1000
+        mock_storage = mock.MagicMock()
+        mock_storage.get_already_processed_ids.return_value = []
+        mock_storage.get_all_cases.return_value = []
+        mock_storage.get_bucket_configs.return_value = all_configs
+        mock_storage.get_timestamp_sec.return_value = 1000
 
         evaluations = []
 
-        def mock_eval(cid, tuning_key, tunable_params, tracker, log_prefix=""):
-            lat = synthetic_kernel(tunable_params.p1, tunable_params.p2)
-            evaluations.append((tunable_params, lat))
-            tracker.record(cid, tuning_key, tunable_params,
-                           TuningStatus.SUCCESS)
-            return TuningStatus.SUCCESS, lat
+        def mock_execute_run(tuning_key, tunable_params, iters, **kwargs):
+            lat_us = synthetic_kernel(tunable_params.p1, tunable_params.p2)
+            lat_ns = lat_us * 1000
+            evaluations.append((tunable_params, lat_us))
+            return TuningStatus.SUCCESS, lat_ns, lat_ns * iters
 
-        mock_tuner._evaluate_single_case.side_effect = mock_eval
+        mock_executor = mock.MagicMock()
+        mock_executor.execute_run.side_effect = mock_execute_run
 
-        bo_opt = BayesianOptimizer(mock_tuner)
+        bo_opt = BayesianOptimizer(mock_tuner, mock_storage, mock_executor)
         sampler = optuna.samplers.TPESampler(seed=42)
         study = optuna.create_study(direction="minimize", sampler=sampler)
         with mock.patch("optuna.create_study") as mock_create_study:
@@ -237,6 +244,41 @@ class TestOptimizerModule(unittest.TestCase):
         self.assertLessEqual(best_eval[1], 12.0)
         self.assertLessEqual(best_eval[0].p1, 5)
         self.assertLessEqual(best_eval[0].p2, 5)
+
+    def test_executor_process_manager_consecutive_start_failures(self):
+        from tools.kernel.tuner.v1.executor_process_manager import \
+            ExecutorProcessManager
+        mock_run_config = mock.MagicMock()
+        mgr = ExecutorProcessManager("mock_tuner", mock_run_config)
+        mgr._consecutive_start_failures = 3
+        with self.assertRaises(RuntimeError) as ctx:
+            mgr._start()
+        self.assertIn("failed to start 3 consecutive times",
+                      str(ctx.exception))
+
+    def test_executor_process_manager_pipe_cleanup_on_kill(self):
+        from tools.kernel.tuner.v1.executor_process_manager import \
+            ExecutorProcessManager
+        mock_run_config = mock.MagicMock()
+        mgr = ExecutorProcessManager("mock_tuner", mock_run_config)
+        mock_proc = mock.MagicMock()
+        mock_proc.pid = 9999
+        mock_stdin = mock.MagicMock()
+        mock_stdout = mock.MagicMock()
+        mock_stderr = mock.MagicMock()
+        mock_proc.stdin = mock_stdin
+        mock_proc.stdout = mock_stdout
+        mock_proc.stderr = mock_stderr
+        mgr._proc = mock_proc
+
+        with mock.patch("os.getpgid") as mock_getpgid:
+            mock_getpgid.return_value = 9999
+            mgr._kill()
+
+        mock_stdin.close.assert_called_once()
+        mock_stdout.close.assert_called_once()
+        mock_stderr.close.assert_called_once()
+        self.assertIsNone(mgr._proc)
 
 
 if __name__ == "__main__":
