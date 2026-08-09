@@ -58,6 +58,7 @@ HF_OVERRIDES=""
 BLOCK_SIZE=""
 LIMIT=""
 ENABLE_THINKING=""
+ENABLE_PREFIX_CACHING=""
 
 # Parse named arguments
 while [[ "$#" -gt 0 ]]; do
@@ -76,6 +77,7 @@ while [[ "$#" -gt 0 ]]; do
         --block_size) BLOCK_SIZE="$2"; shift ;;
         --limit) LIMIT="$2"; shift ;;
         --enable_thinking) ENABLE_THINKING="$2"; shift ;;
+        --enable_prefix_caching) ENABLE_PREFIX_CACHING="$2"; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown parameter passed: $1"; usage ;;
     esac
@@ -100,6 +102,9 @@ if [ -n "$BLOCK_SIZE" ]; then
 fi
 if [ -n "$ENABLE_THINKING" ]; then
     extra_json+=$(printf ', "enable_thinking": %s' "$ENABLE_THINKING")
+fi
+if [ -n "$ENABLE_PREFIX_CACHING" ]; then
+    extra_json+=$(printf ', "enable_prefix_caching": %s' "$ENABLE_PREFIX_CACHING")
 fi
 
 
