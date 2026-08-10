@@ -23,7 +23,7 @@ from vllm.utils.math_utils import cdiv
 @functools.partial(
     jax.tree_util.register_dataclass,
     data_fields=["kv_cache_lens"],
-    meta_fields=["cache_pages"],
+    meta_fields=["cache_pages", "num_gather_kv"],
 )
 @dataclass
 class PCPMetadata:
@@ -48,6 +48,17 @@ class PCPMetadata:
     # elided entirely.  REQUIRED: a default would silently elide the cache
     # phase for any caller that forgot to set it.
     cache_pages: int
+    # STATIC (meta field): the cache-phase algorithm split point. The runner
+    # orders lanes so that lanes [0, num_gather_kv) use gather-KV and
+    # [num_gather_kv, num_reqs) use gather-Q, mirroring how the RPA kernel
+    # splits decode / prefill / mixed into contiguous ranges.
+    #
+    # This is STATIC rather than a device-side boundary because gather-KV
+    # materialises the all-gathered context on every rank: sizing that
+    # collective for the whole batch (as a dynamic range would force) needs
+    # num_reqs x the context and blows out HBM. A static split lets each group
+    # gather exactly what it uses.
+    num_gather_kv: int = 0
 
 
 @functools.partial(

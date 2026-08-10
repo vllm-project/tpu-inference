@@ -56,22 +56,6 @@ def _to_rank_order(x, pcp, C):
         x.reshape(2 * pcp, C, *x.shape[1:])[_row_perm(pcp)].reshape(x.shape))
 
 
-def _pcp_meta(pcp, C, num_current):
-    """The per-rank fused current-phase metadata, exactly as _prepare_inputs
-    builds it: cu = [0, C, C + tail_real] and q_pos_offsets = [head, tail]."""
-    two_p = 2 * pcp
-    cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
-    qpos = np.zeros((pcp, MAX_SEQ), np.int32)
-    for r in range(pcp):
-        tail_off = (two_p - 1 - r) * C
-        tail_real = int(np.clip(num_current - tail_off, 0, C))
-        cu[r, 1] = C  # seq 0 (head) is always fully real
-        cu[r, 2:] = C + tail_real  # seq 1 (tail) is clamped
-        qpos[r, 0] = r * C
-        qpos[r, 1] = tail_off
-    return jnp.asarray(cu), jnp.asarray(qpos)
-
-
 class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     def setUp(self):
@@ -227,6 +211,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             padded_num_reqs=1,
             pcp=PCPMetadata(
                 kv_cache_lens=jnp.array([L], jnp.int32),
+                # the single lane sits in the gather_kv group
+                num_gather_kv=1,
                 # pages the CACHED tokens occupy (a token-ordered page holds
                 # PAGE*pcp tokens); 0 elides the cache phase.
                 cache_pages=cdiv(L, PAGE * pcp),
@@ -387,9 +373,6 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         pi[pps:2 * pps] = phys
         pi = jnp.asarray(pi)
 
-        def pad1(xs):
-            return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
-
         # `cache_pages` is the static bound the runner supplies: the number of
         # pages the CACHED tokens occupy (page P of the token-ordered cache
         # holds gpage = PAGE*pcp tokens), rounded up to a power of two.  It is
@@ -413,6 +396,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             padded_num_reqs=1,
             pcp=PCPMetadata(
                 kv_cache_lens=jnp.array([L], jnp.int32),
+                num_gather_kv=1,
                 cache_pages=hint,
             ),
         )
@@ -471,6 +455,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             padded_num_reqs=1,
             pcp=PCPMetadata(
                 kv_cache_lens=jnp.array([0], jnp.int32),
+                num_gather_kv=0,
                 cache_pages=0,
             ),
         )

@@ -370,24 +370,14 @@ def pcp_forward(
                   k_scale=k_scale,
                   v_scale=v_scale)
 
-    # Cache-phase strategy, decided per compile from static comm estimates.
-    # all_gather and reduce_scatter are duals and move the same (p-1)/p
-    # fraction, so gather-Q counts both legs; gather-KV moves K and V but has
-    # no output collective.  Volume alone puts the crossover at
-    # ctx = chunk*NQ/NKV, but gather-Q issues TWO collective rounds (two sync
-    # points) plus an LSE reweight, so empirically it needs ~2x the raw volume
-    # advantage before it actually wins.
-    # Under multi-request `cache_pages` is the MAX over the batch's requests
-    # (an upper bound), and the collectives are per-lane, so the estimates are
-    # per-lane too.
+    # Cache-phase strategy. The PER-REQUEST choice is made by the runner (it
+    # knows each request's own cached length) and arrives as the static split
+    # point `num_gather_kv`; see PCPMetadata. `cache_phase` overrides it and
+    # forces one algorithm for every lane (tests, A/B).
     cache_pages = md.pcp.cache_pages
-    _GATHER_Q_OVERHEAD = 2.0
-    comm_q = 2 * per_req_tokens * q.shape[1] * q.shape[2]
-    comm_kv = 2 * (cache_pages * kv_cache.shape[1]) * k.shape[1] * q.shape[2]
-    use_gather_kv = comm_kv < _GATHER_Q_OVERHEAD * comm_q
-    phase = (("gather_kv" if use_gather_kv else "gather_q")
-             if cache_phase is None else cache_phase.lower())
-    assert phase in ("gather_kv", "gather_q", "ring"), (
+    num_gather_kv = md.pcp.num_gather_kv
+    phase = None if cache_phase is None else cache_phase.lower()
+    assert phase in (None, "gather_kv", "gather_q", "ring"), (
         f"cache_phase must be 'gather_kv', 'gather_q' or 'ring', got {phase!r}"
     )
 
@@ -419,6 +409,23 @@ def pcp_forward(
         dist_one = jnp.array([0, 0, 1], jnp.int32)
         dist_two = jnp.array([0, 0, 2], jnp.int32)
 
+        # ---- Cache-phase algorithm groups --------------------------------
+        # The runner orders lanes so each cache-phase algorithm owns a
+        # CONTIGUOUS range -- the same shape as the RPA kernel's
+        # decode / prefill / mixed split -- and hands us the split point:
+        #   lanes [0, num_gather_kv)        -> gather-KV
+        #   lanes [num_gather_kv, num_reqs) -> gather-Q
+        # The split is STATIC, so each group gathers exactly what it uses and
+        # each lane picks its algorithm at trace time (no masking, no wasted
+        # collective). gather-KV in particular materialises the all-gathered
+        # context on every rank, so it must NOT be sized for the whole batch.
+        n_gather_kv = min(num_gather_kv, num_reqs)
+
+        def _lane_phase(i):
+            if phase is not None:  # explicitly forced for every lane
+                return phase
+            return "gather_kv" if i < n_gather_kv else "gather_q"
+
         def _one_lane(i, kv_cache_in):
             """One request lane: cache phase + current phase, LSE-merged.
 
@@ -449,6 +456,7 @@ def pcp_forward(
             cu_i = jnp.array([0, C, C], jnp.int32).at[2].set(C + tail_real)
 
             # ---- Cache phase ------------------------------------------------
+            lane_phase = _lane_phase(i)
             kv_cache_temp = kv_cache_in
             if cache_pages == 0:
                 # Nothing cached anywhere in this batch (first chunk of a
@@ -456,7 +464,7 @@ def pcp_forward(
                 # cache, be fully masked, and have its -inf result discarded
                 # by merge_attn_states. Skip it outright.
                 context_out = context_lse = None
-            elif phase == "ring":
+            elif lane_phase == "ring":
                 cu_ring = jnp.array([0, local_per_req, local_per_req],
                                     jnp.int32)
                 context_out, _, context_lse = _rpa_cp_call(
@@ -477,7 +485,7 @@ def pcp_forward(
                     use_causal_mask=False,
                     update_kv_cache=False,
                     **common)
-            elif phase == "gather_kv":
+            elif lane_phase == "gather_kv":
                 cu_kv = jnp.array([0, local_per_req, local_per_req], jnp.int32)
                 kv_src = jnp.take(kv_cache_in, pi_i[:cache_pages], axis=0)
                 kv_tok = lax.all_gather(kv_src, pcp_axis, axis=2, tiled=False)

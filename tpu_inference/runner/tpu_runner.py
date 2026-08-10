@@ -2909,6 +2909,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # (num_computed) and the packed logits indices are PCP-specific.
         pcp_metadata = None
         pcp_nat_to_packed = None
+        pcp_lane_of_req = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             assert not self.uses_mrope, "PCP does not support M-RoPE yet."
@@ -2919,6 +2920,50 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             Lreq = padded_num_scheduled_tokens_per_dp_rank // R
             C = Lreq // two_p  # head-tail chunk size
             region = R * 2 * C  # per-pcp-rank contiguous region = tokens//pcp
+
+            # --- per-request cache-phase algorithm, then lane grouping ------
+            # Mimics the kernel's decode/prefill/mixed split: requests are
+            # ORDERED so that each algorithm owns a CONTIGUOUS lane range, and
+            # the cumulative group ends are handed to pcp_forward, which
+            # launches one cache-phase kernel per algorithm over its own range
+            # (an empty range does no work).
+            #   group 0 = gather_kv, group 1 = gather_q, group 2 = ring.
+            # The rule matches the estimate pcp_forward used to use: gather-KV
+            # moves ctx*NKV, gather-Q moves 2*lane*NQ and needs ~2x the raw
+            # volume advantage (two collective rounds + an LSE reweight).
+            parallel_config = self.vllm_config.parallel_config
+            num_q_heads = self.model_config.get_num_attention_heads(
+                parallel_config)
+            num_kv_heads = self.model_config.get_num_kv_heads(parallel_config)
+            gpage = self.block_size * pcp_size  # tokens per token-ordered page
+            comm_q_term = 2 * Lreq * num_q_heads
+            ncomp_of_req = [
+                int(self.input_batch.num_computed_tokens_cpu[r])
+                for r in req_idxs
+            ]
+            cache_pages_of_req = [
+                round_up_pcp_cache_pages(n, self.block_size,
+                                         self.max_num_blocks_per_req)
+                for n in ncomp_of_req
+            ]
+            # 0 = gather_kv, 1 = gather_q (ring is opt-in, group 2, unused here)
+            algo_of_req = [
+                0 if cp_i * gpage * num_kv_heads < comm_q_term else 1
+                for cp_i in cache_pages_of_req
+            ]
+            n_reqs_pcp = len(counts)
+            lane_order = [j for j in range(n_reqs_pcp) if algo_of_req[j] == 0]
+            lane_order += [j for j in range(n_reqs_pcp) if algo_of_req[j] == 1]
+            n_gather_kv = sum(1 for a in algo_of_req if a == 0)
+            # The split point is STATIC: it selects which lanes take the
+            # gather-KV path, so each group's collective is sized to exactly
+            # the lanes that use it (sizing gather-KV for the whole batch
+            # needs num_reqs x the context and blows out HBM).
+            # lane_of_req[j] = the lane that carries request j
+            lane_of_req = np.empty(n_reqs_pcp, np.int64)
+            for lane, j in enumerate(lane_order):
+                lane_of_req[j] = lane
+            pcp_lane_of_req = lane_of_req
 
             positions_nat = np.asarray(positions).copy()
             ids_nat = np.asarray(input_ids_view).copy()
@@ -2931,41 +2976,48 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             kv_cache_lens_np = np.zeros(R, np.int32)
             logits_indices_view[:] = -1
-            max_num_computed = 0
+            max_num_computed = max(ncomp_of_req, default=0)
 
             start = 0
-            for i, (nc_i, req_idx) in enumerate(zip(counts, req_idxs)):
-                nc_i = int(nc_i)
-                ncomp = int(self.input_batch.num_computed_tokens_cpu[req_idx])
-                kv_cache_lens_np[i] = ncomp
-                max_num_computed = max(max_num_computed, ncomp)
-                p = np.arange(nc_i)
+            for j, nc_j in enumerate(counts):
+                nc_j = int(nc_j)
+                i = int(lane_of_req[j])  # this request's LANE
+                kv_cache_lens_np[i] = ncomp_of_req[j]
+                p = np.arange(nc_j)
                 c = p // C
                 o = p % C
                 is_head = c < pcp_size
                 rank = np.where(is_head, c, two_p - 1 - c)
                 dest = (rank * region + i * (2 * C) + np.where(is_head, 0, C) +
                         o)
-                packed_ids[dest] = ids_nat[start:start + nc_i]
-                packed_pos[dest] = positions_nat[start:start + nc_i]
-                pcp_nat_to_packed[start:start + nc_i] = dest
-                # logits_indices: packed position of the last real token.
-                last = nc_i - 1
+                packed_ids[dest] = ids_nat[start:start + nc_j]
+                packed_pos[dest] = positions_nat[start:start + nc_j]
+                pcp_nat_to_packed[start:start + nc_j] = dest
+                # logits_indices stay in REQUEST order (the sampler's output
+                # slot j must be request j) but point into request j's lane.
+                last = nc_j - 1
                 lc = last // C
                 lo = last % C
                 if lc < pcp_size:
                     lrank, head_col = lc, 0
                 else:
                     lrank, head_col = two_p - 1 - lc, C
-                logits_indices_view[i] = (lrank * region + i * (2 * C) +
+                logits_indices_view[j] = (lrank * region + i * (2 * C) +
                                           head_col + lo)
-                start += nc_i
+                start += nc_j
 
             input_ids_view[:] = packed_ids
             positions[:] = packed_pos
 
+            # seq_lens were filled in REQUEST order by the generic path above;
+            # pcp_forward indexes them by LANE, so permute.
+            seq_lens_nat = np.asarray(seq_lens_view).copy()
+            for j in range(n_reqs_pcp):
+                seq_lens_view[int(lane_of_req[j])] = seq_lens_nat[j]
+
             repl = NamedSharding(self.mesh, PartitionSpec())
             pcp_metadata = PCPMetadata(
+                num_gather_kv=n_gather_kv,
                 kv_cache_lens=device_array(self.mesh,
                                            kv_cache_lens_np,
                                            sharding=repl),
@@ -3040,9 +3092,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         out=block_tables_view[req_offset:req_offset +
                                               _num_reqs])
 
-            # PCP places one request per lane, so each lane row already carries
-            # its own request's block table from the generic fill above
-            # (pcp_forward duplicates it for that lane's head/tail seqs).
+            if pcp_lane_of_req is not None:
+                # PCP places one request per LANE and groups the lanes by
+                # cache-phase algorithm, so the rows (filled above in request
+                # order) must be permuted into lane order. pcp_forward
+                # duplicates a lane's row for that lane's head/tail seqs.
+                rows = block_tables_view[:len(pcp_lane_of_req)].copy()
+                for j, lane in enumerate(pcp_lane_of_req):
+                    block_tables_view[int(lane)] = rows[j]
 
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
