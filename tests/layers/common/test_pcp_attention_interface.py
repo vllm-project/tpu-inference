@@ -135,15 +135,10 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         return jnp.asarray(np.concatenate(shards, axis=1), DTYPE)
 
     def _page_indices(self, pps):
-        """The fused current phase has TWO seqs that are the SAME request. The
-        kernel offsets page_indices by `seq_idx * pages_per_seq` and the WRITING
-        seq is the tail (seq 1), so seq 1 must carry a COPY of the request's
-        pages -- zeros would send every write to page 0."""
-        pi = np.arange(pps, dtype=np.int32)
-        out = np.zeros(MAX_SEQ * pps, np.int32)
-        out[:pps] = pi
-        out[pps:2 * pps] = pi
-        return jnp.asarray(out)
+        """One block-table row per request LANE. `pcp_forward` duplicates a
+        lane's row internally for that lane's head/tail seqs, so the caller
+        supplies exactly `num_reqs * pages_per_seq` entries."""
+        return jnp.asarray(np.arange(pps, dtype=np.int32))
 
     def _cache_at_pages(self, k, v, ntok, pcp, pps, npages, phys):
         """Build an `npages`-page global pcp cache in which the request's
@@ -222,24 +217,16 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         npages = max(pps, 1)
         cache = self._strided_cache(k_prev, v_prev, L, pcp, npages)
 
-        def pad1(xs):
-            return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
-
-        # Both fused seqs are the SAME request -> [T, T] / [P, P].
-        kv_lens = pad1([kv_total, kv_total])
-        kv_cache_lens = pad1([L, L])
-        cu_q_lens, q_pos_offsets = _pcp_meta(pcp, C, num_current)
-        distribution = jnp.array([0, 0, 2], jnp.int32)  # head + tail
-
+        # Lengths are PER REQUEST (one lane here); pcp_forward expands each
+        # lane into its head/tail seqs internally.
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
-            seq_lens=kv_lens,
+            seq_lens=jnp.array([kv_total], jnp.int32),
             block_tables=self._page_indices(pps),
-            request_distribution=distribution,
+            request_distribution=jnp.array([0, 0, 1], jnp.int32),
+            padded_num_reqs=1,
             pcp=PCPMetadata(
-                query_start_loc=cu_q_lens,
-                kv_cache_lens=kv_cache_lens,
-                q_pos_offsets=q_pos_offsets,
+                kv_cache_lens=jnp.array([L], jnp.int32),
                 # pages the CACHED tokens occupy (a token-ordered page holds
                 # PAGE*pcp tokens); 0 elides the cache phase.
                 cache_pages=cdiv(L, PAGE * pcp),
@@ -418,16 +405,14 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             self.assertLess(hint, pps,
                             "hint must be tighter than pages_per_seq")
 
-        cu, qpos = _pcp_meta(pcp, C, num_current)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
-            seq_lens=pad1([kv_total, kv_total]),
+            seq_lens=jnp.array([kv_total], jnp.int32),
             block_tables=pi,
-            request_distribution=jnp.array([0, 0, 2], jnp.int32),
+            request_distribution=jnp.array([0, 0, 1], jnp.int32),
+            padded_num_reqs=1,
             pcp=PCPMetadata(
-                query_start_loc=cu,
-                kv_cache_lens=pad1([L, L]),
-                q_pos_offsets=qpos,
+                kv_cache_lens=jnp.array([L], jnp.int32),
                 cache_pages=hint,
             ),
         )
@@ -476,24 +461,16 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         npages = 4 * pps
         cache = jnp.full((npages, PAGE * pcp, *self._cache_dims(1)), jnp.nan,
                          DTYPE)
-        pi = np.zeros(MAX_SEQ * pps, np.int32)
-        pi[:pps] = np.arange(pps)
-        pi[pps:2 * pps] = np.arange(pps)
-        pi = jnp.asarray(pi)
+        pi = jnp.asarray(np.arange(pps, dtype=np.int32))
 
-        def pad1(xs):
-            return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
-
-        cu, qpos = _pcp_meta(pcp, C, num_current)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
-            seq_lens=pad1([kv_total, kv_total]),
+            seq_lens=jnp.array([kv_total], jnp.int32),
             block_tables=pi,
-            request_distribution=jnp.array([0, 0, 2], jnp.int32),
+            request_distribution=jnp.array([0, 0, 1], jnp.int32),
+            padded_num_reqs=1,
             pcp=PCPMetadata(
-                query_start_loc=cu,
-                kv_cache_lens=pad1([0, 0]),
-                q_pos_offsets=qpos,
+                kv_cache_lens=jnp.array([0], jnp.int32),
                 cache_pages=0,
             ),
         )
