@@ -175,13 +175,56 @@ _QWEN3_CODER_TP8_V7X = {
         64,
         "none",
     ): (1, 1, 40960, 1, 2),
+    # Medium context (8k / 16k / 32k), FP8 KV. The heuristic maximises bkv_sz
+    # under the VMEM cap at a fixed batch_size=8, which lands on bkv=11008 --
+    # so a 16k request needs two k-blocks and a 32k request three, purely
+    # because the tile does not divide the context. Trading batch_size down
+    # buys a bkv that covers the whole context in one block, and one k-block
+    # per sequence beats a wider batch: -6 to -8% at 8k, -9 to -12% at 16k and
+    # -14 to -17% at 32k, measured at concurrency 8/16/32/64 (3-rep medians,
+    # no concurrency regresses). 1k and 4k already fit one block, and 64k+ is
+    # bandwidth-bound, so neither moves.
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        8192,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 8192, 4, 3),
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        16384,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 16384, 4, 3),
+    (
+        "TPU7x",
+        2048,
+        "q_bfloat16_kv_float8_e4m3fn",
+        "q16_kv1_d128",
+        32768,
+        "d",
+        "seq_along_lane",
+        64,
+        "none",
+    ): (1, 1, 32768, 2, 3),
     # FP8 KV entries for max_model_len 64k / 128k / 256k / 512k / 1M at
     # batched_tokens_bucket=64 (single-token decode with num_seqs <= 64).
-    # 64k-256k use triple-buffered bkv=65536, which fits the actual VMEM
-    # allocation but exceeds the heuristic's 80% cap; the extra buffer
-    # hides more DMA when there are few outer steps per sequence. 512k
-    # and 1M drop to nbuf=2 with a wider tile once enough outer steps
-    # amortise the buffer count.
+    # All FP8 KV shapes 64k-1M use triple-buffered bkv=65536: with only 2
+    # buffers we can never keep more than one DMA in flight, which caps
+    # measured HBM at ~30% of the 8 TB/s peak on TPU v7x. Deepening to 3
+    # buffers doubles concurrent DMAs and closes the bandwidth gap on
+    # long-context decode. bkv=65536 (one full page pack) is small enough
+    # that 3 * 65536 * 128 * 2 (K+V) * 1 (fp8) = 48 MB fits comfortably.
     (
         "TPU7x",
         2048,
@@ -225,7 +268,7 @@ _QWEN3_CODER_TP8_V7X = {
         "seq_along_lane",
         64,
         "none",
-    ): (1, 1, 77568, 1, 2),
+    ): (1, 1, 65536, 1, 3),
     (
         "TPU7x",
         2048,
@@ -236,7 +279,7 @@ _QWEN3_CODER_TP8_V7X = {
         "seq_along_lane",
         64,
         "none",
-    ): (1, 1, 77568, 1, 2),
+    ): (1, 1, 65536, 1, 3),
 }
 TUNED_BLOCK_SIZES: dict[tuple, tuple[int, int, int, int, int]] = {}
 TUNED_BLOCK_SIZES.update(_QWEN3_CODER_TP8_V7X)
