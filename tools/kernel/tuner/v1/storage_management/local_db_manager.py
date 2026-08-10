@@ -33,7 +33,12 @@ class LocalDbManager(StorageManager):
     logged for visibility.
     """
 
-    def __init__(self, worker_id=None, dry_run=False, db_path=None):
+    def __init__(self,
+                 worker_id=None,
+                 dry_run=False,
+                 db_path=None,
+                 results_batch_size=10):
+        super().__init__(results_batch_size=results_batch_size)
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
@@ -132,6 +137,7 @@ class LocalDbManager(StorageManager):
         return {}
 
     def flush(self):
+        self.flush_results()
         if not self.buffer or self.dry_run:
             return
         table = self._read_table('KernelTuningCases')
@@ -269,8 +275,8 @@ class LocalDbManager(StorageManager):
             and start <= row['CaseId'] <= end
         }
 
-    def save_results_batch(self, results):
-        if not results:
+    def save_results_batch(self):
+        if not self.results_buffer:
             return
         cols = ('ID', 'RunId', 'CaseId', 'ProcessedStatus', 'WorkerID',
                 'Latency', 'WarmupTime', 'TotalTime', 'ProcessedAt', 'TPU')
@@ -280,8 +286,20 @@ class LocalDbManager(StorageManager):
             (row['ID'], row['RunId'], row['CaseId']): i
             for i, row in enumerate(table)
         }
-        for result in results:
-            row = dict(zip(cols, result))
+        for result in self.results_buffer:
+            t = (
+                result.case_set_id,
+                result.run_id,
+                result.case_id,
+                result.processed_status,
+                result.worker_id,
+                result.latency,
+                result.warmup_time,
+                result.total_time,
+                result.processed_at,
+                result.tpu,
+            )
+            row = dict(zip(cols, t))
             key = (row['ID'], row['RunId'], row['CaseId'])
             if key in index:
                 table[index[key]] = row
@@ -289,7 +307,8 @@ class LocalDbManager(StorageManager):
                 index[key] = len(table)
                 table.append(row)
         self._write_table('CaseResults', table)
-        logger.info(f'Saved {len(results)} results to CaseResults')
+        logger.info(f'Saved {len(self.results_buffer)} results to CaseResults')
+        self.results_buffer.clear()
 
     def get_bucket_configs(self, cs_id, start, end):
         table = self._read_table('KernelTuningCases')
@@ -337,7 +356,10 @@ class LocalDbManager(StorageManager):
 
     def close(self):
         """Closes the database manager, ensuring all buffered data is flushed."""
+        if getattr(self, '_closed', False):
+            return
         self.flush()
+        self._closed = True
         logger.info(
             f'Database at {self.db_path} closed with {self.current_case_id} cases, {self.invalid_count} invalid cases.'
         )
