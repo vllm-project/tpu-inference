@@ -6,7 +6,6 @@ generates textual outputs. It measures raw tokens-per-second throughput and
 optionally exports JAX XProf traces for analysis in TensorBoard.
 Results are appended to a central CSV alongside the reproduction command.
 """
-
 import argparse
 import time
 import os
@@ -28,13 +27,8 @@ def main(args):
 
     llm = LLM(model=args.model, **engine_kwargs)
     
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-    ] * (args.batch_size // 2)
-    
-    if len(prompts) < args.batch_size:
-        prompts.extend(["Fill"] * (args.batch_size - len(prompts)))
+    # Generate exact dummy token lengths according to input_len and batch_size
+    dummy_token_ids = [[0] * args.input_len for _ in range(args.batch_size)]
 
     # Temperature controls shape of sampling probability distribution 
     #   higher temperature -> more deterministic sampling
@@ -43,7 +37,7 @@ def main(args):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=args.output_len)
 
     # Warmup
-    llm.generate(prompts, sampling_params)
+    llm.generate(prompt_token_ids=dummy_token_ids, sampling_params=sampling_params)
 
     if args.trace:
         options = jax.profiler.ProfileOptions()
@@ -59,7 +53,7 @@ def main(args):
         jax.profiler.start_trace(base_dir, profiler_options=options)
 
     start_time = time.time()
-    outputs = llm.generate(prompts, sampling_params)
+    outputs = llm.generate(prompt_token_ids=dummy_token_ids, sampling_params=sampling_params)
     end_time = time.time()
 
     if args.trace:
