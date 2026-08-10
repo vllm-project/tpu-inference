@@ -689,9 +689,9 @@ class InputBatch:
 
     @property
     def max_decode_tokens(self) -> int:
-        is_spec_decode = getattr(self, "is_spec_decode", False)
-        num_spec_tokens = getattr(self, "num_speculative_tokens", 0)
-        return (num_spec_tokens + 1) if (is_spec_decode and envs.USE_BATCHED_RPA_KERNEL) else 1
+        if self.is_spec_decode and envs.USE_BATCHED_RPA_KERNEL:
+            return self.num_speculative_tokens + 1
+        return 1
 
     @property
     def max_num_logprobs(self) -> Optional[int]:
