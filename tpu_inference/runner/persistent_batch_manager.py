@@ -17,8 +17,8 @@ from typing import Dict
 import jax
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
-from tpu_inference import envs
 from tpu_inference.logger import init_logger
+from tpu_inference import envs
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
@@ -50,24 +50,22 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
-        # Check if spec decoding is active on the input batch and derive the decode token stride.
-        # Standard decode uses 1 token; spec decode verification uses (num_speculative_tokens + 1) tokens.
-        is_spec_decode = getattr(self.input_batch, "is_spec_decode", False)
-        if not isinstance(is_spec_decode, bool):
-            is_spec_decode = False
-        num_spec_tokens = getattr(self.input_batch, "num_speculative_tokens",
-                                  0)
-        if not isinstance(num_spec_tokens, int):
-            num_spec_tokens = 0
-        max_decode_tokens = (num_spec_tokens +
-                             1) if (is_spec_decode
-                                    and envs.USE_BATCHED_RPA_KERNEL) else 1
+        max_decode_tokens = self.input_batch.max_decode_tokens
 
-        # If all scheduled requests match the decode threshold, no reordering is needed.
+        if (
+            max_decode_tokens == 1
+            and scheduler_output.total_num_scheduled_tokens == num_reqs
+        ):
+            num_decode = num_reqs
+            self.input_batch.request_distribution = [
+                num_decode, num_decode, num_reqs
+            ]
+            return swap_cnt
+
+        # Check if all scheduled requests match the decode threshold
         all_decode = True
         for req_id in self.input_batch.req_ids[:num_reqs]:
-            if scheduler_output.num_scheduled_tokens[
-                    req_id] > max_decode_tokens:
+            if scheduler_output.num_scheduled_tokens[req_id] > max_decode_tokens:
                 all_decode = False
                 break
 
@@ -84,12 +82,10 @@ class PersistentBatchManager:
             i_req_id = self.input_batch.req_ids[i]
             j_req_id = self.input_batch.req_ids[j]
 
-            if scheduler_output.num_scheduled_tokens[
-                    i_req_id] <= max_decode_tokens:
+            if scheduler_output.num_scheduled_tokens[i_req_id] <= max_decode_tokens:
                 # i is a decode request, move to the next one.
                 i += 1
-            elif scheduler_output.num_scheduled_tokens[
-                    j_req_id] > max_decode_tokens:
+            elif scheduler_output.num_scheduled_tokens[j_req_id] > max_decode_tokens:
                 # j is a prefill request, move to the previous one.
                 j -= 1
             else:

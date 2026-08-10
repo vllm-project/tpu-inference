@@ -2828,16 +2828,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         positions = self.positions_cpu[:padded_total_num_scheduled_tokens]
         mrope_positions = self.mrope_positions_cpu[:, :
                                                    padded_total_num_scheduled_tokens]
-        is_spec_decode = getattr(self.input_batch, "is_spec_decode", False)
-        if not isinstance(is_spec_decode, bool):
-            is_spec_decode = False
-        num_spec_tokens = getattr(self.input_batch, "num_speculative_tokens",
-                                  0)
-        if not isinstance(num_spec_tokens, int):
-            num_spec_tokens = 0
-        max_decode_tokens = (num_spec_tokens +
-                             1) if (is_spec_decode
-                                    and envs.USE_BATCHED_RPA_KERNEL) else 1
+        max_decode_tokens = self.input_batch.max_decode_tokens
 
         _request_distribution = []
         for dp_rank in range(dp_size):
@@ -2846,8 +2837,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Count decode requests (those with num_scheduled_tokens <= max_decode_tokens) in this DP rank
             num_decode_in_dp_rank = 0
             for req_id in req_ids_dp[dp_rank]:
-                if scheduler_output.num_scheduled_tokens[
-                        req_id] <= max_decode_tokens:
+                if scheduler_output.num_scheduled_tokens[req_id] <= max_decode_tokens:
                     num_decode_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])
