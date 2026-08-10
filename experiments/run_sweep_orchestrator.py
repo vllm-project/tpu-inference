@@ -22,13 +22,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_PATH = os.path.join(BASE_DIR, "tpu_profile_vllm.py")
 DEFAULT_RESULT_DIR = os.path.join(BASE_DIR, "results")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="Path to YAML config")
-    parser.add_argument("--result-dir", default=DEFAULT_RESULT_DIR, help="Base directory for results")
-    parser.add_argument("--experiment-id", default=None, help="Pass to resume sweep from specific ID")
-    args = parser.parse_args()
-
+def main(args):
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
@@ -148,9 +142,16 @@ def main():
         except subprocess.CalledProcessError as e:
             print(f"!!! CRASH DETECTED. This usually indicates a limits Wall.")
             print(f"!!! Cleaning TPU locks and safely moving to the next matrix dimension...")
-            subprocess.run(["sudo", "rm", "-f", "/tmp/libtpu_lockfile"])
+            subprocess.run(["pkill", "-9", "-f", "tpu_profile_vllm.py"])
+            subprocess.run(["rm", "-f", "/tmp/libtpu_lockfile"])
                 
     print(f"Sweep configuration {args.config} complete! Results written to {csv_file}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, help="Path to YAML config")
+    parser.add_argument("--result-dir", default=DEFAULT_RESULT_DIR, help="Base directory for results")
+    parser.add_argument("--experiment-id", default=None, help="Pass to resume sweep from specific ID")
+    args = parser.parse_args()
+
+    main(args=args)

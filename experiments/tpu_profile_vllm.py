@@ -14,6 +14,7 @@ import json
 import csv
 from vllm import LLM, SamplingParams
 import jax
+import numpy as np
 
 def main(args):
     print(f"\n========== Benchmark Results ==========\nInitializing model: {args.model}")
@@ -27,8 +28,13 @@ def main(args):
 
     llm = LLM(model=args.model, **engine_kwargs)
     
-    # Generate exact dummy token lengths according to input_len and batch_size
-    dummy_token_ids = [[0] * args.input_len for _ in range(args.batch_size)]
+    # Generate exact dummy token lengths according to input_len and batch_size 
+    # Note: vocabulary size of Gemma 4 is 262144, far larger than our random range of 0 to 9999
+    dummy_prompt_token_ids = np.random.randint(10000, size=(args.batch_size, args.input_len))
+    prompts = [
+        {"prompt_token_ids": [int(x) for x in batch]} 
+        for batch in dummy_prompt_token_ids
+    ]
 
     # Temperature controls shape of sampling probability distribution 
     #   higher temperature -> more deterministic sampling
@@ -41,7 +47,7 @@ def main(args):
                                      ignore_eos=True)
 
     # Warmup
-    llm.generate(prompt_token_ids=dummy_token_ids, sampling_params=sampling_params)
+    llm.generate(prompts=prompts, sampling_params=sampling_params)
 
     if args.trace:
         options = jax.profiler.ProfileOptions()
@@ -57,7 +63,7 @@ def main(args):
         jax.profiler.start_trace(base_dir, profiler_options=options)
 
     start_time = time.time()
-    outputs = llm.generate(prompt_token_ids=dummy_token_ids, sampling_params=sampling_params)
+    outputs = llm.generate(prompts=prompts, sampling_params=sampling_params)
     end_time = time.time()
 
     if args.trace:
