@@ -52,8 +52,8 @@ steps:
   #     BS=1 8k/1k, matrix {1k/1k, 8k/1k} x {conc 8, conc 64} — the
   #     conc-64 cells get real KV capacity for the first time.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13g: podfix + loop correctness fixes, loop off, unpinned pool, tuned streamer"
-    key: tpu7x_k3_attempt13g
+  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13i: INSTRUMENTED accuracy-collapse run (unpinned compact, scoring-first, wrong-dump, churn trace)"
+    key: tpu7x_k3_attempt13i
     timeout_in_minutes: 420
     env:
       TPU_VERSION: "tpu7x"
@@ -73,6 +73,9 @@ steps:
       # also a hard requirement of the sharded expert streaming below.
       MXFP4_SHARD_THEN_DECODE: "1"
       K3_SHARDED_EXPERT_STREAMING: "1"
+      # Per-step slot/index trace (samples: first 200 steps + every 50th).
+      CHURN_TRACE: "1"
+      CHURN_TRACE_EVERY: "50"
     agents:
       queue: tpu_v7x_32_queue
     commands:
@@ -95,4 +98,5 @@ steps:
             --concurrency 4 \
             --long-tokens 256 \
             --needle-tokens 8000 \
-          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --full-gsm8k --bs1-bench --matrix-bench"
+          && python3 /workspace/tpu_inference/tests/e2e/multihost/k3_server_scoring_probe.py \
+          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --skip-bench"

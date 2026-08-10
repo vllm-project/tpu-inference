@@ -105,11 +105,15 @@ else
     --model local-completions \
     --model_args "model=${MODEL},base_url=${BASE}/v1/completions,num_concurrent=8,max_retries=2,timeout=600,tokenized_requests=False,tokenizer_backend=None" \
     --tasks gsm8k ${GSM8K_LIMIT_ARGS[@]+"${GSM8K_LIMIT_ARGS[@]}"} \
+    --log_samples --output_path /root/lm_eval_out \
     2>&1 | tee /root/k3_gsm8k.log
   acc_rc=${PIPESTATUS[0]}
   echo "[k3-acc] rc=${acc_rc} (124 means the cap killed a hang)"
   grep -E "strict-match|flexible-extract|exact_match" /root/k3_gsm8k.log \
     | tail -10 || true
+  # Dump the WRONG generations (full, untruncated) — on a failing run the
+  # diagnostic value is entirely in the failures, not the first N samples.
+  python3 "$(dirname "$0")/k3_dump_wrong_samples.py" /root/lm_eval_out || true
 fi
 
 run_bench() {
