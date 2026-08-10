@@ -2,7 +2,8 @@
 # Importance: This config defines granular blocks to 
 # instruct the JAX XProf profiler to capture exact periodic TPU hardware component counters
 # Ony works on v7/v7x and above. 
-
+engine_args:
+  enable_prefix_caching: false
 tensor_parallel_size: 4
 dtype: bfloat16
 max_model_len: 8192

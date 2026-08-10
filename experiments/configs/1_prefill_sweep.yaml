@@ -3,12 +3,13 @@
 # increasing input_len, this config measures how efficiently the TPU processes 
 # growing context windows during the initial Attention-Prefill phase.
 
+engine_args:
+  enable_prefix_caching: false
 tensor_parallel_size: 4
 dtype: bfloat16
-max_model_len: 200000
+max_model_len: 200001
 env_vars:
   VLLM_ENABLE_V1_MULTIPROCESSING: '0'
-engine_args: {}
 sweep_matrix:
   output_len: [1]
   batch_size: [1]

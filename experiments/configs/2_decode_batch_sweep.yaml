@@ -2,13 +2,13 @@
 # Importance: Evaluates the system limit by holding context size constant and 
 # exponentially scaling the batch size. This helps determine the max operational 
 # batch capacity before TPU HBM memory (KV Cache limit) is exhausted.
-
+engine_args:
+  enable_prefix_caching: false
 tensor_parallel_size: 4
 dtype: bfloat16
 max_model_len: 131500
 env_vars:
   VLLM_ENABLE_V1_MULTIPROCESSING: '0'
-engine_args: {}
 sweep_matrix:
   output_len: [64]
   batch_size: [1, 4, 16, 64, 128, 256]
