@@ -36,6 +36,7 @@ CORRECTNESS_MAX_TOKENS="${CORRECTNESS_MAX_TOKENS:-64}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
 RANDOM_SEED="${RANDOM_SEED:-10}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-10}"
+TEST_MODE="${TEST_MODE:-2}" # 1: benchmark, 2: correctness, 3: both
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
@@ -61,6 +62,13 @@ if [[ "${TPU_VERSION}" != "tpu7x" ]]; then
   echo "ERROR: This test requires TPU_VERSION=tpu7x." >&2
   exit 1
 fi
+case "${TEST_MODE}" in
+  1 | 2 | 3) ;;
+  *)
+    echo "ERROR: TEST_MODE must be 1 (benchmark), 2 (correctness), or 3 (both)." >&2
+    exit 2
+    ;;
+esac
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 TOP_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
@@ -282,36 +290,48 @@ run_correctness_phase() {
   cat "${LOG_DIR}/correctness.txt"
 }
 
-echo "--- Generating deterministic non-speculative baseline outputs"
-start_server baseline
-run_correctness_phase baseline
-docker cp "${CONTAINER_NAME}:${BASELINE_OUTPUT}" "${LOG_DIR}/baseline.json" 2>/dev/null || true
-stop_server
+if [[ "${TEST_MODE}" == "2" || "${TEST_MODE}" == "3" ]]; then
+  echo "--- Generating deterministic non-speculative baseline outputs"
+  start_server baseline
+  run_correctness_phase baseline
+  docker cp "${CONTAINER_NAME}:${BASELINE_OUTPUT}" "${LOG_DIR}/baseline.json" 2>/dev/null || true
+  stop_server
 
-echo "--- Waiting for all TPU resources to return to the Ray cluster"
-timeout "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}" \
-  docker exec "${CONTAINER_NAME}" python3 "${VERIFY_SCRIPT}" --phase wait \
-    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
-    --resource-wait-seconds "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}"
+  echo "--- Waiting for all TPU resources to return to the Ray cluster"
+  timeout "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}" \
+    docker exec "${CONTAINER_NAME}" python3 "${VERIFY_SCRIPT}" --phase wait \
+      --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+      --resource-wait-seconds "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}"
 
-echo "--- Comparing n-gram speculative outputs with the baseline"
-start_server speculative
-run_correctness_phase speculative
-docker cp "${CONTAINER_NAME}:${SPECULATIVE_OUTPUT}" "${LOG_DIR}/speculative.json" 2>/dev/null || true
-assert_ngram_draft_tokens
+  echo "--- Comparing n-gram speculative outputs with the baseline"
+  start_server speculative
+  run_correctness_phase speculative
+  docker cp "${CONTAINER_NAME}:${SPECULATIVE_OUTPUT}" "${LOG_DIR}/speculative.json" 2>/dev/null || true
+  assert_ngram_draft_tokens
+fi
 
-echo "--- Running multi-host speculative benchmark"
-timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" docker exec "${CONTAINER_NAME}" \
-  vllm bench serve --backend vllm --host 127.0.0.1 --port "${VLLM_PORT}" --model "${MODEL}" \
-  --dataset-name random --random-input-len "${INPUT_LEN}" --random-output-len "${OUTPUT_LEN}" \
-  --num-prompts "${NUM_PROMPTS}" --request-rate inf --max-concurrency "${MAX_CONCURRENCY}" \
-  --trust-remote-code --seed "${RANDOM_SEED}" >"${LOG_DIR}/benchmark.txt" 2>&1
-cat "${LOG_DIR}/benchmark.txt"
-failed_requests="$(awk '/Failed requests:/ {print $3}' "${LOG_DIR}/benchmark.txt" | tail -1)"
-[[ "${failed_requests}" =~ ^[0-9]+$ && "${failed_requests}" -eq 0 ]] || {
-  echo "ERROR: Benchmark reported failed requests: ${failed_requests:-unknown}" >&2
-  exit 1
-}
+if [[ "${TEST_MODE}" == "1" ]]; then
+  echo "--- Starting n-gram speculative server for benchmark-only mode"
+  start_server speculative
+fi
+
+if [[ "${TEST_MODE}" == "1" || "${TEST_MODE}" == "3" ]]; then
+  echo "--- Running multi-host speculative benchmark"
+  if ! timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" docker exec "${CONTAINER_NAME}" \
+    vllm bench serve --backend vllm --host 127.0.0.1 --port "${VLLM_PORT}" --model "${MODEL}" \
+    --dataset-name random --random-input-len "${INPUT_LEN}" --random-output-len "${OUTPUT_LEN}" \
+    --num-prompts "${NUM_PROMPTS}" --request-rate inf --max-concurrency "${MAX_CONCURRENCY}" \
+    --trust-remote-code --seed "${RANDOM_SEED}" >"${LOG_DIR}/benchmark.txt" 2>&1; then
+    cat "${LOG_DIR}/benchmark.txt" >&2 || true
+    exit 1
+  fi
+  cat "${LOG_DIR}/benchmark.txt"
+  failed_requests="$(awk '/Failed requests:/ {print $3}' "${LOG_DIR}/benchmark.txt" | tail -1)"
+  [[ "${failed_requests}" =~ ^[0-9]+$ && "${failed_requests}" -eq 0 ]] || {
+    echo "ERROR: Benchmark reported failed requests: ${failed_requests:-unknown}" >&2
+    exit 1
+  }
+fi
 
 echo "--- Tests completed successfully"
 echo "Multi-host TPU v7x-16 n-gram speculative decoding passed: head=${HEAD_INTERNAL_IP}, worker=${WORKER_IPS}, model=${MODEL}, config=${SPECULATIVE_CONFIG}"
