@@ -95,16 +95,3 @@ One JSON object per line, one line per trajectory:
 | `prompt_len` | Initial prompt length in tokens. Taken from the first stream of each group. |
 | `out_lens` | Assistant tokens generated on each turn, in order. Its length sets the turn count. |
 | `obs_lens` | Environment observation tokens appended after each turn, in order. |
-
-Every field is used during replay; there are none to ignore. No prompt or
-completion text is needed, so a trace of 1,024 trajectories is only a few
-hundred KB and carries no task content.
-
-To build one from RL rollout dumps, walk each trajectory's assistant-token mask
-and record the length of each alternating run: runs of generated tokens become
-`out_lens`, the runs between them become `obs_lens`, and the leading run of
-non-generated tokens is `prompt_len`. Truncate to the unpadded trajectory length
-first, or trailing padding is counted as one enormous observation. While
-building, check that `prompt_len + sum(out_lens) + sum(obs_lens)` equals the
-recorded trajectory length for every row; that catches both the padding mistake
-and any off-by-one in the run extraction.

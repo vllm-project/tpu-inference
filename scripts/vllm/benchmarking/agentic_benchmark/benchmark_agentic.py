@@ -60,10 +60,6 @@ def make_token_text(tokenizer: AutoTokenizer, num_tokens: int,
                     rng: random.Random) -> str:
     """Builds text of about num_tokens tokens.
 
-    Decoding random ids and re-encoding overshoots by roughly 5%, so the text
-    is trimmed back once. That lands within a token or two, which is close
-    enough; no caller needs an exact length.
-
     Args:
         tokenizer: Tokenizer used to decode the sampled ids.
         num_tokens: Approximate token count.
