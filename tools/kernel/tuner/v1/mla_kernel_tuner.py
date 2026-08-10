@@ -34,21 +34,6 @@ from tpu_inference.utils import align_to, get_dtype_packing
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-flags.DEFINE_integer("mla_total_num_pages", 1506,
-                     "Total number of pages in the cache.")
-flags.DEFINE_integer("mla_page_size_per_kv_packing", 256,
-                     "Page size per KV packing.")
-flags.DEFINE_integer("mla_kv_packing", 4, "Packing factor for KV.")
-flags.DEFINE_integer("mla_max_num_seqs", 160,
-                     "Maximum number of sequences in the batch.")
-flags.DEFINE_integer("mla_pages_per_seq", 9, "Number of pages per sequence.")
-flags.DEFINE_integer("mla_actual_num_q_heads", 128,
-                     "Actual number of Q heads.")
-flags.DEFINE_integer("mla_actual_lkv_dim", 512, "Actual NOPE head dimension.")
-flags.DEFINE_integer("mla_actual_r_dim", 64, "Actual ROPE head dimension.")
-flags.DEFINE_string("mla_kv_dtype", "float8_e4m3fn", "KV cache data type.")
-flags.DEFINE_string("mla_q_dtype", "float8_e4m3fn", "Q activation dtype.")
-
 
 def _get_flag_value(name: str):
     """Safely retrieves a flag's value if flags are parsed, otherwise its default."""

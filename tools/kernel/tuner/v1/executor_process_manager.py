@@ -194,9 +194,12 @@ class ExecutorProcessManager:
             sys.executable,
             "-m",
             executor_module,
-            f"--kernel_tuner_name={self._kernel_tuner_name}",
             f"--run_config_path={self._run_config_path}",
         ]
+
+        from tools.kernel.tuner.v1.kernel_tuner_flags import \
+            get_present_flag_args
+        command.extend(get_present_flag_args())
 
         env = get_subprocess_env()
 

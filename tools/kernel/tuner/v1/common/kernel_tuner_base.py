@@ -271,6 +271,16 @@ class KernelTunerBase(ABC):
         step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{case_id_start}_{case_id_end}'
         yml_file_path = self.run_config.subbucket_yml_path(case_id_end)
         safe_remove_files(yml_file_path)
+        from tools.kernel.tuner.v1.kernel_tuner_flags import \
+            get_present_flag_args
+        extra_flags = get_present_flag_args(exclude_flags={
+            'run_locally',
+            'begin_case_id',
+            'end_case_id',
+        })
+        extra_flags_str = '  '.join([''] +
+                                    extra_flags) + ' ' if extra_flags else ''
+
         return {
             "label":
             f"cs_id={self.run_config.case_set_id} rid={self.run_config.run_id} Bucket([{case_id_start}, {case_id_end}))",
@@ -292,18 +302,8 @@ class KernelTunerBase(ABC):
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
                     'pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
-                    f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
-                    f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
-                    f'  --tpu_version={self.run_config.tpu_version} '
-                    f'  --tpu_cores={self.run_config.tpu_cores} '
-                    f'  --case_set_desc=\"{self.run_config.case_set_desc}\" '
-                    f'  --use_bayesian_optimization={self.run_config.use_bayesian_optimization} '
-                    f'  --n_bayesian_trials={self.tuner_config.n_bayesian_trials} '
-                    f'  --min_cases_for_bayesian={self.tuner_config.min_cases_for_bayesian} '
                     f'  --run_locally=False '
-                    f'  --tpu_queue_multi={self.run_config.tpu_queue_multi} '
-                    f'  --max_execution_minutes={self.run_config.max_execution_minutes} '
-                    f'  --job_priority={self.run_config.job_priority} '
+                    f'{extra_flags_str}'
                     f'  --begin_case_id={case_id_start} --end_case_id={case_id_end}\''
                 ),
                 LiteralString(

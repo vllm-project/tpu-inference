@@ -367,6 +367,39 @@ class TestOptimizerModule(unittest.TestCase):
             if sys.platform.startswith("linux"):
                 self.assertEqual(kwargs.get("preexec_fn"), _set_pdeathsig)
 
+    def test_executor_process_manager_flag_forwarding(self):
+        from absl import flags
+
+        from tools.kernel.tuner.v1.executor_process_manager import \
+            ExecutorProcessManager
+
+        mock_run_config = mock.MagicMock()
+        mgr = ExecutorProcessManager("mla_kernel_tuner", mock_run_config)
+
+        with mock.patch("subprocess.Popen") as mock_popen, \
+             mock.patch.object(mgr, "_read_json_response") as mock_read, \
+             mock.patch("tempfile.mkstemp") as mock_mkstemp, \
+             mock.patch("tools.kernel.tuner.v1.executor_process_manager.run_config_to_json") as mock_to_json, \
+             mock.patch("os.fdopen"):
+            mock_mkstemp.return_value = (10, "/tmp/cfg.json")
+            mock_to_json.return_value = "{}"
+            mock_proc = mock.MagicMock()
+            mock_proc.pid = 1234
+            mock_popen.return_value = mock_proc
+            mock_read.return_value = {"status": "ready"}
+
+            if "mla_max_num_seqs" in flags.FLAGS:
+                flags.FLAGS["mla_max_num_seqs"].present = 1
+                flags.FLAGS["mla_max_num_seqs"].value = 200
+
+            mgr._start()
+
+            mock_popen.assert_called_once()
+            args, _ = mock_popen.call_args
+            cmd = args[0]
+            if "mla_max_num_seqs" in flags.FLAGS:
+                self.assertIn("--mla_max_num_seqs=200", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

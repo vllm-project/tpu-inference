@@ -105,3 +105,47 @@ MIN_CASES_FOR_BAYESIAN = flags.DEFINE_integer(
     'Minimum number of total cases for a tuning key search space required to use Bayesian Optimization. '
     'Overrides default if specified via flag or KERNEL_TUNING_MIN_CASES_FOR_BAYESIAN env var.'
 )
+
+# ------------------------------------------------------------------
+# MLA Kernel Tuner Flags
+# ------------------------------------------------------------------
+MLA_TOTAL_NUM_PAGES = flags.DEFINE_integer(
+    "mla_total_num_pages", 1506, "Total number of pages in the cache.")
+MLA_PAGE_SIZE_PER_KV_PACKING = flags.DEFINE_integer(
+    "mla_page_size_per_kv_packing", 256, "Page size per KV packing.")
+MLA_KV_PACKING = flags.DEFINE_integer("mla_kv_packing", 4,
+                                      "Packing factor for KV.")
+MLA_MAX_NUM_SEQS = flags.DEFINE_integer(
+    "mla_max_num_seqs", 160, "Maximum number of sequences in the batch.")
+MLA_PAGES_PER_SEQ = flags.DEFINE_integer("mla_pages_per_seq", 9,
+                                         "Number of pages per sequence.")
+MLA_ACTUAL_NUM_Q_HEADS = flags.DEFINE_integer("mla_actual_num_q_heads", 128,
+                                              "Actual number of Q heads.")
+MLA_ACTUAL_LKV_DIM = flags.DEFINE_integer("mla_actual_lkv_dim", 512,
+                                          "Actual NOPE head dimension.")
+MLA_ACTUAL_R_DIM = flags.DEFINE_integer("mla_actual_r_dim", 64,
+                                        "Actual ROPE head dimension.")
+MLA_KV_DTYPE = flags.DEFINE_string("mla_kv_dtype", "float8_e4m3fn",
+                                   "KV cache data type.")
+MLA_Q_DTYPE = flags.DEFINE_string("mla_q_dtype", "float8_e4m3fn",
+                                  "Q activation dtype.")
+
+
+def get_present_flag_args(exclude_flags: set[str]
+                          | tuple[str, ...] = ()) -> list[str]:
+    """Returns a list of '--flag_name=value' strings for explicitly present CLI flags.
+
+    Args:
+        exclude_flags: Container of flag names to exclude from the returned list.
+
+    Returns:
+        List of CLI flag argument strings (e.g. ['--mla_max_num_seqs=200']).
+    """
+    exclude_set = set(exclude_flags)
+    exclude_set.add('generate_buildkite_pipeline')
+    args = []
+    for name in flags.FLAGS:
+        flag = flags.FLAGS[name]
+        if flag.present and name not in exclude_set:
+            args.append(f'--{name}={flag.value}')
+    return args
