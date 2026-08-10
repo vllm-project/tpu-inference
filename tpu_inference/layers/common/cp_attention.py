@@ -19,10 +19,22 @@ from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
+from tpu_inference.kernels.experimental.rpa_v3_cp.kernel.rpa_v3_cp import merge_kv
+import tpu_inference.kernels.experimental.rpa_v3_cp.write_kv as write_kv_pallas
+from tpu_inference import envs
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
+
+logger = init_logger(__name__)
+
+if envs.USE_BATCHED_RPA_KERNEL:
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
+    logger.info_once("Using experimental batched RPA kernel")
+else:
+    import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_cp
+    logger.info_once("Using default RPA kernel")
 
 # ── Shared utilities ──────────────────────────────────────────────────────────
 
@@ -68,10 +80,27 @@ def _rpa_cp_call(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    return_lse: bool = True,
+    skip_cache_attn: bool = False,
+    skip_current_attn: bool = False,
     **flags,
 ):
-    """Call rpa_v3_cp with shared CP params; always returns LSE."""
-    return rpa_v3_cp.ragged_paged_attention(
+    """Call with shared CP params"""
+    if envs.USE_BATCHED_RPA_KERNEL:
+        from tpu_inference.kernels.experimental.batched_rpa import \
+            configs as brpa_configs
+        if skip_cache_attn:
+            scope = brpa_configs.AttentionScope.NEW_TOKENS_ONLY
+        elif skip_current_attn:
+            scope = brpa_configs.AttentionScope.CACHE_ONLY
+        else:
+            scope = brpa_configs.AttentionScope.FULL
+        flags['attention_scope'] = scope
+        flags['use_causal_mask'] = True
+    else:
+        flags['skip_cache_attn'] = skip_cache_attn
+        flags['skip_current_attn'] = skip_current_attn
+    return rpa_cp.ragged_paged_attention(
         q,
         k,
         v,
@@ -86,7 +115,7 @@ def _rpa_cp_call(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
-        return_lse=True,
+        return_lse=return_lse,
         **flags,
     )
 
@@ -152,6 +181,7 @@ def dcp_forward(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    is_decode: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """DCP attention forward — single shard_map over the 'dcp' axis.
 
@@ -162,6 +192,22 @@ def dcp_forward(
       4. current phase         attend local Q against this rank's new tokens
       5. merge_attn_states     lse-weighted combine
     """
+    if is_decode and envs.DCP_DECODE_ONLY_OPT:
+        return dcp_forward_decode_only(
+            kv_cache=kv_cache,
+            q=q,
+            k=k,
+            v=v,
+            attention_metadata=md,
+            mesh=mesh,
+            head_dim_original=head_dim_original,
+            sm_scale=sm_scale,
+            attention_chunk_size=attention_chunk_size,
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
+        )
+
     if head_dim_original is None:
         head_dim_original = q.shape[-1]
     if sm_scale is None:
@@ -189,7 +235,6 @@ def dcp_forward(
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD, None, None)
-    print(f"page_size={kv_cache.shape[1]}")
 
     common = dict(sm_scale=sm_scale,
                   q_scale=q_scale,
@@ -324,6 +369,9 @@ def pcp_forward(
       4. current phase         local Q (head+tail) attends all-gathered current KV
       5. merge_attn_states     lse-weighted combine
     """
+    if envs.USE_BATCHED_RPA_KERNEL:
+        raise NotImplementedError(
+            "PCP is not supported with USE_BATCHED_RPA_KERNEL.")
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
     two_p = 2 * pcp_size
@@ -514,3 +562,120 @@ def pcp_forward(
         check_vma=False,
     )(q, k, v, kv_cache, md.seq_lens, md.pcp.kv_cache_lens, md.block_tables,
       md.request_distribution, md.pcp.query_start_loc, md.pcp.q_pos_offsets)
+
+def dcp_forward_decode_only(
+    kv_cache: jax.Array,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    attention_metadata: AttentionMetadata,
+    mesh: Mesh,
+    head_dim_original: int | None = None,
+    sm_scale: float | None = None,
+    attention_chunk_size: int | None = None,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """DCP decode forward pass (q_len=1 per sequence) using a single shard_map."""
+    if head_dim_original is None:
+        head_dim_original = q.shape[-1]
+    if sm_scale is None:
+        sm_scale = head_dim_original**-0.5
+
+    md = attention_metadata
+    dcp_axis = 'dcp'
+    dcp_size = mesh.shape[dcp_axis]
+
+    # GQA/MQA: replicate KV heads to match ATTN_HEAD sharding before shard_map.
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    if tp_size > 1:
+        num_kv_heads = k.shape[1]
+        if num_kv_heads < tp_size:
+            if tp_size % num_kv_heads != 0:
+                raise ValueError(
+                    f"tp_size {tp_size} must be divisible by num_kv_heads {num_kv_heads}"
+                )
+            factor = tp_size // num_kv_heads
+            k = jnp.repeat(k, factor, axis=1)
+            v = jnp.repeat(v, factor, axis=1)
+
+    cp_rank_global = jnp.arange(dcp_size, dtype=jnp.int32)
+
+    q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                      ShardingAxisName.KV_HEAD, None, None)
+
+    common = dict(
+        sm_scale=sm_scale,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        sliding_window=attention_chunk_size,
+    )
+
+    def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
+                  page_indices_local, cu_q_lens_local, distribution_local,
+                  cp_rank):
+        # kv_cache_local.shape[1] is the local page_size after KV_CONTEXT sharding.
+        # batched_rpa supports page level interleaved.
+        # rpa_v3_cp supports token level interleaved.
+        cp_kv_cache_interleaved_size = kv_cache_local.shape[1] if envs.USE_BATCHED_RPA_KERNEL else 1
+
+        # Write new decode token first, then attend to the full updated cache.
+        merged_kv = rpa_v3_cp.merge_kv(k_local, v_local)
+        kv_cache_updated = write_kv_pallas.write_decode_kv(
+            merged_kv=merged_kv,
+            kv_cache=kv_cache_local,
+            kv_lens=kv_lens_local,
+            page_indices=page_indices_local,
+            cu_q_lens=cu_q_lens_local,
+            distribution=distribution_local,
+            cp_rank=cp_rank,
+            cp_group_size=dcp_size,
+            cp_kv_cache_interleaved_size=cp_kv_cache_interleaved_size,
+        )
+
+        q_all_heads = lax.all_gather(q_local, dcp_axis, axis=1, tiled=True)
+
+        # RPA use kv_len - q_len to decide cache_len, we +1 here to include new tokens.
+        attn_out, kv_cache_final, lse = _rpa_cp_call(
+            q_all_heads,
+            k_local,
+            v_local,
+            kv_cache_updated,
+            kv_lens_local + 1,
+            page_indices_local,
+            cu_q_lens_local,
+            distribution_local,
+            cp_rank=cp_rank,
+            cp_group_size=dcp_size,
+            update_kv_cache=False,
+            return_lse=True,
+            skip_cache_attn=False,
+            skip_current_attn=True,
+            **common,
+        )
+
+        final_output, _ = _dcp_a2a_reduce(attn_out, lse, dcp_axis, dcp_size)
+        return kv_cache_final, final_output
+
+    return jax.shard_map(
+        _shard_fn,
+        mesh=mesh,
+        in_specs=(
+            q_spec,
+            kv_spec,
+            kv_spec,
+            kv_cache_spec,
+            P(ShardingAxisName.ATTN_DATA),  # kv_lens
+            P(ShardingAxisName.ATTN_DATA),  # page_indices
+            P(ShardingAxisName.ATTN_DATA),  # cu_q_lens
+            P(ShardingAxisName.ATTN_DATA),  # distribution
+            P(ShardingAxisName.KV_CONTEXT),  # cp_rank_global
+        ),
+        out_specs=(kv_cache_spec, q_spec),
+        check_vma=False,
+    )(q, k, v, kv_cache, md.seq_lens, md.block_tables, md.query_start_loc,
+      md.request_distribution, cp_rank_global)
