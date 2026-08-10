@@ -78,7 +78,7 @@ python benchmarks/benchmark_agentic.py \
 
 ## 3. Replaying a Recorded Rollout Trace
 
-Pass `--trace-file` to replay measured trajectories. 
+Pass `--trace-file` to replay measured trajectories.
 
 ### Trace file format
 
