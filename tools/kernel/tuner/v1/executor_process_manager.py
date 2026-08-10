@@ -45,6 +45,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _set_pdeathsig():
+    """Sets PR_SET_PDEATHSIG to SIGKILL on Linux.
+
+    This ensures the child executor process receives SIGKILL if its parent worker
+    process terminates (e.g. killed by the runner or container timeout), preventing
+    orphaned processes from holding the TPU device lock.
+    """
+    try:
+        import ctypes
+        import signal
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6").prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+    except Exception:
+        pass
+
+
 class ExecutorProcessManager:
     """Manages a persistent executor subprocess for isolated run() calls.
 
@@ -188,6 +204,8 @@ class ExecutorProcessManager:
             f'Starting {executor_module} as subprocess for evaluate single case...'
         )
         logger.debug(f"Command: {' '.join(command)}")
+        preexec_fn = _set_pdeathsig if sys.platform.startswith(
+            "linux") else None
         self._proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
@@ -197,6 +215,7 @@ class ExecutorProcessManager:
             bufsize=1,  # line-buffered
             env=env,
             start_new_session=True,  # own process group for clean kill
+            preexec_fn=preexec_fn,
         )
 
         # Stream executor stderr to our logger in a background thread.
@@ -238,8 +257,6 @@ class ExecutorProcessManager:
                     f"Executor did not respond within {timeout} seconds.")
 
             line = self._read_with_timeout(remaining_timeout)
-            if not line:
-                raise EOFError("Executor stdout reached EOF unexpectedly.")
 
             line_str = line.strip()
             if not line_str:
@@ -283,7 +300,7 @@ class ExecutorProcessManager:
         line = result_container[0]
         if not line:
             raise BrokenPipeError("Executor stdout closed (process died?).")
-        return line.strip()
+        return line
 
     def _stream_stderr(self):
         """Stream executor stderr lines to our logger."""

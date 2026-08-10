@@ -23,7 +23,6 @@ from tools.kernel.tuner.v1.common.tuner_datatypes import (
     RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey, TuningStatus)
 # isort: on
 from tools.kernel.tuner.v1.common.utils import safe_remove_files
-from tools.kernel.tuner.v1.utils import get_worker_id
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -136,7 +135,6 @@ class KernelTunerBase(ABC):
             self.tuner_config.n_bayesian_trials = run_config.n_bayesian_trials
         if run_config.min_cases_for_bayesian is not None:
             self.tuner_config.min_cases_for_bayesian = run_config.min_cases_for_bayesian
-        self.worker_id = get_worker_id(run_config.worker_id)
         self.use_bayesian_optimization = tuner_config.support_bayesian_optimization and run_config.use_bayesian_optimization
 
         if run_config.use_bayesian_optimization and not tuner_config.support_bayesian_optimization:
@@ -307,7 +305,7 @@ class KernelTunerBase(ABC):
                     f'  --max_execution_minutes={self.run_config.max_execution_minutes} '
                     f'  --job_priority={self.run_config.job_priority} '
                     f'  --begin_case_id={case_id_start} --end_case_id={case_id_end}\''
-                    f'  --worker_id={self.worker_id}'),
+                ),
                 LiteralString(
                     f'if [ -f {yml_file_path} ]; then '
                     f'  buildkite-agent artifact upload {yml_file_path} && '

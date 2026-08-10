@@ -84,7 +84,7 @@ class SweepOptimizer(TuningOptimizer):
         status, avg_latency_ns, _ = executor_mgr.execute_run(
             tuning_key,
             tunable_params,
-            iters=tuner._measurement_iters if not tuner.lightweight else 5,
+            iters=tuner._measurement_iters,
             use_xprof=use_xprof)
 
         if status != TuningStatus.SUCCESS:
@@ -111,7 +111,7 @@ class SweepOptimizer(TuningOptimizer):
         if use_xprof:
             from tools.kernel.tuner.v1.common.utils import \
                 find_events_by_pattern
-            measurement_iters = tuner._measurement_iters if not tuner.lightweight else 5
+            measurement_iters = tuner._measurement_iters
             jit_kernel_pattern = tuner._resolve_kernel_pattern(tuning_key)
             # xprof dir is shared via filesystem with the executor
             matching_events, average_latency_us = find_events_by_pattern(
@@ -164,14 +164,19 @@ class SweepOptimizer(TuningOptimizer):
 
     # TODO: This function should take a time_budget parameter and yield based on this
     # time_budget so the worker thread can centralize/orchestrate with the jobs.
-    def measure_latency(self, begin_case_id: int, end_case_id: int) -> int:
+    def measure_latency(self,
+                        begin_case_id: int,
+                        end_case_id: int,
+                        bucket_id: int | None = None) -> int:
         from tools.kernel.tuner.v1.common.kernel_tuner_base import \
             ProcessedCasesTracker
 
         tuner = self.tuner
         storage_manager = self.storage_manager
         worker_id = tuner.worker_id
-        bucket_id = begin_case_id // tuner.run_config.job_bucket_size
+        if bucket_id is None:
+            bucket_id = (begin_case_id if tuner.use_bayesian_optimization else
+                         begin_case_id // tuner.run_config.job_bucket_size)
         logger.info(
             f"Worker [{worker_id}] Claimed CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
         )

@@ -109,7 +109,10 @@ class BayesianOptimizer(TuningOptimizer):
         return sweep._evaluate_single_case(cid, tuning_key, tunable_params,
                                            tracker, log_prefix)
 
-    def measure_latency(self, begin_case_id: int, end_case_id: int) -> int:
+    def measure_latency(self,
+                        begin_case_id: int,
+                        end_case_id: int,
+                        bucket_id: int | None = None) -> int:
         import optuna
 
         from tools.kernel.tuner.v1.common.kernel_tuner_base import \
@@ -119,6 +122,9 @@ class BayesianOptimizer(TuningOptimizer):
         tuner = self.tuner
         storage_manager = self.storage_manager
         worker_id = tuner.worker_id
+
+        if bucket_id is None:
+            bucket_id = begin_case_id
 
         # Bucket defined as [begin, end), get_bucket_configs uses inclusive range [start, end].
         bucket_cases = storage_manager.get_bucket_configs(
@@ -152,10 +158,11 @@ class BayesianOptimizer(TuningOptimizer):
                 SweepOptimizer
             return SweepOptimizer(tuner, storage_manager,
                                   self.executor_mgr).measure_latency(
-                                      begin_case_id, end_case_id)
+                                      begin_case_id,
+                                      end_case_id,
+                                      bucket_id=bucket_id)
 
-        # inital bucket tuning status
-        bucket_id = begin_case_id
+        # initial bucket tuning status
         params_to_case_id: dict[TunableParams, int] = {}
         for case_id, tc in bucket_cases.items():
             params_to_case_id[tc.tunable_params] = case_id

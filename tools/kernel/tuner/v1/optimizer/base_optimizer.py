@@ -53,12 +53,16 @@ class TuningOptimizer(ABC):
         pass
 
     @abstractmethod
-    def measure_latency(self, begin_case_id: int, end_case_id: int) -> int:
+    def measure_latency(self,
+                        begin_case_id: int,
+                        end_case_id: int,
+                        bucket_id: int | None = None) -> int:
         """Measures latency of cases within the given bucket range.
 
         Args:
             begin_case_id: Start case ID (inclusive).
             end_case_id: End case ID (exclusive).
+            bucket_id: Optional bucket identifier. If None, derived from begin_case_id.
 
         Returns:
             The next case ID to process (for partial completion / retry).

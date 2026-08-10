@@ -131,7 +131,7 @@ class TestOptimizerModule(unittest.TestCase):
         ) as mock_sweep_measure:
             mock_sweep_measure.return_value = 1
             bo_opt.measure_latency(0, 1)
-            mock_sweep_measure.assert_called_once_with(0, 1)
+            mock_sweep_measure.assert_called_once_with(0, 1, bucket_id=0)
 
     def test_bayesian_optimizer_fallback_min_cases(self):
         """Tests Bayesian optimizer falls back to sweep when case count < min_cases_for_bayesian."""
@@ -172,7 +172,47 @@ class TestOptimizerModule(unittest.TestCase):
         ) as mock_sweep_measure:
             mock_sweep_measure.return_value = 5
             bo_opt.measure_latency(0, 5)
-            mock_sweep_measure.assert_called_once_with(0, 5)
+            mock_sweep_measure.assert_called_once_with(0, 5, bucket_id=0)
+
+    def test_bayesian_optimizer_fallback_preserves_bucket_id(self):
+        """Tests that Bayesian optimizer fallback passes bucket_id=begin_case_id to SweepOptimizer."""
+        mock_tuner = mock.MagicMock()
+        mock_tuner.worker_id = "test_worker"
+        mock_tuner.run_config = RunConfig(
+            case_set_id="cs",
+            run_id="r1",
+            case_set_desc="desc",
+            tpu_version="v4",
+            tpu_cores=8,
+            tpu_queue_multi="queue",
+        )
+        mock_tuner.tuner_config = TunerConfig(
+            tuning_key_class=MockKey,
+            tunable_params_class=MockParams,
+            kernel_tuner_name="mock_tuner",
+            support_bayesian_optimization=True,
+            min_cases_for_bayesian=200,
+        )
+
+        mock_storage = mock.MagicMock()
+        mock_storage.get_bucket_configs.return_value = {
+            i: ("cs", i, str(TuningCase(MockKey(1), MockParams(i, 1))))
+            for i in range(100, 200)
+        }
+        mock_tuner.get_search_space.return_value = {
+            "p1": list(range(10)),
+            "p2": [1]
+        }
+
+        mock_executor = mock.MagicMock()
+        bo_opt = BayesianOptimizer(mock_tuner, mock_storage, mock_executor)
+
+        with mock.patch(
+                "tools.kernel.tuner.v1.optimizer.sweep_optimizer.SweepOptimizer.measure_latency"
+        ) as mock_sweep_measure:
+            mock_sweep_measure.return_value = 200
+            bo_opt.measure_latency(100, 200)
+            mock_sweep_measure.assert_called_once_with(100, 200, bucket_id=100)
 
     def test_bayesian_optimizer_convergence(self):
         """Tests that Bayesian optimization converges to near-optimal solution."""
@@ -279,6 +319,53 @@ class TestOptimizerModule(unittest.TestCase):
         mock_stdout.close.assert_called_once()
         mock_stderr.close.assert_called_once()
         self.assertIsNone(mgr._proc)
+
+    def test_executor_process_manager_blank_lines(self):
+        from tools.kernel.tuner.v1.executor_process_manager import \
+            ExecutorProcessManager
+        mock_run_config = mock.MagicMock()
+        mgr = ExecutorProcessManager("mock_tuner", mock_run_config)
+        mock_proc = mock.MagicMock()
+        mgr._proc = mock_proc
+
+        mock_proc.stdout.readline.side_effect = [
+            "\n",
+            "   \n",
+            "non-json log line\n",
+            "\n",
+            '{"status": "ready"}\n',
+        ]
+
+        resp = mgr._read_json_response(timeout=10)
+        self.assertEqual(resp, {"status": "ready"})
+
+    def test_executor_process_manager_pdeathsig(self):
+        import sys
+
+        from tools.kernel.tuner.v1.executor_process_manager import (
+            ExecutorProcessManager, _set_pdeathsig)
+
+        mock_run_config = mock.MagicMock()
+        mgr = ExecutorProcessManager("mock_tuner", mock_run_config)
+
+        with mock.patch("subprocess.Popen") as mock_popen, \
+             mock.patch.object(mgr, "_read_json_response") as mock_read, \
+             mock.patch("tempfile.mkstemp") as mock_mkstemp, \
+             mock.patch("tools.kernel.tuner.v1.executor_process_manager.run_config_to_json") as mock_to_json, \
+             mock.patch("os.fdopen"):
+            mock_mkstemp.return_value = (10, "/tmp/cfg.json")
+            mock_to_json.return_value = "{}"
+            mock_proc = mock.MagicMock()
+            mock_proc.pid = 1234
+            mock_popen.return_value = mock_proc
+            mock_read.return_value = {"status": "ready"}
+
+            mgr._start()
+
+            mock_popen.assert_called_once()
+            _, kwargs = mock_popen.call_args
+            if sys.platform.startswith("linux"):
+                self.assertEqual(kwargs.get("preexec_fn"), _set_pdeathsig)
 
 
 if __name__ == "__main__":
