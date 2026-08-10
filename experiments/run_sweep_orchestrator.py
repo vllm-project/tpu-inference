@@ -12,6 +12,7 @@ import yaml
 import subprocess
 import argparse
 import os
+import sys
 import json
 import itertools
 import csv
@@ -101,7 +102,7 @@ def main():
         # build script command
         print(f">>> Running iteration: {current_config}")
         cmd = [
-            "/mnt/pd/shen/vllm_env/bin/python3", SCRIPT_PATH,
+            sys.executable, SCRIPT_PATH,
             "--csv-file", csv_file,
             "--sweep-metadata", json.dumps(current_config),
             "--tensor-parallel-size", str(tp_size),

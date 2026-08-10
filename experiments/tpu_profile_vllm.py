@@ -95,9 +95,25 @@ def main(args):
     meta["Reproduction_Command"] = cmd_str
 
     file_exists = os.path.exists(csv_file)
+    
+    if file_exists and os.path.getsize(csv_file) > 0:
+        with open(csv_file, "r") as f_read:
+            try:
+                fieldnames = next(csv.reader(f_read))
+            except StopIteration:
+                fieldnames = list(meta.keys())
+    else:
+        # Rely on Python's guaranteed insertion order: 
+        # sweep metadata is loaded first, metrics and command are appended last.
+        fieldnames = list(meta.keys())
+
+    dropped_keys = set(meta.keys()) - set(fieldnames)
+    if dropped_keys:
+        print(f"Warning: Dropping new keys not present in existing CSV: {dropped_keys}")
+
     with open(csv_file, mode="a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=meta.keys())
-        if not file_exists:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore', restval='')
+        if not file_exists or os.path.getsize(csv_file) == 0:
             writer.writeheader()
         writer.writerow(meta)
 
