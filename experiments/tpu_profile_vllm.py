@@ -34,7 +34,11 @@ def main(args):
     #   higher temperature -> more deterministic sampling
     # Top p controls the size of the token candidate pool 
     #   0.95 keeps the top tokens whose probabilities add up to 95% of the total probability pool
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=args.output_len)
+    # ignore_eos=True ensures that model will keep generating until it hits the specified output length
+    sampling_params = SamplingParams(temperature=0.8, 
+                                     top_p=0.95, 
+                                     max_tokens=args.output_len, 
+                                     ignore_eos=True)
 
     # Warmup
     llm.generate(prompt_token_ids=dummy_token_ids, sampling_params=sampling_params)
