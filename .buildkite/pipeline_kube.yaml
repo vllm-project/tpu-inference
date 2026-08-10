@@ -79,46 +79,25 @@
             sizeLimit: 1Gi
 
 steps:
-  # Job 1: v6e-1 (1 chip, nominal)
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 Job 1 (Nominal 1/2)"
-    key: "v6e_1_job_1"
+  # Spawn 3 concurrent v6e-1 jobs using Buildkite native parallelism
+  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 (1 chip) %n"
+    key: "v6e_1_jobs"
+    parallelism: 3
     agents:
       queue: "v6e-1-1x1"
     commands:
-      - echo "=== v6e-1 Job acquired TPU chip. Holding for 3600 seconds ==="
+      - echo "=== v6e-1 Job $$BUILDKITE_PARALLEL_JOB / $$BUILDKITE_PARALLEL_TOTAL acquired TPU chip. Holding for 3600 seconds ==="
       - sleep 3600
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
-  # Job 2: v6e-1 (1 chip, nominal)
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 Job 2 (Nominal 2/2)"
-    key: "v6e_1_job_2"
-    agents:
-      queue: "v6e-1-1x1"
-    commands:
-      - echo "=== v6e-1 Job acquired TPU chip. Holding for 3600 seconds ==="
-      - sleep 3600
-    plugins:
-      - <<: *kube_tpu_v6e_1chip_plugin
-
-  # Job 3: v6e-1 (1 chip, borrowed from cohort!)
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 Job 3 (BORROWED from cohort)"
-    key: "v6e_1_job_3"
-    agents:
-      queue: "v6e-1-1x1"
-    commands:
-      - echo "=== v6e-1 Job 3 BORROWED 3rd chip from v6e cohort! Holding for 3600 seconds ==="
-      - sleep 3600
-    plugins:
-      - <<: *kube_tpu_v6e_1chip_plugin
-
-  # Job 4: v6e-8 (8 chips, queued until cohort releases capacity)
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-8 Job 4 (Queued until cohort capacity releases)"
-    key: "v6e_8_job_4"
+  # Spawn 1 v6e-8 job (8 chips)
+  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-8 (8 chips)"
+    key: "v6e_8_job"
     agents:
       queue: "v6e-8-2x4"
     commands:
-      - echo "=== v6e-8 Job 4 acquired 8 chips after cohort release! Holding for 30 seconds ==="
+      - echo "=== v6e-8 Job acquired 8 chips after cohort release! Holding for 30 seconds ==="
       - sleep 30
     plugins:
       - <<: *kube_tpu_v6e_8chip_plugin
