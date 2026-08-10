@@ -3077,6 +3077,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         has_initial_state = metadata.get("has_initial_state")
+        # DEV ONLY: per-step slot/index trace for the accuracy-collapse
+        # investigation (env-gated; CHURN_TRACE_EVERY samples the stream so
+        # a long eval does not flood the log: always the first 200 steps,
+        # then every Nth).
+        import os as _os
+        if (_os.environ.get("CHURN_TRACE") == "1"
+                and self.kv_cache_config.has_mamba_layers):
+            self._churn_step = getattr(self, "_churn_step", -1) + 1
+            _every = int(_os.environ.get("CHURN_TRACE_EVERY", "50"))
+            if self._churn_step < 200 or self._churn_step % _every == 0:
+                logger.info(
+                    "[churn-trace] step=%d slots=%s has_init=%s qsl=%s "
+                    "dist=%s", self._churn_step,
+                    mamba_state_indices_cpu[:16].tolist(),
+                    (np.asarray(
+                        jax.device_get(has_initial_state))[:16].tolist()
+                     if has_initial_state is not None else None),
+                    np.asarray(jax.device_get(query_start_loc))[:12].tolist(),
+                    np.asarray(jax.device_get(request_distribution)).tolist())
         logits_indices = metadata["logits_indices"]
 
         # The host-side `num_computed_tokens_cpu` assumes all speculatively
