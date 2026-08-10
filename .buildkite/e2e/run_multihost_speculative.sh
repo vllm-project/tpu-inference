@@ -27,9 +27,12 @@ readonly TENSOR_PARALLEL_SIZE=$((CHIPS_PER_HOST * CORES_PER_CHIP * HOSTS_PER_V7X
 SSH_USER="${SSH_USER:-$(whoami)}"
 HOST_HF_HOME="${HOST_HF_HOME:-/tmp/hf_home}"
 LOG_DIR="${LOG_DIR:-${HOME}/logs}"
-MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
+# Runai Streamer reads this checkpoint directly from GCS rather than first
+# materializing it in HF_HOME. Keep this in sync with the multihost offload E2E.
+MODEL="${MODEL:-gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39}"
 INPUT_LEN="${INPUT_LEN:-128}"
 OUTPUT_LEN="${OUTPUT_LEN:-128}"
+CORRECTNESS_MAX_TOKENS="${CORRECTNESS_MAX_TOKENS:-64}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
 RANDOM_SEED="${RANDOM_SEED:-10}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-10}"
@@ -37,7 +40,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-16}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
-LOAD_FORMAT="${LOAD_FORMAT:-auto}"
+LOAD_FORMAT="${LOAD_FORMAT:-runai_streamer}"
 SKIP_JAX_PRECOMPILE="${SKIP_JAX_PRECOMPILE:-1}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 CONTAINER_NAME="${CONTAINER_NAME:-node}"
@@ -63,7 +66,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 TOP_DIR="$(dirname "$(dirname "${SCRIPT_DIR}")")"
 CLUSTER_SCRIPT="${TOP_DIR}/scripts/multihost/run_cluster.sh"
 mkdir -p "${LOG_DIR}" "${HOST_HF_HOME}"
-rm -f "${LOG_DIR}/vllm_serve.log" "${LOG_DIR}/benchmark.txt"
+rm -f "${LOG_DIR}/vllm_serve.log" "${LOG_DIR}/benchmark.txt" \
+  "${LOG_DIR}/correctness.txt" "${LOG_DIR}/baseline.json" \
+  "${LOG_DIR}/speculative.json"
 
 metadata() {
   curl -fs -H 'Metadata-Flavor: Google' \
@@ -190,25 +195,6 @@ assert_ngram_draft_tokens() {
   fi
 }
 
-run_speculative_probe() {
-  local request_body
-  request_body="$(python3 -c '
-import json
-import sys
-print(json.dumps({
-    "model": sys.argv[1],
-    "prompt": "Keep repeating: " + "a " * 20,
-    "max_tokens": 32,
-    "temperature": 0.0,
-    "ignore_eos": True,
-}))
-' "${MODEL}")"
-  echo "--- Running n-gram speculative-decoding probe"
-  curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/completions" \
-    -H 'Content-Type: application/json' --data "${request_body}" >/dev/null
-  assert_ngram_draft_tokens
-}
-
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 if [[ -z "${DOCKER_IMAGE:-}" ]]; then
   IMAGE_NAME="${IMAGE_NAME:-us-central1-docker.pkg.dev/${PROJECT}/tpu-inference/vllm-tpu}"
@@ -251,13 +237,68 @@ sleep "${WORKER_STARTUP_WAIT_SECONDS:-120}"
 printf -v quoted_model '%q' "${MODEL}"
 printf -v quoted_load_format '%q' "${LOAD_FORMAT}"
 printf -v quoted_speculative_config '%q' "${SPECULATIVE_CONFIG}"
-SERVE_CMD="vllm serve ${quoted_model} --port ${VLLM_PORT} --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} --trust-remote-code --load-format ${quoted_load_format} --no-enable-prefix-caching --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} --max-model-len ${MAX_MODEL_LEN} --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} --max-num-seqs ${MAX_NUM_SEQS} --speculative-config ${quoted_speculative_config}"
+SERVE_BASE_CMD="vllm serve ${quoted_model} --port ${VLLM_PORT} --tensor-parallel-size ${TENSOR_PARALLEL_SIZE} --trust-remote-code --load-format ${quoted_load_format} --no-enable-prefix-caching --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} --max-model-len ${MAX_MODEL_LEN} --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS} --max-num-seqs ${MAX_NUM_SEQS}"
+VERIFY_SCRIPT="/workspace/tpu_inference/.buildkite/e2e/verify_multihost_speculative.py"
+VERIFY_DIR="/tmp/multihost_speculative_verification"
+BASELINE_OUTPUT="${VERIFY_DIR}/baseline.json"
+SPECULATIVE_OUTPUT="${VERIFY_DIR}/speculative.json"
 
-echo "--- Starting one multi-host speculative vLLM server"
-docker exec -d -e HF_HOME=/root/.cache/huggingface "${CONTAINER_NAME}" \
-  bash -c "${SERVE_CMD} > /root/vllm_serve.log 2>&1"
-wait_for_server
-run_speculative_probe
+start_server() {
+  local mode=$1 serve_command="${SERVE_BASE_CMD}"
+  if [[ "${mode}" == "speculative" ]]; then
+    serve_command+=" --speculative-config ${quoted_speculative_config}"
+  fi
+  echo "--- Starting multi-host ${mode} vLLM server"
+  docker exec -d -e HF_HOME=/root/.cache/huggingface "${CONTAINER_NAME}" \
+    bash -c "${serve_command} > /root/vllm_serve.log 2>&1"
+  wait_for_server
+}
+
+stop_server() {
+  echo "--- Stopping vLLM server"
+  docker exec "${CONTAINER_NAME}" bash -c "pkill -TERM -f '[v]llm serve' || true"
+  for _ in {1..60}; do
+    if ! docker exec "${CONTAINER_NAME}" pgrep -f '[v]llm serve' >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 5
+  done
+  echo "ERROR: vLLM server did not stop within 300 seconds." >&2
+  return 1
+}
+
+run_correctness_phase() {
+  local phase=$1
+  : >"${LOG_DIR}/correctness.txt"
+  if ! timeout "${CORRECTNESS_TIMEOUT_SECONDS:-3600}" \
+    docker exec "${CONTAINER_NAME}" python3 "${VERIFY_SCRIPT}" \
+      --phase "${phase}" --url "http://127.0.0.1:${VLLM_PORT}/v1/completions" \
+      --model "${MODEL}" --max-tokens "${CORRECTNESS_MAX_TOKENS}" \
+      --seed "${RANDOM_SEED}" --baseline-output "${BASELINE_OUTPUT}" \
+      --speculative-output "${SPECULATIVE_OUTPUT}" >"${LOG_DIR}/correctness.txt" 2>&1; then
+    cat "${LOG_DIR}/correctness.txt" >&2 || true
+    return 1
+  fi
+  cat "${LOG_DIR}/correctness.txt"
+}
+
+echo "--- Generating deterministic non-speculative baseline outputs"
+start_server baseline
+run_correctness_phase baseline
+docker cp "${CONTAINER_NAME}:${BASELINE_OUTPUT}" "${LOG_DIR}/baseline.json" 2>/dev/null || true
+stop_server
+
+echo "--- Waiting for all TPU resources to return to the Ray cluster"
+timeout "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}" \
+  docker exec "${CONTAINER_NAME}" python3 "${VERIFY_SCRIPT}" --phase wait \
+    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+    --resource-wait-seconds "${RESOURCE_RELEASE_TIMEOUT_SECONDS:-300}"
+
+echo "--- Comparing n-gram speculative outputs with the baseline"
+start_server speculative
+run_correctness_phase speculative
+docker cp "${CONTAINER_NAME}:${SPECULATIVE_OUTPUT}" "${LOG_DIR}/speculative.json" 2>/dev/null || true
+assert_ngram_draft_tokens
 
 echo "--- Running multi-host speculative benchmark"
 timeout "${BENCHMARK_TIMEOUT_SECONDS:-1800}" docker exec "${CONTAINER_NAME}" \
