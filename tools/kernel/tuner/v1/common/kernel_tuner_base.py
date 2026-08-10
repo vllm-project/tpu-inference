@@ -350,7 +350,6 @@ class KernelTunerBase(ABC):
         steps:
           - label: "Measure latency for cases [begin_case_id, end_case_id)"
             command: "python -m tools.kernel.tuner.v1.kernel_tuner_runner\
-                      --worker_id=WORKER_ID\
                       --case_set_id=CASE_SET_ID\
                       --run_id=RUN_ID\
                       --begin_case_id=BEGIN_CASE_ID\

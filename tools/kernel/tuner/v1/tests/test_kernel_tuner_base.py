@@ -547,16 +547,6 @@ class WorkerIdResolutionTest(absltest.TestCase):
             self.assertEqual(get_worker_id(), '0')
 
     def test_component_worker_id_initialization(self):
-        tuner_config = TunerConfig(
-            tuning_key_class=MockTuningKey,
-            tunable_params_class=MockTunableParams,
-            kernel_tuner_name="mock_tuner",
-        )
-        run_config = RunConfig(worker_id="worker_xyz")
-        tuner = MockKernelTuner(tuner_config=tuner_config,
-                                run_config=run_config)
-        self.assertEqual(tuner.worker_id, "worker_xyz")
-
         db_manager = LocalDbManager(worker_id="db_worker", dry_run=True)
         self.assertEqual(db_manager.worker_id, "db_worker")
 
