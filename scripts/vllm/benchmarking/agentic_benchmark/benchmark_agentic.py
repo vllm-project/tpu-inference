@@ -572,7 +572,9 @@ async def main_async(args: argparse.Namespace):
     trace_groups: List[List[Dict[str, Any]]] | None = None
     if args.trace_file:
         trace_groups = load_trace(args.trace_file)
-        if args.num_groups and args.num_groups < len(trace_groups):
+        # Unset means replay the whole trace, rather than the synthetic
+        # default of 2 groups, which would silently truncate it.
+        if args.num_groups is not None:
             trace_groups = trace_groups[:args.num_groups]
         turns = sum(
             len(s.get("out_lens", [])) for g in trace_groups for s in g)
@@ -605,8 +607,9 @@ async def main_async(args: argparse.Namespace):
                 for i, specs in enumerate(trace_groups)
             ]
         else:
+            num_groups = 2 if args.num_groups is None else args.num_groups
             group_tasks = [
-                worker(i, session) for i in range(1, args.num_groups + 1)
+                worker(i, session) for i in range(1, num_groups + 1)
             ]
         results = await asyncio.gather(*group_tasks)
 
@@ -647,8 +650,9 @@ def main():
     parser.add_argument(
         "--num-groups",
         type=int,
-        default=2,
-        help="Number of GRPO groups (requests) to simulate.",
+        default=None,
+        help="Number of GRPO groups (requests) to simulate. Defaults to 2, "
+        "or to every group in --trace-file when replaying a trace.",
     )
     parser.add_argument(
         "--group-size",
