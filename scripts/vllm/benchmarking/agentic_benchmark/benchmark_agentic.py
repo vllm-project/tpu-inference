@@ -58,37 +58,27 @@ def get_percentile(data: List[float], percentile: float) -> float:
 
 def make_token_text(tokenizer: AutoTokenizer, num_tokens: int,
                     rng: random.Random) -> str:
-    """Builds text that encodes to num_tokens tokens.
+    """Builds text of about num_tokens tokens.
 
-    decode() then encode() is not an identity, so the round trip is corrected
-    until the length matches. Callers rely on the exact length because the
-    prompt lengths replayed from a trace are the measured ones.
+    Decoding random ids and re-encoding overshoots by roughly 5%, so the text
+    is trimmed back once. That lands within a token or two, which is close
+    enough; no caller needs an exact length.
 
     Args:
-        tokenizer: Tokenizer used to decode and re-encode.
-        num_tokens: Target token count.
+        tokenizer: Tokenizer used to decode the sampled ids.
+        num_tokens: Approximate token count.
         rng: Random source, so shared spans can be reproduced exactly.
 
     Returns:
-        str: Text of the requested token length.
+        str: Generated text.
     """
     if num_tokens <= 0:
         return ""
     # Safe token ID range, avoiding special control characters.
     ids = [rng.randint(1000, 50000) for _ in range(num_tokens)]
     text = tokenizer.decode(ids, skip_special_tokens=True)
-    for _ in range(8):
-        cur = len(tokenizer.encode(text, add_special_tokens=False))
-        if cur == num_tokens:
-            break
-        if cur > num_tokens:
-            keep = tokenizer.encode(text,
-                                    add_special_tokens=False)[:num_tokens]
-            text = tokenizer.decode(keep, skip_special_tokens=True)
-        else:
-            extra = [rng.randint(1000, 50000) for _ in range(num_tokens - cur)]
-            text += tokenizer.decode(extra, skip_special_tokens=True)
-    return text
+    trimmed = tokenizer.encode(text, add_special_tokens=False)[:num_tokens]
+    return tokenizer.decode(trimmed, skip_special_tokens=True)
 
 
 def generate_initial_prompt(tokenizer: AutoTokenizer,
@@ -109,22 +99,6 @@ def generate_initial_prompt(tokenizer: AutoTokenizer,
 
 def build_initial_prompt(tokenizer: AutoTokenizer, global_prefix: str,
                          total_len: int, group_idx: int) -> str:
-    """Builds a group's initial prompt as global_prefix + group-specific text.
-
-    Every group receives the identical global_prefix string, so all
-    trajectories share it as a token prefix, while the remainder is shared
-    only by the streams within one group. This reproduces the two-level
-    sharing that drives prefix cache behaviour in real agent rollouts.
-
-    Args:
-        tokenizer: Tokenizer used to size the group-specific portion.
-        global_prefix: Text shared by every trajectory (may be empty).
-        total_len: Desired total prompt length in tokens.
-        group_idx: Group index, seeding the group-specific portion.
-
-    Returns:
-        str: The group's initial prompt.
-    """
     global_len = len(tokenizer.encode(
         global_prefix, add_special_tokens=False)) if global_prefix else 0
     remainder = max(0, total_len - global_len)
@@ -572,8 +546,6 @@ async def main_async(args: argparse.Namespace):
     trace_groups: List[List[Dict[str, Any]]] | None = None
     if args.trace_file:
         trace_groups = load_trace(args.trace_file)
-        # Unset means replay the whole trace, rather than the synthetic
-        # default of 2 groups, which would silently truncate it.
         if args.num_groups is not None:
             trace_groups = trace_groups[:args.num_groups]
         turns = sum(
