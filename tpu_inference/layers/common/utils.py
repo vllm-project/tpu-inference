@@ -20,6 +20,7 @@ from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, Sharding
 
 from tpu_inference import envs
+from tpu_inference.utils import to_jax_dtype
 
 # Lazy initialized, since device might not be ready at import time.
 _cpu_mesh = None
@@ -156,8 +157,11 @@ def general_device_put(tensor: jax.Array,
         # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
         # `source_mesh`.
         with ctx:
-            global_array = jax.make_array_from_callback(
-                t.shape, sharding, lambda index: t[index])
+            global_array = jax.make_array_from_callback(t.shape,
+                                                        sharding,
+                                                        lambda index: t[index],
+                                                        dtype=to_jax_dtype(
+                                                            t.dtype))
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):

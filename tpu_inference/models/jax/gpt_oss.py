@@ -37,6 +37,7 @@ from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
     get_param, model_weights_generator, print_param_info)
+from tpu_inference.utils import to_jax_dtype
 
 logger = init_logger(__name__)
 
@@ -480,11 +481,15 @@ class GptOss(nnx.Module):
             return scales_jnp[index]
 
         q_sharded = jax.make_array_from_callback(
-            exp_q_shape, NamedSharding(self.mesh, P(*qv.sharding)),
-            get_q_slice)
+            exp_q_shape,
+            NamedSharding(self.mesh, P(*qv.sharding)),
+            get_q_slice,
+            dtype=to_jax_dtype(codes_jnp.dtype))
         s_sharded = jax.make_array_from_callback(
-            exp_s_shape, NamedSharding(self.mesh, P(*sv.sharding)),
-            get_s_slice)
+            exp_s_shape,
+            NamedSharding(self.mesh, P(*sv.sharding)),
+            get_s_slice,
+            dtype=to_jax_dtype(scales_jnp.dtype))
 
         model_weight.array.qvalue.value = q_sharded
         model_weight.array.scale.value = s_sharded
@@ -519,7 +524,9 @@ class GptOss(nnx.Module):
 
         sharded_array = jax.make_array_from_callback(
             transformed_weight.shape,
-            NamedSharding(self.mesh, P(*model_weight.sharding)), get_slice)
+            NamedSharding(self.mesh, P(*model_weight.sharding)),
+            get_slice,
+            dtype=to_jax_dtype(transformed_weight.dtype))
         model_weight.value = sharded_array
 
     def __call__(
