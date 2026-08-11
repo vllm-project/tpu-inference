@@ -65,6 +65,34 @@ logger = init_logger(__name__)
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
+def allocate_mamba_pool(cache_shape: tuple, cache_dtype,
+                        sharding: NamedSharding) -> jax.Array:
+    """Allocates one recurrent/conv state pool tensor, ZERO-INITIALIZED.
+
+    Zero-init is load-bearing, not cosmetic: as of jax 0.11.0 `jnp.empty`
+    returns genuinely uninitialized memory on platforms that support it
+    (before 0.11.0 it was an alias for `jnp.zeros`). An uninitialized pool
+    holds whatever bytes the allocator recycles — including NaN patterns —
+    and any step where `has_initial_state=1` meets pool contents the
+    request did not write consumes that garbage: the request's output
+    becomes argmax-over-NaN (token 0) for every remaining step and the
+    recurrent state it writes back stays NaN. The has_initial_state=0
+    masking only protects the FIRST touch of a slot.
+
+    MAMBA_POOL_NAN_CANARY=1 (debug rigs only) fills the pool with NaN
+    instead, turning any read-before-write or multiplicative-mask hole
+    into an immediate deterministic NaN rather than a garbage-dependent
+    lottery.
+    """
+
+    def _allocate():
+        if os.environ.get("MAMBA_POOL_NAN_CANARY") == "1":
+            return jnp.full(cache_shape, jnp.nan, dtype=cache_dtype)
+        return jnp.zeros(shape=cache_shape, dtype=cache_dtype)
+
+    return jax.jit(_allocate, out_shardings=sharding)()
+
+
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
     return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
         attn_module, DeepseekV4SWACache) or isinstance(
@@ -1060,26 +1088,9 @@ class KVCacheManager:
 
                         # NOTE: conv state will always be BF16 and SSM state will always be FP32
                         # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
-                        def _allocate_mamba(c_shape=cache_shape,
-                                            c_dtype=jax_dtype):
-                            # DEV ONLY canary: fill the pool with NaN
-                            # instead of leaving it uninitialized. On a
-                            # correctly masked stack a NaN-canary pool is
-                            # harmless (every slot is written before it is
-                            # read); any read-before-write or
-                            # multiplicative-mask hole turns into an
-                            # immediate, deterministic NaN instead of a
-                            # garbage-dependent lottery.
-                            import os as _os
-                            if _os.environ.get("MAMBA_POOL_NAN_CANARY") == "1":
-                                return jnp.full(c_shape,
-                                                jnp.nan,
-                                                dtype=c_dtype)
-                            return jnp.empty(shape=c_shape, dtype=c_dtype)
-
-                        mamba_allocate = jax.jit(_allocate_mamba,
-                                                 out_shardings=sharding)
-                        mamba_states.append(mamba_allocate())
+                        mamba_states.append(
+                            allocate_mamba_pool(cache_shape, jax_dtype,
+                                                sharding))
 
                     metadata["mamba"].count += 1
                     if metadata["mamba"].shape is None:
