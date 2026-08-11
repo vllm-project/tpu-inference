@@ -79,21 +79,23 @@
             sizeLimit: 1Gi
 
 steps:
-  # Spawn 3 concurrent v6e-1 jobs using Buildkite native parallelism
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 (1 chip) %n"
-    key: "v6e_1_jobs"
-    parallelism: 3
+  # Build 1: Spawn 6 concurrent v6e-1 jobs (2 nominal + 4 borrowed from cohort) for 6 minutes (360s)
+  - label: ":kubernetes: Borrowing Test | v6e-1 (1 chip) %n"
+    key: "v6e_1_loan_jobs"
+    if: "build.env('TEST_TYPE') == 'v6e1' || build.env('TEST_TYPE') == null"
+    parallelism: 6
     agents:
       queue: "v6e-1-1x1"
     commands:
-      - echo "=== v6e-1 Job $$BUILDKITE_PARALLEL_JOB / $$BUILDKITE_PARALLEL_TOTAL acquired TPU chip. Holding for 3600 seconds ==="
-      - sleep 3600
+      - echo "=== v6e-1 Job $$BUILDKITE_PARALLEL_JOB / $$BUILDKITE_PARALLEL_TOTAL acquired TPU chip. Holding for 360 seconds (6 mins) ==="
+      - sleep 360
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
-  # Spawn 1 v6e-8 job (8 chips)
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-8 (8 chips)"
-    key: "v6e_8_job"
+  # Build 2: Spawn 1 v6e-8 job (needs 8 chips, reclaims cohort capacity after v6e-1 returns them)
+  - label: ":kubernetes: Quota Reclaim Test | v6e-8 (8 chips)"
+    key: "v6e_8_reclaim_job"
+    if: "build.env('TEST_TYPE') == 'v6e8'"
     agents:
       queue: "v6e-8-2x4"
     commands:
