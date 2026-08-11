@@ -1808,8 +1808,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             (generated_tokens, final_kv_caches, final_state, final_rng,
              all_expert_indices, logprobs_tensors) = continue_decode(
                  state=self.state_leaves,
-                 model_fn=getattr(self.model, "step_fn_no_options",
-                                  self.model_fn),
+                 model_fn=self.model.step_fn_no_options,
                  compute_logits_fn=self.compute_logits_fn,
                  sample_fn=sample,
                  mesh=self.mesh,

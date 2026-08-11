@@ -378,7 +378,7 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    run_model_jit = functools.partial(
+    _wrap_with_jit = functools.partial(
         jax.jit,
         out_shardings=(
             kv_cache_sharding,
@@ -397,9 +397,9 @@ def get_flax_model(
     # options-free twin for that path; the loop jit in `runner/decode_loop.py`
     # supplies the options for the whole fused program. Mirrors the torchax
     # path in `models/vllm/vllm_model_wrapper.py`.
-    run_model_no_options = run_model_jit(run_model_impl)
+    run_model_no_options = _wrap_with_jit(run_model_impl)
 
-    run_model = run_model_jit(
+    run_model = _wrap_with_jit(
         run_model_impl,
         compiler_options=get_step_fn_compiler_options(),
     )
@@ -568,9 +568,10 @@ def get_flax_model(
 
     state_leaves = tuple(jax.tree_util.tree_leaves(state))
 
-    # `runner/tpu_runner.py` and `runner/compilation_manager.py` look this up
-    # with `getattr(self.model, "step_fn_no_options", <fallback>)`, where
-    # `self.model` is `ModelInterface.model`.
+    # `runner/tpu_runner.py` and `runner/compilation_manager.py` read
+    # `self.model.step_fn_no_options`, where `self.model` is
+    # `ModelInterface.model`. The torchax path sets the same attribute in
+    # `models/vllm/vllm_model_wrapper.py`, so both paths define it.
     jit_model.step_fn_no_options = wrapped_model_fn_no_options
 
     return ModelInterface(
