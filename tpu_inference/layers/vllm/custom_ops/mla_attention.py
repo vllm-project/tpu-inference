@@ -27,6 +27,7 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.mla import (MLAModules,
                                             MultiHeadLatentAttentionWrapper)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionType
 
 from tpu_inference import utils
@@ -93,8 +94,28 @@ class VllmMLAAttention(MLAAttention):
         self.attn_type = AttentionType.DECODER
         self.sliding_window = None
 
+        # Only genuinely *quantized* kv_cache_dtype values (fp8*/nvfp4/
+        # per_token_head -- see vllm's `is_quantized_kv_cache`) should route
+        # through this backend's fp8-style dequant-on-gather / static
+        # per-tensor quantize-before-cache-write code paths
+        # (`flash_attn_mla_sparse.py`'s `_quantize_dequantize_round_trip`/
+        # `quantize_kv` calls, gated on `layer.kv_cache_quantized_dtype`).
+        # The previous `!= "auto"` check incorrectly also matched plain
+        # float dtypes (`bfloat16`, `float16`) whenever an *explicit*
+        # `--kv-cache-dtype` was passed (as opposed to `auto`), causing
+        # those quantize/dequantize helpers -- which assume a genuinely
+        # narrow target dtype's representable range -- to fire for a
+        # bfloat16 cache. Confirmed via a live crash-free-but-NaN run on
+        # the TPU VM (`--kv-cache-dtype=bfloat16`): `GLM5_DSA_DEBUG=1`
+        # showed `q_combined_mean_abs=nan` from the very first sparse
+        # attention call, tracing back to `_quantize_dequantize_round_trip`
+        # being invoked with `dtype=jnp.bfloat16` and this checkpoint's
+        # fp8-calibration-heuristic `k_scale`/`v_scale` defaults
+        # (`GLM5_DSA_KV_SCALE_DEFAULT`, 0.001) -- nonsensical for a
+        # non-quantized target dtype, producing NaNs that then propagated
+        # through every downstream layer.
         self.kv_cache_quantized_dtype = None
-        if self.kv_cache_dtype != "auto":
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(
                 self.kv_cache_dtype)
 
@@ -138,15 +159,60 @@ class VllmMLAAttention(MLAAttention):
             # Upstream MLA registers W_UK_T/W_UV as nn.Parameters, so the
             # intermediate JAX values cannot be assigned to the attributes
             # directly; stage them in locals and assign Parameters at the end.
-            w_uk_t, w_uk_t_scale = quantize_tensor(
-                self.kv_cache_quantized_dtype, jax_view(self.W_UK_T), axis=1)
+            #
+            # Guard on `self.kv_cache_quantized_dtype is not None` -- this
+            # used to call `quantize_tensor(self.kv_cache_quantized_dtype,
+            # ...)` unconditionally, including when `kv_cache_quantized_dtype`
+            # is `None` (an unquantized -- e.g. bf16 -- KV cache). Confirmed
+            # via a live TPU VM run that this is a *second* real, distinct
+            # bug of the same shape as the `__init__` one fixed just above:
+            # `quantize_tensor(None, ...)` doesn't raise (`jnp.finfo(None)`
+            # silently returns *float64*'s info instead of erroring, and
+            # `Array.astype(None)` is a silent no-op), but computes a scale
+            # of `abs_max / float64_max` -- underflows to 0 in
+            # float32/bfloat16 -- whose reciprocal (`scale_inv`) becomes
+            # `inf`, producing NaN/Inf directly baked into `W_UK_T`/`W_UV`
+            # at weight-loading time (confirmed live: `GLM5_DSA_DEBUG=1`
+            # showed `q_combined_mean_abs=nan` from the very first sparse
+            # attention call even *after* fixing the `__init__` bug above,
+            # traced to this second call site). When unquantized, just
+            # device-put the tensors as-is with a scale of 1.0 (a no-op),
+            # matching every other "unquantized" fallback convention in this
+            # file (e.g. `flash_attn_mla_sparse.py`'s `k_scale_static`).
+            if self.kv_cache_quantized_dtype is not None:
+                w_uk_t, w_uk_t_scale = quantize_tensor(
+                    self.kv_cache_quantized_dtype,
+                    jax_view(self.W_UK_T),
+                    axis=1)
+                w_uv, w_uv_scale = quantize_tensor(
+                    self.kv_cache_quantized_dtype, jax_view(self.W_UV), axis=1)
+            else:
+                # Fallback scale shapes must match `quantize_tensor(...,
+                # axis=1)`'s own output shape convention (per-tensor max
+                # reduced over axis=1, keepdims, then squeezed on that same
+                # axis) so the later `jnp.expand_dims(..., 1)` /
+                # `jnp.expand_dims(..., 0)` + broadcast-multiply calls below
+                # behave identically to the quantized case (just a no-op
+                # scale of 1.0 everywhere). Computed generically (drop axis
+                # 1 from the tensor's own shape, whatever its rank) rather
+                # than hardcoding the real 3-D `[H, nope/kv_lora_rank,
+                # kv_lora_rank/v_head_dim]` convention, so this also works
+                # against simplified/mocked lower-rank tensors (e.g. this
+                # file's own unit tests).
+                w_uk_t_j = jax_view(self.W_UK_T)  # [H, nope, kv_lora_rank]
+                w_uk_t = w_uk_t_j
+                w_uk_t_scale = jnp.ones(w_uk_t_j.shape[:1] +
+                                        w_uk_t_j.shape[2:],
+                                        dtype=jnp.float32)  # [H, kv_lora_rank]
+                w_uv_j = jax_view(self.W_UV)  # [H, kv_lora_rank, v_head_dim]
+                w_uv = w_uv_j
+                w_uv_scale = jnp.ones(w_uv_j.shape[:1] + w_uv_j.shape[2:],
+                                      dtype=jnp.float32)  # [H, v_head_dim]
+
             w_uk_t = torch_view(general_device_put(w_uk_t, sharding))
             w_uk_t_scale = torch_view(
                 general_device_put(jnp.expand_dims(w_uk_t_scale, 1), sharding))
 
-            w_uv, w_uv_scale = quantize_tensor(self.kv_cache_quantized_dtype,
-                                               jax_view(self.W_UV),
-                                               axis=1)
             w_uv = torch_view(general_device_put(w_uv, sharding))
             w_uv_scale = torch_view(
                 general_device_put(jnp.expand_dims(w_uv_scale, 0), sharding))
@@ -269,6 +335,23 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            # Pre-existing gap, not GLM-5.2-specific: this was never
+            # threaded through, so `MLAAttention.__init__`'s
+            # `topk_indices_buffer` param (and therefore every sparse MLA
+            # layer's attention Impl) silently defaulted to `None` for
+            # *every* layer, dense or sparse-indexer-carrying alike --
+            # confirmed via a live crash on the TPU VM
+            # (`PallasMLASparseAttentionBackendImpl.forward()` raising
+            # "requires a topk_indices_buffer ... got None") the first time
+            # any model actually exercised `use_sparse=True` through this
+            # generic wrapper. Unconditional (not gated on `skip_topk`),
+            # matching upstream vLLM's own (unmodified)
+            # `MultiHeadLatentAttentionWrapper.__init__`, which always
+            # passes `mla_modules.topk_indices_buffer` here regardless of
+            # per-layer skip status -- every layer's Impl needs the *same*
+            # shared buffer object to read from, even "skip" layers that
+            # never write it themselves.
+            topk_indices_buffer=mla_modules.topk_indices_buffer,
             non_causal_multi_token_decode=non_causal_multi_token_decode,
         )
 

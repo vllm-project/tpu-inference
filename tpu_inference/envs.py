@@ -407,6 +407,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
     "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
     env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
+    # TEMP DIAGNOSTIC (GLM-5.2 DSA Phase 4 bring-up debugging): guarded debug
+    # prints in glm5_indexer.py / flash_attn_mla_sparse.py. No-op by default.
+    # Remove once bring-up correctness is confirmed.
+    "GLM5_DSA_DEBUG":
+    env_bool("GLM5_DSA_DEBUG", default=False),
+    # TEMP INTERIM FIX (GLM-5.2 DSA Phase 4 bring-up): fixed static k_scale/
+    # v_scale used by PallasMLASparseAttentionBackendImpl when
+    # `layer.kv_cache_quantized_dtype` is set and no real per-layer
+    # calibration is available (see the calibration block in
+    # flash_attn_mla_sparse.py::forward() for full detail on why -- data-
+    # dependent calibration hits a jax.errors.ConcretizationTypeError since
+    # forward() runs inside an outer jax.jit trace). Chosen from a live
+    # measurement of GLM-5.2-NVFP4's actual kv_c_normed magnitude, not a
+    # calibrated per-layer value -- follow-up: thread a real dynamic scale
+    # through the kernel (scalar-prefetch) instead of this static default.
+    "GLM5_DSA_KV_SCALE_DEFAULT":
+    lambda: float(os.getenv("GLM5_DSA_KV_SCALE_DEFAULT", "0.001")),
+    # Separate static scale for the *rope* half of the concatenated MLA K
+    # row (`k_pe`), which measured ~100-1000x larger in magnitude than the
+    # *latent* half (`kv_c_normed`, scaled by GLM5_DSA_KV_SCALE_DEFAULT
+    # above) live on GLM-5.2-NVFP4 -- a single shared scale severely
+    # saturates/clips this portion. Chosen so k_pe's measured max (~8-8.5)
+    # divided by this scale lands comfortably under fp8 e4m3's max
+    # representable magnitude (448), leaving headroom for outliers.
+    "GLM5_DSA_KV_SCALE_ROPE_DEFAULT":
+    lambda: float(os.getenv("GLM5_DSA_KV_SCALE_ROPE_DEFAULT", "0.05")),
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),

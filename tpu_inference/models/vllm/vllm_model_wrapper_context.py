@@ -32,6 +32,22 @@ class VllmModelWrapperContext:
     vllm_config: Optional[VllmConfig] = None
     expert_indices_list: List[jax.Array] = field(default_factory=list)
     shared_attn_metadata: SharedAttentionMetadata = field(default_factory=None)
+    # GLM-5.2/DSA sparse-indexer top-k indices, shared by reference across
+    # every decoder layer within a single forward pass (written once by an
+    # indexer-carrying layer, read by every layer's attention -- including
+    # "skip" layers that reuse the most recently computed value; see
+    # `layers/vllm/custom_ops/experimental/glm5/glm5_indexer.py` /
+    # `layers/vllm/backends/flash_attn_mla_sparse.py`). Deliberately *not*
+    # threaded through a persistent torch buffer object mutated in place
+    # (`self.topk_indices_buffer[...].copy_(...)`) -- confirmed via a live
+    # crash on the TPU VM (`jax.errors.UnexpectedTracerError`) that
+    # reassigning a persistent (cross-jit-call) Python object's underlying
+    # JAX value from *inside* a `jax.jit` trace leaks a tracer once the
+    # trace exits. `VllmModelWrapperContext` is instead constructed fresh
+    # per forward pass (see `set_vllm_model_wrapper_context`), exactly like
+    # `kv_caches`'s existing "mutate this call's context object, discard it
+    # after" idiom, which does not have this problem.
+    topk_indices_buffer: Optional[jax.Array] = None
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None

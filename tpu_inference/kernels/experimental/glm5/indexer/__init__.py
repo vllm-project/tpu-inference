@@ -11,7 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from tpu_inference.layers.vllm.backends import flash_attn as flash_attn
-from tpu_inference.layers.vllm.backends import flash_attn_mla as flash_attn_mla
-from tpu_inference.layers.vllm.backends import \
-    flash_attn_mla_sparse as flash_attn_mla_sparse

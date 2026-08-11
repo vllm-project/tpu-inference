@@ -144,7 +144,14 @@ class TpuPlatform(Platform):
 
         use_mla = attn_selector_config.use_mla
         if use_mla:
-            selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
+            if attn_selector_config.use_sparse:
+                # DSA-style models (GLM-5.2, DeepSeek-V3.2): the indexer's
+                # top-k selection needs the sparse gather-attend kernel, not
+                # the dense backend's full ragged-paged attend. See
+                # layers/vllm/backends/flash_attn_mla_sparse.py.
+                selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE
+            else:
+                selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
         elif selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",
                         selected_backend)

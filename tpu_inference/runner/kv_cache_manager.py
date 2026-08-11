@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
                                                DeepseekV4IndexerCache)
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
@@ -70,6 +71,28 @@ def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
                 attn_module, CompressorStateCache)
 
 
+def is_dsa_indexer_cache(attn_module: AttentionLayerBase) -> bool:
+    """True for the GLM-5.2 / DeepSeek-V3.2-style DSA lightning indexer's own
+    K-cache layer (``VllmGlm5IndexerCache``, a
+    ``vllm.model_executor.models.deepseek_v2.DeepseekV32IndexerCache``
+    subclass -- see ``layers/vllm/custom_ops/experimental/glm5/
+    glm5_indexer.py``). Deliberately parallel to, not merged with,
+    ``is_cache_for_ds_v4``: this is DeepSeek-V4's *different*,
+    compressed-KV-specific indexer cache class
+    (``vllm.models.deepseek_v4.attention.DeepseekV4IndexerCache``), and the
+    two go through different allocation paths below (DSv4's packed/overlay
+    allocator vs. this plain, single-array one).
+    """
+    return isinstance(attn_module, DeepseekV32IndexerCache)
+
+
+# Must match `kernels/experimental/glm5/indexer/topk.py::_KV_PACKING` /
+# `layers/vllm/custom_ops/experimental/glm5/glm5_indexer.py::_KV_PACKING`:
+# 4 per-token records packed into each physical row of the GLM-5.2/DSA
+# indexer's uint8 K-cache.
+_DSA_INDEXER_KV_PACKING = 4
+
+
 def is_ds_v4(vllm_config):
     return "DeepseekV4ForCausalLM" in (vllm_config.model_config.architectures)
 
@@ -84,6 +107,12 @@ class KVCacheManager:
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
         self.use_mla = self.runner.model_config.use_mla
+        # Populated by `get_kv_cache_spec` with every GLM-5.2/DSA indexer
+        # cache layer name (see `is_dsa_indexer_cache`), so
+        # `initialize_kv_cache` can route them through the plain
+        # (non-MLA-latent) allocation path instead of `use_mla=True`'s
+        # ~576-wide main-attention layout.
+        self.dsa_indexer_cache_layer_names: set[str] = set()
         # Set by `update_mamba_page_size_padded` for hybrid attention+mamba
         # models. When set, every attention layer spec reports this as its
         # `page_size_padded` so vLLM sees a uniform page size across groups
@@ -634,6 +663,23 @@ class KVCacheManager:
                         kv_cache_spec[layer_name] = spec
                     continue
 
+                if is_dsa_indexer_cache(attn_module):
+                    # A bare (non-DSv4) indexer-cache module has no
+                    # `attn_type`/`kv_sharing_target_layer_name`/
+                    # `sliding_window`, so it would otherwise fall through to
+                    # (and crash on) the generic `Attention`-layer dispatch
+                    # below. Delegate to its own spec (small, uint8, packed
+                    # per `topk.indexer_kv_cache_width` -- see
+                    # `VllmGlm5IndexerCache.get_kv_cache_spec`), and remember
+                    # it so `initialize_kv_cache` skips the MLA-latent
+                    # allocation path for it.
+                    spec = attn_module.get_kv_cache_spec(
+                        self.runner.vllm_config)
+                    if spec is not None:
+                        kv_cache_spec[layer_name] = spec
+                        self.dsa_indexer_cache_layer_names.add(layer_name)
+                    continue
+
                 if disable_sliding_window:
                     attn_module.sliding_window = None
 
@@ -736,6 +782,26 @@ class KVCacheManager:
             else:
                 for layer_name in group.layer_names:
                     layer_name_to_spec[layer_name] = group.kv_cache_spec
+
+        # TEMP DIAGNOSTIC (GLM-5.2 DSA bring-up, Phase 4): confirm whether
+        # vLLM groups the indexer cache and main-attention cache into one
+        # kv_cache_group (via a heterogeneous `kv_cache_specs` wrapper) or
+        # two separate groups, and whether every indexer-cache layer name
+        # got a correctly distinct (uint8, small) spec either way. Remove
+        # once Phase 4 bring-up is confirmed correct.
+        logger.info(
+            "[glm5-dsa-diag] num kv_cache_groups=%d; per-group summary: %s",
+            len(kv_cache_config.kv_cache_groups),
+            [(type(g.kv_cache_spec).__name__, len(g.layer_names))
+             for g in kv_cache_config.kv_cache_groups])
+        for name in self.dsa_indexer_cache_layer_names:
+            spec = layer_name_to_spec.get(name)
+            logger.info(
+                "[glm5-dsa-diag] indexer layer=%s spec=%s block_size=%s "
+                "head_size=%s dtype=%s", name, type(spec).__name__,
+                getattr(spec, "block_size", None),
+                getattr(spec, "head_size", None), getattr(
+                    spec, "dtype", None))
 
         # set the kv cache layout which is needed by kv connectors
         # NOTE(jcgu): please update the default value when the order changes
@@ -917,16 +983,51 @@ class KVCacheManager:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
                         block_size = layer_spec.storage_block_size
 
-                        kv_cache = create_kv_caches(
-                            num_blocks=num_blocks,
-                            block_size=block_size,
-                            num_kv_heads=layer_spec.num_kv_heads,
-                            head_size=layer_spec.head_size,
-                            mesh=self.runner.mesh,
-                            layer_names=[f'kv_cache_tensor.{i}'],
-                            cache_dtype=t2j_dtype(layer_spec.dtype),
-                            use_mla=self.use_mla,
-                        )[0]
+                        if layer_name in self.dsa_indexer_cache_layer_names:
+                            # GLM-5.2/DSA indexer K-cache: a small, uint8,
+                            # `_DSA_INDEXER_KV_PACKING`-tokens-packed-per-
+                            # physical-row array (see
+                            # `kernels/experimental/glm5/indexer/topk.py::
+                            # pack_indexer_kv_cache`'s layout). Neither
+                            # `use_mla=True`'s ~576-wide main-attention
+                            # latent layout (`mla/v2/kernel.py::
+                            # get_kv_cache_shape`) nor the generic
+                            # `use_mla=False` K+V-doubled multi-head
+                            # attention layout (`ragged_paged_attention`'s
+                            # `get_kv_cache_shape`) matches this cache's
+                            # actual physical shape -- allocate it directly,
+                            # mirroring DSv4's `create_kv_cache_of_shape`
+                            # bespoke-shape idiom (not its packed/overlay
+                            # *allocator*, which is DSv4-specific and not
+                            # reused here).
+                            if block_size % _DSA_INDEXER_KV_PACKING != 0:
+                                raise ValueError(
+                                    "[kv-cache] GLM-5.2/DSA indexer cache "
+                                    f"block_size ({block_size}) must be a "
+                                    "multiple of "
+                                    f"{_DSA_INDEXER_KV_PACKING}")
+                            indexer_shape = (
+                                num_blocks,
+                                block_size // _DSA_INDEXER_KV_PACKING,
+                                _DSA_INDEXER_KV_PACKING,
+                                layer_spec.head_size,
+                            )
+                            kv_cache = create_kv_cache_of_shape(
+                                indexer_shape,
+                                mesh=self.runner.mesh,
+                                cache_dtype=t2j_dtype(layer_spec.dtype),
+                            )
+                        else:
+                            kv_cache = create_kv_caches(
+                                num_blocks=num_blocks,
+                                block_size=block_size,
+                                num_kv_heads=layer_spec.num_kv_heads,
+                                head_size=layer_spec.head_size,
+                                mesh=self.runner.mesh,
+                                layer_names=[f'kv_cache_tensor.{i}'],
+                                cache_dtype=t2j_dtype(layer_spec.dtype),
+                                use_mla=self.use_mla,
+                            )[0]
                         kv_caches.append(kv_cache)
 
                         # Update Regular Attention Metadata
