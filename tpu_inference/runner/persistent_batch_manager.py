@@ -18,7 +18,6 @@ import jax
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference.logger import init_logger
-from tpu_inference import envs
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
@@ -52,10 +51,8 @@ class PersistentBatchManager:
             return swap_cnt
         max_decode_tokens = self.input_batch.max_decode_tokens
 
-        if (
-            max_decode_tokens == 1
-            and scheduler_output.total_num_scheduled_tokens == num_reqs
-        ):
+        if (max_decode_tokens == 1
+                and scheduler_output.total_num_scheduled_tokens == num_reqs):
             num_decode = num_reqs
             self.input_batch.request_distribution = [
                 num_decode, num_decode, num_reqs
@@ -65,7 +62,8 @@ class PersistentBatchManager:
         # Check if all scheduled requests match the decode threshold
         all_decode = True
         for req_id in self.input_batch.req_ids[:num_reqs]:
-            if scheduler_output.num_scheduled_tokens[req_id] > max_decode_tokens:
+            if scheduler_output.num_scheduled_tokens[
+                    req_id] > max_decode_tokens:
                 all_decode = False
                 break
 
@@ -82,10 +80,12 @@ class PersistentBatchManager:
             i_req_id = self.input_batch.req_ids[i]
             j_req_id = self.input_batch.req_ids[j]
 
-            if scheduler_output.num_scheduled_tokens[i_req_id] <= max_decode_tokens:
+            if scheduler_output.num_scheduled_tokens[
+                    i_req_id] <= max_decode_tokens:
                 # i is a decode request, move to the next one.
                 i += 1
-            elif scheduler_output.num_scheduled_tokens[j_req_id] > max_decode_tokens:
+            elif scheduler_output.num_scheduled_tokens[
+                    j_req_id] > max_decode_tokens:
                 # j is a prefill request, move to the previous one.
                 j -= 1
             else:

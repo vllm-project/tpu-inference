@@ -2837,7 +2837,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # Count decode requests (those with num_scheduled_tokens <= max_decode_tokens) in this DP rank
             num_decode_in_dp_rank = 0
             for req_id in req_ids_dp[dp_rank]:
-                if scheduler_output.num_scheduled_tokens[req_id] <= max_decode_tokens:
+                if scheduler_output.num_scheduled_tokens[
+                        req_id] <= max_decode_tokens:
                     num_decode_in_dp_rank += 1
             _request_distribution.append(
                 [num_decode_in_dp_rank, num_decode_in_dp_rank, _num_reqs])

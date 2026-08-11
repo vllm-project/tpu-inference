@@ -31,7 +31,6 @@ Note: batched_rpa is build on top / derived from RPA3.
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference import envs
@@ -315,11 +314,7 @@ def ragged_paged_attention(
         soft_cap=soft_cap,
         mask_value=mask_value,
     )
-    # Using trace-time pl.cdiv to calculate required pages without JAX float tracer
-    max_decode_bkv_p_new = (
-        1 if decode_query_size <= 1
-        else 1 + pl.cdiv(decode_query_size - 1, page_size)
-    )
+
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,
         num_page_indices=num_page_indices,
