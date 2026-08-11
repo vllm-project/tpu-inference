@@ -94,9 +94,4 @@ steps:
             --gpu-memory-utilization 0.8 \
             --model-loader-extra-config '{\"concurrency\":64}' \
             --additional-config '{\"enable_continue_decode\":false,\"sharding\":{\"sharding_strategy\":{\"enable_dp_attention\":false,\"tensor_parallelism\":8,\"expert_parallelism\":4}}}'" \
-          "python3 /workspace/tpu_inference/tests/e2e/multihost/serving_probe.py \
-            --concurrency 4 \
-            --long-tokens 256 \
-            --needle-tokens 8000 \
-          && python3 /workspace/tpu_inference/tests/e2e/multihost/k3_server_scoring_probe.py \
-          && bash /workspace/tpu_inference/tests/e2e/multihost/k3_acc_bench.sh --skip-bench"
+          "bash /workspace/tpu_inference/tests/e2e/multihost/k3_13i_phases.sh"
