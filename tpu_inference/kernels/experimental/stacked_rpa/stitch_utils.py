@@ -27,6 +27,7 @@ def _stitch_decode_lane(
     cache_pages: jax.Array,
     new_tok_offset: jax.Array,
     page_size: int,
+    new_kv_vref: jax.Ref | None = None,
 ):
     """O(1) Decode Path: rewrite only the boundary 128-lane chunk.
 
@@ -42,13 +43,23 @@ def _stitch_decode_lane(
     vmem_u32 = vmem_ref.at[b_idx].bitcast(
         jnp.uint32)  # [2*kv, hd_words, v_len]
     dst_off = (bkv_sz_cache // num_lanes) * num_lanes
-    src_off = cache_pages * page_size + (new_tok_offset //
-                                         num_lanes) * num_lanes
     dst_rel = bkv_sz_cache % num_lanes
     src_lane = new_tok_offset % num_lanes
 
     dst = vmem_u32[:, :, pl.ds(dst_off, num_lanes)]
-    src = vmem_u32[:, :, pl.ds(src_off, num_lanes)]
+    if new_kv_vref is not None:
+        # New KV is resident for the whole kernel (configs.new_kv_resident),
+        # so read the token's 128-lane chunk straight out of it instead of
+        # from a per-cell staged copy in this cell's halo. The array fits one
+        # page, so new_tok_offset is the absolute lane and the lane maths is
+        # identical -- only the base ref changes.
+        src_u32 = new_kv_vref.bitcast(jnp.uint32)
+        src_off = (new_tok_offset // num_lanes) * num_lanes
+        src = src_u32[:, :, pl.ds(src_off, num_lanes)]
+    else:
+        src_off = cache_pages * page_size + (new_tok_offset //
+                                             num_lanes) * num_lanes
+        src = vmem_u32[:, :, pl.ds(src_off, num_lanes)]
     rolled = pltpu.roll(src, dst_rel - src_lane, axis=2)
     lane_idx = jax.lax.broadcasted_iota(jnp.int32, dst.shape, 2)
     merged = jax.lax.select(lane_idx >= dst_rel, rolled, dst)
@@ -121,6 +132,7 @@ def stitch_new_kv_lane(
     new_kv_len_start: jax.Array,
     *,
     cfgs: configs.RpaConfigs,
+    new_kv_vref: jax.Ref | None = None,
 ):
     """Fetches and computes stitched KV tokens (separated to avoid RAW hazards).
 
@@ -147,6 +159,7 @@ def stitch_new_kv_lane(
             cache_pages,
             new_tok_offset,
             cfgs.serve.page_size,
+            new_kv_vref if cfgs.new_kv_resident else None,
         )
     else:
         return _stitch_prefill_lane(

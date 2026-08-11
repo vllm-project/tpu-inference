@@ -82,6 +82,19 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
 
         page_size = self.cfgs.serve.page_size
         bkv_p_cache = self.cfgs.bkv_p_cache
+        # Size the new-KV staging fetch to what new_kv_hbm actually holds
+        # (align_to(total_q_tokens, 128) lanes), not to a full page. A full
+        # page reads off the end of the array for decode -- 2048 lanes out of
+        # a 128-lane array at 32 decode tokens -- and at one cache page per
+        # cell it doubles the KV traffic. Also bound by the lanes left after
+        # src_off, for when the padded array is not a whole number of pages.
+        # Everything here is a multiple of 128, so the size stays aligned.
+        new_fetch_lanes = min(page_size, new_kv_hbm.shape[-1])
+
+        def _new_fetch_sz(src_off):
+            remaining = new_kv_hbm.shape[-1] - src_off
+            return jnp.minimum(new_fetch_lanes, jnp.maximum(remaining, 0))
+
         if self.cfgs.use_chunked_flash:
             # Coalesce all cache pages into a single DMA descriptor. The
             # 5-D VMEM shape matches HBM so make_async_copy accepts it.
@@ -92,9 +105,9 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
             for b in range(self.cfgs.batch_size):
                 total_valid = 0
                 for i in range(bkv_p_cache):
-                    _, _, dma_valid = schedule_ref.get_dma_kv_cache(
+                    _, _, cache_sz = schedule_ref.get_dma_kv_cache(
                         block_idx, b, i)
-                    total_valid += dma_valid
+                    total_valid += jnp.where(cache_sz > 0, 1, 0)
                 first_p_idx, first_dst_off, _ = schedule_ref.get_dma_kv_cache(
                     block_idx, b, 0)
                 first_dst_page = first_dst_off // page_size
@@ -125,9 +138,10 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
             vmem_dst_lane = self.window_ref.at[slot]
             for b in range(self.cfgs.batch_size):
                 for i in range(bkv_p_cache):
-                    p_idx, dst_off, dma_valid = schedule_ref.get_dma_kv_cache(
+                    p_idx, dst_off, cache_sz = schedule_ref.get_dma_kv_cache(
                         block_idx, b, i)
-                    sz = dma_valid * page_size
+                    # Real size, so a partial last page isn't read in full.
+                    sz = cache_sz
                     dst_off = pl.multiple_of(dst_off, 128)
                     sz = pl.multiple_of(sz, 128)
                     pltpu.make_async_copy(
@@ -136,10 +150,12 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
                         sem,
                     ).start()
 
-                for i in range(self.cfgs.bkv_p_new):
+                # Resident new KV is staged once at kernel entry.
+                n_new = 0 if self.cfgs.new_kv_resident else self.cfgs.bkv_p_new
+                for i in range(n_new):
                     src_new_off, dst_vmem_off, dma_valid = (
                         schedule_ref.get_dma_fetch_kv_new(block_idx, b, i))
-                    sz = dma_valid * page_size
+                    sz = dma_valid * _new_fetch_sz(src_new_off)
                     src_new_off = pl.multiple_of(src_new_off, 128)
                     dst_vmem_off = pl.multiple_of(dst_vmem_off, 128)
                     sz = pl.multiple_of(sz, 128)
@@ -166,16 +182,18 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
             for b in range(self.cfgs.batch_size):
                 do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
                 for i in range(self.cfgs.bkv_p_new):
-                    dst_hbm_p, src_vmem_off, dma_valid = schedule_ref.get_dma_update_kv_new(
-                        block_idx, b, i)
-                    sz = jnp.where(do_writeback, dma_valid * page_size, 0)
+                    (dst_hbm_p, src_vmem_off, dma_valid, wb_lane,
+                     wb_sz) = schedule_ref.get_dma_update_kv_new(
+                         block_idx, b, i)
+                    sz = jnp.where(do_writeback, dma_valid * wb_sz, 0)
                     src_page = src_vmem_off // page_size
                     sz = pl.multiple_of(sz, 128)
+                    wb_lane = pl.multiple_of(wb_lane, 128)
                     pltpu.make_async_copy(
                         vmem_src_5d.at[b, src_page, :, :,
-                                       pl.ds(0, sz)],
+                                       pl.ds(wb_lane, sz)],
                         kv_out_ref.at[dst_hbm_p, :, :,
-                                      pl.ds(0, sz)],
+                                      pl.ds(wb_lane, sz)],
                         sem,
                     ).start()
         else:
@@ -183,16 +201,18 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
             for b in range(self.cfgs.batch_size):
                 do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
                 for i in range(self.cfgs.bkv_p_new):
-                    dst_hbm_p, src_vmem_off, dma_valid = schedule_ref.get_dma_update_kv_new(
-                        block_idx, b, i)
-                    sz = jnp.where(do_writeback, dma_valid * page_size, 0)
-                    src_vmem_off = pl.multiple_of(src_vmem_off, 128)
+                    (dst_hbm_p, src_vmem_off, dma_valid, wb_lane,
+                     wb_sz) = schedule_ref.get_dma_update_kv_new(
+                         block_idx, b, i)
+                    sz = jnp.where(do_writeback, dma_valid * wb_sz, 0)
+                    src_vmem_off = pl.multiple_of(src_vmem_off + wb_lane, 128)
                     sz = pl.multiple_of(sz, 128)
+                    wb_lane = pl.multiple_of(wb_lane, 128)
                     pltpu.make_async_copy(
                         vmem_src_lane.at[b, :, :,
                                          pl.ds(src_vmem_off, sz)],
                         kv_out_ref.at[dst_hbm_p, :, :,
-                                      pl.ds(0, sz)],
+                                      pl.ds(wb_lane, sz)],
                         sem,
                     ).start()
 
@@ -201,7 +221,7 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
         src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        _, _, schedule_ref = src_ref
+        _, new_kv_hbm, schedule_ref = src_ref
         slot = self.current_wait_in_slot
         sem = self.sem_recvs.at[slot]
         vmem_dst = self.window_ref.at[slot]
@@ -212,9 +232,9 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
             for b in range(self.cfgs.batch_size):
                 total_pages_b = 0
                 for i in range(self.cfgs.bkv_p_cache):
-                    _, _, dma_valid = schedule_ref.get_dma_kv_cache(
+                    _, _, cache_sz = schedule_ref.get_dma_kv_cache(
                         block_idx, b, i)
-                    total_pages_b += dma_valid
+                    total_pages_b += jnp.where(cache_sz > 0, 1, 0)
                 for i in range(self.cfgs.bkv_p_new):
                     _, _, dma_valid = schedule_ref.get_dma_fetch_kv_new(
                         block_idx, b, i)
@@ -226,17 +246,25 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
                 ).wait()
         else:
             vmem_dst = self.window_ref.at[slot]
+            # Must match copy_in's byte count exactly or the wait hangs.
+            new_fetch_lanes = min(self.cfgs.serve.page_size,
+                                  new_kv_hbm.shape[-1])
             for b in range(self.cfgs.batch_size):
-                total_pages_b = 0
+                cache_lanes_b = 0
+                new_lanes_b = 0
                 for i in range(self.cfgs.bkv_p_cache):
-                    _, _, dma_valid = schedule_ref.get_dma_kv_cache(
+                    _, _, cache_sz = schedule_ref.get_dma_kv_cache(
                         block_idx, b, i)
-                    total_pages_b += dma_valid
-                for i in range(self.cfgs.bkv_p_new):
-                    _, _, dma_valid = schedule_ref.get_dma_fetch_kv_new(
-                        block_idx, b, i)
-                    total_pages_b += jnp.where(dma_valid > 0, 1, 0)
-                sz = total_pages_b * self.cfgs.serve.page_size
+                    cache_lanes_b += cache_sz
+                n_new = 0 if self.cfgs.new_kv_resident else self.cfgs.bkv_p_new
+                for i in range(n_new):
+                    src_new_off, _, dma_valid = (
+                        schedule_ref.get_dma_fetch_kv_new(block_idx, b, i))
+                    remaining = new_kv_hbm.shape[-1] - src_new_off
+                    fetch_sz = jnp.minimum(new_fetch_lanes,
+                                           jnp.maximum(remaining, 0))
+                    new_lanes_b += jnp.where(dma_valid > 0, fetch_sz, 0)
+                sz = cache_lanes_b + new_lanes_b
                 sz = pl.multiple_of(sz, 128)
                 pltpu.make_async_copy(
                     vmem_dst.at[b, :, :, pl.ds(0, sz)],
@@ -256,15 +284,17 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
 
         for b in range(self.cfgs.batch_size):
             do_writeback = schedule_ref.do_writeback[block_idx, b] == 1
-            total_pages_b = 0
+            # Mirror copy_out's byte count exactly -- it now sends the 128-lane
+            # writeback window per page, not the whole page, and a wait that
+            # disagrees with the send hangs the pipeline.
+            sz = 0
             for i in range(self.cfgs.bkv_p_new):
-                _, _, dma_valid = schedule_ref.get_dma_update_kv_new(
-                    block_idx, b, i)
-                total_pages_b += jnp.where(do_writeback, dma_valid, 0)
+                _, _, dma_valid, _, wb_sz = (
+                    schedule_ref.get_dma_update_kv_new(block_idx, b, i))
+                sz += jnp.where(do_writeback, dma_valid * wb_sz, 0)
 
-            sz = total_pages_b * self.cfgs.serve.page_size
             sz = pl.multiple_of(sz, 128)
-            dst_hbm_p, _, _ = schedule_ref.get_dma_update_kv_new(
+            dst_hbm_p, _, _, _, _ = schedule_ref.get_dma_update_kv_new(
                 block_idx, b, 0)
             hbm_p_idx = dst_hbm_p  # physical page (folded in at build)
             pltpu.make_async_copy(

@@ -14,6 +14,7 @@
 """Wrapper for RPA kernel to match expected interface."""
 
 import dataclasses
+import os
 
 import jax
 import jax.numpy as jnp
@@ -647,7 +648,6 @@ def _make_cfgs(
     # (hybrid packing), or detect balance and fall back to the data-parallel
     # path (adaptive dispatch). Until then, only enable for imbalanced/long
     # mixed batches.
-    import os
 
     dense_pack = (os.environ.get("STACKED_RPA_DENSE_PACK", "1") == "1"
                   and mode == configs.RpaCase.DECODE) or (
@@ -680,7 +680,10 @@ def _make_visibility_hbm(
 ) -> jax.Array:
     visibility_pad = max(effective_decode.bq_sz, effective_prefill.bq_sz)
     if visibility is None:
-        return jnp.zeros((queries.shape[0] + visibility_pad, 128),
+        # No visibility -> the kernel gates every visibility_hbm access on
+        # cfgs.has_visibility, so contents are unread. Use jnp.empty to skip
+        # the device-side memset (jnp.zeros pays that cost per call).
+        return jnp.empty((queries.shape[0] + visibility_pad, 128),
                          dtype=jnp.int32)
     return jnp.pad(visibility, ((0, visibility_pad), (0, 126)))
 
@@ -787,6 +790,7 @@ def build_schedules(
     decode_block_sizes: configs.BlockSizes | None = None,
     prefill_block_sizes: configs.BlockSizes | None = None,
     update_kv_cache: bool = True,
+    dispatch_hint: str = "auto",
 ):
     """Precompute the (DECODE, MIXED) RPA schedules once for a forward step.
 
@@ -854,22 +858,31 @@ def build_schedules(
     )
     visibility_hbm = _make_visibility_hbm(queries, effective_decode,
                                           effective_prefill, visibility)
-    decode_schedule = schedule.generate_rpa_metadata(
+    # M1 (hardcore): skip the metadata pallas for the mode the caller knows
+    # won't fire. Each generate_rpa_metadata is a full pallas_call (~140us of
+    # scalar-core work at short ctx). dispatch_hint="decode_only" (the common
+    # serving case with no prefill mix in the step) eliminates the mixed
+    # metadata call entirely — the downstream ragged_paged_attention gates the
+    # mixed branch on distribution counts and returns args unchanged when
+    # empty, so the None mixed_schedule is never dereferenced.
+    build_decode = dispatch_hint in ("auto", "decode_only")
+    build_mixed = dispatch_hint in ("auto", "mixed_only")
+    decode_schedule = (schedule.generate_rpa_metadata(
         cu_q_lens,
         kv_lens,
         distribution,
         page_indices,
         cfgs=decode_cfgs,
         visibility=visibility_hbm if visibility is not None else None,
-    )
-    mixed_schedule = schedule.generate_rpa_metadata(
+    ) if build_decode else None)
+    mixed_schedule = (schedule.generate_rpa_metadata(
         cu_q_lens,
         kv_lens,
         distribution,
         page_indices,
         cfgs=mixed_cfgs,
         visibility=visibility_hbm if visibility is not None else None,
-    )
+    ) if build_mixed else None)
     return decode_schedule, mixed_schedule
 
 
@@ -1008,6 +1021,7 @@ def build_schedules_prepacked_kv(
         "out_dtype",
         "use_causal_mask",
         "update_kv_cache",
+        "dispatch_hint",
     ),
     donate_argnames=("queries", "kv_cache"),
 )
@@ -1039,6 +1053,7 @@ def ragged_paged_attention_prepacked_kv(
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     precomputed_schedules: tuple | None = None,
+    dispatch_hint: str = "auto",
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched RPA with K/V already in SEQ_ALONG_LANE ``new_kv_hbm``."""
 
@@ -1149,6 +1164,13 @@ def ragged_paged_attention_prepacked_kv(
         o_hbm_alias_q_hbm: jax.Array,
         kv_cache: jax.Array,
     ):
+        # Static Python-level skip when the caller knows the batch is
+        # pure-decode or pure-mixed. Removes the compiled kernel for the
+        # unused mode from the HLO entirely, plus one lax.cond dispatch.
+        if dispatch_hint == "decode_only" and mode != configs.RpaCase.DECODE:
+            return o_hbm_alias_q_hbm, kv_cache
+        if dispatch_hint == "mixed_only" and mode != configs.RpaCase.MIXED:
+            return o_hbm_alias_q_hbm, kv_cache
         start, end = mode.get_range(distribution)
         return jax.lax.cond(
             end > start,
@@ -1190,6 +1212,7 @@ def ragged_paged_attention_prepacked_kv(
         "use_causal_mask",
         "update_kv_cache",
         "kv_layout",
+        "dispatch_hint",
     ),
     donate_argnames=("queries", "keys", "values", "kv_cache"),
 )
@@ -1224,6 +1247,7 @@ def ragged_paged_attention(
     kv_layout: configs.KVLayout = configs.KVLayout.SEQ_ALONG_LANE,
     precomputed_schedules: tuple | None = None,
     prepacked_new_kv_hbm: jax.Array | None = None,
+    dispatch_hint: str = "auto",
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -1399,6 +1423,13 @@ def ragged_paged_attention(
         o_hbm_alias_q_hbm: jax.Array,
         kv_cache: jax.Array,
     ):
+        # Static Python-level skip when the caller knows the batch is
+        # pure-decode or pure-mixed. Removes the compiled kernel for the
+        # unused mode from the HLO entirely, plus one lax.cond dispatch.
+        if dispatch_hint == "decode_only" and mode != configs.RpaCase.DECODE:
+            return o_hbm_alias_q_hbm, kv_cache
+        if dispatch_hint == "mixed_only" and mode != configs.RpaCase.MIXED:
+            return o_hbm_alias_q_hbm, kv_cache
         start, end = mode.get_range(distribution)
         return jax.lax.cond(
             end > start,
