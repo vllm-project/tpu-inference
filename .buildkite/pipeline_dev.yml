@@ -18,12 +18,12 @@
 # 0 B -- so the consumer is outside docker. This step only MEASURES;
 # deletions come after, targeted at what it finds.
 steps:
-  - label: "tpu7x-32 disk triage (read-only) — why did 814 run out of space"
-    key: tpu7x_disk_triage
+  - label: "tpu7x-32 occupancy check (read-only) — is anyone using the pod"
+    key: tpu7x_pod_occupancy
     timeout_in_minutes: 30
     env:
       TPU_VERSION: "tpu7x"
     agents:
       queue: tpu_v7x_32_queue
     commands:
-      - bash tests/e2e/multihost/pod_disk_triage.sh
+      - bash tests/e2e/multihost/pod_occupancy.sh
