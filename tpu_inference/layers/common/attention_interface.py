@@ -52,9 +52,14 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 # tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
 # for details
 if envs.USE_BATCHED_RPA_KERNEL:
-    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
-    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
-    logger.info_once("Using experimental batched RPA kernel")
+    if envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        import tpu_inference.kernels.experimental.stacked_rpa.wrapper as rpa
+        import tpu_inference.kernels.experimental.stacked_rpa.wrapper as rpa_cp
+        logger.info_once("Using experimental stacked RPA kernel")
+    else:
+        import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+        import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
+        logger.info_once("Using experimental batched RPA kernel")
 else:
     import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_cp
     import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
@@ -408,8 +413,12 @@ def sharded_ragged_paged_attention(
             v = jnp.repeat(v, factor, axis=1)
 
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD, None, None)
+    if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
+                          None, None)
+    else:
+        kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
+                          ShardingAxisName.ATTN_HEAD, None, None)
     in_specs = (
         qkv_spec,  # q
         qkv_spec,  # k

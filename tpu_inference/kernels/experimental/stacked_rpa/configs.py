@@ -120,6 +120,19 @@ class KVLayout(enum.StrEnum):
     SEQ_ALONG_LANE = enum.auto()
 
 
+class AttentionScope(enum.StrEnum):
+    """Which KV tokens each CP rank attends to.
+
+    - FULL: attend to all tokens (no CP, or single rank).
+    - CACHE_ONLY: attend only to cached tokens (this rank's local cache slice).
+    - NEW_TOKENS_ONLY: attend only to new tokens (current request's tokens).
+    """
+
+    FULL = enum.auto()
+    CACHE_ONLY = enum.auto()
+    NEW_TOKENS_ONLY = enum.auto()
+
+
 @dataclasses.dataclass(frozen=True)
 class ServingConfigs:
     """Serving config that can change depending on use cases."""
@@ -135,6 +148,9 @@ class ServingConfigs:
     scale_k: int | None = None
     scale_v: int | None = None
     kv_layout: KVLayout = KVLayout.SEQ_ALONG_LANE
+    cp_group_size: int | None = None
+    attention_scope: AttentionScope = AttentionScope.FULL
+    return_lse: bool = False
 
     @property
     def pages_per_seq(self) -> int:
@@ -639,6 +655,12 @@ class RpaConfigs:
                 f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},).")
         if distribution.shape != (3, ):
             raise ValueError(f"Expected {distribution.shape=} to be (3,).")
+
+        if self.serve.cp_group_size is not None:
+            if self.serve.attention_scope == AttentionScope.FULL:
+                raise ValueError(
+                    "Context Parallel does not support AttentionScope.FULL. "
+                    "Use CACHE_ONLY or NEW_TOKENS_ONLY.")
 
         if visibility is not None:
             if visibility.shape != (q.shape[0], 2):

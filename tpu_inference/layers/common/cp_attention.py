@@ -30,8 +30,12 @@ from tpu_inference.utils import get_mesh_shape_product
 logger = init_logger(__name__)
 
 if envs.USE_BATCHED_RPA_KERNEL:
-    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
-    logger.info_once("Using experimental batched RPA kernel")
+    if envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        import tpu_inference.kernels.experimental.stacked_rpa.wrapper as rpa_cp
+        logger.info_once("Using experimental stacked RPA kernel")
+    else:
+        import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa_cp
+        logger.info_once("Using experimental batched RPA kernel")
 else:
     import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_cp
     logger.info_once("Using default RPA kernel")
@@ -87,14 +91,21 @@ def _rpa_cp_call(
 ):
     """Call with shared CP params"""
     if envs.USE_BATCHED_RPA_KERNEL:
-        from tpu_inference.kernels.experimental.batched_rpa import \
-            configs as brpa_configs
-        if skip_cache_attn:
-            scope = brpa_configs.AttentionScope.NEW_TOKENS_ONLY
-        elif skip_current_attn:
-            scope = brpa_configs.AttentionScope.CACHE_ONLY
+        if envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+            from tpu_inference.kernels.experimental.stacked_rpa import \
+                configs as srpa_configs
+            scope_cfgs = srpa_configs
         else:
-            scope = brpa_configs.AttentionScope.FULL
+            from tpu_inference.kernels.experimental.batched_rpa import \
+                configs as brpa_configs
+            scope_cfgs = brpa_configs
+
+        if skip_cache_attn:
+            scope = scope_cfgs.AttentionScope.NEW_TOKENS_ONLY
+        elif skip_current_attn:
+            scope = scope_cfgs.AttentionScope.CACHE_ONLY
+        else:
+            scope = scope_cfgs.AttentionScope.FULL
         flags['attention_scope'] = scope
         flags['use_causal_mask'] = True
     else:
@@ -233,8 +244,12 @@ def dcp_forward(
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                      ShardingAxisName.KV_HEAD, None, None)
+    if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_HEAD,
+                          None, ShardingAxisName.KV_CONTEXT)
+    else:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD, None, None)
 
     common = dict(sm_scale=sm_scale,
                   q_scale=q_scale,
@@ -604,8 +619,12 @@ def dcp_forward_decode_only(
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                      ShardingAxisName.KV_HEAD, None, None)
+    if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_HEAD,
+                          None, ShardingAxisName.KV_CONTEXT)
+    else:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD, None, None)
 
     common = dict(
         sm_scale=sm_scale,
@@ -618,24 +637,38 @@ def dcp_forward_decode_only(
     def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
                   page_indices_local, cu_q_lens_local, distribution_local,
                   cp_rank):
-        # kv_cache_local.shape[1] is the local page_size after KV_CONTEXT sharding.
+        # kv_cache_local.shape[1]/shape[-1] is the local page_size after KV_CONTEXT sharding.
         # batched_rpa supports page level interleaved.
         # rpa_v3_cp supports token level interleaved.
-        cp_kv_cache_interleaved_size = kv_cache_local.shape[1] if envs.USE_BATCHED_RPA_KERNEL else 1
+        if envs.USE_BATCHED_RPA_KERNEL:
+            if envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+                cp_kv_cache_interleaved_size = kv_cache_local.shape[-1]
+            else:
+                cp_kv_cache_interleaved_size = kv_cache_local.shape[1]
+        else:
+            cp_kv_cache_interleaved_size = 1
 
         # Write new decode token first, then attend to the full updated cache.
-        merged_kv = merge_kv(k_local, v_local)
-        kv_cache_updated = write_kv_pallas.write_decode_kv(
-            merged_kv=merged_kv,
-            kv_cache=kv_cache_local,
-            kv_lens=kv_lens_local,
-            page_indices=page_indices_local,
-            cu_q_lens=cu_q_lens_local,
-            distribution=distribution_local,
-            cp_rank=cp_rank,
-            cp_group_size=dcp_size,
-            cp_kv_cache_interleaved_size=cp_kv_cache_interleaved_size,
-        )
+        if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+            kv_cache_updated = kv_cache_local
+            kv_lens_arg = kv_lens_local
+            update_kv_cache_arg = True
+            # TODO: Support write decode kv for seq-on-lane kv layout
+        else:
+            merged_kv = merge_kv(k_local, v_local)
+            kv_cache_updated = write_kv_pallas.write_decode_kv(
+                merged_kv=merged_kv,
+                kv_cache=kv_cache_local,
+                kv_lens=kv_lens_local,
+                page_indices=page_indices_local,
+                cu_q_lens=cu_q_lens_local,
+                distribution=distribution_local,
+                cp_rank=cp_rank,
+                cp_group_size=dcp_size,
+                cp_kv_cache_interleaved_size=cp_kv_cache_interleaved_size,
+            )
+            kv_lens_arg = kv_lens_local + 1
+            update_kv_cache_arg = False
 
         q_all_heads = lax.all_gather(q_local, dcp_axis, axis=1, tiled=True)
 
@@ -645,13 +678,13 @@ def dcp_forward_decode_only(
             k_local,
             v_local,
             kv_cache_updated,
-            kv_lens_local + 1,
+            kv_lens_arg,
             page_indices_local,
             cu_q_lens_local,
             distribution_local,
             cp_rank=cp_rank,
             cp_group_size=dcp_size,
-            update_kv_cache=False,
+            update_kv_cache=update_kv_cache_arg,
             return_lse=True,
             skip_cache_attn=False,
             skip_current_attn=True,

@@ -36,6 +36,8 @@ def flash_attention_chunked(
     new_tok_offset: jax.Array,
     visibility: jax.Array | None,
     skip_mask: jax.Array | None,
+    cache_len: jax.Array | None = None,
+    kv_new_start: jax.Array | None = None,
     cfgs: configs.RpaConfigs,
     bq_start: int,
     num_cache_pages: int,
@@ -133,6 +135,10 @@ def flash_attention_chunked(
                     m0,
                     q_idx_b.astype(jnp.int32)
                     < kv_idx_b.astype(jnp.int32) + int(sliding_window))
+            if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+                m0 = jnp.logical_and(m0, kv_idx_b >= kv_new_start.astype(int_ty))
+            if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
+                m0 = jnp.logical_and(m0, kv_idx_b < cache_len.astype(int_ty))
             return m0
 
         _branchless_ok = (skip_mask is not None and tq * s_p <= 64 * 1024)

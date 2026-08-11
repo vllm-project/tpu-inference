@@ -34,8 +34,8 @@ def _run_chunked_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
                             acc_scratch_ref, processed_q_len, processed_kv_len,
                             effective_kv_len, bkv_sz_frm_cache_list,
                             new_kv_len_start_list, visibility_list,
-                            skip_mask_list, step, schedule_ref, cfgs, m_val,
-                            l_val, acc_val):
+                            skip_mask_list, cache_len, kv_new_start, step,
+                            schedule_ref, cfgs, m_val, l_val, acc_val):
     # Decode-only path (bq_sz=1) with the 5-D VMEM layout and per-page
     # flash. m_val / l_val / acc_val are the accumulator snapshot the caller
     # took after any dense-pack reset.
@@ -63,6 +63,8 @@ def _run_chunked_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
                             if cfgs.has_visibility else None),
                 skip_mask=(skip_mask_list[b_idx]
                            if skip_mask_list is not None else None),
+                cache_len=cache_len[b_idx] if cache_len else None,
+                kv_new_start=kv_new_start[b_idx] if kv_new_start else None,
                 cfgs=cfgs,
                 bq_start=bq_start,
                 num_cache_pages=cfgs.bkv_p_cache,
@@ -77,8 +79,8 @@ def _run_shipped_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
                             acc_scratch_ref, processed_q_len, processed_kv_len,
                             effective_kv_len, bkv_sz_frm_cache_list,
                             new_kv_len_start_list, visibility_list,
-                            skip_mask_list, step, schedule_ref, cfgs, m_val,
-                            l_val, acc_val):
+                            skip_mask_list, cache_len, kv_new_start, step,
+                            schedule_ref, cfgs, m_val, l_val, acc_val):
     # MIXED / PREFILL path (and DECODE when the chunked path is not enabled).
     # Uses the 4-D VMEM layout, a single-shot flash, and a stitch pass.
     # Snapshot arguments follow the same convention as
@@ -149,6 +151,8 @@ def _run_shipped_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
             effective_kv_len=effective_kv_len,
             visibility=visibility_list if cfgs.has_visibility else None,
             skip_mask=skip_mask_list,
+            cache_len=cache_len or None,
+            kv_new_start=kv_new_start or None,
             cfgs=cfgs,
             bq_start=bq_start)
         m_scratch_ref[:, :, q_slice] = m_next
@@ -191,8 +195,12 @@ def calculate_and_store_out(
     schedule_ref: schedule.RpaSchedule,
     acc_scratch_ref: jax.Ref,
     l_scratch_ref: jax.Ref,
+    m_scratch_ref: jax.Ref,
     o_vref: jax.Ref,
     *,
+    cu_q_lens_ref: jax.Ref | None = None,
+    lse_hbm_ref: jax.Ref | None = None,
+    lse_sem_ref: jax.Ref | None = None,
     cfgs: configs.RpaConfigs,
 ):
 
@@ -224,6 +232,27 @@ def calculate_and_store_out(
         out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
         utils.strided_store(out_ref, 0, out_ref.shape[0], 1, out)
 
+    def _write_lse(b_idx: int):
+        lse_val = m_scratch_ref[b_idx] + jnp.log(
+            jnp.maximum(l_scratch_ref[b_idx], 1e-9))
+
+        s_idx = schedule_ref.s_idx[step_idx, b_idx]
+        q_idx = schedule_ref.q_idx[step_idx, b_idx]
+        gqh = cfgs.model.num_q_heads_per_kv_head
+        q_src = cu_q_lens_ref[s_idx] + q_idx * cfgs.bq_sz
+        q_src_flat = pl.multiple_of(q_src * gqh, 8)
+        _, q_sz_task = schedule_ref.get_dma_q(step_idx, b_idx)
+        q_sz_flat = pl.multiple_of(
+            q_sz_task * cfgs.aligned_num_q_heads_per_kv_head, 8)
+        m_scratch_ref[b_idx] = lse_val.astype(cfgs.serve.dtype_out)
+        cp = pltpu.make_async_copy(
+            m_scratch_ref.at[b_idx, :, pl.ds(0, q_sz_flat), :],
+            lse_hbm_ref.at[:, pl.ds(q_src_flat, q_sz_flat), :],
+            lse_sem_ref.at[0],
+        )
+        cp.start()
+        cp.wait()
+
     for b in range(cfgs.batch_size):
         # Adding a conditional causes a scheduling barrier. In prefill, we often
         # use small block sizes, so it's not worth executing the accumulation
@@ -236,6 +265,10 @@ def calculate_and_store_out(
         else:
             _accum(b)
 
+        if cfgs.serve.return_lse:
+            is_last_k = schedule_ref.is_last_k[step_idx, b] == 1
+            jax.lax.cond(is_last_k, _write_lse, lambda _: None, b)
+
 
 def _stacked_combine_and_store(
     step_idx: jax.Array,
@@ -245,6 +278,9 @@ def _stacked_combine_and_store(
     m_scratch_ref: jax.Ref,
     o_vref: jax.Ref,
     *,
+    cu_q_lens_ref: jax.Ref | None = None,
+    lse_hbm_ref: jax.Ref | None = None,
+    lse_sem_ref: jax.Ref | None = None,
     cfgs: configs.RpaConfigs,
 ):
     """Stacked segmented combine.
@@ -312,6 +348,27 @@ def _stacked_combine_and_store(
             out_ref = o_u32_vref.reshape(-1, cfgs.aligned_q_head_dim)
             out_b = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
             utils.strided_store(out_ref, 0, out_ref.shape[0], 1, out_b)
+
+            # 4b) write LSE = m + log(l) to HBM if requested.
+            if cfgs.serve.return_lse:
+                lse_val = m_comb + jnp.log(jnp.maximum(l_comb, 1e-9))
+                # lse_val = jnp.where(l_comb > 1e-5, lse_val, -jnp.inf)
+                s_idx = schedule_ref.s_idx[step_idx, root]
+                q_idx = schedule_ref.q_idx[step_idx, root]
+                q_src = cu_q_lens_ref[s_idx] + q_idx * cfgs.bq_sz
+                q_src_flat = pl.multiple_of(q_src * cfgs.model.num_q_heads_per_kv_head,
+                                            8)
+                _, q_sz_task = schedule_ref.get_dma_q(step_idx, root)
+                q_sz_flat = pl.multiple_of(
+                    q_sz_task * cfgs.aligned_num_q_heads_per_kv_head, 8)
+                m_scratch_ref[root] = lse_val.astype(cfgs.serve.dtype_out)
+                lse_cp = pltpu.make_async_copy(
+                    m_scratch_ref.at[root, :, pl.ds(0, q_sz_flat), :],
+                    lse_hbm_ref.at[:, pl.ds(q_src_flat, q_sz_flat), :],
+                    lse_sem_ref.at[0],
+                )
+                lse_cp.start()
+                lse_cp.wait()
 
             # 5) reset the group's cells to identity for reuse.
             for m in range(root, n):
@@ -474,10 +531,13 @@ def rpa_body(
     l_carry_ref: jax.Ref,
     acc_carry_ref: jax.Ref,
     carry_valid_ref: jax.Ref,
+    lse_sem_ref: jax.Ref | None = None,
     *,
     # Passed refs
     cu_q_lens_ref: jax.Ref,
     kv_lens_ref: jax.Ref,
+    cp_rank_ref: jax.Ref | None,
+    lse_hbm_ref: jax.Ref | None = None,
     # Configs.
     cfgs: configs.RpaConfigs,
 ):
@@ -506,6 +566,9 @@ def rpa_body(
     new_kv_len_start_list = []
     visibility_list = []
     skip_mask_list = []
+    # CP attention scope lists (empty when not in CP mode).
+    cache_len = []
+    kv_new_start = []
     int_ty = cfgs.serve.int_ty
     for b_idx in range(cfgs.batch_size):
         s_idx = schedule_ref.s_idx[step, b_idx]
@@ -536,12 +599,25 @@ def rpa_body(
         skip_mask_list.append(schedule_ref.skip_mask[step, b_idx])
 
         # Stitching metadata
-        kv_left = jnp.maximum(kv_len - k_id, 0)
-        if cfgs.update_kv_cache:
-            kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
-        else:
+        if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
+            local_cache_len = offset
+            if cfgs.serve.cp_group_size is not None:
+                rank = cp_rank_ref[0]
+                local_cache_len = utils.cp_local_cache_len(
+                offset, cfgs.serve.cp_group_size, rank,
+                    cfgs.serve.page_size)
+            cache_len.append(local_cache_len.astype(int_ty))
+
+            kv_left = jnp.maximum(local_cache_len - k_id, 0)
             kv_left_frm_cache = kv_left
-        kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
+            kv_left_frm_new = jnp.zeros_like(kv_left)
+        else:
+            kv_left = jnp.maximum(kv_len - k_id, 0)
+            if cfgs.update_kv_cache:
+                kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+            else:
+                kv_left_frm_cache = kv_left
+            kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
 
         bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
         new_kv_len_start = q_end - kv_left_frm_new
@@ -549,12 +625,19 @@ def rpa_body(
         bkv_sz_frm_cache_list.append(bkv_sz_frm_cache.astype(int_ty))
         new_kv_len_start_list.append(new_kv_len_start.astype(int_ty))
 
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+            kv_new_start.append((kv_len - q_len).astype(int_ty))
+
         if not cfgs.is_stacked:
             start_k_idx = 0
             if (sliding_window := cfgs.model.sliding_window) is not None:
                 sw_start_idx = (kv_len - q_len + q_idx * cfgs.bq_sz -
                                 sliding_window + 1)
                 start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
+            if (cfgs.serve.attention_scope ==
+                    configs.AttentionScope.NEW_TOKENS_ONLY):
+                start_k_idx = jnp.maximum(
+                    start_k_idx, (kv_len - q_len) // cfgs.bkv_sz)
 
             is_first_k_block = k_idx == start_k_idx
             reset_cond = jnp.logical_and(is_valid, is_first_k_block)
@@ -616,6 +699,8 @@ def rpa_body(
         new_kv_len_start_list=new_kv_len_start_list,
         visibility_list=visibility_list,
         skip_mask_list=skip_mask_list,
+        cache_len=cache_len,
+        kv_new_start=kv_new_start,
         step=step,
         schedule_ref=schedule_ref,
         cfgs=cfgs,
@@ -663,6 +748,9 @@ def rpa_body(
             l_scratch_ref,
             m_scratch_ref,
             o_vref,
+            cu_q_lens_ref=cu_q_lens_ref,
+            lse_hbm_ref=lse_hbm_ref,
+            lse_sem_ref=lse_sem_ref,
             cfgs=cfgs,
         )
     else:
@@ -671,7 +759,11 @@ def rpa_body(
             schedule_ref,
             acc_scratch_ref,
             l_scratch_ref,
+            m_scratch_ref,
             o_vref,
+            cu_q_lens_ref=cu_q_lens_ref,
+            lse_hbm_ref=lse_hbm_ref,
+            lse_sem_ref=lse_sem_ref,
             cfgs=cfgs,
         )
 
@@ -775,9 +867,11 @@ def rpa_kernel(
     new_kv_hbm: jax.Array,
     kv_cache_hbm: jax.Array,
     visibility_hbm: jax.Array,
+    cp_rank: jax.Array | None = None,
+    lse_hbm: jax.Array | None = None,
     *,
     cfgs: configs.RpaConfigs,
-) -> tuple[jax.Array, jax.Array]:
+) -> tuple[jax.Array, ...]:
     """Perform batched ragged paged attention with scheduler data.
 
     Args:
@@ -810,18 +904,23 @@ def rpa_kernel(
         # Scalar prefetch.
         cu_q_lens_ref: jax.Ref,
         kv_lens_ref: jax.Ref,
+        cp_rank_ref: jax.Ref | None,
         # Inputs.
         schedule_hbm_ref: schedule.RpaSchedule,
         q_hbm_ref: jax.Ref,
         new_kv_hbm_ref: jax.Ref,
         kv_cache_hbm_ref: jax.Ref,
         visibility_hbm_ref: jax.Ref,
+        lse_hbm_ref: jax.Ref | None,
         # Outputs.
         o_hbm_ref: jax.Ref,
         o_kv_cache_hbm_ref: jax.Ref,
+        o_lse_hbm_ref: jax.Ref | None = None
     ):
 
         del o_kv_cache_hbm_ref
+        if cfgs.serve.return_lse:
+            lse_hbm_ref = o_lse_hbm_ref
 
         q_alloc, kv_cache_alloc, visibility_alloc, o_alloc = create_allocs(
             kv_cache_hbm_ref, q_hbm_ref, visibility_hbm_ref, cfgs)
@@ -862,7 +961,8 @@ def rpa_kernel(
                     dtype=configs.accum_dtype(cfgs.serve.dtype_out),
                 ),  # acc_carry
                 pltpu.SMEM((1, ), jnp.int32),  # carry_valid
-            ),
+            ) + ((pltpu.SemaphoreType.DMA((1, )), )
+                 if cfgs.serve.return_lse else ()),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
 
@@ -870,12 +970,18 @@ def rpa_kernel(
             w_size = cfgs.sched_window
             num_windows = cfgs.total_steps_ub // w_size  # static, >= 1
 
+            if cfgs.serve.return_lse:
+                base_scratches = scratches[:-1]
+                lse_sem = scratches[-1]
+            else:
+                lse_sem = None
+                base_scratches = scratches
+            m_s, l_s, acc_s, m_c, l_c, acc_c, cv = base_scratches
             if cfgs.is_stacked:
                 # One-time identity init of the online-softmax scratch. Stacked
                 # relies on reset-after-combine per request thereafter (no
                 # per-first-block reset), so cells not yet touched by any request
                 # start (and stay) at identity.
-                m_s, l_s, acc_s, m_c, l_c, acc_c, cv = scratches
                 m_s[...] = jnp.full_like(m_s[...], -jnp.inf)
                 l_s[...] = jnp.zeros_like(l_s[...])
                 acc_s[...] = jnp.zeros_like(acc_s[...])
@@ -935,6 +1041,8 @@ def rpa_kernel(
                         cfgs=cfgs,
                         cu_q_lens_ref=cu_q_lens_ref,
                         kv_lens_ref=kv_lens_ref,
+                        cp_rank_ref=cp_rank_ref,
+                        lse_hbm_ref=lse_hbm_ref,
                     ),
                     grid=(n_steps, ),
                     in_specs=(
@@ -944,12 +1052,15 @@ def rpa_kernel(
                     ),
                     out_specs=(o_alloc.spec, ),
                 )
+                scratches_passed = (buf, ) + base_scratches
+                if cfgs.serve.return_lse:
+                    scratches_passed = scratches_passed + (lse_sem, )
                 pipeline_func(
                     (q_hbm_ref, buf),
                     (kv_cache_hbm_ref, new_kv_hbm_ref, buf),
                     (visibility_hbm_ref, buf),
                     (o_hbm_ref, buf),
-                    scratches=(buf, ) + scratches,
+                    scratches=scratches_passed,
                     allocations=final_allocs,
                 )
 
@@ -1028,28 +1139,41 @@ def rpa_kernel(
 
         _run()
 
-    # q_hbm / kv_cache_hbm live after the 2 scalar-prefetch operands and the
+    # q_hbm / kv_cache_hbm live after the scalar-prefetch operands and the
     # flattened schedule leaves; compute their input indices so adding schedule
     # fields (e.g. combine_span) can't silently misalign the aliases.
+    # cp_rank=None is not an actual pallas input, so use the active count.
+    _cp_group_size = cfgs.serve.cp_group_size
+    _scalar_args = (cu_q_lens, kv_lens,
+                    cp_rank if _cp_group_size is not None else None)
+    _n_active_scalars = sum(1 for s in _scalar_args if s is not None)
     _n_sched_leaves = len(jax.tree_util.tree_leaves(schedule_hbm))
-    _q_in_idx = 2 + _n_sched_leaves  # q_hbm_ref
+    _q_in_idx = _n_active_scalars + _n_sched_leaves  # q_hbm_ref
     _kv_in_idx = _q_in_idx + 2  # after q_hbm, new_kv_hbm
+    _lse_in_idx = _kv_in_idx + 2  # after kv_cache_hbm, visibility_hbm
+    _return_lse = cfgs.serve.return_lse
+    _input_output_aliases: dict[int, int] = {_q_in_idx: 0, _kv_in_idx: 1}
+    if _return_lse:
+        _input_output_aliases[_lse_in_idx] = 2
     _kernel = pl.pallas_call(
         ragged_paged_attention_pipeline,
-        out_shape=[q_hbm, kv_cache_hbm],
+        out_shape=([q_hbm, kv_cache_hbm, lse_hbm]
+                   if _return_lse else [q_hbm, kv_cache_hbm]),
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=2,
+            num_scalar_prefetch=3,
             in_specs=[
                 schedule_hbm.in_specs(),
                 pl.BlockSpec(memory_space=pltpu.HBM),  # q_hbm_ref
                 pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv_hbm_ref
                 pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache_hbm_ref
                 pl.BlockSpec(memory_space=pltpu.HBM),  # visibility_hbm_ref
+                pl.BlockSpec(memory_space=pltpu.HBM) if _return_lse else None,  # lse_hbm_ref (aliased to out[2])
             ],
             out_specs=[
                 pl.BlockSpec(memory_space=pltpu.HBM),  # aliased_o_hbm_ref
                 pl.BlockSpec(
                     memory_space=pltpu.HBM),  # aliased_kv_cache_hbm_ref
+                pl.BlockSpec(memory_space=pltpu.HBM) if _return_lse else None,  # lse_hbm_ref
             ],
         ),
         compiler_params=pltpu.CompilerParams(
@@ -1061,10 +1185,7 @@ def rpa_kernel(
             # disable_bounds_checks); semaphore usage is covered by the tests.
             disable_semaphore_checks=True,
         ),
-        input_output_aliases={
-            _q_in_idx: 0,
-            _kv_in_idx: 1
-        },
+        input_output_aliases=_input_output_aliases,
         name=get_kernel_name(cfgs),
         metadata=get_kernel_metadata(cfgs),
     )
@@ -1082,9 +1203,11 @@ def rpa_kernel(
     return _kernel(
         cu_q_lens,
         kv_lens,
+        cp_rank if _cp_group_size is not None else None,
         constrained_schedule_hbm_ref,
         pltpu.with_memory_space_constraint(q_hbm, pltpu.HBM),
         pltpu.with_memory_space_constraint(new_kv_hbm, pltpu.HBM),
         pltpu.with_memory_space_constraint(kv_cache_hbm, pltpu.HBM),
         pltpu.with_memory_space_constraint(visibility_hbm, pltpu.HBM),
+        pltpu.with_memory_space_constraint(lse_hbm, pltpu.HBM) if _return_lse else None
     )

@@ -242,6 +242,7 @@ def compute_metadata(
     cfgs: configs.RpaConfigs,
     window_lo: int = 0,
     sorted_seq_idx_ref: jax.Ref | None = None,
+    cp_rank_ref: jax.Ref | None = None,
 ):
     """Fill metadata using triple nested loop of seq->q->k loop.
 
@@ -331,16 +332,30 @@ def compute_metadata(
             else:
                 fetch_vmem = (cache_pages + i) * cfgs.serve.page_size
 
-            p_idx = jnp.minimum(
-                (kv_len_start + slot_start) >> cfgs.serve.page_size_log2,
-                cfgs.serve.pages_per_seq - 1,
-            )
-            # Physical KV-cache page (page_indices folded in at build time):
-            # the consume kernel uses dst_hbm directly, no page_indices lookup.
-            dst_hbm = seq_page_table_ref[p_idx]
+            # Global page position of the slot being written back.
+            global_p_idx = (kv_len_start + slot_start) >> cfgs.serve.page_size_log2
+            if cfgs.serve.cp_group_size is not None and cp_rank_ref is not None:
+                # CP: page table holds LOCAL (rank-owned) pages.
+                # global_p_idx // G gives the local slot; only write back when
+                # this rank owns the page (global_p_idx % G == rank).
+                rank = cp_rank_ref[0]
+                local_p_idx = jnp.minimum(
+                    global_p_idx // cfgs.serve.cp_group_size,
+                    cfgs.serve.pages_per_seq - 1,
+                )
+                dst_hbm = seq_page_table_ref[local_p_idx]
+                wb_dma_valid = jnp.where(
+                    (dma_sz > 0)
+                    & (global_p_idx % cfgs.serve.cp_group_size == rank),
+                    1, 0)
+            else:
+                p_idx = jnp.minimum(global_p_idx, cfgs.serve.pages_per_seq - 1)
+                # Physical KV-cache page (page_indices folded in at build time):
+                # the consume kernel uses dst_hbm directly, no page_indices lookup.
+                dst_hbm = seq_page_table_ref[p_idx]
+                wb_dma_valid = jnp.where(dma_sz > 0, 1, 0)
 
-            packed_dma_valid = fetch_dma_valid | (
-                jnp.where(dma_sz > 0, 1, 0) << 1)
+            packed_dma_valid = fetch_dma_valid | (wb_dma_valid << 1)
 
             schedule.dma_kv_new[local, target_lane, i, 0] = new_page_start
             schedule.dma_kv_new[local, target_lane, i, 1] = fetch_vmem
@@ -467,6 +482,23 @@ def compute_metadata(
                                 q_sz_task - 1) // cfgs.bkv_sz + 1
             end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
 
+        # CP attention scope: restrict k-range to owned cache or new tokens only.
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+            # Skip all k-blocks that are purely cached; only attend new tokens.
+            start_k_idx = jnp.maximum(start_k_idx,
+                                      (k_len - q_len) // cfgs.bkv_sz)
+        elif (cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY
+              and cfgs.serve.cp_group_size is not None
+              and cp_rank_ref is not None):
+            # Truncate k-range to this rank's local cache length.
+            rank = cp_rank_ref[0]
+            local_cache_len = utils.cp_local_cache_len(
+                k_len - q_len, cfgs.serve.cp_group_size, rank,
+                cfgs.serve.page_size)
+            k_len = local_cache_len
+            end_k_idx = jnp.minimum(end_k_idx,
+                                    pl.cdiv(local_cache_len, cfgs.bkv_sz))
+
         k_loop_fn = functools.partial(
             k_loop,
             target_lane=target_lane,
@@ -584,6 +616,7 @@ def compute_metadata(
                 # (causal / sliding-window / visibility), parameterized by q_idx.
                 q_src = q_start + q_idx * cfgs.bq_sz
                 q_sz_task = jnp.clip(q_end - q_src, 0, cfgs.bq_sz)
+                k_len_eff = k_len  # may be truncated for CACHE_ONLY
 
                 start_k_idx = 0
                 if cfgs.has_visibility:
@@ -619,6 +652,21 @@ def compute_metadata(
                         cfgs.bkv_sz + 1,
                     )
 
+                # CP attention scope: restrict k-range to owned cache or new tokens only.
+                if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+                    start_k_idx = jnp.maximum(start_k_idx,
+                                              (k_len_eff - q_len) // cfgs.bkv_sz)
+                elif (cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY
+                      and cfgs.serve.cp_group_size is not None
+                      and cp_rank_ref is not None):
+                    rank = cp_rank_ref[0]
+                    local_cache_len = utils.cp_local_cache_len(
+                        k_len - q_len, cfgs.serve.cp_group_size, rank,
+                        cfgs.serve.page_size)
+                    k_len_eff = local_cache_len
+                    end_k_idx = jnp.minimum(end_k_idx,
+                                            pl.cdiv(local_cache_len, cfgs.bkv_sz))
+
                 num_k_seq = jnp.maximum(end_k_idx - start_k_idx, 0)
                 p0 = g
                 p1 = g + num_k_seq
@@ -634,7 +682,7 @@ def compute_metadata(
                         q_end=q_end,
                         q_src=q_src,
                         q_sz_task=q_sz_task,
-                        k_len=k_len,
+                        k_len=k_len_eff,
                         q_len=q_len,
                         end_k_idx=end_k_idx,
                     )
@@ -753,6 +801,21 @@ def compute_metadata(
                     cfgs.bkv_sz + 1,
                 )
 
+            # CP attention scope: restrict k-range to owned cache or new tokens only.
+            if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+                start_k_idx = jnp.maximum(start_k_idx,
+                                          (k_len - q_len) // cfgs.bkv_sz)
+            elif (cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY
+                  and cfgs.serve.cp_group_size is not None
+                  and cp_rank_ref is not None):
+                rank = cp_rank_ref[0]
+                local_cache_len = utils.cp_local_cache_len(
+                    k_len - q_len, cfgs.serve.cp_group_size, rank,
+                    cfgs.serve.page_size)
+                k_len = local_cache_len
+                end_k_idx = jnp.minimum(end_k_idx,
+                                        pl.cdiv(local_cache_len, cfgs.bkv_sz))
+
             num_k_seq = jnp.maximum(end_k_idx - start_k_idx, 0)
             is_long = num_k_seq >= n
 
@@ -819,6 +882,7 @@ def rpa_metadata_schedule_kernel(
     cu_q_lens_ref: jax.Ref,
     kv_lens_ref: jax.Ref,
     distribution_ref: jax.Ref,
+    cp_rank_ref: jax.Ref | None,
     visibility_bounds_ref: jax.Ref,
     # HBM input (streamed per-seq into SMEM during the build).
     page_indices_hbm_ref: jax.Ref,
@@ -917,6 +981,7 @@ def rpa_metadata_schedule_kernel(
             cfgs=cfgs,
             window_lo=window_lo,
             sorted_seq_idx_ref=sorted_seq_idx_ref,
+            cp_rank_ref=cp_rank_ref,
         )
 
         # Stream this window's big (per-step) SMEM leaves to their HBM slot.
@@ -970,6 +1035,7 @@ def rpa_metadata_schedule_kernel_stacked(
     kv_lens_ref: jax.Ref,
     distribution_ref: jax.Ref,
     sorted_seq_idx_ref: jax.Ref,
+    cp_rank_ref: jax.Ref | None,
     visibility_bounds_ref: jax.Ref,
     # HBM input (streamed per-seq into SMEM during the build).
     page_indices_hbm_ref: jax.Ref,
@@ -990,6 +1056,7 @@ def rpa_metadata_schedule_kernel_stacked(
         cu_q_lens_ref,
         kv_lens_ref,
         distribution_ref,
+        cp_rank_ref,
         visibility_bounds_ref,
         page_indices_hbm_ref,
         schedule_hbm_ref,
@@ -1011,6 +1078,7 @@ def generate_rpa_metadata(
     cfgs: configs.RpaConfigs,
     *,
     visibility: jax.Array | None = None,
+    cp_rank: jax.Array | None = None,
     interpret=False,
     sorted_seq_idx_override: jax.Array | None = None,
 ) -> RpaSchedule:
@@ -1082,7 +1150,7 @@ def generate_rpa_metadata(
             functools.partial(rpa_metadata_schedule_kernel_stacked, cfgs=cfgs),
             out_shape=hbm_shaped,
             grid_spec=pltpu.PrefetchScalarGridSpec(
-                num_scalar_prefetch=4,
+                num_scalar_prefetch=5,
                 in_specs=[
                     pl.BlockSpec(memory_space=pltpu.VMEM),  # visibility_bounds
                     pl.BlockSpec(memory_space=pltpu.HBM),  # page_indices
@@ -1103,6 +1171,7 @@ def generate_rpa_metadata(
             kv_lens,
             distribution,
             sorted_seq_idx,
+            cp_rank,
             visibility_bounds,
             page_indices_padded,
         )
@@ -1111,7 +1180,7 @@ def generate_rpa_metadata(
         functools.partial(rpa_metadata_schedule_kernel, cfgs=cfgs),
         out_shape=hbm_shaped,
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=3,
+            num_scalar_prefetch=4,
             in_specs=[
                 pl.BlockSpec(memory_space=pltpu.VMEM),  # visibility_bounds
                 pl.BlockSpec(memory_space=pltpu.HBM),  # page_indices
@@ -1131,6 +1200,7 @@ def generate_rpa_metadata(
         cu_q_lens,
         kv_lens,
         distribution,
+        cp_rank,
         visibility_bounds,
         page_indices_padded,
     )

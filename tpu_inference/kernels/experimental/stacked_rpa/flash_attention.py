@@ -30,6 +30,8 @@ def flash_attention_qk_softmax(
     effective_kv_len: list[jax.Array],  # [B]
     visibility: list[jax.Array] | None = None,  # [B] x [bq_sz, 128]
     skip_mask: list[jax.Array] | None = None,  # [B]
+    cache_len: list[jax.Array] | None = None,  # [B] for CACHE_ONLY scope
+    kv_new_start: list[jax.Array] | None = None,  # [B] for NEW_TOKENS_ONLY scope
     cfgs: configs.RpaConfigs,
     bq_start: int,
 ):
@@ -109,6 +111,12 @@ def flash_attention_qk_softmax(
                     mask,
                     q_idx_b.astype(jnp.int32)
                     < kv_idx_b.astype(jnp.int32) + int(sliding_window))
+            if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+                mask = jnp.logical_and(
+                    mask, kv_idx_b >= kv_new_start[b_idx].astype(int_ty))
+            if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
+                mask = jnp.logical_and(
+                    mask, kv_idx_b < cache_len[b_idx].astype(int_ty))
             return mask
 
         # Small qk tiles (decode, tq == 1) fit the branchless path without VREG

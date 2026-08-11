@@ -139,6 +139,20 @@ def convert_to_target_bitwidth(val, target_bitwidth: int, kv_dtype: jnp.dtype):
         return left_out + right_out
 
 
+def cp_local_cache_len(global_cache_len, cp_group_size, cp_rank, page_size):
+    """Number of cache tokens owned by this CP rank.
+
+    Assumes cp_kv_cache_interleave_size = page_size (page-level interleaving).
+    """
+    super_page = cp_group_size * page_size
+    full_tokens = (global_cache_len // super_page) * page_size
+    rem_tokens = jnp.maximum(
+        0,
+        jnp.minimum(page_size,
+                    (global_cache_len % super_page) - cp_rank * page_size))
+    return full_tokens + rem_tokens
+
+
 def has_bank_conflicts(stride: int, distance=24, num_banks=32) -> bool:
     banks = set()
     for i in range(distance):

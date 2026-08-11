@@ -166,13 +166,24 @@ def bench_kv_len(global_kv_len: int):
     # ==========================================================================
     #  1. TP8 JIT Definition & Run
     # ==========================================================================
+    from tpu_inference import envs
+    from tpu_inference.kernels.experimental.stacked_rpa import configs as srpa_configs
     pages_per_seq_tp8 = math.ceil(global_kv_len / PAGE_SIZE)
     total_pages_tp8 = MAX_NUM_SEQS * pages_per_seq_tp8
     factor = TP8_MODEL // NUM_KV_HEADS
-    tp8_cache_shape = get_kv_cache_shape(
-        total_pages_tp8, PAGE_SIZE, NUM_KV_HEADS * factor, HEAD_DIM, KV_DTYPE
-    )
-    cache_sharding_tp8 = NamedSharding(mesh_tp8, P(None, None, model_axis, None))
+
+    if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        from tpu_inference.kernels.experimental.stacked_rpa.wrapper import get_kv_cache_shape as get_rpa_cache_shape
+        tp8_cache_shape = get_rpa_cache_shape(
+            total_pages_tp8, PAGE_SIZE, NUM_KV_HEADS * factor, HEAD_DIM, KV_DTYPE,
+            kv_layout=srpa_configs.KVLayout.SEQ_ALONG_LANE
+        )
+        cache_sharding_tp8 = NamedSharding(mesh_tp8, P(None, model_axis, None, None))
+    else:
+        tp8_cache_shape = get_kv_cache_shape(
+            total_pages_tp8, PAGE_SIZE, NUM_KV_HEADS * factor, HEAD_DIM, KV_DTYPE
+        )
+        cache_sharding_tp8 = NamedSharding(mesh_tp8, P(None, None, model_axis, None))
 
     @jax.jit
     def init_tp8_cache():
@@ -210,10 +221,19 @@ def bench_kv_len(global_kv_len: int):
     # ==========================================================================
     pages_per_seq_dcp = math.ceil(global_kv_len / PHYSICAL_BLOCK_SIZE)
     total_pages_dcp = MAX_NUM_SEQS * pages_per_seq_dcp
-    dcp_cache_shape = get_kv_cache_shape(
-        total_pages_dcp, PHYSICAL_BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM, KV_DTYPE
-    )
-    cache_sharding_dcp = NamedSharding(mesh, P(None, dcp_axis, model_axis, None))
+
+    if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        from tpu_inference.kernels.experimental.stacked_rpa.wrapper import get_kv_cache_shape as get_rpa_cache_shape
+        dcp_cache_shape = get_rpa_cache_shape(
+            total_pages_dcp, PHYSICAL_BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM, KV_DTYPE,
+            kv_layout=srpa_configs.KVLayout.SEQ_ALONG_LANE
+        )
+        cache_sharding_dcp = NamedSharding(mesh, P(None, model_axis, None, dcp_axis))
+    else:
+        dcp_cache_shape = get_kv_cache_shape(
+            total_pages_dcp, PHYSICAL_BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM, KV_DTYPE
+        )
+        cache_sharding_dcp = NamedSharding(mesh, P(None, dcp_axis, model_axis, None))
 
     @jax.jit
     def init_dcp_cache():
