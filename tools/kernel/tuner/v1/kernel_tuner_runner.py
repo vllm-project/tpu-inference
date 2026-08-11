@@ -107,6 +107,7 @@ def _invoke_worker_process(kernel_tuner_name: str, run_config: RunConfig,
         sys.executable,
         '-m',
         'tools.kernel.tuner.v1.kernel_tuner_worker',
+        f"--kernel_tuner_name={kernel_tuner_name}",
         f'--begin_case_id={begin_case_id}',
         f'--end_case_id={end_case_id}',
         f'--run_config_path={run_config_path}',
@@ -116,6 +117,7 @@ def _invoke_worker_process(kernel_tuner_name: str, run_config: RunConfig,
     from tools.kernel.tuner.v1.kernel_tuner_flags import get_present_flag_args
     command.extend(
         get_present_flag_args(exclude_flags={
+            'kernel_tuner_name',
             'begin_case_id',
             'end_case_id',
         }))

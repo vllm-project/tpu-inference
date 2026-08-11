@@ -39,6 +39,20 @@ def _literal_representer(dumper, data):
 yaml.add_representer(LiteralString, _literal_representer)
 
 
+def _embed_flag_in_bash_c(arg: str) -> str:
+    """Double-quote a '--name=value' arg so the inner shell of the generated
+    bash -c command keeps the value as one word."""
+    name, sep, value = arg.partition('=')
+    if not sep:
+        return arg  # boolean form '--name' / '--noname'
+    assert "'" not in value, (
+        f'{name} value must not contain single quotes when generating '
+        'Buildkite steps (it would terminate the bash -c quoting)')
+    escaped = (value.replace('\\', '\\\\').replace('"', '\\"').replace(
+        '$', '\\$').replace('`', '\\`'))
+    return f'{name}="{escaped}"'
+
+
 class ProcessedCasesTracker:
     """Tracks evaluated case IDs and their execution statuses to manage state and OOM early-pruning."""
 
@@ -147,6 +161,11 @@ class KernelTunerBase(ABC):
                                       "xprof")
         # Control number of iterations for measuring kernel latency.
         self._measurement_iters = 5 if self.tuner_config.jit_kernel_pattern else 100
+
+    @property
+    def worker_id(self) -> str:
+        from tools.kernel.tuner.v1.utils import get_worker_id
+        return get_worker_id(self.run_config.worker_id)
 
     @staticmethod
     def init_case_set(storage_manager, run_config: RunConfig) -> bool:
@@ -273,13 +292,15 @@ class KernelTunerBase(ABC):
         safe_remove_files(yml_file_path)
         from tools.kernel.tuner.v1.kernel_tuner_flags import \
             get_present_flag_args
-        extra_flags = get_present_flag_args(exclude_flags={
-            'run_locally',
-            'begin_case_id',
-            'end_case_id',
-        })
-        extra_flags_str = '  '.join([''] +
-                                    extra_flags) + ' ' if extra_flags else ''
+        extra_flags = get_present_flag_args(
+            exclude_flags={
+                'run_locally',
+                'begin_case_id',
+                'end_case_id',
+                'worker_id',  # keep per-agent env resolution; don't stamp the generator's id
+            })
+        extra_flags_str = ''.join(f'  {_embed_flag_in_bash_c(a)}'
+                                  for a in extra_flags)
 
         return {
             "label":

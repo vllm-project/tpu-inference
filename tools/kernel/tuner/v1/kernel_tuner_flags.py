@@ -131,21 +131,21 @@ MLA_Q_DTYPE = flags.DEFINE_string("mla_q_dtype", "float8_e4m3fn",
                                   "Q activation dtype.")
 
 
-def get_present_flag_args(exclude_flags: set[str]
-                          | tuple[str, ...] = ()) -> list[str]:
-    """Returns a list of '--flag_name=value' strings for explicitly present CLI flags.
+def get_present_flag_args(exclude_flags=()):
+    """Serialize explicitly-set shared tuner flags to CLI args.
 
-    Args:
-        exclude_flags: Container of flag names to exclude from the returned list.
-
-    Returns:
-        List of CLI flag argument strings (e.g. ['--mla_max_num_seqs=200']).
+    Only flags defined in THIS module are forwarded, so process-specific
+    flags (worker's --result_path, executor's --run_config_path, absl
+    logging flags) can never leak into a child that doesn't define them.
     """
-    exclude_set = set(exclude_flags)
-    exclude_set.add('generate_buildkite_pipeline')
-    args = []
-    for name in flags.FLAGS:
-        flag = flags.FLAGS[name]
-        if flag.present and name not in exclude_set:
-            args.append(f'--{name}={flag.value}')
-    return args
+    exclude = set(exclude_flags)
+    exclude.add('generate_buildkite_pipeline')
+    own = {
+        f.name
+        for f in flags.FLAGS.flags_by_module_dict().get(__name__, [])
+    }
+    return [
+        flags.FLAGS[name].serialize()  # absl-native '--name=value'
+        for name in sorted(own)
+        if flags.FLAGS[name].present and name not in exclude
+    ]
