@@ -68,7 +68,8 @@ curl -sf http://localhost:8256/health > /dev/null \
 echo "=== [3/3] scoring probe over HTTP + trace check ==="
 SCORING_BASE=http://localhost:8256 \
   SCORING_MODEL=gs://tpu-commons-ci/moonshootai/kimi/k3-sliced \
-  SCORING_WAVES=5 python3 tests/e2e/multihost/k3_server_scoring_probe.py
+  SCORING_WAVES=5 python3 tests/e2e/multihost/k3_server_scoring_probe.py \
+  || { echo "SCORING PROBE FAILED — serve log tail:"; tail -60 /tmp/serve.log; exit 1; }
 
 echo "=== churn-trace lines in the serve log: ==="
 grep -c "churn-trace" /tmp/serve.log || { echo "NO TRACE LINES"; exit 1; }

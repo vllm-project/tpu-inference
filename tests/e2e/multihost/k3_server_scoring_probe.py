@@ -22,13 +22,22 @@ this is bit-stable (verified on an 8-chip slice through 60 waves / ~500
 churned requests); drift here with a simultaneously collapsed gsm8k
 isolates the corruption to the decode path.
 
+Mechanism: vLLM's `prompt_logprobs` completions extension (the engine
+path this instrument was validated on) with echo+logprobs as a fallback.
+HTTP errors print the full response body — a swallowed 500 here has
+already cost one green-but-dead validation run.
+
 Env: SCORING_WAVES (default 12), SCORING_BASE (default
 http://localhost:8000), SCORING_MODEL (default the K3 GCS path).
-Prints per-wave max |delta| and exits 0 always (measurement, not a gate).
+Exit codes: 0 = measurement completed (BIT-STABLE or DRIFTING — drift is
+a result, not a failure); 2 = INCOMPLETE (the instrument itself failed;
+a green build must not hide a dead instrument).
 """
 import concurrent.futures
 import json
 import os
+import sys
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -42,24 +51,58 @@ rng = np.random.default_rng(20260810)
 PROMPTS = [[int(t) for t in rng.integers(1000, 150000, size=1024)]
            for _ in range(8)]
 
+MECHANISM = os.environ.get("SCORING_MECHANISM", "prompt_logprobs")
+
+
+def _post(payload):
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(f"{BASE}/v1/completions",
+                                 data=body,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode(errors="replace")[:2000]
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError(
+            f"HTTP {e.code} from /v1/completions; response body: "
+            f"{detail!r}") from e
+
 
 def score_one(prompt_ids):
-    body = json.dumps({
+    global MECHANISM
+    if MECHANISM == "prompt_logprobs":
+        out = _post({
+            "model": MODEL,
+            "prompt": prompt_ids,
+            "max_tokens": 1,
+            "temperature": 0.0,
+            "prompt_logprobs": 0,
+        })
+        plps = out["choices"][0].get("prompt_logprobs")
+        if plps is None:
+            raise RuntimeError(
+                "server returned no prompt_logprobs; response keys: "
+                f"{sorted(out['choices'][0])}")
+        total = 0.0
+        for entry in plps:
+            if entry:
+                total += min(float(v["logprob"]) for v in entry.values())
+        return total
+    # Fallback: echo the prompt and read token_logprobs.
+    out = _post({
         "model": MODEL,
         "prompt": prompt_ids,
         "max_tokens": 1,
         "temperature": 0.0,
         "echo": True,
         "logprobs": 1,
-    }).encode()
-    req = urllib.request.Request(f"{BASE}/v1/completions",
-                                 data=body,
-                                 headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
-        out = json.load(r)
+    })
     lps = out["choices"][0]["logprobs"]["token_logprobs"]
-    # First entry is None (no logprob for the first token); the last entry
-    # belongs to the generated token — sum the echoed prompt portion only.
     prompt_lps = [x for x in lps[:len(prompt_ids)] if x is not None]
     return float(sum(prompt_lps))
 
@@ -70,16 +113,29 @@ def wave():
 
 
 def main():
-    print(f"[scoring-probe] {W} waves x 8 fixed 1024-token sequences")
+    global MECHANISM
+    print(f"[scoring-probe] {W} waves x 8 fixed 1024-token sequences "
+          f"(mechanism={MECHANISM})")
     ref = None
     worst_overall = 0.0
     for w in range(W):
         try:
             sums = wave()
         except Exception as exc:  # noqa: BLE001
-            print(f"[scoring-probe] wave={w} REQUEST FAILED: {exc}")
-            print("[scoring-probe] RESULT: INCOMPLETE")
-            return
+            if w == 0 and MECHANISM == "prompt_logprobs":
+                print(f"[scoring-probe] prompt_logprobs failed ({exc}); "
+                      "falling back to echo+logprobs")
+                MECHANISM = "echo"
+                try:
+                    sums = wave()
+                except Exception as exc2:  # noqa: BLE001
+                    print(f"[scoring-probe] fallback also failed: {exc2}")
+                    print("[scoring-probe] RESULT: INCOMPLETE")
+                    sys.exit(2)
+            else:
+                print(f"[scoring-probe] wave={w} REQUEST FAILED: {exc}")
+                print("[scoring-probe] RESULT: INCOMPLETE")
+                sys.exit(2)
         if ref is None:
             ref = sums
             print("[scoring-probe] wave=0 ref sums:",
