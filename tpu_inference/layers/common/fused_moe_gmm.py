@@ -115,6 +115,11 @@ def gmm_wrapper(lhs,
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
         group_offset=group_offset[0],
+        # zero_initialize=False is safe ONLY while every consumer of rows
+        # outside the local expert groups stays select-masked (megablox
+        # _zero_uninitialized_memory, ragged_gather_reduce's jnp.where after
+        # the multiply). Multiplicative masking is not enough: those rows are
+        # uninitialized memory and 0 * NaN = NaN.
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,

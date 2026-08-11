@@ -1115,6 +1115,11 @@ def mla_sliding_window_ragged_paged_attention(
     if unnormalized_output:
         # output of swa attn is consumed by csa, hca attn, padding tokens'
         # data won't be used downstream at all, so un-initialized buffer is fine.
+        # CONTRACT (load-bearing since jax 0.11.0, where jnp.empty/empty_like
+        # returns genuinely uninitialized memory -- recycled HBM, NaN patterns
+        # included): every downstream consumer must DROP padding rows via
+        # select/slice, never via multiplication or accumulation -- 0 * NaN
+        # is NaN, so a masked-sum over these rows corrupts real outputs.
         l_sum = jnp.empty((q.shape[0], num_l_heads), dtype=jnp.float32)
         m = jnp.empty((q.shape[0], num_l_heads), dtype=jnp.float32)
         in_output = jnp.empty_like(q)
