@@ -412,13 +412,17 @@ fi
 
 # Prep specialized configurations (DeepSeek)
 if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" && "${IS_MULTI_HOST_BENCH:-false}" == "false" ]]; then
-  if command -v gsutil &> /dev/null; then
-    echo "Syncing generation configs for DeepSeek-R1"
-    GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
-    mkdir -p "$GENERATION_CONFIG_FOLDER"
-    gsutil -m cp -r gs://tpu-commons-ci/deepseek/* "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
+  if [[ -n "${GCS_GEN_CONFIG:-}" ]]; then
+    if command -v gsutil &> /dev/null; then
+      echo "Syncing generation configs for DeepSeek-R1 from GCS: $GCS_GEN_CONFIG"
+      GENERATION_CONFIG_FOLDER="$ARTIFACT_FOLDER/generation_configs"
+      mkdir -p "$GENERATION_CONFIG_FOLDER"
+      gsutil -m cp "${GCS_GEN_CONFIG}/config.json" "${GCS_GEN_CONFIG}/generation_config.json" "$GENERATION_CONFIG_FOLDER" || echo "Warning: failed to sync generation configs ${DATASET}"
+    else
+      echo "Warning: gsutil not found. Skipping DeepSeek-R1 generation configs download from GCS."
+    fi
   else
-    echo "Warning: gsutil not found. Skipping DeepSeek-R1 generation configs download from GCS."
+    echo "gcs gen config path not found, skipping download the generation configs"
   fi
 fi
 

@@ -246,6 +246,50 @@ def get_padded_num_heads(num_heads: int, sharding_size: int) -> int:
     return num_heads
 
 
+def get_layer_kv_params(
+        text_config: Any,
+        layer_type: str) -> Tuple[Optional[int], Optional[int]]:
+    """Returns (head_dim, num_kv_heads) for one attention layer.
+
+    Models like Gemma4 use a larger head_dim (global_head_dim) and, with
+    attention_k_eq_v, fewer KV heads (num_global_key_value_heads) on their
+    full-attention layers than on their sliding ones.
+
+    transformers >= 5.15 stores such values per layer
+    (config.per_layer_config[i]); the flat global_* aliases are removed and
+    reading head_dim / num_key_value_heads on the whole-model config raises
+    AmbiguousGlobalPerLayerAttributeError — a RuntimeError, so getattr
+    defaults do NOT swallow it. Older versions expose flat attributes that
+    are split by layer_types.
+
+    Either returned value may be None when the config omits it (e.g.
+    Gemma-4 E2B sets num_global_key_value_heads=None); callers apply their
+    own fallbacks.
+    """
+    # `is True` so MagicMock configs in tests (where any attribute access
+    # returns a truthy Mock) take the flat-attribute path below.
+    if getattr(text_config, "is_heterogeneous", False) is True:
+        layer_types = list(text_config.layer_types)
+        # Per-layer values depend only on the layer type, so any layer of
+        # the same type is representative.
+        idx = layer_types.index(layer_type) if layer_type in layer_types else 0
+        layer_config = text_config.per_layer_config[idx]
+        return layer_config.head_dim, layer_config.num_key_value_heads
+    if layer_type == "sliding_attention":
+        return (getattr(text_config, "head_dim",
+                        None), getattr(text_config, "num_key_value_heads",
+                                       None))
+    head_dim = (getattr(text_config, "global_head_dim", None)
+                or getattr(text_config, "head_dim", None))
+    if getattr(text_config, "attention_k_eq_v", False):
+        num_kv_heads = (getattr(text_config, "num_global_key_value_heads",
+                                None)
+                        or getattr(text_config, "num_key_value_heads", None))
+    else:
+        num_kv_heads = getattr(text_config, "num_key_value_heads", None)
+    return head_dim, num_kv_heads
+
+
 def get_dtype_packing(dtype):
     bits = dtypes.itemsize_bits(dtype)
     return 32 // bits
