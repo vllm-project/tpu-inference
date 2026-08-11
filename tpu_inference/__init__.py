@@ -12,17 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The environment variables override should be imported before any other
-# modules to ensure that the environment variables are set before any
-# other modules are imported.
-import tpu_inference.env_override  # noqa: F401
-from tpu_inference import envs
-
-# Engine-first XLA load: import Raiden's engine extension here -- the earliest
-# tpu_inference entry point, before any submodule (e.g. platforms/tpu_platform.py)
-# runs `import jax` and loads jaxlib's libjax_common.so. This ensures Raiden's
-# embedded XLA runtime comes up before jaxlib's so the two XLA copies don't collide
-# in static initializers.
+# Engine-first XLA load: import Raiden's engine extension before anything else,
+# so Raiden's embedded XLA runtime comes up before jaxlib's and the two copies
+# don't collide in static initializers.
+#
+# This must precede `env_override` as well as any submodule: env_override imports
+# `vllm.sampling_params`, which reaches `vllm.config` -> `torch` and loads jaxlib's
+# XLA. Loading Raiden's extension after that segfaults the process outright, and
+# the `except` clauses below cannot catch a SIGSEGV. Hoisting it is safe for the
+# environment overrides below: the extension does not map libtpu at import time,
+# so LIBTPU_INIT_ARGS and XLA_FLAGS are still set long before TPU initialization.
 try:
     import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401
 except ModuleNotFoundError:
@@ -34,7 +33,12 @@ except Exception as _raiden_exc:  # pragma: no cover - best-effort preload
     print(f"[tpu_raiden] engine preload failed: {_raiden_exc}",
           file=_sys.stderr)
 
-from tpu_inference import tpu_info as ti
+# The environment variables override should be imported before any other
+# modules to ensure that the environment variables are set before any
+# other modules are imported.
+import tpu_inference.env_override  # noqa: F401, E402
+from tpu_inference import envs  # noqa: E402
+from tpu_inference import tpu_info as ti  # noqa: E402
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
