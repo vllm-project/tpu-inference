@@ -792,37 +792,7 @@ def kernel_main_fused_rs(
                 1] = metadata_ref.gm_id_to_m_offset[gm_id + 1]
             expert_id = fused_metadata_ref.gm_id_to_group_id[0]
 
-            # DMA gather. When indices are packed, set divisor=top_k so the
-            # gather extracts the actual lhs_idx via integer division.
-            _gather_divisor = top_k if pack_indices else 1
-
-            @jax.named_scope("dma_gather_start")
-            @pl.when(gm_id == 0)
-            def _():
-                dma_gather_gm_start(
-                    hidden_states_ref,
-                    gathered_lhs_2x_ref.at[sem_id],
-                    lhs_indices_ref,
-                    gather_sem_ref.at[sem_id],
-                    0,
-                    metadata_ref,
-                    divisor=_gather_divisor,
-                )
-
-            @jax.named_scope("dma_gather_prefetch")
-            @pl.when(gm_id + 1 < local_num_gm)
-            def _():
-                dma_gather_gm_start(
-                    hidden_states_ref,
-                    gathered_lhs_2x_ref.at[1 - sem_id],
-                    lhs_indices_ref,
-                    gather_sem_ref.at[1 - sem_id],
-                    gm_id + 1,
-                    metadata_ref,
-                    divisor=_gather_divisor,
-                )
-
-            # --- Weight DMA (overlapped with gather) ---
+            # --- Weight DMA (issued first to overlap with gather issuance) ---
             # w1 prologue: load first num_w1_bufs tiles (gm==0 only;
             # for gm>0, tiles were prefetched during previous gm's GMM2).
             total_w1_steps = num_n1 * num_k1
@@ -865,6 +835,37 @@ def kernel_main_fused_rs(
             def _():
                 for _i in range(min(num_w2_bufs, total_w2_steps)):
                     start_w2_dma(_i, expert_id, _i // num_k2, _i % num_k2)
+
+            # --- DMA gather (issued after weight DMAs are in flight) ---
+            # When indices are packed, set divisor=top_k so the
+            # gather extracts the actual lhs_idx via integer division.
+            _gather_divisor = top_k if pack_indices else 1
+
+            @jax.named_scope("dma_gather_start")
+            @pl.when(gm_id == 0)
+            def _():
+                dma_gather_gm_start(
+                    hidden_states_ref,
+                    gathered_lhs_2x_ref.at[sem_id],
+                    lhs_indices_ref,
+                    gather_sem_ref.at[sem_id],
+                    0,
+                    metadata_ref,
+                    divisor=_gather_divisor,
+                )
+
+            @jax.named_scope("dma_gather_prefetch")
+            @pl.when(gm_id + 1 < local_num_gm)
+            def _():
+                dma_gather_gm_start(
+                    hidden_states_ref,
+                    gathered_lhs_2x_ref.at[1 - sem_id],
+                    lhs_indices_ref,
+                    gather_sem_ref.at[1 - sem_id],
+                    gm_id + 1,
+                    metadata_ref,
+                    divisor=_gather_divisor,
+                )
 
             # Wait for gather (weight DMAs running in parallel).
             dma_gather_gm_wait(

@@ -887,22 +887,39 @@ def dma_gather_gm_start(src_ref,
     """
     m_start = metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    num_rows = m_end - m_start
     sls = pltpu.get_tpu_info().get_sublane_tiling(src_ref.dtype)
     m_start_local = m_start % sls
+    tile_m = dst_ref.shape[0]
 
-    def _gather_body(i, _):
-        row = m_start + i
-        src_row = indices_ref[row]
-        if divisor != 1:
-            src_row = src_row // divisor
-        pltpu.make_async_copy(
-            src_ref=src_ref.at[pl.ds(src_row, 1), :, :],
-            dst_ref=dst_ref.at[pl.ds(m_start_local + i, 1), :, :],
-            sem=sem_ref,
-        ).start()
-        return _
+    def _full_tile():
+        for i in range(tile_m):
+            row = m_start + i
+            src_row = indices_ref[row]
+            if divisor != 1:
+                src_row = src_row // divisor
+            pltpu.make_async_copy(
+                src_ref=src_ref.at[pl.ds(src_row, 1), :, :],
+                dst_ref=dst_ref.at[pl.ds(m_start_local + i, 1), :, :],
+                sem=sem_ref,
+            ).start()
 
-    lax.fori_loop(0, m_end - m_start, _gather_body, 0)
+    def _partial_tile():
+        def _gather_body(i, _):
+            row = m_start + i
+            src_row = indices_ref[row]
+            if divisor != 1:
+                src_row = src_row // divisor
+            pltpu.make_async_copy(
+                src_ref=src_ref.at[pl.ds(src_row, 1), :, :],
+                dst_ref=dst_ref.at[pl.ds(m_start_local + i, 1), :, :],
+                sem=sem_ref,
+            ).start()
+            return _
+
+        lax.fori_loop(0, num_rows, _gather_body, 0)
+
+    lax.cond(num_rows == tile_m, _full_tile, _partial_tile)
 
 
 @jax.named_scope("dma_gather_gm_wait")
