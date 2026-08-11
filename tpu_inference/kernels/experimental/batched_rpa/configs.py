@@ -77,7 +77,13 @@ class ServingConfigs:
     scale_k: int | None = None
     scale_v: int | None = None
     kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
-    max_decode_bkv_p_new: int = 1
+    decode_query_size: int = 1
+
+    @property
+    def max_decode_bkv_p_new(self) -> int:
+        if self.decode_query_size <= 1:
+            return 1
+        return 1 + pl.cdiv(self.decode_query_size - 1, self.page_size)
 
     @property
     def pages_per_seq(self) -> int:

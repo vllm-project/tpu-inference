@@ -332,7 +332,7 @@ def ragged_paged_attention(
         scale_k=k_scale,
         scale_v=v_scale,
         kv_layout=kv_layout,
-        max_decode_bkv_p_new=max_decode_bkv_p_new,
+        decode_query_size=decode_query_size,
     )
 
     q_hbm, new_kv_hbm = prepare_inputs(
