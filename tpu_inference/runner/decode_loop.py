@@ -316,7 +316,8 @@ def _get_decode_core():
     "auto"), which a hardcoded literal silently dropped.
 
     Built lazily, not at import: the "auto" path queries the TPU VMEM size and
-    needs initialized devices.
+    needs initialized devices. Cached so the jit is constructed once rather than
+    per call, which would rebuild the dispatch wrapper on every decode step.
     """
     return functools.partial(
         jax.jit,
