@@ -48,7 +48,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c '
           generator_script="./tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
-          pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+          pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt
           if [[ ! -f "$$generator_script" ]]; then
             echo "🚨 Bootstrap script not found at $$generator_script"
             exit 1

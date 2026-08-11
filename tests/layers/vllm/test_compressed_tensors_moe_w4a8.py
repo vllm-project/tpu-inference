@@ -25,13 +25,14 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.model_executor.layers.fused_moe import FusedMoE, RoutedExperts
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32, quantize_weights)
 from vllm.scalar_type import scalar_types
 
 # yapf: disable
 from tests.layers.common import utils as test_utils
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8 import \
     VllmCompressedTensorsW4A8MoEMethod
@@ -171,10 +172,10 @@ def test_fused_moe_method_w4(mesh, num_tokens, intermediate_size, hidden_size,
     input_quant = quant_config.target_scheme_map['Linear']['input_activations']
 
     with set_current_vllm_config(vllm_config):
-        layer = FusedMoE(num_experts=num_experts,
-                         top_k=topk,
-                         hidden_size=hidden_size,
-                         intermediate_size=intermediate_size)
+        layer = FusedMoEFactory(num_experts=num_experts,
+                                top_k=topk,
+                                hidden_size=hidden_size,
+                                intermediate_size=intermediate_size)
         layer.moe_config.moe_parallel_config.use_ep = use_ep
         moe = quant_config.get_moe_config(layer.routed_experts)
         method = VllmCompressedTensorsW4A8MoEMethod(weight_quant, input_quant,

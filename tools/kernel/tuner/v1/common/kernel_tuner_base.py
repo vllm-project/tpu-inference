@@ -16,13 +16,15 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
+from typing import Any
 
 import jax
 import yaml
 
 # isort: off
 from tools.kernel.tuner.v1.common.tuner_datatypes import (
-    RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey, TuningStatus)
+    CaseResult, RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey,
+    TuningStatus)
 # isort: on
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,32 @@ def _literal_representer(dumper, data):
 
 
 yaml.add_representer(LiteralString, _literal_representer)
+
+
+class ProcessedCasesTracker:
+    """Tracks evaluated case IDs and their execution statuses to manage state and OOM early-pruning."""
+
+    def __init__(self, initial_processed_ids: set[int] = None):
+        self.processed_ids: set[int] = set(initial_processed_ids or [])
+        self.history: dict[Any, list[tuple[TunableParams, TuningStatus]]] = {}
+
+    def __contains__(self, case_id: int) -> bool:
+        return case_id in self.processed_ids
+
+    def record(self, case_id: int, tuning_key: TuningKey,
+               tunable_params: TunableParams, status: TuningStatus) -> None:
+        """Records a case ID as processed and tracks its tuning status."""
+        self.processed_ids.add(case_id)
+        self.history.setdefault(tuning_key, []).append(
+            (tunable_params, status))
+
+    def is_oom_expected(self, tuning_key: TuningKey,
+                        tunable_params: TunableParams) -> bool:
+        """Returns True if a smaller configuration for the same tuning key previously failed with OOM."""
+        for p, s in self.history.get(tuning_key, []):
+            if s == TuningStatus.FAILED_OOM and p <= tunable_params:
+                return True
+        return False
 
 
 class KernelTunerBase(ABC):
@@ -62,8 +90,15 @@ class KernelTunerBase(ABC):
                  run_config: RunConfig = None):
         assert tuner_config is not None, "tuner_config must be specified"
         assert run_config is not None, "run_config must be specified"
-        assert tuner_config.tuning_key_class is not None, "tuning_key_class must be specified"
-        assert tuner_config.tunable_params_class is not None, "tunable_params_class must be specified"
+        assert tuner_config.tuning_key_class is not None and issubclass(
+            tuner_config.tuning_key_class, TuningKey
+        ), (f"tuner_config.tuning_key_class ({tuner_config.tuning_key_class}) "
+            "must satisfy the TuningKey protocol (hashable/frozen).")
+        assert tuner_config.tunable_params_class is not None and issubclass(
+            tuner_config.tunable_params_class, TunableParams
+        ), (f"tuner_config.tunable_params_class ({tuner_config.tunable_params_class}) "
+            "must satisfy the TunableParams protocol (__hash__, __le__, __ge__)."
+            )
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."
         # lazy import the storage manager to avoid import spanner when running locally
         if run_config.run_locally:
@@ -82,10 +117,26 @@ class KernelTunerBase(ABC):
         self._tuning_key = None
         self.tuner_config = tuner_config
         self.run_config = run_config
+        if run_config.n_bayesian_trials is not None:
+            self.tuner_config.n_bayesian_trials = run_config.n_bayesian_trials
         self.worker_id = run_config.worker_id or 'unknown_worker'
         self.xprof_dir = os.path.join("/tmp/kernel_tuning",
                                       self.tuner_config.kernel_tuner_name,
                                       "xprof")
+        self.use_bayesian_optimization = tuner_config.support_bayesian_optimization and run_config.use_bayesian_optimization
+        if run_config.use_bayesian_optimization and not tuner_config.support_bayesian_optimization:
+            logger.info(
+                f'{tuner_config.kernel_tuner_name} does not support Bayesian Optimization, falls back to full sweep.'
+            )
+        # Control number of iterations for measuring kernel latency.
+        self._measurement_iters = 5 if self.tuner_config.jit_kernel_pattern else 100
+
+        if self.use_bayesian_optimization:
+            from tools.kernel.tuner.v1.optimizer import BayesianOptimizer
+            self.optimizer = BayesianOptimizer(self)
+        else:
+            from tools.kernel.tuner.v1.optimizer import SweepOptimizer
+            self.optimizer = SweepOptimizer(self)
 
     def _init_case_set(self) -> bool:
         """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
@@ -149,7 +200,8 @@ class KernelTunerBase(ABC):
                     # tunable_params_list.append(TunableParams.from_dict(current_combination))
                     if not current_combination:
                         return
-                    yield TunableParams(**current_combination)
+                    yield self.tuner_config.tunable_params_class(
+                        **current_combination)
                     return
                 key = remain_keys[0]
                 for value in search_space[key]:
@@ -239,29 +291,7 @@ class KernelTunerBase(ABC):
             assert len(
                 cases
             ) > 0, f"No cases found for CaseSetId {self.run_config.case_set_id}. This should not happen as the cases should have been generated and stored in the storage manager before."
-            if self.tuner_config.support_bayesian_optimization:
-                # For Bayesian optimization, partition the cases by key.
-                buckets = []
-                previous_tuning_key = None
-                for idx, row in enumerate(cases):
-                    # row is a tuple of (CaseId, CaseKeyValue)
-                    case_key_value = row[1]
-                    tuning_case = TuningCase.from_string(
-                        case_key_value, self.tuner_config.tuning_key_class,
-                        self.tuner_config.tunable_params_class)
-
-                    if previous_tuning_key is None or tuning_case.tuning_key != previous_tuning_key:
-                        buckets.append((idx, idx + 1))
-                        previous_tuning_key = tuning_case.tuning_key
-                    else:
-                        buckets[-1] = (buckets[-1][0], idx + 1)
-            else:
-                total_cases = len(cases)
-                buckets = [(i,
-                            min(i + self.run_config.job_bucket_size,
-                                total_cases))
-                           for i in range(0, total_cases,
-                                          self.run_config.job_bucket_size)]
+            buckets = self.optimizer.generate_tuning_jobs(cases)
             logger.info(
                 f'total cases: {len(cases)}, total buckets: {len(buckets)}')
             return buckets
@@ -293,13 +323,15 @@ class KernelTunerBase(ABC):
                     'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
-                    'pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow && '
+                    'pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
                     f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
                     f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
                     f'  --tpu_version={self.run_config.tpu_version} '
                     f'  --tpu_cores={self.run_config.tpu_cores} '
                     f'  --case_set_desc=\"{self.run_config.case_set_desc}\" '
+                    f'  --use_bayesian_optimization={self.run_config.use_bayesian_optimization} '
+                    f'  --n_bayesian_trials={self.tuner_config.n_bayesian_trials} '
                     f'  --run_locally=False '
                     f'  --tpu_queue_multi={self.run_config.tpu_queue_multi} '
                     f'  --max_execution_minutes={self.run_config.max_execution_minutes} '
@@ -345,7 +377,10 @@ class KernelTunerBase(ABC):
         )
 
     def generate_buildkite_pipeline(self) -> str:
-        """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
+        """
+        Generate the Buildkite pipeline for the given tuning jobs. Each tuning job 
+        will be represented as a Buildkite step that calls the measure_latency function
+        with the corresponding case_id range.
         """
         output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
         if os.path.exists(output_path):
@@ -355,14 +390,25 @@ class KernelTunerBase(ABC):
         # The Buildkite pipeline YAML will be generated in the format of:
         # steps:
         #   - label: "Measure latency for cases [begin_case_id, end_case_id)"
-        #     command: "python -m tools.kernel.tuner.v1.kernel_tuner_runner --worker_id=WORKER_ID --case_set_id=CASE_SET_ID --run_id=RUN_ID --begin_case_id=BEGIN_CASE_ID --end_case_id=END_CASE_ID"
+        #     command: "python -m tools.kernel.tuner.v1.kernel_tuner_runner\
+        #               --worker_id=WORKER_ID\
+        #               --case_set_id=CASE_SET_ID\
+        #               --run_id=RUN_ID\
+        #               --begin_case_id=BEGIN_CASE_ID\
+        #               --end_case_id=END_CASE_ID"
         pipeline = {"steps": []}
 
-        for bucket_id, (case_id_start, case_id_end) in enumerate(buckets):
+        for enum_bucket_id, (case_id_start, case_id_end) in enumerate(buckets):
             step = self._build_step(case_id_start,
                                     case_id_end,
                                     parent_step_key=os.environ.get(
                                         'BUILDKITE_STEP_KEY', None))
+            # In Bayesian mode each bucket covers exactly one TuningKey and its
+            # begin case_id is a stable unique identifier, so we use it as the
+            # bucket_id to keep generate_buildkite_pipeline and measure_latency
+            # consistent.  In sweep mode we continue using the enumerate index.
+            bucket_id = (case_id_start
+                         if self.use_bayesian_optimization else enum_bucket_id)
             logger.info(
                 f"Adding Buildkite step for bucket {bucket_id}: cases [{case_id_start}, {case_id_end})"
             )
@@ -376,7 +422,7 @@ class KernelTunerBase(ABC):
                 case_id_end,
                 tpu=self.run_config.tpu_queue_multi)
 
-        if self.tuner_config.support_bayesian_optimization:
+        if self.use_bayesian_optimization:
             group_name = f'Bayesian Optimization Group[{self.tuner_config.kernel_tuner_name}]'
         else:
             group_name = f'Sweeping Group[{self.tuner_config.kernel_tuner_name}]'
@@ -393,6 +439,132 @@ class KernelTunerBase(ABC):
         logger.info(
             f"Generated Buildkite pipeline YAML saved to {output_path} in Docker"
         )
+
+    def _evaluate_single_case(
+        self,
+        cid: int,
+        tuning_key: TuningKey,
+        tunable_params: TunableParams,
+        tracker: ProcessedCasesTracker,
+        log_prefix: str = "",
+    ) -> tuple[TuningStatus, int]:
+        """Evaluates a single tuning case (warmup, measurement run, xprof verification).
+
+        Saves result to storage manager and updates the ProcessedCasesTracker state.
+
+        Returns:
+            tuple (status, average_latency_us). On failure, average_latency_us is 0.
+        """
+        worker_id = self.worker_id
+        self._cleanup_xprof_dir()
+        begin_case_perf = time.perf_counter_ns()
+
+        # --- Warmup (1 iteration) ---
+        status, warmup_ns, _ = self.run(tuning_key, tunable_params, iters=1)
+        if status != TuningStatus.SUCCESS:
+            logger.warning(
+                f"{log_prefix}Case {cid} failed during warmup with status {status} for params {tunable_params}."
+            )
+            self.storage_manager.save_result(
+                CaseResult(
+                    case_set_id=self.run_config.case_set_id,
+                    run_id=self.run_config.run_id,
+                    case_id=cid,
+                    processed_status=status.value,
+                    worker_id=worker_id,
+                    latency=0,
+                    warmup_time=0,
+                    total_time=0,
+                    processed_at=self.storage_manager.get_timestamp_sec(),
+                    tpu=self.run_config.tpu_queue_multi,
+                ))
+            tracker.record(cid, tuning_key, tunable_params, status)
+            return status, 0
+
+        warmup_us = int(warmup_ns // 1000)
+
+        # --- Measurement Run ---
+        if self.tuner_config.jit_kernel_pattern is not None:
+            with jax.profiler.trace(self.xprof_dir,
+                                    create_perfetto_link=False):
+                status, avg_latency_ns, _ = self.run(
+                    tuning_key, tunable_params, iters=self._measurement_iters)
+        else:
+            status, avg_latency_ns, _ = self.run(tuning_key,
+                                                 tunable_params,
+                                                 iters=self._measurement_iters)
+
+        if status != TuningStatus.SUCCESS:
+            logger.warning(
+                f"{log_prefix}Case {cid} failed during measurement run with status {status} for params {tunable_params}."
+            )
+            self.storage_manager.save_result(
+                CaseResult(
+                    case_set_id=self.run_config.case_set_id,
+                    run_id=self.run_config.run_id,
+                    case_id=cid,
+                    processed_status=status.value,
+                    worker_id=worker_id,
+                    latency=0,
+                    warmup_time=warmup_us,
+                    total_time=0,
+                    processed_at=self.storage_manager.get_timestamp_sec(),
+                    tpu=self.run_config.tpu_queue_multi,
+                ))
+            tracker.record(cid, tuning_key, tunable_params, status)
+            return status, 0
+
+        # --- Extract Latency (xprof or timer) ---
+        if self.tuner_config.jit_kernel_pattern is not None:
+            from tools.kernel.tuner.v1.common.utils import \
+                find_events_by_pattern
+            matching_events, average_latency_us = find_events_by_pattern(
+                self.xprof_dir, self.tuner_config.jit_kernel_pattern)
+            if len(matching_events) != self._measurement_iters:
+                msg = (
+                    f"{log_prefix}Expected {self._measurement_iters} matching events for "
+                    f"pattern '{self.tuner_config.jit_kernel_pattern}' in xprof, but found "
+                    f"{len(matching_events)}. Profiling/pattern-matching failure at {self.xprof_dir}."
+                )
+                logger.error(msg)
+                self.storage_manager.save_result(
+                    CaseResult(
+                        case_set_id=self.run_config.case_set_id,
+                        run_id=self.run_config.run_id,
+                        case_id=cid,
+                        processed_status=TuningStatus.XPROF_MEASUREMENT_ERROR.
+                        value,
+                        worker_id=worker_id,
+                        latency=0,
+                        warmup_time=warmup_us,
+                        total_time=0,
+                        processed_at=self.storage_manager.get_timestamp_sec(),
+                        tpu=self.run_config.tpu_queue_multi,
+                    ))
+                tracker.record(cid, tuning_key, tunable_params,
+                               TuningStatus.XPROF_MEASUREMENT_ERROR)
+                raise RuntimeError(msg)
+        else:
+            average_latency_us = int(avg_latency_ns // 1000)
+
+        total_time_us = int((time.perf_counter_ns() - begin_case_perf) // 1000)
+
+        self.storage_manager.save_result(
+            CaseResult(
+                case_set_id=self.run_config.case_set_id,
+                run_id=self.run_config.run_id,
+                case_id=cid,
+                processed_status=TuningStatus.SUCCESS.value,
+                worker_id=worker_id,
+                latency=average_latency_us,
+                warmup_time=warmup_us,
+                total_time=total_time_us,
+                processed_at=self.storage_manager.get_timestamp_sec(),
+                tpu=self.run_config.tpu_queue_multi,
+            ))
+        tracker.record(cid, tuning_key, tunable_params, TuningStatus.SUCCESS)
+
+        return TuningStatus.SUCCESS, average_latency_us
 
     @abstractmethod
     def generate_inputs(self, tuning_key: TuningKey) -> dict:
@@ -417,8 +589,9 @@ class KernelTunerBase(ABC):
 
         Fetches inputs via `generate_inputs`, runs the kernel with the supplied
         tunable parameters for `iters` iterations, and returns timing results.
-        All exceptions must be caught internally; nothing should propagate to
-        the caller.
+        OOM exceptions must be caught internally and return FAILED_OOM.
+        Other exceptions must be logged and re-raised. These non OOM exception will be logged
+        and stop the program since we should not fail silently.
 
         A common implementation pattern is:
         ```
@@ -438,12 +611,18 @@ class KernelTunerBase(ABC):
                 end_time_ns = time.perf_counter_ns()
                 average_latency_ns = (end_time_ns - start_time_ns) // iters
                 return TuningStatus.SUCCESS, average_latency_ns, end_time_ns - start_time_ns
-            except OOMError as e:
-                logger.warning(f"OOM error when running kernel for tuning key {tuning_key} with tunable params {tunable_params}: {e}")
-                return TuningStatus.FAILED_OOM, 0, 0
-            except Exception as e:
-                logger.error(f"Unknown error when running kernel for tuning key {tuning_key} with tunable params {tunable_params}: {e}")
-                return TuningStatus.UNKNOWN_ERROR, 0, 0
+            except Exception as err:
+                if "RESOURCE_EXHAUSTED:" in str(err):
+                    logger.warning(
+                        f"Kernel run failed with OOM for {tuning_key=}, {tunable_params=}"
+                    )
+                    return TuningStatus.FAILED_OOM, float("inf"), float("inf")
+                logger.warning(
+                    f"Failed with {tuning_key=}, {tunable_params=}, got error: {err=}"
+                )
+                raise Exception(
+                    f"Kernel run failed with tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}, got error: {err=}"
+                )
         ```
 
         Args:
@@ -485,177 +664,5 @@ class KernelTunerBase(ABC):
                 f"Failed to clean up xprof dir {self.xprof_dir}: {e}")
 
     def measure_latency(self, begin_case_id: int, end_case_id: int):
-        """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
-
-        Args:
-            begin_case_id: Start of the case_id range (inclusive) within the caseset to measure.
-            end_case_id: End of the case_id range (exclusive) within the caseset to measure.
-        """
-        worker_id = self.worker_id
-        bucket_id = begin_case_id // self.run_config.job_bucket_size
-        logger.info(
-            f"Worker [{worker_id}] Claimed CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
-        )
-        self.storage_manager.mark_bucket_in_progress(
-            self.run_config.case_set_id, self.run_config.run_id, bucket_id)
-
-        processed_ids = self.storage_manager.get_already_processed_ids(
-            self.run_config.case_set_id, self.run_config.run_id, begin_case_id,
-            end_case_id)
-        all_configs = self.storage_manager.get_bucket_configs(
-            self.run_config.case_set_id, begin_case_id, end_case_id)
-
-        bucket_start_perf = time.perf_counter()
-        results_buffer = []
-        bucket_fully_processed = True
-        last_processed_case_id = begin_case_id - 1
-        all_processed_cases_status = []
-        for cid in range(begin_case_id, end_case_id):
-            time_elapsed_minutes = (time.perf_counter() -
-                                    bucket_start_perf) / 60
-            logger.info(
-                f"Worker [{worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
-            )
-            self._cleanup_xprof_dir()
-            if not self.run_config.run_locally and (
-                    time_elapsed_minutes
-                    > self.run_config.max_execution_minutes
-            ) and not self.tuner_config.support_bayesian_optimization:
-                logger.warning(
-                    f"Worker [{worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_config.max_execution_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
-                )
-                parent_step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{begin_case_id}_{end_case_id}'
-                self.generate_buildkite_pipeline_subbucket(
-                    cid, end_case_id, parent_step_key=parent_step_key)
-                bucket_fully_processed = False
-                break
-            last_processed_case_id = cid
-            if cid in processed_ids:
-                continue
-            assert cid in all_configs, f"CaseId {cid} is missing in the configs retrieved from storage manager for CaseSetId {self.run_config.case_set_id}. This should not happen as the configs should have been generated and stored in the storage manager before."
-            _, _, case_key_value = all_configs[cid]
-            tuning_case = TuningCase.from_string(
-                case_key_value, self.tuner_config.tuning_key_class,
-                self.tuner_config.tunable_params_class)
-            tuning_key, tunable_params, _ = tuning_case.tuning_key, tuning_case.tunable_params, tuning_case.is_baseline
-
-            # check whether tuning_key is same as last one and if last one is OOM, then we can skip
-            if any(tuning_key == k and s == TuningStatus.FAILED_OOM
-                   and p <= tunable_params
-                   for k, p, s in all_processed_cases_status):
-                logger.warning(
-                    f"Skipping CaseId {cid} with tuning key {tuning_key} and tunable params {tunable_params} because it is expected to fail with OOM based on previous cases."
-                )
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     TuningStatus.SKIPPED.value, worker_id, 0, 0, 0,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
-                all_processed_cases_status.append(
-                    [tuning_key, tunable_params, TuningStatus.FAILED_OOM])
-                continue
-
-            begin_case_id_time = time.perf_counter_ns()
-
-            def run_and_record_failure(tuning_key,
-                                       tunable_params,
-                                       iters,
-                                       warmup_us=0):
-                status, avg_latency_ns, _ = self.run(tuning_key,
-                                                     tunable_params,
-                                                     iters=iters)
-                if status != TuningStatus.SUCCESS:
-                    results_buffer.append(
-                        (self.run_config.case_set_id, self.run_config.run_id,
-                         cid, status.value, worker_id, 0, warmup_us, 0,
-                         self.storage_manager.get_timestamp_sec(),
-                         self.run_config.tpu_queue_multi))
-                    all_processed_cases_status.append(
-                        [tuning_key, tunable_params, status])
-                return status, avg_latency_ns
-
-            # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
-            status, warmup_ns = run_and_record_failure(tuning_key,
-                                                       tunable_params,
-                                                       iters=1)
-            if status != TuningStatus.SUCCESS:
-                logger.warning(
-                    f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
-                )
-                continue
-            warmup_us = int(warmup_ns // 1000)
-
-            measurement_iters = 100
-            if self.tuner_config.jit_kernel_pattern is not None:
-                with jax.profiler.trace(self.xprof_dir,
-                                        create_perfetto_link=False):
-                    status, average_latency_ns = run_and_record_failure(
-                        tuning_key,
-                        tunable_params,
-                        iters=measurement_iters,
-                        warmup_us=warmup_us)
-            else:
-                status, average_latency_ns = run_and_record_failure(
-                    tuning_key,
-                    tunable_params,
-                    iters=measurement_iters,
-                    warmup_us=warmup_us)
-            if status != TuningStatus.SUCCESS:
-                logger.warning(
-                    f"Case {cid} failed during main run with status: {status}. Total time spent: {(time.perf_counter_ns() - begin_case_id_time)/1e9:.2f}s."
-                )
-                continue
-
-            if self.tuner_config.jit_kernel_pattern is not None:
-                from tools.kernel.tuner.v1.common.utils import \
-                    find_events_by_pattern
-                matching_events, average_latency_us = find_events_by_pattern(
-                    self.xprof_dir, self.tuner_config.jit_kernel_pattern)
-                if len(matching_events) != measurement_iters:
-                    logger.fatal(
-                        f"Expected {measurement_iters} matching events for pattern {self.tuner_config.jit_kernel_pattern} in xprof, but found {len(matching_events)}. This may indicate an issue with the profiling or the pattern matching."
-                    )
-                    status = TuningStatus.XPROF_MEASUREMENT_ERROR
-                else:
-                    logger.info(
-                        f'Case {cid} average latency is {average_latency_us}us from xprof'
-                    )
-            else:
-                average_latency_us = int(average_latency_ns // 1000)
-                logger.info(
-                    f'Case {cid} average latency is {average_latency_us}us from timer'
-                )
-
-            total_time_us = int(
-                (time.perf_counter_ns() - begin_case_id_time) // 1000)
-            results_buffer.append(
-                (self.run_config.case_set_id, self.run_config.run_id, cid,
-                 status.value, worker_id, average_latency_us, warmup_us,
-                 total_time_us, self.storage_manager.get_timestamp_sec(),
-                 self.run_config.tpu_queue_multi))
-            all_processed_cases_status.append(
-                [tuning_key, tunable_params, status])
-
-            if self.run_config.debug:
-                logger.info(
-                    f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
-                )
-
-            if len(results_buffer) >= 10:
-                self.storage_manager.save_results_batch(results_buffer)
-                results_buffer = []
-
-        self.storage_manager.save_results_batch(results_buffer)
-
-        bucket_total_time_us = int(
-            (time.perf_counter() - bucket_start_perf) * 1_000_000)
-        self.storage_manager.add_bucket_processed_time_us(
-            self.run_config.case_set_id, self.run_config.run_id, bucket_id,
-            bucket_total_time_us)
-        if bucket_fully_processed:
-            self.storage_manager.mark_bucket_completed(
-                self.run_config.case_set_id, self.run_config.run_id, bucket_id)
-        logger.info(
-            f"Worker [{worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
-        )
-        self._cleanup_xprof_dir()
+        """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id)."""
+        self.optimizer.measure_latency(begin_case_id, end_case_id)

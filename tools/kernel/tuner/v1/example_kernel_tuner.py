@@ -34,13 +34,13 @@ def mock_kernel(key1, key2, param1, param2):
     time.sleep(random.random() / 5)  # Simulate some computation time
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class TuningKey:
     key1: int
     key2: int
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class TunableParams:
     param1: int
     param2: int
@@ -60,27 +60,44 @@ class ExampleKernelTuner(KernelTunerBase):
     # demonstrate the tuning pipeline.
 
     def __init__(self, run_config: RunConfig):
+        # Note: support_bayesian_optimization=True demonstrates BO support.
+        # For small search spaces (e.g. 2-3 configurations per key in this mock example),
+        # Bayesian optimization evaluates up to min(n_bayesian_trials, total_cases).
+        # Set min_cases_for_bayesian in TunerConfig if automatic fallback to sweep
+        # is desired for small search spaces.
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
-            kernel_tuner_name="example_kernel_tuner")
+            kernel_tuner_name="example_kernel_tuner",
+            support_bayesian_optimization=True)
         self.run_config = run_config
         super().__init__(
             tuner_config=self.tuner_config,
             run_config=self.run_config)  # Use a small bucket size for testing
 
-    def generate_cases(self) -> list[TuningCase]:
-        # Generate some mock tuning cases based on the case_set_id and desc.
-        key1_values = [1, 2]
-        key2_values = [4, 5]
+    def get_search_space(self, tuning_key: TuningKey) -> dict[str, list]:
         param1_values = [7]
-        param2_values = [10, 11]
+        if tuning_key.key2 >= 8:
+            param2_values = [10, 11, 12]
+        else:
+            param2_values = [10, 11]
+        return {
+            'param1': param1_values,
+            'param2': param2_values,
+        }
+
+    def generate_cases(self) -> list[TuningCase]:
+        # Generate mock tuning cases based on search space.
+        key1_values = [1, 2, 4]
+        key2_values = [4, 8, 16]
         cases = []
-        for k1, k2, p1, p2 in itertools.product(key1_values, key2_values,
-                                                param1_values, param2_values):
+        for k1, k2 in itertools.product(key1_values, key2_values):
             tuning_key = TuningKey(key1=k1, key2=k2)
-            tunable_params = TunableParams(param1=p1, param2=p2)
-            cases.append(TuningCase(tuning_key, tunable_params))
+            search_space = self.get_search_space(tuning_key)
+            for p1, p2 in itertools.product(search_space['param1'],
+                                            search_space['param2']):
+                tunable_params = TunableParams(param1=p1, param2=p2)
+                cases.append(TuningCase(tuning_key, tunable_params))
         return cases
 
     def generate_inputs(self, tuning_key: TuningKey):
