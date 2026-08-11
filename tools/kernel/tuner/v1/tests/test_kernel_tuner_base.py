@@ -13,9 +13,6 @@
 # limitations under the License.
 
 import os
-
-os.environ["JAX_PLATFORMS"] = "cpu"
-
 import tempfile
 from dataclasses import dataclass
 from unittest import mock
