@@ -78,26 +78,40 @@
             medium: Memory
             sizeLimit: 1Gi
 
+.kube_common_retry: &kube_common_retry
+  automatic:
+    # Triggered when GKE / Kueue terminates the agent pod on preemption (SIGTERM)
+    - signal_reason: "agent_stop"
+      limit: 3
+    # Triggered if killed abruptly or disconnected
+    - signal_reason: "*"
+      limit: 3
+    - exit_status: -1
+      limit: 3
+
 steps:
-  # Spawn 6 concurrent v6e-1 jobs (2 nominal + up to 4 borrowed from cohort) for 6 minutes (360s)
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-1 (1 chip) %n"
+  # Build 1: Spawn 6 concurrent v6e-1 jobs (2 nominal + 4 borrowed from cohort) for 6 minutes (360s)
+  - label: ":kubernetes: Preemption & Retry Test | v6e-1 (1 chip) %n"
     key: "v6e_1_jobs"
+    if: "build.env('TEST_TYPE') == 'v6e1' || build.env('TEST_TYPE') == null"
     parallelism: 6
     agents:
       queue: "v6e-1-1x1"
+    retry: *kube_common_retry
     commands:
       - echo "=== v6e-1 Job $$BUILDKITE_PARALLEL_JOB / $$BUILDKITE_PARALLEL_TOTAL acquired TPU chip. Holding for 360 seconds (6 mins) ==="
       - sleep 360
     plugins:
       - <<: *kube_tpu_v6e_1chip_plugin
 
-  # Spawn 1 v6e-8 job (8 nominal chips) for 30 seconds
-  - label: ":kubernetes: Autoscaling & Borrowing Test | v6e-8 (8 chips)"
+  # Build 2: Spawn 1 v6e-8 job (8 nominal chips, preempts borrowed v6e-1 jobs) for 30 seconds
+  - label: ":kubernetes: Quota Reclaim & Preempt | v6e-8 (8 chips)"
     key: "v6e_8_job"
+    if: "build.env('TEST_TYPE') == 'v6e8' || build.env('TEST_TYPE') == null"
     agents:
       queue: "v6e-8-2x4"
     commands:
-      - echo "=== v6e-8 Job acquired 8 chips! Holding for 30 seconds ==="
+      - echo "=== v6e-8 Job acquired 8 chips (reclaimed/preempted cohort quota)! Holding for 30 seconds ==="
       - sleep 30
     plugins:
       - <<: *kube_tpu_v6e_8chip_plugin
