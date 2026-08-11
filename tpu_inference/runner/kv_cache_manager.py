@@ -1062,6 +1062,19 @@ class KVCacheManager:
                         # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
                         def _allocate_mamba(c_shape=cache_shape,
                                             c_dtype=jax_dtype):
+                            # DEV ONLY canary: fill the pool with NaN
+                            # instead of leaving it uninitialized. On a
+                            # correctly masked stack a NaN-canary pool is
+                            # harmless (every slot is written before it is
+                            # read); any read-before-write or
+                            # multiplicative-mask hole turns into an
+                            # immediate, deterministic NaN instead of a
+                            # garbage-dependent lottery.
+                            import os as _os
+                            if _os.environ.get("MAMBA_POOL_NAN_CANARY") == "1":
+                                return jnp.full(c_shape,
+                                                jnp.nan,
+                                                dtype=c_dtype)
                             return jnp.empty(shape=c_shape, dtype=c_dtype)
 
                         mamba_allocate = jax.jit(_allocate_mamba,

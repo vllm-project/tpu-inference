@@ -1717,6 +1717,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 lora_metadata,
             )
 
+        # DEV ONLY: NaN tripwire for the accuracy-collapse hunt (env-gated;
+        # reports the first clean->NaN transition per state-pool slot and any
+        # NaN logits row, with slot/step attribution). See runner/nan_guard.py.
+        import os as _os
+        if _os.environ.get("NAN_GUARD") == "1":
+            if not hasattr(self, "_nan_guard"):
+                from tpu_inference.runner.nan_guard import NanGuard
+                self._nan_guard = NanGuard(self)
+            self._nan_guard.check(self.kv_caches, logits, full_logits)
+
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
             attn_metadata=attn_metadata,
