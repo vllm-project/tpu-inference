@@ -52,8 +52,8 @@ steps:
   #     BS=1 8k/1k, matrix {1k/1k, 8k/1k} x {conc 8, conc 64} — the
   #     conc-64 cells get real KV capacity for the first time.
   # -----------------------------------------------------------------
-  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13i: INSTRUMENTED accuracy-collapse run (unpinned compact, scoring-first, wrong-dump, churn trace)"
-    key: tpu7x_k3_attempt13i
+  - label: "tpu7x multi-host (4 hosts) Kimi-K3 attempt 13j: NaN-guarded accuracy-collapse run (unpinned compact, nan tripwire, churn trace actually plumbed)"
+    key: tpu7x_k3_attempt13j
     timeout_in_minutes: 420
     env:
       TPU_VERSION: "tpu7x"
@@ -74,8 +74,14 @@ steps:
       MXFP4_SHARD_THEN_DECODE: "1"
       K3_SHARDED_EXPERT_STREAMING: "1"
       # Per-step slot/index trace (samples: first 200 steps + every 50th).
+      # NOTE: 817 proved these never reached the pod serve — run_multihost.sh
+      # forwards env through an explicit -e whitelist only (zero
+      # [churn-trace] lines in 817's log). The whitelist now carries them.
       CHURN_TRACE: "1"
       CHURN_TRACE_EVERY: "50"
+      # NaN tripwire (runner/nan_guard.py): first clean->NaN transition per
+      # state-pool slot + NaN logits rows, with slot/step attribution.
+      NAN_GUARD: "1"
     agents:
       queue: tpu_v7x_32_queue
     commands:
