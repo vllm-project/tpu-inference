@@ -537,6 +537,50 @@ class RpaConfigs:
         )
 
     @property
+    def new_kv_padded_lanes(self) -> int:
+        """Lane count of new_kv_hbm: align_to(total_q_tokens, num_lanes)."""
+        num_lanes = pltpu.get_tpu_info().num_lanes
+        return utils.align_to(self.serve.total_q_tokens, num_lanes)
+
+    @property
+    def new_kv_resident(self) -> bool:
+        """Whether new_kv_hbm can be staged once per kernel instead of per cell.
+
+        It does not change across steps, and when it fits one page it is
+        small enough to keep in VMEM (32 KB at 32 single-token decodes), so
+        one descriptor at kernel entry replaces batch_size per step.
+
+        Needs to fit one page because the per-cell fetch is page-anchored --
+        beyond that, cells need different pages. Single-token decode only;
+        multi-token decode stitches from inside the cell's own block.
+        """
+        return (self.mode == RpaCase.DECODE and self.decode_q_len == 1
+                and not self.use_chunked_flash
+                and self.new_kv_padded_lanes <= self.serve.page_size)
+
+    @property
+    def new_kv_vmem_shape(self):
+        """Resident new-KV scratch, sized minimally when it is unused."""
+        lanes = self.new_kv_padded_lanes if self.new_kv_resident else 128
+        return (self.model.num_kv_heads * 2, self.aligned_kv_head_dim, lanes)
+
+    @property
+    def num_lanes(self) -> int:
+        return pltpu.get_tpu_info().num_lanes
+
+    @property
+    def wb_lane_bits(self) -> tuple[int, int]:
+        """(width, mask) of each lane field packed into ``dma_kv_new[..., 4]``.
+
+        The writeback window is 128-lane granular, so an offset and a size
+        within one page each fit in ``bit_length(page_size // num_lanes)``
+        bits: 5 apiece at page_size 2048, packed above the two valid bits
+        rather than widening the descriptor (its width caps ``max_steps_ub``).
+        """
+        w = (self.serve.page_size // self.num_lanes).bit_length()
+        return w, (1 << w) - 1
+
+    @property
     def dma_kv_new_size(self) -> int:
         return 5
 

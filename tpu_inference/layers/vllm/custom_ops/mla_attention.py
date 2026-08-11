@@ -93,6 +93,11 @@ class VllmMLAAttention(MLAAttention):
         self.attn_type = AttentionType.DECODER
         self.sliding_window = None
 
+        # forward() branches on this; default it when the vLLM parent
+        # __init__ does not set it.
+        if not hasattr(self, "calculate_kv_scales"):
+            self.calculate_kv_scales = False
+
         self.kv_cache_quantized_dtype = None
         if self.kv_cache_dtype != "auto":
             self.kv_cache_quantized_dtype = utils.to_jax_dtype(

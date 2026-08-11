@@ -30,12 +30,27 @@ from tpu_inference.kernels.experimental.stacked_rpa import (
 # pl.with_scoped is required at import time; enforced by JAX >= 0.9.2.
 
 
-def _run_chunked_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
-                            acc_scratch_ref, processed_q_len, processed_kv_len,
-                            effective_kv_len, bkv_sz_frm_cache_list,
-                            new_kv_len_start_list, visibility_list,
-                            skip_mask_list, step, schedule_ref, cfgs, m_val,
-                            l_val, acc_val):
+def _run_chunked_flash_path(*,
+                            q,
+                            kv_in_vref,
+                            m_scratch_ref,
+                            l_scratch_ref,
+                            acc_scratch_ref,
+                            processed_q_len,
+                            processed_kv_len,
+                            effective_kv_len,
+                            bkv_sz_frm_cache_list,
+                            new_kv_len_start_list,
+                            visibility_list,
+                            skip_mask_list,
+                            step,
+                            schedule_ref,
+                            cfgs,
+                            m_val,
+                            l_val,
+                            acc_val,
+                            new_kv_vref=None):
+    del new_kv_vref  # chunked path stages new KV in its own 5-D buffer
     # Decode-only path (bq_sz=1) with the 5-D VMEM layout and per-page
     # flash. m_val / l_val / acc_val are the accumulator snapshot the caller
     # took after any dense-pack reset.
@@ -73,12 +88,26 @@ def _run_chunked_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
             acc_scratch_ref[b_idx:b_idx + 1, :, q_slice, :] = o_next
 
 
-def _run_shipped_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
-                            acc_scratch_ref, processed_q_len, processed_kv_len,
-                            effective_kv_len, bkv_sz_frm_cache_list,
-                            new_kv_len_start_list, visibility_list,
-                            skip_mask_list, step, schedule_ref, cfgs, m_val,
-                            l_val, acc_val):
+def _run_shipped_flash_path(*,
+                            q,
+                            kv_in_vref,
+                            m_scratch_ref,
+                            l_scratch_ref,
+                            acc_scratch_ref,
+                            processed_q_len,
+                            processed_kv_len,
+                            effective_kv_len,
+                            bkv_sz_frm_cache_list,
+                            new_kv_len_start_list,
+                            visibility_list,
+                            skip_mask_list,
+                            step,
+                            schedule_ref,
+                            cfgs,
+                            m_val,
+                            l_val,
+                            acc_val,
+                            new_kv_vref=None):
     # MIXED / PREFILL path (and DECODE when the chunked path is not enabled).
     # Uses the 4-D VMEM layout, a single-shot flash, and a stitch pass.
     # Snapshot arguments follow the same convention as
@@ -90,7 +119,8 @@ def _run_shipped_flash_path(*, q, kv_in_vref, m_scratch_ref, l_scratch_ref,
                                               b_idx,
                                               bkv_sz_frm_cache_list[b_idx],
                                               new_kv_len_start_list[b_idx],
-                                              cfgs=cfgs)
+                                              cfgs=cfgs,
+                                              new_kv_vref=new_kv_vref)
         stitch_results.append(res)
     for b_idx in range(cfgs.batch_size):
         stitch_utils.store_new_kv_lane(kv_in_vref,
@@ -474,6 +504,7 @@ def rpa_body(
     l_carry_ref: jax.Ref,
     acc_carry_ref: jax.Ref,
     carry_valid_ref: jax.Ref,
+    new_kv_vref: jax.Ref,
     *,
     # Passed refs
     cu_q_lens_ref: jax.Ref,
@@ -622,6 +653,7 @@ def rpa_body(
         m_val=m_val,
         l_val=l_val,
         acc_val=acc_val,
+        new_kv_vref=new_kv_vref,
     )
 
     if cfgs.is_stacked:
@@ -703,7 +735,11 @@ def create_allocs(
         block_shape=cfgs.q_vmem_shape,
         memory_space=pltpu.VMEM,
         index_map=lambda i: (i, ),
-        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=False),
+        # Output BufferedRef is limited to buffer_count<=2 by Pallas runtime
+        # (see NotImplementedError in pltpu output-ref handling). Flipping
+        # use_lookahead=True with count=2 still lets the last-step write-back
+        # overlap the compute drain via the semaphore path in BatchingORef.
+        pipeline_mode=pl.Buffered(buffer_count=2, use_lookahead=True),
     )
     visibility_spec = pl.BlockSpec(
         block_shape=(cfgs.batch_size, cfgs.bq_sz, 128),
@@ -733,7 +769,7 @@ def create_allocs(
         spec=o_spec,
         dtype_or_type=o_hbm_ref,
         buffer_count=2,
-        use_lookahead=False,
+        use_lookahead=True,
         cfgs=cfgs,
     )
     visibility_alloc = bref_override.BatchingVisibilityRef.input(
@@ -834,8 +870,10 @@ def rpa_kernel(
                 schedule.RpaSchedule.create_shape_dtype(
                     cfgs, steps=cfgs.sched_window).scratch_shapes()
                 for _ in range(1 if cfgs.fits_one_window else 2)),
+            # +1 slot: the last index is reserved for the resident new-KV
+            # copy so it never shares a semaphore with the schedule stream.
             dma_sem=pltpu.SemaphoreType.DMA((
-                1, ) if cfgs.fits_one_window else (2, )),
+                2, ) if cfgs.fits_one_window else (3, )),
             scratches=(
                 pltpu.VMEM(
                     cfgs.lm_scratch_shape,
@@ -862,6 +900,8 @@ def rpa_kernel(
                     dtype=configs.accum_dtype(cfgs.serve.dtype_out),
                 ),  # acc_carry
                 pltpu.SMEM((1, ), jnp.int32),  # carry_valid
+                pltpu.VMEM(cfgs.new_kv_vmem_shape,
+                           dtype=cfgs.serve.dtype_kv),  # resident new KV
             ),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
@@ -875,7 +915,7 @@ def rpa_kernel(
                 # relies on reset-after-combine per request thereafter (no
                 # per-first-block reset), so cells not yet touched by any request
                 # start (and stay) at identity.
-                m_s, l_s, acc_s, m_c, l_c, acc_c, cv = scratches
+                m_s, l_s, acc_s, m_c, l_c, acc_c, cv, _nk = scratches
                 m_s[...] = jnp.full_like(m_s[...], -jnp.inf)
                 l_s[...] = jnp.zeros_like(l_s[...])
                 acc_s[...] = jnp.zeros_like(acc_s[...])
@@ -887,18 +927,39 @@ def rpa_kernel(
 
             flat_hbm = jax.tree_util.tree_leaves(schedule_hbm_ref)
 
+            def _new_kv_init():
+                # Stage the whole new-KV array once. It is invariant across
+                # steps, so one descriptor here replaces batch_size
+                # descriptors per step in KVBufferedRefSeqAlongLane.copy_in.
+                if not cfgs.new_kv_resident:
+                    return None
+                lanes = cfgs.new_kv_padded_lanes
+                nk_sem = 1 if cfgs.fits_one_window else 2
+                cp = pltpu.make_async_copy(
+                    new_kv_hbm_ref.at[:, :, pl.ds(0, lanes)],
+                    scratches[7].at[:, :, pl.ds(0, lanes)],
+                    dma_sem.at[nk_sem],
+                )
+                cp.start()
+                return cp
+
             def _kv_cache_init():
                 # Init KV-cache scratch to zeros. p*v causal-masks on lhs (p) by
                 # zeroing masked columns, which is only safe if rhs (v) has no NaNs;
                 # pre-zeroing the scratch guarantees that (stale non-NaN data is
                 # also fine).
-                kv_alloc = final_allocs[1]
-                # Zero the KV scratch via the u32 view directly. Do NOT reshape
+                #
+                # Only the FIRST buffer slot needs pre-zeroing: subsequent slots
+                # are fully overwritten by the async KV DMA before the pipeline
+                # body reads them (BufferedRef guarantee). Zeroing all n_buffer
+                # slots wastes ~7-15us per call on the VMEM memset (50MB at
+                # nbuf=3/bkv=65536). Zero the u32 view directly. Do NOT reshape
                 # to [-1, num_lanes]: under the collapsed [.., head_dim, v_len]
                 # SEQ layout that changes the minormost (tiled) dim, which
                 # Mosaic rejects ("minormost dimension must be unchanged").
-                kv_ref_u32 = kv_alloc.window_ref.bitcast(jnp.uint32)
-                kv_ref_u32[...] = jnp.zeros_like(kv_ref_u32)
+                kv_alloc = final_allocs[1]
+                slot0_u32 = kv_alloc.window_ref.at[0].bitcast(jnp.uint32)
+                slot0_u32[...] = jnp.zeros_like(slot0_u32)
 
             def _sched_copies(w, n_steps, buf, sem_idx):
                 # Build (not start) the clamped HBM->SMEM copies for window w into
@@ -962,8 +1023,11 @@ def rpa_kernel(
                 descs = _sched_copies(0, safe_steps, buf, 0)
                 for c in descs:
                     c.start()
+                nk = _new_kv_init()
                 _kv_cache_init()  # overlaps the schedule copy
                 jax.tree.map(lambda c: c.wait(), descs)
+                if nk is not None:
+                    nk.wait()
                 _run_pipeline(safe_steps, buf)
             else:
                 # MULTI-WINDOW path (static): the schedule exceeds one SMEM window.
@@ -980,7 +1044,10 @@ def rpa_kernel(
                 win0_steps = jnp.minimum(actual_steps, w_size)
                 for c in _sched_copies(0, win0_steps, buf0, 0):
                     c.start()
+                nk = _new_kv_init()
                 _kv_cache_init()
+                if nk is not None:
+                    nk.wait()
 
                 def _window(w, _):
                     win_steps = jnp.clip(actual_steps - w * w_size, 0, w_size)

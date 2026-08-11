@@ -158,7 +158,8 @@ class RpaSchedule:
         batch_idx: jax.typing.ArrayLike,
         page_idx: jax.typing.ArrayLike,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        # 0: src_hbm, 1: dst_vmem, 2: size
+        # 0: src_hbm, 1: dst_vmem, 2: transfer size in lanes (0 = skip),
+        # 128-aligned and <= page_size.
         src_off = self.dma_kv_cache[step, batch_idx, page_idx, 0]
         dst_off = self.dma_kv_cache[step, batch_idx, page_idx, 1]
         sz = self.dma_kv_cache[step, batch_idx, page_idx, 2]
@@ -181,12 +182,18 @@ class RpaSchedule:
         step: jax.typing.ArrayLike,
         batch_idx: jax.typing.ArrayLike,
         page_idx: jax.typing.ArrayLike,
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
-        # 2: wb_hbm, 3: wb_vmem, 4: packed_dma_valid (bit 1)
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+        # 2: wb_hbm, 3: wb_vmem, 4: packed (bit 1 = valid, then lane window)
         dst_hbm = self.dma_kv_new[step, batch_idx, page_idx, 2]
         src_vmem = self.dma_kv_new[step, batch_idx, page_idx, 3]
-        sz = (self.dma_kv_new[step, batch_idx, page_idx, 4] >> 1) & 1
-        return dst_hbm, src_vmem, sz
+        packed = self.dma_kv_new[step, batch_idx, page_idx, 4]
+        sz = (packed >> 1) & 1
+        # The writeback only has to persist the lanes the new tokens landed on,
+        # not the whole page; the schedule packs that 128-lane window here.
+        w, mask = self.cfgs.wb_lane_bits
+        wb_lane = ((packed >> 2) & mask) * self.cfgs.num_lanes
+        wb_sz = ((packed >> (2 + w)) & mask) * self.cfgs.num_lanes
+        return dst_hbm, src_vmem, sz, wb_lane, wb_sz
 
     def get_dma_q(
             self, step: jax.typing.ArrayLike,
@@ -339,8 +346,23 @@ def compute_metadata(
             # the consume kernel uses dst_hbm directly, no page_indices lookup.
             dst_hbm = seq_page_table_ref[p_idx]
 
-            packed_dma_valid = fetch_dma_valid | (
-                jnp.where(dma_sz > 0, 1, 0) << 1)
+            # Writeback window: the new tokens for this page occupy window
+            # lanes [dst_vmem, dst_vmem + dma_sz), and window lane
+            # slot_start + j is page lane j. Round that to 128 and persist
+            # only those lanes -- a single-token decode dirties one 128-lane
+            # chunk, so writing the whole page moved page_size/128 (16x at
+            # page_size 2048) more bytes than it had to.
+            num_lanes = cfgs.num_lanes
+            lane_lo = dst_vmem - slot_start
+            wb_lane = (lane_lo // num_lanes) * num_lanes
+            wb_end = pl.cdiv(lane_lo + dma_sz, num_lanes) * num_lanes
+            wb_sz = jnp.where(dma_sz > 0, wb_end - wb_lane, 0)
+
+            w, _ = cfgs.wb_lane_bits
+            packed_dma_valid = (fetch_dma_valid
+                                | (jnp.where(dma_sz > 0, 1, 0) << 1)
+                                | ((wb_lane // num_lanes) << 2)
+                                | ((wb_sz // num_lanes) << (2 + w)))
 
             schedule.dma_kv_new[local, target_lane, i, 0] = new_page_start
             schedule.dma_kv_new[local, target_lane, i, 1] = fetch_vmem
@@ -385,10 +407,16 @@ def compute_metadata(
                 # build time). within-seq logical page = kv_p_start + i.
                 src_hbm = seq_page_table_ref[jnp.minimum(
                     kv_p_start + i, cfgs.serve.pages_per_seq - 1)]
-                dma_valid = jnp.where(dma_sz > 0, 1, 0)
+                # Keep the real size rather than a 0/1 valid bit: the
+                # consume side used to rebuild it as valid * page_size, so a
+                # sequence's partial last page was always read in full (2x
+                # the KV at kv_len 1024, page_size 2048). Rounding up to the
+                # lane tile costs at most 127 lanes, which stay inside the
+                # page and are masked by effective_kv_len and the V mask.
+                dma_sz = utils.align_to(dma_sz, 128)
                 schedule.dma_kv_cache[local, target_lane, i, 0] = src_hbm
                 schedule.dma_kv_cache[local, target_lane, i, 1] = dst_vmem
-                schedule.dma_kv_cache[local, target_lane, i, 2] = dma_valid
+                schedule.dma_kv_cache[local, target_lane, i, 2] = dma_sz
 
             schedule.do_writeback[local, target_lane] = do_writeback
             schedule.skip_mask[local, target_lane] = skip_mask
@@ -896,13 +924,26 @@ def rpa_metadata_schedule_kernel(
     # same per-lane `step` values on every window; compute_metadata only writes
     # the rows whose global step falls inside the current window. `w` may be a
     # static int (window 0) or a traced index (the fori_loop over the rest).
+    #
+    # mask_window is scalar-core work and dominates the metadata pallas at
+    # short context: the scratch window is sized to the SMEM budget
+    # (thousands of rows) but the consume kernel only reads
+    # [0, actual_steps), so masking that prefix is enough.
+    #
+    # DECODE only, where _worst_steps provably bounds actual_steps (one
+    # q-block per sequence). MIXED/PREFILL derive their q-block count from
+    # the aggregate token count, which can under-count the true per-sequence
+    # sum by up to num_seqs - 1, so the bound is unsafe there.
+    mask_upper = (min(cfgs._worst_steps, w_size)
+                  if cfgs.mode == configs.RpaCase.DECODE else w_size)
+
     def build_window(w):
         window_lo = w * w_size
 
         for b_idx in range(cfgs.batch_size):
             lane_lengths_ref[b_idx] = 0
 
-        jax.lax.fori_loop(0, w_size, mask_window, None)
+        jax.lax.fori_loop(0, mask_upper, mask_window, None)
 
         compute_metadata(
             cu_q_lens_ref,
@@ -919,18 +960,24 @@ def rpa_metadata_schedule_kernel(
             sorted_seq_idx_ref=sorted_seq_idx_ref,
         )
 
-        # Stream this window's big (per-step) SMEM leaves to their HBM slot.
+        # Stream this window's SMEM leaves to their HBM slot, only as far as
+        # mask_upper, rounded to the 1024-int32 DMA tile.
         dma_list = []
         for h, s in zip(flat_hbm, flat_smem):
             if h.shape[0] > 1:
                 s_len = s.shape[
                     0]  # full SMEM leaf == one window (w_size * stride)
+                raw_stride = s_len // w_size  # int32s per step
+                copy_len = min(
+                    ((mask_upper * raw_stride + 1023) // 1024) * 1024,
+                    s_len,
+                )
                 # w is a traced fori_loop index; hint that the HBM offset is a
                 # multiple of s_len (a multiple of the leaf tile at W=num_lanes) so
                 # Mosaic can prove tile-alignment inside the dynamic loop.
                 copy = pltpu.make_async_copy(
-                    s.at[pl.ds(0, s_len)],
-                    h.at[pl.ds(pl.multiple_of(w * s_len, s_len), s_len)],
+                    s.at[pl.ds(0, copy_len)],
+                    h.at[pl.ds(pl.multiple_of(w * s_len, s_len), copy_len)],
                     dma_sem.at[0],
                 )
                 copy.start()
