@@ -75,7 +75,7 @@ if TYPE_CHECKING:
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     SLICE_ROPE_CACHE: bool = False
-    ROPE_CACHE_ROW_MAJOR: bool = True
+    ROPE_CACHE_ROW_MAJOR: bool = False
     HASH_TABLE_ROW_MAJOR: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
@@ -455,7 +455,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the whole table back to {1,0} inside the step function on every forward
     # pass. Trades 2x HBM for that buffer for the per-step copy.
     "ROPE_CACHE_ROW_MAJOR":
-    env_bool("ROPE_CACHE_ROW_MAJOR", default=True),
+    env_bool("ROPE_CACHE_ROW_MAJOR", default=False),
     # similar to ROPE_CACHE_ROW_MAJOR, but for the hash-MoE routing table
     # (`*.routed_experts.hash_indices_table`, [vocab_size, num_experts_per_tok]).
     "HASH_TABLE_ROW_MAJOR":
