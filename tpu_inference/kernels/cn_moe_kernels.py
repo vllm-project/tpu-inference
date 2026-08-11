@@ -44,24 +44,16 @@ _CN_NBUF = max(2, int(_os.getenv("MOE_CN_NBUF", "4")))
 #  Buffer selection
 # =====================================================================
 def _select_buf(ref, cur_buf, nbuf, tile_start=None, tile_size=None):
-    """Read buffer slot `cur_buf` from ref[nbuf, ...].
-
-    Uses a jnp.where chain — each ref[i] is a static-int index that
-    Mosaic handles correctly.  Faster than lax.switch in practice.
+    """Read buffer slot `cur_buf` from ref[nbuf, ...] via a direct dynamic
+    index (single read, no nbuf-way jnp.where chain).
 
     tile_start/tile_size (static) select one tile within the slot, so
     multiple K/I-tiles can share a buffer without aliasing.
     """
-
-    def _read(i):
-        if tile_start is None:
-            return ref[i]
-        return ref[i, pl.ds(tile_start, tile_size)]
-
-    result = _read(0)
-    for i in range(1, nbuf):
-        result = jnp.where(cur_buf == i, _read(i), result)
-    return result
+    del nbuf
+    if tile_start is None:
+        return ref[cur_buf]
+    return ref[cur_buf, pl.ds(tile_start, tile_size)]
 
 
 # =====================================================================
@@ -171,6 +163,7 @@ def _expert_body(
     weight,
     tok,
     lhs_scratch_ref,
+    inter_scratch_ref,
     w1_ref,
     w1_scale_ref,
     w2_ref,
@@ -236,14 +229,8 @@ def _expert_body(
         def _():
             _wait_w1_dma(gj, cur_w1_buf, k, **dma_kw_w1)
 
-    for m in range(NUM_I):
-
-        @pl.when(is_new_expert)
-        def _():
-            _wait_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
-
     # ---- Compute: skip entirely for masked/padding slots (weight == 0) ----
-    @pl.when(weight != 0.0)
+    @pl.when(weight.astype(jnp.float32) != 0.0)
     def _():
         # ---- Phase 1: K-tiled gate+up matmul ----
         gate_up_acc = jnp.zeros((M_PAD, 2 * I), dtype=jnp.float32)
@@ -263,8 +250,9 @@ def _expert_body(
             lhs_tile = lhs_scratch_ref[pl.ds(0, M_PAD),
                                        pl.ds(k * K_TILE, K_TILE)]
 
+            # MXU has no bf16xfp8 mode; the cast itself is exact.
+            w1_cast = w1_fp8.astype(DTYPE_LHS)
             if DEQUANT_W1_AFTER_:
-                w1_cast = w1_fp8.astype(DTYPE_LHS)
                 block_acc = jnp.matmul(lhs_tile,
                                        w1_cast,
                                        preferred_element_type=jnp.float32)
@@ -273,18 +261,31 @@ def _expert_body(
                     jnp.float32)
                 gate_up_acc = gate_up_acc + block_acc
             else:
-                w1_fp32 = w1_fp8.astype(jnp.float32).reshape(
-                    KB_TILE, QB_eff, 2 * I)
-                w1_dequant = (w1_fp32 * s1).reshape(K_TILE,
-                                                    2 * I).astype(DTYPE_LHS)
-                gate_up_acc = gate_up_acc + jnp.matmul(
-                    lhs_tile, w1_dequant, preferred_element_type=jnp.float32)
+                for b in range(KB_TILE):
+                    ks = b * QB_eff
+                    blk = jnp.matmul(
+                        lhs_tile[:, ks:ks + QB_eff],
+                        w1_cast[ks:ks + QB_eff, :],
+                        preferred_element_type=jnp.float32)
+                    gate_up_acc = gate_up_acc + blk * s1[b].reshape(
+                        1, 2 * I).astype(jnp.float32)
 
         # ---- SwiGLU ----
         gate = gate_up_acc[:, :I]
         up = gate_up_acc[:, I:]
         silu_gate = gate * jax.nn.sigmoid(gate)
-        intermediate = (silu_gate * up).astype(DTYPE_LHS)
+        inter_scratch_ref[...] = (silu_gate * up).astype(DTYPE_LHS)
+
+    # ---- w2 waits sit after phase 1 so the w2 DMA lands under that compute.
+    for m in range(NUM_I):
+
+        @pl.when(is_new_expert)
+        def _():
+            _wait_w2_dma(gj, cur_w2_buf, m, **dma_kw_w2)
+
+    @pl.when(weight.astype(jnp.float32) != 0.0)
+    def _():
+        intermediate = inter_scratch_ref[...]
 
         # ---- Phase 2: I-tiled down matmul ----
         down_acc = jnp.zeros((M_PAD, H), dtype=jnp.float32)
@@ -303,8 +304,8 @@ def _expert_body(
                              tile_size=IB_TILE)
             inter_tile = intermediate[:, m * I_TILE:(m + 1) * I_TILE]
 
+            w2_cast = w2_fp8.astype(DTYPE_LHS)
             if DEQUANT_W2_AFTER_:
-                w2_cast = w2_fp8.astype(DTYPE_LHS)
                 block_acc = jnp.matmul(inter_tile,
                                        w2_cast,
                                        preferred_element_type=jnp.float32)
@@ -313,12 +314,15 @@ def _expert_body(
                     jnp.float32)
                 down_acc = down_acc + block_acc
             else:
-                w2_fp32 = w2_fp8.astype(jnp.float32).reshape(
-                    IB_TILE, min(I_TILE, IB), H)
-                w2_dequant = (w2_fp32 * s2).reshape(I_TILE,
-                                                    H).astype(DTYPE_LHS)
-                down_acc = down_acc + jnp.matmul(
-                    inter_tile, w2_dequant, preferred_element_type=jnp.float32)
+                IB_eff_ = min(I_TILE, IB)
+                for b in range(IB_TILE):
+                    is_ = b * IB_eff_
+                    blk = jnp.matmul(
+                        inter_tile[:, is_:is_ + IB_eff_],
+                        w2_cast[is_:is_ + IB_eff_, :],
+                        preferred_element_type=jnp.float32)
+                    down_acc = down_acc + blk * s2[b].reshape(
+                        1, H).astype(jnp.float32)
 
         # ---- Accumulate weighted expert contribution to this token's row ----
         result = (down_acc * weight).reshape(1, 1, H)
@@ -349,6 +353,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     full_lhs_2d_ref,  # [C_PAD, K]         — 2D DMA landing pad
     full_lhs_scratch_ref,  # [C_PAD, 1, K]      — 3D for dynamic indexing
     lhs_scratch_ref,  # [M_PAD, K]
+    inter_scratch_ref,  # [M_PAD, I]
     w1_bufs_ref,  # [NBUF_W1, K, 2I]     — full K range per slot
     w1_s_bufs_ref,  # [NBUF_W1, K_BLOCKS, 1, 2I] fp32
     w2_bufs_ref,  # [NBUF_W2, I, H]      — full I range per slot
@@ -415,6 +420,7 @@ def _cn_w1w2_fused_token_kernel_fp8(
     # Compute-body kwargs
     body_kw = dict(
         lhs_scratch_ref=lhs_scratch_ref,
+        inter_scratch_ref=inter_scratch_ref,
         w1_ref=w1_ref,
         w1_scale_ref=w1_scale_ref,
         w2_ref=w2_ref,
@@ -452,11 +458,11 @@ def _cn_w1w2_fused_token_kernel_fp8(
 
     # ---- Seed phase: prefetch the first NBUF experts (scalar-prefetch only) ----
     gj0 = pl.multiple_of(ids_ref[0], 1)
-    _start_all_dma(gj0, jnp.int32(0), jnp.int32(0), **all_dma_kw)
+    _start_all_dma(gj0, 0, 0, **all_dma_kw)
     for d in range(1, NBUF):
         seed_gj = seed_experts_ref[d]
-        buf_d_w1 = jnp.int32(d % NBUF_W1_)
-        buf_d_w2 = jnp.int32(d % NBUF_W2_)
+        buf_d_w1 = d % NBUF_W1_
+        buf_d_w2 = d % NBUF_W2_
 
         @pl.when(seed_gj >= 0)
         def _(sgj=seed_gj, bw1=buf_d_w1, bw2=buf_d_w2):
@@ -570,7 +576,7 @@ def _forward_fill_ids(sorted_ids, sorted_weights):
     Returns:
         effective_ids  [N]: forward-filled expert indices.
     """
-    valid = (sorted_weights != 0.0)
+    valid = (sorted_weights.astype(jnp.float32) != 0.0)
 
     def _fill_op(a, b):
         a_id, a_v = a
@@ -714,10 +720,8 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs,
     IB_eff = min(I_TILE, IB)
     IB_TILE = I_TILE // IB_eff
 
-    NUM_K_setup = K // K_TILE
-    NUM_I_setup = I // I_TILE
-    NBUF_W1 = max(_CN_NBUF, NUM_K_setup)
-    NBUF_W2 = max(_CN_NBUF, NUM_I_setup)
+    NBUF_W1 = _CN_NBUF
+    NBUF_W2 = _CN_NBUF
     NBUF_EFF = max(NBUF_W1, NBUF_W2)
 
     # ---- Forward-fill IDs for EP (zero-weight → last real expert) ----
@@ -741,6 +745,7 @@ def cn_gemv_w1w2_fused_mb_fp8(lhs,
             pltpu.VMEM((C_PAD, K), lhs.dtype),  # full_lhs_2d (DMA pad)
             pltpu.VMEM((C_PAD, 1, K), lhs.dtype),  # full_lhs_scratch (3D)
             pltpu.VMEM((M_PAD, K), lhs.dtype),  # lhs_scratch
+            pltpu.VMEM((M_PAD, I), lhs.dtype),  # inter_scratch
             pltpu.VMEM((NBUF_W1, K, N1), w1.dtype),
             pltpu.VMEM((NBUF_W1, K_BLOCKS, 1, N1), w1_scale.dtype),
             pltpu.VMEM((NBUF_W2, I, H), w2.dtype),

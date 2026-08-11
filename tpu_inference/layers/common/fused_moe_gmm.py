@@ -20,9 +20,19 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+import os as _os
+
 import tpu_inference.envs as envs
 from tpu_inference.kernels.cn_moe_kernels import TOP_K as CN_MOE_TOP_K
+from tpu_inference.kernels.cn_moe_kernels import _CN_I_TILE, _CN_K_TILE
 from tpu_inference.kernels.cn_moe_kernels import cn_moe_full
+from tpu_inference.kernels.cn_moe_kernels_pipelined import \
+    cn_moe_full_pipelined
+
+# Experimental emit_pipeline-based CN kernel (see cn_moe_kernels_pipelined.py)
+# -- unvalidated on real hardware, NUM_K=NUM_I=1 only. Off by default; opt in
+# per-run to A/B test against the working kernel.
+_USE_PIPELINED_CN = _os.getenv("MOE_CN_USE_PIPELINED", "0") == "1"
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
@@ -663,14 +673,25 @@ def fused_moe_func(
                 local_ids = topk_ids_local
                 local_weights = topk_weights_local
 
-            local_out = cn_moe_full(hs,
-                                    w1_local,
-                                    w1_scale_local,
-                                    w2_local,
-                                    w2_scale_local,
-                                    local_ids,
-                                    local_weights,
-                                    use_ep=use_ep)
+            # Pipelined path only supports a single K/I tile (NUM_K=NUM_I=1);
+            # fall back to the working kernel outside that shape regardless
+            # of the opt-in flag, so an unsupported shape can't silently
+            # break correctness.
+            k_dim = w1_local.shape[1]
+            id_dim = w1_local.shape[2] // 2
+            use_pipelined = (_USE_PIPELINED_CN and k_dim <= _CN_K_TILE
+                            and id_dim <= _CN_I_TILE)
+            cn_fn = cn_moe_full_pipelined if use_pipelined else cn_moe_full
+            logger.info(
+                f"CN kernel variant: {'pipelined' if use_pipelined else 'original'}")
+            local_out = cn_fn(hs,
+                              w1_local,
+                              w1_scale_local,
+                              w2_local,
+                              w2_scale_local,
+                              local_ids,
+                              local_weights,
+                              use_ep=use_ep)
 
             # ---- Reduction: mirror moe_gmm_local machinery ----
             reduction_axis = (ShardingAxisName.EXPERT
