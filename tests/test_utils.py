@@ -14,8 +14,9 @@ from torchax.ops.mappings import t2j as ref_t2j
 # Import the functions to be tested
 from tpu_inference.utils import (GBYTES, enable_megacore, get_device_hbm_limit,
                                  get_device_name, get_jax_dtype_from_str_dtype,
-                                 get_megacore, get_padded_head_dim,
-                                 hbm_usage_bytes, hbm_usage_gb)
+                                 get_layer_kv_params, get_megacore,
+                                 get_padded_head_dim, hbm_usage_bytes,
+                                 hbm_usage_gb)
 from tpu_inference.utils import t2j as t2j
 
 
@@ -285,3 +286,97 @@ def poison_tpu_memory():
         ],
         compiler_params=pltpu.CompilerParams(disable_bounds_checks=True),
     )(jnp.zeros((1, ), dtype=jnp.float32))
+
+
+class _FlatGemma4Config:
+    """Flat (transformers < 5.15) Gemma4-style text config."""
+
+    def __init__(self, **overrides):
+        self.head_dim = 256
+        self.global_head_dim = 512
+        self.num_key_value_heads = 16
+        self.num_global_key_value_heads = 4
+        self.attention_k_eq_v = True
+        for key, value in overrides.items():
+            setattr(self, key, value)
+
+
+class _PerLayerConfig:
+
+    def __init__(self, head_dim, num_key_value_heads):
+        self.head_dim = head_dim
+        self.num_key_value_heads = num_key_value_heads
+
+
+class _HeterogeneousGemma4Config:
+    """transformers >= 5.15 style config: per-layer values, guarded flat reads."""
+
+    is_heterogeneous = True
+    layer_types = ["sliding_attention", "full_attention"]
+    per_layer_config = [_PerLayerConfig(256, 16), _PerLayerConfig(512, 4)]
+
+    @property
+    def head_dim(self):
+        # Emulates AmbiguousGlobalPerLayerAttributeError: a RuntimeError, so
+        # getattr defaults must not be relied on to swallow it.
+        raise RuntimeError("head_dim is a per-layer attribute")
+
+    @property
+    def num_key_value_heads(self):
+        raise RuntimeError("num_key_value_heads is a per-layer attribute")
+
+
+def test_get_layer_kv_params_flat_sliding():
+    config = _FlatGemma4Config()
+    assert get_layer_kv_params(config, "sliding_attention") == (256, 16)
+
+
+def test_get_layer_kv_params_flat_full_with_k_eq_v():
+    config = _FlatGemma4Config()
+    assert get_layer_kv_params(config, "full_attention") == (512, 4)
+
+
+def test_get_layer_kv_params_flat_full_without_k_eq_v():
+    config = _FlatGemma4Config(attention_k_eq_v=False)
+    assert get_layer_kv_params(config, "full_attention") == (512, 16)
+
+
+def test_get_layer_kv_params_flat_full_none_globals():
+    # Gemma-4 E2B style: global attributes present but None.
+    config = _FlatGemma4Config(global_head_dim=None,
+                               num_global_key_value_heads=None)
+    assert get_layer_kv_params(config, "full_attention") == (256, 16)
+
+
+def test_get_layer_kv_params_flat_missing_attrs():
+
+    class Empty:
+        pass
+
+    assert get_layer_kv_params(Empty(), "full_attention") == (None, None)
+    assert get_layer_kv_params(Empty(), "sliding_attention") == (None, None)
+
+
+def test_get_layer_kv_params_heterogeneous():
+    config = _HeterogeneousGemma4Config()
+    assert get_layer_kv_params(config, "sliding_attention") == (256, 16)
+    assert get_layer_kv_params(config, "full_attention") == (512, 4)
+
+
+def test_get_layer_kv_params_heterogeneous_unknown_layer_type():
+    # A layer type not present in layer_types falls back to layer 0.
+    config = _HeterogeneousGemma4Config()
+    assert get_layer_kv_params(config, "chunked_attention") == (256, 16)
+
+
+def test_get_layer_kv_params_magicmock_takes_flat_path():
+    # MagicMock auto-creates a truthy Mock for is_heterogeneous; the helper
+    # must still take the flat path so mock-based tests keep working.
+    config = MagicMock()
+    config.head_dim = 256
+    config.global_head_dim = 512
+    config.num_key_value_heads = 16
+    config.num_global_key_value_heads = 4
+    config.attention_k_eq_v = True
+    assert get_layer_kv_params(config, "full_attention") == (512, 4)
+    assert get_layer_kv_params(config, "sliding_attention") == (256, 16)

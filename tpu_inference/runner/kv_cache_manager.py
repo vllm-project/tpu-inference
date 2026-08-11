@@ -514,25 +514,20 @@ class KVCacheManager:
                             text_config.layer_types):
                         layer_type = text_config.layer_types[i]
 
-                    is_sliding = layer_type == "sliding_attention"
-                    # Use `or` instead of getattr default so we also handle
-                    # the case where the attribute is present but None
-                    # (e.g. Gemma-4 E2B has num_global_key_value_heads=None).
-                    # `or` also coerces 0 → fallback, which is fine because
-                    # 0 num_kv_heads / head_dim is never a valid config and
-                    # would crash get_padded_num_heads downstream anyway.
-                    if not is_sliding:
-                        num_kv_heads = (getattr(
-                            text_config, "num_global_key_value_heads", None)
-                                        or base_num_kv_heads)
-                        head_size = (getattr(text_config, "global_head_dim",
-                                             None) or base_head_size)
-                    else:
-                        num_kv_heads = (getattr(text_config,
-                                                "num_key_value_heads", None)
-                                        or base_num_kv_heads)
-                        head_size = (getattr(text_config, "head_dim", None)
-                                     or base_head_size)
+                    # transformers >= 5.15 stores head_dim / num_kv_heads per
+                    # layer; older versions use flat attributes split by
+                    # layer_types (see utils.get_layer_kv_params). `or`
+                    # instead of plain defaults so we also handle values that
+                    # are present but None (e.g. Gemma-4 E2B has
+                    # num_global_key_value_heads=None). `or` also coerces 0 →
+                    # fallback, which is fine because 0 num_kv_heads /
+                    # head_dim is never a valid config and would crash
+                    # get_padded_num_heads downstream anyway.
+                    layer_head_size, layer_num_kv_heads = (
+                        common_utils.get_layer_kv_params(
+                            text_config, layer_type))
+                    num_kv_heads = layer_num_kv_heads or base_num_kv_heads
+                    head_size = layer_head_size or base_head_size
                     # Pad num_kv_heads to multiple of TP size.
                     num_kv_heads = common_utils.get_padded_num_heads(
                         num_kv_heads, model_cnt)

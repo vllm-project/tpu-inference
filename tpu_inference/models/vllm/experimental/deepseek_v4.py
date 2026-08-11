@@ -35,6 +35,8 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
     VllmDeepseekV4MLAAttention
+from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
+    VllmDeepseekCompressor
 from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 
 
@@ -800,6 +802,15 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights,
                                             mapper=self.hf_to_vllm_mapper)
+
+        # Post-load weight surgery goes here.
+        # The TPU compress-and-store kernel wants ``fused_wkv_wgate`` as
+        # [hidden_size, 2 * coff * head_dim]; transpose it once here instead of
+        # on every forward pass.
+        for module in self.modules():
+            if isinstance(module, VllmDeepseekCompressor):
+                module.transpose_wkv_wgate()
+
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
