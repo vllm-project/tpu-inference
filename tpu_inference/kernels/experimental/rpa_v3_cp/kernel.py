@@ -2097,7 +2097,7 @@ def get_default_block_sizes(
             bkv_csz -= page_size
         bs = {**bs, "bkv_sz": bkv_sz, "bkv_csz": bkv_csz}
 
-    if pcp_ring:
+    if pcp_ring and case == RpaCase.MIXED:
         # Ring sizing is the opposite of the default heuristic.  The default
         # picks small Q tiles because re-streaming KV per tile is nearly free
         # from local HBM; the ring re-streams the cache over ICI (~50x slower),
