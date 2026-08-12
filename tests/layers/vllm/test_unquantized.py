@@ -29,7 +29,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
@@ -41,6 +40,7 @@ from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
 from tpu_inference.layers.vllm.custom_ops.fused_moe import _all_reduce_over_tp
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
@@ -578,7 +578,7 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        vllm_fused_moe = FusedMoE(
+        vllm_fused_moe = FusedMoEFactory(
             num_experts=num_experts,
             top_k=topk,
             hidden_size=hidden_size,
@@ -701,7 +701,7 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        vllm_fused_moe = FusedMoE(
+        vllm_fused_moe = FusedMoEFactory(
             num_experts=num_experts,
             top_k=topk,
             hidden_size=hidden_size,

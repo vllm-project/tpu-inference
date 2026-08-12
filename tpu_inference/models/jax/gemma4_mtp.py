@@ -193,18 +193,11 @@ class Gemma4MTPAttention(JaxModule):
             self.rope_scaling = getattr(config, "rope_scaling", None)
             self.rope_proportion = 0.25 if not self.is_sliding else 1.0
 
-        if not self.is_sliding:
-            self.head_dim_original = config.global_head_dim
-        else:
-            self.head_dim_original = config.head_dim
-
-        use_k_eq_v = (not self.is_sliding) and getattr(
-            config, "attention_k_eq_v", False)
-        if use_k_eq_v:
-            self.num_kv_heads = (config.num_global_key_value_heads
-                                 or config.num_key_value_heads)
-        else:
-            self.num_kv_heads = config.num_key_value_heads
+        # transformers >= 5.15 stores head_dim / num_kv_heads per layer;
+        # older versions use flat attributes split by layer_types (see
+        # utils.get_layer_kv_params).
+        self.head_dim_original, self.num_kv_heads = utils.get_layer_kv_params(
+            config, self.layer_type)
 
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
         self.mesh = mesh

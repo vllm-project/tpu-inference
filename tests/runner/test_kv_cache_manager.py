@@ -35,7 +35,8 @@ from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
 from tpu_inference.runner.input_batch import CachedRequestState
-from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
+from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
+                                           get_attention_page_size_bytes)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -931,6 +932,35 @@ class TestKVCacheManager:
 
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
 
+    def test_reinitialize_kv_cache_reuses_mamba_allocators(self):
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        _get_mamba_cache_allocator.cache_clear()
+        try:
+            with patch('dataclasses.replace') as mock_replace:
+                mock_replaced_spec = MagicMock()
+                mock_replaced_spec.page_size_bytes = page_size_bytes
+                mock_replace.return_value = mock_replaced_spec
+
+                self.runner.initialize_kv_cache(kv_cache_config)
+                self.runner.delete_kv_cache()
+                self.runner.reinitialize_kv_cache()
+
+            cache_info = _get_mamba_cache_allocator.cache_info()
+            assert cache_info.misses == 2
+            assert cache_info.hits == 6
+        finally:
+            _get_mamba_cache_allocator.cache_clear()
+
     def test_initialize_kv_cache_no_duplicate_shared_layers(self):
         block_size = self.runner.vllm_config.cache_config.block_size
         num_kv_heads = 8
@@ -1489,13 +1519,16 @@ class TestKVCacheManager:
                                               head_size=512,
                                               dtype=torch.float32,
                                               sliding_window=8)
-        hca_state_spec = SlidingWindowMLASpec(block_size=1,
+        # HCA states are hosted on a CSA NoPE array (131072B page), so they are
+        # paged at 32 states/block -- a different (block_size, sliding_window)
+        # family than the CSA/indexer states, hence their own cache group.
+        hca_state_spec = SlidingWindowMLASpec(block_size=32,
                                               num_kv_heads=1,
                                               head_size=1024,
                                               dtype=torch.float32,
-                                              sliding_window=8)
+                                              sliding_window=128)
 
-        mla_specs, state_specs = {}, {}
+        mla_specs, state_specs, hca_state_specs = {}, {}, {}
         for i in range(2):
             mla_specs[f"model.layers.{i}.attn"] = main_spec
             mla_specs[f"model.layers.{i}.attn.indexer.k_cache"] = idx_spec
@@ -1504,7 +1537,7 @@ class TestKVCacheManager:
             state_specs[f"model.layers.{i}.attn.indexer.compressor."
                         "state_cache"] = idx_state_spec
         mla_specs["model.layers.2.attn"] = hca_spec
-        state_specs[
+        hca_state_specs[
             "model.layers.2.attn.compressor.state_cache"] = hca_state_spec
         swa_names = [
             f"model.layers.{i}.attn.swa_cache" for i in range(num_swa_layers)
@@ -1516,7 +1549,8 @@ class TestKVCacheManager:
 
         groups = []
         for block_size, specs in ((1024, mla_specs), (16, state_specs),
-                                  (128, swa_specs_0), (128, swa_specs_1)):
+                                  (32, hca_state_specs), (128, swa_specs_0),
+                                  (128, swa_specs_1)):
             groups.append(
                 KVCacheGroupSpec(layer_names=list(specs),
                                  kv_cache_spec=UniformTypeKVCacheSpecs(
@@ -1587,17 +1621,23 @@ class TestKVCacheManager:
         assert caches[2].shape == (num_blocks, 64, 4, 256)
         assert caches[6].shape == (num_blocks, 16, 4, 128)
 
-        # Compressor state caches share their compressed-KV layer's array
-        # (the compressor kernel writes state + compressed KV through one
-        # buffer and asserts index equality at runtime).
+        # CSA / indexer compressor state caches share their own compressed-KV
+        # layer's array (the compressor kernel writes state + compressed KV
+        # through one buffer there).
         for i in range(2):
             assert (idx_map[f'model.layers.{i}.attn.compressor.state_cache'] ==
                     idx_map[f'model.layers.{i}.attn'])
             assert (idx_map[f'model.layers.{i}.attn.indexer.compressor.'
                             'state_cache'] ==
                     idx_map[f'model.layers.{i}.attn.indexer.k_cache'])
+        # The HCA state cache goes on a CSA NoPE array instead of its own HCA
+        # array, whose page holds only 2 token states (vs 32) and would make
+        # the state block table 16x longer than SMEM can hold. Its cache group
+        # holds nothing else, so the first CSA NoPE array is free.
         assert (idx_map['model.layers.2.attn.compressor.state_cache'] ==
-                idx_map['model.layers.2.attn'])
+                idx_map['model.layers.0.attn'])
+        assert (idx_map['model.layers.2.attn.compressor.state_cache']
+                != idx_map['model.layers.2.attn'])
 
         # swa_caches overlay the CSA NoPE arrays (never the indexer or HCA
         # arrays), by position: distinct within one cache group (shared block
@@ -1718,6 +1758,107 @@ class TestKVCacheManager:
             assert len(set(indices)) == len(indices)
         assert ([idx_map[name] for name in swa_groups[0]
                  ] == [idx_map[name] for name in swa_groups[1]])
+
+    def _ds_v4_hca_state_group(self, groups):
+        for group in groups:
+            names = group.layer_names
+            if any(
+                    name.endswith('.compressor.state_cache')
+                    and 'indexer' not in name and 'layers.2' in name
+                    for name in names):
+                return group
+        raise AssertionError('no HCA state group')
+
+    def test_initialize_kv_cache_ds_v4_hca_state_overflows_csa_arrays(self):
+        # 3 HCA state caches but only 2 CSA NoPE arrays to host them: the
+        # third falls through to the overflow pool, never to a CSA array a
+        # sibling state cache already took.
+        num_blocks = 32
+        groups = self._ds_v4_groups()
+        hca_group = self._ds_v4_hca_state_group(groups)
+        base_spec = hca_group.kv_cache_spec.kv_cache_specs[
+            'model.layers.2.attn.compressor.state_cache']
+        hca_specs = dict(hca_group.kv_cache_spec.kv_cache_specs)
+        mla_group = next(group for group in groups
+                         if 'model.layers.2.attn' in group.layer_names)
+        mla_specs = dict(mla_group.kv_cache_spec.kv_cache_specs)
+        hca_layer_spec = mla_specs['model.layers.2.attn']
+        for i in (3, 4):
+            mla_specs[f'model.layers.{i}.attn'] = hca_layer_spec
+            hca_specs[
+                f'model.layers.{i}.attn.compressor.state_cache'] = base_spec
+
+        rebuilt = []
+        for group in groups:
+            specs = group.kv_cache_spec.kv_cache_specs
+            if group is hca_group:
+                specs = hca_specs
+            elif group is mla_group:
+                specs = mla_specs
+            rebuilt.append(
+                KVCacheGroupSpec(layer_names=list(specs),
+                                 kv_cache_spec=UniformTypeKVCacheSpecs(
+                                     block_size=group.kv_cache_spec.block_size,
+                                     kv_cache_specs=specs)))
+
+        tensors = self._ds_v4_packed_tensors(rebuilt, num_blocks)
+        self._init_ds_v4(
+            KVCacheConfig(num_blocks=num_blocks,
+                          kv_cache_tensors=tensors,
+                          kv_cache_groups=rebuilt))
+
+        idx_map = self.runner.layer_name_to_kvcache_index
+        caches = self.runner.kv_caches
+        csa_nope = [
+            idx_map['model.layers.0.attn'], idx_map['model.layers.1.attn']
+        ]
+        state_indices = [
+            idx_map[f'model.layers.{i}.attn.compressor.state_cache']
+            for i in (2, 3, 4)
+        ]
+        # Distinct within the group (they share a block table), first two on
+        # the CSA NoPE arrays, the third on an array of the same shape from
+        # the overflow pool.
+        assert len(set(state_indices)) == 3
+        assert state_indices[:2] == csa_nope
+        assert state_indices[2] not in csa_nope
+        assert caches[state_indices[2]].shape == caches[csa_nope[0]].shape
+
+    def test_initialize_kv_cache_ds_v4_same_group_collision_raises(self):
+        # Layers of one cache group share a block table, so two of them on one
+        # array would write the same rows. The overlay maps the i-th HCA state
+        # onto the i-th CSA NoPE array, which is only safe because the HCA
+        # states are always their own cache group; if vLLM ever merges them
+        # with the CSA states (already on those arrays), fail loudly at
+        # startup rather than silently corrupt the cache.
+        num_blocks = 32
+        groups = self._ds_v4_groups()
+        hca_group = self._ds_v4_hca_state_group(groups)
+        state_group = next(group for group in groups
+                           if 'model.layers.0.attn.compressor.state_cache' in
+                           group.layer_names)
+        merged_specs = dict(state_group.kv_cache_spec.kv_cache_specs)
+        merged_specs.update(hca_group.kv_cache_spec.kv_cache_specs)
+
+        rebuilt = []
+        for group in groups:
+            if group is hca_group:
+                continue
+            specs = (merged_specs if group is state_group else
+                     group.kv_cache_spec.kv_cache_specs)
+            rebuilt.append(
+                KVCacheGroupSpec(layer_names=list(specs),
+                                 kv_cache_spec=UniformTypeKVCacheSpecs(
+                                     block_size=group.kv_cache_spec.block_size,
+                                     kv_cache_specs=specs)))
+
+        tensors = self._ds_v4_packed_tensors(rebuilt, num_blocks)
+        kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
+                                        kv_cache_tensors=tensors,
+                                        kv_cache_groups=rebuilt)
+
+        with pytest.raises(ValueError, match=r"\[kv-cache\].*same array"):
+            self._init_ds_v4(kv_cache_config)
 
     def test_initialize_kv_cache_ds_v4_missing_k_cache_raises(self):
         # A compressor state cache without its compressed-KV layer must fail

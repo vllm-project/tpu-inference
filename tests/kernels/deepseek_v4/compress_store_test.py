@@ -72,6 +72,7 @@ class CompressStoreTest(jtu.JaxTestCase):
         compress_ratio,
         overlap,
         physical_page_size,
+        state_physical_page_size=None,
         quant_block=64,
         rms_eps=1e-6,
         positions=None,
@@ -92,6 +93,7 @@ class CompressStoreTest(jtu.JaxTestCase):
             mode,
             size_n=num_tokens,
             physical_page_size=physical_page_size,
+            state_physical_page_size=state_physical_page_size,
             rms_eps=rms_eps,
             head_dim=head_dim,
             rope_head_dim=rope_head_dim,
@@ -100,6 +102,10 @@ class CompressStoreTest(jtu.JaxTestCase):
         )
 
         state_block_size = cfgs.state_block_size
+        if mode is config.Mode.HCA:
+            separate_state = True
+        else:
+            separate_state = False
 
         state_width = cfgs.state_width
         state_dim = 2 * state_width
@@ -136,28 +142,37 @@ class CompressStoreTest(jtu.JaxTestCase):
         ape = jax.random.normal(k3, (compress_ratio, state_width))
         run_1_positions = jnp.arange(run_1_tokens, dtype=jnp.int32)
 
-        slots_per_token = physical_page_size // state_block_size
+        slots_per_token = cfgs.state_rows_per_token
         run_1_slot_mapping = np.arange(run_1_tokens) * slots_per_token
         run_1_slot_mapping = jnp.array(run_1_slot_mapping, dtype=jnp.int32)
 
         init_cache = jnp.zeros(cfgs.cache_shape(num_pages), dtype=jnp.uint8)
+        init_state_cache = jnp.zeros(cfgs.state_cache_shape(num_pages),
+                                     dtype=jnp.uint8)
 
         ref_wkv_proj_and_save_state_jit = jax.jit(
             proj_and_save_state_ref.ref_wkv_proj_and_save_state,
             static_argnums=(6, 7, 8, 9),
         )
-        populated_cache = ref_wkv_proj_and_save_state_jit(
+        # The state scatter targets the state array, which is `init_cache`
+        # itself in the shared-buffer layout.
+        populated_state_cache = ref_wkv_proj_and_save_state_jit(
             hidden_states=hidden_states,
             wkv_wgate=wkv_wgate,
             ape=ape,
             positions=run_1_positions,
             slot_mapping=run_1_slot_mapping,
-            cache=init_cache,
+            cache=init_state_cache if separate_state else init_cache,
             state_block_size=state_block_size,
             head_dim=head_dim,
             compress_ratio=compress_ratio,
             overlap=overlap,
         )
+        if separate_state:
+            populated_cache = init_cache
+        else:
+            populated_cache = populated_state_cache
+            populated_state_cache = None
 
         # 3. Setup Kernel 2 inputs
         if token_to_req_indices is None:
@@ -206,6 +221,8 @@ class CompressStoreTest(jtu.JaxTestCase):
                                     dtype=jnp.int32)
         else:
             block_table = jnp.array(block_table)
+        block_table_stride = block_table.shape[1]
+        block_table = block_table.reshape(-1)
 
         rms_weight = jax.random.normal(k4, (head_dim, ))
 
@@ -229,7 +246,19 @@ class CompressStoreTest(jtu.JaxTestCase):
         # 4. Run Reference
         ref_compress_norm_rope_store_jit = jax.jit(
             compress_store_ref.ref_compress_norm_rope_store,
-            static_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 18),
+            static_argnames=(
+                "block_table_stride",
+                "state_block_size",
+                "head_dim",
+                "rope_head_dim",
+                "compress_ratio",
+                "overlap",
+                "rms_eps",
+                "quant_block",
+                "is_quantized",
+                "has_rope",
+                "has_rope_cache",
+            ),
         )
         ref_out = ref_compress_norm_rope_store_jit(
             cache=populated_cache,
@@ -241,6 +270,7 @@ class CompressStoreTest(jtu.JaxTestCase):
             kv_slot_mapping=kv_slot_mapping,
             rms_weight=rms_weight,
             cos_sin_cache=cos_sin_cache,
+            block_table_stride=block_table_stride,
             state_block_size=state_block_size,
             head_dim=head_dim,
             rope_head_dim=rope_head_dim,
@@ -251,6 +281,7 @@ class CompressStoreTest(jtu.JaxTestCase):
             is_quantized=is_quantized,
             has_rope=has_rope,
             has_rope_cache=cfgs.dims.has_rope_cache,
+            state_cache=populated_state_cache,
         )
         ref_cache_output, ref_rope_output = ref_out
 
@@ -263,6 +294,9 @@ class CompressStoreTest(jtu.JaxTestCase):
             token_to_req_indices,
             kv_slot_mapping,
             rms_weight,
+            block_table_stride=block_table_stride,
+            state_cache=(jnp.copy(populated_state_cache)
+                         if separate_state else None),
             rope_cache=jnp.copy(init_rope_cache),
             cos_sin_cache=cos_sin_cache,
             compress_ratio=cfgs.dims.compress_ratio,
@@ -324,7 +358,8 @@ class CompressStoreTest(jtu.JaxTestCase):
                 rope_head_dim=64,
                 compress_ratio=128,
                 overlap=False,
-                physical_page_size=128,
+                physical_page_size=16,
+                state_physical_page_size=256,
             ),
         ),
         (
@@ -335,7 +370,8 @@ class CompressStoreTest(jtu.JaxTestCase):
                 rope_head_dim=64,
                 compress_ratio=128,
                 overlap=False,
-                physical_page_size=128,
+                physical_page_size=16,
+                state_physical_page_size=256,
             ),
         ),
         (
@@ -372,7 +408,8 @@ class CompressStoreTest(jtu.JaxTestCase):
                 rope_head_dim=64,
                 compress_ratio=128,
                 overlap=False,
-                physical_page_size=128,
+                physical_page_size=16,
+                state_physical_page_size=256,
                 positions=np.array([127, 255, 383, 511], dtype=np.int32),
                 prefill_len=512,
             ),
@@ -398,7 +435,8 @@ class CompressStoreTest(jtu.JaxTestCase):
                 rope_head_dim=64,
                 compress_ratio=128,
                 overlap=False,
-                physical_page_size=128,
+                physical_page_size=16,
+                state_physical_page_size=256,
                 positions=np.array([383, 127, 511, 255], dtype=np.int32),
                 prefill_len=512,
             ),
@@ -424,7 +462,8 @@ class CompressStoreTest(jtu.JaxTestCase):
                 rope_head_dim=64,
                 compress_ratio=128,
                 overlap=False,
-                physical_page_size=128,
+                physical_page_size=16,
+                state_physical_page_size=256,
                 positions=np.array([127, 126, 255, 254, 383, 382],
                                    dtype=np.int32),
                 prefill_len=384,

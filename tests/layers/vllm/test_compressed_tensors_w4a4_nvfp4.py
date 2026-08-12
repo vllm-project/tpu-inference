@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ import jax
 import pytest
 import torch
 import torchax
+from jax._src import test_util as jtu
 from jax.sharding import PartitionSpec
 from torchax.interop import torch_view
 from torchax.ops.mappings import j2t, t2j
@@ -38,8 +40,8 @@ from tests.layers.common import utils as test_utils
 from tests.layers.vllm.nvfp4_utils import (NVFP4_GROUP_SIZE, quantize_to_nvfp4,
                                            ref_dequant_nvfp4)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
-from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import \
-    VllmCompressedTensorsW4A4Fp4
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w4a4_nvfp4 import (
+    VllmCompressedTensorsW4A4Fp4, W4A4ActivationType)
 from tpu_inference.layers.vllm.quantization.configs import \
     VllmQuantLinearConfig
 
@@ -80,8 +82,10 @@ def override_activation_quant_config(vllm_config):
     vllm_config.model_config.hf_text_config.quantization_config = vllm_config.model_config.hf_config.quantization_config
 
 
-def initialize_layer_weights(layer: torch.nn.Module,
-                             use_a16: bool = True) -> torch.Tensor:
+def initialize_layer_weights(
+    layer: torch.nn.Module,
+    activation_type: W4A4ActivationType = W4A4ActivationType.BF16
+) -> torch.Tensor:
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW4A4Fp4)
@@ -123,7 +127,7 @@ def initialize_layer_weights(layer: torch.nn.Module,
     layer.weight_global_scale = torch.nn.Parameter(weight_global_scale,
                                                    requires_grad=False)
 
-    if not use_a16:
+    if activation_type == W4A4ActivationType.NVFP4:
         layer.input_global_scale = torch.nn.Parameter(torch.tensor(
             [1.0], dtype=torch.float32),
                                                       requires_grad=False)
@@ -133,11 +137,13 @@ def initialize_layer_weights(layer: torch.nn.Module,
     return weight_ref
 
 
-def return_ref_and_layer_output(layer: torch.nn.Module,
-                                use_a16: bool = True,
-                                batch_size: int = 16):
+def return_ref_and_layer_output(
+        layer: torch.nn.Module,
+        activation_type: W4A4ActivationType = W4A4ActivationType.BF16,
+        batch_size: int = 16):
 
-    weight_ref = initialize_layer_weights(layer, use_a16=use_a16)
+    weight_ref = initialize_layer_weights(layer,
+                                          activation_type=activation_type)
     assert isinstance(layer, LinearBase)
     scheme = layer.scheme
     assert isinstance(scheme, VllmCompressedTensorsW4A4Fp4)
@@ -151,9 +157,9 @@ def return_ref_and_layer_output(layer: torch.nn.Module,
     input_tensor = input_tensor.to('cpu')
 
     # Run reference implementation
-    if not use_a16:
+    if activation_type == W4A4ActivationType.NVFP4:
         # Quantize activation to FP4
-        # Since use_a16=False tests FP4xFP4, we need to quantize the activation
+        # Since activation_type=NVFP4 tests FP4xFP4, we need to quantize the activation
         # However, TPU does not natively support FP4xFP4 and raises an error
         # So we skip actual activation quantization in reference for now
         pass
@@ -214,9 +220,18 @@ def setup_environment():
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
+@pytest.mark.parametrize("activation_type",
+                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
+@pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_row_parallel_linear(model, bias, num_devices, enable_sp,
-                             enable_attn_dp, use_a16):
+                             enable_attn_dp, activation_type,
+                             requantize_block_size):
+    if requantize_block_size is not None:
+        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
+            requantize_block_size)
+    else:
+        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -245,11 +260,12 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
             return_bias=False,
             quant_config=quant_config,
         )
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -257,9 +273,18 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("enable_sp", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
+@pytest.mark.parametrize("activation_type",
+                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
+@pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_column_parallel_linear(model, bias, num_devices, enable_sp,
-                                enable_attn_dp, use_a16):
+                                enable_attn_dp, activation_type,
+                                requantize_block_size):
+    if requantize_block_size is not None:
+        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
+            requantize_block_size)
+    else:
+        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -288,11 +313,12 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
             return_bias=False,
             quant_config=quant_config,
         )
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -301,9 +327,18 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
 @pytest.mark.parametrize("enable_attn_dp", [False, True])
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
+@pytest.mark.parametrize("activation_type",
+                         [W4A4ActivationType.FP8, W4A4ActivationType.BF16])
+@pytest.mark.parametrize("requantize_block_size", [None, 32])
 def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
-                             enable_attn_dp, use_a16):
+                             enable_attn_dp, activation_type,
+                             requantize_block_size):
+    if requantize_block_size is not None:
+        os.environ["REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"] = str(
+            requantize_block_size)
+    else:
+        os.environ.pop("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE", None)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -335,22 +370,30 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
             quant_config=quant_config,
         )
         linear_layer.quant_method.fuse_matmuls = fuse_matmuls
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.35)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
 
 
-@pytest.mark.parametrize("bias", [False, True])
-@pytest.mark.parametrize("num_devices", [1, min(4, jax.local_device_count())])
-@pytest.mark.parametrize("fuse_matmuls", [False, True])
-@pytest.mark.parametrize("enable_sp", [False, True])
-@pytest.mark.parametrize("enable_attn_dp", [False, True])
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_a16", [True])
-def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
-                                       enable_sp, enable_attn_dp, use_a16):
+def merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
+                                         fuse_matmuls, enable_sp,
+                                         enable_attn_dp, activation_type,
+                                         requantize_block_size,
+                                         enable_quantized_matmul_kernel):
+    if requantize_block_size is not None:
+        monkeypatch.setenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE",
+                           str(requantize_block_size))
+    else:
+        monkeypatch.delenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE",
+                           raising=False)
+    if enable_quantized_matmul_kernel:
+        monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "1")
+    else:
+        monkeypatch.delenv("ENABLE_QUANTIZED_MATMUL_KERNEL", raising=False)
+
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
 
@@ -373,15 +416,146 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
     with set_current_vllm_config(vllm_config):
         linear_layer = MergedColumnParallelLinear(
             input_size=2048,
-            output_sizes=[7168] * 2,
+            output_sizes=[64] * 2,
             bias=bias,
             params_dtype=dtype,
             return_bias=False,
             quant_config=quant_config,
         )
         linear_layer.quant_method.fuse_matmuls = fuse_matmuls
-        linear_layer.scheme.use_a16 = use_a16
+        linear_layer.scheme.activation_type = activation_type
 
-    ref_output, layer_output = return_ref_and_layer_output(linear_layer,
-                                                           use_a16=use_a16)
-    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=0.15)
+    ref_output, layer_output = return_ref_and_layer_output(
+        linear_layer, activation_type=activation_type)
+    atol = 0.5 if activation_type == W4A4ActivationType.FP8 else 0.35
+    torch.testing.assert_close(ref_output, layer_output, rtol=0.1, atol=atol)
+
+
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("num_devices", [1, min(4, jax.local_device_count())])
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+@pytest.mark.parametrize("enable_sp", [False, True])
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.BF16])
+@pytest.mark.parametrize(
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, False),
+                                                              (256, False)])
+def test_merged_column_parallel_linear(monkeypatch, model, bias, num_devices,
+                                       fuse_matmuls, enable_sp, enable_attn_dp,
+                                       activation_type, requantize_block_size,
+                                       enable_quantized_matmul_kernel):
+    merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
+                                         fuse_matmuls, enable_sp,
+                                         enable_attn_dp, activation_type,
+                                         requantize_block_size,
+                                         enable_quantized_matmul_kernel)
+
+
+# gmmv2 + 256 block size would trigger the quantized matmul
+# path in gmm_v2, which would need to cast packed f4e2m1 to fp8. This operation
+# would lead to a Mosaic error on v6e
+# https://screenshot-v2.corp.google.com/0o6oukm5252h8
+@pytest.mark.skipif(not jtu.is_device_tpu_at_least(version=7),
+                    reason="Expect TPUv7+")
+@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("num_devices", [1, min(4, jax.local_device_count())])
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+@pytest.mark.parametrize("enable_sp", [False, True])
+@pytest.mark.parametrize("enable_attn_dp", [False, True])
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("activation_type", [W4A4ActivationType.FP8])
+@pytest.mark.parametrize(
+    "requantize_block_size, enable_quantized_matmul_kernel", [(None, True),
+                                                              (256, True)])
+def test_merged_column_parallel_linear_v7(monkeypatch, model, bias,
+                                          num_devices, fuse_matmuls, enable_sp,
+                                          enable_attn_dp, activation_type,
+                                          requantize_block_size,
+                                          enable_quantized_matmul_kernel):
+    merged_column_parallel_linear_helper(monkeypatch, model, bias, num_devices,
+                                         fuse_matmuls, enable_sp,
+                                         enable_attn_dp, activation_type,
+                                         requantize_block_size,
+                                         enable_quantized_matmul_kernel)
+
+
+def test_get_scheme():
+
+    from tpu_inference.layers.vllm.quantization.compressed_tensors.compressed_tensors import \
+        VllmCompressedTensorsConfig
+
+    def get_scheme(input_quant):
+        config_dict = {
+            "quant_method": "compressed-tensors",
+            "format": "float-quantized",
+            "config_groups": {
+                "group_0": {
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "symmetric": True,
+                        "strategy": "tensor_group",
+                        "group_size": 16,
+                    }
+                }
+            }
+        }
+        if input_quant is not None:
+            config_dict["config_groups"]["group_0"][
+                "input_activations"] = input_quant
+
+        config = VllmCompressedTensorsConfig.from_config(config_dict)
+        config.vllm_config = MagicMock()
+        config.mesh = MagicMock()
+
+        # Mock layer for get_scheme
+        layer = MagicMock(spec=LinearBase)
+        layer.input_size = 16
+        layer.output_size = 16
+        layer.weight_packed = torch.nn.Parameter(torch.empty(16, 16))
+        return config.get_scheme(layer, layer_name="Linear")
+
+    # 1. nvfp4 weights + fp8 dynamic input yields FP8
+    scheme = get_scheme({
+        "num_bits": 8,
+        "type": "float",
+        "symmetric": True,
+        "strategy": "tensor",
+        "dynamic": True,
+    })
+    assert scheme.activation_type == W4A4ActivationType.FP8
+
+    # 2. nvfp4 input yields NVFP4
+    scheme = get_scheme({
+        "num_bits": 4,
+        "type": "float",
+        "symmetric": True,
+        "strategy": "tensor_group",
+        "group_size": 16,
+        "dynamic": True,
+    })
+    assert scheme.activation_type == W4A4ActivationType.NVFP4
+
+    # 3. input_quant is None yields BF16
+    scheme = get_scheme(None)
+    assert scheme.activation_type == W4A4ActivationType.BF16
+
+    # 4. unsupported input_quant raises error
+    with pytest.raises(ValueError):
+        get_scheme({
+            "num_bits": 8,
+            "type": "int",
+            "symmetric": True,
+            "strategy": "tensor",
+            "dynamic": True,
+        })
+    with pytest.raises(ValueError):
+        get_scheme({
+            "num_bits": 8,
+            "type": "float",
+            "symmetric": True,
+            "strategy": "tensor",
+            "dynamic": False,
+        })

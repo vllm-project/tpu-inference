@@ -91,6 +91,12 @@ def test_multi_modal_inference(monkeypatch, enable_dynamic_image_sizes):
     pass_config = {k: v for k, v in pass_config.items() if v is not None}
     engine_args["compilation_config"]["pass_config"] = pass_config
 
+    # asdict() turns the default FaultToleranceConfig into a plain dict, and
+    # EngineArgs.__post_init__ treats a dict fault_tolerance_config as an
+    # explicit opt-in, force-enabling fault tolerance — which is then rejected
+    # in internal-LB mode. Drop it so the default (disabled) config is used.
+    engine_args.pop("fault_tolerance_config", None)
+
     llm = LLM(**engine_args)
 
     try:
