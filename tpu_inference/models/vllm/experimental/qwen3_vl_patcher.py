@@ -45,6 +45,7 @@ import jax
 import jax.numpy as jnp
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
 from torchax.interop import jax_view, torch_view
@@ -54,9 +55,103 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
+from tpu_inference.kernels.flash_attention.kernel import \
+    encoder_only_flash_attention
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
+LARGE_ATTN_ELEMENT_THRESHOLD = 40 * 1024 * 1024  # 40M elements (~160MB in float32)
+
+_orig_sdpa = F.scaled_dot_product_attention
+
+
+def _flash_attn_sdpa(query: torch.Tensor,
+                     key: torch.Tensor,
+                     value: torch.Tensor,
+                     attn_mask: torch.Tensor | None = None,
+                     dropout_p: float = 0.0,
+                     is_causal: bool = False,
+                     scale: float | None = None,
+                     *args,
+                     **kwargs) -> torch.Tensor:
+    """Redirect large SDPA calls in Vision Attention to encoder_only_flash_attention.
+
+    For large sequence lengths (e.g. video processing with >40M intermediate attention elements),
+    materializing the full attention matrix in VMEM leads to out-of-memory errors on TPU.
+    This function redirects such large calls to the block-based encoder_only_flash_attention kernel.
+    """
+    # Calculate total attention matrix elements: batch * heads * q_seq * kv_seq
+    if query.ndim >= 3 and key.ndim >= 3:
+        q_len = query.shape[-2]
+        kv_len = key.shape[-2]
+        num_heads = query.shape[-3] if query.ndim >= 3 else 1
+        kv_heads = key.shape[-3] if key.ndim >= 3 else 1
+        batch_size = query.shape[0] if query.ndim == 4 else 1
+        total_elements = batch_size * num_heads * q_len * kv_len
+        is_self_attn = (q_len == kv_len and num_heads == kv_heads)
+    else:
+        total_elements = 0
+        is_self_attn = False
+
+    # Only engage flash attention path if:
+    # 1. Total elements exceed large attention threshold
+    # 2. Equal sequence lengths and matching head counts (standard encoder self-attention)
+    # 3. No dropout, non-causal (standard for vision encoder self-attention)
+    # 4. No arbitrary attention mask (standard for full bidirectional vision attention)
+    if (total_elements >= LARGE_ATTN_ELEMENT_THRESHOLD and is_self_attn
+            and dropout_p == 0.0 and not is_causal and attn_mask is None):
+        try:
+            logger.info_once(
+                f"Redirecting large vision attention ({total_elements} elements) to encoder_only_flash_attention"
+            )
+            # Obtain JAX views of query, key, value
+            q_jax = jax_view(query)
+            k_jax = jax_view(key)
+            v_jax = jax_view(value)
+
+            if q_jax.ndim == 4:
+                # Standard SDPA: [B, H, S, D] -> transpose to [B, S, H, D] -> flatten to [B*S, H, D]
+                b, h, s, d = q_jax.shape
+                q_flat = jnp.reshape(jnp.transpose(q_jax, (0, 2, 1, 3)),
+                                     (b * s, h, d))
+                k_flat = jnp.reshape(jnp.transpose(k_jax, (0, 2, 1, 3)),
+                                     (b * s, h, d))
+                v_flat = jnp.reshape(jnp.transpose(v_jax, (0, 2, 1, 3)),
+                                     (b * s, h, d))
+                seq_lens = jnp.full((b, ), s, dtype=jnp.int32)
+                out_jax = encoder_only_flash_attention(
+                    q_flat, k_flat, v_flat, seq_lens=seq_lens, sm_scale=scale)
+                # Reshape back: [B*S, H, D] -> [B, S, H, D] -> [B, H, S, D]
+                out_jax = jnp.transpose(jnp.reshape(out_jax, (b, s, h, d)),
+                                        (0, 2, 1, 3))
+                return torch_view(out_jax)
+            elif q_jax.ndim == 3:
+                # PyTorch SDPA 3D: [H, S, D] -> transpose to [S, H, D] for kernel
+                h, s, d = q_jax.shape
+                q_shd = jnp.transpose(q_jax, (1, 0, 2))
+                k_shd = jnp.transpose(k_jax, (1, 0, 2))
+                v_shd = jnp.transpose(v_jax, (1, 0, 2))
+                seq_lens = jnp.full((1, ), s, dtype=jnp.int32)
+                out_jax = encoder_only_flash_attention(
+                    q_shd, k_shd, v_shd, seq_lens=seq_lens, sm_scale=scale)
+                # Reshape back: [S, H, D] -> [H, S, D]
+                out_jax = jnp.transpose(out_jax, (1, 0, 2))
+                return torch_view(out_jax)
+        except Exception as e:
+            logger.warning(
+                f"Failed to execute encoder_only_flash_attention ({e}), falling back to standard SDPA"
+            )
+
+    return _orig_sdpa(query,
+                      key,
+                      value,
+                      attn_mask=attn_mask,
+                      dropout_p=dropout_p,
+                      is_causal=is_causal,
+                      scale=scale,
+                      *args,
+                      **kwargs)
 
 
 def _patched_set_deepstack(vllm_model, deepstack_input_embeds):
@@ -372,7 +467,18 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
 
 
 def apply_qwen3_vl_patches(vllm_model):
-    """Apply Qwen3-VL specific patches for stateless Deepstack support."""
+    """Apply Qwen3-VL specific patches for stateless Deepstack support and Vision Flash Attention."""
+    # Patch SDPA specifically in ViT attention wrappers and Qwen vision modules
+    # to redirect large sequence video attention to encoder_only_flash_attention.
+    try:
+        import vllm.v1.attention.ops.vit_attn_wrappers as vit_attn_wrappers
+        vit_attn_wrappers.F.scaled_dot_product_attention = _flash_attn_sdpa
+    except (ImportError, AttributeError):
+        pass
+
+    if hasattr(qwen3_vl_mod, "F"):
+        qwen3_vl_mod.F.scaled_dot_product_attention = _flash_attn_sdpa
+
     if not getattr(vllm_model, "use_deepstack", False):
         return
 
@@ -427,6 +533,7 @@ def apply_qwen3_vl_patches(vllm_model):
         logger.info(
             "Disabled dynamo for Qwen3LLMModel; JAX JIT handles outer compilation"
         )
+
 
 
 def is_qwen3_vl(vllm_model) -> bool:
