@@ -229,92 +229,139 @@ class TestDPScheduler:
         assert rank_tokens[0] == 30
         assert rank_tokens[1] == 15
 
-    def test_find_best_rank_with_cache_hit(self, mock_vllm_config,
-                                           mock_kv_cache_config,
-                                           mock_structured_output_manager):
-        """Test _find_best_rank_for_request prefers cache hits."""
-        # Enable prefix caching to exercise the cache-hit path
+    def test_find_best_rank_prefers_cache_when_idle(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Cache locality wins when it lowers the resulting load."""
         mock_vllm_config.cache_config.enable_prefix_caching = True
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
 
         mock_request = MagicMock(spec=Request)
+        mock_request.num_tokens = 100
 
-        # Mock _send_command and _get_result for PROBE_COMPUTED_BLOCKS (2 ranks)
         scheduler._send_command = MagicMock()
+        # Per rank the scheduler collects (cached_tokens, pending_prefill).
         scheduler._get_result = MagicMock(side_effect=[
             10,
-            25,  # PROBE_COMPUTED_BLOCKS: rank 0=10, rank 1=25
+            0,
+            (0, 0),
+            1000,  # rank 0: 10 cached, idle -> load 90
+            25,
+            0,
+            (0, 0),
+            1000,  # rank 1: 25 cached, idle -> load 75
         ])
 
-        rank = scheduler._find_best_rank_for_request(mock_request)
+        assert scheduler._find_best_rank_for_request(mock_request) == 1
 
-        # Should prefer rank with better cache hit (rank 1 has 25 cached tokens)
-        assert rank == 1
+    def test_find_best_rank_abandons_cache_when_rank_busy(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """A cache hit loses once the rank holding it is loaded enough.
 
-    def test_find_best_rank_without_cache_hit(self, mock_vllm_config,
-                                              mock_kv_cache_config,
-                                              mock_structured_output_manager):
-        """_find_best_rank_for_request sorts by
-        (pending_prefill, inflight, min_remaining_output)."""
+        This is the decision pure cache affinity cannot make.
+        """
+        mock_vllm_config.cache_config.enable_prefix_caching = True
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
 
         mock_request = MagicMock(spec=Request)
+        mock_request.num_tokens = 1000
 
-        # Primary key wins: rank 1 has fewer pending prefill tokens.
-        scheduler._get_rank_routing_state = MagicMock(return_value=(
-            {
-                0: 100,
-                1: 50
-            },  # pending
-            {
-                0: 5,
-                1: 5
-            },  # inflight
-            {
-                0: 1000,
-                1: 1000
-            }  # min_remaining
-        ))
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(side_effect=[
+            500,
+            800,
+            (0, 0),
+            1000,  # rank 0: 500 cached but 800 queued -> load 1300
+            0,
+            0,
+            (0, 0),
+            1000,  # rank 1: nothing cached, idle      -> load 1000
+        ])
+
         assert scheduler._find_best_rank_for_request(mock_request) == 1
 
-        # Primary ties; secondary key wins: rank 0 has fewer inflight.
-        scheduler._get_rank_routing_state = MagicMock(return_value=(
-            {
-                0: 50,
-                1: 50
-            },
-            {
-                0: 3,
-                1: 7
-            },
-            {
-                0: 1000,
-                1: 1000
-            },
-        ))
-        assert scheduler._find_best_rank_for_request(mock_request) == 0
+    def test_find_best_rank_without_prefix_caching(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """With caching off no rank reports cached tokens, so the rank with
+        the least queued prefill wins."""
+        mock_vllm_config.cache_config.enable_prefix_caching = False
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
 
-        # Primary and secondary tie; tertiary wins: rank 1 has the running
-        # req with the fewest remaining output tokens (closest to its
-        # max_tokens), so it is most likely to free a slot soonest.
-        scheduler._get_rank_routing_state = MagicMock(return_value=(
-            {
-                0: 0,
-                1: 0
-            },
-            {
-                0: 4,
-                1: 4
-            },
-            {
-                0: 9100,
-                1: 500
-            },
-        ))
+        mock_request = MagicMock(spec=Request)
+        mock_request.num_tokens = 100
+
+        scheduler._send_command = MagicMock()
+        # No cache probe is issued; pending_prefill and counts are collected.
+        scheduler._get_result = MagicMock(side_effect=[
+            100,
+            (0, 0),
+            1000,  # rank 0
+            50,
+            (0, 0),
+            1000,  # rank 1
+        ])
+
+        assert scheduler._find_best_rank_for_request(mock_request) == 1
+
+    def test_find_best_rank_breaks_load_ties_by_inflight(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Equal load falls back to fewest in-flight requests.
+
+        Queued prefill does not reflect decode load, and ranks tie at zero
+        queued prefill for much of a decode-heavy phase.
+        """
+        mock_vllm_config.cache_config.enable_prefix_caching = False
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.num_tokens = 100
+
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(side_effect=[
+            0,
+            (7, 0),
+            1000,  # rank 0: idle prefill queue, 7 in flight
+            0,
+            (3, 0),
+            1000,  # rank 1: idle prefill queue, 3 in flight
+        ])
+
+        assert scheduler._find_best_rank_for_request(mock_request) == 1
+
+    def test_find_best_rank_breaks_remaining_ties_by_min_output(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """Load and in-flight tied: prefer the rank whose running request is
+        closest to its max_tokens, so most likely to free a slot soonest."""
+        mock_vllm_config.cache_config.enable_prefix_caching = False
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+
+        mock_request = MagicMock(spec=Request)
+        mock_request.num_tokens = 100
+
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(side_effect=[
+            0,
+            (4, 0),
+            900,  # rank 0: 900 output tokens still to go
+            0,
+            (4, 0),
+            100,  # rank 1: only 100 left, frees a slot sooner
+        ])
+
         assert scheduler._find_best_rank_for_request(mock_request) == 1
 
     def test_add_request_assigns_to_best_rank(self, mock_vllm_config,

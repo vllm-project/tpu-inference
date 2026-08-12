@@ -137,7 +137,11 @@ class _TorchaxEncoderModelAdapter:
             }
             return self._jit_forward(self._params, padded_jax)
 
-    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> jax.Array:
+    def encoder_eager_forward(self,
+                              mm_kwargs: dict[str, Any],
+                              path: str = "default") -> jax.Array:
+        # ``path`` mirrors the vLLM SupportsEncoderCudaGraph contract; the
+        # TPU adapters only serve the single default encoder path.
         # Bridge plain-torch mm_kwargs -> torchax, dispatch the model's eager
         # vision forward via functional_call (binds the real TPU weights),
         # and return a jax.Array. The torchax env is entered locally here so
@@ -162,7 +166,7 @@ class _TorchaxEncoderModelAdapter:
             return jax_view(out_torch)
 
     def postprocess_encoder_output(self,
-                                   output: jax.Array,
+                                   output: jax.Array | dict[str, jax.Array],
                                    indices: list[int],
                                    per_item_out_tokens: list[int],
                                    dest,
@@ -172,6 +176,11 @@ class _TorchaxEncoderModelAdapter:
         # scatter_output_slices + torch .clone()). The encoder output is a
         # jax.Array here, so slice per item and scatter; jax arrays are
         # immutable, so ``clone`` is a no-op.
+        # Newer vLLM's unified _execute_local passes a per-path dict
+        # ({"default": array} on TPU — single path); older vLLM passes the
+        # bare array.
+        if isinstance(output, dict):
+            output = output["default"]
         offset = 0
         for idx in indices:
             n = per_item_out_tokens[idx]
@@ -219,16 +228,24 @@ class JaxEncoderModelAdapter:
                 jax_inputs[k] = v
         return self._model.encoder_cudagraph_forward(jax_inputs)
 
-    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> jax.Array:
+    def encoder_eager_forward(self,
+                              mm_kwargs: dict[str, Any],
+                              path: str = "default") -> jax.Array:
+        # ``path`` mirrors the vLLM SupportsEncoderCudaGraph contract; the
+        # underlying JAX models serve the single default encoder path.
         return self._model.encoder_eager_forward(mm_kwargs)
 
     def postprocess_encoder_output(self,
-                                   output: jax.Array,
+                                   output: jax.Array | dict[str, jax.Array],
                                    indices: list[int],
                                    per_item_out_tokens: list[int],
                                    dest,
                                    clone: bool = False,
                                    batch_mm_kwargs=None) -> None:
+        # Normalize newer vLLM's per-path dict ({"default": array} on TPU)
+        # before delegating to the single-path JAX model implementation.
+        if isinstance(output, dict):
+            output = output["default"]
         self._model.postprocess_encoder_output(output, indices,
                                                per_item_out_tokens, dest,
                                                clone, batch_mm_kwargs)
@@ -393,6 +410,7 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         self,
         mm_kwargs: dict[str, Any],
         token_budget: int,
+        path: str = "default",
     ) -> jax.Array | None:
         """XLA-cache analog of CUDA-graph replay.
 
@@ -401,6 +419,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         ``run_budget_forward``. Returns a **jax.Array** that the inherited
         ``_execute_local`` slices via the adapter's jax-friendly
         ``postprocess_encoder_output`` — no outer torchax env required.
+
+        ``path`` mirrors the base-class signature (the unified
+        ``_execute_local`` always forwards it); the TPU manager only
+        configures the single default encoder path, so budget templates
+        are keyed by ``token_budget`` alone.
         """
         num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_templates:

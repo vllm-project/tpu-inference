@@ -29,22 +29,19 @@ from absl import app, flags
 
 from tools.kernel.tuner.v1.autotune.kernel_autotune_config import \
     kernel_autotune_mapping
+from tools.kernel.tuner.v1.kernel_tuner_flags import (GCP_PROJECT_ID,
+                                                      SPANNER_DATABASE_ID,
+                                                      SPANNER_INSTANCE_ID)
 
 logger = logging.getLogger(__name__)
 
-_GCP_PROJECT_ID = flags.DEFINE_string(
-    'gcp_project_id', 'cloud-tpu-inference-test',
-    'The GCP project ID to use for Spanner. Only used when --run_locally is false.'
-)
-_SPANNER_INSTANCE_ID = flags.DEFINE_string(
-    'spanner_instance_id', 'vllm-bm-inst',
-    'The Spanner instance ID to use. Only used when --run_locally is false.')
-_SPANNER_DATABASE_ID = flags.DEFINE_string(
-    'spanner_database_id', 'tune-gmm',
-    'The Spanner database ID to use. Only used when --run_locally is false.')
 _AUTOTUNE_ID = flags.DEFINE_string(
-    'autotune_id', '',
-    'The autotune ID to use for this run, for example, "KERNEL_AUTOTUNE_2026-06-23-07-10".'
+    'autotune_id', None,
+    'The autotune ID to process. Must match one of the autotune IDs in kernel_autotune_config.py.'
+)
+_OUTPUT_DIR = flags.DEFINE_string(
+    'output_dir', None,
+    'The output directory to save the processed results to. If not specified, results will be printed to stdout.'
 )
 _PROCESS_STEP = flags.DEFINE_string(
     'process_step', 'PATCH_KERNEL_AUTOTUNE_RESULT',
@@ -61,9 +58,9 @@ class KernelAutoTuneResultProcessor:
 
     def __init__(self):
         self.autotune_id = self._get_flag_value(_AUTOTUNE_ID)
-        self.gcp_project_id = self._get_flag_value(_GCP_PROJECT_ID)
-        self.spanner_instance_id = self._get_flag_value(_SPANNER_INSTANCE_ID)
-        self.spanner_database_id = self._get_flag_value(_SPANNER_DATABASE_ID)
+        self.gcp_project_id = self._get_flag_value(GCP_PROJECT_ID)
+        self.spanner_instance_id = self._get_flag_value(SPANNER_INSTANCE_ID)
+        self.spanner_database_id = self._get_flag_value(SPANNER_DATABASE_ID)
         process_step = self._get_flag_value(_PROCESS_STEP)
         assert process_step in [
             'EVALUATE_AND_CREATE_PR', 'PATCH_KERNEL_AUTOTUNE_RESULT'

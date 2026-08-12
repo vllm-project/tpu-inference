@@ -48,7 +48,7 @@ steps:
       - |
         .buildkite/scripts/run_in_docker.sh bash -c '
           generator_script="./tools/kernel/tuner/v1/autotune/bootstrap_kernel_tuners.py"
-          pip install --upgrade -r tools/kernel/tuner/v1/storage_management/requirements.txt
+          pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt
           if [[ ! -f "$$generator_script" ]]; then
             echo "🚨 Bootstrap script not found at $$generator_script"
             exit 1
@@ -66,9 +66,11 @@ steps:
           echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
           cat /tmp/kernel_tuning/generated_pipeline.yml; 
         } | buildkite-agent pipeline upload
+        rm -f "/tmp/kernel_tuning/generated_pipeline.yml"
 
 
   # -----------------------------------------------------------------
+  # This step will generate the bucketinize job in YML and upload to BuildKite
   # -----------------------------------------------------------------
   - label: ":docker: Tuning Cases Generation and Pipeline Upload (${TPU_VERSION:-tpu6e})"
     key: generate_tuning_cases_and_yml
@@ -117,3 +119,4 @@ steps:
           echo "priority: ${PRIORITY_KERNEL_TUNING}"; 
           cat /tmp/kernel_tuning/generated_pipeline.yml; 
         } | buildkite-agent pipeline upload
+        rm -f "/tmp/kernel_tuning/generated_pipeline.yml"

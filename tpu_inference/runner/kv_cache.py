@@ -116,6 +116,27 @@ def _get_kv_cache_allocator(
     return _allocate
 
 
+@cache
+def _get_mamba_cache_allocator(
+        cache_shape: tuple, cache_dtype: jnp.dtype,
+        sharding: NamedSharding) -> Callable[[], jax.Array]:
+
+    @partial(jax.jit, out_shardings=sharding)
+    def _allocate() -> jax.Array:
+        return jnp.empty(
+            shape=cache_shape,
+            dtype=cache_dtype,
+        )
+
+    return _allocate
+
+
+def create_mamba_cache(cache_shape: tuple, cache_dtype: jnp.dtype,
+                       sharding: NamedSharding) -> jax.Array:
+    """Creates a fresh Mamba state array with a cached allocator."""
+    return _get_mamba_cache_allocator(cache_shape, cache_dtype, sharding)()
+
+
 def create_kv_caches(
     num_blocks: int,
     block_size: int,
@@ -169,6 +190,19 @@ def create_kv_caches(
     sharded_allocate = _get_kv_cache_allocator(cache_shape, cache_dtype,
                                                sharding)
     return [sharded_allocate() for _ in layer_names]
+
+
+def create_kv_cache_of_shape(
+    cache_shape: tuple,
+    mesh: Mesh,
+    cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
+) -> jax.Array:
+    """Creates a single zero-filled KV cache array with an explicit shape.
+    """
+    sharding = NamedSharding(
+        mesh, PartitionSpec(ShardingAxisName.BATCH,
+                            ShardingAxisName.KV_CONTEXT))
+    return _get_kv_cache_allocator(tuple(cache_shape), cache_dtype, sharding)()
 
 
 def get_attention_page_size_bytes(mesh, block_size, num_kv_heads, head_size,

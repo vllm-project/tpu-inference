@@ -104,6 +104,7 @@ class PageBufferRef(_BufferedRef):
             state_cache_ref,
             positions_ref,
             block_table_ref,
+            block_table_stride,
             token_to_req_indices_ref,
         ) = src_ref
 
@@ -126,7 +127,8 @@ class PageBufferRef(_BufferedRef):
             block_idx = position // block_size - (pages_to_buffer_per_token -
                                                   1) + p
             safe_block_idx = jnp.maximum(block_idx, 0)
-            page = block_table_ref[req_idx, safe_block_idx]
+            page = block_table_ref[req_idx * block_table_stride +
+                                   safe_block_idx]
 
             src = state_cache_ref.at[page, :, :, :]
             dest = page_buffer_ref.at[n, p, :, :, :]
@@ -410,9 +412,11 @@ def create_allocs_and_specs(
     *,
     cache_ref,
     rope_cache_ref,
+    state_cache_ref,
     cos_sin_cache_ref,
     positions_ref,
     block_table_ref,
+    block_table_stride,
     token_to_req_indices_ref,
     kv_slot_mapping_ref,
     is_first_mask_ref,
@@ -486,9 +490,10 @@ def create_allocs_and_specs(
         cfgs=cfgs,
     )
     page_buffer_args = (
-        cache_ref,
+        cache_ref if state_cache_ref is None else state_cache_ref,
         positions_ref,
         block_table_ref,
+        block_table_stride,
         token_to_req_indices_ref,
     )
 
