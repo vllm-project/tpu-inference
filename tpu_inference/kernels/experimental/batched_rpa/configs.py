@@ -326,7 +326,7 @@ class RpaConfigs:
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return 5
         if (self.serve.kv_layout == KVLayout.HEAD_ALONG_SUBLANE
-            and self.serve.cp_group_size is not None):
+                and self.serve.cp_group_size is not None):
             return 5
         return 4
 
@@ -435,18 +435,11 @@ class RpaConfigs:
 
         # Context Parallel Support
         if self.serve.cp_group_size is not None:
-            if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
-                raise ValueError(
-                    "Context Parallel does not support KVLayout.SEQ_ALONG_LANE yet."
-                )
             if self.serve.attention_scope == AttentionScope.FULL:
                 raise ValueError(
                     "Context Parallel does not support AttentionScope.FULL"
-                    " where cache is sharded but current tokens is sequential"
+                    " where cache is sharded but current tokens is sequential")
+            if self.model.sliding_window is not None:
+                raise ValueError(
+                    "Context Parallel does not support sliding window right now"
                 )
-        # Attention Scope
-        if (self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE 
-            and self.serve.attention_scope != AttentionScope.FULL):
-            raise ValueError(
-                f"SEQ_ALONG_LANE do not supports {self.serve.attention_scope} yet."
-            )

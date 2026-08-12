@@ -220,12 +220,17 @@ def rpa_body(
         sequence_len.append(kv_len.astype(int_ty))
 
         # Stitching metadata
-        kv_left = jnp.maximum(kv_len - k_id, 0)
-        kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
-        kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
-
-        bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
-        new_kv_len_start = q_end - kv_left_frm_new
+        if (cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY
+                and cfgs.serve.cp_group_size is not None):
+            kv_left = jnp.maximum(local_cache_len - k_id, 0)
+            bkv_sz_frm_cache = jnp.minimum(kv_left, cfgs.bkv_sz)
+            new_kv_len_start = q_end  # no new tokens in CACHE_ONLY
+        else:
+            kv_left = jnp.maximum(kv_len - k_id, 0)
+            kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
+            kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
+            bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
+            new_kv_len_start = q_end - kv_left_frm_new
 
         bkv_sz_frm_cache_list.append(bkv_sz_frm_cache.astype(int_ty))
         new_kv_len_start_list.append(new_kv_len_start.astype(int_ty))

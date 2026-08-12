@@ -219,10 +219,10 @@ class RpaSchedule:
 
         idx_wrapper = SmemWrapper.create_shape_dtype(
             (cfgs.max_steps_ub, cfgs.batch_size))
-        
-        dma_kv_new_struct_cls = SeqAlongLaneDmaNew 
+
+        dma_kv_new_struct_cls = SeqAlongLaneDmaNew
         if cfgs.serve.kv_layout == configs.KVLayout.HEAD_ALONG_SUBLANE:
-           dma_kv_new_struct_cls = HeadAlongSublaneDmaNewCP if cfgs.serve.cp_group_size else HeadAlongSublaneDmaNew 
+            dma_kv_new_struct_cls = HeadAlongSublaneDmaNewCP if cfgs.serve.cp_group_size else HeadAlongSublaneDmaNew
         return cls(
             s_idx=idx_wrapper,
             q_idx=idx_wrapper,
@@ -366,6 +366,9 @@ def compute_metadata(
             kv_left_frm_cache = kv_left
         p_offset = s_idx * cfgs.serve.pages_per_seq + kv_p_start
 
+        if cfgs.serve.cp_group_size is not None:
+            rank = cp_rank_ref[0]
+
         for i in range(cfgs.bkv_p_cache):
             dst_vmem = i << cfgs.serve.page_size_log2
             dma_sz = kv_left_frm_cache - dst_vmem
@@ -375,8 +378,28 @@ def compute_metadata(
                                   cfgs.serve.num_page_indices - 1)
 
             if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
-                dma_valid = jnp.where(dma_sz > 0, 1, 0)
-                schedule.dma_kv_cache[step, target_lane, i, 0] = src_hbm
+                if (cfgs.serve.cp_group_size is not None
+                        and cfgs.serve.attention_scope
+                        == configs.AttentionScope.NEW_TOKENS_ONLY):
+                    # NOTE: NEW_TOKENS_ONLY + CP: k_idx is global, so kv_p_start is
+                    # also a global page offset. Since SEQ_ALONG_LANE write entire
+                    # page back to cache, we have to fetch the correct local page.
+                    p_idx = kv_p_start + i
+                    local_page_i = jnp.minimum(
+                        p_idx // cfgs.serve.cp_group_size,
+                        cfgs.serve.pages_per_seq - 1,
+                    )
+                    src_hbm_cp = s_idx * cfgs.serve.pages_per_seq + local_page_i
+                    dma_valid = jnp.where(
+                        (dma_sz > 0) &
+                        (p_idx % cfgs.serve.cp_group_size == rank),
+                        1,
+                        0,
+                    )
+                    schedule.dma_kv_cache[step, target_lane, i, 0] = src_hbm_cp
+                else:
+                    dma_valid = jnp.where(dma_sz > 0, 1, 0)
+                    schedule.dma_kv_cache[step, target_lane, i, 0] = src_hbm
                 schedule.dma_kv_cache[step, target_lane, i, 1] = dst_vmem
                 schedule.dma_kv_cache[step, target_lane, i, 2] = dma_valid
             else:
@@ -395,9 +418,6 @@ def compute_metadata(
         do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb), 1, 0)
         schedule.do_writeback[step, target_lane] = do_writeback
         src_hbm = q_end - kv_left_frm_new
-
-        if cfgs.serve.cp_group_size is not None:
-            rank = cp_rank_ref[0]
 
         def fill_dma_kv_new(i, dst_vmem, dma_sz, slot_start):
             dma_entry = schedule.dma_kv_new[step, target_lane, i]
@@ -421,12 +441,26 @@ def compute_metadata(
                 # the existing cached pages. E.g., if cache_pages=2, new pages go to offsets 2*page_size,
                 # 3*page_size, etc.
                 fetch_vmem = (cache_pages + i) * cfgs.serve.page_size
-                p_idx = jnp.minimum(
-                    (kv_len_start + slot_start) >> cfgs.serve.page_size_log2,
-                    cfgs.serve.pages_per_seq - 1,
-                )
-                dst_hbm = s_idx * cfgs.serve.pages_per_seq + p_idx
-                wb_val = jnp.where(dma_sz > 0, 1, 0)
+                if cfgs.serve.cp_group_size is not None:
+                    p_idx = jnp.minimum(
+                        (kv_len_start + slot_start) >>
+                        cfgs.serve.page_size_log2,
+                        cfgs.serve.pages_per_seq * cfgs.serve.cp_group_size -
+                        1,
+                    )
+                    local_slot = p_idx // cfgs.serve.cp_group_size
+                    dst_hbm = s_idx * cfgs.serve.pages_per_seq + local_slot
+                    wb_val = jnp.where(
+                        (dma_sz > 0) &
+                        (p_idx % cfgs.serve.cp_group_size == rank), 1, 0)
+                else:
+                    p_idx = jnp.minimum(
+                        (kv_len_start + slot_start) >>
+                        cfgs.serve.page_size_log2,
+                        cfgs.serve.pages_per_seq - 1,
+                    )
+                    dst_hbm = s_idx * cfgs.serve.pages_per_seq + p_idx
+                    wb_val = jnp.where(dma_sz > 0, 1, 0)
 
                 dma_entry.fetch_hbm[...] = new_page_start
                 dma_entry.fetch_vmem[...] = fetch_vmem
@@ -435,7 +469,7 @@ def compute_metadata(
                 dma_entry.set_flags(fetch_val, wb_val)
             else:
                 tok_idx = kv_len_start + dst_vmem
-                if cfgs.serve.cp_group_size is not None: 
+                if cfgs.serve.cp_group_size is not None:
                     # NOTE: tok_idx is a global token index, but cfgs.serve.pages_per_seq
                     # is the calculated from num_page_indices. The global upper
                     # bound for tok_idx is pages_per_seq * cp_group_size.
@@ -511,8 +545,7 @@ def compute_metadata(
 
         if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
             # Skip pure-cache blocks; start at the first block containing new tokens.
-            start_k_idx = jnp.maximum(start_k_idx,
-                                      cache_len // cfgs.bkv_sz)
+            start_k_idx = jnp.maximum(start_k_idx, cache_len // cfgs.bkv_sz)
 
         if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
             # Shrink kv_len and end_k_idx to this rank's local cache extent, switching

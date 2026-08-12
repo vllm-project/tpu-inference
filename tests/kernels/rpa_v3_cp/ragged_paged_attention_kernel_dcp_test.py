@@ -22,6 +22,8 @@ from jax._src import test_util as jtu
 
 USE_BATCHED_RPA_KERNEL = (os.environ.get("USE_BATCHED_RPA_KERNEL",
                                          "1").lower() == "1")
+USE_SEQ_ON_LANE = (USE_BATCHED_RPA_KERNEL and os.environ.get(
+    "USE_BATCHED_RPA_SEQ_ON_LANE", "0").lower() == "1")
 
 if USE_BATCHED_RPA_KERNEL:
     print('Use batched RPA kernel')
@@ -37,6 +39,11 @@ if USE_BATCHED_RPA_KERNEL:
     _cache_only_kwargs = {
         "attention_scope": brpa_configs.AttentionScope.CACHE_ONLY
     }
+    if USE_SEQ_ON_LANE:
+        print('use seq on lane')
+        _new_tokens_only_kwargs[
+            "kv_layout"] = brpa_configs.KVLayout.SEQ_ALONG_LANE
+        _cache_only_kwargs["kv_layout"] = brpa_configs.KVLayout.SEQ_ALONG_LANE
 else:
     from tpu_inference.kernels.experimental.batched_rpa.utils import (
         align_to, get_dtype_packing)
@@ -226,8 +233,11 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
         # Lower head dimension.
         num_heads = (16, 2)
         head_dim = 128
-        global_page_size = 32
-        local_page_size = global_page_size // cp_group_size
+
+        # Even though head_on_sublane supports page_size != 128, still set it
+        # because normally default page_size is 128.
+        local_page_size = 128
+        global_page_size = local_page_size * cp_group_size
         page_size = global_page_size
         cp_kv_cache_interleaved_size = local_page_size if USE_BATCHED_RPA_KERNEL else 1
         rng = np.random.default_rng(1234)
@@ -327,8 +337,33 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
             ).reshape(num_prefix_pages, page_size, *prefix_kv.shape[1:])
             kv_cache = kv_cache.at[indices].set(prefix_kv_padded)
 
+        if USE_SEQ_ON_LANE:
+            # Convert HAS kv_cache -> SAL: pages are stored with sequence along
+            # the last axis instead of heads along sublane.
+            # HAS: (num_pages, page_size, num_kv_heads_x2//packing, packing, head_dim)
+            # SAL: (num_pages, num_kv_heads_x2, head_dim//packing, packing, page_size)
+            kv_cache_sal = (kv_cache.reshape(
+                num_pages, page_size, num_kv_heads_x2,
+                padded_head_dim).transpose(0, 2, 3, 1).reshape(
+                    num_pages, num_kv_heads_x2, padded_head_dim // kv_packing,
+                    kv_packing, page_size))
+
+        def _sal_to_has(sal_cache):
+            """Convert per-rank SAL cache back to HAS for validation."""
+            lp = local_page_size
+            return (sal_cache.reshape(num_pages, num_kv_heads_x2,
+                                      padded_head_dim,
+                                      lp).transpose(0, 3, 1, 2).reshape(
+                                          num_pages, lp,
+                                          num_kv_heads_x2 // kv_packing,
+                                          kv_packing, padded_head_dim))
+
         def get_kv_cache_for_rank(rank):
-            if cp_kv_cache_interleaved_size == 1:
+            if USE_SEQ_ON_LANE:
+                # Page-level CP with SEQ_ALONG_LANE: slice last axis (sequence).
+                lp = local_page_size
+                return kv_cache_sal[:, :, :, :, rank * lp:(rank + 1) * lp]
+            elif cp_kv_cache_interleaved_size == 1:
                 # Token-level interleaving (rpa_v3_cp)
                 kv_cache_rank = jnp.full(kv_cache_shape, 0.0, dtype=kv_dtype)
                 for i, prefix_kv in enumerate(prefixes_kv):
@@ -403,6 +438,9 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
             query_outs.append(query_out)
             query_lses.append(query_lse)
             print("Verifying KV cache for rank after FIRST call...")
+            # For SAL, convert back to HAS layout for a uniform validation path.
+            updated_kv_has = (_sal_to_has(updated_kv_cache)
+                              if USE_SEQ_ON_LANE else updated_kv_cache)
             for i, (q_len, kv_len) in enumerate(seq_lens):
                 indices_start = i * pages_per_seq
                 if cp_kv_cache_interleaved_size == 1:
@@ -412,7 +450,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
                     expected_kv_seq = expected_kv_cache[
                         page_indices_seq].reshape(
                             -1, *kv_cache.shape[-3:])[:kv_len]
-                    rank_kv_seq = updated_kv_cache[page_indices_seq].reshape(
+                    rank_kv_seq = updated_kv_has[page_indices_seq].reshape(
                         -1, *kv_cache.shape[-3:])[:kv_len]
                     expected_kv_for_rank = expected_kv_seq[rank::cp_group_size]
                     num_tokens_for_rank = expected_kv_for_rank.shape[0]
@@ -426,7 +464,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
                     )
                 else:
                     # Page-level (batched_rpa CP): compact per-rank validation.
-                    # updated_kv_cache shape: (num_pages, local_page_size, ...)
+                    # updated_kv_has shape: (num_pages, local_page_size, ...)
                     # rank r's compact slot j = ref global slot j's rank-r sub-page
                     lp = local_page_size
                     num_sub_pages = cdiv(kv_len, lp)
@@ -435,7 +473,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
                         phys = int(page_indices[indices_start + j])
                         tok_count = min((sp + 1) * lp, kv_len) - sp * lp
                         self.assertAllClose(
-                            updated_kv_cache[phys, :tok_count],
+                            updated_kv_has[phys, :tok_count],
                             expected_kv_cache[phys,
                                               rank * lp:rank * lp + tok_count],
                             rtol=rtol,
@@ -467,6 +505,8 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
             print(f"LSE: current={query_lse[:seq_lens[0][0]]}")
             print(f"LSE: context={context_lse[:seq_lens[0][0]]}")
             print(f"Verifying KV cache for rank {rank}...")
+            # update_kv_cache=False so final_kv_cache == updated_kv_cache;
+            # we validate using the already-converted updated_kv_has.
             for i, (q_len, kv_len) in enumerate(seq_lens):
                 indices_start = i * pages_per_seq
                 if cp_kv_cache_interleaved_size == 1:
@@ -476,7 +516,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
                     expected_kv_seq = expected_kv_cache[
                         page_indices_seq].reshape(
                             -1, *kv_cache.shape[-3:])[:kv_len]
-                    rank_kv_seq = final_kv_cache[page_indices_seq].reshape(
+                    rank_kv_seq = updated_kv_has[page_indices_seq].reshape(
                         -1, *kv_cache.shape[-3:])[:kv_len]
                     expected_kv_for_rank = expected_kv_seq[rank::cp_group_size]
                     num_tokens_for_rank = expected_kv_for_rank.shape[0]
@@ -496,7 +536,7 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
                         phys = int(page_indices[indices_start + j])
                         tok_count = min((sp + 1) * lp, kv_len) - sp * lp
                         self.assertAllClose(
-                            final_kv_cache[phys, :tok_count],
+                            updated_kv_has[phys, :tok_count],
                             expected_kv_cache[phys,
                                               rank * lp:rank * lp + tok_count],
                             rtol=rtol,

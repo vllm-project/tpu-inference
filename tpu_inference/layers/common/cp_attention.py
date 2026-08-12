@@ -214,9 +214,16 @@ def dcp_forward(
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                      ShardingAxisName.KV_HEAD, None, None)
-    print(f"page_size={kv_cache.shape[1]}")
+
+    # For SEQ_ALONG_LANE: KV_CONTEXT shard dim[4] (page tokens).
+    # For HEAD_ALONG_SUBLANE: KV_CONTEXT shards dim[1] (page tokens).
+    if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        kv_cache_spec = P(ShardingAxisName.BATCH, None,
+                          ShardingAxisName.KV_HEAD, None,
+                          ShardingAxisName.KV_CONTEXT)
+    else:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD, None, None)
 
     common = dict(sm_scale=sm_scale,
                   q_scale=q_scale,
