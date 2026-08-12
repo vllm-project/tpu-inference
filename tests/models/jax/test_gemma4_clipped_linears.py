@@ -29,7 +29,6 @@ serving-side clip-bound contract WITHOUT requiring a gated HF checkpoint:
 
 Synthetic tiny modules — fast, no network, CPU-only.
 """
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -51,8 +50,9 @@ def _set_bounds(m, imin, imax, omin, omax):
 
 def _make_einsum(use_clipped):
     # y[t,o] = x[t,d] * W[d,o]
-    return Gemma4ClippableEinsum(
-        "td,do->to", (4, 3), use_clipped_linears=use_clipped, rngs=_rngs())
+    return Gemma4ClippableEinsum("td,do->to", (4, 3),
+                                 use_clipped_linears=use_clipped,
+                                 rngs=_rngs())
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +67,10 @@ def test_flag_off_is_exact_noop():
     y = m(x)
     W = m.weight.value
     expected = jnp.einsum("td,do->to", x, W)
-    np.testing.assert_allclose(np.asarray(y), np.asarray(expected), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(y),
+                               np.asarray(expected),
+                               rtol=1e-6,
+                               atol=1e-6)
     # validate_clip_bounds is a no-op when off.
     m.validate_clip_bounds()
 
@@ -78,7 +81,8 @@ def test_flag_off_is_exact_noop():
 def test_clip_forward_matches_oracle():
     m = _make_einsum(use_clipped=True)
     _set_bounds(m, -0.5, 0.5, -1.0, 1.0)
-    x = jnp.asarray(np.random.RandomState(1).randn(3, 4) * 3.0, dtype=jnp.float32)
+    x = jnp.asarray(np.random.RandomState(1).randn(3, 4) * 3.0,
+                    dtype=jnp.float32)
     y = m(x)
     W = np.asarray(m.weight.value)
     xin = np.clip(np.asarray(x), -0.5, 0.5)
@@ -165,6 +169,7 @@ def test_q_k_bounds_are_distinct():
 # nnx.iter_graph walk, then invoke the SAME validation logic used post-load.
 # ---------------------------------------------------------------------------
 class _FakeVisionConfig:
+
     def __init__(self, num_hidden_layers, use_clipped_linears=True):
         self.num_hidden_layers = num_hidden_layers
         self.use_clipped_linears = use_clipped_linears
@@ -174,7 +179,8 @@ class _FakeBlock(nnx.Module):
     """7 clipped projections: q,k,v,o + gate,up,down."""
 
     def __init__(self, finite=True):
-        for nm in ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"):
+        for nm in ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj",
+                   "up_proj", "down_proj"):
             e = _make_einsum(use_clipped=True)
             if finite:
                 _set_bounds(e, -1.0, 1.0, -2.0, 2.0)
@@ -182,6 +188,7 @@ class _FakeBlock(nnx.Module):
 
 
 class _FakeVisionTower(nnx.Module):
+
     def __init__(self, num_blocks, finite=True, use_clipped=True):
         # config carried as a non-data attribute (mirrors the real tower's vt.config).
         self.config = _FakeVisionConfig(num_blocks, use_clipped)
@@ -193,6 +200,7 @@ class _FakeVisionTower(nnx.Module):
 
 
 class _FakeModel(nnx.Module):
+
     def __init__(self, vt):
         self.vision_tower = vt
 
@@ -200,14 +208,20 @@ class _FakeModel(nnx.Module):
 class _Harness(nnx.Module):
     """Exposes the real _validate_vision_clip_bounds via composition."""
 
-    def __init__(self, num_blocks, finite=True, use_clipped=True, vt_none=False):
+    def __init__(self,
+                 num_blocks,
+                 finite=True,
+                 use_clipped=True,
+                 vt_none=False):
         if vt_none:
             self.model = _FakeModel(None)
         else:
-            self.model = _FakeModel(_FakeVisionTower(num_blocks, finite, use_clipped))
+            self.model = _FakeModel(
+                _FakeVisionTower(num_blocks, finite, use_clipped))
 
     # Bind the real method under test.
-    from tpu_inference.models.jax.gemma4_mm import Gemma4ForConditionalGeneration as _G
+    from tpu_inference.models.jax.gemma4_mm import \
+        Gemma4ForConditionalGeneration as _G
     _validate_vision_clip_bounds = _G._validate_vision_clip_bounds
 
 
@@ -221,7 +235,8 @@ def test_walker_counts_exactly_16x7_448():
 def test_walker_zero_modules_fails():
     # A tower with zero blocks -> expected_modules == 0 -> hard-fail (not a silent pass).
     h = _Harness(num_blocks=0, finite=True)
-    with pytest.raises(ValueError, match="positive expected clip-module count"):
+    with pytest.raises(ValueError,
+                       match="positive expected clip-module count"):
         h._validate_vision_clip_bounds()
 
 

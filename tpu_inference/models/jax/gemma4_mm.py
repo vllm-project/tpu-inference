@@ -138,8 +138,11 @@ class Gemma4ClippableEinsum(JaxEinsum):
     via the existing ``orig_to_new_suffix`` remap; the weights loader's
     reshape/permute hooks continue to match ``q_proj.weight``/``k_proj.weight``/...).
 
-    Mirrors HF transformers ``Gemma4ClippableLinear``: when the vision config sets
-    ``use_clipped_linears=True`` the forward is
+    Equivalent of HF transformers ``Gemma4ClippableLinear``
+    (``transformers/models/gemma4/modeling_gemma4.py``). vLLM has no PyTorch-local
+    class for this op: the vLLM Gemma-4 vision path delegates the vision tower to
+    Hugging Face Transformers, so ``Gemma4ClippableLinear`` is the semantic reference.
+    When the vision config sets ``use_clipped_linears=True`` the forward is
 
         x = clamp(x, input_min, input_max)   # activation input clamp
         y = einsum(x, weight)                 # the plain JaxEinsum projection
@@ -150,24 +153,27 @@ class Gemma4ClippableEinsum(JaxEinsum):
     ``use_clipped_linears`` is False no bound state is created and this is an exact
     no-op relative to the plain einsum. MODEL-LOCAL: does not change generic JaxEinsum.
 
-    M1 (required-bound hard failure): bounds initialize to a NON-FINITE NaN sentinel;
+    Required-bound hard failure: bounds initialize to a NON-FINITE NaN sentinel;
     ``validate_clip_bounds`` hard-fails if any required bound is missing (still at the
     sentinel), non-finite, or not scalar-compatible — refusing a silent identity clamp.
     """
 
-    def __init__(self, einsum_str, kernel_shape, *, use_clipped_linears, **kwargs):
+    def __init__(self, einsum_str, kernel_shape, *, use_clipped_linears,
+                 **kwargs):
         super().__init__(einsum_str, kernel_shape, **kwargs)
         self.use_clipped_linears = bool(use_clipped_linears)
         if self.use_clipped_linears:
+
             def _b():
                 return nnx.Param(jnp.asarray(jnp.nan, dtype=jnp.float32))
+
             self.input_min = _b()
             self.input_max = _b()
             self.output_min = _b()
             self.output_max = _b()
 
     def validate_clip_bounds(self):
-        """M1 hard-fail: every required bound must be finite, scalar, and correctly ordered
+        """Hard-fail: every required bound must be finite, scalar, and correctly ordered
         (input_min<=input_max, output_min<=output_max). No-op when off."""
         if not self.use_clipped_linears:
             return
@@ -180,11 +186,11 @@ class Gemma4ClippableEinsum(JaxEinsum):
                     f"Gemma4ClippableEinsum[{pfx}]: required clip bound '{nm}' is absent "
                     f"while use_clipped_linears=True.")
             v = p.get_value()
-            if v.shape not in ((), (1,)):
+            if v.shape not in ((), (1, )):
                 raise ValueError(
                     f"Gemma4ClippableEinsum[{pfx}]: clip bound '{nm}' has non-scalar shape "
                     f"{v.shape}; expected scalar.")
-            fv = float(jnp.reshape(v, (-1,))[0])
+            fv = float(jnp.reshape(v, (-1, ))[0])
             if not bool(jnp.isfinite(jnp.asarray(fv))):
                 raise ValueError(
                     f"Gemma4ClippableEinsum[{pfx}]: required clip bound '{nm}'={fv} is "
@@ -197,24 +203,27 @@ class Gemma4ClippableEinsum(JaxEinsum):
         if vals["input_min"] > vals["input_max"]:
             raise ValueError(
                 f"Gemma4ClippableEinsum[{pfx}]: input_min={vals['input_min']} > "
-                f"input_max={vals['input_max']} (a clamp with min>max would empty the interval).")
+                f"input_max={vals['input_max']} (a clamp with min>max would empty the interval)."
+            )
         if vals["output_min"] > vals["output_max"]:
             raise ValueError(
                 f"Gemma4ClippableEinsum[{pfx}]: output_min={vals['output_min']} > "
-                f"output_max={vals['output_max']} (a clamp with min>max would empty the interval).")
+                f"output_max={vals['output_max']} (a clamp with min>max would empty the interval)."
+            )
 
     def __call__(self, inputs):
         if not self.use_clipped_linears:
             return super().__call__(inputs)
         xd = inputs.dtype
-        inputs = jnp.clip(inputs, self.input_min.get_value().astype(xd),
+        inputs = jnp.clip(inputs,
+                          self.input_min.get_value().astype(xd),
                           self.input_max.get_value().astype(xd))
         y = super().__call__(inputs)
         yd = y.dtype
-        y = jnp.clip(y, self.output_min.get_value().astype(yd),
+        y = jnp.clip(y,
+                     self.output_min.get_value().astype(yd),
                      self.output_max.get_value().astype(yd))
         return y
-
 
 
 class Gemma4VisionFlashAttention(JaxModule):
@@ -246,13 +255,11 @@ class Gemma4VisionFlashAttention(JaxModule):
         _ucl = bool(getattr(config, "use_clipped_linears", False))
 
         self.q_proj = Gemma4ClippableEinsum(
-            "BTD,DNH->BTNH",
-            (self.features, self.num_heads, self.head_dim),
+            "BTD,DNH->BTNH", (self.features, self.num_heads, self.head_dim),
             use_clipped_linears=_ucl,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
-                init_fn,
-                (None, ShardingAxisName.VIT_MODEL, None)),
+                init_fn, (None, ShardingAxisName.VIT_MODEL, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=f"{prefix}.q_proj.linear")
@@ -275,13 +282,11 @@ class Gemma4VisionFlashAttention(JaxModule):
             quant_config=quant_config,
             prefix=f"{prefix}.v_proj.linear")
         self.o_proj = Gemma4ClippableEinsum(
-            "BTNH,NHD->BTD",
-            (self.num_heads, self.head_dim, self.features),
+            "BTNH,NHD->BTD", (self.num_heads, self.head_dim, self.features),
             use_clipped_linears=_ucl,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(
-                init_fn,
-                (ShardingAxisName.VIT_MODEL, None, None)),
+                init_fn, (ShardingAxisName.VIT_MODEL, None, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj.linear")
@@ -836,7 +841,7 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
             ],
         )
         loaded = loader.load_weights(mapper.apply(weights))
-        # M1 (required-bound hard failure): after load, validate every vision
+        # Required-bound hard failure: after load, validate every vision
         # Gemma4ClippableEinsum has finite, scalar clip bounds. A missing bound
         # (still at the NaN sentinel), a non-finite bound, or a non-scalar bound
         # raises ValueError instead of silently degrading to an identity clamp.
@@ -878,7 +883,8 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
 
         n_checked = 0
         for _, node in nnx.iter_graph(vt):
-            if isinstance(node, Gemma4ClippableEinsum) and node.use_clipped_linears:
+            if isinstance(node,
+                          Gemma4ClippableEinsum) and node.use_clipped_linears:
                 node.validate_clip_bounds()
                 n_checked += 1
 
