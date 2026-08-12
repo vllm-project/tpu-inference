@@ -1001,6 +1001,7 @@ class Gemma4Model(JaxModule):
 
 
 class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
+    # qkv_proj packing is removed in PR 3376 for performance gain
     packed_modules_mapping = {
         "gate_up_proj": [
             "gate_proj",
