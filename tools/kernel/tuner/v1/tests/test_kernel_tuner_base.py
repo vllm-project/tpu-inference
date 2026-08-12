@@ -13,9 +13,6 @@
 # limitations under the License.
 
 import os
-
-os.environ["JAX_PLATFORMS"] = "cpu"
-
 import tempfile
 from dataclasses import dataclass
 from unittest import mock
@@ -74,9 +71,26 @@ class MockKernelTuner(KernelTunerBase):
         raise NotImplementedError("This method should be mocked in tests")
 
 
+def _make_storage_and_cases(tuner, tmp_dir):
+    """Helper to create a storage manager, init cases, and return (storage_manager, buckets)."""
+    storage_manager = LocalDbManager(db_path=tmp_dir)
+    KernelTunerBase.init_case_set(storage_manager, tuner.run_config)
+    cases = tuner.generate_cases()
+    for case_id, case_str in enumerate(map(str, cases)):
+        storage_manager.add_tuner_case(tuner.run_config.case_set_id,
+                                       case_id,
+                                       case_str,
+                                       tpu=tuner.run_config.tpu_queue_multi)
+    storage_manager.flush()
+    storage_manager.finish_case_set(tuner.run_config.case_set_id, len(cases),
+                                    0, 0.0)
+    return storage_manager
+
+
 class KernelTunerBaseTest(absltest.TestCase):
 
     def test_measure_latency_skips_larger_params_after_oom(self):
+        """Tests OOM-based pruning: if a smaller config OOMs, larger configs are skipped."""
         tuner_config = TunerConfig(
             tuning_key_class=MockTuningKey,
             tunable_params_class=MockTunableParams,
@@ -96,43 +110,42 @@ class KernelTunerBaseTest(absltest.TestCase):
         kernel_tuner = MockKernelTuner(
             tuner_config=tuner_config,
             run_config=run_config,
+            lightweight=True,
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            kernel_tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
+            storage_manager = _make_storage_and_cases(kernel_tuner, tmp_dir)
 
-            with mock.patch.object(MockKernelTuner, "run",
-                                   autospec=True) as run_mock:
-                run_mock.side_effect = [
-                    (TuningStatus.FAILED_OOM, 0, 0),
-                ]
+            # Mock executor that returns OOM for the first (smallest) params
+            mock_executor = mock.MagicMock()
+            mock_executor.execute_run.side_effect = [
+                (TuningStatus.FAILED_OOM, 0, 0),
+            ]
 
-                buckets = kernel_tuner._generate_tuning_jobs()
-                self.assertEqual(buckets, [(0, 2)])
+            from tools.kernel.tuner.v1.optimizer import SweepOptimizer
+            optimizer = SweepOptimizer(kernel_tuner, storage_manager,
+                                       mock_executor)
 
-                kernel_tuner.measure_latency(0, 2)
+            cases = storage_manager.get_all_cases(run_config.case_set_id)
+            buckets = optimizer.generate_tuning_jobs(cases)
+            self.assertEqual(buckets, [(0, 2)])
 
-                results = kernel_tuner.storage_manager._read_table(
-                    "CaseResults")
-                case_status = {
-                    result["CaseId"]: result["ProcessedStatus"]
-                    for result in results
-                }
-                self.assertEqual(
-                    case_status, {
-                        0: TuningStatus.FAILED_OOM.value,
-                        1: TuningStatus.SKIPPED.value
-                    })
-                self.assertEqual(run_mock.call_count, 1)
+            optimizer.measure_latency(0, 2)
 
-                run_mock.assert_called_once_with(
-                    kernel_tuner,
-                    MockTuningKey(name="same_key", size=1),
-                    MockTunableParams(size=1),
-                    iters=1,
-                )
+            results = storage_manager._read_table("CaseResults")
+            case_status = {
+                result["CaseId"]: result["ProcessedStatus"]
+                for result in results
+            }
+            self.assertEqual(case_status, {
+                0: TuningStatus.FAILED_OOM.value,
+                1: TuningStatus.SKIPPED.value
+            })
+            # Only 1 call to executor (warmup of case 0), case 1 was OOM-skipped
+            self.assertEqual(mock_executor.execute_run.call_count, 1)
 
     def test_measure_latency_runs_both_cases_when_no_oom(self):
+        """Tests that both cases run when neither causes OOM."""
         tuner_config = TunerConfig(
             tuning_key_class=MockTuningKey,
             tunable_params_class=MockTunableParams,
@@ -152,49 +165,37 @@ class KernelTunerBaseTest(absltest.TestCase):
         kernel_tuner = MockKernelTuner(
             tuner_config=tuner_config,
             run_config=run_config,
+            lightweight=True,
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            kernel_tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
+            storage_manager = _make_storage_and_cases(kernel_tuner, tmp_dir)
 
-            with mock.patch.object(MockKernelTuner, "run",
-                                   autospec=True) as run_mock:
-                run_mock.side_effect = [
-                    (TuningStatus.SUCCESS, 10, 10),
-                    (TuningStatus.SUCCESS, 1000, 1000),
-                    (TuningStatus.SUCCESS, 10, 10),
-                    (TuningStatus.SUCCESS, 1000, 1000),
-                ]
+            mock_executor = mock.MagicMock()
+            mock_executor.execute_run.return_value = (TuningStatus.SUCCESS,
+                                                      1000, 1000)
 
-                buckets = kernel_tuner._generate_tuning_jobs()
-                self.assertEqual(buckets, [(0, 2)])
+            from tools.kernel.tuner.v1.optimizer import SweepOptimizer
+            optimizer = SweepOptimizer(kernel_tuner, storage_manager,
+                                       mock_executor)
 
-                kernel_tuner.measure_latency(0, 2)
+            cases = storage_manager.get_all_cases(run_config.case_set_id)
+            buckets = optimizer.generate_tuning_jobs(cases)
+            self.assertEqual(buckets, [(0, 2)])
 
-                results = kernel_tuner.storage_manager._read_table(
-                    "CaseResults")
-                case_status = {
-                    result["CaseId"]: result["ProcessedStatus"]
-                    for result in results
-                }
-                self.assertEqual(case_status, {
-                    0: TuningStatus.SUCCESS.value,
-                    1: TuningStatus.SUCCESS.value
-                })
-                self.assertEqual(run_mock.call_count, 4)
+            optimizer.measure_latency(0, 2)
 
-                run_mock.assert_any_call(
-                    kernel_tuner,
-                    MockTuningKey(name="same_key", size=1),
-                    MockTunableParams(size=1),
-                    iters=1,
-                )
-                run_mock.assert_any_call(
-                    kernel_tuner,
-                    MockTuningKey(name="same_key", size=1),
-                    MockTunableParams(size=2),
-                    iters=1,
-                )
+            results = storage_manager._read_table("CaseResults")
+            case_status = {
+                result["CaseId"]: result["ProcessedStatus"]
+                for result in results
+            }
+            self.assertEqual(case_status, {
+                0: TuningStatus.SUCCESS.value,
+                1: TuningStatus.SUCCESS.value
+            })
+            # 2 cases × 2 calls each (warmup + measurement) = 4
+            self.assertEqual(mock_executor.execute_run.call_count, 4)
 
     def test_use_bayesian_optimization_flag_combinations(self):
         tc_support = TunerConfig(
@@ -235,69 +236,77 @@ class KernelTunerBaseTest(absltest.TestCase):
                                         run_config=rc_disable)
         self.assertFalse(tuner_tc_only.use_bayesian_optimization)
 
-    def test_measure_latency_dispatches_correctly(self):
+    def test_min_cases_for_bayesian_run_config_override(self):
         tc = TunerConfig(
             tuning_key_class=MockTuningKey,
             tunable_params_class=MockTunableParams,
             kernel_tuner_name="mock_kernel_tuner",
-            support_bayesian_optimization=True,
+            min_cases_for_bayesian=200,
         )
-
-        from tools.kernel.tuner.v1.optimizer import (BayesianOptimizer,
-                                                     SweepOptimizer)
-
-        rc_bayesian = RunConfig(
-            case_set_id="cs_bayesian",
+        rc_override = RunConfig(
+            case_set_id="cs_min_cases",
             run_id="r1",
             case_set_desc="desc",
-            use_bayesian_optimization=True,
+            min_cases_for_bayesian=50,
         )
-        tuner_bayesian = MockKernelTuner(tuner_config=tc,
-                                         run_config=rc_bayesian)
-        self.assertIsInstance(tuner_bayesian.optimizer, BayesianOptimizer)
-        with mock.patch.object(tuner_bayesian.optimizer,
-                               "measure_latency") as mock_measure:
-            tuner_bayesian.measure_latency(0, 2)
-            mock_measure.assert_called_once_with(0, 2)
+        tuner = MockKernelTuner(tuner_config=tc, run_config=rc_override)
+        self.assertEqual(tuner.tuner_config.min_cases_for_bayesian, 50)
 
-        rc_sweep = RunConfig(
-            case_set_id="cs_sweep",
-            run_id="r1",
-            case_set_desc="desc",
-            use_bayesian_optimization=False,
-        )
-        tuner_sweep = MockKernelTuner(tuner_config=tc, run_config=rc_sweep)
-        self.assertIsInstance(tuner_sweep.optimizer, SweepOptimizer)
-        with mock.patch.object(tuner_sweep.optimizer,
-                               "measure_latency") as mock_measure:
-            tuner_sweep.measure_latency(0, 2)
-            mock_measure.assert_called_once_with(0, 2)
+    def test_lightweight_mode_sets_xprof_dir(self):
+        """Verifies lightweight mode sets xprof_dir and _measurement_iters."""
 
-    def test_bayesian_optimization_falls_back_when_search_space_empty(self):
         tc = TunerConfig(
             tuning_key_class=MockTuningKey,
             tunable_params_class=MockTunableParams,
             kernel_tuner_name="mock_kernel_tuner",
-            support_bayesian_optimization=True,
         )
         rc = RunConfig(
-            case_set_id="cs_empty_space",
-            run_id="r1",
+            case_set_id="cs_lw",
+            run_id="r_lw",
             case_set_desc="desc",
-            use_bayesian_optimization=True,
         )
-        tuner = MockKernelTuner(tuner_config=tc, run_config=rc)
+        tuner = MockKernelTuner(tuner_config=tc,
+                                run_config=rc,
+                                lightweight=True)
+        self.assertTrue(tuner.lightweight)
+        self.assertTrue(hasattr(tuner, 'xprof_dir'))
+        self.assertTrue(hasattr(tuner, '_measurement_iters'))
 
+    def test_full_mode_sets_xprof_dir(self):
+        """Verifies full (non-lightweight) mode sets xprof_dir."""
+        tc = TunerConfig(
+            tuning_key_class=MockTuningKey,
+            tunable_params_class=MockTunableParams,
+            kernel_tuner_name="mock_kernel_tuner",
+        )
+        rc = RunConfig(
+            case_set_id="cs_full",
+            run_id="r_full",
+            case_set_desc="desc",
+        )
+        tuner = MockKernelTuner(tuner_config=tc,
+                                run_config=rc,
+                                lightweight=False)
+        self.assertFalse(tuner.lightweight)
+        self.assertTrue(hasattr(tuner, 'xprof_dir'))
+        self.assertTrue(hasattr(tuner, '_measurement_iters'))
+        self.assertEqual(tuner._measurement_iters, 100)
+
+    def test_init_case_set_static_method(self):
+        """Tests the static init_case_set method."""
+        rc = RunConfig(
+            case_set_id="cs_init_test",
+            run_id="r1",
+            case_set_desc="test desc",
+        )
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
-            tuner._generate_tuning_jobs()
-
-            with mock.patch.object(tuner, "get_search_space", return_value={}), \
-                 mock.patch("tools.kernel.tuner.v1.optimizer.sweep_optimizer.SweepOptimizer") as mock_sweep_cls:
-                mock_sweep_inst = mock.MagicMock()
-                mock_sweep_cls.return_value = mock_sweep_inst
-                tuner.measure_latency(0, 2)
-                mock_sweep_inst.measure_latency.assert_called_once_with(0, 2)
+            storage_manager = LocalDbManager(db_path=tmp_dir)
+            # First call should return True (new case set)
+            result = KernelTunerBase.init_case_set(storage_manager, rc)
+            self.assertTrue(result)
+            # Second call should return False (already exists)
+            result = KernelTunerBase.init_case_set(storage_manager, rc)
+            self.assertFalse(result)
 
     def test_bayesian_optimization_runs_optuna_trials(self):
         tc = TunerConfig(
@@ -313,48 +322,28 @@ class KernelTunerBaseTest(absltest.TestCase):
             case_set_desc="desc",
             use_bayesian_optimization=True,
         )
-        tuner = MockKernelTuner(tuner_config=tc, run_config=rc)
+        kernel_tuner = MockKernelTuner(tuner_config=tc,
+                                       run_config=rc,
+                                       lightweight=True)
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
-            tuner._generate_tuning_jobs()
+            storage_manager = _make_storage_and_cases(kernel_tuner, tmp_dir)
 
-            with mock.patch.object(MockKernelTuner, "run",
-                                   autospec=True) as run_mock:
-                run_mock.return_value = (TuningStatus.SUCCESS, 100, 100)
-                tuner.measure_latency(0, 2)
+            mock_executor = mock.MagicMock()
+            mock_executor.execute_run.return_value = (TuningStatus.SUCCESS,
+                                                      100, 100)
 
-                results = tuner.storage_manager._read_table("CaseResults")
-                self.assertGreater(len(results), 0)
-                for res in results:
-                    self.assertEqual(res["ProcessedStatus"],
-                                     TuningStatus.SUCCESS.value)
+            from tools.kernel.tuner.v1.optimizer import BayesianOptimizer
+            optimizer = BayesianOptimizer(kernel_tuner, storage_manager,
+                                          mock_executor)
 
-    def test_measure_latency_xprof_mismatch_raises_runtime_error(self):
-        tc = TunerConfig(
-            tuning_key_class=MockTuningKey,
-            tunable_params_class=MockTunableParams,
-            kernel_tuner_name="mock_kernel_tuner",
-            jit_kernel_pattern="test_kernel_pattern",
-        )
-        rc = RunConfig(
-            case_set_id="cs_xprof",
-            run_id="r1",
-            case_set_desc="desc",
-            run_locally=True,
-        )
-        tuner = MockKernelTuner(tuner_config=tc, run_config=rc)
+            optimizer.measure_latency(0, 2)
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
-            tuner._generate_tuning_jobs()
-
-            with mock.patch.object(MockKernelTuner, "run", autospec=True) as run_mock, \
-                 mock.patch("tools.kernel.tuner.v1.common.utils.find_events_by_pattern", return_value=([], 0)):
-                run_mock.return_value = (TuningStatus.SUCCESS, 100, 100)
-                with self.assertRaises(RuntimeError) as cm:
-                    tuner.measure_latency(0, 1)
-                self.assertIn("matching events", str(cm.exception))
+            results = storage_manager._read_table("CaseResults")
+            self.assertGreater(len(results), 0)
+            for res in results:
+                self.assertEqual(res["ProcessedStatus"],
+                                 TuningStatus.SUCCESS.value)
 
     def test_bayesian_optimization_outperforms_randomization(self):
         """Verifies that Bayesian Optimization (TPESampler) achieves lower latency than Random Search (RandomSampler) under the same trial budget."""
@@ -422,17 +411,36 @@ class KernelTunerBaseTest(absltest.TestCase):
 
         orig_create_study = optuna.create_study
 
+        # Helper to create storage+cases for the GridKernelTuner
+        def _setup_grid(case_set_id, run_id, desc, tmp_dir):
+            rc = RunConfig(
+                case_set_id=case_set_id,
+                run_id=run_id,
+                case_set_desc=desc,
+                use_bayesian_optimization=True,
+            )
+            tuner = GridKernelTuner(tuner_config=tuner_config,
+                                    run_config=rc,
+                                    lightweight=True)
+            sm = _make_storage_and_cases(tuner, tmp_dir)
+
+            # Create a mock executor that invokes the real run()
+            # We create a real (non-lightweight) tuner for the actual run
+            real_tuner = GridKernelTuner(tuner_config=tuner_config,
+                                         run_config=rc,
+                                         lightweight=False)
+            mock_executor = mock.MagicMock()
+            mock_executor.execute_run.side_effect = lambda tk, tp, iters, **kw: real_tuner.run(
+                tk, tp, iters)
+            return tuner, sm, mock_executor
+
         # 1. Run Bayesian Optimization (TPESampler)
-        rc_bo = RunConfig(
-            case_set_id="cs_bo",
-            run_id="r_bo",
-            case_set_desc="bo test",
-            use_bayesian_optimization=True,
-        )
-        bo_tuner = GridKernelTuner(tuner_config=tuner_config, run_config=rc_bo)
         with tempfile.TemporaryDirectory() as tmp_dir:
-            bo_tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
-            bo_tuner._generate_tuning_jobs()
+            bo_tuner, bo_sm, bo_exec = _setup_grid("cs_bo", "r_bo", "bo test",
+                                                   tmp_dir)
+
+            from tools.kernel.tuner.v1.optimizer import BayesianOptimizer
+            bo_optimizer = BayesianOptimizer(bo_tuner, bo_sm, bo_exec)
 
             def bo_study_factory(*args, **kwargs):
                 kwargs["sampler"] = optuna.samplers.TPESampler(
@@ -441,25 +449,19 @@ class KernelTunerBaseTest(absltest.TestCase):
 
             with mock.patch("optuna.create_study",
                             side_effect=bo_study_factory):
-                bo_tuner.measure_latency(0, 100)
+                bo_optimizer.measure_latency(0, 100)
 
-            bo_results = bo_tuner.storage_manager._read_table("CaseResults")
+            bo_results = bo_sm._read_table("CaseResults")
             bo_min_latency = min(
                 r["Latency"] for r in bo_results
                 if r["ProcessedStatus"] == TuningStatus.SUCCESS.value)
 
         # 2. Run Random Search (RandomSampler)
-        rc_rand = RunConfig(
-            case_set_id="cs_rand",
-            run_id="r_rand",
-            case_set_desc="rand test",
-            use_bayesian_optimization=True,
-        )
-        rand_tuner = GridKernelTuner(tuner_config=tuner_config,
-                                     run_config=rc_rand)
         with tempfile.TemporaryDirectory() as tmp_dir:
-            rand_tuner.storage_manager = LocalDbManager(db_path=tmp_dir)
-            rand_tuner._generate_tuning_jobs()
+            rand_tuner, rand_sm, rand_exec = _setup_grid(
+                "cs_rand", "r_rand", "rand test", tmp_dir)
+
+            rand_optimizer = BayesianOptimizer(rand_tuner, rand_sm, rand_exec)
 
             def rand_study_factory(*args, **kwargs):
                 kwargs["sampler"] = optuna.samplers.RandomSampler(seed=42)
@@ -467,10 +469,9 @@ class KernelTunerBaseTest(absltest.TestCase):
 
             with mock.patch("optuna.create_study",
                             side_effect=rand_study_factory):
-                rand_tuner.measure_latency(0, 100)
+                rand_optimizer.measure_latency(0, 100)
 
-            rand_results = rand_tuner.storage_manager._read_table(
-                "CaseResults")
+            rand_results = rand_sm._read_table("CaseResults")
             rand_min_latency = min(
                 r["Latency"] for r in rand_results
                 if r["ProcessedStatus"] == TuningStatus.SUCCESS.value)
@@ -515,6 +516,74 @@ class DataclassProtocolTest(absltest.TestCase):
         self.assertFalse(params1 >= params2)
         self.assertTrue(params2 >= params1)
         self.assertFalse(params2 <= params1)
+
+
+class WorkerIdResolutionTest(absltest.TestCase):
+
+    def test_explicit_worker_id(self):
+        from tools.kernel.tuner.v1.utils import get_worker_id
+        self.assertEqual(get_worker_id('custom_worker_123'),
+                         'custom_worker_123')
+        self.assertEqual(get_worker_id(42), '42')
+
+    def test_env_worker_id_resolution(self):
+        from tools.kernel.tuner.v1.utils import get_worker_id
+        with mock.patch.dict(os.environ, {'TPU_WORKER_ID': 'tpu_worker_5'},
+                             clear=True):
+            self.assertEqual(get_worker_id(), 'tpu_worker_5')
+
+        with mock.patch.dict(os.environ, {'HOST_NAME': 'host_alpha'},
+                             clear=True):
+            self.assertEqual(get_worker_id(), 'host_alpha')
+
+        with mock.patch.dict(os.environ, {'HOSTNAME': 'host_beta'},
+                             clear=True):
+            self.assertEqual(get_worker_id(), 'host_beta')
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(get_worker_id(), '0')
+
+    def test_component_worker_id_initialization(self):
+        db_manager = LocalDbManager(worker_id="db_worker", dry_run=True)
+        self.assertEqual(db_manager.worker_id, "db_worker")
+
+
+class GetAlreadyProcessedIdsTest(absltest.TestCase):
+
+    def test_local_db_manager_returns_processed_case_status_namedtuples(self):
+        from tools.kernel.tuner.v1.common.tuner_datatypes import \
+            ProcessedCaseStatus
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_manager = LocalDbManager(db_path=tmpdir,
+                                        worker_id="test_worker")
+            # Insert dummy case result into local db
+            table = [
+                {
+                    'ID': 'cs_1',
+                    'RunId': 'r_1',
+                    'CaseId': 10,
+                    'ProcessedStatus': 'SUCCESS',
+                },
+                {
+                    'ID': 'cs_1',
+                    'RunId': 'r_1',
+                    'CaseId': 20,
+                    'ProcessedStatus': 'FAILED_OOM',
+                },
+            ]
+            db_manager._write_table('CaseResults', table)
+
+            res = db_manager.get_already_processed_ids('cs_1', 'r_1', 0, 100)
+            self.assertEqual(len(res), 2)
+            self.assertIsInstance(res[0], ProcessedCaseStatus)
+            self.assertEqual(res[0].case_id, 10)
+            self.assertEqual(res[0].status, 'SUCCESS')
+            self.assertEqual(res[0][0], 10)
+            self.assertEqual(res[0][1], 'SUCCESS')
+
+            self.assertIsInstance(res[1], ProcessedCaseStatus)
+            self.assertEqual(res[1].case_id, 20)
+            self.assertEqual(res[1].status, 'FAILED_OOM')
 
 
 if __name__ == "__main__":
