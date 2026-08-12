@@ -20,7 +20,8 @@ try:
 except ImportError:
     optuna = None
 
-from tools.kernel.tuner.v1.common.tuner_datatypes import (CaseResult,
+from tools.kernel.tuner.v1.common.tuner_datatypes import (BucketStatus,
+                                                          CaseResult,
                                                           TunableParams,
                                                           TuningCase,
                                                           TuningStatus)
@@ -85,81 +86,98 @@ class BayesianOptimizer(TuningOptimizer):
                 buckets[-1] = (buckets[-1][0], idx + 1)
         return buckets
 
-    def measure_latency(self, begin_case_id: int, end_case_id: int) -> None:
+    def _evaluate_single_case(self,
+                              cid,
+                              tuning_key,
+                              tunable_params,
+                              tracker,
+                              log_prefix=""):
+        """Evaluates a single tuning case via the executor subprocess.
+
+        Delegates to SweepOptimizer._evaluate_single_case which contains
+        the shared warmup + measurement + xprof logic.
+        """
+        from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
+            SweepOptimizer
+
+        # Create a temporary sweep optimizer with the same dependencies
+        # to reuse the _evaluate_single_case implementation.
+        # TODO: Create a new class that contains this method so we don't need to
+        # import SweepOptimizer here.
+        sweep = SweepOptimizer(self.tuner, self.storage_manager,
+                               self.executor_mgr)
+        return sweep._evaluate_single_case(cid, tuning_key, tunable_params,
+                                           tracker, log_prefix)
+
+    def measure_latency(self,
+                        begin_case_id: int,
+                        end_case_id: int,
+                        bucket_id: int | None = None) -> int:
         import optuna
 
         from tools.kernel.tuner.v1.common.kernel_tuner_base import \
             ProcessedCasesTracker
-        from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
-            SweepOptimizer
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         tuner = self.tuner
+        storage_manager = self.storage_manager
         worker_id = tuner.worker_id
 
-        all_configs = tuner.storage_manager.get_bucket_configs(
-            tuner.run_config.case_set_id, begin_case_id, end_case_id)
-
-        if not all_configs:
-            logger.warning(
-                f"No configs found for [{begin_case_id}, {end_case_id}). "
-                "Nothing to optimize.")
+        if bucket_id is None:
             bucket_id = begin_case_id
-            tuner.storage_manager.mark_bucket_completed(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                bucket_id)
-            return
 
-        first_cid = min(all_configs.keys())
-        _, _, first_case_kv = all_configs[first_cid]
-        first_case = TuningCase.from_string(
-            first_case_kv, tuner.tuner_config.tuning_key_class,
-            tuner.tuner_config.tunable_params_class)
-        tuning_key = first_case.tuning_key
+        # Bucket defined as [begin, end), get_bucket_configs uses inclusive range [start, end].
+        bucket_cases = storage_manager.get_bucket_configs(
+            tuner.run_config.case_set_id, begin_case_id, end_case_id - 1)
+        bucket_cases = {
+            case_id:
+            TuningCase.from_string(case_kv,
+                                   tuner.tuner_config.tuning_key_class,
+                                   tuner.tuner_config.tunable_params_class)
+            for case_id, (_, _, case_kv) in bucket_cases.items()
+        }
+
+        assert len(
+            bucket_cases
+        ) == end_case_id - begin_case_id, f'Error: Expected {end_case_id - begin_case_id} cases, got {len(bucket_cases)} in the bucket {begin_case_id}_{end_case_id}.'
+        assert len(
+            set(v.tuning_key for v in bucket_cases.values())
+        ) == 1, f'Error: All cases in the bucket {begin_case_id}_{end_case_id} should have the same tuning key for Bayesian Optimization.'
+
+        tuning_key = list(bucket_cases.values())[0].tuning_key
 
         search_space = tuner.get_search_space(tuning_key)
-        if not search_space:
+        if not search_space or len(
+                bucket_cases) < tuner.tuner_config.min_cases_for_bayesian:
             logger.warning(
-                f"get_search_space returned empty dict for tuning key {tuning_key}. "
-                "Cannot run Bayesian optimization; falling back to sequential sweep."
+                f"Tuning key {tuning_key} has {len(search_space)} cases in search space or "
+                f"less than {tuner.tuner_config.min_cases_for_bayesian} cases in bucket {begin_case_id}_{end_case_id}. "
+                "Cannot run Bayesian search strategy; falling back to sequential sweep. Update min_cases_for_bayesian and n_bayesian_trials via command line flags to use Bayesian search strategy."
             )
             from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
                 SweepOptimizer
-            SweepOptimizer(tuner).measure_latency(begin_case_id, end_case_id)
-            return
+            return SweepOptimizer(tuner, storage_manager,
+                                  self.executor_mgr).measure_latency(
+                                      begin_case_id,
+                                      end_case_id,
+                                      bucket_id=bucket_id)
 
-        # inital bucket tuning status
-        bucket_id = begin_case_id
+        # initial bucket tuning status
+        params_to_case_id: dict[TunableParams, int] = {}
+        for case_id, tc in bucket_cases.items():
+            params_to_case_id[tc.tunable_params] = case_id
         logger.info(
             f"Worker [{worker_id}] Starting Bayesian optimization for "
             f"CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, "
             f"Bucket begin={begin_case_id} end={end_case_id}.")
-        tuner.storage_manager.mark_bucket_in_progress(
-            tuner.run_config.case_set_id, tuner.run_config.run_id, bucket_id)
-        tracker = ProcessedCasesTracker(
-            tuner.storage_manager.get_already_processed_ids(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                begin_case_id, end_case_id))
+        tracker = ProcessedCasesTracker(storage_manager, tuner.tuner_config,
+                                        tuner.run_config, begin_case_id,
+                                        end_case_id)
 
-        params_to_case_id: dict[TunableParams, int] = {}
-        for cid, (_, _, case_kv) in all_configs.items():
-            tc = TuningCase.from_string(
-                case_kv, tuner.tuner_config.tuning_key_class,
-                tuner.tuner_config.tunable_params_class)
-            params_to_case_id[tc.tunable_params] = cid
-
-        if (tuner.tuner_config.min_cases_for_bayesian > 0
-                and len(params_to_case_id)
-                < tuner.tuner_config.min_cases_for_bayesian):
-            logger.warning(
-                f"Tuning key {tuning_key} search space contains {len(params_to_case_id)} cases, "
-                f"which is less than min_cases_for_bayesian threshold ({tuner.tuner_config.min_cases_for_bayesian}). "
-                "Falling back to sequential sweep.")
-            from tools.kernel.tuner.v1.optimizer.sweep_optimizer import \
-                SweepOptimizer
-            SweepOptimizer(tuner).measure_latency(begin_case_id, end_case_id)
-            return
-
+        storage_manager.update_bucket_status(tuner.run_config.case_set_id,
+                                             tuner.run_config.run_id,
+                                             bucket_id,
+                                             BucketStatus.IN_PROGRESS)
         bucket_start_perf = time.perf_counter()
 
         int_param_sorted: dict[str, list] = {}
@@ -168,6 +186,9 @@ class BayesianOptimizer(TuningOptimizer):
                     isinstance(v, int) and not isinstance(v, bool)
                     for v in pvalues):
                 int_param_sorted[pname] = sorted(pvalues)
+
+        # TODO: Bayesian doesn't guarantee evaluate the baseline cases, need to explicitly
+        # Evaluate them so using Bayesian in autotune pipeline can be supported.
 
         def objective(trial: optuna.Trial) -> float:
             suggested: dict = {}
@@ -195,7 +216,7 @@ class BayesianOptimizer(TuningOptimizer):
                     f"Trial {trial.number}: Skipping {tunable_params} "
                     "due to expected OOM from a smaller configuration.")
                 if cid not in tracker:
-                    tuner.storage_manager.save_result(
+                    storage_manager.save_result(
                         CaseResult(
                             case_set_id=tuner.run_config.case_set_id,
                             run_id=tuner.run_config.run_id,
@@ -205,8 +226,7 @@ class BayesianOptimizer(TuningOptimizer):
                             latency=0,
                             warmup_time=0,
                             total_time=0,
-                            processed_at=tuner.storage_manager.
-                            get_timestamp_sec(),
+                            processed_at=storage_manager.get_timestamp_sec(),
                             tpu=tuner.run_config.tpu_queue_multi,
                         ))
                     tracker.record(cid, tuning_key, tunable_params,
@@ -219,7 +239,7 @@ class BayesianOptimizer(TuningOptimizer):
                 )
                 raise optuna.exceptions.TrialPruned()
 
-            status, average_latency_us = tuner._evaluate_single_case(
+            status, average_latency_us = self._evaluate_single_case(
                 cid=cid,
                 tuning_key=tuning_key,
                 tunable_params=tunable_params,
@@ -270,21 +290,39 @@ class BayesianOptimizer(TuningOptimizer):
                     n_trials=1,
                     callbacks=callbacks,
                 )
-            tuner.storage_manager.mark_bucket_completed(
-                tuner.run_config.case_set_id, tuner.run_config.run_id,
-                bucket_id)
+            completed_trials = [
+                t for t in study.trials
+                if t.state == optuna.trial.TrialState.COMPLETE
+            ]
+            if completed_trials:
+                storage_manager.update_bucket_status(
+                    tuner.run_config.case_set_id, tuner.run_config.run_id,
+                    bucket_id, BucketStatus.COMPLETED)
+            else:
+                logger.warning(
+                    f"All Bayesian optimization trials were pruned or failed for bucket {bucket_id}. Marking status as FAILED."
+                )
+                storage_manager.update_bucket_status(
+                    tuner.run_config.case_set_id, tuner.run_config.run_id,
+                    bucket_id, BucketStatus.FAILED)
         except Exception as e:
             logger.error(
                 f"Error in Bayesian optimization for CaseSetId: {tuner.run_config.case_set_id}, RunId: {tuner.run_config.run_id}, Bucket {bucket_id}: {e}",
                 exc_info=True,
             )
+            storage_manager.update_bucket_status(
+                tuner.run_config.case_set_id,
+                tuner.run_config.run_id,
+                bucket_id,
+                BucketStatus.FAILED,
+            )
             raise
         finally:
-            tuner.storage_manager.flush_results()
+            storage_manager.flush_results()
 
             bucket_total_time_us = int(
                 (time.perf_counter() - bucket_start_perf) * 1_000_000)
-            tuner.storage_manager.add_bucket_processed_time_us(
+            storage_manager.add_bucket_processed_time_us(
                 tuner.run_config.case_set_id, tuner.run_config.run_id,
                 bucket_id, bucket_total_time_us)
 
@@ -305,3 +343,5 @@ class BayesianOptimizer(TuningOptimizer):
             f"{tuner.tuner_config.n_bayesian_trials} requested. "
             f"{best_info}"
             f"Total time: {bucket_total_time_us/1e6:.2f}s.")
+
+        return end_case_id
