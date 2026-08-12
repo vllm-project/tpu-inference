@@ -125,6 +125,15 @@ class GridTHW(tuple):
         return f"GridTHW({tuple(self)})"
 
 
+def is_video_supported_model(vllm_model, vllm_config: VllmConfig) -> bool:
+    """Check if the model architecture supports video multimodal inputs."""
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    model_type = getattr(hf_config, "model_type", "").lower() if hf_config else ""
+    return any(
+        v_arch in model_type
+        for v_arch in ("qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen_vl"))
+
+
 def maybe_precompile_vision_encoder_fn(
         params: Any, embed_multimodal_fn: Optional[Callable], vllm_model,
         vllm_config: VllmConfig) -> Optional[Callable]:
@@ -151,16 +160,48 @@ def maybe_precompile_vision_encoder_fn(
     spatial_merge_unit = vc.spatial_merge_size**2
     max_patches = (vllm_config.scheduler_config.max_num_batched_tokens //
                    spatial_merge_unit)
-    min_shift = 4  # 1 << 4 = 16 patches minimum
+
+    import os
+    env_min_shift = os.environ.get("VISION_MIN_SHIFT", None)
+    if env_min_shift:
+        try:
+            min_shift = max(1, int(env_min_shift.strip()))
+        except ValueError:
+            min_shift = 4
+    else:
+        min_shift = 4  # 1 << 4 = 16 patches minimum
+
     max_shift = max(min_shift, (max(max_patches, 1) - 1).bit_length())
     num_patches_paddings = [1 << i for i in range(min_shift, max_shift + 1)]
+
+    # Frame counts:
+    # For video-capable models, warm representative video frame counts [2, 4, 8, 16].
+    # For image-only and Omni models, default strictly to [1] to avoid startup compilation bloat.
+    env_frames = os.environ.get("VISION_PRECOMPILE_FRAMES", None)
+    if env_frames:
+        try:
+            parsed = [
+                int(f.strip()) for f in env_frames.split(",") if f.strip()
+            ]
+            frame_counts = [f for f in parsed if f >= 1]
+            if not frame_counts:
+                frame_counts = [1]
+        except ValueError:
+            logger.warning(
+                f"Invalid VISION_PRECOMPILE_FRAMES '{env_frames}', using defaults."
+            )
+            frame_counts = [1, 2, 4, 8, 16] if is_video_supported_model(
+                vllm_model, vllm_config) else [1]
+    elif is_video_supported_model(vllm_model, vllm_config):
+        frame_counts = [1, 2, 4, 8, 16]
+    else:
+        frame_counts = [1]
 
     jax_dtype = to_jax_dtype(vllm_config.model_config.dtype)
 
     def precompile_fn(run_compilation_fn: Callable) -> None:
+        # 1. Precompile standard single-frame image shapes across patch budgets
         for num_patches in num_patches_paddings:
-            # Split num_patches into (h, w) by distributing bits evenly.
-            # For any power-of-2 num_patches = 2^k: h=2^(k//2), w=2^(k-k//2).
             k = int(round(math.log2(num_patches)))
             h = 1 << (k // 2)
             w = 1 << (k - k // 2)
@@ -168,9 +209,8 @@ def maybe_precompile_vision_encoder_fn(
             dummy_pixel_values = jnp.ones((num_patches, patch_input_dim),
                                           dtype=jax_dtype)
             dummy_image_grid_thw = GridTHW([(1, h, w)])
-
             run_compilation_fn(
-                f"vllm embed_multimodal {dummy_image_grid_thw}",
+                f"vllm embed_multimodal image {dummy_image_grid_thw}",
                 embed_multimodal_fn,
                 params,
                 call_kwargs={
@@ -179,6 +219,33 @@ def maybe_precompile_vision_encoder_fn(
                 },
                 num_patches=num_patches,
             )
+
+        # 2. Precompile multi-frame video shapes for video-supported models
+        video_frames = [t for t in frame_counts if t > 1]
+        if video_frames:
+            # Representative spatial grid (e.g. 14x14 or 16x16)
+            rep_h, rep_w = 16, 16
+            rep_spatial_patches = rep_h * rep_w
+            for t in video_frames:
+                total_patches = t * rep_spatial_patches
+                if total_patches > max_patches:
+                    continue
+
+                dummy_pixel_values = jnp.ones((total_patches, patch_input_dim),
+                                              dtype=jax_dtype)
+                dummy_video_grid_thw = GridTHW([(t, rep_h, rep_w)])
+                run_compilation_fn(
+                    f"vllm embed_multimodal video {dummy_video_grid_thw}",
+                    embed_multimodal_fn,
+                    params,
+                    call_kwargs={
+                        "pixel_values_videos": dummy_pixel_values,
+                        "video_grid_thw": dummy_video_grid_thw,
+                        "second_per_grid_ts": jnp.zeros((1, ), dtype=jnp.float32),
+                        "timestamps": jnp.zeros((1, 2), dtype=jnp.float32),
+                    },
+                    num_patches=total_patches,
+                )
 
     return precompile_fn
 
