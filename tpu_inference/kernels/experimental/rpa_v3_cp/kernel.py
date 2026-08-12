@@ -2102,14 +2102,7 @@ def get_default_block_sizes(
         # picks small Q tiles because re-streaming KV per tile is nearly free
         # from local HBM; the ring re-streams the cache over ICI (~50x slower),
         # so its DMA only hides behind compute when the resident tile is as
-        # large as VMEM allows.  Two direct rules, both measured:
-        #  - bq_sz: largest tile under the empirical VMEM wall of ~8k
-        #    token-head rows (10.2k compiles, 16.4k OOMs, at both head_dims;
-        #    the analytic estimator undercounts the rows x bkv QK^T scratch).
-        #    Reproduces every benchmark-validated tile (512 @ 16 q-heads,
-        #    256 @ 32, 1024 @ 8).
-        #  - bkv_sz: the per-hop DMA payload; ~2MB amortizes the ~30us per-hop
-        #    fixed cost (larger measured slower).
+        # large as VMEM allows.
         RING_MAX_TILE_ROWS = 8192
         RING_HOP_TARGET_BYTES = 2 * 1024 * 1024
         bytes_per_token = (2 * actual_num_kv_heads * head_dim *

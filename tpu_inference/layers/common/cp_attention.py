@@ -314,8 +314,6 @@ def pcp_forward(
                   k_scale=k_scale,
                   v_scale=v_scale)
 
-    # `cache_pages == 0` is a static (compile-key) signal that nothing is
-    # cached yet; it elides the cache phase entirely below.
     cache_pages = md.pcp.cache_pages
 
     def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
@@ -333,14 +331,6 @@ def pcp_forward(
                                                     padded_q_len, *x.shape[1:])
 
         # ---- Cache phase --------------------------------------------------
-        # In-kernel ring: every rank keeps its local Q (head+tail chunks) and
-        # its 1/p KV-cache shard; the kernel rotates KV shards around the pcp
-        # axis with async remote copies, folding all rounds into one online
-        # softmax.  Communication overlaps compute block-by-block, nothing is
-        # materialized (2 bkv blocks resident), and there is no output
-        # collective.  The cache phase never writes the cache
-        # (update_kv_cache=False); the current phase starts from the untouched
-        # local shard.
         if cache_pages == 0:
             # Nothing cached (first chunk of a chunked prefill): the cache
             # phase would attend an empty cache, be fully masked, and have its
