@@ -82,6 +82,7 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         return embed_multimodal_func_jax
 
 
+@jax.tree_util.register_pytree_node_class
 class GridTHW(tuple):
     """Tensor-like wrapper for image/video grid_thw arguments.
 
@@ -103,6 +104,12 @@ class GridTHW(tuple):
         flat: tuple = _nested_to_tuple(values)
         return super().__new__(cls, flat)
 
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        if isinstance(key, slice):
+            return type(self)(val)
+        return val
+
     # ---- tensor-like API expected by _process_image_input ----
 
     @property
@@ -123,6 +130,13 @@ class GridTHW(tuple):
 
     def __repr__(self):
         return f"GridTHW({tuple(self)})"
+
+    def tree_flatten(self):
+        return (), tuple(self)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(aux_data)
 
 
 def maybe_precompile_vision_encoder_fn(
