@@ -2098,31 +2098,27 @@ def get_default_block_sizes(
         bs = {**bs, "bkv_sz": bkv_sz, "bkv_csz": bkv_csz}
 
     if pcp_ring:
-        # One bq block per launch: every extra block re-streams the whole
-        # cache around the ring. bkv_sz is the per-hop payload; ~2MB amortizes
-        # the per-hop fixed cost (larger measured slower). The margin covers
-        # what get_vmem_estimate_bytes omits (spills, compute temporaries).
-        VMEM_SAFETY = 0.85
+        # Ring sizing is the opposite of the default heuristic.  The default
+        # picks small Q tiles because re-streaming KV per tile is nearly free
+        # from local HBM; the ring re-streams the cache over ICI (~50x slower),
+        # so its DMA only hides behind compute when the resident tile is as
+        # large as VMEM allows.  Two direct rules, both measured:
+        #  - bq_sz: largest tile under the empirical VMEM wall of ~8k
+        #    token-head rows (10.2k compiles, 16.4k OOMs, at both head_dims;
+        #    the analytic estimator undercounts the rows x bkv QK^T scratch).
+        #    Reproduces every benchmark-validated tile (512 @ 16 q-heads,
+        #    256 @ 32, 1024 @ 8).
+        #  - bkv_sz: the per-hop DMA payload; ~2MB amortizes the ~30us per-hop
+        #    fixed cost (larger measured slower).
+        RING_MAX_TILE_ROWS = 8192
         RING_HOP_TARGET_BYTES = 2 * 1024 * 1024
-        budget = int(
-            VMEM_SAFETY *
-            (vmem_limit_bytes or pltpu.get_tpu_info().vmem_capacity_bytes))
         bytes_per_token = (2 * actual_num_kv_heads * head_dim *
                            (32 // kv_packing) // 8)
         bkv_sz = max(
             page_size,
             RING_HOP_TARGET_BYTES // bytes_per_token // page_size * page_size)
-        bq_sz = max_q
-        while bq_sz > 1 and get_vmem_estimate_bytes(
-                actual_num_kv_heads,
-                actual_num_q_heads // actual_num_kv_heads,
-                head_dim,
-                bq_sz,
-                bkv_sz,
-                q_dtype,
-                kv_dtype,
-        ) > budget:
-            bq_sz //= 2
+        bq_sz = max(
+            1, min(max_q, RING_MAX_TILE_ROWS // max(1, actual_num_q_heads)))
         bq_csz = min(bs["bq_csz"], bq_sz)
         while bq_csz > 1 and bq_sz % bq_csz != 0:
             bq_csz -= 1

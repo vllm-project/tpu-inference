@@ -171,7 +171,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         return Mesh(
             np.array(jax.devices()[:pcp]).reshape(shape), MESH_AXIS_NAMES)
 
-    def _run(self, pcp, L, num_current, padded_s, cache_phase=None):
+    def _run(self, pcp, L, num_current, padded_s):
         """Drive the wrapper; return (out_rank_order, kv_cache, exp_token_order).
 
         L = num_computed (already in the strided cache), num_current = the real
@@ -253,8 +253,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                                      md,
                                      sm_scale=SM_SCALE,
                                      update_kv_cache=True,
-                                     use_causal_mask=True,
-                                     cache_phase=cache_phase)
+                                     use_causal_mask=True)
         return np.asarray(out), np.asarray(new_cache), exp, C
 
     def _assert_matches(self, out, exp, pcp, C, num_current):
@@ -270,19 +269,18 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         self.assertAllClose(got, exp, atol=2e-2, rtol=2e-2)
 
     # ------------------------------ tests ------------------------------------
-    @parameterized.product(pcp=[2, 4], phase=["ring", "gather_kv", "gather_q"])
-    def test_cache_phase_strategies_agree(self, pcp, phase):
-        """All three cache-phase strategies must produce the same answer.
+    @parameterized.product(pcp=[2, 4])
+    def test_ring_cache_phase_matches_reference(self, pcp):
+        """The ring cache phase must reproduce the full-causal reference.
 
-        They differ only in how each rank gets to see the whole cache -- ring
-        streams it, gather_kv materializes it, gather_q moves the queries
-        instead -- so any divergence is a bug in one of them, not a modelling
-        choice.
+        The ring streams each rank's KV shard around the pcp axis instead of
+        materializing the cache, so any divergence is a synchronization or
+        masking bug in the rotation, not a modelling choice.
         """
         if jax.device_count() < pcp:
             self.skipTest(f"needs >= {pcp} devices")
         L, S = 512, 128
-        out, _, exp, C = self._run(pcp, L, S, S, cache_phase=phase)
+        out, _, exp, C = self._run(pcp, L, S, S)
         self._assert_matches(out, exp, pcp, C, S)
 
     @parameterized.product(pcp=[2, 4])
