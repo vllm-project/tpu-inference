@@ -623,8 +623,9 @@ async def main_async(args: argparse.Namespace):
             trace_groups = trace_groups[:args.num_groups]
         # Honour --group-size by keeping only its first streams of each group.
         widest = max((len(g) for g in trace_groups), default=0)
-        trace_groups = [g[:resolve_group_size(args, len(g))]
-                        for g in trace_groups]
+        trace_groups = [
+            g[:resolve_group_size(args, len(g))] for g in trace_groups
+        ]
         if args.group_size is not None and args.group_size > widest:
             print(f"Warning: --group-size {args.group_size} exceeds the "
                   f"{widest} streams the trace holds; running {widest}.")
