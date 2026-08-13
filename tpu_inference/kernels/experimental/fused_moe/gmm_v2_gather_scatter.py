@@ -1006,6 +1006,8 @@ def calculate_tiling(
     lhs_mod = min(pl.cdiv(16, lhs_bits), 2)
     rhs_mod = min(pl.cdiv(16, rhs_bits), 2)
     tile_m = bf16_bf16_tile_m * lhs_mod // rhs_mod
+    if dims.size_m > 128:
+        tile_m = max(tile_m, 128)
     tile_m = min(tile_m, dims.size_m)
 
     # Subtract non-rhs VMEM overhead before computing per-buffer budget.

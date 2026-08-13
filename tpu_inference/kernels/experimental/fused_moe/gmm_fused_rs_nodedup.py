@@ -63,8 +63,8 @@ def get_fused_rs_tuned_block_sizes(
     # Device-specific tuned tables were removed; return the default (with the
     # fp8 direct-write tile_m clamp for VMEM safety).
     result = default_block_sizes
-    if fp8_direct_write and result[0] > 64:
-        result = (64, ) + tuple(result[1:])
+    if fp8_direct_write and result[0] > 128:
+        result = (128, ) + tuple(result[1:])
     return result
 
 
@@ -309,9 +309,11 @@ def _select_fused_rs_block_sizes(
     # NOTE: fp8 direct-write tile_m sizing is now handled in Step 4
     # (get_fused_rs_tuned_block_sizes, called with fp8_direct_write): dedicated
     # fp8-comm entries carry VMEM-safe tiles (e.g. tile_m=96 full-N), and shapes
-    # without one fall back to the bf16 tile clamped to tile_m<=64. Both the host
+    # without one fall back to the bf16 tile clamped to tile_m<=128. Both the host
     # max-gm calc and the kernel call this helper, so their loop bounds stay
     # aligned. (Replaces the former unconditional ``tile_m = min(tile_m, 64)``.)
+    if size_m > 128 and tile_m < 128:
+        tile_m = 128
 
     # --- Step 6: Assertions ---
     assert size_k1 % tile_k1 == 0, f"tile_k1={tile_k1} must divide size_k1={size_k1}"
