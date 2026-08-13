@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from itertools import islice
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -48,6 +48,10 @@ logger = init_logger(__name__)
 
 init_fn = nnx.initializers.uniform()
 modeling_flax_utils = FlaxUtils()
+
+
+def _get_language_config(hf_config: Any) -> Any:
+    return getattr(hf_config, "text_config", hf_config)
 
 
 class Qwen2MLP(JaxModule):
@@ -304,7 +308,7 @@ class Qwen2Model(JaxModule):
         model_config = vllm_config.model_config
         hf_config = model_config.hf_config
         # Since transformers v5, Qwen2_5_VLConfig nests language attrs under text_config
-        lang_config = getattr(hf_config, 'text_config', hf_config)
+        lang_config = _get_language_config(hf_config)
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
         rms_norm_eps = lang_config.rms_norm_eps
@@ -396,9 +400,8 @@ class Qwen2ForCausalLM(JaxModule, LoadableWithIterator):
         model_config = vllm_config.model_config
         if not model_config.hf_config.tie_word_embeddings:
             vocab_size = model_config.get_vocab_size()
-            hidden_size = getattr(
-                model_config.hf_config, 'hidden_size',
-                model_config.hf_config.text_config.hidden_size)
+            hidden_size = _get_language_config(
+                model_config.hf_config).hidden_size
             self.lm_head = JaxLmHead(
                 hidden_size=hidden_size,
                 vocab_size=vocab_size,

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -26,7 +27,8 @@ from vllm.model_executor.model_loader import LoadConfig, get_model_loader
 from tpu_inference.distributed.jax_parallel_state import \
     init_pp_distributed_environment
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.models.jax.qwen2 import Qwen2ForCausalLM
+from tpu_inference.models.jax.qwen2 import (Qwen2ForCausalLM,
+                                            _get_language_config)
 from tpu_inference.runner.kv_cache import create_kv_caches
 
 
@@ -104,6 +106,13 @@ def mock_get_pp_group():
 
 class TestQwen2ForCausalLM:
     """Tests for the main Qwen2ForCausalLM model class."""
+
+    def test_language_config_supports_flat_and_nested_configs(self):
+        flat_config = SimpleNamespace(hidden_size=3584)
+        nested_config = SimpleNamespace(text_config=flat_config)
+
+        assert _get_language_config(flat_config) is flat_config
+        assert _get_language_config(nested_config) is flat_config
 
     @pytest.mark.parametrize("mock_vllm_config", [
         MockVllmConfig("Qwen/Qwen2.5-1.5B", "auto"),
