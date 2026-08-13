@@ -505,8 +505,13 @@ class RaggedPagedAttentionDecodeContextParallelismTest(jtu.JaxTestCase):
             print(f"LSE: current={query_lse[:seq_lens[0][0]]}")
             print(f"LSE: context={context_lse[:seq_lens[0][0]]}")
             print(f"Verifying KV cache for rank {rank}...")
-            # update_kv_cache=False so final_kv_cache == updated_kv_cache;
-            # we validate using the already-converted updated_kv_has.
+            # update_kv_cache=False so final_kv_cache == updated_kv_cache.
+            # For HAS, updated_kv_has is an alias of updated_kv_cache which
+            # JAX deletes after the context call (input-output aliasing).
+            # Reassign from final_kv_cache which holds the identical data.
+            # For SAL, updated_kv_has is already a separate HAS-converted array.
+            if not USE_SEQ_ON_LANE:
+                updated_kv_has = final_kv_cache
             for i, (q_len, kv_len) in enumerate(seq_lens):
                 indices_start = i * pages_per_seq
                 if cp_kv_cache_interleaved_size == 1:
