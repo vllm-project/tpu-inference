@@ -194,6 +194,8 @@ def get_kv_cache_shape(
         "cp_group_size",
         "attention_scope",
         "return_lse",
+        "pcp_ring_axis_name",
+        "pcp_ring_mesh_axis_names",
     ),
     # Donation of transient inputs can fail for some runtime buffer layouts in
     # the experimental tuning path. Keep donation only for kv_cache, which is
@@ -230,6 +232,8 @@ def ragged_paged_attention(
     cp_rank: jax.Array | None = None,
     attention_scope: configs.AttentionScope = configs.AttentionScope.FULL,
     return_lse: bool = False,
+    pcp_ring_axis_name: str | None = None,
+    pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
 ) -> tuple[jax.Array, jax.Array] | tuple[jax.Array, jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -271,6 +275,13 @@ def ragged_paged_attention(
         attention_scope: Which KV positions to attend to. FULL attends all positions,
             CACHE_ONLY skips new tokens, NEW_TOKENS_ONLY skips cached tokens. Defaults to FULL.
         return_lse: If True, return log-sum-exp (lse) values along with the output. Defaults to False.
+        pcp_ring_axis_name: PCP cache phase only. When set, CACHE_ONLY streams
+            each rank's KV cache shard around this mesh axis in-kernel so every
+            rank attends the full cache with its local Q; one online softmax
+            accumulates all rounds. Requires CACHE_ONLY, an even cp_group_size,
+            update_kv_cache=False, and the HEAD_ALONG_SUBLANE layout.
+        pcp_ring_mesh_axis_names: All axis names of the mesh the ring runs on,
+            in order. Defaults to a one-axis mesh.
 
     Returns:
         out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
@@ -338,6 +349,8 @@ def ragged_paged_attention(
         attention_scope=attention_scope,
         return_lse=return_lse,
         update_kv_cache=update_kv_cache,
+        pcp_ring_axis_name=pcp_ring_axis_name,
+        pcp_ring_mesh_axis_names=pcp_ring_mesh_axis_names,
     )
 
     q_hbm, new_kv_hbm = prepare_inputs(

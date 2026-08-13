@@ -164,6 +164,10 @@ def rpa_body(
     acc_scratch_ref: jax.Ref,
     lse_dma_sem_ref: jax.Ref | None,
     cp_rank_ref: jax.Array | None,
+    ring_kv_ref: jax.Ref | None = None,  # [2, *kv_vmem_shape]
+    ring_dma_sems: jax.Ref | None = None,  # [2] send/recv
+    ring_sync_sem: jax.Ref | None = None,
+    ring_local_sem: jax.Ref | None = None,  # [1]
     *,
     # Passed refs
     cu_q_lens_ref: jax.Ref,
@@ -173,6 +177,23 @@ def rpa_body(
     cfgs: configs.RpaConfigs,
 ):
     step = pl.program_id(0)
+
+    ring = cfgs.ring_enabled
+    if ring:
+        ring_size = cfgs.serve.cp_group_size
+        my_ring_id = lax.axis_index(cfgs.serve.pcp_ring_axis_name)
+
+        def ring_device_id(rank):
+            if cfgs.serve.pcp_ring_mesh_axis_names is None:
+                return (rank, )
+            return tuple(
+                rank if name == cfgs.serve.pcp_ring_axis_name else lax.
+                axis_index(name)
+                for name in cfgs.serve.pcp_ring_mesh_axis_names)
+
+        ring_next_id = ring_device_id(lax.rem(my_ring_id + 1, ring_size))
+        ring_prev_id = ring_device_id(
+            lax.rem(my_ring_id + ring_size - 1, ring_size))
 
     # Step 1: Fetch metadata.
     processed_q_len = []
@@ -185,6 +206,7 @@ def rpa_body(
     kv_new_start = []  # for new tokens.
     cache_len = []  # for cache only.
     int_ty = cfgs.serve.int_ty
+    ring_pos = jnp.int32(0)  # common ring-encoded k_idx across valid lanes
     for b_idx in range(cfgs.batch_size):
         s_idx = schedule_ref.s_idx[step, b_idx]
         is_valid = s_idx != -1
@@ -195,6 +217,15 @@ def rpa_body(
         safe_s_idx = jnp.maximum(0, s_idx)
         q_idx = schedule_ref.q_idx[step, b_idx]
         k_idx = schedule_ref.k_idx[step, b_idx]
+        if ring:
+            # k_idx is ring-encoded as block * ring_size + round. All valid
+            # lanes carry the same encoded value at a given step (a single
+            # sequence's q blocks all walk the same ring), so the max below
+            # recovers it while masked lanes contribute 0.
+            ring_pos = jnp.maximum(ring_pos,
+                                   jnp.where(is_valid, k_idx, jnp.int32(0)))
+            ring_round_b = lax.rem(k_idx, ring_size)
+            k_idx = k_idx // ring_size
         k_id = jnp.where(is_valid, k_idx * cfgs.bkv_sz, 0)
         kv_len = jnp.where(is_valid, kv_lens_ref[safe_s_idx], 0)
         q_start = jnp.where(is_valid, cu_q_lens_ref[safe_s_idx], 0)
@@ -208,6 +239,12 @@ def rpa_body(
             if (cfgs.serve.cp_group_size is not None):
                 cp_group_size = cfgs.serve.cp_group_size
                 rank = cp_rank_ref[0]
+                if ring:
+                    # After r hops the resident block originated from rank
+                    # (my_id - r) mod ring_size; mask by that rank's shard
+                    # length instead of our own.
+                    rank = lax.rem(my_ring_id + ring_size - ring_round_b,
+                                   ring_size)
                 local_cache_len = utils.cp_local_cache_len(
                     offset, cp_group_size, rank, cfgs.serve.page_size)
             # We add this to make sure flash_attention.py can mask non-cache tokens out.
@@ -243,12 +280,99 @@ def rpa_body(
             start_k_idx = jnp.maximum(start_k_idx, offset // cfgs.bkv_sz)
 
         is_first_k_block = k_idx == start_k_idx
+        if ring:
+            # Rounds > 0 of block 0 continue the same online softmax; only
+            # the very first round of the first block resets the scratch.
+            is_first_k_block = jnp.logical_and(is_first_k_block,
+                                               ring_round_b == 0)
         reset_cond = jnp.logical_and(is_valid, is_first_k_block)
         m_scratch_ref[b_idx] = jnp.where(reset_cond, -jnp.inf,
                                          m_scratch_ref[b_idx])
         l_scratch_ref[b_idx] = jnp.where(reset_cond, 0.0, l_scratch_ref[b_idx])
         acc_scratch_ref[b_idx] = jnp.where(reset_cond, 0.0,
                                            acc_scratch_ref[b_idx])
+
+    # Ring rotation setup. Every ring step computes on ring_kv_ref[round % 2]:
+    # round 0 fills slot 0 with a local copy of the pipeline's fetched block,
+    # and while round r computes, the resident block is sent to the next
+    # rank's other slot so round r+1's data arrives behind the compute. The
+    # even ring_size keeps the round parity consistent across block
+    # boundaries. A regular semaphore carries "your target slot is free"
+    # credits backwards along the ring (see release conditions below).
+    if ring:
+        ring_round = lax.rem(ring_pos, ring_size)
+        ring_slot = lax.rem(ring_round, 2)
+        is_last_round = ring_round == ring_size - 1
+        is_first_launch = step == 0
+        num_steps = jnp.minimum(schedule_ref.actual_steps[0],
+                                cfgs.max_steps_ub)
+        is_last_launch = step == num_steps - 1
+
+        # Startup rendezvous with both neighbors before any remote traffic:
+        # on a cold first execution a fast device's RDMA could otherwise land
+        # on a neighbor that is still loading the program and lose part of
+        # the block to its startup initialization.
+        @pl.when(is_first_launch)
+        def ring_startup_barrier():
+            barrier_sem = pltpu.get_barrier_semaphore()
+            pltpu.semaphore_signal(
+                barrier_sem,
+                1,
+                device_id=ring_next_id,
+                device_id_type=pl.DeviceIdType.MESH,
+            )
+            pltpu.semaphore_signal(
+                barrier_sem,
+                1,
+                device_id=ring_prev_id,
+                device_id_type=pl.DeviceIdType.MESH,
+            )
+            pl.semaphore_wait(barrier_sem, 2)
+
+        # Credit release for the slot step t-1 was reading (the target of the
+        # previous rank's next send). Signaling here — at the top of the
+        # following step — rather than at the end of step t-1 keeps the
+        # release behind a full step boundary: the signal is issued by the
+        # scalar core, which can run ahead of the vector core's still
+        # in-flight reads of that slot, so an end-of-step release can let the
+        # incoming block clobber data mid-read. Last-round steps grant no
+        # credit (the previous rank sends nothing that round).
+        @pl.when(~is_first_launch & ~is_last_round)
+        def release_prev_slot():
+            pl.semaphore_signal(
+                ring_sync_sem,
+                1,
+                device_id=ring_prev_id,
+                device_id_type=pl.DeviceIdType.MESH,
+            )
+
+        @pl.when(ring_round == 0)
+        def fill_ring_slot0():
+            cp = pltpu.make_async_copy(kv_in_vref, ring_kv_ref.at[0],
+                                       ring_local_sem.at[0])
+            cp.start()
+            cp.wait()
+
+        @pl.when(~is_last_round & ~is_first_launch)
+        def wait_ring_sync():
+            pl.semaphore_wait(ring_sync_sem, 1)
+
+        remote_op = pltpu.make_async_remote_copy(
+            src_ref=ring_kv_ref.at[ring_slot],
+            dst_ref=ring_kv_ref.at[1 - ring_slot],
+            send_sem=ring_dma_sems.at[0],
+            recv_sem=ring_dma_sems.at[1],
+            device_id=ring_next_id,
+            device_id_type=pl.DeviceIdType.MESH,
+        )
+
+        @pl.when(~is_last_round)
+        def start_rotate():
+            remote_op.start()
+
+    # Under the ring, compute reads the rotating buffer instead of the
+    # pipeline's block (which only round 0 touches, via the copy above).
+    kv_read_vref = ring_kv_ref.at[ring_slot] if ring else kv_in_vref
 
     # Step 2: Fetch inputs.
     q_p = cfgs.aligned_num_q_heads_per_kv_head // cfgs.serve.packing_q
@@ -315,7 +439,7 @@ def rpa_body(
             for kv_head_start in range(0, cfgs.model.num_kv_heads,
                                        heads_per_load):
                 bkv_lst = strided_load_bkv(
-                    kv_in_vref,
+                    kv_read_vref,
                     b_idx,
                     kv_head_start * 2,
                     cfgs=cfgs,
@@ -385,6 +509,15 @@ def rpa_body(
         cfgs=cfgs,
     )
     acc_scratch_ref[:, :, prev_q_slice] = o_next
+
+    if ring:
+
+        @pl.when(~is_last_round)
+        def finish_rotate():
+            # Waits both our send and the incoming block for the next round.
+            # The credit releasing this step's slot to the previous rank is
+            # granted at the top of the next step (see release_prev_slot).
+            remote_op.wait()
 
     # Step 4: Write back outputs.
     calculate_and_store_out(
@@ -588,6 +721,16 @@ def rpa_kernel(
                 ),  # acc
                 pltpu.SemaphoreType.DMA(
                     (1, )) if return_lse else None,  # lse_sem
+                pltpu.VMEM(
+                    (2, *cfgs.kv_vmem_shape),
+                    dtype=cfgs.serve.dtype_kv,
+                ) if cfgs.ring_enabled else None,  # ring_kv
+                pltpu.SemaphoreType.DMA(
+                    (2, )) if cfgs.ring_enabled else None,  # ring send/recv
+                pltpu.SemaphoreType.REGULAR
+                if cfgs.ring_enabled else None,  # ring_sync
+                pltpu.SemaphoreType.DMA(
+                    (1, )) if cfgs.ring_enabled else None,  # ring_local
             ),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
@@ -626,14 +769,26 @@ def rpa_kernel(
                 -1, num_lanes)
             kv_ref_flat[...] = jnp.zeros_like(kv_ref_flat)
 
+            if cfgs.ring_enabled:
+                # Same zero-init for the ring scratch: whatever a previous
+                # program left at this address must not be interpretable as
+                # plausible KV data.
+                ring_kv_flat = scratches[4].bitcast(jnp.uint32).reshape(
+                    -1, num_lanes)
+                ring_kv_flat[...] = jnp.zeros_like(ring_kv_flat)
+
             jax.tree.map(lambda x: x.wait(), dma_list)
 
+            # Body scratch order: schedule, m, l, acc, lse_sem, cp_rank,
+            # then the ring refs (ring_kv, ring send/recv, ring_sync,
+            # ring_local).
             pipeline_func(
                 (q_hbm_ref, schedule_ref),
                 (kv_cache_hbm_ref, new_kv_hbm_ref, schedule_ref,
                  page_indices_ref),
                 (o_hbm_ref, schedule_ref),
-                scratches=(schedule_ref, ) + scratches + (cp_rank_ref, ),
+                scratches=(schedule_ref, ) + scratches[:4] +
+                (cp_rank_ref, ) + scratches[4:],
                 allocations=final_allocs,
             )
 
@@ -677,6 +832,10 @@ def rpa_kernel(
         compiler_params=pltpu.CompilerParams(
             vmem_limit_bytes=cfgs.vmem_limit_bytes,
             disable_bounds_checks=True,
+            # The ring's startup barrier needs a barrier semaphore.
+            **({
+                "collective_id": 0
+            } if cfgs.ring_enabled else {}),
         ),
         input_output_aliases=input_output_aliases,
         name=get_kernel_name(cfgs),
