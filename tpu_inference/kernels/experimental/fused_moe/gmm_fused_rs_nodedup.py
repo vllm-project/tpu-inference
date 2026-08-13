@@ -977,7 +977,7 @@ def kernel_main_fused_rs(
             # direct_write_buf[local_row * top_k + topk_idx].
             # Loop bound is m_en - m_st (valid rows), not tile_m, eliminating
             # wasted iterations on padding rows.
-            num_valid = m_en - m_st
+            m_valid = m_en - m_st
 
             @jax.named_scope("direct_write_rows")
             def _do_direct_write():
@@ -1108,8 +1108,17 @@ def kernel_main_fused_rs(
                         lax.select(is_local, jnp.int32(1), jnp.int32(0)),
                     )
 
-                return lax.fori_loop(0, num_valid, _write_row,
-                                     (jnp.int32(0), jnp.int32(0)))
+                def _full_tile():
+                    carry = (jnp.int32(0), jnp.int32(0))
+                    for i in range(tile_m):
+                        carry = _write_row(i, carry)
+                    return carry
+
+                def _partial_tile():
+                    return lax.fori_loop(0, m_valid, _write_row,
+                                         (jnp.int32(0), jnp.int32(0)))
+
+                return lax.cond(m_valid == tile_m, _full_tile, _partial_tile)
 
             send_sz, local_sz = _do_direct_write()
             gm_id_ref[1 + stg_id] = gm_id_ref[1 + stg_id] + send_sz
