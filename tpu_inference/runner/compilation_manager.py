@@ -162,22 +162,26 @@ class CompilationManager:
                 reason)
             return
 
-        def _lower_and_compile(fn, args, call_kwargs, name, mesh,
-                               compile_only):
+        try:
+            with jax.set_mesh(self.runner.mesh):
+                lowered = fn.lower(*args, **call_kwargs)
+        except Exception as e:
+            if compile_only:
+                logger.error(
+                    f"Failed to lower {name} with compile_only=True: {e}")
+                raise
+            else:
+                # AOT lower not supported here (e.g. a jit whose body contains a
+                # nested jit with compiler_options). Fall back to warmup-only — the
+                # warmup pass will trigger inline compile.
+                logger.info(
+                    "AOT lower skipped for %s (%r); will compile in warmup.",
+                    name, e)
+                return
+
+        # Compilation is thread-safe
+        def _compile(lowered, name, mesh):
             with jax.set_mesh(mesh):
-                try:
-                    lowered = fn.lower(*args, **call_kwargs)
-                except Exception as e:
-                    if compile_only:
-                        logger.error(
-                            f"Failed to lower {name} with compile_only=True: {e}"
-                        )
-                        raise
-                    else:
-                        logger.info(
-                            "AOT lower skipped for %s (%r); will compile in warmup.",
-                            name, e)
-                        return None
                 start = time.perf_counter()
                 compiled = lowered.compile()
                 elapsed = time.perf_counter() - start
@@ -186,13 +190,10 @@ class CompilationManager:
                 return compiled
 
         if self._compile_executor is None:
-            _lower_and_compile(fn, args, call_kwargs, log_name,
-                               self.runner.mesh, compile_only)
+            _compile(lowered, log_name, self.runner.mesh)
         else:
-            future = self._compile_executor.submit(_lower_and_compile, fn,
-                                                   args, call_kwargs, log_name,
-                                                   self.runner.mesh,
-                                                   compile_only)
+            future = self._compile_executor.submit(_compile, lowered, log_name,
+                                                   self.runner.mesh)
             self._compile_futures.append(future)
 
     def _flush_compilations(self) -> None:
@@ -238,49 +239,53 @@ class CompilationManager:
         try:
             with self.runner.maybe_setup_dummy_loras(
                     self.runner.lora_config), jax.set_mesh(self.runner.mesh):
-                # Phase 1: Backbones
                 self._precompile_backbone_text_only()
+                self._flush_compilations()
                 if self.runner.is_multimodal_model:
                     if self.runner.precompile_vision_encoder_fn is not None:
                         self.runner.precompile_vision_encoder_fn(
                             self._run_compilation, )
                     self._precompile_input_embeddings_merger()
+                    self._flush_compilations()
                     self._precompile_backbone_with_inputs_embeds()
-                # Barrier 1: Flush Backbones
-                self._flush_compilations()
-
-                # Phase 2: Async manipulators
+                    self._flush_compilations()
                 if self.runner.scheduler_config.async_scheduling:
                     self._precompile_substitute_placeholder_token()
+                    self._flush_compilations()
                     if self.runner.speculative_config:
                         self._precompile_subtract_num_rejected_tokens()
+                        self._flush_compilations()
                         self._precompile_concat_last_sampled_tokens_and_draft_tokens(
                         )
-                # Barrier 2: Flush Async Manipulators
-                self._flush_compilations()
+                        self._flush_compilations()
 
                 if not self.runner.is_last_rank:
                     return
-                # Phase 3: Auxiliary Kernels & Helpers
                 self._precompile_select_from_array()
+                self._flush_compilations()
                 if not self.runner.is_pooling_model:
                     self._precompile_compute_logits()
                 else:
                     self._precompile_compute_pooling()
+                self._flush_compilations()
                 # Skip sampling if already precompiled before KV cache allocation
                 if not self._sampling_precompiled:
                     self._precompile_sampling()
+                    self._flush_compilations()
                 self._precompile_disagg_utils()
+                self._flush_compilations()
                 # Skip gather_logprobs if already precompiled before KV cache allocation
                 if not self._gather_logprobs_precompiled:
                     self._precompile_gather_logprobs()
+                    self._flush_compilations()
                 self._precompile_structured_decoding()
+                self._flush_compilations()
                 if self.runner.speculative_config:
                     self._precompile_speculative_decoding()
+                    self._flush_compilations()
                 if self.runner.enable_continue_decode:
                     self._precompile_continue_decode()
-                # Barrier 3: Flush Auxiliary Kernels
-                self._flush_compilations()
+                    self._flush_compilations()
         finally:
             self._finalize_compilation()
         elapsed = time.perf_counter() - compilation_start_time
@@ -2074,8 +2079,7 @@ class CompilationManager:
                 f"worker{self.runner.rank} continue_decode_steps_{user_max_decode_steps}_reqs_{num_reqs}",
                 continue_decode_wrapper,
                 self.runner.state_leaves,
-                getattr(self.runner.model, "step_fn_no_options",
-                        self.runner.model_fn),
+                self.runner.model.step_fn_no_options,
                 self.runner.compute_logits_fn,
                 sample,
                 self.runner.mesh,

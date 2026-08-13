@@ -24,6 +24,12 @@ Typical usage:
     only with the StorageManager interface, making the backend swappable.
 """
 
+import atexit
+
+from tools.kernel.tuner.v1.common.tuner_datatypes import (BucketStatus,
+                                                          CaseResult,
+                                                          ProcessedCaseStatus)
+
 
 class StorageManager:
     """Abstract base class for kernel tuner storage backends.
@@ -34,8 +40,17 @@ class StorageManager:
       - Local JSON file: a lightweight backend for offline or development use.
     """
 
-    def __init__(self, instance_id='vllm-bm-inst', database_id='tune-gmm'):
-        raise NotImplementedError("Subclasses must implement __init__")
+    def __init__(self, results_batch_size=10):
+        self.results_buffer = []
+        self.results_batch_size = results_batch_size
+        self._closed = False
+        atexit.register(self.close)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def init_case_set(self, case_set_id, scan_space, desc):
         """Creates a new CaseSet entry in storage.
@@ -88,13 +103,32 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement get_case_set_metadata")
 
+    def save_result(self, result: CaseResult):
+        """Buffers a single CaseResult for storage and flushes when batch threshold is met.
+
+        Args:
+            result: A CaseResult instance.
+        """
+        assert isinstance(
+            result,
+            CaseResult), f'result is not a CaseResult instance: {result}'
+        self.results_buffer.append(result)
+        if len(self.results_buffer) >= self.results_batch_size:
+            self.flush_results()
+
+    def flush_results(self):
+        """Flushes any buffered result tuples to the backend storage."""
+        if self.results_buffer:
+            self.save_results_batch()
+            self.results_buffer.clear()
+
     def flush(self):
-        """Flushes any buffered tuning cases to the backend storage.
+        """Flushes any buffered tuning cases and results to the backend storage.
 
         Implementations that buffer writes (e.g. for batching) must commit all
         pending data when this is called.
         """
-        raise NotImplementedError("Subclasses must implement flush")
+        self.flush_results()
 
     def add_tuner_case(self,
                        caseset_id: str,
@@ -137,7 +171,7 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement create_buckets_for_run")
 
-    def mark_bucket_in_progress(self, cs_id, r_id, b_id):
+    def update_bucket_status(self, cs_id, r_id, b_id, status: BucketStatus):
         """Marks a work bucket as IN_PROGRESS, claiming it for the current worker.
 
         Used by tuner agents to coordinate work distribution and avoid duplicate
@@ -146,21 +180,11 @@ class StorageManager:
         Args:
             cs_id: Case set ID the bucket belongs to.
             r_id: Run ID the bucket belongs to.
-            b_id: Bucket ID to claim.
+            b_id: Bucket ID to update.
+            status: Status to update the bucket to.
         """
         raise NotImplementedError(
-            "Subclasses must implement mark_bucket_in_progress")
-
-    def mark_bucket_completed(self, cs_id, r_id, b_id):
-        """Marks a work bucket as COMPLETED.
-
-        Args:
-            cs_id: Case set ID the bucket belongs to.
-            r_id: Run ID the bucket belongs to.
-            b_id: Bucket ID to mark as completed.
-        """
-        raise NotImplementedError(
-            "Subclasses must implement mark_bucket_completed")
+            "Subclasses must implement update_bucket_status")
 
     def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
                                      processed_time_us):
@@ -177,7 +201,8 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement add_bucket_processed_time_us")
 
-    def get_already_processed_ids(self, cs_id, r_id, start, end):
+    def get_already_processed_ids(self, cs_id: str, r_id: str, start: int,
+                                  end: int) -> list[ProcessedCaseStatus]:
         """Returns case IDs that have already been processed within a range.
 
         Used by tuner agents to resume interrupted runs without reprocessing
@@ -190,20 +215,17 @@ class StorageManager:
             end: End of the case ID range (inclusive).
 
         Returns:
-            A set of integer case IDs that have already been processed.
+            A list of ProcessedCaseStatus namedtuples, each containing:
+                'case_id': the case ID (int)
+                'status': the processing status (str) of the case
         """
         raise NotImplementedError(
             "Subclasses must implement get_already_processed_ids")
 
-    def save_results_batch(self, results):
-        """Persists a batch of tuning results to the backend.
+    def save_results_batch(self):
+        """Immediately persists a batch of tuning results to the backend.
 
         Called by tuner agents after completing a batch of cases.
-
-        Args:
-            results: A list of result tuples, each containing fields for
-                CaseResults (ID, RunId, CaseId, ProcessedStatus, WorkerID,
-                Latency, WarmupTime, TotalTime, ProcessedAt, TPU).
         """
         raise NotImplementedError(
             "Subclasses must implement save_results_batch")

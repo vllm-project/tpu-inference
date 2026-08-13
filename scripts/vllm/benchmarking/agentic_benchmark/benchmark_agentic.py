@@ -6,6 +6,9 @@ This script simulates a continuous stream of GRPO training requests:
 - Each stream is a multi-turn conversation (10-100 turns).
 - Each turn generates 200-2k tokens, followed by a simulated environment
   response of 10-100 tokens.
+- Between turns the stream sits idle for the tool-call time (running the
+  environment), leaving a hole in the batch that continuous batching must
+  fill from other streams.
 - All streams run concurrently and asynchronously, testing vLLM's ability
   to handle prefix caching and async scheduling of multi-turn conversations.
 """
@@ -56,6 +59,27 @@ def get_percentile(data: List[float], percentile: float) -> float:
     return sorted_data[lower]
 
 
+def make_token_text(tokenizer: AutoTokenizer, num_tokens: int,
+                    rng: random.Random) -> str:
+    """Builds text of about num_tokens tokens.
+
+    Args:
+        tokenizer: Tokenizer used to decode the sampled ids.
+        num_tokens: Approximate token count.
+        rng: Random source, so shared spans can be reproduced exactly.
+
+    Returns:
+        str: Generated text.
+    """
+    if num_tokens <= 0:
+        return ""
+    # Safe token ID range, avoiding special control characters.
+    ids = [rng.randint(1000, 50000) for _ in range(num_tokens)]
+    text = tokenizer.decode(ids, skip_special_tokens=True)
+    trimmed = tokenizer.encode(text, add_special_tokens=False)[:num_tokens]
+    return tokenizer.decode(trimmed, skip_special_tokens=True)
+
+
 def generate_initial_prompt(tokenizer: AutoTokenizer,
                             args: argparse.Namespace) -> str:
     """Generates a random initial prompt of a specific token length.
@@ -69,9 +93,42 @@ def generate_initial_prompt(tokenizer: AutoTokenizer,
     """
     length = random.randint(args.initial_prompt_len_min,
                             args.initial_prompt_len_max)
-    # Using safe token ID range to avoid special control characters
-    token_ids = [random.randint(1000, 50000) for _ in range(length)]
-    return tokenizer.decode(token_ids, skip_special_tokens=True)
+    return make_token_text(tokenizer, length, random)
+
+
+def build_initial_prompt(tokenizer: AutoTokenizer, global_prefix: str,
+                         total_len: int, group_idx: int) -> str:
+    global_len = len(tokenizer.encode(
+        global_prefix, add_special_tokens=False)) if global_prefix else 0
+    remainder = max(0, total_len - global_len)
+    group_text = make_token_text(tokenizer, remainder,
+                                 random.Random(1_000_000 + group_idx))
+    if not global_prefix:
+        return group_text
+    return global_prefix + "\n" + group_text
+
+
+def load_trace(path: str) -> List[List[Dict[str, Any]]]:
+    """Loads a rollout trace, returning per-group lists of trajectory specs.
+
+    Args:
+        path: Path to the JSONL trace.
+
+    Returns:
+        List[List[Dict[str, Any]]]: Trajectories grouped by "group", each
+        inner list sorted by "stream".
+    """
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            groups.setdefault(rec["group"], []).append(rec)
+    for specs in groups.values():
+        specs.sort(key=lambda r: r.get("stream", 0))
+    return [groups[k] for k in sorted(groups)]
 
 
 async def run_grpo_stream(
@@ -83,6 +140,7 @@ async def run_grpo_stream(
     stream_idx: int,
     group_idx: int,
     args: argparse.Namespace,
+    spec: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     """Runs a single GRPO stream as a multi-turn conversation.
 
@@ -99,7 +157,11 @@ async def run_grpo_stream(
     Returns:
         List[Dict[str, Any]]: Statistics of each turn in the stream.
     """
-    num_turns = random.randint(args.turns_min, args.turns_max)
+    out_lens = spec.get("out_lens") if spec else None
+    obs_lens = spec.get("obs_lens") if spec else None
+    tool_times = spec.get("tool_times") if spec else None
+    num_turns = (len(out_lens) if out_lens is not None else random.randint(
+        args.turns_min, args.turns_max))
     messages = [
         {
             "role": "system",
@@ -114,7 +176,11 @@ async def run_grpo_stream(
     stats = []
 
     for turn in range(1, num_turns + 1):
-        max_tokens = random.randint(args.output_len_min, args.output_len_max)
+        if out_lens is not None:
+            max_tokens = out_lens[turn - 1]
+        else:
+            max_tokens = random.randint(args.output_len_min,
+                                        args.output_len_max)
         payload = {
             "model": model,
             "messages": messages,
@@ -211,17 +277,30 @@ async def run_grpo_stream(
             }
 
             # Simulate environment response of 10-100 tokens
-            env_len = random.randint(args.env_len_min, args.env_len_max)
-            env_token_ids = [
-                random.randint(1000, 50000) for _ in range(env_len)
-            ]
-            env_text = tokenizer.decode(env_token_ids,
-                                        skip_special_tokens=True)
+            if obs_lens is not None:
+                idx = turn - 1
+                env_len = obs_lens[idx] if idx < len(obs_lens) else 0
+            else:
+                env_len = random.randint(args.env_len_min, args.env_len_max)
+            env_text = make_token_text(tokenizer, env_len, random)
 
             messages.append({"role": "user", "content": env_text})
             turn_stat["env_tokens"] = len(tokenizer.encode(env_text))
 
+            # The stream is idle while the environment executes the tool
+            # call; the next turn only starts once it finishes.
+            idle = 0.0
+            if turn < num_turns:
+                if tool_times is not None:
+                    idx = turn - 1
+                    idle = tool_times[idx] if idx < len(tool_times) else 0.0
+                else:
+                    idle = random.uniform(args.tool_time_min,
+                                          args.tool_time_max)
+            turn_stat["tool_time_s"] = idle
             stats.append(turn_stat)
+            if idle > 0:
+                await asyncio.sleep(idle)
 
         except Exception as e:
             total_time_ms = (time.perf_counter() - start_time) * 1000.0
@@ -256,6 +335,8 @@ async def run_group(
     tokenizer: AutoTokenizer,
     group_idx: int,
     args: argparse.Namespace,
+    global_prefix: str = "",
+    specs: List[Dict[str, Any]] | None = None,
 ) -> List[Dict[str, Any]]:
     """Runs a single GRPO group of G parallel streams.
 
@@ -270,13 +351,27 @@ async def run_group(
     Returns:
         List[Dict[str, Any]]: Accumulated stats of all streams in the group.
     """
-    initial_prompt = generate_initial_prompt(tokenizer, args)
+    if specs:
+        target_len = specs[0].get("prompt_len") or args.initial_prompt_len_max
+        initial_prompt = build_initial_prompt(tokenizer, global_prefix,
+                                              target_len, group_idx)
+        num_streams = len(specs)
+    elif global_prefix:
+        target_len = random.randint(args.initial_prompt_len_min,
+                                    args.initial_prompt_len_max)
+        initial_prompt = build_initial_prompt(tokenizer, global_prefix,
+                                              target_len, group_idx)
+        num_streams = args.group_size
+    else:
+        initial_prompt = generate_initial_prompt(tokenizer, args)
+        num_streams = args.group_size
+
     initial_prompt_len = len(tokenizer.encode(initial_prompt))
-    print(f"Group {group_idx}: Starting {args.group_size} streams with "
+    print(f"Group {group_idx}: Starting {num_streams} streams with "
           f"shared initial prompt of {initial_prompt_len} tokens...")
 
     tasks = []
-    for stream_idx in range(args.group_size):
+    for stream_idx in range(num_streams):
         tasks.append(
             run_grpo_stream(
                 session,
@@ -287,6 +382,7 @@ async def run_group(
                 stream_idx,
                 group_idx,
                 args,
+                specs[stream_idx] if specs else None,
             ))
 
     results = await asyncio.gather(*tasks)
@@ -342,6 +438,11 @@ def print_report(
     print(f"Total Input Tokens (Pref): {total_input_tokens:,}")
     print(f"Total Output Tokens (Dec): {total_output_tokens:,}")
     print(f"Total Tokens Processed:    {total_tokens:,}")
+    tool_idle = [s["tool_time_s"] for s in all_stats if "tool_time_s" in s]
+    if any(tool_idle):
+        print(f"Tool-Call Idle (per str.): {sum(tool_idle):.1f} s total, "
+              f"p50 {get_percentile(tool_idle, 50)*1000:.0f} ms, "
+              f"p99 {get_percentile(tool_idle, 99)*1000:.0f} ms per gap")
 
     # Throughput metrics
     groups_per_sec = total_groups / total_duration_sec
@@ -460,19 +561,46 @@ async def main_async(args: argparse.Namespace):
             print("Please ensure vLLM serve was started before running.")
             sys.exit(1)
 
+    trace_groups: List[List[Dict[str, Any]]] | None = None
+    if args.trace_file:
+        trace_groups = load_trace(args.trace_file)
+        if args.num_groups is not None:
+            trace_groups = trace_groups[:args.num_groups]
+        turns = sum(
+            len(s.get("out_lens", [])) for g in trace_groups for s in g)
+        streams = sum(len(g) for g in trace_groups)
+        print(f"Replaying trace {args.trace_file}: {len(trace_groups)} groups,"
+              f" {streams} streams, {turns:,} turns")
+
+    global_prefix = ""
+    if args.global_prefix_len > 0:
+        global_prefix = make_token_text(tokenizer, args.global_prefix_len,
+                                        random.Random(0))
+        got = len(tokenizer.encode(global_prefix, add_special_tokens=False))
+        print(f"Global prefix shared by every trajectory: {got} tokens")
+
     semaphore = asyncio.Semaphore(args.concurrency)
 
-    async def worker(group_idx: int, session: aiohttp.ClientSession):
+    async def worker(group_idx: int,
+                     session: aiohttp.ClientSession,
+                     specs: List[Dict[str, Any]] | None = None):
         async with semaphore:
             return await run_group(session, url, args.model, tokenizer,
-                                   group_idx, args)
+                                   group_idx, args, global_prefix, specs)
 
     start_time = time.perf_counter()
 
     async with make_client_session() as session:
-        group_tasks = [
-            worker(i, session) for i in range(1, args.num_groups + 1)
-        ]
+        if trace_groups is not None:
+            group_tasks = [
+                worker(i + 1, session, specs)
+                for i, specs in enumerate(trace_groups)
+            ]
+        else:
+            num_groups = 2 if args.num_groups is None else args.num_groups
+            group_tasks = [
+                worker(i, session) for i in range(1, num_groups + 1)
+            ]
         results = await asyncio.gather(*group_tasks)
 
     end_time = time.perf_counter()
@@ -512,8 +640,9 @@ def main():
     parser.add_argument(
         "--num-groups",
         type=int,
-        default=2,
-        help="Number of GRPO groups (requests) to simulate.",
+        default=None,
+        help="Number of GRPO groups (requests) to simulate. Defaults to 2, "
+        "or to every group in --trace-file when replaying a trace.",
     )
     parser.add_argument(
         "--group-size",
@@ -569,6 +698,41 @@ def main():
         type=int,
         default=100,
         help="Maximum simulated environment response length in tokens.",
+    )
+    parser.add_argument(
+        "--tool-time-min",
+        type=float,
+        default=0.0,
+        help="Minimum simulated tool-call time in seconds; the stream idles "
+        "this long between turns.",
+    )
+    parser.add_argument(
+        "--tool-time-max",
+        type=float,
+        default=0.0,
+        help="Maximum simulated tool-call time in seconds.",
+    )
+    parser.add_argument(
+        "--trace-file",
+        type=str,
+        default=None,
+        help="Replay a recorded rollout trace (JSONL) instead of sampling "
+        "turn counts and lengths. Each row is one trajectory: "
+        '{"group", "stream", "prompt_len", "out_lens", "obs_lens"} plus an '
+        'optional "tool_times" list of seconds the stream idles between '
+        "consecutive turns (aligned with obs_lens). "
+        "Overrides --turns-*, --output-len-*, --env-len-*, "
+        "--initial-prompt-len-* and --tool-time-*.",
+    )
+    parser.add_argument(
+        "--global-prefix-len",
+        type=int,
+        default=0,
+        help="Tokens of prompt shared by *every* trajectory, mimicking the "
+        "system prompt and tool definitions of a real agent. The remainder "
+        "of each initial prompt is shared only within a group. Real "
+        "SWE-agent rollouts measure ~6476 tokens global and ~1100 "
+        "per-group.",
     )
     parser.add_argument(
         "--concurrency",

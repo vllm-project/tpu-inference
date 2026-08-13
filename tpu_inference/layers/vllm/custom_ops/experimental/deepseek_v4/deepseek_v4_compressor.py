@@ -110,6 +110,21 @@ class VllmDeepseekCompressor(DeepseekCompressor):
             super().__init__(*args, **kwargs)
         finally:
             dsv4_compressor.CompressorStateCache = orig_state_cache
+        self._wkv_wgate_transposed = False
+
+    def transpose_wkv_wgate(self) -> None:
+        """Stores ``fused_wkv_wgate.weight`` transposed, once, at load time.
+
+        vLLM lays linear weights out as [out_features, in_features], but the
+        compress-and-store kernel consumes them as
+        [hidden_size, 2 * coff * head_dim].
+        """
+        if self._wkv_wgate_transposed:
+            return
+        weight = self.fused_wkv_wgate.weight.data.t().contiguous()
+        self.fused_wkv_wgate.weight = torch.nn.Parameter(weight,
+                                                         requires_grad=False)
+        self._wkv_wgate_transposed = True
 
     # pylint: disable=unused-argument
     def forward(
@@ -223,9 +238,10 @@ class VllmDeepseekCompressor(DeepseekCompressor):
                 outs.append(new_state_cache)
             return tuple(outs) if len(outs) > 1 else outs[0]
 
+        assert self._wkv_wgate_transposed
         operands = (
             jax_view(hidden_states),
-            jax_view(self.fused_wkv_wgate.weight).T,
+            jax_view(self.fused_wkv_wgate.weight),
             jax_view(self.ape),
             jax_view(self.norm.weight),
             jax_view(rotary_emb.cos_sin_cache),

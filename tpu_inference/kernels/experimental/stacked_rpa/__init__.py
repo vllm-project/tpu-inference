@@ -11,5 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Stacked RPA kernel implementation.
 
-# This kernel is experimental and not fully tested.
+The public entry points live in ``wrapper``. Decode's sliding-window and global
+packages, plus the prefill package, each own their schedule, buffered refs, and
+kernel implementation. Only FlashAttention math and low-level layout utilities
+are shared beneath those concrete paths.
+"""

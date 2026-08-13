@@ -28,7 +28,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -37,6 +36,7 @@ from tests.layers.common import utils as test_utils
 from tests.layers.vllm.nvfp4_utils import (NVFP4_GROUP_SIZE, quantize_to_nvfp4,
                                            ref_dequant_nvfp4)
 from tpu_inference.layers.common.quant_methods import NVFP4
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization.nvfp4 import (VllmNvfp4Config,
                                                           VllmNvfp4MoEMethod)
 
@@ -285,7 +285,7 @@ def test_fused_moe(num_devices, num_tokens, intermediate_size, hidden_size,
     config.vllm_config = vllm_config
 
     with set_current_vllm_config(vllm_config):
-        moe_layer = FusedMoE(
+        moe_layer = FusedMoEFactory(
             num_experts=num_experts,
             top_k=topk,
             hidden_size=hidden_size,
