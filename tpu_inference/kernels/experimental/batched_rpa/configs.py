@@ -94,6 +94,11 @@ class ServingConfigs:
     attention_scope: AttentionScope = AttentionScope.FULL
     return_lse: bool = False
     update_kv_cache: bool = True
+    # PCP ring cache phase: when set, CACHE_ONLY streams each rank's KV cache
+    # shard around this mesh axis so every rank attends the full cache with
+    # its local Q, accumulating all rounds in one online softmax.
+    pcp_ring_axis_name: str | None = None
+    pcp_ring_mesh_axis_names: tuple[str, ...] | None = None
 
     @property
     def pages_per_seq(self) -> int:
@@ -191,6 +196,11 @@ class RpaConfigs:
         return self.block.n_buffer
 
     # Define derived values.
+
+    @property
+    def ring_enabled(self) -> bool:
+        return (self.serve.pcp_ring_axis_name is not None
+                and self.serve.attention_scope == AttentionScope.CACHE_ONLY)
 
     @property
     def max_steps_ub(self) -> int:
@@ -443,3 +453,27 @@ class RpaConfigs:
                 raise ValueError(
                     "Context Parallel does not support sliding window right now"
                 )
+
+        if self.serve.pcp_ring_axis_name is not None:
+            if self.serve.cp_group_size is None:
+                raise ValueError(
+                    "pcp_ring_axis_name requires cp_group_size to be set.")
+            if self.serve.cp_group_size % 2 != 0:
+                # The ring double-buffers by round parity; an odd group size
+                # would collide the incoming block with the round-0 fill.
+                raise ValueError(
+                    "pcp_ring_axis_name requires an even cp_group_size, got"
+                    f" {self.serve.cp_group_size}.")
+            if self.serve.attention_scope != AttentionScope.CACHE_ONLY:
+                raise ValueError(
+                    "pcp_ring_axis_name is a cache-phase path and requires"
+                    " AttentionScope.CACHE_ONLY.")
+            if self.serve.update_kv_cache:
+                raise ValueError(
+                    "pcp_ring_axis_name requires update_kv_cache=False; the"
+                    " ring never writes the cache.")
+            if self.serve.kv_layout != KVLayout.HEAD_ALONG_SUBLANE:
+                raise NotImplementedError(
+                    "pcp_ring_axis_name only supports HEAD_ALONG_SUBLANE;"
+                    " SEQ_ALONG_LANE stitches new KV in-place in the block"
+                    " buffer, which would corrupt rotated blocks.")

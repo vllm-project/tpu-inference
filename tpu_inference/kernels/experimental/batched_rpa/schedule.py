@@ -353,8 +353,17 @@ def compute_metadata(
         schedule.dma_q[step, target_lane, 0] = q_src
         schedule.dma_q[step, target_lane, 1] = q_sz_task
 
-        kv_len_start = k_idx * cfgs.bkv_sz
-        kv_p_start = k_idx * cfgs.bkv_p
+        if cfgs.ring_enabled:
+            # k_idx is ring-encoded as block * cp_group_size + round. Only
+            # round 0 fetches this rank's block from HBM; later rounds receive
+            # the block from the previous rank over the ring.
+            ring_block = k_idx // cfgs.serve.cp_group_size
+            ring_is_round0 = k_idx % cfgs.serve.cp_group_size == 0
+            kv_len_start = ring_block * cfgs.bkv_sz
+            kv_p_start = ring_block * cfgs.bkv_p
+        else:
+            kv_len_start = k_idx * cfgs.bkv_sz
+            kv_p_start = k_idx * cfgs.bkv_p
         kv_left = k_len - kv_len_start
         if update_kv_cache:
             kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
@@ -373,6 +382,8 @@ def compute_metadata(
             dst_vmem = i << cfgs.serve.page_size_log2
             dma_sz = kv_left_frm_cache - dst_vmem
             dma_sz = jnp.clip(dma_sz, 0, cfgs.serve.page_size)
+            if cfgs.ring_enabled:
+                dma_sz = jnp.where(ring_is_round0, dma_sz, 0)
 
             src_hbm = jnp.minimum(p_offset + i,
                                   cfgs.serve.num_page_indices - 1)
@@ -565,6 +576,19 @@ def compute_metadata(
             k_len = local_cache_len
             end_k_idx = jnp.minimum(end_k_idx,
                                     pl.cdiv(local_cache_len, cfgs.bkv_sz))
+            if cfgs.ring_enabled:
+                # Ring: every rank must run the same number of steps, so size
+                # the block loop by rank 0's shard (the longest under
+                # page-interleaving) and run cp_group_size rounds per block;
+                # short ranks' tails are masked in the kernel. k_len stays at
+                # this rank's local length so round-0 fetch sizes clip to the
+                # pages this rank actually owns.
+                rank0_cache_len = utils.cp_local_cache_len(
+                    cache_len, cfgs.serve.cp_group_size, 0,
+                    cfgs.serve.page_size)
+                num_ring_blocks = pl.cdiv(rank0_cache_len, cfgs.bkv_sz)
+                start_k_idx = 0
+                end_k_idx = num_ring_blocks * cfgs.serve.cp_group_size
 
         k_loop_fn = functools.partial(
             k_loop,
