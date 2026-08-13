@@ -6,6 +6,9 @@ This script simulates a continuous stream of GRPO training requests:
 - Each stream is a multi-turn conversation (10-100 turns).
 - Each turn generates 200-2k tokens, followed by a simulated environment
   response of 10-100 tokens.
+- Between turns the stream sits idle for the tool-call time (running the
+  environment), leaving a hole in the batch that continuous batching must
+  fill from other streams.
 - All streams run concurrently and asynchronously, testing vLLM's ability
   to handle prefix caching and async scheduling of multi-turn conversations.
 """
@@ -156,6 +159,7 @@ async def run_grpo_stream(
     """
     out_lens = spec.get("out_lens") if spec else None
     obs_lens = spec.get("obs_lens") if spec else None
+    tool_times = spec.get("tool_times") if spec else None
     num_turns = (len(out_lens) if out_lens is not None else random.randint(
         args.turns_min, args.turns_max))
     messages = [
@@ -283,7 +287,20 @@ async def run_grpo_stream(
             messages.append({"role": "user", "content": env_text})
             turn_stat["env_tokens"] = len(tokenizer.encode(env_text))
 
+            # The stream is idle while the environment executes the tool
+            # call; the next turn only starts once it finishes.
+            idle = 0.0
+            if turn < num_turns:
+                if tool_times is not None:
+                    idx = turn - 1
+                    idle = tool_times[idx] if idx < len(tool_times) else 0.0
+                else:
+                    idle = random.uniform(args.tool_time_min,
+                                          args.tool_time_max)
+            turn_stat["tool_time_s"] = idle
             stats.append(turn_stat)
+            if idle > 0:
+                await asyncio.sleep(idle)
 
         except Exception as e:
             total_time_ms = (time.perf_counter() - start_time) * 1000.0
@@ -421,6 +438,11 @@ def print_report(
     print(f"Total Input Tokens (Pref): {total_input_tokens:,}")
     print(f"Total Output Tokens (Dec): {total_output_tokens:,}")
     print(f"Total Tokens Processed:    {total_tokens:,}")
+    tool_idle = [s["tool_time_s"] for s in all_stats if "tool_time_s" in s]
+    if any(tool_idle):
+        print(f"Tool-Call Idle (per str.): {sum(tool_idle):.1f} s total, "
+              f"p50 {get_percentile(tool_idle, 50)*1000:.0f} ms, "
+              f"p99 {get_percentile(tool_idle, 99)*1000:.0f} ms per gap")
 
     # Throughput metrics
     groups_per_sec = total_groups / total_duration_sec
@@ -678,14 +700,29 @@ def main():
         help="Maximum simulated environment response length in tokens.",
     )
     parser.add_argument(
+        "--tool-time-min",
+        type=float,
+        default=0.0,
+        help="Minimum simulated tool-call time in seconds; the stream idles "
+        "this long between turns.",
+    )
+    parser.add_argument(
+        "--tool-time-max",
+        type=float,
+        default=0.0,
+        help="Maximum simulated tool-call time in seconds.",
+    )
+    parser.add_argument(
         "--trace-file",
         type=str,
         default=None,
         help="Replay a recorded rollout trace (JSONL) instead of sampling "
         "turn counts and lengths. Each row is one trajectory: "
-        '{"group", "stream", "prompt_len", "out_lens", "obs_lens"}. '
-        "Overrides --turns-*, --output-len-*, --env-len-* and "
-        "--initial-prompt-len-*.",
+        '{"group", "stream", "prompt_len", "out_lens", "obs_lens"} plus an '
+        'optional "tool_times" list of seconds the stream idles between '
+        "consecutive turns (aligned with obs_lens). "
+        "Overrides --turns-*, --output-len-*, --env-len-*, "
+        "--initial-prompt-len-* and --tool-time-*.",
     )
     parser.add_argument(
         "--global-prefix-len",
