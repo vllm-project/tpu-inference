@@ -118,7 +118,11 @@ class BlockDiffusionStrategy:
                     or sampling_params.frequency_penalty != 0.0
                     or sampling_params.repetition_penalty != 1.0):
                 raise ValueError(
-                    "Block diffusion does not support sampling penalties")
+                    "Block diffusion does not support sampling penalties: "
+                    f"presence_penalty={sampling_params.presence_penalty}, "
+                    f"frequency_penalty={sampling_params.frequency_penalty}, "
+                    f"repetition_penalty={sampling_params.repetition_penalty}"
+                )
             if sampling_params.min_tokens != 0:
                 raise ValueError(
                     "Block diffusion does not support min_tokens yet")
