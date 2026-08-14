@@ -305,6 +305,7 @@ def _mla_ragged_paged_attention_kernel(
     new_kv_c_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, lkv_dim] if not transpose_kv_cache else [lkv_dim, max_num_tokens]
     new_k_pe_hbm_ref,  # [max_num_tokens_per_kv_packing, kv_packing, r_dim] if not transpose_kv_cache else [r_dim, max_num_tokens]
     cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] if not transpose_kv_cache else [total_num_pages, align_to(lkv_dim + r_dim, 128), page_size]
+    topk_mask_hbm_ref,  # uint8[max_num_tokens, topk_mask_width]; a [1, 128] dummy when use_topk_mask is False
     # Output
     o_hbm_ref,  # [max_num_tokens, num_q_heads, lkv_dim]
     updated_cache_kv_hbm_ref,  # [total_num_pages, page_size_per_kv_packing, kv_packing, align_to(lkv_dim + r_dim, 128)] if not transpose_kv_cache else [total_num_pages, align_to(lkv_dim + r_dim, 128), page_size]
@@ -314,7 +315,8 @@ def _mla_ragged_paged_attention_kernel(
     bq_nope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, lkv_dim]
     bq_rope_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, r_dim]
     bo_x2_ref,  # [2, batch_size, bq_sz, num_q_heads, lkv_dim]
-    sems,  # [4, batch_size, 2]
+    btopk_ref,  # uint8[batch_size, bq_sz, bkv_sz] tile of the top-k mask; unused when use_topk_mask is False
+    sems,  # [5, batch_size, 2]
     l_ref,  # [batch_size, bq_sz * num_q_heads, 128],
     m_ref,  # [batch_size, bq_sz * num_q_heads, 128],
     acc_ref,  # [batch_size, bq_sz * num_q_heads, lkv_dim],
@@ -335,6 +337,7 @@ def _mla_ragged_paged_attention_kernel(
     bq_sz,
     batch_size: int = 1,
     q_split: int = 1,
+    use_topk_mask: bool = False,
     debug_mode: bool = False,
 ):
     assert ql_nope_hbm_ref.shape == o_hbm_ref.shape
@@ -462,6 +465,16 @@ def _mla_ragged_paged_attention_kernel(
             mask = q_span < k_span
             if sliding_window is not None:
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+            if use_topk_mask:
+                # s.shape[1:] is [bq_sz * num_q_heads, bkv_sz]; one mask row per
+                # query token, repeated across that token's heads.
+                n_q = s.shape[1] // num_q_heads
+                row0 = cu_q_lens_ref[seq_idx] + bq_idx * bq_sz
+                mask = jnp.logical_or(
+                    mask,
+                    jnp.repeat(topk_excluded_rows(row0, n_q, 0, s.shape[2]),
+                               num_q_heads,
+                               axis=0))
             mask_list.append(mask)
         mask = jnp.stack(mask_list, axis=0)
 
@@ -508,6 +521,7 @@ def _mla_ragged_paged_attention_kernel(
         bkv_idx,
         head_l_ref,
         head_m_ref,
+        b=0,
     ):
         assert len(ql_nope.shape) == 2
         assert len(q_pe.shape) == 2
@@ -601,6 +615,14 @@ def _mla_ragged_paged_attention_kernel(
                         mask_part = jnp.logical_or(
                             mask_part, threshold_per_sq - sliding_window
                             >= iota1)
+                    mask_part = apply_topk_mask(
+                        mask_part,
+                        row0=(cu_q_lens_ref[batch_start_seq_idx + b] +
+                              bq_idx * bq_sz + bq_offset + q_idx),
+                        col_lo=s_idx * 128,
+                        col_hi=(s_idx + 1) * 128,
+                        num_rows=num_q_heads,
+                    )
                     s_1d_list.append(
                         jnp.where(
                             mask_part, mask_value,
@@ -620,6 +642,18 @@ def _mla_ragged_paged_attention_kernel(
 
             if sliding_window is not None:
                 mask = jnp.logical_or(mask, q_span - sliding_window >= k_span)
+            if use_topk_mask:
+                # One mask row per query token, repeated across its heads to
+                # line up with s's [token-major x heads, kv] row order.
+                n_q = s.shape[0] // num_q_heads
+                row0 = (cu_q_lens_ref[batch_start_seq_idx + b] +
+                        bq_idx * bq_sz + bq_offset)
+                mask = jnp.logical_or(
+                    mask,
+                    jnp.repeat(topk_excluded_rows(row0, n_q, 0, s.shape[1]),
+                               num_q_heads,
+                               axis=0),
+                )
             s = jnp.where(mask, mask_value, s)
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
         m_prev = load_with_init(head_m_ref, -jnp.inf)
@@ -1577,6 +1611,73 @@ def _mla_ragged_paged_attention_kernel(
     def wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx):
         return _fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx, wait=True)
 
+    def fetch_btopk(bkv_idx):
+        """Blocking fetch of this KV block's slice of the top-k mask.
+
+        Fetches *all* query tokens (``[max_num_tokens, bkv_sz]``) and slices
+        only the KV dimension. That is deliberate: Mosaic requires offsets along
+        tiled dimensions to be tile-aligned (32 for uint8), and query-token
+        offsets come from ``cu_q_lens`` so they are arbitrary. The KV offset is
+        a multiple of ``bkv_sz`` (itself a multiple of 128), so slicing that
+        dimension alone is always aligned. Callers then pick their token row out
+        of VMEM, where dynamic indexing is permitted.
+
+        Blocking and single-buffered on purpose: the buffer is uint8 and small
+        next to the KV blocks, and the mask buys correctness here, not
+        bandwidth -- the dense page walk is unchanged.
+        """
+        if not use_topk_mask:
+            return
+        col0 = bkv_idx * bkv_sz
+        src = topk_mask_hbm_ref.at[:, pl.ds(col0, bkv_sz)]
+        sem = sems.at[4, 0, 0]
+        _async_copy(src, btopk_ref, sem, False)
+        _async_copy(src, btopk_ref, sem, True)
+
+    # uint8 VMEM/HBM buffers are tiled (32, 128), so *any* dynamic index along
+    # the sublane (token) axis must be provably 32-aligned -- and token offsets
+    # come from cu_q_lens, so they are not. Instead read a 32-row window that is
+    # aligned by construction and pick the row out in registers, where no
+    # alignment rule applies.
+    _TOPK_SUBLANE = 32
+
+    def topk_row(row0, col_lo, col_hi):
+        """One mask row at dynamic global token index ``row0``, as [1, N]."""
+        aligned = (row0 // _TOPK_SUBLANE) * _TOPK_SUBLANE
+        residual = row0 - aligned
+        # Cast before reducing: Mosaic has no reduction over unsigned ints.
+        window = btopk_ref[pl.ds(aligned, _TOPK_SUBLANE),
+                           col_lo:col_hi].astype(jnp.int32)
+        n = col_hi - col_lo
+        selected = lax.broadcasted_iota(jnp.int32, (_TOPK_SUBLANE, n),
+                                        0) == residual
+        # Exactly one row survives, so max doubles as the selection.
+        return jnp.max(jnp.where(selected, window, 0), axis=0, keepdims=True)
+
+    def topk_excluded_rows(row0, n_rows, col_lo, col_hi):
+        """Rows ``[row0, row0 + n_rows)`` of the mask, True where excluded.
+
+        ``n_rows`` is static (it comes from the block's query count), so this
+        unrolls into ``n_rows`` register-level row selections.
+        """
+        rows = [topk_row(row0 + i, col_lo, col_hi) for i in range(n_rows)]
+        return jnp.concatenate(rows, axis=0) == 0
+
+    def apply_topk_mask(mask, *, row0, col_lo, col_hi, num_rows):
+        """OR the top-k exclusion into an existing causal/sliding-window mask.
+
+        ``mask`` is True where a position must be masked *out*, matching the
+        convention of the causal and sliding-window masks above. A zero in the
+        mask means "the indexer did not select this position", so it becomes
+        True here. Selection is per query token, so one row broadcasts across
+        that token's heads.
+        """
+        if not use_topk_mask:
+            return mask
+        excluded = topk_row(row0, col_lo, col_hi) == 0
+        return jnp.logical_or(
+            mask, jnp.broadcast_to(excluded, (num_rows, col_hi - col_lo)))
+
     def start_send_bo(batch_start_seq_idx, bo_idx, bo_sem_idx):
         bo_ids_ref[bo_sem_idx] = batch_start_seq_idx
         bo_ids_ref[bo_sem_idx + 2] = bo_idx
@@ -1822,6 +1923,9 @@ def _mla_ragged_paged_attention_kernel(
                 else:
                     load_bkv_fn = load_transposed_bkv
 
+                # Top-k mask slice for this KV block; no-op when dense.
+                fetch_btopk(bkv_idx)
+
                 if two_step_flash_attention:
                     debug_print("[RPA debug] two step flash attention")
                     prev_p = None
@@ -1874,6 +1978,7 @@ def _mla_ragged_paged_attention_kernel(
                                 bkv_idx=bkv_idx,
                                 head_l_ref=l_ref.at[b, bq_start:bq_end],
                                 head_m_ref=m_ref.at[b, bq_start:bq_end],
+                                b=b,
                             )
 
                             if prev_p is not None:
@@ -2185,6 +2290,10 @@ def mla_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    # DSA (DeepSeek-V3.2 / GLM-5.2) sparse attention: uint8
+    # [max_num_tokens, mask_width], 1 = this token may attend to that absolute
+    # KV position. None (the default) runs dense attention.
+    topk_mask: jax.Array | None = None,
     # Kernel optimization params.
     chunk_prefill_size: int | None = None,
     # Kernel tuning params for decode, prefill, and mixed cases.
@@ -2250,6 +2359,27 @@ def mla_ragged_paged_attention(
   """
     if mask_value is None:
         mask_value = jnp.finfo(s_dtype).min
+
+    # Pallas needs a fixed operand list, so always pass a mask array and gate
+    # every read on the static `use_topk_mask` flag. The dummy is never touched.
+    use_topk_mask = topk_mask is not None
+    if use_topk_mask:
+        if topk_mask.dtype != jnp.uint8:
+            raise ValueError(f"Expected uint8 {topk_mask.dtype=}")
+        if topk_mask.ndim != 2:
+            raise ValueError(f"Expected 2D {topk_mask.shape=}")
+        # NOTE: ql_nope arrives head-major ([num_q_heads, max_num_tokens,
+        # lkv_dim]); q_pe is the token-major one.
+        if topk_mask.shape[0] != q_pe.shape[0]:
+            raise ValueError(
+                f"Expected {topk_mask.shape[0]=} to equal max_num_tokens "
+                f"{q_pe.shape[0]=}")
+        if topk_mask.shape[1] % 128 != 0:
+            raise ValueError(
+                f"Expected {topk_mask.shape[1]=} to be a multiple of 128")
+        topk_mask_arr = topk_mask
+    else:
+        topk_mask_arr = jnp.zeros((1, 128), jnp.uint8)
 
     if num_kv_pages_per_block is None or num_queries_per_block is None:
         raise ValueError(
@@ -2382,6 +2512,7 @@ def mla_ragged_paged_attention(
             pl.BlockSpec(memory_space=pltpu.HBM),  # new_kv_c
             pl.BlockSpec(memory_space=pltpu.HBM),  # new_k_pe
             pl.BlockSpec(memory_space=pltpu.HBM),  # cache_kv
+            pl.BlockSpec(memory_space=pltpu.HBM),  # topk_mask
         ]
 
         out_specs = [
@@ -2439,14 +2570,41 @@ def mla_ragged_paged_attention(
             jnp.float32,
         )
 
+        # bkv_sz is only bound inside the transpose branch above, so recompute
+        # it here for both layouts. The buffer spans every query token because
+        # the token axis cannot be sliced at a dynamic offset in HBM (see
+        # fetch_btopk); only the KV axis is blocked.
+        btopk_bkv_sz = (bkv_p * page_size_per_kv_packing *
+                        kv_packing if not transpose_kv_cache else bkv_p *
+                        page_size)
+        # The KV loop walks in bkv_sz strides, so the mask must be a whole
+        # number of blocks wide. Pad with 1s ("attend"): the padding sits past
+        # kv_len and is already removed by the causal mask, and padding with 0s
+        # would risk masking real positions if that ever stopped holding.
+        topk_mask_case = topk_mask_arr
+        if use_topk_mask:
+            padded_w = align_to(topk_mask_case.shape[1], btopk_bkv_sz)
+            if padded_w != topk_mask_case.shape[1]:
+                topk_mask_case = jnp.pad(
+                    topk_mask_case,
+                    ((0, 0), (0, padded_w - topk_mask_case.shape[1])),
+                    constant_values=1,
+                )
+        btopk_buf = pltpu.VMEM(
+            (topk_mask_case.shape[0], btopk_bkv_sz),
+            jnp.uint8,
+        )
+
         scratch_shapes = [
             bkvc_double_buf,
             bkpe_double_buf,
             bq_nope_double_buf,
             bq_rope_double_buf,
             bo_double_buf,  # Double buffering for output block.
-            # Semaphores for double buffering of bkv, bq, bo and bkv_update.
-            pltpu.SemaphoreType.DMA((4, batch_size, 2)),
+            btopk_buf,  # Top-k mask tile (unused unless use_topk_mask).
+            # Semaphores for double buffering of bkv, bq, bo, bkv_update and
+            # the top-k mask tile.
+            pltpu.SemaphoreType.DMA((5, batch_size, 2)),
             # Intermediate buffers per kv head for flash attention.
             l_scratch,
             m_scratch,
@@ -2483,6 +2641,7 @@ def mla_ragged_paged_attention(
                     bkv_p=bkv_p,
                     batch_size=batch_size,
                     q_split=q_split,
+                    use_topk_mask=use_topk_mask,
                     s_dtype=s_dtype,
                     transpose_kv_cache=transpose_kv_cache,
                     two_step_flash_attention=two_step_flash_attention,
@@ -2507,6 +2666,8 @@ def mla_ragged_paged_attention(
                     jax.ShapeDtypeStruct(shape=cache_kv.shape,
                                          dtype=cache_kv.dtype),
                 ],
+                # NOTE: topk_mask is appended *after* cache_kv so these operand
+                # indices (7 scalar prefetches, then inputs) stay valid.
                 input_output_aliases={
                     7: 0,  # Alias output activation with ql_nope
                     11: 1,  # Aliasing cache_kv with updated_cache_kv
@@ -2520,6 +2681,7 @@ def mla_ragged_paged_attention(
             new_kv_c,
             new_k_pe,
             cache_kv,
+            topk_mask_case,
         )
 
     batch_distribution = (distribution[0] //

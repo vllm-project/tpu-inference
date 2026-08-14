@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
                                                DeepseekV4IndexerCache)
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
@@ -72,6 +73,17 @@ def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
 
 def is_ds_v4(vllm_config):
     return "DeepseekV4ForCausalLM" in (vllm_config.model_config.architectures)
+
+
+def is_cache_for_dsa(attn_module: AttentionLayerBase) -> bool:
+    """True for the DSA (DeepSeek-V3.2 / GLM-5.2) indexer k-cache.
+
+    ``DeepseekV32IndexerCache`` is an ``AttentionLayerBase`` that carries
+    neither ``attn_type`` nor ``kv_sharing_target_layer_name``, so the generic
+    branch of ``get_kv_cache_spec`` cannot inspect it. It knows its own spec,
+    so we delegate, exactly like ``is_cache_for_ds_v4``.
+    """
+    return isinstance(attn_module, DeepseekV32IndexerCache)
 
 
 class KVCacheManager:
@@ -627,7 +639,8 @@ class KVCacheManager:
                         kv_cache_spec[layer_name] = spec
                     continue
 
-                if is_cache_for_ds_v4(attn_module):
+                if is_cache_for_ds_v4(attn_module) or is_cache_for_dsa(
+                        attn_module):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     if spec is not None:

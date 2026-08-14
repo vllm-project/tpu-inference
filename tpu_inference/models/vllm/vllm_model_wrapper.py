@@ -38,6 +38,7 @@ from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.model_loader import get_model as vllm_get_model
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.model_executor.models.interfaces_base import is_pooling_model
+from vllm.platforms import current_platform
 from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import \
@@ -199,6 +200,20 @@ class VllmModelWrapper:
         load_context = patch("torch._sync", return_value=None) if (
             use_random_weights and not use_pathways_dummy) else nullcontext()
 
+        # DSA models (DeepSeek-V3.2 / GLM-5.2) allocate their shared
+        # `topk_indices_buffer` with `device=current_platform.device_type`
+        # (vllm/model_executor/models/deepseek_v2.py). torch does not know a
+        # "tpu" device and raises. The model really is being constructed on CPU
+        # here (see device_config.device above), so reporting "cpu" for the
+        # duration of construction is accurate rather than a workaround. Scoped
+        # to DSA models so no other architecture changes behaviour.
+        hf_config = getattr(vllm_config_for_load.model_config, "hf_config",
+                            None)
+        is_dsa_model = hasattr(hf_config, "index_topk")
+        device_type_context = patch.object(
+            current_platform, "device_type",
+            "cpu") if is_dsa_model else nullcontext()
+
         # By default load weights to the CPU device first. If we are running
         # under Pathways, this would cause weights to be loaded on a CPU-only
         # node, so we'll need to remove this context.
@@ -208,8 +223,8 @@ class VllmModelWrapper:
         # Load the vLLM model and wrap it into a new model whose forward
         # function can calculate the hidden_state and logits.
 
-        with load_context, jax_context, set_current_vllm_config(
-                self.vllm_config):
+        with load_context, jax_context, device_type_context, \
+                set_current_vllm_config(self.vllm_config):
             model_config_for_load = vllm_config_for_load.speculative_config.draft_model_config if self.is_draft_model else vllm_config_for_load.model_config
             vllm_model = vllm_get_model(vllm_config=vllm_config_for_load,
                                         model_config=model_config_for_load)

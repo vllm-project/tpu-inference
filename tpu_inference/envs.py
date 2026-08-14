@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
+    DSA_DISABLE_INDEXER: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -407,6 +408,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("VLLM_TPU_PATCH_MM_EMBEDDINGS", default=False),
     "DISABLE_MLA_Q_ACTIVATION_QUANTIZATION":
     env_bool("DISABLE_MLA_Q_ACTIVATION_QUANTIZATION", default=False),
+    # Run DSA models (DeepSeek-V3.2 / GLM-5.2) with dense MLA: never invoke the
+    # lightning indexer and ignore the top-k selection. Bring-up escape hatch --
+    # the model was trained with sparse attention, so quality is degraded.
+    "DSA_DISABLE_INDEXER":
+    env_bool("DSA_DISABLE_INDEXER", default=False),
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),

@@ -564,6 +564,42 @@ def attention(
     return kv_cache, output
 
 
+def build_topk_mask(
+    topk_indices: jax.Array,  # i32[num_tokens, topk], -1 padded
+    kv_width: int,
+    dtype: jnp.dtype = jnp.uint8,
+) -> jax.Array:
+    """Expand DSA top-k indices into a dense per-token attend mask.
+
+    The lightning indexer emits, per query token, the ``topk`` KV positions that
+    token is allowed to attend to, right-padded with ``-1``. The MLA kernel wants
+    a dense ``[num_tokens, kv_width]`` mask instead, where 1 means "attend".
+
+    Out-of-range and ``-1`` entries are routed into a trailing sink column that
+    is sliced off, so padding never aliases onto a real position (a plain
+    scatter of ``-1`` would land on the last column).
+
+    Args:
+        topk_indices: i32 ``[num_tokens, topk]``, ``-1`` padded.
+        kv_width: width of the returned mask; must cover the longest kv length.
+        dtype: mask dtype, ``uint8`` by default.
+
+    Returns:
+        ``dtype[num_tokens, kv_width]``, 1 where the token may attend.
+    """
+    if topk_indices.ndim != 2:
+        raise ValueError(f"Expected 2D {topk_indices.shape=}")
+    num_tokens = topk_indices.shape[0]
+    rows = jnp.broadcast_to(
+        jnp.arange(num_tokens, dtype=jnp.int32)[:, None], topk_indices.shape)
+    # Send every invalid index to the sink column at kv_width.
+    valid = topk_indices >= 0
+    cols = jnp.where(valid, topk_indices, kv_width)
+    mask = jnp.zeros((num_tokens, kv_width + 1), dtype)
+    mask = mask.at[rows, cols].set(jnp.ones((), dtype), mode="drop")
+    return mask[:, :kv_width]
+
+
 def mla_attention(
         q_NTA: jax.Array,
         q_rope_TNH: jax.Array,

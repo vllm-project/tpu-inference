@@ -29,7 +29,7 @@ from vllm.model_executor.layers.mla import (MLAModules,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import AttentionType
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import general_device_put
@@ -249,6 +249,13 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
         self.is_sparse = mla_modules.is_sparse
         self.g_proj = getattr(mla_modules, "g_proj", None)
         self.skip_topk = skip_topk
+
+        # Bring-up escape hatch: run DSA models with dense MLA. The indexer is
+        # still constructed by vLLM (its weights load and its k_cache registers
+        # a KV cache spec), we just never invoke it and never sparsify.
+        self.disable_indexer = envs.DSA_DISABLE_INDEXER
+        if self.disable_indexer and self.is_sparse:
+            self.is_sparse = False
 
         if self.indexer is not None and not self.skip_topk:
             assert hasattr(self.indexer, "topk_tokens")
