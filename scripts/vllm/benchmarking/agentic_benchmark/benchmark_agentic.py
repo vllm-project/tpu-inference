@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import random
+import subprocess
 import sys
 import time
 from collections import Counter
@@ -25,6 +26,27 @@ from typing import Any, Dict, List
 
 import aiohttp
 from transformers import AutoTokenizer
+
+DEFAULT_GROUP_SIZE = 16
+
+
+def resolve_group_size(args: argparse.Namespace,
+                       available: int | None = None) -> int:
+    """Resolves how many streams to run in one group.
+
+    Args:
+        args: Parsed command line arguments.
+        available: Streams the trace offers for this group, when replaying.
+
+    Returns:
+        int: Stream count, never more than the trace provides.
+    """
+    if available is None:
+        return (DEFAULT_GROUP_SIZE
+                if args.group_size is None else args.group_size)
+    if args.group_size is None:
+        return available
+    return min(args.group_size, available)
 
 
 def make_client_session() -> aiohttp.ClientSession:
@@ -108,24 +130,56 @@ def build_initial_prompt(tokenizer: AutoTokenizer, global_prefix: str,
     return global_prefix + "\n" + group_text
 
 
+def read_trace(path: str) -> str:
+    """Reads a trace file from a local path or a gs:// URI.
+
+    Traces are small, so the whole file is read at once.
+
+    Args:
+        path: Local path, or "gs://bucket/object".
+
+    Returns:
+        str: The file's contents.
+    """
+    if not path.startswith("gs://"):
+        with open(path) as f:
+            return f.read()
+
+    bucket, _, blob = path[len("gs://"):].partition("/")
+    if not bucket or not blob:
+        raise ValueError(f"malformed GCS URI: {path}")
+    try:
+        from google.cloud import storage
+    except ImportError:
+        # No client library here, so fall back to the gsutil CLI.
+        proc = subprocess.run(["gsutil", "cat", path],
+                              capture_output=True,
+                              text=True)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"cannot read {path}: install google-cloud-storage, or make "
+                f"gsutil usable ({proc.stderr.strip()})") from None
+        return proc.stdout
+    return storage.Client().bucket(bucket).blob(blob).download_as_text()
+
+
 def load_trace(path: str) -> List[List[Dict[str, Any]]]:
     """Loads a rollout trace, returning per-group lists of trajectory specs.
 
     Args:
-        path: Path to the JSONL trace.
+        path: Path to the JSONL trace, local or gs://.
 
     Returns:
         List[List[Dict[str, Any]]]: Trajectories grouped by "group", each
         inner list sorted by "stream".
     """
     groups: Dict[Any, List[Dict[str, Any]]] = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            groups.setdefault(rec["group"], []).append(rec)
+    for line in read_trace(path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        groups.setdefault(rec["group"], []).append(rec)
     for specs in groups.values():
         specs.sort(key=lambda r: r.get("stream", 0))
     return [groups[k] for k in sorted(groups)]
@@ -355,16 +409,17 @@ async def run_group(
         target_len = specs[0].get("prompt_len") or args.initial_prompt_len_max
         initial_prompt = build_initial_prompt(tokenizer, global_prefix,
                                               target_len, group_idx)
+        # Already trimmed to --group-size when the trace was loaded.
         num_streams = len(specs)
     elif global_prefix:
         target_len = random.randint(args.initial_prompt_len_min,
                                     args.initial_prompt_len_max)
         initial_prompt = build_initial_prompt(tokenizer, global_prefix,
                                               target_len, group_idx)
-        num_streams = args.group_size
+        num_streams = resolve_group_size(args)
     else:
         initial_prompt = generate_initial_prompt(tokenizer, args)
-        num_streams = args.group_size
+        num_streams = resolve_group_size(args)
 
     initial_prompt_len = len(tokenizer.encode(initial_prompt))
     print(f"Group {group_idx}: Starting {num_streams} streams with "
@@ -566,6 +621,14 @@ async def main_async(args: argparse.Namespace):
         trace_groups = load_trace(args.trace_file)
         if args.num_groups is not None:
             trace_groups = trace_groups[:args.num_groups]
+        # Honour --group-size by keeping only its first streams of each group.
+        widest = max((len(g) for g in trace_groups), default=0)
+        trace_groups = [
+            g[:resolve_group_size(args, len(g))] for g in trace_groups
+        ]
+        if args.group_size is not None and args.group_size > widest:
+            print(f"Warning: --group-size {args.group_size} exceeds the "
+                  f"{widest} streams the trace holds; running {widest}.")
         turns = sum(
             len(s.get("out_lens", [])) for g in trace_groups for s in g)
         streams = sum(len(g) for g in trace_groups)
@@ -648,8 +711,11 @@ def main():
         "--group-size",
         "-g",
         type=int,
-        default=16,
-        help="Group size (number of parallel streams per prompt).",
+        default=None,
+        help="Group size (number of parallel streams per prompt). Defaults "
+        f"to {DEFAULT_GROUP_SIZE}, or to every stream a --trace-file group "
+        "holds when replaying a trace. Replaying a trace keeps the first "
+        "streams of each group and never invents more than the trace has.",
     )
     parser.add_argument(
         "--initial-prompt-len-min",
@@ -716,8 +782,9 @@ def main():
         "--trace-file",
         type=str,
         default=None,
-        help="Replay a recorded rollout trace (JSONL) instead of sampling "
-        "turn counts and lengths. Each row is one trajectory: "
+        help="Replay a recorded rollout trace (JSONL), local path or "
+        "gs://bucket/object, instead of sampling turn counts and lengths. "
+        "Each row is one trajectory: "
         '{"group", "stream", "prompt_len", "out_lens", "obs_lens"} plus an '
         'optional "tool_times" list of seconds the stream idles between '
         "consecutive turns (aligned with obs_lens). "
