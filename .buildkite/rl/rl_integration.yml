@@ -64,7 +64,7 @@ steps:
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "rl_integration"
-      CI_STAGE: "PauseResumeTest"
+      CI_STAGE: "Single-Host CorrectnessTest"
       CI_CATEGORY: "rl support matrix"
     agents:
       queue: cpu
