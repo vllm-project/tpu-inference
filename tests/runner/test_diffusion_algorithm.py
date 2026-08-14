@@ -58,6 +58,8 @@ LogitAlignment = _CONFIG.LogitAlignment
 NextBlockPolicy = _CONFIG.NextBlockPolicy
 low_confidence_commit = _ALGORITHM.low_confidence_commit
 denoise_block = _PROGRAM.denoise_block
+denoise_block_dual_cache = _PROGRAM.denoise_block_dual_cache
+select_aligned_hidden_states = _PROGRAM.select_aligned_hidden_states
 
 
 def _thresholds(batch_size, value=0.9):
@@ -87,6 +89,32 @@ def test_low_confidence_commit_threshold_and_forced_progress():
     np.testing.assert_array_equal(tokens, [[0, 0, 1], [0, 1, 0]])
     assert remaining[0].sum() == 2
     assert remaining[1].sum() == 2
+
+
+def test_dual_cache_hidden_selection_matches_reference_shift_rules():
+    hidden = jnp.arange(32, dtype=jnp.float32).reshape(1, 32, 1)
+
+    full = select_aligned_hidden_states(
+        hidden,
+        1,
+        32,
+        jnp.array(8, dtype=jnp.int32),
+        8,
+        LogitAlignment.SHIFTED,
+        local_alignment=False,
+    )
+    partial = select_aligned_hidden_states(
+        hidden[:, :8],
+        1,
+        8,
+        jnp.array(0, dtype=jnp.int32),
+        8,
+        LogitAlignment.SHIFTED,
+        local_alignment=True,
+    )
+
+    np.testing.assert_array_equal(full[:, 0], np.arange(7, 15))
+    np.testing.assert_array_equal(partial[:, 0], [0, 0, 1, 2, 3, 4, 5, 6])
 
 
 def test_low_confidence_commit_keeps_inactive_rows_unchanged():
@@ -320,6 +348,108 @@ def test_step_cap_force_fills_and_final_forward_refreshes_kv():
     # the next block prediction; the final forward exposes the committed tokens.
     np.testing.assert_array_equal(next_block_token(output.kv_caches), [4])
     np.testing.assert_array_equal(next_block_token(initial_canvas), [1])
+
+
+def test_dual_cache_uses_q32_once_then_q8_for_each_sub_block():
+    block_size = 32
+    sub_block_size = 8
+    mask_token_id = 3
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches,
+                        active_rows, forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, positions, active_rows, forward_context
+        logits = jnp.zeros((canvas.shape[0], 4), dtype=jnp.float32)
+        return logits, kv_caches.at[2].add(1)
+
+    initial_canvas = jnp.array(
+        [[0] + [mask_token_id] * (block_size - 1)], dtype=jnp.int32)
+    initial_mask = initial_canvas == mask_token_id
+    output = denoise_block_dual_cache(
+        full_forward,
+        partial_forward,
+        final_forward,
+        low_confidence_commit,
+        None,
+        initial_canvas,
+        initial_mask,
+        jnp.arange(block_size, dtype=jnp.int32)[None, :],
+        jnp.zeros((3, ), dtype=jnp.int32),
+        jnp.array([True]),
+        _thresholds(1, value=1.0),
+        _temperatures(1),
+        None,
+        logit_alignment=LogitAlignment.SHIFTED,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=sub_block_size,
+    )
+
+    np.testing.assert_array_equal(output.canvas, np.zeros((1, block_size)))
+    np.testing.assert_array_equal(output.kv_caches, [4, 27, 1])
+    np.testing.assert_array_equal(output.denoise_steps, [31])
+    assert int(output.q32_forward_calls) == 5
+    assert int(output.q8_forward_calls) == 27
+    assert int(output.q32_forward_calls) * block_size + int(
+        output.q8_forward_calls) * sub_block_size == 376
+
+
+def test_dual_cache_partial_forward_receives_only_rows_with_work():
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], 4, 4), dtype=jnp.float32)
+        return logits, kv_caches.at[0].add(jnp.sum(active_rows))
+
+    def partial_forward(model_state, canvas, positions, kv_caches,
+                        active_rows, forward_context, start):
+        del model_state, positions, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], 4, 4), dtype=jnp.float32)
+        return logits, kv_caches.at[1].add(jnp.sum(active_rows))
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        return jnp.zeros((2, 4), dtype=jnp.float32), kv_caches
+
+    output = denoise_block_dual_cache(
+        full_forward,
+        partial_forward,
+        final_forward,
+        low_confidence_commit,
+        None,
+        jnp.array([[0, 3, 2, 1], [0, 3, 3, 3]], dtype=jnp.int32),
+        jnp.array([[False, True, False, False],
+                   [False, True, True, True]]),
+        jnp.tile(jnp.arange(4, dtype=jnp.int32), (2, 1)),
+        jnp.zeros((2, ), dtype=jnp.int32),
+        jnp.array([True, True]),
+        _thresholds(2, value=1.0),
+        _temperatures(2),
+        None,
+        logit_alignment=LogitAlignment.SHIFTED,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=3,
+        sub_block_size=4,
+    )
+
+    np.testing.assert_array_equal(output.kv_caches, [2, 2])
+    np.testing.assert_array_equal(output.denoise_steps, [1, 3])
+    assert int(output.q8_forward_calls) == 2
 
 
 def test_heterogeneous_rows_preserve_inactive_kv():

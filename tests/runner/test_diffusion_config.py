@@ -109,6 +109,7 @@ def test_runtime_and_model_overrides_are_separate():
                 "confidence_threshold": 0.75,
                 "temperature": 0.2,
                 "max_denoise_steps": 12,
+                "use_dual_cache": True,
             },
         }))
 
@@ -118,6 +119,7 @@ def test_runtime_and_model_overrides_are_separate():
     assert resolved.diffusion.runtime.confidence_threshold == 0.75
     assert resolved.diffusion.runtime.temperature == 0.2
     assert resolved.diffusion.runtime.max_denoise_steps == 12
+    assert resolved.diffusion.runtime.use_dual_cache is True
 
 
 def test_new_model_adapter_does_not_change_strategy_resolution():

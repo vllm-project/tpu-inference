@@ -77,7 +77,28 @@ def test_diffusion_precompile_uses_the_runtime_mesh_context():
 
 
 def test_diffusion_forward_uses_nested_jit_safe_model_callable():
-    forward_source = ast.unparse(_strategy_method("_model_forward"))
+    forward_source = ast.unparse(_strategy_method("_run_model"))
 
     assert "runner.model_fn_no_options" in forward_source
     assert "runner.model_fn(" not in forward_source
+
+
+def test_dual_cache_has_distinct_full_partial_and_final_forwards():
+    denoise_source = ast.unparse(_strategy_method("_denoise_blocks"))
+    partial_source = ast.unparse(
+        _strategy_method("_model_forward_partial_subblock"))
+    final_source = ast.unparse(_strategy_method("_model_forward_final"))
+
+    assert "denoise_block_dual_cache" in denoise_source
+    assert "dynamic_slice" in partial_source
+    assert "sub_block_size" in partial_source
+    assert "[:, -1, :]" in final_source
+
+
+def test_diffusion_uses_configured_capacity_and_partial_cache_metadata():
+    build_source = ast.unparse(_strategy_method("_build_batch"))
+
+    assert "batch_size = self.batch_size" in build_source
+    assert "batch_size = runner.max_num_reqs" not in build_source
+    assert "replace_cached_kv=True" in build_source
+    assert "partial_query_start_loc" in build_source

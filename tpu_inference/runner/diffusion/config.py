@@ -92,6 +92,7 @@ class DiffusionRuntimeConfig:
     confidence_threshold: float = 0.9
     temperature: float = 0.0
     max_denoise_steps: int = 0
+    use_dual_cache: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence_threshold <= 1.0:
@@ -246,6 +247,7 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
             diffusion_values.get("confidence_threshold", 0.9)),
         temperature=float(diffusion_values.get("temperature", 0.0)),
         max_denoise_steps=int(diffusion_values.get("max_denoise_steps", 0)),
+        use_dual_cache=bool(diffusion_values.get("use_dual_cache", False)),
     )
     return GenerationStrategyConfig(
         strategy=strategy,

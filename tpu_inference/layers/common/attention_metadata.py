@@ -82,12 +82,14 @@ class PCPMetadata:
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "cache_update_active_rows",
         "pcp",
     ],
     meta_fields=[
         "padded_num_reqs",
         "pcp_cache_pages",
         "attention_mask_spec",
+        "replace_cached_kv",
     ],
 )
 @dataclass
@@ -112,6 +114,9 @@ class AttentionMetadata(object):
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
 
+    # Optional per-row write mask for block-diffusion cache replacement.
+    cache_update_active_rows: jax.Array | None = None
+
     # PCP-specific metadata. None when not running prefill context parallelism.
     pcp: PCPMetadata | None = None
 
@@ -126,6 +131,10 @@ class AttentionMetadata(object):
     pcp_cache_pages: int | None = None
 
     attention_mask_spec: AttentionMaskSpec = CAUSAL_ATTENTION_MASK
+
+    # Partial block-diffusion forwards replace K/V at existing logical token
+    # positions, then attend to the complete cached block.
+    replace_cached_kv: bool = False
 
 
 @functools.partial(

@@ -37,6 +37,7 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata, resolve_use_causal_mask)
 from tpu_inference.layers.common.cp_attention import dcp_forward, pcp_forward
+from tpu_inference.layers.common.kv_cache_replace import replace_cached_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -510,6 +511,25 @@ def attention(
     use_causal_mask = resolve_use_causal_mask(md, use_causal_mask)
     # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
     shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
+
+    if md.replace_cached_kv:
+        if not update_kv_cache:
+            raise ValueError(
+                "replace_cached_kv requires the attention layer to own its cache"
+            )
+        active_rows = md.cache_update_active_rows
+        if active_rows is None:
+            active_rows = (jnp.arange(md.seq_lens.shape[0]) <
+                           md.request_distribution[-1])
+        kv_cache = replace_cached_kv(
+            kv_cache,
+            k,
+            v,
+            md.input_positions,
+            md.block_tables,
+            active_rows,
+        )
+        update_kv_cache = False
 
     if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
         if not use_causal_mask:

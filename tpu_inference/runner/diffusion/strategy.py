@@ -24,6 +24,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from tpu_inference.layers.common.attention_metadata import (AttentionMaskKind,
                                                             AttentionMaskSpec,
                                                             AttentionMetadata)
+from tpu_inference.logger import init_logger
 from tpu_inference.runner.diffusion.algorithm import get_commit_algorithm
 from tpu_inference.runner.diffusion.batch import (PendingBlockOutput,
                                                   complete_seeded_decode_block,
@@ -35,13 +36,18 @@ from tpu_inference.runner.diffusion.config import (CanvasPolicy,
                                                    DiffusionConfig,
                                                    NextBlockPolicy,
                                                    PromptRemainderPolicy)
-from tpu_inference.runner.diffusion.program import denoise_block
+from tpu_inference.runner.diffusion.program import (denoise_block,
+                                                    denoise_block_dual_cache,
+                                                    select_aligned_hidden_states)
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
     from tpu_inference.runner.tpu_runner import TPUModelRunner
+
+
+logger = init_logger(__name__)
 
 
 class BlockDiffusionStrategy:
@@ -51,7 +57,11 @@ class BlockDiffusionStrategy:
         self.runner = runner
         self.config = config
         self._pending_outputs: dict[str, PendingBlockOutput] = {}
+        self._last_denoise_trace: dict[str, Any] | None = None
         self._forward_fn = self._model_forward
+        self._full_subblock_forward_fn = self._model_forward_full_subblock
+        self._partial_subblock_forward_fn = self._model_forward_partial_subblock
+        self._final_forward_fn = self._model_forward_final
         self._commit_fn = get_commit_algorithm(config.runtime.algorithm)
 
         model = config.model
@@ -76,6 +86,12 @@ class BlockDiffusionStrategy:
     @property
     def block_size(self) -> int:
         return self.config.model.block_size
+
+    @property
+    def batch_size(self) -> int:
+        configured = (self.runner.dp_size *
+                      self.runner.scheduler_config.max_num_seqs)
+        return max(1, min(configured, self.runner.max_num_reqs))
 
     def _validate_runner_capabilities(self) -> None:
         runner = self.runner
@@ -149,10 +165,12 @@ class BlockDiffusionStrategy:
         block_starts: list[int],
         canvases: list[list[int]],
         masks: list[list[bool]] | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, AttentionMetadata]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array,
+               tuple[AttentionMetadata, AttentionMetadata]]:
         runner = self.runner
-        batch_size = runner.max_num_reqs
+        batch_size = self.batch_size
         block_size = self.block_size
+        sub_block_size = self.config.model.sub_block_size
         num_active = len(req_ids)
         if num_active > batch_size:
             raise ValueError("Diffusion batch exceeds max_num_reqs")
@@ -167,10 +185,16 @@ class BlockDiffusionStrategy:
                                   dtype=np.int32)
         query_start_loc[:num_active + 1] = np.arange(
             num_active + 1, dtype=np.int32) * block_size
+        partial_query_start_loc = np.full((batch_size + 1, ),
+                                          num_active * sub_block_size,
+                                          dtype=np.int32)
+        partial_query_start_loc[:num_active + 1] = np.arange(
+            num_active + 1, dtype=np.int32) * sub_block_size
 
         source_block_tables = runner.input_batch.block_table[0].get_cpu_tensor(
         )
-        block_tables = np.zeros_like(source_block_tables)
+        block_tables = np.zeros((batch_size, source_block_tables.shape[1]),
+                                dtype=source_block_tables.dtype)
         offsets = np.arange(block_size, dtype=np.int32)
         for row, (req_id, block_start,
                   row_canvas) in enumerate(zip(req_ids, block_starts,
@@ -204,7 +228,7 @@ class BlockDiffusionStrategy:
 
         request_distribution = np.array([0, 0, num_active], dtype=np.int32)
         (canvas, mask, positions, seq_lens, active_rows, query_start_loc,
-         request_distribution,
+         partial_query_start_loc, request_distribution,
          block_tables) = device_array(self.runner.mesh, (
              canvas,
              mask,
@@ -212,10 +236,11 @@ class BlockDiffusionStrategy:
              seq_lens,
              active_rows,
              query_start_loc,
+             partial_query_start_loc,
              request_distribution,
              block_tables.reshape(-1),
          ))
-        metadata = AttentionMetadata(
+        full_metadata = AttentionMetadata(
             input_positions=positions.reshape(-1),
             block_tables=block_tables,
             seq_lens=seq_lens,
@@ -225,7 +250,19 @@ class BlockDiffusionStrategy:
             attention_mask_spec=AttentionMaskSpec(
                 AttentionMaskKind.BIDIRECTIONAL),
         )
-        return canvas, mask, positions, active_rows, metadata
+        partial_metadata = AttentionMetadata(
+            input_positions=positions[:, :sub_block_size].reshape(-1),
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=partial_query_start_loc,
+            request_distribution=request_distribution,
+            padded_num_reqs=batch_size,
+            attention_mask_spec=AttentionMaskSpec(
+                AttentionMaskKind.BIDIRECTIONAL),
+            replace_cached_kv=True,
+        )
+        return (canvas, mask, positions, active_rows,
+                (full_metadata, partial_metadata))
 
     def _model_forward(
         self,
@@ -234,29 +271,139 @@ class BlockDiffusionStrategy:
         positions: jax.Array,
         kv_caches: Any,
         active_rows: jax.Array,
-        attention_metadata: AttentionMetadata,
+        forward_context: tuple[AttentionMetadata, AttentionMetadata],
     ) -> tuple[jax.Array, Any]:
         del active_rows
+        attention_metadata, _ = forward_context
+        kv_caches, hidden_states = self._run_model(
+            state_leaves,
+            kv_caches,
+            canvas.reshape(-1),
+            positions.reshape(-1),
+            attention_metadata,
+        )
+        logits = self.runner.compute_logits_fn(state_leaves, hidden_states,
+                                               None)
+        return logits.reshape(canvas.shape[0], canvas.shape[1], -1), kv_caches
+
+    def _run_model(
+        self,
+        state_leaves: Any,
+        kv_caches: Any,
+        input_ids: jax.Array,
+        input_positions: jax.Array,
+        attention_metadata: AttentionMetadata,
+    ) -> tuple[Any, jax.Array]:
         runner = self.runner
-        flat_canvas = canvas.reshape(-1)
-        flat_positions = positions.reshape(-1)
         attention_metadata = replace(attention_metadata,
-                                     input_positions=flat_positions)
+                                     input_positions=input_positions)
         kv_caches, hidden_states, _, _ = runner.model_fn_no_options(
             state_leaves,
             kv_caches,
-            flat_canvas,
+            input_ids,
             attention_metadata,
             None,
-            flat_positions,
+            input_positions,
             tuple(runner.layer_name_to_kvcache_index.items()),
             None,
             None,
             runner.is_first_rank,
             runner.is_last_rank,
         )
-        logits = runner.compute_logits_fn(state_leaves, hidden_states, None)
-        return logits.reshape(canvas.shape[0], canvas.shape[1], -1), kv_caches
+        return kv_caches, hidden_states
+
+    def _model_forward_full_subblock(
+        self,
+        state_leaves: Any,
+        canvas: jax.Array,
+        positions: jax.Array,
+        kv_caches: Any,
+        active_rows: jax.Array,
+        forward_context: tuple[AttentionMetadata, AttentionMetadata],
+        start: jax.Array,
+    ) -> tuple[jax.Array, Any]:
+        del active_rows
+        full_metadata, _ = forward_context
+        kv_caches, hidden_states = self._run_model(
+            state_leaves,
+            kv_caches,
+            canvas.reshape(-1),
+            positions.reshape(-1),
+            full_metadata,
+        )
+        selected = select_aligned_hidden_states(
+            hidden_states,
+            canvas.shape[0],
+            canvas.shape[1],
+            start,
+            self.config.model.sub_block_size,
+            self.config.model.logit_alignment,
+            local_alignment=False,
+        )
+        logits = self.runner.compute_logits_fn(state_leaves, selected, None)
+        return logits.reshape(canvas.shape[0],
+                              self.config.model.sub_block_size, -1), kv_caches
+
+    def _model_forward_partial_subblock(
+        self,
+        state_leaves: Any,
+        canvas: jax.Array,
+        positions: jax.Array,
+        kv_caches: Any,
+        active_rows: jax.Array,
+        forward_context: tuple[AttentionMetadata, AttentionMetadata],
+        start: jax.Array,
+    ) -> tuple[jax.Array, Any]:
+        _, partial_metadata = forward_context
+        sub_block_size = self.config.model.sub_block_size
+        partial_canvas = jax.lax.dynamic_slice(
+            canvas, (0, start), (canvas.shape[0], sub_block_size))
+        partial_positions = jax.lax.dynamic_slice(
+            positions, (0, start), (positions.shape[0], sub_block_size))
+        partial_metadata = replace(partial_metadata,
+                                   cache_update_active_rows=active_rows)
+        kv_caches, hidden_states = self._run_model(
+            state_leaves,
+            kv_caches,
+            partial_canvas.reshape(-1),
+            partial_positions.reshape(-1),
+            partial_metadata,
+        )
+        selected = select_aligned_hidden_states(
+            hidden_states,
+            canvas.shape[0],
+            sub_block_size,
+            jnp.array(0, dtype=jnp.int32),
+            sub_block_size,
+            self.config.model.logit_alignment,
+            local_alignment=True,
+        )
+        logits = self.runner.compute_logits_fn(state_leaves, selected, None)
+        return logits.reshape(canvas.shape[0], sub_block_size, -1), kv_caches
+
+    def _model_forward_final(
+        self,
+        state_leaves: Any,
+        canvas: jax.Array,
+        positions: jax.Array,
+        kv_caches: Any,
+        active_rows: jax.Array,
+        forward_context: tuple[AttentionMetadata, AttentionMetadata],
+    ) -> tuple[jax.Array, Any]:
+        del active_rows
+        full_metadata, _ = forward_context
+        kv_caches, hidden_states = self._run_model(
+            state_leaves,
+            kv_caches,
+            canvas.reshape(-1),
+            positions.reshape(-1),
+            full_metadata,
+        )
+        final_hidden = hidden_states.reshape(canvas.shape[0], canvas.shape[1],
+                                             -1)[:, -1, :]
+        logits = self.runner.compute_logits_fn(state_leaves, final_hidden,
+                                               None)
+        return logits, kv_caches
 
     def _forward_blocks(
         self,
@@ -266,7 +413,7 @@ class BlockDiffusionStrategy:
     ) -> np.ndarray:
         canvas, _, positions, active_rows, metadata = self._build_batch(
             req_ids, block_starts, canvases)
-        logits, self.runner.kv_caches = self._forward_fn(
+        logits, self.runner.kv_caches = self._final_forward_fn(
             self.runner.state_leaves,
             canvas,
             positions,
@@ -285,34 +432,88 @@ class BlockDiffusionStrategy:
     ) -> tuple[np.ndarray, np.ndarray]:
         canvas, mask, positions, active_rows, metadata = self._build_batch(
             req_ids, block_starts, canvases, masks)
-        batch_size = self.runner.max_num_reqs
+        batch_size = self.batch_size
         thresholds = jnp.full(
             (batch_size, ),
             self.config.runtime.confidence_threshold,
             dtype=jnp.float32,
         )
         temperatures = jnp.zeros((batch_size, ), dtype=jnp.float32)
-        output = denoise_block(
-            self._forward_fn,
-            self._commit_fn,
-            self.runner.state_leaves,
-            canvas,
-            mask,
-            positions,
-            self.runner.kv_caches,
-            active_rows,
-            thresholds,
-            temperatures,
-            metadata,
-            mask_token_id=self.config.model.mask_token_id,
-            logit_alignment=self.config.model.logit_alignment,
-            next_block_policy=self.config.model.next_block_policy,
-            sub_block_size=self.config.model.sub_block_size,
-            max_denoise_steps=self.config.runtime.max_denoise_steps,
-        )
+        if self.config.runtime.use_dual_cache:
+            output = denoise_block_dual_cache(
+                self._full_subblock_forward_fn,
+                self._partial_subblock_forward_fn,
+                self._final_forward_fn,
+                self._commit_fn,
+                self.runner.state_leaves,
+                canvas,
+                mask,
+                positions,
+                self.runner.kv_caches,
+                active_rows,
+                thresholds,
+                temperatures,
+                metadata,
+                mask_token_id=self.config.model.mask_token_id,
+                logit_alignment=self.config.model.logit_alignment,
+                next_block_policy=self.config.model.next_block_policy,
+                sub_block_size=self.config.model.sub_block_size,
+                max_denoise_steps=self.config.runtime.max_denoise_steps,
+            )
+        else:
+            output = denoise_block(
+                self._forward_fn,
+                self._commit_fn,
+                self.runner.state_leaves,
+                canvas,
+                mask,
+                positions,
+                self.runner.kv_caches,
+                active_rows,
+                thresholds,
+                temperatures,
+                metadata,
+                mask_token_id=self.config.model.mask_token_id,
+                logit_alignment=self.config.model.logit_alignment,
+                next_block_policy=self.config.model.next_block_policy,
+                sub_block_size=self.config.model.sub_block_size,
+                max_denoise_steps=self.config.runtime.max_denoise_steps,
+            )
         self.runner.kv_caches = output.kv_caches
-        canvas_host, anchors_host = jax.device_get(
-            (output.canvas[:len(req_ids)], output.next_anchor[:len(req_ids)]))
+        if self.config.runtime.use_dual_cache:
+            (canvas_host, anchors_host, denoise_steps_host, q32_calls_host,
+             q8_calls_host) = jax.device_get((
+                 output.canvas[:len(req_ids)],
+                 output.next_anchor[:len(req_ids)],
+                 output.denoise_steps[:len(req_ids)],
+                 output.q32_forward_calls,
+                 output.q8_forward_calls,
+             ))
+            q32_calls = int(q32_calls_host)
+            q8_calls = int(q8_calls_host)
+            static_transformer_positions = self.batch_size * (
+                q32_calls * self.block_size
+                + q8_calls * self.config.model.sub_block_size)
+            static_lm_head_positions = self.batch_size * (
+                (q32_calls - 1 + q8_calls) *
+                self.config.model.sub_block_size + 1)
+            self._last_denoise_trace = {
+                "active_requests": len(req_ids),
+                "static_batch_rows": self.batch_size,
+                "q32_forward_calls": q32_calls,
+                "q8_forward_calls": q8_calls,
+                "static_transformer_positions": static_transformer_positions,
+                "static_lm_head_positions": static_lm_head_positions,
+                "denoise_steps": np.asarray(denoise_steps_host).tolist(),
+            }
+            logger.info("Fast-dLLM DualCache trace: %s",
+                        self._last_denoise_trace)
+        else:
+            canvas_host, anchors_host = jax.device_get((
+                output.canvas[:len(req_ids)],
+                output.next_anchor[:len(req_ids)],
+            ))
+            self._last_denoise_trace = None
         return np.asarray(canvas_host), np.asarray(anchors_host)
 
     def _process_prefill(self, req_ids: list[str]) -> dict[str, list[int]]:
@@ -354,7 +555,7 @@ class BlockDiffusionStrategy:
                 [block_index * self.block_size] * len(group),
                 canvases,
             )
-            anchors = np.argmax(logits[:, -1, :], axis=-1)
+            anchors = np.argmax(logits, axis=-1)
             for row, req_id in enumerate(group):
                 plan = plans[req_id]
                 if (plan.remainder_size == 0
@@ -516,7 +717,7 @@ class BlockDiffusionStrategy:
                                                                            [],
                                                                            [],
                                                                            [])
-        logits, self.runner.kv_caches = self._forward_fn(
+        logits, self.runner.kv_caches = self._final_forward_fn(
             self.runner.state_leaves,
             canvas,
             positions,
@@ -525,27 +726,49 @@ class BlockDiffusionStrategy:
             metadata,
         )
         thresholds = jnp.full(
-            (self.runner.max_num_reqs, ),
+            (self.batch_size, ),
             self.config.runtime.confidence_threshold,
             dtype=jnp.float32,
         )
-        output = denoise_block(
-            self._forward_fn,
-            self._commit_fn,
-            self.runner.state_leaves,
-            canvas,
-            mask,
-            positions,
-            self.runner.kv_caches,
-            active_rows,
-            thresholds,
-            jnp.zeros_like(thresholds),
-            metadata,
-            mask_token_id=self.config.model.mask_token_id,
-            logit_alignment=self.config.model.logit_alignment,
-            next_block_policy=self.config.model.next_block_policy,
-            sub_block_size=self.config.model.sub_block_size,
-            max_denoise_steps=self.config.runtime.max_denoise_steps,
-        )
+        if self.config.runtime.use_dual_cache:
+            output = denoise_block_dual_cache(
+                self._full_subblock_forward_fn,
+                self._partial_subblock_forward_fn,
+                self._final_forward_fn,
+                self._commit_fn,
+                self.runner.state_leaves,
+                canvas,
+                mask,
+                positions,
+                self.runner.kv_caches,
+                active_rows,
+                thresholds,
+                jnp.zeros_like(thresholds),
+                metadata,
+                mask_token_id=self.config.model.mask_token_id,
+                logit_alignment=self.config.model.logit_alignment,
+                next_block_policy=self.config.model.next_block_policy,
+                sub_block_size=self.config.model.sub_block_size,
+                max_denoise_steps=self.config.runtime.max_denoise_steps,
+            )
+        else:
+            output = denoise_block(
+                self._forward_fn,
+                self._commit_fn,
+                self.runner.state_leaves,
+                canvas,
+                mask,
+                positions,
+                self.runner.kv_caches,
+                active_rows,
+                thresholds,
+                jnp.zeros_like(thresholds),
+                metadata,
+                mask_token_id=self.config.model.mask_token_id,
+                logit_alignment=self.config.model.logit_alignment,
+                next_block_policy=self.config.model.next_block_policy,
+                sub_block_size=self.config.model.sub_block_size,
+                max_denoise_steps=self.config.runtime.max_denoise_steps,
+            )
         self.runner.kv_caches = output.kv_caches
         jax.block_until_ready((logits, output.canvas))

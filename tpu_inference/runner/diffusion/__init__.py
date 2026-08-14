@@ -21,9 +21,10 @@ from tpu_inference.runner.diffusion.config import (
     GenerationStrategyConfig, LogitAlignment, NextBlockPolicy,
     PromptRemainderPolicy, register_diffusion_model_adapter,
     resolve_generation_strategy)
-from tpu_inference.runner.diffusion.program import (BlockForwardFn,
-                                                    DenoiseBlockOutput,
-                                                    denoise_block)
+from tpu_inference.runner.diffusion.program import (
+    AlignedSubBlockForwardFn, BlockForwardFn, DenoiseBlockOutput,
+    DualCacheDenoiseBlockOutput, FinalBlockForwardFn, denoise_block,
+    denoise_block_dual_cache, select_aligned_hidden_states)
 
 from tpu_inference.runner.diffusion.batch import (  # isort: skip
     PendingBlockOutput, PromptBlockPlan, complete_seeded_decode_block,
@@ -33,16 +34,19 @@ from tpu_inference.runner.diffusion.batch import (  # isort: skip
 
 __all__ = [
     "AttentionPolicy",
+    "AlignedSubBlockForwardFn",
     "BlockForwardFn",
     "CanvasPolicy",
     "CommitFn",
     "DenoiseBlockOutput",
+    "DualCacheDenoiseBlockOutput",
     "DiffusionAlgorithm",
     "DiffusionConfig",
     "DiffusionModelSpec",
     "DiffusionRuntimeConfig",
     "GenerationStrategy",
     "GenerationStrategyConfig",
+    "FinalBlockForwardFn",
     "LogitAlignment",
     "NextBlockPolicy",
     "PendingBlockOutput",
@@ -50,6 +54,7 @@ __all__ = [
     "PromptRemainderPolicy",
     "complete_seeded_decode_block",
     "denoise_block",
+    "denoise_block_dual_cache",
     "flush_partial_block_output",
     "get_commit_algorithm",
     "low_confidence_commit",
@@ -57,5 +62,6 @@ __all__ = [
     "required_cache_end",
     "register_diffusion_model_adapter",
     "resolve_generation_strategy",
+    "select_aligned_hidden_states",
     "start_partial_block_output",
 ]
