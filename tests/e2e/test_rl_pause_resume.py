@@ -25,12 +25,6 @@
 #   2. Requests submitted during a pause are queued, not aborted.
 #   3. Rotating cache_salt stops a new policy from reusing the old policy's
 #      blocks, while leaving reuse within a policy intact.
-#
-# (3) is the invariant the whole design rests on and nothing in the engine
-# enforces it: cache_salt is a per-request field the caller supplies, and the
-# engine's weight_version never reaches the block hasher. If it silently
-# stopped working, an RL run would keep producing plausible rewards computed
-# against stale KV.
 
 from __future__ import annotations
 
