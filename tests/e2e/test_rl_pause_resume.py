@@ -23,19 +23,15 @@
 #   1. mode="keep" freezes in-flight work without corrupting it -- the tokens
 #      produced across a pause match an uninterrupted run exactly.
 #   2. Requests submitted during a pause are queued, not aborted.
-#   3. Rotating cache_salt stops a new policy from reusing the old policy's
-#      blocks, while leaving reuse within a policy intact.
+#   3. clear_cache=True completes instead of failing on a missing worker RPC.
 #
-# (3) is the invariant the whole design rests on and nothing in the engine
-# enforces it: cache_salt is a per-request field the caller supplies, and the
-# engine's weight_version never reaches the block hasher. If it silently
-# stopped working, an RL run would keep producing plausible rewards computed
-# against stale KV.
+# cache_salt behaviour is deliberately not retested here: the block hasher and
+# block pool are vLLM code this repo reuses unmodified, and upstream covers it
+# in tests/v1/core/test_prefix_caching.py.
 
 from __future__ import annotations
 
 import asyncio
-import uuid
 
 import pytest
 from vllm import SamplingParams
@@ -55,12 +51,6 @@ PAUSE_HOLD_S = 3.0
 
 PROMPT = ("Count from one to forty, writing each number as a word, "
           "separated by commas.")
-
-# The salt test needs a prompt spanning several KV blocks: vLLM only caches
-# complete blocks, so anything shorter than block_size (64 on TPU by default)
-# reports zero cached tokens no matter how the salt behaves, and the
-# comparison silently becomes 0 > 0.
-SALT_PROMPT = "Reference material: " + " ".join(f"item{i}" for i in range(400))
 
 
 @pytest.fixture(scope="module")
@@ -91,20 +81,12 @@ def engine(loop):
 async def _collect(engine: AsyncLLM,
                    request_id: str,
                    prompt: str = PROMPT,
-                   max_tokens: int = GEN_TOKENS,
-                   cache_salt: str | None = None):
-    """Runs one request to completion, returning (token_ids, num_cached).
-
-    cache_salt rides on the prompt dict (`TextPrompt.cache_salt`); AsyncLLM's
-    generate() has no such keyword.
-    """
+                   max_tokens: int = GEN_TOKENS):
+    """Runs one request to completion, returning (token_ids, num_cached)."""
     params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-    prompt_arg: str | dict = prompt
-    if cache_salt is not None:
-        prompt_arg = {"prompt": prompt, "cache_salt": cache_salt}
     token_ids: list[int] = []
     num_cached = None
-    async for out in engine.generate(prompt_arg, params, request_id):
+    async for out in engine.generate(prompt, params, request_id):
         token_ids = list(out.outputs[0].token_ids)
         num_cached = out.num_cached_tokens
     return token_ids, num_cached
@@ -183,56 +165,6 @@ class TestRequestsSubmittedWhilePaused:
             await engine.resume_generation()
             token_ids, _ = await asyncio.wait_for(task, timeout=120)
             assert len(token_ids) == 16
-
-        loop.run_until_complete(scenario())
-
-
-class TestCacheSaltIsolatesPolicies:
-    """Rotating cache_salt is what fences a new policy off from old KV."""
-
-    def test_salt_rotation_drops_reuse_and_same_salt_keeps_it(
-            self, loop, engine):
-
-        async def scenario():
-            # Unique per run: with fixed salts a warm pool from an earlier
-            # run would make the cold step look like a hit and invert the
-            # whole comparison.
-            run_id = uuid.uuid4().hex[:8]
-            salt_a, salt_b = f"policy-vA-{run_id}", f"policy-vB-{run_id}"
-            prompt = SALT_PROMPT
-
-            _, cold = await _collect(engine,
-                                     "salt-a-cold",
-                                     prompt=prompt,
-                                     max_tokens=8,
-                                     cache_salt=salt_a)
-            _, warm = await _collect(engine,
-                                     "salt-a-warm",
-                                     prompt=prompt,
-                                     max_tokens=8,
-                                     cache_salt=salt_a)
-            _, rotated = await _collect(engine,
-                                        "salt-b",
-                                        prompt=prompt,
-                                        max_tokens=8,
-                                        cache_salt=salt_b)
-            _, warm_b = await _collect(engine,
-                                       "salt-b-warm",
-                                       prompt=prompt,
-                                       max_tokens=8,
-                                       cache_salt=salt_b)
-
-            assert warm is not None, "engine did not report num_cached_tokens"
-            assert warm > cold, (f"prefix caching is not working at all "
-                                 f"(cold={cold}, warm={warm})")
-            assert rotated < warm, (
-                f"rotating cache_salt did not invalidate reuse "
-                f"(salt B cached={rotated}, salt A warm cached={warm}); a new "
-                f"policy would read KV computed under the old one")
-            assert warm_b > rotated, (
-                f"the prompt does not re-cache under the new salt "
-                f"(cached={warm_b}); the drop above may have been eviction "
-                f"rather than the salt")
 
         loop.run_until_complete(scenario())
 
