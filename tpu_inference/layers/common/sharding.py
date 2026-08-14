@@ -168,16 +168,30 @@ ShardingAxisName = LazyShardingAxisName()
 
 
 def is_attn_dp(mesh: Mesh) -> bool:
-    """Whether attention data-parallelism is active on ``mesh``.
+    """Whether attention data parallelism proper is active on ``mesh``.
 
-    True when the attention-data axes carry a factor beyond plain data
-    parallelism (i.e. ``attn_dp`` * ``attn_dp_expert`` > 1), meaning attention
-    is replicated over more data-parallel shards than the MLP/data axis alone.
+    True when the token stream is split into independent request groups
+    beyond plain data parallelism (``attn_dp`` * ``attn_dp_expert`` > 1).
+    'pcp' does not count: it splits within a request, not across requests
+    — use is_attn_replicated for that.
     """
-    attn_dp_size = utils.get_mesh_shape_product(mesh,
-                                                ShardingAxisName.ATTN_DATA)
+    seq_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.SEQUENCE)
     dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
-    return (attn_dp_size // dp_size) > 1
+    return (seq_size // dp_size) > 1
+
+
+def is_attn_replicated(mesh: Mesh) -> bool:
+    """Whether attention weights are replicated over extra mesh axes.
+
+    True when attention-domain tokens are distributed across more ranks
+    than the MLP data axis (``attn_dp``, ``attn_dp_expert``, or ``pcp``
+    > 1); MoE outputs must then be scattered back to the attention layout
+    rather than late-reduced.
+    """
+    attn_data_size = utils.get_mesh_shape_product(mesh,
+                                                  ShardingAxisName.ATTN_DATA)
+    dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
+    return (attn_data_size // dp_size) > 1
 
 
 @dataclass

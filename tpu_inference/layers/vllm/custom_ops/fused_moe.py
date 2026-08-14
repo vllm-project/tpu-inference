@@ -21,7 +21,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.common.sharding import ShardingAxisName, is_attn_dp
+from tpu_inference.layers.common.sharding import (ShardingAxisName,
+                                                  is_attn_dp,
+                                                  is_attn_replicated)
 from tpu_inference.layers.vllm.interface.moe import \
     select_moe_backend_from_fused_moe_config
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -95,7 +97,7 @@ class VllmMoERunner(MoERunner):
         if self._shared_experts is None:
             return True
 
-        if is_attn_dp(mesh) or self.moe_config.is_sequence_parallel:
+        if is_attn_replicated(mesh) or self.moe_config.is_sequence_parallel:
             return True
 
         moe_backend = select_moe_backend_from_fused_moe_config(self.moe_config)
@@ -135,13 +137,12 @@ class VllmMoERunner(MoERunner):
 
         # True attention-DP shards tokens over the SEQUENCE axes and reduces
         # shared+fused together in the model's reduce-scatter pass. PCP also
-        # makes is_attn_dp() true (it lives on ATTN_DATA) but has no such
-        # model pass, so the shared expert must still be reduced here.
-        _true_attn_dp = get_mesh_shape_product(
-            mesh, ShardingAxisName.SEQUENCE) > 1
+        # makes is_attn_replicated() true (it lives on ATTN_DATA) but has
+        # no such model pass, so the shared expert must still be reduced
+        # here — hence the strict is_attn_dp.
         if (shared_output is not None and fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel
-                and not _true_attn_dp):
+                and not is_attn_dp(mesh)):
             shared_output = _all_reduce_over_tp(shared_output, mesh)
         return shared_output
 
@@ -166,7 +167,7 @@ class VllmMoERunner(MoERunner):
         if output_is_reduced is None:
             output_is_reduced = self._fused_output_is_reduced
 
-        is_dp = is_attn_dp(mesh)
+        is_dp = is_attn_replicated(mesh)
         is_sequence_parallel = self.moe_config.is_sequence_parallel
 
         if not is_dp and not is_sequence_parallel and not output_is_reduced:

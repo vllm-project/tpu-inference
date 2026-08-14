@@ -50,7 +50,7 @@ class TestFusedOutputIsReduced:
     def test_true_under_attention_dp(self):
         runner = _make_runner(shared_experts=object())
         with patch.object(fm, "_get_mesh", return_value=object()), \
-             patch.object(fm, "is_attn_dp", return_value=True):
+             patch.object(fm, "is_attn_replicated", return_value=True):
             assert runner._fused_output_is_reduced is True
 
     @pytest.mark.parametrize("backend", [MoEBackend.GMM_EP, MoEBackend.GMM_TP])
@@ -62,7 +62,7 @@ class TestFusedOutputIsReduced:
         # order of the checks -- the DP short-circuit must precede the GMM ones.
         runner = _make_runner(shared_experts=object())
         with patch.object(fm, "_get_mesh", return_value=object()), \
-             patch.object(fm, "is_attn_dp", return_value=True), \
+             patch.object(fm, "is_attn_replicated", return_value=True), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
                           return_value=backend), \
              patch.object(fm, "_gmm_and_shared_reduce_over_same_axes",
@@ -79,7 +79,7 @@ class TestFusedOutputIsReduced:
     def test_true_for_non_gmm_backends(self, backend):
         # Only GMM_EP / GMM_TP defer the all-reduce; others always reduce.
         runner = _make_runner(shared_experts=object())
-        with patch.object(fm, "is_attn_dp", return_value=False), \
+        with patch.object(fm, "is_attn_replicated", return_value=False), \
              patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
                           return_value=backend):
@@ -88,7 +88,7 @@ class TestFusedOutputIsReduced:
     @pytest.mark.parametrize("backend", [MoEBackend.GMM_EP, MoEBackend.GMM_TP])
     def test_true_when_gmm_reduces_different_axes(self, backend):
         runner = _make_runner(shared_experts=object())
-        with patch.object(fm, "is_attn_dp", return_value=False), \
+        with patch.object(fm, "is_attn_replicated", return_value=False), \
              patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
                           return_value=backend), \
@@ -101,7 +101,7 @@ class TestFusedOutputIsReduced:
     @pytest.mark.parametrize("backend", [MoEBackend.GMM_EP, MoEBackend.GMM_TP])
     def test_false_when_all_conditions_met(self, backend):
         runner = _make_runner(shared_experts=object())
-        with patch.object(fm, "is_attn_dp", return_value=False), \
+        with patch.object(fm, "is_attn_replicated", return_value=False), \
              patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "select_moe_backend_from_fused_moe_config",
                           return_value=backend), \
@@ -172,11 +172,30 @@ class TestMaybeReduceSharedExpertOutput:
         reduced = torch.full((2, 3), 7.0)
         mesh = object()
         with patch.object(fm, "_get_mesh", return_value=mesh), \
+             patch.object(fm, "is_attn_replicated", return_value=True), \
              patch.object(fm, "is_attn_dp", return_value=True), \
              patch.object(fm, "_all_reduce_over_tp",
                           return_value=reduced) as reduce:
             runner._maybe_reduce_shared_expert_output(shared)
         reduce.assert_not_called()
+
+    def test_reduces_shared_output_under_pcp(self):
+        # PCP replicates attention weights (is_attn_replicated) without true
+        # attention DP: the fused kernel reduces its own output but there is
+        # no model reduce-scatter pass for the shared expert, so it must
+        # still be reduced here.
+        runner = _make_runner(shared_experts=object())
+        shared = torch.ones(2, 3)
+        reduced = torch.full((2, 3), 7.0)
+        mesh = object()
+        with patch.object(fm, "_get_mesh", return_value=mesh), \
+             patch.object(fm, "is_attn_replicated", return_value=True), \
+             patch.object(fm, "is_attn_dp", return_value=False), \
+             patch.object(fm, "_all_reduce_over_tp",
+                          return_value=reduced) as reduce:
+            out = runner._maybe_reduce_shared_expert_output(shared)
+        reduce.assert_called_once_with(shared, mesh)
+        assert out is reduced
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +209,7 @@ class TestMaybeReduceFinalOutput:
         runner = _make_runner()
         states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
         with patch.object(fm, "_get_mesh", return_value=object()), \
-             patch.object(fm, "is_attn_dp", return_value=True), \
+             patch.object(fm, "is_attn_replicated", return_value=True), \
              patch.object(fm, "_all_reduce_over_tp") as reduce:
             out = runner._maybe_reduce_final_output(states, trunc_size=3)
         reduce.assert_not_called()
@@ -200,7 +219,7 @@ class TestMaybeReduceFinalOutput:
         runner = _make_runner(is_sequence_parallel=True)
         states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
         with patch.object(fm, "_get_mesh", return_value=object()), \
-             patch.object(fm, "is_attn_dp", return_value=False), \
+             patch.object(fm, "is_attn_replicated", return_value=False), \
              patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=False), \
              patch.object(fm, "_all_reduce_over_tp") as reduce:
@@ -214,7 +233,7 @@ class TestMaybeReduceFinalOutput:
         runner = _make_runner()
         states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
         with patch.object(fm, "_get_mesh", return_value=object()), \
-             patch.object(fm, "is_attn_dp", return_value=False), \
+             patch.object(fm, "is_attn_replicated", return_value=False), \
              patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=True), \
              patch.object(fm, "_all_reduce_over_tp") as reduce:
@@ -228,7 +247,7 @@ class TestMaybeReduceFinalOutput:
         reduced = torch.arange(100, 108, dtype=torch.float32).reshape(2, 4)
         mesh = object()
         with patch.object(fm, "_get_mesh", return_value=mesh), \
-             patch.object(fm, "is_attn_dp", return_value=False), \
+             patch.object(fm, "is_attn_replicated", return_value=False), \
              patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=False), \
              patch.object(fm, "_all_reduce_over_tp",
