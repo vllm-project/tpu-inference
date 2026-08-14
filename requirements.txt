@@ -24,4 +24,11 @@ gcsfs==2026.1.0
 hypothesis==6.151.9
 sortedcontainers==2.4.0
 # Upstream pins to 5.5.3 https://github.com/vllm-project/vllm/blob/de3fe8dc62f3d77eb8dab8125ca90436f606bccb/requirements/test/nightly-torch.txt#L32
-transformers>=5.8.0
+# transformers 5.15.0 turns Gemma4 head_dim into a per-layer attribute: reading it off
+# the global config raises AmbiguousGlobalPerLayerAttributeError, both in vLLM's
+# Gemma4ModelArchConfigConvertor.get_head_size (fixed upstream in
+# https://github.com/vllm-project/vllm/pull/49797, not yet in our LKG) and in
+# tpu_inference/models/jax/gemma4.py which reads config.head_dim/global_head_dim.
+# TODO(cuiq): remove the cap once the vLLM LKG includes #49797 and the JAX Gemma4
+# model reads per-layer configs.
+transformers>=5.8.0,<5.15.0
