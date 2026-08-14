@@ -219,8 +219,12 @@ so they serialise. Their combined runtime is essentially their wall-clock span �
 15.6 minutes of work in a 16.2 minute window for `clone` — where the
 single-chip steps overlap freely.
 
-That queue is capacity, not contention with the other shape, and a second
-eight-chip node would remove most of it. Whether it is worth one is a separate
+That queue is mostly capacity rather than contention with the other shape -
+though not purely. Later builds log `Preempted to accommodate a workload due
+to reclamation within the cohort` and `insufficient unused quota for
+google.com/tpu in flavor v6e`, so reclamation does occur: thirteen steps
+wanting 48 chip-equivalents against a cohort of 18 oversubscribe it. A second
+eight-chip node would remove most of the queue. Whether it is worth one is a separate
 question: those five steps total about 15 node-minutes per suite.
 
 ### Nodes are created for most steps
@@ -367,6 +371,51 @@ cron whose failure is silent.
 
 The 43 chip-minute gap between them is the price of not owning that machinery.
 
+## Kubernetes cannot seed its own cache
+
+Every figure above reads a cache bare metal filled. Asked to build one from
+nothing, the same configuration does not get there.
+
+Starting from an empty namespace, three consecutive runs of the same 13 steps:
+
+| | sum | vs bare metal |
+|---|---|---|
+| bare metal | 102.8 | 1.00x |
+| fuse, bare-metal-seeded ([200](https://buildkite.com/tpu-commons/kube-dev/builds/200)) | 95.3 | 0.93x |
+| fuse, self-built pass 1 ([216](https://buildkite.com/tpu-commons/kube-dev/builds/216)) | 128.6 | 1.25x |
+| fuse, self-built pass 2 ([217](https://buildkite.com/tpu-commons/kube-dev/builds/217)) | **127.7** | **1.24x** |
+
+128.6 to 127.7 is a plateau, not a warm-up curve. The cold run
+([215](https://buildkite.com/tpu-commons/kube-dev/builds/215)) cost 217.5 minutes across the nine steps that produced
+timings.
+
+**Write-through itself works** - the namespace went from zero to 819 entries.
+The problem is scale: the seeded cache holds **24,439**. Three passes of the
+per-push suite produce 3% of it.
+
+**The shortfall is concentrated in one step.** Speculative decoding runs an
+identical test set either way - `11 passed, 21 deselected` - in 1699s seeded
+and 3440s self-built, and 58.1 then 58.0 across the two passes. Every other
+step is within a couple of minutes. Neither run logs compilation markers at
+default verbosity, so this is not attributed, only located.
+
+The likely explanation is that the subset consumes entries it does not
+produce. Cache keys are content-addressed over HLO, and steps compile
+overlapping modules, so the nightly's part2, kernels and MLPerf variants
+populate entries the per-push steps also hit. That fits both the 819 against
+24,439 and the plateau, and it is untested.
+
+**What it means for the recommendation.** `clone` was rejected earlier for
+borrowing its performance from whatever fills the bucket. `fuse` has the same
+dependency; it is only less visible, because the mount is writable and looks
+self-sufficient. Neither stands alone on a per-push suite.
+
+The operating model this points at is the one sketched under "What changes
+when bare metal goes away": the nightly run is the cache producer, because it
+is the only thing that exercises the full surface, and per-push runs consume
+what it leaves. Testing that is one `NIGHTLY=1` run against the self-built
+namespace followed by a 13-step run.
+
 ## What changes when bare metal goes away
 
 **Age-based retention starts deleting live entries.** The bucket has a four-day
@@ -408,8 +457,13 @@ matching `429` anywhere in the logs. The true count was zero. The claim that
 downloading models is "fast but not viable" rested on it and did not survive
 checking.
 
-**`JAX unit tests part2` has never produced a valid number.** Evicted by the
-cluster autoscaler in builds [175](https://buildkite.com/tpu-commons/kube-dev/builds/175) and [178](https://buildkite.com/tpu-commons/kube-dev/builds/178) — job pods are evictable by default and
+**`JAX unit tests part2` has never produced a valid number**, and its
+durations are lower bounds rather than completed runs: it executes under
+`pytest -x`, so a single failure ends it early. In [203](https://buildkite.com/tpu-commons/kube-dev/builds/203) it stopped
+after 1796 of its tests on an environment assumption - GKE injects
+TPU_ACCELERATOR_TYPE into every TPU pod and the test asserted it absent.
+Before that it was evicted by the cluster autoscaler in builds [175](https://buildkite.com/tpu-commons/kube-dev/builds/175)
+and [178](https://buildkite.com/tpu-commons/kube-dev/builds/178) — job pods are evictable by default and
 it is the only step still running when a build drains — and cold-cached in 180.
 
 Every configuration's steps were checked for identical pytest counts before
