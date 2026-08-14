@@ -377,17 +377,67 @@ def _denoise_block_dual_cache_jit(
                 remaining,
                 token_ids,
                 jnp.array(1, dtype=jnp.int32),
+                q32_calls + 1,
                 q8_calls,
             )
 
-            def has_work(state):
-                _, _, _, _, remaining, _, iteration, _ = state
+            def needs_full_refresh(state):
+                _, _, _, _, remaining, _, iteration, _, _ = state
                 return ((iteration < steps_per_sub_block)
-                        & jnp.any(remaining))
+                        & jnp.any(remaining[:, 0]))
+
+            def full_refresh_step(state):
+                (current_sub_canvas, current_sub_mask, current_steps,
+                 current_kv, remaining, _, iteration, current_q32_calls,
+                 current_q8_calls) = state
+                current_canvas = jax.lax.dynamic_update_slice(
+                    canvas, current_sub_canvas, (0, start))
+                row_has_work = jnp.any(remaining, axis=-1)
+                with jax.named_scope("diffusion_dual_cache_q32"):
+                    logits, current_kv = full_forward_fn(
+                        model_state,
+                        current_canvas,
+                        positions,
+                        current_kv,
+                        row_has_work,
+                        forward_context,
+                        start,
+                    )
+                token_ids, next_remaining = commit_fn(
+                    logits,
+                    remaining,
+                    row_has_work,
+                    confidence_threshold,
+                    temperature,
+                    mask_token_id,
+                )
+                committed = remaining & ~next_remaining
+                current_sub_canvas = jnp.where(committed, token_ids,
+                                               current_sub_canvas)
+                current_sub_mask &= ~committed
+                current_steps += row_has_work.astype(jnp.int32)
+                return (
+                    current_sub_canvas,
+                    current_sub_mask,
+                    current_steps,
+                    current_kv,
+                    next_remaining,
+                    token_ids,
+                    iteration + 1,
+                    current_q32_calls + 1,
+                    current_q8_calls,
+                )
+
+            state = jax.lax.while_loop(needs_full_refresh, full_refresh_step,
+                                       state)
+
+            def has_work(state):
+                _, _, _, _, remaining, _, iteration, _, _ = state
+                return ((iteration < steps_per_sub_block) & jnp.any(remaining))
 
             def denoise_step(state):
                 (current_sub_canvas, current_sub_mask, current_steps,
-                 current_kv, remaining, _, iteration,
+                 current_kv, remaining, _, iteration, current_q32_calls,
                  current_q8_calls) = state
                 current_canvas = jax.lax.dynamic_update_slice(
                     canvas, current_sub_canvas, (0, start))
@@ -423,21 +473,22 @@ def _denoise_block_dual_cache_jit(
                     next_remaining,
                     token_ids,
                     iteration + 1,
+                    current_q32_calls,
                     current_q8_calls + 1,
                 )
 
             state = jax.lax.while_loop(has_work, denoise_step, state)
             (next_sub_canvas, next_sub_mask, next_steps, next_kv, remaining,
-             last_tokens, _, next_q8_calls) = state
+             last_tokens, _, next_q32_calls, next_q8_calls) = state
             next_sub_canvas = jnp.where(remaining, last_tokens,
                                         next_sub_canvas)
             next_sub_mask &= ~remaining
-            next_canvas = jax.lax.dynamic_update_slice(
-                canvas, next_sub_canvas, (0, start))
+            next_canvas = jax.lax.dynamic_update_slice(canvas, next_sub_canvas,
+                                                       (0, start))
             next_mask = jax.lax.dynamic_update_slice(mask, next_sub_mask,
                                                      (0, start))
             return (next_canvas, next_mask, next_steps, next_kv,
-                    q32_calls + 1, next_q8_calls)
+                    next_q32_calls, next_q8_calls)
 
         return jax.lax.cond(jnp.any(eligible), work, no_work, operand=None)
 
@@ -506,7 +557,7 @@ def denoise_block_dual_cache(
     sub_block_size: int,
     max_denoise_steps: int = 0,
 ) -> DualCacheDenoiseBlockOutput:
-    """Denoise with one q32 refresh followed by cached q8 replacements."""
+    """Denoise with aligned q32 refreshes followed by q8 replacements."""
     if initial_canvas.ndim != 2:
         raise ValueError("initial_canvas must have shape [batch, block_size]")
     if initial_mask.shape != initial_canvas.shape:

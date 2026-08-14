@@ -362,8 +362,8 @@ def test_dual_cache_uses_q32_once_then_q8_for_each_sub_block():
                            dtype=jnp.float32)
         return logits, kv_caches.at[0].add(1)
 
-    def partial_forward(model_state, canvas, positions, kv_caches,
-                        active_rows, forward_context, start):
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
         del model_state, positions, active_rows, forward_context, start
         logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
                            dtype=jnp.float32)
@@ -375,8 +375,8 @@ def test_dual_cache_uses_q32_once_then_q8_for_each_sub_block():
         logits = jnp.zeros((canvas.shape[0], 4), dtype=jnp.float32)
         return logits, kv_caches.at[2].add(1)
 
-    initial_canvas = jnp.array(
-        [[0] + [mask_token_id] * (block_size - 1)], dtype=jnp.int32)
+    initial_canvas = jnp.array([[0] + [mask_token_id] * (block_size - 1)],
+                               dtype=jnp.int32)
     initial_mask = initial_canvas == mask_token_id
     output = denoise_block_dual_cache(
         full_forward,
@@ -407,6 +407,61 @@ def test_dual_cache_uses_q32_once_then_q8_for_each_sub_block():
         output.q8_forward_calls) * sub_block_size == 376
 
 
+def test_dual_cache_keeps_q32_until_shifted_sub_block_anchor_is_committed():
+    mask_token_id = 3
+    sub_block_size = 2
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context
+        first_call_for_second_sub_block = (start == 2) & (kv_caches[0] == 1)
+        confident_position = jnp.where(first_call_for_second_sub_block, 1, 0)
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        logits = logits.at[:, confident_position, 0].set(20.0)
+        return logits, kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, positions, active_rows, forward_context
+        logits = jnp.zeros((canvas.shape[0], 4), dtype=jnp.float32)
+        return logits, kv_caches.at[2].add(1)
+
+    initial_canvas = jnp.array(
+        [[0, mask_token_id, mask_token_id, mask_token_id]], dtype=jnp.int32)
+    output = denoise_block_dual_cache(
+        full_forward,
+        partial_forward,
+        final_forward,
+        low_confidence_commit,
+        None,
+        initial_canvas,
+        initial_canvas == mask_token_id,
+        jnp.arange(4, dtype=jnp.int32)[None, :],
+        jnp.zeros((3, ), dtype=jnp.int32),
+        jnp.array([True]),
+        _thresholds(1, value=0.9),
+        _temperatures(1),
+        None,
+        logit_alignment=LogitAlignment.SHIFTED,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=sub_block_size,
+    )
+
+    np.testing.assert_array_equal(output.canvas, [[0, 0, 0, 0]])
+    np.testing.assert_array_equal(output.kv_caches, [3, 0, 1])
+    assert int(output.q32_forward_calls) == 4
+    assert int(output.q8_forward_calls) == 0
+
+
 def test_dual_cache_partial_forward_receives_only_rows_with_work():
 
     def full_forward(model_state, canvas, positions, kv_caches, active_rows,
@@ -415,8 +470,8 @@ def test_dual_cache_partial_forward_receives_only_rows_with_work():
         logits = jnp.zeros((canvas.shape[0], 4, 4), dtype=jnp.float32)
         return logits, kv_caches.at[0].add(jnp.sum(active_rows))
 
-    def partial_forward(model_state, canvas, positions, kv_caches,
-                        active_rows, forward_context, start):
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
         del model_state, positions, forward_context, start
         logits = jnp.zeros((canvas.shape[0], 4, 4), dtype=jnp.float32)
         return logits, kv_caches.at[1].add(jnp.sum(active_rows))
@@ -433,8 +488,7 @@ def test_dual_cache_partial_forward_receives_only_rows_with_work():
         low_confidence_commit,
         None,
         jnp.array([[0, 3, 2, 1], [0, 3, 3, 3]], dtype=jnp.int32),
-        jnp.array([[False, True, False, False],
-                   [False, True, True, True]]),
+        jnp.array([[False, True, False, False], [False, True, True, True]]),
         jnp.tile(jnp.arange(4, dtype=jnp.int32), (2, 1)),
         jnp.zeros((2, ), dtype=jnp.int32),
         jnp.array([True, True]),
