@@ -114,7 +114,7 @@ def gdn_attention_core_tpu(
     # Use reorder_concatenated_tensor_for_sharding to reorder into correct layout
     key_dim = n_kq * d_k
     value_dim = n_v * d_v
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.GDN_ATTN_HEAD)
     dp_size = get_mesh_shape_product(mesh, ShardingAxisName.SEQUENCE)
 
     j_mixed_qkv = reorder_concatenated_tensor_for_sharding(

@@ -91,18 +91,18 @@ def run_jax_gdn_attention(
     """
     in_specs = (
         P(ShardingAxisName.SEQUENCE,
-          ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
-        P(ShardingAxisName.SEQUENCE, ShardingAxisName.ATTN_HEAD),  # j_b
-        P(ShardingAxisName.SEQUENCE, ShardingAxisName.ATTN_HEAD),  # j_a
+          ShardingAxisName.GDN_ATTN_HEAD),  # j_mixed_qkv
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD),  # j_b
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD),  # j_a
         P(ShardingAxisName.SEQUENCE, None,
-          ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(ShardingAxisName.SEQUENCE, ShardingAxisName.ATTN_HEAD, None,
+          ShardingAxisName.GDN_ATTN_HEAD),  # conv_state
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD, None,
           None),  # recurrent_state
-        P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
-        P(ShardingAxisName.ATTN_HEAD)
+        P(ShardingAxisName.GDN_ATTN_HEAD, None, None),  # j_conv_weight
+        P(ShardingAxisName.GDN_ATTN_HEAD)
         if j_conv_bias is not None else None,  # j_conv_bias
-        P(ShardingAxisName.ATTN_HEAD),  # j_A_log
-        P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
+        P(ShardingAxisName.GDN_ATTN_HEAD),  # j_A_log
+        P(ShardingAxisName.GDN_ATTN_HEAD),  # j_dt_bias
         P(ShardingAxisName.SEQUENCE),  # query_start_loc
         P(ShardingAxisName.SEQUENCE),  # state_indices
         P(ShardingAxisName.SEQUENCE),  # distribution
@@ -112,14 +112,18 @@ def run_jax_gdn_attention(
     out_specs = (
         (
             P(ShardingAxisName.SEQUENCE, None,
-              ShardingAxisName.ATTN_HEAD),  # new_conv_state
-            P(ShardingAxisName.SEQUENCE, ShardingAxisName.ATTN_HEAD, None,
+              ShardingAxisName.GDN_ATTN_HEAD),  # new_conv_state
+            P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
-        P(ShardingAxisName.SEQUENCE, ShardingAxisName.ATTN_HEAD),  # output
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD),  # output
     )
 
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.GDN_ATTN_HEAD)
+    if n_kq % tp_size != 0 or n_v % tp_size != 0:
+        raise ValueError(
+            f"GDN heads (n_kq={n_kq}, n_v={n_v}) must be divisible by the "
+            f"GDN_ATTN_HEAD mesh product {tp_size}")
 
     p_run_jax_gdn_attention_local = functools.partial(
         wrapper.fused_conv1d_gdn,

@@ -53,7 +53,9 @@ class Fp8LinearMethod:
             weight_scale_jax,
             self.linear_config.weight_sharding,
             mesh=self.linear_config.mesh,
-            defer_all_reduce=self.linear_config.defer_all_reduce)
+            defer_all_reduce=self.linear_config.defer_all_reduce,
+            token_sharding=getattr(self.linear_config, "token_sharding",
+                                   None))
 
         if bias is not None:
             outs += bias
@@ -76,7 +78,9 @@ class Fp8LinearMethod:
                 weight_scale,
                 self.linear_config.weight_sharding,
                 mesh=mesh,
-                defer_all_reduce=self.linear_config.defer_all_reduce)
+                defer_all_reduce=self.linear_config.defer_all_reduce,
+                token_sharding=getattr(self.linear_config, "token_sharding",
+                                       None))
 
             if bias is not None:
                 out += bias[i]

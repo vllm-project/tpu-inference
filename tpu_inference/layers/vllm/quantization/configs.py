@@ -50,15 +50,25 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         self.tp_size = get_mesh_shape_product(self.mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
-        self.n_shards = get_mesh_shape_product(self.mesh,
-                                               self.weight_sharding[1])
+        # GDN linear-attention projections shard heads over GDN_ATTN_HEAD
+        # (which includes 'pcp': GDN heads are independent, and tokens are
+        # replicated across pcp in the GDN domain). The token axis of their
+        # activations must then exclude 'pcp' or the same mesh axis would
+        # appear on two spec dims.
+        _is_gdn = "linear_attn" in getattr(layer, "prefix", "")
+        _head_axis = (ShardingAxisName.GDN_ATTN_HEAD
+                      if _is_gdn else ShardingAxisName.ATTN_HEAD)
+        self.token_sharding = (ShardingAxisName.SEQUENCE
+                               if _is_gdn else ShardingAxisName.ATTN_DATA)
+
+        self.n_shards = get_mesh_shape_product(self.mesh, _head_axis)
 
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+            self.weight_sharding = P(_head_axis, None)
             if self.enable_sp:
                 self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            self.weight_sharding = P(None, _head_axis)
 
             if self.enable_sp:
                 self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)
@@ -78,6 +88,11 @@ class VllmQuantLinearConfig(QuantLinearConfig):
             logger.warning(
                 "Unsupported linear layer type of %s. Can potentially yield "
                 " bad performance.", type(layer))
+
+        if _is_gdn:
+            # keep bias consistent with the reassigned weight sharding (the
+            # base class derived it from the default weight_sharding)
+            self.bias_sharding = P(self.weight_sharding[1])
 
         if isinstance(layer, QKVParallelLinear):
             self.num_proj = 3

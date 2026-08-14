@@ -45,6 +45,10 @@ class ShardingAxisNameBase:
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
     ATTN_HEAD = ('model', 'expert', 'dcp')  # Q heads
+    # GDN linear-attention heads are independent, so unlike softmax attention
+    # they can also shard over 'pcp' (tokens are replicated across pcp in the
+    # GDN domain; see gdn_attention.py).
+    GDN_ATTN_HEAD = ('model', 'expert', 'dcp', 'pcp')
     KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
@@ -79,6 +83,7 @@ class ShardingAxisName2D:
     """
     SEQUENCE = 'data'
     ATTN_DATA = 'data'
+    GDN_ATTN_HEAD = 'model'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
     KV_HEAD = 'model'
