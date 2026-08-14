@@ -90,13 +90,30 @@ def xla_quantized_matmul(
     return out.astype(x.dtype)
 
 
+def _token_axes_for(weight_spec) -> tuple:
+    """Token-dim mesh axes: ATTN_DATA minus axes the weight spec uses.
+
+    A mesh axis may appear on at most one dim of a spec; when the weight
+    already uses an ATTN_DATA axis (GDN projections put 'pcp' on the head
+    dim), the token dim yields it.
+    """
+    used = set()
+    for ax in weight_spec:
+        if ax is None:
+            continue
+        used.update(ax if isinstance(ax, tuple) else (ax, ))
+    data = ShardingAxisName.ATTN_DATA
+    if not isinstance(data, tuple):
+        data = (data, )
+    return tuple(a for a in data if a not in used)
+
+
 def sharded_matmul(x: jax.Array,
                    w: jax.Array,
                    weight_sharding: P | NamedSharding,
                    *,
                    mesh: Mesh | None = None,
-                   defer_all_reduce: bool = False,
-                   token_sharding=None) -> jax.Array:
+                   defer_all_reduce: bool = False) -> jax.Array:
     """Matmul that can skip its all-reduce (``defer_all_reduce=True``).
 
     A plain einsum under GSPMD is always all-reduced by the partitioner, so it
@@ -107,13 +124,10 @@ def sharded_matmul(x: jax.Array,
         mesh = mesh or weight_sharding.mesh
         weight_sharding = weight_sharding.spec
     in_axis, out_axis = weight_sharding
-    # The token axis defaults to ATTN_DATA; layers whose head axis includes
-    # 'pcp' (GDN projections) pass SEQUENCE so no mesh axis lands on two dims.
-    if token_sharding is None:
-        token_sharding = ShardingAxisName.ATTN_DATA
+    token_axes = _token_axes_for(weight_sharding)
     # x may have extra leading batch dims.
     batch_dims = (None, ) * (x.ndim - 2)
-    x_spec = P(token_sharding, *batch_dims, in_axis)
+    x_spec = P(token_axes, *batch_dims, in_axis)
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_spec) if mesh else x_spec)
@@ -128,7 +142,7 @@ def sharded_matmul(x: jax.Array,
         wrapper,
         mesh=mesh,
         in_specs=(x_spec, weight_sharding),
-        out_specs=P(token_sharding, *batch_dims, out_axis),
+        out_specs=P(token_axes, *batch_dims, out_axis),
         check_vma=False,
     )(x, w)
 
@@ -140,8 +154,7 @@ def sharded_quantized_matmul(x: jax.Array,
                              *,
                              mesh: Mesh | None = None,
                              defer_all_reduce: bool = False,
-                             maybe_quantize_x: bool = True,
-                             token_sharding=None) -> jax.Array:
+                             maybe_quantize_x: bool = True) -> jax.Array:
     """
     Wrapper around the quantized matmul kernel.
 
@@ -173,11 +186,8 @@ def sharded_quantized_matmul(x: jax.Array,
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
     in_axis, out_axis = weight_spec
-    # The token axis defaults to ATTN_DATA; layers whose head axis includes
-    # 'pcp' (GDN projections) pass SEQUENCE so no mesh axis lands on two dims.
-    if token_sharding is None:
-        token_sharding = ShardingAxisName.ATTN_DATA
-    x_sharding = P(token_sharding, in_axis)
+    token_axes = _token_axes_for(weight_spec)
+    x_sharding = P(token_axes, in_axis)
     enable_quantized_matmul_kernel = w_s is not None and (len(
         w_s.shape) == 3 or len(w_s.shape) == 4)
     if enable_quantized_matmul_kernel:
@@ -196,7 +206,7 @@ def sharded_quantized_matmul(x: jax.Array,
         else:
             # 1D (channelwise) case
             scale_sharding = P(out_axis, )
-    out_sharding = P(token_sharding, out_axis)
+    out_sharding = P(token_axes, out_axis)
 
     x = jax.lax.with_sharding_constraint(
         x,

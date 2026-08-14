@@ -254,9 +254,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                 weight_scale_jax,
                 self.linear_config.weight_sharding,
                 mesh=self.linear_config.mesh,
-                defer_all_reduce=self.linear_config.defer_all_reduce,
-                token_sharding=getattr(self.linear_config, "token_sharding",
-                                       None))
+                defer_all_reduce=self.linear_config.defer_all_reduce)
 
         if bias is not None and not layer.skip_bias_add:
             outs += jax_view(bias)
@@ -301,9 +299,7 @@ class VllmCompressedTensorsW8A8Fp8(CompressedTensorsW8A8Fp8):
                     weight_scale_jax,
                     self.linear_config.weight_sharding,
                     mesh=self.linear_config.mesh,
-                    defer_all_reduce=self.linear_config.defer_all_reduce,
-                    token_sharding=getattr(self.linear_config,
-                                           "token_sharding", None))
+                    defer_all_reduce=self.linear_config.defer_all_reduce)
 
             if bias is not None and not layer.skip_bias_add:
                 out += jax_view(bias[i])
