@@ -139,20 +139,19 @@ class LazyShardingAxisName:
         self._initialize()
         return getattr(self._cls, name)
 
+    def attn_head(self, layer_prefix: str = ""):
+        """Head-sharding axis for a layer, selected by its prefix.
+
+        GDN linear-attention layers shard heads over GDN_ATTN_HEAD (which
+        includes 'pcp': GDN heads are independent, and tokens are replicated
+        across pcp in the GDN domain). Everything else uses ATTN_HEAD.
+        """
+        if "linear_attn" in layer_prefix:
+            return self.GDN_ATTN_HEAD
+        return self.ATTN_HEAD
+
 
 ShardingAxisName = LazyShardingAxisName()
-
-
-def attn_head_axis(layer_prefix: str = ""):
-    """Head-sharding axis for a layer, selected by its prefix.
-
-    GDN linear-attention layers shard heads over GDN_ATTN_HEAD (which
-    includes 'pcp': GDN heads are independent, and tokens are replicated
-    across pcp in the GDN domain). Everything else uses ATTN_HEAD.
-    """
-    if "linear_attn" in layer_prefix:
-        return ShardingAxisName.GDN_ATTN_HEAD
-    return ShardingAxisName.ATTN_HEAD
 
 
 def is_attn_dp(mesh: Mesh) -> bool:

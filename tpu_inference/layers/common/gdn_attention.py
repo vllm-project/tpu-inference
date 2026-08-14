@@ -120,10 +120,6 @@ def run_jax_gdn_attention(
     )
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.GDN_ATTN_HEAD)
-    if n_kq % tp_size != 0 or n_v % tp_size != 0:
-        raise ValueError(
-            f"GDN heads (n_kq={n_kq}, n_v={n_v}) must be divisible by the "
-            f"GDN_ATTN_HEAD mesh product {tp_size}")
 
     p_run_jax_gdn_attention_local = functools.partial(
         wrapper.fused_conv1d_gdn,

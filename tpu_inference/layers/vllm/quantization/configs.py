@@ -28,8 +28,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from tpu_inference.layers.common.process_weights.linear_weights import \
     get_model_matmul_fusion_assignment
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.common.sharding import (ShardingAxisName,
-                                                  attn_head_axis)
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import TPU_SECOND_LAST_MINOR, get_mesh_shape_product
 
 # yapf: enable
@@ -51,7 +50,7 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         self.tp_size = get_mesh_shape_product(self.mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
-        _head_axis = attn_head_axis(getattr(layer, "prefix", ""))
+        _head_axis = ShardingAxisName.attn_head(getattr(layer, "prefix", ""))
 
         if isinstance(layer, RowParallelLinear):
             self.weight_sharding = P(_head_axis, None)
