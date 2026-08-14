@@ -85,8 +85,20 @@ steps:
         - exit_status: "*"
           limit: 2
     command: |
-      pip install cryptography
+      # 1. Create the virtual environment
+      python3 -m venv .venv_crypto
+      # 2. Set a trap to delete the venv when the step exits (on success AND failure)
+      trap 'rm -rf .venv_crypto' EXIT
+      # 3. Activate the venv and install dependencies
+      source .venv_crypto/bin/activate
+      pip install --upgrade pip
+      pip install cryptography PyJWT
+      # 4. Source your script
       source .buildkite/scripts/export_ci_bot_token.sh
+      # 5. Deactivate the virtual environment so the rest of your pipeline 
+      # runs in the standard environment
+      deactivate
+
       echo "🚀 Patching kernel autotune results and creating evaluation branch."
       .buildkite/scripts/run_in_docker.sh bash -c '
         branch_name="kernel_autotune.update_tuned_params_$${KERNEL_TUNING_AUTOTUNE_ID}"
@@ -150,8 +162,20 @@ steps:
         # remove the existing generated HTML reports in the temp dir on the host. 
         rm -f "/tmp/kernel_tuning/*.html"
       - |
-        pip install cryptography
+        # 1. Create the virtual environment
+        python3 -m venv .venv_crypto
+        # 2. Set a trap to delete the venv when the step exits (on success AND failure)
+        trap 'rm -rf .venv_crypto' EXIT
+        # 3. Activate the venv and install dependencies
+        source .venv_crypto/bin/activate
+        pip install --upgrade pip
+        pip install cryptography PyJWT
+        # 4. Source your script
         source .buildkite/scripts/export_ci_bot_token.sh
+        # 5. Deactivate the virtual environment so the rest of your pipeline 
+        # runs in the standard environment
+        deactivate
+
         echo "🚀 Evaluating tuning results and optionally creating a PR."
         .buildkite/scripts/run_in_docker.sh bash -c '
           set -e
