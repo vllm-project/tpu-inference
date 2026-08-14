@@ -59,9 +59,10 @@ def patch_vllm_scheduler_for_multi_token_decode() -> None:
     if not getattr(Scheduler, "_multi_token_decode_patched", False):
         original_update_base = Scheduler._update_request_with_output
 
-        def patched_update_base(scheduler_self, request, new_token_ids):
+        def patched_update_base(scheduler_self, request, new_token_ids, *args,
+                                **kwargs):
             res_token_ids, stopped = original_update_base(
-                scheduler_self, request, new_token_ids)
+                scheduler_self, request, new_token_ids, *args, **kwargs)
 
             if getattr(scheduler_self, "_multi_token_decode_enabled", False):
                 diff = len(res_token_ids) - 1
@@ -92,12 +93,13 @@ def patch_vllm_scheduler_for_multi_token_decode() -> None:
         original_async_update_req = AsyncScheduler._update_request_with_output
 
         def patched_async_update_request_with_output(scheduler_self, request,
-                                                     new_token_ids):
+                                                     new_token_ids, *args,
+                                                     **kwargs):
             if (getattr(scheduler_self, "_multi_token_decode_enabled", False)
                     and len(new_token_ids) > 1):
                 request.num_output_placeholders += (len(new_token_ids) - 1)
             return original_async_update_req(scheduler_self, request,
-                                             new_token_ids)
+                                             new_token_ids, *args, **kwargs)
 
         AsyncScheduler._update_request_with_output = patched_async_update_request_with_output
         AsyncScheduler._multi_token_decode_patched = True

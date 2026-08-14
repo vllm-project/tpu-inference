@@ -27,14 +27,24 @@ def _load_utils_with_fake_vllm(monkeypatch):
             del vllm_config
             self.num_lookahead_tokens = 2
 
-        def _update_request_with_output(self, request, new_token_ids):
+        def _update_request_with_output(self,
+                                        request,
+                                        new_token_ids,
+                                        *,
+                                        is_stale=False):
+            request.is_stale = is_stale
             retained = list(new_token_ids[:request.retain_tokens])
             request.output_token_ids.extend(retained)
             return retained, len(retained) != len(new_token_ids)
 
     class AsyncScheduler:
 
-        def _update_request_with_output(self, request, new_token_ids):
+        def _update_request_with_output(self,
+                                        request,
+                                        new_token_ids,
+                                        *,
+                                        is_stale=False):
+            request.is_stale = is_stale
             request.num_output_placeholders -= len(new_token_ids)
             return list(new_token_ids), False
 
@@ -114,6 +124,24 @@ def test_output_accounting_uses_tokens_retained_after_eos(monkeypatch):
     assert retained == [10, 11]
     assert stopped is True
     assert request.num_computed_tokens == 2
+
+
+def test_output_accounting_forwards_scheduler_keywords(monkeypatch):
+    utils, Scheduler, _ = _load_utils_with_fake_vllm(monkeypatch)
+    utils.patch_vllm_scheduler_for_multi_token_decode()
+    scheduler = Scheduler(
+        SimpleNamespace(additional_config={
+            utils.MULTI_TOKEN_LOOKAHEAD_CONFIG: 3,
+        }))
+    request = SimpleNamespace(
+        retain_tokens=2,
+        output_token_ids=[],
+        num_computed_tokens=1,
+    )
+
+    scheduler._update_request_with_output(request, [10, 11], is_stale=True)
+
+    assert request.is_stale is True
 
 
 def test_async_placeholder_accounting_consumes_one_scheduled_step(monkeypatch):
