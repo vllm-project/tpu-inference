@@ -95,6 +95,10 @@ class KVCacheManager:
         # means this layer will perform attention using the keys and values
         # from the KV cache of `shared_kv_cache_layers[layer_name]`.
         self.shared_kv_cache_layers: dict[str, str] = {}
+        # DSA (DeepSeek-V3.2 / GLM-5.2) indexer k-cache layers. These ride the
+        # generic MLA allocation path but need `_DSA_INDEXER_KV_PACKING`
+        # instead of the global `MLA_KV_PACKING_SIZE`; see `_get_kv_caches`.
+        self._dsa_indexer_layers: set[str] = set()
         self.use_mla = self.runner.model_config.use_mla
         # Set by `update_mamba_page_size_padded` for hybrid attention+mamba
         # models. When set, every attention layer spec reports this as its
@@ -645,6 +649,10 @@ class KVCacheManager:
                         self.runner.vllm_config)
                     if spec is not None:
                         kv_cache_spec[layer_name] = spec
+                        if is_cache_for_dsa(attn_module):
+                            # Remembered so the allocation loop can give this
+                            # cache the packing its Pallas kernel expects.
+                            self._dsa_indexer_layers.add(layer_name)
                     continue
 
                 if disable_sliding_window:
@@ -939,6 +947,9 @@ class KVCacheManager:
                             layer_names=[f'kv_cache_tensor.{i}'],
                             cache_dtype=t2j_dtype(layer_spec.dtype),
                             use_mla=self.use_mla,
+                            mla_kv_packing=(
+                                self._DSA_INDEXER_KV_PACKING if layer_name
+                                in self._dsa_indexer_layers else None),
                         )[0]
                         kv_caches.append(kv_cache)
 
@@ -1002,6 +1013,13 @@ class KVCacheManager:
             f"hbm={utils.hbm_usage_gb(self.runner.mesh.devices.flatten())}Gb")
 
         logger.info(" | ".join(log_parts))
+
+    # The DSA indexer k-cache is uint8, and `streamindex_topk`'s scores kernel
+    # asserts `get_dtype_packing(kv_dtype) == kv_packing`, i.e. 32 // 8 == 4.
+    # DSv4 gets this by forcing `MLA_KV_PACKING_SIZE=4` for its whole packed
+    # slab; GLM-5.2/V3.2 keep the global default for their main MLA latent
+    # cache and override it for this one cache only.
+    _DSA_INDEXER_KV_PACKING = 4
 
     _DS_V4_STATE_CACHE_SUFFIX = ".compressor.state_cache"
     _DS_V4_INDEXER_CACHE_SUFFIX = ".indexer.k_cache"

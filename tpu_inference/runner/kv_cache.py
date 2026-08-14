@@ -59,7 +59,8 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                                  actual_num_kv_heads: int,
                                  actual_head_dim: int,
                                  kv_dtype: any,
-                                 use_mla: bool = False):
+                                 use_mla: bool = False,
+                                 mla_kv_packing: int | None = None):
     """Gets the KV cache shape based on the mesh configuration.
 
     This function scales block_size by the CONTEXT (DCP, PCP) axis and num_heads by duplicate kv heads.
@@ -84,8 +85,8 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
                 total_num_pages,
                 physical_block_size,
                 actual_head_dim,
-                kv_dtype,
-                envs.MLA_KV_PACKING_SIZE,
+                kv_dtype, (envs.MLA_KV_PACKING_SIZE
+                           if mla_kv_packing is None else mla_kv_packing),
                 transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE))
     else:
         assert actual_num_kv_heads % model_cnt == 0
@@ -146,6 +147,7 @@ def create_kv_caches(
     layer_names: List[str],
     cache_dtype: jnp.dtype = DEFAULT_KV_CACHE_DTYPE,
     use_mla: bool = False,
+    mla_kv_packing: int | None = None,
 ) -> List[jax.Array]:
     """
     Creates a list of KV cache where each array mapps to single attention layer.
@@ -162,6 +164,10 @@ def create_kv_caches(
         mesh: The mesh to shard the KV caches across.
         layer_names: The names of the decoder layers in the model.
         cache_dtype: The datatype of KV cache.
+        mla_kv_packing: Overrides `envs.MLA_KV_PACKING_SIZE` for this cache
+            (MLA only). The DSA indexer k-cache is uint8 and its Pallas kernel
+            asserts the packing matches the dtype (4), while the global default
+            is tuned for the main MLA latent cache.
 
     Returns:
         A list of KV caches, one per each decoder layer in the model.
@@ -172,7 +178,8 @@ def create_kv_caches(
 
     cache_shape = get_kv_cache_shape_with_mesh(mesh, num_blocks, block_size,
                                                num_kv_heads, head_size,
-                                               cache_dtype, use_mla)
+                                               cache_dtype, use_mla,
+                                               mla_kv_packing)
 
     # num_blocks --> shard by data batch
     # block_size --> shard by context

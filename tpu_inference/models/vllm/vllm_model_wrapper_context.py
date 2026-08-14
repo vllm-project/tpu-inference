@@ -32,6 +32,12 @@ class VllmModelWrapperContext:
     vllm_config: Optional[VllmConfig] = None
     expert_indices_list: List[jax.Array] = field(default_factory=list)
     shared_attn_metadata: SharedAttentionMetadata = field(default_factory=None)
+    # DSA (DeepSeek-V3.2 / GLM-5.2) lightning-indexer top-k, i32
+    # [num_tokens, topk] of absolute KV positions. A "full" indexer layer writes
+    # it and the "shared" layers that follow reuse it, per `index_topk_freq` /
+    # `index_skip_topk_offset`. The context is rebuilt per forward call, so this
+    # only ever holds tracers from the current trace.
+    topk_indices: Optional[jax.Array] = None
 
 
 _vllm_model_wrapper_context: Optional[VllmModelWrapperContext] = None

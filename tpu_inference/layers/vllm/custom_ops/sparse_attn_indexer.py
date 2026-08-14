@@ -32,6 +32,8 @@ Pallas kernel wants rather than converting on every access.
 import jax
 import jax.numpy as jnp
 import torch
+import torchax
+import vllm.model_executor.models.deepseek_v2 as deepseek_v2
 from jax.sharding import PartitionSpec as P
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
@@ -47,6 +49,32 @@ logger = init_logger(__name__)
 
 # fp8 e4m3 finite max; the scale is chosen so |q| / scale lands inside this.
 _FP8_E4M3_MAX = 448.0
+
+
+def _patch_torchax_type_as_for_views() -> None:
+    """Let ``Tensor.type_as`` accept a ``torchax.view.View`` as ``other``.
+
+    ``Indexer.forward`` slices the fused wk+weights GEMM (``k = kw[:, :head_dim]``)
+    and feeds the result straight into ``k_norm``. Under tracing that slice is a
+    ``torchax.view.View``, and vLLM's ``LayerNorm.forward`` ends in
+    ``F.layer_norm(x.float(), ...).type_as(x)``. ``View`` is a ``torch.Tensor``
+    subclass that stores its data lazily and has no ``_elem``, so torchax's
+    ``type_as`` -- which reads ``other._elem.dtype`` -- raises
+    ``AttributeError: 'View' object has no attribute '_elem'``.
+
+    Materializing ``other`` costs nothing here: ``type_as`` only needs its dtype.
+    """
+    orig_type_as = torchax.tensor.Tensor.type_as
+
+    def type_as(self, other):
+        if not hasattr(other, "_elem"):
+            other = torch_view(jax_view(other))
+        return orig_type_as(self, other)
+
+    torchax.tensor.Tensor.type_as = type_as
+
+
+_patch_torchax_type_as_for_views()
 
 
 def cdiv(a, b):
@@ -114,19 +142,52 @@ def quantize_k_to_e8m0_record(k: jax.Array, record_width: int) -> jax.Array:
     return jnp.concatenate(parts, axis=-1)
 
 
-def per_token_group_quant_fp8_jax(q: jax.Array, group_size: int):
+def per_token_group_quant_fp8_jax(q: jax.Array,
+                                  group_size: int,
+                                  use_ue8m0: bool = True):
     """TPU stand-in for vLLM's CUDA ``per_token_group_quant_fp8``.
 
-    Returns ``(q_fp8, scale)`` with one power-of-two scale per group, matching
-    ``use_ue8m0=True`` on the CUDA path.
+    Returns ``(q_fp8, scale)``, one scale per group. ``use_ue8m0`` rounds the
+    scale up to a power of two, matching the CUDA path's ue8m0 scale format.
     """
     orig_shape = q.shape
     q = q.reshape(-1, group_size).astype(jnp.float32)
     amax = jnp.max(jnp.abs(q), axis=-1, keepdims=True)
     safe = jnp.where(amax > 0, amax, 1.0)
-    scale = jnp.exp2(jnp.ceil(jnp.log2(safe / _FP8_E4M3_MAX)))
+    scale = safe / _FP8_E4M3_MAX
+    if use_ue8m0:
+        scale = jnp.exp2(jnp.ceil(jnp.log2(scale)))
     q_fp8 = (q / scale).astype(jnp.float8_e4m3fn)
     return q_fp8.reshape(orig_shape), scale.reshape(orig_shape[:-1])
+
+
+def _patch_indexer_per_token_group_quant_fp8() -> None:
+    """Route ``Indexer.forward``'s q quantization to the JAX implementation.
+
+    ``deepseek_v2.py`` imports ``per_token_group_quant_fp8`` into its module
+    namespace and calls it inside ``Indexer.forward``; the vLLM implementation
+    is a Triton kernel and dies on TPU with ``module 'triton' has no attribute
+    'next_power_of_2'``. The name is looked up as a module global at call time,
+    so rebinding it here redirects every DSA model (DeepSeek-V3.2, GLM-5.2)
+    without touching upstream or subclassing the model.
+    """
+
+    def per_token_group_quant_fp8(x,
+                                  group_size,
+                                  column_major_scales: bool = False,
+                                  use_ue8m0: bool = True,
+                                  **kwargs):
+        assert not column_major_scales, (
+            "column_major_scales=True is not implemented on TPU; the DSA "
+            "indexer calls this with column_major_scales=False.")
+        x_fp8, scale = per_token_group_quant_fp8_jax(jax_view(x), group_size,
+                                                     use_ue8m0)
+        return torch_view(x_fp8), torch_view(scale)
+
+    deepseek_v2.per_token_group_quant_fp8 = per_token_group_quant_fp8
+
+
+_patch_indexer_per_token_group_quant_fp8()
 
 
 @SparseAttnIndexer.register_oot

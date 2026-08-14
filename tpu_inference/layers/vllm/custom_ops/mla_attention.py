@@ -328,7 +328,12 @@ class VllmMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper):
             q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
 
         if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            # Publish for this layer's own attention and for the "shared" layers
+            # after it, which skip the indexer and reuse this selection.
+            topk_indices = self.indexer(hidden_states, q_c, positions,
+                                        self.indexer_rope_emb)
+            get_vllm_model_wrapper_context().topk_indices = jax_view(
+                topk_indices)
 
         if llama_4_scaling is not None:
             q_nope *= llama_4_scaling

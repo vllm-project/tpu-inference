@@ -29,6 +29,8 @@ from tpu_inference.layers.common.attention_interface import mla_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.quantization import (
     quantize_kv, static_per_tensor_quantize_tensor)
+from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+    get_vllm_model_wrapper_context
 
 
 @register_backend(AttentionBackendEnum.FLASH_ATTN_MLA)
@@ -180,6 +182,18 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
                                   value=None,
                                   k_scale=k_scale)
         k_pe = k_pe.squeeze(1)
+
+        # DSA: restrict attention to the lightning indexer's selection. Both
+        # the layer that ran the indexer and the "shared" layers after it read
+        # the same published top-k.
+        topk_indices = None
+        if getattr(layer, "use_sparse", False):
+            topk_indices = get_vllm_model_wrapper_context().topk_indices
+            if topk_indices is None:
+                raise RuntimeError(
+                    "MLA layer is marked sparse but no DSA top-k was published; "
+                    "the indexer must run before the first sparse layer.")
+
         new_kv_cache, outputs = mla_attention(
             q_nope,
             q_pe,
@@ -198,6 +212,7 @@ class PallasMLAttentionBackendImpl(MLAAttentionImpl):
             k_scale=k_scale,
             v_scale=v_scale,
             sm_scale=self.scale,
+            topk_indices=topk_indices,
         )
 
         # einsum selects 'n' as the major-most physical dimension again.

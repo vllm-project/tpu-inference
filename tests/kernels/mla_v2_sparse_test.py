@@ -187,6 +187,60 @@ class MlaV2SparseTest(jtu.JaxTestCase):
         )
         self.assertArraysEqual(expected, got)
 
+    @staticmethod
+    def _causal_mask(seq_lens, width):
+        """1 exactly where the kernel's own causal mask already permits.
+
+        This is a no-op mask by construction, so the kernel must return the
+        dense result unchanged.
+        """
+        total_q = sum(q for q, _ in seq_lens)
+        mask = np.zeros((total_q, width), np.uint8)
+        row = 0
+        for q_len, kv_len in seq_lens:
+            for i in range(q_len):
+                mask[row, :kv_len - q_len + i + 1] = 1
+                row += 1
+        return jnp.asarray(mask)
+
+    def test_exact_causal_mask_matches_dense_short_seqs(self):
+        """Sequences shorter than one page -- the production regime.
+
+        Every other test here uses kv_len > page_size; GLM-5.2's prompts are
+        tens of tokens against a 128-wide page.
+        """
+        seq_lens = [(5, 5), (9, 9), (8, 8), (15, 15)]
+        cfg = dict(seq_lens=seq_lens,
+                   num_heads=64,
+                   lkv_dim=512,
+                   r_dim=64,
+                   page_size=128,
+                   num_pages=64)
+        for width in (128, 1024):
+            with self.subTest(width=width):
+                dense = self._run(**cfg, topk_mask=None, sliding_window=None)
+                got = self._run(**cfg,
+                                topk_mask=self._causal_mask(seq_lens, width),
+                                sliding_window=None)
+                self.assertArraysEqual(dense, got)
+
+    def test_exact_causal_mask_matches_dense_short_decode(self):
+        """Same, on the batched-decode path with short cached sequences."""
+        seq_lens = [(1, 20), (1, 24), (1, 23), (1, 30)]
+        cfg = dict(seq_lens=seq_lens,
+                   num_heads=64,
+                   lkv_dim=512,
+                   r_dim=64,
+                   page_size=128,
+                   num_pages=64)
+        for width in (128, 1024):
+            with self.subTest(width=width):
+                dense = self._run(**cfg, topk_mask=None, sliding_window=None)
+                got = self._run(**cfg,
+                                topk_mask=self._causal_mask(seq_lens, width),
+                                sliding_window=None)
+                self.assertArraysEqual(dense, got)
+
     def test_rejects_malformed_mask(self):
         seq_lens = [(64, 128)]
         cfg = dict(seq_lens=seq_lens,

@@ -617,7 +617,8 @@ def mla_attention(
         q_scale: float | None = None,
         k_scale: float | None = None,
         v_scale: float | None = None,
-        sm_scale: float | None = None) -> Tuple[jax.Array, jax.Array]:
+        sm_scale: float | None = None,
+        topk_indices: jax.Array | None = None) -> Tuple[jax.Array, jax.Array]:
     """
     Main shared interface for MLA attention.  Computes the sharded attention
     output and kv cache update.
@@ -640,7 +641,11 @@ def mla_attention(
         k_scale: scale to apply to k (if quantized)
         v_scale: scale to apply to v (if quantized)
         sm_scale: softmax scale
+        topk_indices: DSA (DeepSeek-V3.2 / GLM-5.2) lightning-indexer output,
+            i32 [tokens_query, topk] of absolute KV positions, -1 padded. When
+            given, attention is restricted to those positions; None runs dense.
     """
+    use_topk_mask = topk_indices is not None
     in_specs = (
         query_nth_sharding
         or P(None, ShardingAxisName.MLP_TENSOR, None),  # q (head-major)
@@ -655,6 +660,11 @@ def mla_attention(
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
+    if use_topk_mask:
+        # Token-major like the query, so each shard sees the top-k rows for its
+        # own tokens; the column axis indexes absolute KV positions and stays
+        # replicated.
+        in_specs = in_specs + (P(ShardingAxisName.ATTN_DATA, None), )
     out_specs = (
         P(ShardingAxisName.BATCH),  # kv cache
         attn_o_nth_sharding
@@ -662,6 +672,20 @@ def mla_attention(
     )
 
     def _mla_ragged_paged_attention(q, q_rope, k, k_rope, cache, *args):
+        topk_mask = None
+        if use_topk_mask:
+            *args, topk_indices_local = args
+            args = tuple(args)
+            # The indexer emits absolute KV positions, so the mask must span the
+            # longest sequence the page table can address. The kernel pads this
+            # up to its own KV block size.
+            assert not envs.MLA_TRANSPOSE_KV_CACHE, (
+                "DSA sparse attention does not support a transposed KV cache.")
+            page_size = cache.shape[1] * cache.shape[2]
+            pages_per_seq = args[1].shape[0] // args[0].shape[0]
+            topk_mask = build_topk_mask(topk_indices_local,
+                                        pages_per_seq * page_size)
+
         dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
         batched_decode_tuning_key = TuningKey(
             case="batched_decode",
@@ -725,19 +749,21 @@ def mla_attention(
             q_scale=q_scale,
             k_scale=k_scale,
             v_scale=v_scale,
+            topk_mask=topk_mask,
             transpose_kv_cache=envs.MLA_TRANSPOSE_KV_CACHE)
 
         return new_cache, out
 
     kv_cache, output_TNA = jax.jit(
-        jax.shard_map(_mla_ragged_paged_attention,
-                      mesh=mesh,
-                      in_specs=in_specs,
-                      out_specs=out_specs,
-                      check_vma=False))(q_NTA, q_rope_TNH, k_SA, k_rope_SH,
-                                        kv_cache, md.seq_lens, md.block_tables,
-                                        md.query_start_loc,
-                                        md.request_distribution)
+        jax.shard_map(
+            _mla_ragged_paged_attention,
+            mesh=mesh,
+            in_specs=in_specs,
+            out_specs=out_specs,
+            check_vma=False))(q_NTA, q_rope_TNH, k_SA, k_rope_SH, kv_cache,
+                              md.seq_lens, md.block_tables, md.query_start_loc,
+                              md.request_distribution,
+                              *((topk_indices, ) if use_topk_mask else ()))
     return kv_cache, output_TNA
 
 
