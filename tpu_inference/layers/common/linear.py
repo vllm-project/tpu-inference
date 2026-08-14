@@ -90,24 +90,6 @@ def xla_quantized_matmul(
     return out.astype(x.dtype)
 
 
-def _token_axes_for(weight_spec) -> tuple:
-    """Token-dim mesh axes: ATTN_DATA minus axes the weight spec uses.
-
-    A mesh axis may appear on at most one dim of a spec; when the weight
-    already uses an ATTN_DATA axis (GDN projections put 'pcp' on the head
-    dim), the token dim yields it.
-    """
-    used = set()
-    for ax in weight_spec:
-        if ax is None:
-            continue
-        used.update(ax if isinstance(ax, tuple) else (ax, ))
-    data = ShardingAxisName.ATTN_DATA
-    if not isinstance(data, tuple):
-        data = (data, )
-    return tuple(a for a in data if a not in used)
-
-
 def sharded_matmul(x: jax.Array,
                    w: jax.Array,
                    weight_sharding: P | NamedSharding,
@@ -124,7 +106,7 @@ def sharded_matmul(x: jax.Array,
         mesh = mesh or weight_sharding.mesh
         weight_sharding = weight_sharding.spec
     in_axis, out_axis = weight_sharding
-    token_axes = _token_axes_for(weight_sharding)
+    token_axes = ShardingAxisName.token_axes(weight_sharding)
     # x may have extra leading batch dims.
     batch_dims = (None, ) * (x.ndim - 2)
     x_spec = P(token_axes, *batch_dims, in_axis)
@@ -186,7 +168,7 @@ def sharded_quantized_matmul(x: jax.Array,
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
     in_axis, out_axis = weight_spec
-    token_axes = _token_axes_for(weight_spec)
+    token_axes = ShardingAxisName.token_axes(weight_spec)
     x_sharding = P(token_axes, in_axis)
     enable_quantized_matmul_kernel = w_s is not None and (len(
         w_s.shape) == 3 or len(w_s.shape) == 4)

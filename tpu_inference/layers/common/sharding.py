@@ -150,6 +150,19 @@ class LazyShardingAxisName:
             return self.GDN_ATTN_HEAD
         return self.ATTN_HEAD
 
+    def token_axes(self, weight_spec):
+        """Token-dim axes for the activations of a matmul with this weight
+        spec: SEQUENCE when the weight uses 'pcp' (GDN projections shard
+        heads over it, and a mesh axis may appear on at most one dim of a
+        spec), ATTN_DATA otherwise.
+        """
+        pcp = self.PREFILL_CONTEXT
+        for dim in weight_spec:
+            if pcp and (dim == pcp or
+                        (isinstance(dim, tuple) and pcp in dim)):
+                return self.SEQUENCE
+        return self.ATTN_DATA
+
 
 ShardingAxisName = LazyShardingAxisName()
 
