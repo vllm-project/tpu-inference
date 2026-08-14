@@ -1481,7 +1481,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     req_id, []))
 
             end_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            num_sampled_tokens = min(len(sampled_ids), pre_num_placeholder_tokens)
+            num_sampled_tokens = min(len(sampled_ids),
+                                     pre_num_placeholder_tokens)
             assert num_sampled_tokens <= pre_num_placeholder_tokens
             start_idx = end_idx - pre_num_placeholder_tokens
             assert end_idx <= self.max_model_len, (
@@ -1489,8 +1490,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
-                                           num_sampled_tokens] = sampled_ids[:num_sampled_tokens]
+            self.input_batch.token_ids_cpu[
+                req_idx, start_idx:start_idx +
+                num_sampled_tokens] = sampled_ids[:num_sampled_tokens]
             self.input_batch.num_tokens_no_spec[
                 req_idx] = start_idx + num_sampled_tokens
             self.input_batch.num_tokens[
@@ -2230,8 +2232,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids[:num_sampled]
+            self.input_batch.token_ids_cpu[
+                req_idx, start_idx:end_idx] = sampled_ids[:num_sampled]
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_state.output_token_ids.extend(sampled_ids)

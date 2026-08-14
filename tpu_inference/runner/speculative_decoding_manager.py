@@ -61,8 +61,7 @@ class SpeculativeDecodingManager:
         for rank in range(self.runner.dp_size):
             req_indices = self._req_indices_dp[rank]
             for j, req_idx in enumerate(req_indices):
-                tokens = draft_token_ids[
-                    j + rank * max_num_reqs_per_dp_rank]
+                tokens = draft_token_ids[j + rank * max_num_reqs_per_dp_rank]
                 reorded_draft_token_ids[req_idx] = tokens[:num_spec]
         self._draft_token_ids = None
         self._req_indices_dp = None
