@@ -60,8 +60,7 @@ PROMPT = ("Count from one to forty, writing each number as a word, "
 # complete blocks, so anything shorter than block_size (64 on TPU by default)
 # reports zero cached tokens no matter how the salt behaves, and the
 # comparison silently becomes 0 > 0.
-SALT_PROMPT = "Reference material: " + " ".join(
-    f"item{i}" for i in range(400))
+SALT_PROMPT = "Reference material: " + " ".join(f"item{i}" for i in range(400))
 
 
 @pytest.fixture(scope="module")
@@ -224,9 +223,8 @@ class TestCacheSaltIsolatesPolicies:
                                        cache_salt=salt_b)
 
             assert warm is not None, "engine did not report num_cached_tokens"
-            assert warm > cold, (
-                f"prefix caching is not working at all "
-                f"(cold={cold}, warm={warm})")
+            assert warm > cold, (f"prefix caching is not working at all "
+                                 f"(cold={cold}, warm={warm})")
             assert rotated < warm, (
                 f"rotating cache_salt did not invalidate reuse "
                 f"(salt B cached={rotated}, salt A warm cached={warm}); a new "
@@ -235,5 +233,33 @@ class TestCacheSaltIsolatesPolicies:
                 f"the prompt does not re-cache under the new salt "
                 f"(cached={warm_b}); the drop above may have been eviction "
                 f"rather than the salt")
+
+        loop.run_until_complete(scenario())
+
+
+class TestPauseWithCacheClear:
+    """clear_cache=True reaches reset_encoder_cache over collective_rpc.
+
+    That RPC resolves by name and is issued regardless of modality, so before
+    TPUWorker grew the method this failed on every TPU model, text-only
+    included, with `NotImplementedError: Method 'reset_encoder_cache' is not
+    implemented.` Verified by deleting the method and re-running this test.
+    Placed last: it aborts in-flight work and wipes the prefix cache, which
+    would disturb the tests above.
+    """
+
+    def test_pause_clear_cache_then_engine_still_serves(self, loop, engine):
+
+        async def scenario():
+            await engine.pause_generation(mode="abort", clear_cache=True)
+            assert await engine.is_paused()
+            await engine.resume_generation()
+            assert not await engine.is_paused()
+
+            token_ids, _ = await _collect(engine,
+                                          "after-cache-clear",
+                                          max_tokens=8)
+            assert len(token_ids) == 8, (
+                "engine did not serve correctly after a cache-clearing pause")
 
         loop.run_until_complete(scenario())
