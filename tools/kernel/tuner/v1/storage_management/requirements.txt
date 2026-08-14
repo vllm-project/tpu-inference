@@ -5,3 +5,4 @@ google-auth
 absl-py
 tensorflow==2.21.0
 optuna==4.9.0
+cryptography
