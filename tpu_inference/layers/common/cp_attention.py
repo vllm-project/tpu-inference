@@ -293,6 +293,20 @@ def pcp_forward(
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
+
+    # GQA/MQA: replicate KV heads to match ATTN_HEAD sharding, mirroring
+    # dcp_forward — tp may exceed the head count (e.g. NKV=2 at tp=4).
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    if tp_size > 1:
+        num_kv_heads = k.shape[1]
+        if num_kv_heads < tp_size:
+            if tp_size % num_kv_heads != 0:
+                raise ValueError(
+                    f"tp_size {tp_size} must be divisible by num_kv_heads "
+                    f"{num_kv_heads}")
+            factor = tp_size // num_kv_heads
+            k = jnp.repeat(k, factor, axis=1)
+            v = jnp.repeat(v, factor, axis=1)
     two_p = 2 * pcp_size
     padded_q_len = q.shape[0]
     C = padded_q_len // two_p

@@ -35,7 +35,6 @@ from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
-
 def gdn_attention_core_tpu(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,

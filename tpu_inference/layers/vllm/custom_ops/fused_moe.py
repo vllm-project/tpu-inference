@@ -43,9 +43,16 @@ def _all_reduce_over_tp(t: torch.Tensor, mesh: Mesh) -> torch.Tensor:
     """All-reduce an unreduced local sum over the TP axis."""
     spec = P(ShardingAxisName.ATTN_DATA, None)
 
+    # The token dim is sharded over ATTN_DATA, which includes 'pcp'; psum
+    # axes must exclude every axis that shards the data dim or the reduce
+    # sums different token chunks into each other (pcp>1 garbage).
+    _reduce_axes = tuple(
+        a for a in ShardingAxisName.MLP_TENSOR
+        if a != ShardingAxisName.PREFILL_CONTEXT)
+
     @shard_map(mesh=mesh, in_specs=spec, out_specs=spec, check_vma=False)
     def _reduce(x):
-        return jax.lax.psum(x, axis_name=ShardingAxisName.MLP_TENSOR)
+        return jax.lax.psum(x, axis_name=_reduce_axes)
 
     return torch_view(_reduce(jax_view(t)))
 
@@ -130,9 +137,15 @@ class VllmMoERunner(MoERunner):
         if fused_output_is_reduced is None:
             fused_output_is_reduced = self._fused_output_is_reduced
 
+        # True attention-DP shards tokens over the SEQUENCE axes and reduces
+        # shared+fused together in the model's reduce-scatter pass. PCP also
+        # makes is_attn_dp() true (it lives on ATTN_DATA) but has no such
+        # model pass, so the shared expert must still be reduced here.
+        _true_attn_dp = get_mesh_shape_product(
+            mesh, ShardingAxisName.SEQUENCE) > 1
         if (shared_output is not None and fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel
-                and not is_attn_dp(mesh)):
+                and not _true_attn_dp):
             shared_output = _all_reduce_over_tp(shared_output, mesh)
         return shared_output
 
