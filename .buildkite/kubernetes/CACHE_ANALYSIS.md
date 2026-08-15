@@ -15,11 +15,26 @@ builds - which is the same property that makes the chip-minutes good.**
 | Can it run without bare metal? | self-built compilation cache | 28.0m | 27.8m seeded | level |
 | Work per hour | suite makespan | 85.4m / 14 steps | 80.4m / 41 steps | **behind** |
 
-The last row is not about the platform. Bare metal fits three times the work
-into the same window because it keeps enough VMs powered on to run everything
-at once; we create nodes on demand and serialise the 8-chip steps behind a
-single one. Both are configuration - `min_nodes` on the 1-chip pool and
-`nominal_nodes` on the 8-chip pool - and both trade idle chips for wall-clock.
+The last row needs reading carefully, because it is measuring a deliberate
+trade rather than a shortfall.
+
+Bare metal fits three times the work into the same window because it keeps
+enough VMs powered on, in fixed shapes, to run everything at once. We create
+nodes on demand. That costs 2.0-3.8m whenever a node has to be built, and it
+serialises the 8-chip steps behind a single node - but it is also what lets
+capacity move between shapes instead of being pinned to a mix chosen in
+advance. A fixed fleet is only fast while the work matches the shapes it was
+provisioned for; when one machine type is contended, a pool that can be
+rebuilt as a different shape finishes sooner than one that cannot.
+
+It is also the same property that produces the chip-minute result above.
+Nothing is held between builds, which is exactly why the overhead is 11.9%
+against 38.4%.
+
+Where it does cost wall-clock, the levers are configuration rather than
+platform: `min_nodes` on the 1-chip pool sets how many nodes are standing when
+a build starts, and `nominal_nodes` on the 8-chip pool sets how far its steps
+serialise. Both trade idle chips for wall-clock, in either direction.
 
 ### What each side is charged for
 
@@ -39,7 +54,8 @@ so the gap between admission and first output is 2.0-3.8m whenever
 cluster-autoscaler has to build one - and 0.1m when it does not. The launcher
 says which: `pod not scheduled yet: Unschedulable`. Charging that to setup and
 comparing it against bare metal's docker pull is charging us for building
-hardware that bare metal never stops paying for.
+hardware that bare metal never stops paying for - and for the flexibility that
+building it on demand buys.
 
 **Queue is not symmetric either.** On Kubernetes the wait for capacity happens
 *inside* the Buildkite job. On bare metal it happens before the job starts and
@@ -103,7 +119,10 @@ Three changes carry nearly all of it, and only one is about Kubernetes:
    configuration made it expensive enough to chase.
 
 Past ~56Gi the model cache stops mattering: 73Gi gives 9.5m against 56Gi's
-8.8m, so the working set already fits and further capacity buys nothing.
+8.8m, so the working set already fits and further capacity buys nothing. The
+shipped figures are 65Gi of models and 8Gi of compilation cache inside a volume
+of half the node's memory, which leaves ~57 GiB of a 176 GB machine to the
+tests.
 
 # How we got there
 
