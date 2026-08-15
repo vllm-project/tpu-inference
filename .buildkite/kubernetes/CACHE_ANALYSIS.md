@@ -1,41 +1,104 @@
-# TPU utilisation on Kubernetes, against bare metal
+# Migrating TPU CI to Kubernetes: does it match bare metal?
 
-> **Preliminary.** The storage numbers below are current as of build
+> **Preliminary.** Storage figures are current as of build
 > [241](https://buildkite.com/tpu-commons/kube-dev/builds/241). The cache was
-> resized afterwards - 73Gi of models and 16Gi of compilation cache in a 98Gi
-> volume, against 241's unbounded capacities - and build
+> resized afterwards and build
 > [242](https://buildkite.com/tpu-commons/kube-dev/builds/242) will settle
-> part2's figure. Everything else stands.
+> part2's number.
 
-Does running TPU CI on Kubernetes use the accelerators at least as efficiently
-as the bare-metal pipeline it replaces?
+## Verdict
 
-**Yes, and the suite now finishes sooner.** Bare metal spends 38% of its TPU
-time not testing; Kubernetes spends 12%. Step for step the two are level -
-0.98x across the ten steps that exist on both - and the whole suite completes
-in 85 minutes against 114 for the same work in the first green Kubernetes run.
+**Yes, on every measure that is about the platform. The one gap left is a
+provisioning setting, not a property of Kubernetes.**
 
-Two changes account for nearly all of it, and neither is about Kubernetes:
+| question | measure | Kubernetes | bare metal | |
+|---|---|---|---|---|
+| Do the tests pass? | full suite | 14/14 | 14/14 | level |
+| How long does a step take? | setup + execution | **1.07x** | 1.00x | level |
+| How efficiently are chips used? | overhead on chip-minutes held | **11.9%** | 38.4% | **better** |
+| Can it run without bare metal? | self-built compilation cache | 28.0m | 27.8m seeded | level |
+| How much work per hour? | suite makespan | 85.4m / 14 steps | 80.4m / 41 steps | **behind** |
 
-* **`VLLM_XLA_CHECK_RECOMPILATION=1`**, which bare metal has always set and
-  Kubernetes never did. Without it JAX declines to persist anything small or
-  quick to compile, so a self-built cache plateaus at 57.7m on speculative
-  decoding no matter how many times it runs. With it, 28.0m - level with a
-  cache that bare metal filled.
-* **The file cache being large enough to hold a checkpoint**, and the tests
-  that read those checkpoints being ordered so one is resident at a time.
-  Together they took part2's checkpoint loading from 84.6m to 8.8m.
+The first four are what a migration has to prove, and they are all met. The
+fifth is real but is a different question: bare metal fits three times the work
+into the same window because it keeps enough VMs powered on to run everything
+at once. Our 8-chip steps queue 8-15 minutes behind a single node because
+`nominal_nodes = 1` on that pool - chosen so a second node does not sit idle.
+Raising it trades chip-minute efficiency for wall-clock, and it is one line of
+configuration.
 
-The ordering fix is not a Kubernetes fix at all. `tests/models/jax/test_gemma4.py`
-cycled four ~30GB checkpoints round-robin, so each was fetched four times with
-the other three in between - the worst case for any cache, including the page
-cache in front of bare metal's local disk. Bare metal pays it too. We only
-found it because the Kubernetes configuration made it expensive enough to
-chase.
+### What each number includes
 
-Every number is from a real run of the same v6e steps, with one image pinned
-across configurations so the storage backend is the only variable. Bare metal
-is the median of the most recent passing nightlies.
+The comparison is only meaningful if both sides are charged for the same work.
+
+* **Bare metal wall time** includes checkout, the docker pull and the cache
+  rsync, because the agent runs on the TPU VM and the job starts before any of
+  it. Measured directly: part2 reaches its first test output 2.3m into a 78.9m
+  job, speculative decoding 1.5m into 28.8m.
+* **Kubernetes** is charged the same way: pod init - image pull, gcsfuse mount,
+  process start - is 2.1-2.7m on the same two steps, and is counted.
+* **Queue is excluded from the 1.07x**, because it is not symmetric. On
+  Kubernetes the wait for a node happens *inside* the Buildkite job; on bare
+  metal the wait for a free VM happens *before* the job starts and never
+  appears in its duration. Counting ours and not theirs would be wrong. Its
+  effect is visible in makespan, which is where it belongs.
+
+| basis | Kubernetes | bare metal | ratio |
+|---|---|---|---|
+| execution only | 168.9m | 176.5m | 0.96x |
+| **+ pod init (like for like)** | **189.5m** | **176.5m** | **1.07x** |
+| + queue | 243.7m | 176.5m | 1.38x |
+
+Thirteen steps matched by hand; bare metal names them differently
+(`Correctness Test | Runai Model Streamer ...` for our `Runai streamer | ...`).
+`E2E MLPerf | JAX + vLLM models` is excluded because bare metal splits it into
+single- and multi-chip variants and it is not clear which ours corresponds to.
+
+### Per step
+
+| step | kube exec | + init | bare metal | ratio |
+|---|---|---|---|---|
+| JAX unit tests part2 | 81.9m | 84.6m | 79.6m | 1.06x |
+| E2E speculative decoding | 30.3m | 32.4m | 29.6m | 1.10x |
+| JAX unit tests part1 | 15.1m | 15.2m | 14.1m | 1.08x |
+| Accuracy Qwen2.5-VL-7B | 8.7m | 12.1m | 6.4m | **1.90x** |
+| E2E MLPerf JAX models | 8.2m | 10.2m | 8.1m | 1.26x |
+| lora e2e multi chip | 4.3m | 8.2m | 6.5m | 1.26x |
+| Runai streamer Torchax Ray | 3.8m | 5.5m | 6.3m | 0.88x |
+| E2E disagg single host | 3.6m | 3.7m | 6.1m | 0.60x |
+| Runai streamer JAX Uniproc | 3.5m | 3.8m | 3.2m | 1.18x |
+| Runai streamer Torchax Uniproc | 2.9m | 5.0m | 3.4m | 1.46x |
+| E2E MPMD data parallelism | 2.5m | 2.6m | 5.3m | 0.49x |
+| lora unit multi chip | 2.2m | 2.3m | 4.8m | 0.48x |
+| lora unit single chip | 1.9m | 3.9m | 3.1m | 1.25x |
+
+`Accuracy Qwen2.5-VL-7B` is the one genuine regression and has not been
+investigated. The short steps are where pod init hurts most - it is a fixed
+2-4m against a 2-minute test - which is also why packing them into one pod is
+on the list below.
+
+## What it took
+
+Three changes carry nearly all of the result, and only one of them is about
+Kubernetes:
+
+1. **`VLLM_XLA_CHECK_RECOMPILATION=1`.** Bare metal sets it on every step and
+   Kubernetes never did. Without it JAX persists nothing small or quick to
+   compile, so a self-built cache plateaus at 57.7m on speculative decoding and
+   stays there. With it, 28.0m.
+2. **A file cache large enough to hold a checkpoint.** 84.6m of part2 was spent
+   refetching model shards that could not fit.
+3. **Test ordering.** `test_gemma4.py` cycled four ~30GB checkpoints
+   round-robin, so each was fetched four times with the other three in between.
+   Grouping them took the remaining loading from 23.8m to 8.8m. **Bare metal
+   pays this too** - its page cache thrashes on the same cycle. We only found
+   it because our configuration made it expensive enough to chase.
+
+# How we got there
+
+What follows is the climb: the measurements that led to the configuration
+above, including the ones that were wrong. Kept because the reasoning is
+reusable and several of the failure modes will recur.
 
 ## The metric
 
@@ -61,58 +124,85 @@ finished in 29; build [199](https://buildkite.com/tpu-commons/kube-dev/builds/19
 minutes longer for free chips. Queueing is a capacity question, not an
 efficiency one.
 
-## Result
+## The compilation cache: Kubernetes can seed its own
 
-**Whole suite, 14 steps.** Build [241](https://buildkite.com/tpu-commons/kube-dev/builds/241),
-the first green run on the configuration we ship, against build
-[230](https://buildkite.com/tpu-commons/kube-dev/builds/230), the first green
-run at all.
+This was open in the first version of this document, and withdrawn from the
+second because two variables had moved. It is now measured.
 
-| | 230 | 241 |
+A cache that Kubernetes builds itself, with no bare-metal seeding, on
+speculative decoding:
+
+| | cold | warm | second warm |
+|---|---|---|---|
+| without the flag | 161.5m | 57.8m | 57.7m |
+| with `VLLM_XLA_CHECK_RECOMPILATION=1` | 133.0m | **28.0m** | - |
+| reference: cache seeded by bare metal | - | 27.8m | - |
+
+Without the flag it plateaus. Builds
+[216](https://buildkite.com/tpu-commons/kube-dev/builds/216) and
+[217](https://buildkite.com/tpu-commons/kube-dev/builds/217) land within 0.1m
+of each other, so no number of passes closes the gap - the entries are skipped
+deterministically. With it, a self-built cache reaches parity with one bare
+metal filled.
+
+The flag's documented job is to fail a test that recompiles at runtime. Its
+second effect is what matters here: `CompilationManager` only lowers
+`jax_persistent_cache_min_compile_time_secs` and `min_entry_size_bytes` to -1
+when it is set, and without that JAX keeps its defaults and never writes
+anything small or quick to compile.
+
+The cold run is the price: 133.0m against 27.8m warm, paid once per cache
+generation.
+
+## The model cache: capacity, then ordering
+
+part2 is the only step with a large model working set, and it was 1.40x bare
+metal. Two independent causes, contributing about equally:
+
+| | execution | checkpoint loading |
 |---|---|---|
-| result | 14/14 | 14/14 |
-| makespan | 114.4m | **85.4m** |
-| JAX unit tests part2 | 111.8m | 81.9m |
-| E2E speculative decoding | 28.8m | 30.3m |
-| E2E disagg | failed | 3.6m |
+| 20Gi cache, round-robin | 111.8m | 84.6m |
+| 56Gi cache, round-robin | 79.1m | 23.8m |
+| 56Gi cache, grouped | **71.6m** | **8.8m** |
+| bare metal | ~79.6m | - |
 
-**Step for step against bare metal.** Execution time on Kubernetes - first
-workload output to job completion - against bare-metal wall time, which is the
-right comparison because a bare-metal VM holds its chips through checkout, the
-docker pull and the cache rsync.
+**Capacity.** `cache-file-for-range-read` ingests the whole object on a partial
+read, and gcsfuse will not cache an object that does not fit the remaining
+capacity. part2 reads gemma-4 checkpoints a few layers at a time, so at 20Gi a
+~30GB shard was refetched every time while evicting the small models that would
+have fit.
 
-| step | kube 241 | bare metal | ratio |
-|---|---|---|---|
-| JAX unit tests part2 | 81.9m | 79.6m | 1.03x |
-| E2E speculative decoding | 30.3m | 29.6m | 1.02x |
-| JAX unit tests part1 | 15.1m | 14.1m | 1.07x |
-| Accuracy Qwen2.5-VL-7B | 8.7m | 6.4m | **1.37x** |
-| E2E MLPerf JAX models | 8.2m | 8.1m | 1.01x |
-| E2E MLPerf JAX + vLLM | 7.2m | 7.3m | 0.98x |
-| lora e2e multi chip | 4.3m | 6.5m | **0.66x** |
-| E2E MPMD data parallelism | 2.5m | 5.3m | **0.47x** |
-| lora unit multi chip | 2.2m | 4.8m | **0.45x** |
-| lora unit single chip | 1.9m | 3.1m | 0.61x |
-| **sum of 10 matched** | **162.3m** | **164.8m** | **0.98x** |
+**Ordering.** Stacked `parametrize` varies the topmost decorator fastest, so
+four checkpoints cycled round-robin and each was fetched four times. Grouping
+them made one checkpoint resident at a time. This costs bare metal too.
 
-Four steps - three Runai streamer variants and disagg - have no bare-metal
-equivalent under the same name and are excluded. The Accuracy step is the one
-genuine regression and has not been investigated.
+Two mechanisms worth remembering, both learned the hard way:
 
-**Chip-minutes.** Durations weighted by chips, from build 230:
+* `fileCacheCapacity` is the threshold gcsfuse evicts against. Setting it to
+  `-1` does not mean "use everything" in any useful sense - it means there is
+  no threshold, so the volume fills and writes fail. Build
+  [241](https://buildkite.com/tpu-commons/kube-dev/builds/241) spent 26.6m on
+  loading that way against build 234's 8.8m in a *smaller* volume.
+* The capacity is nominal unless the pod declares a `gke-gcsfuse-cache` volume
+  at least as large. Without one the sidecar falls back to 5GiB of ephemeral
+  storage; build [239](https://buildkite.com/tpu-commons/kube-dev/builds/239)
+  spent 113.6m loading, worse than having no tuning at all.
 
-| | executing | held | overhead |
-|---|---|---|---|
-| bare metal | 183 | 297 | 38.4% |
-| Kubernetes | 320 | 363 | **11.9%** |
+## What we tried and rejected
 
-The two are not on the same base - 230 ran 14 steps where the bare-metal figure
-covers 13 - so read the overhead column, not the totals.
+**GKE gcsfuse profiles.** Managed StorageClasses that size the cache from the
+node and the bucket, which would have replaced a capacity figure derived by
+hand from one machine type. Measured against the hand-tuned mounts on the same
+image and ordering, build
+[240](https://buildkite.com/tpu-commons/kube-dev/builds/240) ran part2 in
+115.9m with 91.3m of loading, against 71.6m and 8.8m - individual checkpoint
+loads of 21 minutes. A profile does not set the readahead, parallel-download
+and chunk-size options these mounts were tuned with, and adding them back on
+top is hand-tuning with a StorageClass attached.
 
-**The efficiency problem is no longer chip-minutes.** At 11.9% there is little
-left to win there. What remains is makespan: every step except part2 finishes
-inside 32 minutes, and part2 then runs alone for another 82. Sharding it is
-worth more than any further storage work, and costs no extra chip-minutes.
+Profiles also gate the pod on a bucket scan while it runs, and the scan
+authenticates as the GKE service agent rather than the workload identity - a
+second reader that the bucket IAM had to be widened for.
 
 ## Where bare metal's 38% goes
 
@@ -140,7 +230,7 @@ it — entries are already distinct per shape, so splitting them loses no sharin
 is why it is the only same-region configuration worse than bare metal. Starting
 from a clone and pulling only the delta costs 26.
 
-**Cross-region latency is the largest single effect in the table.** Measured
+**Cross-region latency was the largest single effect at the time.** Measured
 from a pod:
 
 | operation | us-central1 | same region |
@@ -382,86 +472,6 @@ Exact figures would need the bare-metal disk size and instance count, which we
 do not have, so this is a statement about shape rather than a total.
 
 
-## The compilation cache: Kubernetes can seed its own
-
-This was open in the first version of this document, and withdrawn from the
-second because two variables had moved. It is now measured.
-
-A cache that Kubernetes builds itself, with no bare-metal seeding, on
-speculative decoding:
-
-| | cold | warm | second warm |
-|---|---|---|---|
-| without the flag | 161.5m | 57.8m | 57.7m |
-| with `VLLM_XLA_CHECK_RECOMPILATION=1` | 133.0m | **28.0m** | - |
-| reference: cache seeded by bare metal | - | 27.8m | - |
-
-Without the flag it plateaus. Builds
-[216](https://buildkite.com/tpu-commons/kube-dev/builds/216) and
-[217](https://buildkite.com/tpu-commons/kube-dev/builds/217) land within 0.1m
-of each other, so no number of passes closes the gap - the entries are skipped
-deterministically. With it, a self-built cache reaches parity with one bare
-metal filled.
-
-The flag's documented job is to fail a test that recompiles at runtime. Its
-second effect is what matters here: `CompilationManager` only lowers
-`jax_persistent_cache_min_compile_time_secs` and `min_entry_size_bytes` to -1
-when it is set, and without that JAX keeps its defaults and never writes
-anything small or quick to compile.
-
-The cold run is the price: 133.0m against 27.8m warm, paid once per cache
-generation.
-
-## The model cache: capacity, then ordering
-
-part2 is the only step with a large model working set, and it was 1.40x bare
-metal. Two independent causes, contributing about equally:
-
-| | execution | checkpoint loading |
-|---|---|---|
-| 20Gi cache, round-robin | 111.8m | 84.6m |
-| 56Gi cache, round-robin | 79.1m | 23.8m |
-| 56Gi cache, grouped | **71.6m** | **8.8m** |
-| bare metal | ~79.6m | - |
-
-**Capacity.** `cache-file-for-range-read` ingests the whole object on a partial
-read, and gcsfuse will not cache an object that does not fit the remaining
-capacity. part2 reads gemma-4 checkpoints a few layers at a time, so at 20Gi a
-~30GB shard was refetched every time while evicting the small models that would
-have fit.
-
-**Ordering.** Stacked `parametrize` varies the topmost decorator fastest, so
-four checkpoints cycled round-robin and each was fetched four times. Grouping
-them made one checkpoint resident at a time. This costs bare metal too.
-
-Two mechanisms worth remembering, both learned the hard way:
-
-* `fileCacheCapacity` is the threshold gcsfuse evicts against. Setting it to
-  `-1` does not mean "use everything" in any useful sense - it means there is
-  no threshold, so the volume fills and writes fail. Build
-  [241](https://buildkite.com/tpu-commons/kube-dev/builds/241) spent 26.6m on
-  loading that way against build 234's 8.8m in a *smaller* volume.
-* The capacity is nominal unless the pod declares a `gke-gcsfuse-cache` volume
-  at least as large. Without one the sidecar falls back to 5GiB of ephemeral
-  storage; build [239](https://buildkite.com/tpu-commons/kube-dev/builds/239)
-  spent 113.6m loading, worse than having no tuning at all.
-
-## What we tried and rejected
-
-**GKE gcsfuse profiles.** Managed StorageClasses that size the cache from the
-node and the bucket, which would have replaced a capacity figure derived by
-hand from one machine type. Measured against the hand-tuned mounts on the same
-image and ordering, build
-[240](https://buildkite.com/tpu-commons/kube-dev/builds/240) ran part2 in
-115.9m with 91.3m of loading, against 71.6m and 8.8m - individual checkpoint
-loads of 21 minutes. A profile does not set the readahead, parallel-download
-and chunk-size options these mounts were tuned with, and adding them back on
-top is hand-tuning with a StorageClass attached.
-
-Profiles also gate the pod on a bucket scan while it runs, and the scan
-authenticates as the GKE service agent rather than the workload identity - a
-second reader that the bucket IAM had to be widened for.
-
 ## Recommendation
 
 **Both caches as PersistentVolumeClaims over GCS FUSE, in the cluster's own
@@ -581,10 +591,30 @@ than the cache sizing: 23.8m of loading became 8.8m without touching the mount.
 
 ## Reproducing
 
+Today, with the comparison finished and the losing backends removed:
+
 ```
 bk build create --pipeline tpu-commons/kube-dev --branch <branch> \
+  --env TEST_TYPE=jax \
+  --env CACHE_BACKEND=<clone|pvc> \
+  --env WORKLOAD_IMAGE=<pinned image>
+```
+
+`TEST_TYPE=part2` or `spec` runs one long step on its own, which is how the
+storage work was iterated without paying for the other thirteen. Setting
+`CACHE_NAMESPACE` to an unused name gives a cold compilation cache without
+disturbing the real one - that is how the self-seeding pair was measured.
+
+The runs in the table below used backends that no longer exist
+(`fuse`, `rsync`, `clone-rsync`, `clone-nomodel`, `nocache`, `none`, `inline`,
+`pvc-profile`). They were deleted once the question they answered was settled;
+the builds remain readable.
+
+```
+# what those runs looked like at the time
+bk build create --pipeline tpu-commons/kube-dev --branch <branch> \
   --env TEST_TYPE=jax --env SKIP_PART2=1 \
-  --env CACHE_BACKEND=<clone|fuse|rsync|clone-rsync|clone-nomodel|nocache|none> \
+  --env CACHE_BACKEND=<one of the above> \
   --env GCS_CACHE_BUCKET=<bucket> \
   --env WORKLOAD_IMAGE=<pinned image>
 ```
