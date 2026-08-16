@@ -320,14 +320,7 @@ class TpuPlatform(Platform):
                                           False):
             from tpu_inference.models.common.model_loader import \
                 resolve_model_impl_type
-            try:
-                impl = resolve_model_impl_type(vllm_config)
-            except Exception as e:
-                logger.warning(
-                    "[tpu_platform] resolve_model_impl_type failed (%s); "
-                    "assuming the JAX-native path for the "
-                    "mm_device_do_normalize check.", e)
-                impl = "flax_nnx"
+            impl = resolve_model_impl_type(vllm_config)
             if impl != "vllm":
                 logger.warning(
                     "[tpu_platform] Disabling mm_device_do_normalize: the "
