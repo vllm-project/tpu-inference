@@ -13,6 +13,15 @@
 # limitations under the License.
 
 steps:
+  - label: ":docker: Build base image (tpu6e)"
+    key: tpu6e_build_docker
+    agents:
+      queue: cpu_64_core
+    env:
+      TPU_VERSION: "tpu6e"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
   - label: ":docker: Build base image (tpu7x)"
     key: tpu7x_build_docker
     agents:
@@ -22,12 +31,26 @@ steps:
     commands:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
-  - label: "tpu7x TP1 vs TP8 perf (run {{matrix}})"
-    key: tpu7x_tp8_perf
+  - label: "tpu6e TP1v8 HEAVY (run {{matrix}})"
+    key: tpu6e_tp8_heavy
+    depends_on: tpu6e_build_docker
+    agents:
+      queue: tpu_v6e_8_queue
+    matrix: ["1","2","3"]
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu6e"
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py::test_tp_performance'
+
+  - label: "tpu7x TP1v8 HEAVY (run {{matrix}})"
+    key: tpu7x_tp8_heavy
     depends_on: tpu7x_build_docker
     agents:
       queue: tpu_v7x_8_queue
-    matrix: ["1","2","3","4","5","6"]
+    matrix: ["1","2","3"]
     env:
       USE_PREBUILT_IMAGE: "1"
       TPU_VERSION: "tpu7x"

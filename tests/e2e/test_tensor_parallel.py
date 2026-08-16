@@ -42,7 +42,8 @@ class InferenceConfig:
     enable_prefix_caching: bool = False
 
 
-def generate_test_prompts(num_prompts: int = 256) -> list[str]:
+def generate_test_prompts(num_prompts: int = 256,
+                          repeat: int = 1) -> list[str]:
     base_text = (
         "The rapid advancement of artificial intelligence has transformed "
         "numerous industries and continues to reshape our understanding of "
@@ -52,8 +53,9 @@ def generate_test_prompts(num_prompts: int = 256) -> list[str]:
         "language processing to computer vision, AI systems are now capable "
         "of understanding context, recognizing patterns, and making decisions "
         "with remarkable accuracy. ")
+    body = base_text * repeat
     return [
-        f"Prompt {i}: {base_text} What are your thoughts on this topic?"
+        f"Prompt {i}: {body} What are your thoughts on this topic?"
         for i in range(num_prompts)
     ]
 
@@ -132,10 +134,12 @@ def _test_tensor_parallelism_performance(
     pipeline_parallel_size: int = 1,
     additional_config: dict | None = None,
     min_speedup: float = 1.05,
+    cfg: TestConfig | None = None,
+    prompt_repeat: int = 1,
 ):
     """Performance test for tensor parallelism."""
-    cfg = TestConfig.for_performance()
-    test_prompts = generate_test_prompts(cfg.num_prompts)
+    cfg = cfg or TestConfig.for_performance()
+    test_prompts = generate_test_prompts(cfg.num_prompts, prompt_repeat)
 
     tp_config = InferenceConfig(
         model_name=model_name,
@@ -175,11 +179,26 @@ def test_tp_performance(sampling_params: SamplingParams):
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
     # Measurement mode: full-slice TP on the 8-chip agent; threshold low so
-    # every run reports its numbers.
+    # every run reports its numbers. Heavy per-step workload so TPU compute
+    # dominates over per-step host overhead: long prompts, large prefill
+    # chunks, fewer sequences, longer decode.
+    heavy = TestConfig(
+        max_model_len=4096,
+        max_num_batched_tokens=8192,
+        max_num_seqs=256,
+        num_prompts=256,
+    )
+    heavy_sampling = SamplingParams(
+        temperature=0.0,
+        max_tokens=128,
+        ignore_eos=True,
+    )
     _test_tensor_parallelism_performance(
-        sampling_params=sampling_params,
+        sampling_params=heavy_sampling,
         model_name="meta-llama/Llama-3.1-8B-Instruct",
         tensor_parallel_size=8,
         pipeline_parallel_size=1,
         min_speedup=0.5,
+        cfg=heavy,
+        prompt_repeat=18,
     )
