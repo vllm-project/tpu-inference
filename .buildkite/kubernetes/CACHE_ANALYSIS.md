@@ -2,99 +2,120 @@
 
 ## Verdict
 
-**Yes. On the same tests Kubernetes is faster per step, faster end to end, and
-uses the chips better. It runs 14 of bare metal's 17 per-push steps; the three
-it does not are named below.**
+**Yes. Setup is an order of magnitude faster, execution is slightly faster, and
+the chips are used better. Every per-push step bare metal runs, we run.**
 
-Every figure is build [243](https://buildkite.com/tpu-commons/kube-dev/builds/243),
-one run on the configuration that ships, against the median of three
-`NIGHTLY`-unset bare-metal builds - [24341](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24341),
+Figures are the median of five consecutive full-suite runs on the shipped
+configuration - builds [255](https://buildkite.com/tpu-commons/kube-dev/builds/255),
+[257](https://buildkite.com/tpu-commons/kube-dev/builds/257),
+[258](https://buildkite.com/tpu-commons/kube-dev/builds/258),
+[259](https://buildkite.com/tpu-commons/kube-dev/builds/259) and
+[260](https://buildkite.com/tpu-commons/kube-dev/builds/260), one image pinned
+across all of them - against the median of three `NIGHTLY`-unset bare-metal
+builds, [24341](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24341),
 [24337](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24337) and
 [24333](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24333).
 
 | question | measure | Kubernetes | bare metal | |
 |---|---|---|---|---|
-| Do the tests pass? | full suite | 14/14 | passing | level |
+| Do the tests pass? | 16 steps, five runs | 16/16 | passing | level |
 | Step setup | container start + mount, vs docker pull + rsync | **0.1m** | 1.5-2.3m | **~20x faster** |
-| Test execution | 13 matched steps | **156.6m** | 176.5m | **0.89x** |
-| Suite wall clock | makespan | **72.3m** / 14 steps | 80.0-81.1m / 17-19 steps | **faster** |
-| Chip efficiency | overhead on chip-minutes held | **13.2%** | 38.4% | **better** |
+| Test execution | 15 matched steps, medians | **169.4m** | 176.5m | **0.96x** |
+| Chip efficiency | overhead on chip-minutes held | **12-13%** | 38.4% | **better** |
 | Can it run without bare metal? | self-built compilation cache | 28.0m | 27.8m seeded | level |
-
-Ten of the thirteen matched steps are at or below bare metal. Three are above:
-`JAX unit tests part1` at 1.15x, `Accuracy Qwen2.5-VL-7B` at 1.19x, and
-`E2E speculative decoding` at 0.98x is level.
-
-### Scope
-
-Bare metal's per-push run schedules 41 tpu6e jobs and executes 17-19 of them;
-the rest are gated behind `NIGHTLY`, as they are here. We run 14. The
-difference is three steps:
-
-| not run on Kubernetes | bare metal median | |
-|---|---|---|
-| `E2E test for Multihost DCN-based P/D disaggregation` | 5.4m | **the JobSet path, never exercised** |
-| `E2E MLPerf tests for JAX + vLLM models on single chip` | 7.3m | we run a multi-chip variant instead |
-| `JAX unit tests combine and report` | 0.2m | merges coverage, which we do not collect |
-
-Two more - `JAX unit tests - kernels` and `- collective kernels` - are gated on
-`RUN_KERNEL_TESTS` and ran in one of the three builds sampled, so they are
-conditional on both sides.
-
-**Multi-host disaggregation is the gap that matters.** It is the only step that
-needs a JobSet rather than a Job, so the launcher's multi-host path has never
-run a real test. Nothing else here depends on it, and nothing here validates it.
-
-### What each side is charged for
-
-Easy to get wrong, and the first two versions of this document did.
-
-**Setup.** Bare metal's wall time already contains its checkout, docker pull
-and cache rsync, because the agent runs on the TPU VM and the job starts before
-any of it: part2 reaches first test output 2.3m into a 78.9m job, speculative
-decoding 1.5m into 28.8m. The Kubernetes equivalent - container start and the
-gcsfuse mount - is **0.08m median, 0.34m worst** across pods that landed on an
-existing node. Image streaming is on and the mount overlaps container start,
-where bare metal pulls and then rsyncs in sequence.
-
-**Node creation is not setup.** Kueue admits a workload before the node exists,
-so the gap between admission and first output is 2.0-3.1m whenever
-cluster-autoscaler has to build one, and 0.1m when it does not. The launcher
-says which: `pod not scheduled yet: Unschedulable`.
-
-**Queue is not symmetric.** On Kubernetes the wait for capacity happens inside
-the Buildkite job; on bare metal it happens before the job starts and never
-appears in its duration. Both belong in makespan, which is why makespan is
-quoted above as its own row.
+| Suite wall clock | makespan | ~85m / 16 steps | 80-81m / 17-19 steps | comparable |
 
 ### Per step
 
-| step | kube 243 | bare metal | ratio |
-|---|---|---|---|
-| JAX unit tests part2 | 71.8m | 79.6m | **0.90x** |
-| E2E speculative decoding | 29.1m | 29.6m | 0.98x |
-| JAX unit tests part1 | 16.2m | 14.1m | 1.15x |
-| E2E MLPerf JAX models | 7.9m | 8.1m | 0.98x |
-| Accuracy Qwen2.5-VL-7B | 7.6m | 6.4m | 1.19x |
-| E2E disagg single host | 4.0m | 6.1m | 0.66x |
-| lora e2e multi chip | 3.9m | 6.5m | 0.60x |
-| Runai streamer Torchax Ray | 3.7m | 6.3m | 0.59x |
-| Runai streamer Torchax Uniproc | 2.9m | 3.4m | 0.85x |
-| Runai streamer JAX Uniproc | 2.8m | 3.2m | 0.87x |
-| E2E MPMD data parallelism | 2.4m | 5.3m | 0.45x |
-| lora unit multi chip | 2.3m | 4.8m | 0.48x |
-| lora unit single chip | 2.0m | 3.1m | 0.65x |
-| **sum** | **156.6m** | **176.5m** | **0.89x** |
+Median of five runs, with the spread, because single observations misled us
+twice: part2 read 71.8m in one build against a five-run range of 78.4-80.0m,
+and `Accuracy Qwen2.5-VL` read 8.7m once and was written up here as a 1.37x
+regression before five runs put it at 6.4m, exactly bare metal's figure.
 
-`E2E MLPerf | JAX + vLLM models` is excluded: the bare-metal step of that name
-did not execute in any of the three builds sampled, so there is nothing to
-compare against.
+| step | kube median | range | bare metal | ratio |
+|---|---|---|---|---|
+| JAX unit tests part2 | 79.1m | 78.4-80.0 | 79.6m | 0.99x |
+| E2E speculative decoding | 27.8m | 27.0-28.2 | 29.6m | 0.94x |
+| JAX unit tests part1 | 15.4m | 15.2-15.8 | 14.1m | 1.09x |
+| E2E MLPerf JAX models | 7.4m | 7.2-7.7 | 8.1m | 0.91x |
+| E2E MLPerf JAX + vLLM | 6.6m | 6.5-7.0 | 7.3m | 0.90x |
+| Accuracy Qwen2.5-VL-7B | 6.4m | 6.2-7.0 | 6.4m | 1.00x |
+| lora e2e multi chip | 3.9m | 3.7-4.0 | 6.5m | 0.60x |
+| Runai streamer Torchax Ray | 3.7m | 3.5-3.9 | 6.3m | 0.59x |
+| E2E disagg single host | 3.6m | 3.6-3.9 | 6.1m | 0.59x |
+| E2E disagg multi host | 3.5m | 3.3-4.4 | 5.4m | 0.65x |
+| Runai streamer JAX Uniproc | 3.0m | 2.6-3.0 | 3.2m | 0.94x |
+| Runai streamer Torchax Uniproc | 2.8m | 2.5-2.8 | 3.4m | 0.82x |
+| E2E MPMD data parallelism | 2.3m | 2.2-2.4 | 5.3m | 0.43x |
+| lora unit tests multi chip | 2.1m | 2.0-2.4 | 4.8m | 0.44x |
+| lora unit tests single chip | 1.8m | 1.5-1.9 | 3.1m | 0.58x |
+| **sum of medians** | **169.4m** | | **176.5m** | **0.96x** |
 
-Eleven of the fourteen commands are byte-identical to `pipeline_jax.yml` once
-each pipeline's wrapper is stripped. The three that differ: `part1` and `part2`
-omit coverage collection, whose output path is a bare-metal disk, and
-`lora e2e | multi chip` sets `MODEL_IMPL_TYPE` and `TPU_BACKEND_TYPE` as step
-env where bare metal sets them inline - same values either way.
+Only `part1` is materially slower. The two long steps that dominate the suite -
+part2 and speculative decoding - are at parity or better, and the short
+multi-chip steps are roughly twice as fast.
+
+### Scope
+
+Bare metal's per-push run schedules 41 tpu6e jobs and executes 17-19; the rest
+are `NIGHTLY`-gated, as they are here. We run 16 of them. What we do not run:
+
+| | |
+|---|---|
+| `JAX unit tests combine and report` | we do run it - see coverage below |
+| `TPU Test Notification` | not a test |
+
+`JAX unit tests - kernels` and `- collective kernels` are gated on both sides,
+by `NIGHTLY` or by `RUN_KERNEL_TESTS` / `RUN_KERNEL_COLLECTIVES_TESTS`, so they
+are conditional rather than missing.
+
+Multi-host disaggregation was the last real gap and is now covered. Bare metal
+runs it as eight docker containers on one 8-chip VM - "multi-host" meaning
+eight TPU processes, not eight machines - and a pod holding all 8 chips is the
+same environment with the container boundaries removed. It has passed in five
+consecutive suites at a median of 3.5m against bare metal's 5.4m. The launcher's
+JobSet path remains unexercised, because nothing here needs a slice spanning
+nodes.
+
+### What each side is charged for
+
+Easy to get wrong, and earlier versions of this document did, twice.
+
+**Setup.** Bare metal's wall time already contains its checkout, docker pull and
+cache rsync, because the agent runs on the TPU VM: part2 reaches first test
+output 2.3m into a 78.9m job, speculative decoding 1.5m into 28.8m. The
+Kubernetes equivalent - container start and the gcsfuse mount - is **0.08m
+median, 0.34m worst** across pods that landed on an existing node. Image
+streaming is on and the mount overlaps container start, where bare metal pulls
+and then rsyncs in sequence.
+
+**Node creation is not setup.** Kueue admits a workload before the node exists,
+so the gap between admission and first output is 2.0-3.8m whenever
+cluster-autoscaler has to build one, and 0.1m when it does not. The launcher
+says which: `pod not scheduled yet: Unschedulable`. Charging that against bare
+metal's docker pull charges us for building hardware bare metal never stops
+paying for.
+
+**Queue is not symmetric.** On Kubernetes the wait for capacity happens inside
+the Buildkite job; on bare metal it happens before the job starts and never
+appears in its duration. Both belong in makespan.
+
+### Coverage and artifacts
+
+Bare metal's per-push suite uploads two artifacts, the coverage shards, and
+merges them in a CPU step. That works here, by a different route.
+
+`artifact_paths` cannot: it collects from the agent's working directory, and the
+agent is in a different pod from the test. So the CI image carries the
+buildkite-agent CLI and the test uploads its own artifacts - the pod has
+`BUILDKITE_AGENT_ACCESS_TOKEN`, `_BUILD_ID` and `_JOB_ID`, which is all
+`artifact upload` needs, and the result is attached to the step's Buildkite job
+exactly as an agent-side upload would be.
+
+The merge step installs `coverage` with pip rather than the pex `pipeline_jax`
+uses: that pex release declares python <3.13 and the launcher image runs 3.14,
+so it cannot bootstrap. pex exists there to avoid installing into a long-lived
+VM's interpreter, which is not a concern for a pod discarded after the step.
 
 ## What it took
 
@@ -115,9 +136,9 @@ Three changes carry nearly all of it, and only one is about Kubernetes:
    configuration made it expensive enough to chase.
 
 Past ~56Gi the model cache stops mattering: 73Gi gives 9.5m against 56Gi's
-8.8m, so the working set already fits. The shipped figures are 65Gi of models
-and 8Gi of compilation cache in a volume of half the node's memory, leaving
-~57 GiB of a 176 GB machine to the tests.
+8.8m. The shipped figures are 65Gi of models and 8Gi of compilation cache in a
+volume of half the node's memory, leaving ~57 GiB of a 176 GB machine to the
+tests.
 
 # How we got there
 
