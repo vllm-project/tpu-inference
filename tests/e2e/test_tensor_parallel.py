@@ -178,20 +178,31 @@ def test_tp_performance(sampling_params: SamplingParams):
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
-    # Measurement mode: full-slice TP on the 8-chip agent; threshold low so
-    # every run reports its numbers. Heavy per-step workload so TPU compute
-    # dominates over per-step host overhead: long prompts, large prefill
-    # chunks, fewer sequences, longer decode.
+    # Heavy per-step workload so TPU compute dominates per-step host
+    # overhead (the stock short-prompt workload measures only engine CPU
+    # overhead: TP=8 == TP=1 on both platforms).
     # max_num_batched_tokens stays at the stock for_performance() value.
-    # max_model_len 2048: prompt (~1.8k incl. 128 decode) fits, and the
-    # attention kernel's KV working set stays inside tpu7x vmem at TP=1
-    # (4096 needs 76.6M vs the 63.9M budget).
-    heavy = TestConfig(
-        max_model_len=2048,
-        max_num_batched_tokens=2048,
-        max_num_seqs=256,
-        num_prompts=256,
-    )
+    # tpu7x: the long-context attention kernel needs >64M vmem at
+    # max_model_len>=2048 on the unsharded leg, so use the proven
+    # max_model_len=1024 with shorter prompts and TP=2.
+    if os.environ.get('TPU_VERSION') == 'tpu7x':
+        heavy = TestConfig(
+            max_model_len=1024,
+            max_num_batched_tokens=2048,
+            max_num_seqs=256,
+            num_prompts=256,
+        )
+        repeat = 9
+        tp_size = 2
+    else:
+        heavy = TestConfig(
+            max_model_len=2048,
+            max_num_batched_tokens=2048,
+            max_num_seqs=256,
+            num_prompts=256,
+        )
+        repeat = 18
+        tp_size = 8
     heavy_sampling = SamplingParams(
         temperature=0.0,
         max_tokens=128,
@@ -200,9 +211,9 @@ def test_tp_performance(sampling_params: SamplingParams):
     _test_tensor_parallelism_performance(
         sampling_params=heavy_sampling,
         model_name="meta-llama/Llama-3.1-8B-Instruct",
-        tensor_parallel_size=8,
+        tensor_parallel_size=tp_size,
         pipeline_parallel_size=1,
         min_speedup=0.5,
         cfg=heavy,
-        prompt_repeat=18,
+        prompt_repeat=repeat,
     )
