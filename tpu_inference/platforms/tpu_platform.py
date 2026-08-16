@@ -318,19 +318,16 @@ class TpuPlatform(Platform):
             if vllm_config.model_config else None
         if mm_cfg is not None and getattr(mm_cfg, "mm_device_do_normalize",
                                           False):
-            impl = envs.MODEL_IMPL_TYPE
-            if impl == "auto":
-                from tpu_inference.models.common.model_loader import \
-                    resolve_model_architecture
-                try:
-                    impl = resolve_model_architecture(vllm_config,
-                                                      is_draft_model=False)
-                except Exception as e:
-                    logger.warning(
-                        "[tpu_platform] resolve_model_architecture failed "
-                        "(%s); assuming the JAX-native path for the "
-                        "mm_device_do_normalize check.", e)
-                    impl = "flax_nnx"
+            from tpu_inference.models.common.model_loader import \
+                resolve_model_impl_type
+            try:
+                impl = resolve_model_impl_type(vllm_config)
+            except Exception as e:
+                logger.warning(
+                    "[tpu_platform] resolve_model_impl_type failed (%s); "
+                    "assuming the JAX-native path for the "
+                    "mm_device_do_normalize check.", e)
+                impl = "flax_nnx"
             if impl != "vllm":
                 logger.warning(
                     "[tpu_platform] Disabling mm_device_do_normalize: the "
