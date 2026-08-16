@@ -174,16 +174,12 @@ def test_tp_performance(sampling_params: SamplingParams):
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
-    # On v6e this workload gets no real TP=2 speedup: nightly runs measure
-    # 1.00x-1.05x, straddling a 1.05 threshold, while tpu7x measures
-    # 1.05x-1.16x. Keep 1.05 as a genuine speedup check on tpu7x; on v6e
-    # only guard against TP being materially slower than a single chip.
-    min_speedup = 1.05 if os.environ.get('TPU_VERSION') == 'tpu7x' else 0.9
-
+    # Measurement mode: full-slice TP on the 8-chip agent; threshold low so
+    # every run reports its numbers.
     _test_tensor_parallelism_performance(
         sampling_params=sampling_params,
         model_name="meta-llama/Llama-3.1-8B-Instruct",
-        tensor_parallel_size=2,
+        tensor_parallel_size=8,
         pipeline_parallel_size=1,
-        min_speedup=min_speedup,
+        min_speedup=0.5,
     )
