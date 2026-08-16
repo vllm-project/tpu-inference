@@ -182,9 +182,10 @@ def test_tp_performance(sampling_params: SamplingParams):
     # every run reports its numbers. Heavy per-step workload so TPU compute
     # dominates over per-step host overhead: long prompts, large prefill
     # chunks, fewer sequences, longer decode.
+    # max_num_batched_tokens stays at the stock for_performance() value.
     heavy = TestConfig(
         max_model_len=4096,
-        max_num_batched_tokens=4096,
+        max_num_batched_tokens=2048,
         max_num_seqs=256,
         num_prompts=256,
     )
