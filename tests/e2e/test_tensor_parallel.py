@@ -184,7 +184,7 @@ def test_tp_performance(sampling_params: SamplingParams):
     # chunks, fewer sequences, longer decode.
     heavy = TestConfig(
         max_model_len=4096,
-        max_num_batched_tokens=8192,
+        max_num_batched_tokens=4096,
         max_num_seqs=256,
         num_prompts=256,
     )
