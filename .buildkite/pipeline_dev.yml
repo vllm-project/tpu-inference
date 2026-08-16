@@ -13,25 +13,14 @@
 # limitations under the License.
 
 steps:
-  - label: ":docker: Build base image (tpu6e)"
-    key: tpu6e_build_docker
+  - label: "pip freeze of rebuilt image"
+    key: pip_freeze_today
     agents:
       queue: cpu_64_core
-    env:
-      TPU_VERSION: "tpu6e"
-    commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
-
-  - label: "tpu6e TP perf (run {{matrix}})"
-    key: tpu6e_tp_perf_stress
-    depends_on: tpu6e_build_docker
-    agents:
-      queue: tpu_v6e_8_queue
-    matrix: ["1","2","3","4","5","6","7","8"]
-    env:
-      USE_PREBUILT_IMAGE: "1"
-      TPU_VERSION: "tpu6e"
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py::test_tp_performance'
+        IMG="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu:f9a898c7822c8aa9fd1968c4c5b8ddcedb75e77a-98e4726a147f37666e1e9adc468e673b32373e21-tpu6e"
+        docker pull -q "$$IMG"
+        echo "PIP_FREEZE_BEGIN"
+        docker run --rm --entrypoint pip "$$IMG" list --format=freeze
+        echo "PIP_FREEZE_END"
