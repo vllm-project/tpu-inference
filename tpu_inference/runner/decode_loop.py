@@ -180,6 +180,17 @@ def _decode_core_impl(
              pad_len,
          )
 
+        # A finished (masked) slot keeps executing until the window exits.
+        # Re-feed its current input token rather than the padding token:
+        # same token, same frozen position, same context, so the K/V it
+        # rewrites each iteration is identical to what is already stored and
+        # the slot is inert. Feeding padding here overwrites the slot's last
+        # real token's KV with padding-derived KV on every masked iteration.
+        # (With the default every-step EOS check the window exits before any
+        # masked iteration runs, so this line only matters for
+        # CONTINUE_DECODE_EOS_CHECK_INTERVAL != 1.)
+        next_input_ids = jnp.where(new_active_mask, next_input_ids, ct)
+
         lp_ids_step = None
         lp_val_step = None
         lp_ranks_step = None
@@ -254,7 +265,13 @@ def _decode_core_impl(
         eos_flag = carry[-1]
         not_done = i < max_decode_steps
         if continue_decode_eos_check_interval <= 0:
-            return not_done
+            # Continuous-batching window: EOS never breaks the fused loop.
+            # Run to the static depth, or until every sequence has finished.
+            # Finished slots are masked by _update_loop_state and re-fed
+            # their current input token, which keeps their KV writes
+            # idempotent (see _run_one_step).
+            active_mask = carry[2]
+            return jnp.logical_and(not_done, jnp.any(active_mask))
         should_check_eos = (i % continue_decode_eos_check_interval == 0)
         return jnp.logical_and(
             not_done,
