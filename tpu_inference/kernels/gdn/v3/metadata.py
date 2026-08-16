@@ -114,8 +114,14 @@ def compute_per_seq_metadata(
     p_id_to_r_base = (query_start_loc[p_id_to_s_idx] +
                       p_id_to_t_id * cfg.chunk_size)
     # Calculate number of rows to calculate / fetch for each tile.
-    p_id_to_r_size = jnp.minimum(
+    # Clamp at 0: padded p_id slots (i >= num_tiles) map to the last sequence
+    # with an r_base past its query range, making the raw difference negative.
+    # The DMA loops in memory_ref.py read every slot of the last tile group,
+    # so padded slots must carry a 0 (no-op) size — a negative value packed
+    # into PackedPIdRecord unpacks as a huge DMA size and halts the TPU core.
+    p_id_to_r_size = jnp.clip(
         query_start_loc[p_id_to_s_idx + 1] - p_id_to_r_base,
+        0,
         cfg.tile_size,
     )
 

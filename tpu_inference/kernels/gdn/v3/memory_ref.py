@@ -124,12 +124,21 @@ class PackedPIdRecord:
         is_first_tile: jax.Array,
         is_last_tile: jax.Array,
     ) -> jax.Array:
-        """Packs s_idx, row size and two tile-state flags into one int32 word."""
+        """Packs s_idx, row size and two tile-state flags into one int32 word.
 
-        s_idx = s_idx.reshape(-1).astype(jnp.int32)
-        r_size = r_size.reshape(-1).astype(jnp.int32)
-        is_first_tile = is_first_tile.reshape(-1).astype(jnp.int32)
-        is_last_tile = is_last_tile.reshape(-1).astype(jnp.int32)
+    Each field is masked to its bit width BEFORE shifting: an out-of-range
+    value (e.g. the negative r_size the metadata builder produces for padded
+    p_id slots) would otherwise smear 1-bits across the neighboring fields and
+    unpack into a huge bogus DMA size / s_idx, causing out-of-bounds copies
+    and TPU core halts.
+    """
+
+        s_idx = s_idx.reshape(-1).astype(jnp.int32) & cls.S_IDX_MASK
+        r_size = r_size.reshape(-1).astype(jnp.int32) & cls.R_SIZE_MASK
+        is_first_tile = is_first_tile.reshape(-1).astype(
+            jnp.int32) & cls.FLAG_MASK
+        is_last_tile = is_last_tile.reshape(-1).astype(
+            jnp.int32) & cls.FLAG_MASK
         word = s_idx << cls.S_IDX_SHIFT
         word |= r_size << cls.R_SIZE_SHIFT
         word |= is_last_tile << cls.LAST_TILE_SHIFT
