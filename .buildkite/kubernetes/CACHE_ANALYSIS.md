@@ -93,6 +93,16 @@ says which: `pod not scheduled yet: Unschedulable`. Charging that against bare
 metal's docker pull charges us for building hardware bare metal never stops
 paying for.
 
+Nodes being built mid-suite is intentional, not an accident of a small fleet:
+the pools scale to zero (or near it) precisely so that every build exercises
+the autoscaler, and it works. Even the worst case - a pod whose node is
+created from scratch - reaches first output in 2.0-3.8m, on par with the
+1.5-2.3m a *warm* bare-metal host spends on its docker pull and rsync. The
+fair comparison for a from-scratch node is a fresh bare-metal host, whose
+models and caches exist in GCS but not yet on its disk: it would pay the full
+image pull, the full cache rsync and cold model downloads before its first
+test, several times what our cold path costs.
+
 **Queue is not symmetric.** On Kubernetes the wait for capacity happens inside
 the Buildkite job; on bare metal it happens before the job starts and never
 appears in its duration. Both belong in makespan.
@@ -457,10 +467,13 @@ question: those five steps total about 15 node-minutes per suite.
 82% of single-chip steps (59 of 72) waited for a node to be created, against
 49% of eight-chip steps. Scale-up costs 2.6 minutes per single-chip step.
 
-This is the cost of scaling to zero, and it is charged before any chip is held,
-which is why it sits outside the utilisation figures. It is real for
-time-to-result, and it is the reason `min_nodes = 2` exists on the single-chip
-pool — the first two steps of a build skip it.
+This is the cost of scaling to zero, and paying it on most steps is a choice:
+it keeps the fleet from holding idle chips between builds, and it means the
+autoscaler path is exercised dozens of times per suite rather than trusted. It
+is charged before any chip is held, which is why it sits outside the
+utilisation figures. It is real for time-to-result, and it is the reason
+`min_nodes = 2` exists on the single-chip pool — the first two steps of a
+build skip it.
 
 #### Fleet occupancy during a build
 
