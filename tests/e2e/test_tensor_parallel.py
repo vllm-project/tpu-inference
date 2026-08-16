@@ -183,8 +183,11 @@ def test_tp_performance(sampling_params: SamplingParams):
     # dominates over per-step host overhead: long prompts, large prefill
     # chunks, fewer sequences, longer decode.
     # max_num_batched_tokens stays at the stock for_performance() value.
+    # max_model_len 2048: prompt (~1.8k incl. 128 decode) fits, and the
+    # attention kernel's KV working set stays inside tpu7x vmem at TP=1
+    # (4096 needs 76.6M vs the 63.9M budget).
     heavy = TestConfig(
-        max_model_len=4096,
+        max_model_len=2048,
         max_num_batched_tokens=2048,
         max_num_seqs=256,
         num_prompts=256,
