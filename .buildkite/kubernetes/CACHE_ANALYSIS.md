@@ -5,16 +5,17 @@
 **Yes. Setup is an order of magnitude faster, execution is slightly faster, and
 the chips are used better. Every per-push step bare metal runs, we run.**
 
-Figures are the median of five consecutive full-suite runs on the shipped
-configuration - builds [255](https://buildkite.com/tpu-commons/kube-dev/builds/255),
+All figures are medians: five consecutive full-suite runs on the shipped
+configuration under one pinned image (builds
+[255](https://buildkite.com/tpu-commons/kube-dev/builds/255),
 [257](https://buildkite.com/tpu-commons/kube-dev/builds/257),
 [258](https://buildkite.com/tpu-commons/kube-dev/builds/258),
-[259](https://buildkite.com/tpu-commons/kube-dev/builds/259) and
-[260](https://buildkite.com/tpu-commons/kube-dev/builds/260), one image pinned
-across all of them - against the median of three `NIGHTLY`-unset bare-metal
-builds, [24341](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24341),
-[24337](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24337) and
-[24333](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24333).
+[259](https://buildkite.com/tpu-commons/kube-dev/builds/259),
+[260](https://buildkite.com/tpu-commons/kube-dev/builds/260)) against three
+`NIGHTLY`-unset bare-metal builds
+([24341](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24341),
+[24337](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24337),
+[24333](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24333)).
 
 | question | measure | Kubernetes | bare metal | |
 |---|---|---|---|---|
@@ -27,10 +28,8 @@ builds, [24341](https://buildkite.com/tpu-commons/tpu-inference-ci/builds/24341)
 
 ### Per step
 
-Median of five runs, with the spread, because single observations misled us
-twice: part2 read 71.8m in one build against a five-run range of 78.4-80.0m,
-and `Accuracy Qwen2.5-VL` read 8.7m once and was written up here as a 1.37x
-regression before five runs put it at 6.4m, exactly bare metal's figure.
+Median of five runs, with the spread. Single runs vary enough to mislead —
+part2 alone spans 78.4-80.0m — so no figure here rests on one observation.
 
 | step | kube median | range | bare metal | ratio |
 |---|---|---|---|---|
@@ -78,8 +77,6 @@ JobSet path remains unexercised, because nothing here needs a slice spanning
 nodes.
 
 ### What each side is charged for
-
-Easy to get wrong, and earlier versions of this document did, twice.
 
 **Setup.** Bare metal's wall time already contains its checkout, docker pull and
 cache rsync, because the agent runs on the TPU VM: part2 reaches first test
@@ -135,18 +132,36 @@ Three changes carry nearly all of it, and only one is about Kubernetes:
    its page cache thrashes on the same cycle. We found it only because our
    configuration made it expensive enough to chase.
 
-Past ~56Gi the model cache stops mattering: 73Gi gives 9.5m against 56Gi's
-8.8m. The shipped figures are 65Gi of models and 8Gi of compilation cache in a
-volume of half the node's memory, leaving ~57 GiB of a 176 GB machine to the
-tests.
+Both caches ship as PersistentVolumeClaims over GCS FUSE in the cluster's own
+region, writable, with the flag set on every step. Writable is the point: the
+cache fills itself, and what a test compiles survives its pod - which is what
+makes the self-seeding numbers above possible. The `clone` backend measured
+marginally cheaper in chip-minutes and ships anyway as the alternative it is
+not: it writes nothing back, so its efficiency is borrowed from whatever filled
+its golden disk.
 
-# How we got there
+Sizing follows three rules:
+
+* the pod's `gke-gcsfuse-cache` volume is RAM-backed and sized per machine type
+  by the launcher, since host memory ranges from 176 GB on `ct6e-standard-1t`
+  to 1440 GB on `ct6e-standard-8t`;
+* `fileCacheCapacity` is explicit on both mounts and fixed, because a
+  PersistentVolume is one object per cluster and every profile binds the same
+  claim - so it has to hold on the smallest shape;
+* the two capacities sum to less than the volume, or the tmpfs reaches its
+  `sizeLimit` before either mount reaches its own eviction threshold.
+
+The shipped figures are 65Gi of models and 8Gi of compilation cache in a volume
+of half the node's memory, leaving ~57 GiB of a 176 GB machine to the tests.
+Past ~56Gi the model cache stops mattering - 73Gi gives 9.5m of loading against
+56Gi's 8.8m - so the working set fits and further capacity is headroom.
+
+## How we got there
 
 What follows is the climb: the measurements that led to the configuration
-above, including the ones that were wrong. Kept because the reasoning is
-reusable and several of the failure modes will recur.
+above, in roughly the order they were made.
 
-## The metric
+### The metric
 
 A TPU chip is unavailable to anyone else from the moment a job takes it until
 that job lets go. What matters is therefore **chip-minutes held**, not how long
@@ -170,10 +185,7 @@ finished in 29; build [199](https://buildkite.com/tpu-commons/kube-dev/builds/19
 minutes longer for free chips. Queueing is a capacity question, not an
 efficiency one.
 
-## The compilation cache: Kubernetes can seed its own
-
-This was open in the first version of this document, and withdrawn from the
-second because two variables had moved. It is now measured.
+### The compilation cache: Kubernetes can seed its own
 
 A cache that Kubernetes builds itself, with no bare-metal seeding, on
 speculative decoding:
@@ -200,7 +212,7 @@ anything small or quick to compile.
 The cold run is the price: 133.0m against 27.8m warm, paid once per cache
 generation.
 
-## The model cache: capacity, then ordering
+### The model cache: capacity, then ordering
 
 part2 is the only step with a large model working set, and it was 1.40x bare
 metal. Two independent causes, contributing about equally:
@@ -228,7 +240,7 @@ have fit.
 four checkpoints cycled round-robin and each was fetched four times. Grouping
 them made one checkpoint resident at a time. This costs bare metal too.
 
-Two mechanisms worth remembering, both learned the hard way:
+Two mechanisms worth remembering:
 
 * `fileCacheCapacity` is the threshold gcsfuse evicts against. Setting it to
   `-1` does not mean "use everything" in any useful sense - it means there is
@@ -240,23 +252,16 @@ Two mechanisms worth remembering, both learned the hard way:
   storage; build [239](https://buildkite.com/tpu-commons/kube-dev/builds/239)
   spent 113.6m loading, worse than having no tuning at all.
 
-## What we tried and rejected
-
-**GKE gcsfuse profiles.** Managed StorageClasses that size the cache from the
-node and the bucket, which would have replaced a capacity figure derived by
-hand from one machine type. Measured against the hand-tuned mounts on the same
-image and ordering, build
+GKE's managed gcsfuse profiles would have replaced the hand-derived capacities
+with StorageClasses that size the cache from the node and the bucket. Measured
+on the same image and ordering, build
 [240](https://buildkite.com/tpu-commons/kube-dev/builds/240) ran part2 in
-115.9m with 91.3m of loading, against 71.6m and 8.8m - individual checkpoint
-loads of 21 minutes. A profile does not set the readahead, parallel-download
-and chunk-size options these mounts were tuned with, and adding them back on
-top is hand-tuning with a StorageClass attached.
+115.9m with 91.3m of loading, against 71.6m and 8.8m: a profile does not set
+the readahead, parallel-download and chunk-size options these mounts are tuned
+with, and it gates the pod on a bucket scan that authenticates as the GKE
+service agent rather than the workload identity. The capacities stay explicit.
 
-Profiles also gate the pod on a bucket scan while it runs, and the scan
-authenticates as the GKE service agent rather than the workload identity - a
-second reader that the bucket IAM had to be widened for.
-
-## Where bare metal's 38% goes
+### Where bare metal's 38% goes
 
 Summed across the 13 steps, bare metal spends 1.0 minute on checkout, 16.4 on
 the docker pull and 6.1 pushing the cache back — 23.4 minutes of wall time, but
@@ -271,7 +276,7 @@ gets mounted.
 That single difference is most of the efficiency gain, and it is structural
 rather than something we tuned.
 
-## Where Kubernetes' overhead goes
+### Where Kubernetes' overhead goes
 
 **Mounting GCS FUSE costs ~36 chip-minutes** over a plain local disk (49 against
 13). That is the metadata prefetch walking 24,441 cache entries at mount. It
@@ -300,21 +305,72 @@ one, so the miss cost dominates. `fuse` holds 474 chip-minutes cross-region and
 503 against `clone`'s 313 on the same bucket. Nothing else measured comes
 close.
 
-## Downloading models instead of mounting them
+### So the cache lives in the cluster's region
+
+The cross-region numbers made the bucket's region the single largest lever, so
+the shipped configuration puts a cache in each cluster's own region. On the two
+platforms that is very different work.
+
+**On Kubernetes the cache is a mount, and mounts are per-cluster.** A GCS FUSE
+PersistentVolume holds the bucket name; the pod refers to a claim by a name that
+is identical in every region. Adding a region means adding an entry to the
+`worker_clusters` map — the same `for_each` that already creates the cluster,
+its node pools and its queues creates the bucket, the PV and the PVC alongside
+them. No manifest changes, no pipeline changes, no step knows which bucket it
+is using. Because the claim is resolved at mount time in whichever cluster the
+workload landed in, this also survives MultiKueue dispatching a job to a
+different region than the one it was submitted from.
+
+**On bare metal the cache is a path on a VM's disk, and the bucket is a
+literal.** `run_in_docker.sh` hardcodes `GCS_CACHE_BASE`, and each agent keeps
+its own copy under `/mnt/disks/persist`. Per-region would mean per-agent
+configuration, and the model cache in particular is purely local to each VM and
+never shared — so a new region starts cold on every host and has no mechanism to
+be seeded. What looks like one cache is really N independent local caches with
+a bucket loosely behind them.
+
+The difference is where the region binding lives: infrastructure that is already
+generated per cluster, against application configuration replicated per host.
+
+It is also cheaper, structurally, because storage cost scales with different
+things on the two platforms:
+
+**Bare metal pays per instance, for provisioned capacity.** Every agent needs a
+persistent disk big enough for the compilation cache and every model any test on
+that host might load, plus headroom, because a disk that fills is an outage
+rather than a slowdown. That is `instances × (cache + models + buffer)`, billed
+on the size allocated whether or not it is used.
+
+**A bucket pays per region, for consumed capacity.** GCS bills what is stored,
+so the buffer disappears: there is nothing to size and nothing to run out of.
+That is `regions × cache`, and regions are a much smaller number than instances
+and grow far more slowly.
+
+For scale, the compilation cache namespace measured 26 GB. On bare metal that
+number is multiplied by the fleet and rounded up; on GCS it is multiplied by the
+number of regions and not rounded at all.
+
+**The clone variant inherits bare metal's cost shape**, which is worth noting
+because it is otherwise the fastest option. Each pod provisions a 50 GiB disk
+from the golden, so a full build allocates up to eleven of them concurrently —
+transient, but provisioned and billed as capacity, on top of the golden itself
+and whatever the bucket already holds. `fuse` allocates nothing per pod.
+
+**Same-region also removes egress billing**, separately from the latency it
+fixed. Reading a us-central1 bucket from southamerica-west1 is inter-region
+egress on every miss and every fetch; reading a bucket in the cluster's own
+region is not.
+
+### Downloading models instead of mounting them
 
 `clone-nomodel` is the most efficient cross-region configuration at 0.76×,
 because it skips the cross-region model mount entirely. Its steps completed
 normally — identical test counts to every other run, 233 passed and 148 skipped
-on part1, 42 passed on the lora unit tests, 11 on speculative decoding — so the
-timings are real rather than truncated by an early abort.
+on part1, 42 passed on the lora unit tests, 11 on speculative decoding — and it
+logged zero HTTP 429 responses.
 
-**It logged zero HTTP 429 responses.** An earlier draft reported 698
-rate-limit events for this configuration. That figure came from matching the
-digits `429` anywhere in the logs and was wrong; there was no throttling in
-these 13 steps.
-
-Rate limiting is real but the evidence is narrower than that claim. One step,
-once: `JAX unit tests part2` in build [160](https://buildkite.com/tpu-commons/kube-dev/builds/160), with no model cache, hit
+Rate limiting is still real, on narrower evidence. One step, once: `JAX unit
+tests part2` in build [160](https://buildkite.com/tpu-commons/kube-dev/builds/160), with no model cache, hit
 `2500 api requests per 5 minutes` and failed. It resolves far more models than
 any other step and is excluded from every comparison here, so this set cannot
 say whether downloading is safe at full-suite scale.
@@ -324,7 +380,7 @@ nothing measurable against downloading. The reason to prefer it is that it
 keeps a third-party request budget off the critical path — not that we measured
 that budget being exceeded.
 
-## Scheduling: profiles, borrowing and autoscaling
+### Scheduling: profiles, borrowing and autoscaling
 
 The fleet is **10 single-chip nodes plus one eight-chip node — 18 chips**. Two
 profiles use it:
@@ -337,7 +393,7 @@ profiles use it:
 Both sit in one Kueue cohort, so either can borrow the other's quota and have it
 reclaimed. Eight of the thirteen steps are single-chip and five are eight-chip.
 
-### Borrowing was measured directly, then deliberately abandoned
+#### Borrowing was measured directly, then deliberately abandoned
 
 Before the suite existed, dedicated builds tested borrowing with `sleep` jobs
 against the original quotas — v6e-1 nominal **2**, v6e-8 nominal **8**, so six
@@ -371,7 +427,7 @@ start, because they had all been queued behind the eight-chip lane and were
 released at once. With nine concurrent single-chip steps per suite there was
 nothing to gain from reaching into the other shape's capacity.
 
-### What the two profiles cost now
+#### What the two profiles cost now
 
 Averaged per step over the nine complete suite builds, under the
 no-borrowing configuration:
@@ -396,7 +452,7 @@ wanting 48 chip-equivalents against a cohort of 18 oversubscribe it. A second
 eight-chip node would remove most of the queue. Whether it is worth one is a separate
 question: those five steps total about 15 node-minutes per suite.
 
-### Nodes are created for most steps
+#### Nodes are created for most steps
 
 82% of single-chip steps (59 of 72) waited for a node to be created, against
 49% of eight-chip steps. Scale-up costs 2.6 minutes per single-chip step.
@@ -406,7 +462,7 @@ which is why it sits outside the utilisation figures. It is real for
 time-to-result, and it is the reason `min_nodes = 2` exists on the single-chip
 pool — the first two steps of a build skip it.
 
-### Fleet occupancy during a build
+#### Fleet occupancy during a build
 
 Chip-minutes integrated over each same-region build, with the build window
 measured from the first pod scheduled to the last job completing:
@@ -429,7 +485,7 @@ that no configuration comes close to saturating the fleet during a single
 suite; the constraint on wall clock is the serialised eight-chip steps and the
 27-minute critical path, not total capacity.
 
-### The autoscaler will take a node out from under a running test
+#### The autoscaler will take a node out from under a running test
 
 Job pods are evictable by default. `OPTIMIZE_UTILIZATION` consolidates an
 underused node roughly ten minutes after it drains, and the last long step of a
@@ -447,7 +503,7 @@ workload pods. `OPTIMIZE_UTILIZATION` is kept rather than switched to
 scale down before single-chip nodes can scale up, and slower scale-down starves
 the other shape.
 
-### Two effects this does not quantify
+#### Two effects this does not quantify
 
 Both favour Kubernetes and neither is in the tables.
 
@@ -462,96 +518,6 @@ Kueue can at least be asked, and the cost of asking is measured above.
 
 Sizing either needs bare-metal fleet uptime against test time, which we do not
 have.
-
-## Why per-region caches are natural here and awkward on bare metal
-
-The measurements above turn on the cache being in the cluster's region. That is
-worth making a design point rather than a one-off fix, because the two
-platforms make it very different work.
-
-**On Kubernetes the cache is a mount, and mounts are per-cluster.** A GCS FUSE
-PersistentVolume holds the bucket name; the pod refers to a claim by a name that
-is identical in every region. Adding a region means adding an entry to the
-`worker_clusters` map — the same `for_each` that already creates the cluster,
-its node pools and its queues creates the bucket, the PV and the PVC alongside
-them. No manifest changes, no pipeline changes, no step knows which bucket it
-is using. Because the claim is resolved at mount time in whichever cluster the
-workload landed in, this also survives MultiKueue dispatching a job to a
-different region than the one it was submitted from.
-
-**On bare metal the cache is a path on a VM's disk, and the bucket is a
-literal.** `run_in_docker.sh` hardcodes `GCS_CACHE_BASE`, and each agent keeps
-its own copy under `/mnt/disks/persist`. Per-region would mean per-agent
-configuration, and the model cache in particular is purely local to each VM and
-never shared — so a new region starts cold on every host and has no mechanism to
-be seeded. What looks like one cache is really N independent local caches with
-a bucket loosely behind them.
-
-The difference is where the region binding lives: infrastructure that is already
-generated per cluster, against application configuration replicated per host.
-
-### It is also cheaper, structurally
-
-Storage cost scales with different things on the two platforms.
-
-**Bare metal pays per instance, for provisioned capacity.** Every agent needs a
-persistent disk big enough for the compilation cache and every model any test on
-that host might load, plus headroom, because a disk that fills is an outage
-rather than a slowdown. That is `instances × (cache + models + buffer)`, billed
-on the size allocated whether or not it is used.
-
-**A bucket pays per region, for consumed capacity.** GCS bills what is stored,
-so the buffer disappears: there is nothing to size and nothing to run out of.
-That is `regions × cache`, and regions are a much smaller number than instances
-and grow far more slowly.
-
-For scale, the compilation cache namespace measured 26 GB. On bare metal that
-number is multiplied by the fleet and rounded up; on GCS it is multiplied by the
-number of regions and not rounded at all.
-
-**The clone variant inherits bare metal's cost shape**, which is worth noting
-because it is otherwise the fastest option. Each pod provisions a 50 GiB disk
-from the golden, so a full build allocates up to eleven of them concurrently —
-transient, but provisioned and billed as capacity, on top of the golden itself
-and whatever the bucket already holds. `fuse` allocates nothing per pod.
-
-**Same-region also removes egress billing**, separately from the latency it
-fixed. Reading a us-central1 bucket from southamerica-west1 is inter-region
-egress on every miss and every fetch; reading a bucket in the cluster's own
-region is not.
-
-Exact figures would need the bare-metal disk size and instance count, which we
-do not have, so this is a statement about shape rather than a total.
-
-
-## Recommendation
-
-**Both caches as PersistentVolumeClaims over GCS FUSE, in the cluster's own
-region, with `VLLM_XLA_CHECK_RECOMPILATION=1` set on every step.**
-
-The claim names are identical in every region and the bucket lives in the
-PersistentVolume, so a workload manifest never carries a bucket name and
-survives MultiKueue placing it in a region it was not submitted from. The mount
-is writable, so the cache fills itself and what a test compiles survives its
-pod - which, with the flag set, is now enough to reach bare metal's numbers
-without bare metal.
-
-Sizing is the part that needs care rather than the backend:
-
-* the pod's `gke-gcsfuse-cache` volume is RAM-backed and sized per machine type
-  by the launcher, since host memory ranges from 176 GB on `ct6e-standard-1t`
-  to 1440 GB on `ct6e-standard-8t`;
-* `fileCacheCapacity` is explicit on both mounts and fixed, because a
-  PersistentVolume is one object per cluster and every profile binds the same
-  claim - so it has to hold on the smallest shape;
-* the two capacities sum to less than the volume, or the tmpfs reaches its
-  `sizeLimit` before either mount reaches its own eviction threshold.
-
-The `clone` backend remains marginally cheaper in chip-minutes and is still not
-the recommendation, for the reason it never was: it writes nothing back, so its
-efficiency is borrowed from whatever filled the golden disk. That argument used
-to be theoretical. It is not any more - the self-seeding measurement above is
-what a writable cache buys.
 
 ## What changes when bare metal goes away
 
@@ -571,77 +537,12 @@ length, once, per namespace.
 **There is no second copy.** Bare metal's VM disks are an accidental backup. If
 the bucket is emptied, the fleet runs at `nocache` efficiency until it refills.
 
-## Corrections
-
-Recorded because each cost real time and the failure mode will recur.
-
-**Builds [178](https://buildkite.com/tpu-commons/kube-dev/builds/178) and [180](https://buildkite.com/tpu-commons/kube-dev/builds/180) ran with no compilation cache at all.**
-`JAX_COMPILATION_CACHE_DIR` was set to `/cache/jax/jax0.11.0_tputpu6e` to match
-the bucket layout when the cache moved to FUSE, and kept when it moved back to a
-clone — but the golden's entries were at `/cache/jax`, from before the namespace
-existed. JAX read an empty directory. The slowdown was attributed first to
-cross-region model reads, then to staleness; it was neither.
-
-**A silent default overrode two experiments.** `GCS_CACHE_BUCKET` had a default
-in the pipeline's `env:` block, which in Buildkite wins over
-`bk build create --env`. Builds [196](https://buildkite.com/tpu-commons/kube-dev/builds/196) and [197](https://buildkite.com/tpu-commons/kube-dev/builds/197) measured the old bucket and reported
-it as the new one.
-
-**A cache refresh filled a disk with another cluster's entries.** An unscoped
-`gcloud storage rsync` pulled 23 GB of `jax0.11.0_tputpu7x` onto a 50 GiB disk
-serving only v6e. `gcloud` exited 0 having failed 21,708 writes.
-
-**A rate-limit figure was fabricated by a bad regex.** An earlier draft
-reported 698 throttling events for the no-model-cache configuration, from
-matching `429` anywhere in the logs. The true count was zero. The claim that
-downloading models is "fast but not viable" rested on it and did not survive
-checking.
-
-**`JAX unit tests part2` has never produced a valid number**, and its
-durations are lower bounds rather than completed runs: it executes under
-`pytest -x`, so a single failure ends it early. In [203](https://buildkite.com/tpu-commons/kube-dev/builds/203) it stopped
-after 1796 of its tests on an environment assumption - GKE injects
-TPU_ACCELERATOR_TYPE into every TPU pod and the test asserted it absent.
-Before that it was evicted by the cluster autoscaler in builds [175](https://buildkite.com/tpu-commons/kube-dev/builds/175)
-and [178](https://buildkite.com/tpu-commons/kube-dev/builds/178) — job pods are evictable by default and
-it is the only step still running when a build drains — and cold-cached in 180.
-
-Every configuration's steps were checked for identical pytest counts before
-its timings were used, so a step that aborted early cannot masquerade as a fast
-one. All 13 steps match across all runs.
-
-The common thread: **every cache failure here is silent.** Missing, stale, empty
-or wrong-path all produce no error, only a slower run and a chip held longer. An
-assertion at pod start that the cache directory exists and is non-empty would
-have caught all of them in one build rather than four.
-
-**`fileCacheCapacity: -1` was read as "use the whole volume".** It removes the
-eviction threshold instead. Build 241 spent three times longer loading
-checkpoints than build 234 did in a smaller volume with explicit capacities.
-
-**Profile-backed volumes were first measured without a cache volume.** Build
-239's 113.6m of loading was a 5GiB ephemeral fallback, not a profile - the
-variant had dropped `gke-gcsfuse-cache` on the incorrect assumption that a
-profile provisions its own. Build 240 is the valid comparison.
-
-**Step ordering was assumed to be irrelevant to storage.** It was worth more
-than the cache sizing: 23.8m of loading became 8.8m without touching the mount.
-
-**Node creation was reported as pod setup.** The gap between Kueue admission
-and first workload output was labelled "init" and compared against bare metal's
-docker pull and rsync, giving 1.07x. Most of that gap is cluster-autoscaler
-building a node - the launcher logs `pod not scheduled yet: Unschedulable` when
-it happens, and the pods that skip it start in 0.08m. Bare metal never creates
-hardware, so the comparison charged us for something it has no equivalent of.
-Corrected above: setup is 0.08m against 1.5-2.3m, and node creation is counted
-with capacity where it belongs.
-
 ## Open questions
 
-- ~~Can Kubernetes sustain its own cache?~~ **Answered** - see "The compilation
-  cache" above. It can, but only with `VLLM_XLA_CHECK_RECOMPILATION=1`; without
-  it a self-built cache plateaus at roughly twice the seeded time and stays
-  there.
+- **Cache failures are silent.** Missing, stale, empty or wrong-path all
+  produce no error, only a slower run and a chip held longer. An assertion at
+  pod start that the cache directory exists and is non-empty would turn a slow
+  week into a failed build.
 - **What does the push cost?** The rsync variants push from a sidecar after the
   workload exits, which is after the launcher stops collecting logs, so it is
   absent from every figure above.
@@ -682,6 +583,10 @@ bk build create --pipeline tpu-commons/kube-dev --branch <branch> \
 
 Pin the image. Without it each run builds its own, the HLO changes, the cache
 hit rate moves with it, and the storage backend cannot be isolated.
+
+Every configuration's steps were checked for identical pytest counts before its
+timings were used, so a step that aborted early cannot masquerade as a fast
+one.
 
 Phases come from the launcher's own log timestamps, so nothing instruments the
 test: `submitting Job` → `admitted` is queue, → `ContainerCreating` is node
