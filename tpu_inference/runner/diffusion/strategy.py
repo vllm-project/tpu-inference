@@ -235,8 +235,7 @@ class BlockDiffusionStrategy:
             active_rows[row] = True
             block_tables[row] = source_block_tables[req_index]
 
-        request_distribution = np.array([0, num_active, num_active],
-                                        dtype=np.int32)
+        request_distribution = np.array([0, 0, num_active], dtype=np.int32)
         (canvas, mask, positions, seq_lens, active_rows, query_start_loc,
          partial_query_start_loc, request_distribution,
          block_tables) = device_array(self.runner.mesh, (
@@ -259,7 +258,6 @@ class BlockDiffusionStrategy:
             padded_num_reqs=batch_size,
             attention_mask_spec=AttentionMaskSpec(
                 AttentionMaskKind.BIDIRECTIONAL),
-            rpa_static_query_len=block_size,
         )
         partial_metadata = AttentionMetadata(
             input_positions=positions[:, :sub_block_size].reshape(-1),
@@ -271,7 +269,6 @@ class BlockDiffusionStrategy:
             attention_mask_spec=AttentionMaskSpec(
                 AttentionMaskKind.BIDIRECTIONAL),
             replace_cached_kv=True,
-            rpa_static_query_len=sub_block_size,
         )
         return (canvas, mask, positions, active_rows, (full_metadata,
                                                        partial_metadata))
