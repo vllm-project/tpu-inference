@@ -82,12 +82,14 @@ steps:
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_THROUGHPUT_THRESHOLD: 1.80
       # 0.98 (recipe default) leaves ~1.9GiB/chip after KV sizing on tpu7x
-      # (94.74GiB HBM), but the torchax-path compiled programs need ~2.5GiB+
-      # at load: nightly 24382 (MODEL_IMPL_TYPE=vllm) failed with
-      # "Error loading program 'jit__forward': Attempting to allocate 1.13G.
-      # There are 528.72M free." 0.95 frees ~4.7GiB for program load; KV
-      # concurrency only drops 153x -> ~148x, far above benchmark needs.
-      GPU_MEMORY_UTILIZATION: "0.95"
+      # (94.74GiB HBM), but the torchax-path compiled programs (backbone
+      # shapes + mm-encoder cudagraph budgets) total ~6GiB+ at load:
+      # nightly 24382 (MODEL_IMPL_TYPE=vllm) failed with "Error loading
+      # program 'jit__forward': Attempting to allocate 1.13G. There are
+      # 528.72M free.", and 0.95 (~4.7GiB free) still hit the same error
+      # late in startup (dev builds 897/898). 0.90 frees ~9.5GiB; KV
+      # concurrency only drops 153x -> ~140x, far above benchmark needs.
+      GPU_MEMORY_UTILIZATION: "0.90"
       COMPILATION_CONFIG: '{"cudagraph_mm_encoder": true}'
     commands:
       - |
@@ -95,7 +97,7 @@ steps:
           buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Benchmark" "not enough HBM"
           exit 0
         fi
-        .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=1800 BLOCK_SIZE=256 USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+        .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=2400 BLOCK_SIZE=256 USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
 
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-31B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Benchmark"
