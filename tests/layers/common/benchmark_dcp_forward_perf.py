@@ -168,7 +168,7 @@ def bench_kv_len(global_kv_len: int):
     # ==========================================================================
     pages_per_seq_tp8 = math.ceil(global_kv_len / PAGE_SIZE)
     total_pages_tp8 = MAX_NUM_SEQS * pages_per_seq_tp8
-    factor = TP8_MODEL // NUM_KV_HEADS
+    factor = max(1, TP8_MODEL // NUM_KV_HEADS)
     tp8_cache_shape = get_kv_cache_shape(
         total_pages_tp8, PAGE_SIZE, NUM_KV_HEADS * factor, HEAD_DIM, KV_DTYPE
     )
