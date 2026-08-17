@@ -53,8 +53,8 @@ import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, PCPMetadata, SharedAttentionMetadata,
-    round_up_pcp_cache_pages)
+    AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
+    SharedAttentionMetadata, round_up_pcp_cache_pages)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -3090,12 +3090,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             attention_metadata = build_attn(block_tables)
             shared_attention_metadata = build_shared_attn()
         else:
-            attention_metadata = {
-                name: build_attn(metadata[f"block_tables_gid_{gid}"])
-                for gid, kv_cache_group in enumerate(
-                    self.kv_cache_config.kv_cache_groups)
-                for name in kv_cache_group.layer_names
-            }
+            # One AttentionMetadata per group, layers of a group
+            # share the block tables, and GroupedAttentionMetadata keeps that
+            # sharing across the jit boundary. See its docstring.
+            attention_metadata = GroupedAttentionMetadata(
+                groups=tuple(
+                    build_attn(metadata[f"block_tables_gid_{gid}"]) for gid in
+                    range(len(self.kv_cache_config.kv_cache_groups))),
+                layer_names_per_group=tuple(
+                    tuple(group.layer_names)
+                    for group in self.kv_cache_config.kv_cache_groups),
+            )
             shared_attention_metadata = build_shared_attn()
 
         # Async scheduling: substitute placeholder tokens for DP
