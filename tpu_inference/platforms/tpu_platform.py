@@ -284,17 +284,31 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
-        # The TPU hybrid (mamba/linear-attention) path does not support
-        # reusing cached prefixes yet — cache hits garble the output. Keep
-        # prefix caching disabled for hybrid models until the GDN/mamba
-        # kernels handle cached prefixes.
+        # Hybrid (mamba/linear-attention) models now reuse cached prefixes
+        # via `mamba_cache_mode="align"`, which addresses recurrent state by
+        # block id (see `runner/mamba_prefix_caching.py`). Three setups still
+        # cannot: DP attention shards the mamba state over the DP axis while
+        # block ids address the whole pool, speculative decoding needs
+        # consecutive state slots for its verify window, and continue_decode
+        # reuses one set of slots for every step of its on-device loop.
+        # Turning prefix caching off here keeps those configurations working
+        # instead of failing at runtime.
+        unsupported_reason = None
         if (cache_config and cache_config.enable_prefix_caching
                 and vllm_config.model_config is not None
                 and getattr(vllm_config.model_config, "is_hybrid", False)):
+            if vllm_config.sharding_config.total_dp_size > 1:
+                unsupported_reason = "DP attention"
+            elif vllm_config.speculative_config is not None:
+                unsupported_reason = "speculative decoding"
+            elif vllm_config.additional_config.get("enable_continue_decode",
+                                                   False):
+                unsupported_reason = "continue_decode"
+        if unsupported_reason is not None:
             logger.warning(
                 "[tpu_platform] Disabling prefix caching: hybrid "
                 "(mamba/linear-attention) models do not support cached "
-                "prefixes on TPU yet (accuracy garbles on cache hits).")
+                "prefixes with %s on TPU.", unsupported_reason)
             cache_config.enable_prefix_caching = False
             # Reset the mamba cache fields derived from the enabled state to
             # their prefix-caching-off defaults; stale values trip vLLM's

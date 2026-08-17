@@ -231,9 +231,12 @@ class TestTpuPlatform:
 
         assert mm_cfg.mm_device_do_normalize == expected_flag
 
-    @pytest.mark.parametrize("is_hybrid,expected_prefix_caching", [
-        (True, False),
-        (False, True),
+    @pytest.mark.parametrize("is_hybrid,unsupported,expected_prefix_caching", [
+        (True, None, True),
+        (True, "dp", False),
+        (True, "spec", False),
+        (True, "continue_decode", False),
+        (False, None, True),
     ])
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
@@ -243,10 +246,14 @@ class TestTpuPlatform:
     )
     def test_check_and_update_config_hybrid_prefix_caching(
             self, mock_update, mock_sharding, vllm_config, is_hybrid,
-            expected_prefix_caching):
-        """Prefix caching is force-disabled for hybrid (mamba/linear-attention)
-        models on TPU — cached-prefix reuse garbles GDN outputs — and left
-        untouched for non-hybrid models."""
+            unsupported, expected_prefix_caching):
+        """Hybrid (mamba/linear-attention) models keep prefix caching.
+
+        Their recurrent state is addressed by block id in
+        `mamba_cache_mode="align"`. It is turned off only for the setups that
+        addressing scheme cannot serve, so those keep working rather than
+        failing at runtime.
+        """
         vllm_config.parallel_config.pipeline_parallel_size = 1
         vllm_config.scheduler_config.is_multimodal_model = False
         vllm_config.compilation_config.mode = "dummy"
@@ -260,11 +267,21 @@ class TestTpuPlatform:
         vllm_config.cache_config.mamba_cache_mode = "align"
         vllm_config.cache_config.mamba_block_size = 256
 
+        # check_and_update_config replaces sharding_config with the manager's
+        # output, so the DP size has to come from the patched manager.
+        mock_sharding.from_vllm_config.return_value.total_dp_size = (
+            2 if unsupported == "dp" else 1)
+        vllm_config.speculative_config = (object()
+                                          if unsupported == "spec" else None)
+        vllm_config.additional_config = {
+            "enable_continue_decode": unsupported == "continue_decode"
+        }
+
         TpuPlatform.check_and_update_config(vllm_config)
 
         assert (vllm_config.cache_config.enable_prefix_caching ==
                 expected_prefix_caching)
-        if is_hybrid:
+        if not expected_prefix_caching:
             # Derived mamba fields must be reset to their prefix-caching-off
             # defaults or vLLM's "--mamba-block-size can only be set with
             # --enable-prefix-caching" validator rejects the config.
