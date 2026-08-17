@@ -21,12 +21,10 @@ from torchax.ops.jtorch import register_function
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 
-# The pallas default scoped-vmem limit is 32MiB, which the ViT flash-attention
-# exceeds on large flattened image sequences: nightly 24382
-# (MODEL_IMPL_TYPE=vllm, Qwen2.5-VL-3B MM perf) failed with
-# CompileTimeScopedVmemOom "size 37.22M and limit 32.00M" at
-# bf16[1,16,25344,80]. 64MiB covers those shapes with headroom; the RPA
-# kernels already run with up to 100MiB on both v6e and v7x.
+# ViT flash-attention on large flattened image sequences needs more scoped
+# vmem than the 32MiB pallas default (~37MiB at bf16[1,16,25344,80]); 64MiB
+# covers such shapes with headroom. The RPA kernels already run with up to
+# 100MiB on both v6e and v7x.
 _VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES = 64 * 1024 * 1024
 
 

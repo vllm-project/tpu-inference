@@ -80,7 +80,7 @@ class TestAttnDpBatchAxisFix:
 class TestVitVmemLimit:
     """The ViT flash attention must raise the scoped-vmem limit above the
     32MiB pallas default: large flattened image sequences exceed it
-    (CompileTimeScopedVmemOom at bf16[1,16,25344,80], nightly 24382)."""
+    (CompileTimeScopedVmemOom at bf16[1,16,25344,80])."""
 
     def test_vit_vmem_limit_covers_failing_shape(self):
         # 37.22M was the observed scoped allocation that OOMed at 32M.
