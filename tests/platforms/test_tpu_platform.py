@@ -271,6 +271,36 @@ class TestTpuPlatform:
             assert vllm_config.cache_config.mamba_cache_mode == "none"
             assert vllm_config.cache_config.mamba_block_size == 4096
 
+    @patch(
+        "tpu_inference.platforms.tpu_platform.envs."
+        "TPU_UNSAFE_HYBRID_PREFIX_CACHING", True)
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_hybrid_prefix_caching_unsafe_override(self, mock_update,
+                                                   mock_sharding, vllm_config):
+        """TPU_UNSAFE_HYBRID_PREFIX_CACHING keeps prefix caching (and the
+        derived mamba fields) untouched for hybrid models, so the throughput
+        ceiling can be measured. Output is wrong in this mode by design."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 256
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        assert vllm_config.cache_config.enable_prefix_caching is True
+        assert vllm_config.cache_config.mamba_cache_mode == "align"
+        assert vllm_config.cache_config.mamba_block_size == 256
+
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")

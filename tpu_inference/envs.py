@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     MODEL_IMPL_TYPE: str = "auto"
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
+    TPU_UNSAFE_HYBRID_PREFIX_CACHING: bool = False
     PHASED_PROFILING_DIR: str = ""
     AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
@@ -262,6 +263,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable new experimental model design
     "NEW_MODEL_DESIGN":
     env_bool("NEW_MODEL_DESIGN", default=False),
+    # Keep prefix caching enabled for hybrid (mamba/linear-attention) models
+    # instead of force-disabling it. UNSAFE: the TPU GDN/mamba path cannot
+    # resume from a cached prefix, so cache hits produce wrong output
+    # (Qwen3.5-397B-A17B-FP8 scores 0.01 on gsm8k). Benchmarking only, to
+    # measure the throughput ceiling that correct cached prefixes would give.
+    "TPU_UNSAFE_HYBRID_PREFIX_CACHING":
+    env_bool("TPU_UNSAFE_HYBRID_PREFIX_CACHING", default=False),
     # Directory to store phased profiling output
     "PHASED_PROFILING_DIR":
     lambda: os.getenv("PHASED_PROFILING_DIR", ""),
