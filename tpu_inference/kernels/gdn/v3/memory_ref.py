@@ -127,7 +127,9 @@ class PackedPIdRecord:
         """Packs s_idx, row size and two tile-state flags into one int32 word."""
 
         s_idx = s_idx.reshape(-1).astype(jnp.int32)
-        r_size = r_size.reshape(-1).astype(jnp.int32)
+        # PER_SEQ pads unused slots with large negative sizes; shifting one of
+        # those left would set the high bits and overwrite s_idx.
+        r_size = jnp.maximum(r_size.reshape(-1).astype(jnp.int32), 0)
         is_first_tile = is_first_tile.reshape(-1).astype(jnp.int32)
         is_last_tile = is_last_tile.reshape(-1).astype(jnp.int32)
         word = s_idx << cls.S_IDX_SHIFT
@@ -184,6 +186,16 @@ class MetadataRef:
         r_base = p_id_to_r_base.reshape(-1).astype(jnp.int32)
         word = PackedPIdRecord.pack(p_id_to_s_idx, p_id_to_r_size,
                                     p_id_is_first_tile, p_id_is_last_tile)
+        # Every tile reads all `seq_tile_size` of its records, so the last tile
+        # reads up to `seq_tile_size - 1` records past the valid ones. Round the
+        # record count up so those reads hit zeroed records instead of whatever
+        # SMEM follows: a zero word is s_idx 0, r_size 0 and both tile flags
+        # false, which issues no DMA.
+        pad = -r_base.shape[0] % cfgs.seq_tile_size
+        if pad:
+            r_base = jnp.pad(r_base, (0, pad))
+            word = jnp.pad(word, (0, pad))
+
         fields = [r_base, word]
         # Interleave fields into one array of structs: [rec0_f0, rec0_f1, ...].
         records = jnp.stack(fields, axis=-1).reshape(-1)
