@@ -38,10 +38,12 @@ from jax.experimental.pallas import tpu as pltpu
 # isort: off
 # yapf: disable
 from .gmm_v2_gather_scatter import (
-    Dimensions, FusedDims, FusedWeightsRef, GmmConfigs, InputConfigs,
-    MetadataRef, TileSizes, WeightsRef, _recover_quant_block_size, align_to,
-    calculate_tiling, dma_gather_gm_start, dma_gather_gm_wait, fill_metadata,
-    get_maybe_quantize_lhs, inner_kernel, zero_out_end_3d, zero_out_start_3d)
+    Dimensions, FusedDims, FusedWeightsRef, GatherMetadata, GmmConfigs,
+    InputConfigs, MetadataRef, ScatterMetadata, TileSizes, WeightsRef,
+    _recover_quant_block_size, align_to, calculate_tiling, dma_gather_gm_start,
+    dma_gather_gm_wait, fill_metadata, get_maybe_quantize_lhs, inner_kernel,
+    prepare_gather_tile_metadata, prepare_scatter_tile_metadata, zero_out_end_3d,
+    zero_out_start_3d)
 # yapf: enable
 # isort: on
 
@@ -838,43 +840,66 @@ def kernel_main_fused_rs(
                 for _i in range(min(num_w2_bufs, total_w2_steps)):
                     start_w2_dma(_i, expert_id, _i // num_k2, _i % num_k2)
 
+            # --- Prepare Scatter Metadata (for current gm_id direct-write) ---
+            scatter_meta = prepare_scatter_tile_metadata(
+                gm_id,
+                metadata_ref,
+                tile_m=tile_m,
+                size_m=fused_dims.size_m,
+                lhs_indices_ref=lhs_indices_ref,
+                topk_indices_ref=topk_indices_ref,
+                my_id=my_id,
+                chunk_size=chunk_size,
+                top_k=top_k,
+                pack_indices=pack_indices,
+            )
+
             # --- DMA gather (issued after weight DMAs are in flight) ---
-            # When indices are packed, set divisor=top_k so the
-            # gather extracts the actual lhs_idx via integer division.
             _gather_divisor = top_k if pack_indices else 1
 
             @jax.named_scope("dma_gather_start")
             @pl.when(gm_id == 0)
             def _():
+                gather_meta_0 = prepare_gather_tile_metadata(
+                    0,
+                    metadata_ref,
+                    tile_m=tile_m,
+                    size_m=fused_dims.size_m,
+                    lhs_indices_ref=lhs_indices_ref,
+                    pack_indices=pack_indices,
+                    gather_divisor=_gather_divisor,
+                )
                 dma_gather_gm_start(
                     hidden_states_ref,
                     gathered_lhs_2x_ref.at[sem_id],
-                    lhs_indices_ref,
                     gather_sem_ref.at[sem_id],
-                    0,
-                    metadata_ref,
-                    divisor=_gather_divisor,
+                    gather_meta_0,
                 )
 
             @jax.named_scope("dma_gather_prefetch")
             @pl.when(gm_id + 1 < local_num_gm)
             def _():
+                next_gather_meta = prepare_gather_tile_metadata(
+                    gm_id + 1,
+                    metadata_ref,
+                    tile_m=tile_m,
+                    size_m=fused_dims.size_m,
+                    lhs_indices_ref=lhs_indices_ref,
+                    pack_indices=pack_indices,
+                    gather_divisor=_gather_divisor,
+                )
                 dma_gather_gm_start(
                     hidden_states_ref,
                     gathered_lhs_2x_ref.at[1 - sem_id],
-                    lhs_indices_ref,
                     gather_sem_ref.at[1 - sem_id],
-                    gm_id + 1,
-                    metadata_ref,
-                    divisor=_gather_divisor,
+                    next_gather_meta,
                 )
 
             # Wait for gather (weight DMAs running in parallel).
             dma_gather_gm_wait(
                 gathered_lhs_2x_ref.at[sem_id],
                 gather_sem_ref.at[sem_id],
-                gm_id,
-                metadata_ref,
+                scatter_meta,
             )
 
             # GMM1 loop.
@@ -959,8 +984,7 @@ def kernel_main_fused_rs(
             def _():
                 zero_out_end_3d(out_buf_ref, zero_sem_ref, zero_size)
 
-            m_st = metadata_ref.gm_id_to_m_offset[gm_id]
-            m_en = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+            m_st = scatter_meta.m_start
             _sls = pltpu.get_tpu_info().get_sublane_tiling(out_dtype)
             _ml = m_st % _sls
 
@@ -972,71 +996,46 @@ def kernel_main_fused_rs(
                         scatter_staging_3x_ref.shape[3],
                     )
 
-            # Step 10: Direct-write — single pass over valid rows only.
-            # Each row either ICI-sends (remote) or DMA-copies (local) to
-            # direct_write_buf[local_row * top_k + topk_idx].
-            # Loop bound is m_en - m_st (valid rows), not tile_m, eliminating
-            # wasted iterations on padding rows.
-            m_valid = m_en - m_st
-
+            # Step 10: Direct-write — branchless static loop over tile_m rows.
+            # Uses pre-computed should_send / should_local from ScatterMetadata to avoid
+            # dynamic loops and dynamic branching on @pl.when.
             @jax.named_scope("direct_write_rows")
             def _do_direct_write():
+                with jax.named_scope("direct_write_do_dma"):
+                    for i in range(tile_m):
+                        row_idx = _ml + i
+                        write_pos = scatter_meta.write_positions[i]
+                        dest_chip = scatter_meta.dest_chips[i]
+                        should_send = scatter_meta.should_sends[i]
+                        should_local = scatter_meta.should_locals[i]
 
-                def _write_row(i, carry):
-                    send_sz, local_sz = carry
-                    row_idx = _ml + i
-                    # Read indices. Either packed (one ref) or separate.
-                    if pack_indices:
-                        # combined = lhs_idx * top_k + topk_slot
-                        #          = (dest_chip * chunk_size + local_row) * top_k + topk_slot
-                        # So:
-                        #   write_pos = local_row * top_k + topk_slot
-                        #             = combined % (chunk_size * top_k)
-                        #   dest_chip = combined // (chunk_size * top_k)
-                        # When chunk_size * top_k is a power of 2 (typical),
-                        # XLA lowers these to a shift + mask — essentially free.
-                        # No need to compute oi/topk_idx/local_row separately.
-                        combined = lhs_indices_ref[m_st + i]
-                        cs_tk = chunk_size * top_k
-                        write_pos = combined % cs_tk
-                        dest_chip = combined // cs_tk
-                    else:
-                        oi = lhs_indices_ref[m_st + i]
-                        topk_idx = topk_indices_ref[m_st + i]
-                        dest_chip = oi // chunk_size
-                        local_row = oi % chunk_size
-                        write_pos = local_row * top_k + topk_idx
-                    is_local = dest_chip == my_id
+                        if fp8_direct_write:
+                            # Quantize each completed expert row before the direct
+                            # write. Remote ICI then moves FP8 payload plus one
+                            # fp32 row scale instead of the full bf16 activation row.
+                            row_f32 = scatter_staging_3x_ref[stg_id,
+                                                             row_idx, :, :].astype(
+                                                                 jnp.float32)
+                            fp8_max = jnp.array(jnp.finfo(jnp.float8_e4m3fn).max,
+                                                dtype=jnp.float32)
+                            row_scale = (jnp.maximum(
+                                jnp.max(jnp.abs(row_f32)),
+                                jnp.array(1e-6, dtype=jnp.float32),
+                            ) / fp8_max)
+                            scatter_scale_3x_ref[stg_id, row_idx, :] = (
+                                row_scale + jnp.zeros((128, ), dtype=jnp.float32))
+                            scatter_fp8_staging_3x_ref[stg_id,
+                                                      row_idx, :, :] = jnp.clip(
+                                                          row_f32 / row_scale,
+                                                          -fp8_max,
+                                                          fp8_max).astype(
+                                                              jnp.float8_e4m3fn)
 
-                    if fp8_direct_write:
-                        # Quantize each completed expert row before the direct
-                        # write. Remote ICI then moves FP8 payload plus one
-                        # fp32 row scale instead of the full bf16 activation row.
-                        row_f32 = scatter_staging_3x_ref[stg_id,
-                                                         row_idx, :, :].astype(
-                                                             jnp.float32)
-                        fp8_max = jnp.array(jnp.finfo(jnp.float8_e4m3fn).max,
-                                            dtype=jnp.float32)
-                        row_scale = (jnp.maximum(
-                            jnp.max(jnp.abs(row_f32)),
-                            jnp.array(1e-6, dtype=jnp.float32),
-                        ) / fp8_max)
-                        scatter_scale_3x_ref[stg_id, row_idx, :] = (
-                            row_scale + jnp.zeros((128, ), dtype=jnp.float32))
-                        scatter_fp8_staging_3x_ref[stg_id,
-                                                   row_idx, :, :] = jnp.clip(
-                                                       row_f32 / row_scale,
-                                                       -fp8_max,
-                                                       fp8_max).astype(
-                                                           jnp.float8_e4m3fn)
-
-                        @pl.when(~is_local)
-                        def _():
                             pltpu.make_async_remote_copy(
                                 src_ref=scatter_fp8_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, 1), :, :],
+                                    stg_id, pl.ds(row_idx, should_send), :, :],
                                 dst_ref=out_buf_ref.at[
-                                    pl.ds(write_pos, 1), :, :],
+                                    pl.ds(write_pos, should_send), :, :],
                                 send_sem=send_sems_ref.at[stg_id],
                                 recv_sem=recv_sem_ref.at[0],
                                 device_id={
@@ -1046,9 +1045,9 @@ def kernel_main_fused_rs(
                             ).start()
                             pltpu.make_async_remote_copy(
                                 src_ref=scatter_scale_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, 1), :],
+                                    stg_id, pl.ds(row_idx, should_send), :],
                                 dst_ref=out_scale_ref.at[
-                                    pl.ds(write_pos, 1), :],
+                                    pl.ds(write_pos, should_send), :],
                                 send_sem=scale_send_sems_ref.at[stg_id],
                                 recv_sem=scale_recv_sem_ref.at[0],
                                 device_id={
@@ -1057,32 +1056,27 @@ def kernel_main_fused_rs(
                                 device_id_type=pltpu.DeviceIdType.MESH,
                             ).start()
 
-                        @pl.when(is_local)
-                        def _():
                             pltpu.make_async_copy(
                                 src_ref=scatter_fp8_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, 1), :, :],
+                                    stg_id, pl.ds(row_idx, should_local), :, :],
                                 dst_ref=out_buf_ref.at[
-                                    pl.ds(write_pos, 1), :, :],
+                                    pl.ds(write_pos, should_local), :, :],
                                 sem=local_write_sems_ref.at[stg_id],
                             ).start()
                             pltpu.make_async_copy(
                                 src_ref=scatter_scale_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, 1), :],
+                                    stg_id, pl.ds(row_idx, should_local), :],
                                 dst_ref=out_scale_ref.at[
-                                    pl.ds(write_pos, 1), :],
+                                    pl.ds(write_pos, should_local), :],
                                 sem=scale_local_write_sems_ref.at[stg_id],
                             ).start()
 
-                    else:
-
-                        @pl.when(~is_local)
-                        def _():
+                        else:
                             pltpu.make_async_remote_copy(
                                 src_ref=scatter_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, 1), :, :],
+                                    stg_id, pl.ds(row_idx, should_send), :, :],
                                 dst_ref=out_buf_ref.at[
-                                    pl.ds(write_pos, 1), :, :],
+                                    pl.ds(write_pos, should_send), :, :],
                                 send_sem=send_sems_ref.at[stg_id],
                                 recv_sem=recv_sem_ref.at[0],
                                 device_id={
@@ -1091,34 +1085,15 @@ def kernel_main_fused_rs(
                                 device_id_type=pltpu.DeviceIdType.MESH,
                             ).start()
 
-                        @pl.when(is_local)
-                        def _():
                             pltpu.make_async_copy(
                                 src_ref=scatter_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, 1), :, :],
+                                    stg_id, pl.ds(row_idx, should_local), :, :],
                                 dst_ref=out_buf_ref.at[
-                                    pl.ds(write_pos, 1), :, :],
+                                    pl.ds(write_pos, should_local), :, :],
                                 sem=local_write_sems_ref.at[stg_id],
                             ).start()
 
-                    return (
-                        send_sz +
-                        lax.select(~is_local, jnp.int32(1), jnp.int32(0)),
-                        local_sz +
-                        lax.select(is_local, jnp.int32(1), jnp.int32(0)),
-                    )
-
-                def _full_tile():
-                    carry = (jnp.int32(0), jnp.int32(0))
-                    for i in range(tile_m):
-                        carry = _write_row(i, carry)
-                    return carry
-
-                def _partial_tile():
-                    return lax.fori_loop(0, m_valid, _write_row,
-                                         (jnp.int32(0), jnp.int32(0)))
-
-                return lax.cond(m_valid == tile_m, _full_tile, _partial_tile)
+                return scatter_meta.total_send_sz, scatter_meta.total_local_sz
 
             send_sz, local_sz = _do_direct_write()
             gm_id_ref[1 + stg_id] = gm_id_ref[1 + stg_id] + send_sz
