@@ -55,6 +55,7 @@ class PCPMetadata:
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "mamba_read_state_indices",
         "pcp",
     ],
     meta_fields=["padded_num_reqs", "pcp_cache_pages"],
@@ -80,6 +81,13 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (max_num_seqs,) int32 — slot each request reads its initial recurrent
+    # state from. None means "same as `mamba_state_indices`", which is the
+    # case unless mamba prefix caching is on: in `mamba_cache_mode="align"`
+    # a request resumes from the state block cached at the last block
+    # boundary and checkpoints into the block covering its current position,
+    # so the read and write slots differ.
+    mamba_read_state_indices: jax.Array | None = None
 
     # PCP-specific metadata. None when not running prefill context parallelism.
     pcp: PCPMetadata | None = None
@@ -103,6 +111,7 @@ class AttentionMetadata(object):
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "mamba_read_state_indices",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -124,6 +133,10 @@ class SharedAttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (max_num_seqs,) int32 — slot each request reads its initial recurrent
+    # state from; None means "same as `mamba_state_indices`". See the
+    # matching field on `AttentionMetadata`.
+    mamba_read_state_indices: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.

@@ -68,6 +68,7 @@ def gdn_attention_core_tpu(
     query_start_loc = first_attn_metadata.query_start_loc
     seq_lens = first_attn_metadata.seq_lens
     state_indices = first_attn_metadata.mamba_state_indices
+    read_state_indices = first_attn_metadata.mamba_read_state_indices
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
@@ -130,6 +131,13 @@ def gdn_attention_core_tpu(
     state_indices_sliced = truncate_sharded_tensor(state_indices,
                                                    padded_num_reqs_per_dp,
                                                    dp_size)
+    read_state_indices_sliced = None
+    if read_state_indices is not None:
+        # Mamba prefix caching: resume from the block cached at the last
+        # block boundary while checkpointing into `state_indices`.
+        read_state_indices_sliced = truncate_sharded_tensor(
+            read_state_indices.astype(jnp.int32), padded_num_reqs_per_dp,
+            dp_size)
     query_start_loc_sliced = truncate_sharded_tensor(
         query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
     seq_lens_sliced = truncate_sharded_tensor(seq_lens, padded_num_reqs_per_dp,
@@ -156,6 +164,7 @@ def gdn_attention_core_tpu(
          d_v,
          kernel_size,
          mesh=mesh,
+         read_state_indices=read_state_indices_sliced,
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
