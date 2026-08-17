@@ -55,6 +55,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         k_scale: float | None = None,
         v_scale: float | None = None,
         use_causal_mask: bool = True,
+        block_causal_size: int | None = None,
+        chunk_prefill_size: int | None = None,
     ):
         rng = np.random.default_rng(1234)
 
@@ -149,7 +151,9 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                             (0, max_num_seq + 1 - cu_q_lens.shape[0]))
         kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
         kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
-        distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
+        prefill_end = len(seq_lens) if chunk_prefill_size is not None else 0
+        distribution = jnp.array(
+            [0, prefill_end, len(seq_lens)], dtype=jnp.int32)
 
         args = (
             q,
@@ -164,6 +168,7 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
 
         kwargs = {
             "use_causal_mask": use_causal_mask,
+            "block_causal_size": block_causal_size,
             "sliding_window": sliding_window,
             "soft_cap": soft_cap,
             "q_scale": q_scale,
@@ -179,6 +184,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         output, updated_kv_cache = ragged_paged_attention(
             *args,
             **kwargs,
+            chunk_prefill_size=chunk_prefill_size,
+            p_block_sizes=(bq_sz, bkv_sz, bq_csz, bkv_csz),
             m_block_sizes=(bq_sz, bkv_sz, bq_csz, bkv_csz),
             vmem_limit_bytes=vmem_limit_bytes,
         )
@@ -229,6 +236,20 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             bq_csz=bq_csz,
             bkv_csz=bkv_csz,
             use_causal_mask=use_causal_mask,
+        )
+
+    def test_ragged_paged_attention_block_causal(self):
+        self._test_ragged_paged_attention(
+            [(128, 128), (128, 128)],
+            (32, 8),
+            128,
+            16,
+            jnp.bfloat16,
+            jnp.bfloat16,
+            1000,
+            use_causal_mask=False,
+            block_causal_size=32,
+            chunk_prefill_size=128,
         )
 
     # TODO: support integer (int8, int4) and fp4 kv cache

@@ -153,6 +153,10 @@ def _test_attention(monkeypatch,
     if head_dim != 64:
         assert mock_paged_attn_kernel.call_args.kwargs[
             "use_causal_mask"] is expected_causal
+        expected_block_size = (attention_mask_spec.block_size
+                               if attention_mask_spec is not None else None)
+        assert mock_paged_attn_kernel.call_args.kwargs[
+            "block_causal_size"] == expected_block_size
         assert mock_paged_attn_kernel.call_args.kwargs[
             "chunk_prefill_size"] == rpa_static_query_len
 
@@ -187,6 +191,16 @@ def test_attention_bidirectional_from_metadata(monkeypatch, mesh):
 
 def test_attention_static_prefill_length(monkeypatch, mesh):
     _test_attention(monkeypatch, mesh, 128, rpa_static_query_len=8)
+
+
+def test_attention_block_causal_from_metadata(monkeypatch, mesh):
+    _test_attention(
+        monkeypatch,
+        mesh,
+        128,
+        attention_mask_spec=AttentionMaskSpec(AttentionMaskKind.BLOCK_CAUSAL,
+                                              block_size=32),
+    )
 
 
 def test_attention_bidirectional_hd64_fails_loudly(monkeypatch, mesh):

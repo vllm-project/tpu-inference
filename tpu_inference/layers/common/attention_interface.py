@@ -35,7 +35,8 @@ from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata, resolve_use_causal_mask)
+    AttentionMetadata, SharedAttentionMetadata, resolve_block_causal_size,
+    resolve_use_causal_mask)
 from tpu_inference.layers.common.cp_attention import dcp_forward, pcp_forward
 from tpu_inference.layers.common.kv_cache_replace import replace_cached_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -389,6 +390,7 @@ def sharded_ragged_paged_attention(
     chunk_prefill_size: int | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    block_causal_size: int | None = None,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -442,9 +444,13 @@ def sharded_ragged_paged_attention(
             "update_kv_cache=False (KV-share) is not supported on the "
             "head_dim==64 RPA kernel.")
 
-    if use_hd64 and not use_causal_mask:
+    if use_causal_mask and block_causal_size is not None:
+        raise ValueError(
+            "Token-causal and block-causal masks are mutually exclusive")
+
+    if use_hd64 and (not use_causal_mask or block_causal_size is not None):
         raise NotImplementedError(
-            "Bidirectional attention is not supported on the head_dim==64 "
+            "Non-token-causal attention is not supported on the head_dim==64 "
             "RPA kernel")
     if use_hd64 and chunk_prefill_size is not None:
         raise NotImplementedError(
@@ -465,6 +471,7 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+            kwargs["block_causal_size"] = block_causal_size
             kwargs["chunk_prefill_size"] = chunk_prefill_size
         return func(*args, **kwargs)
 
@@ -514,6 +521,7 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
+    block_causal_size = resolve_block_causal_size(md, use_causal_mask)
     use_causal_mask = resolve_use_causal_mask(md, use_causal_mask)
     # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
     shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
@@ -538,9 +546,9 @@ def attention(
         update_kv_cache = False
 
     if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
-        if not use_causal_mask:
+        if not use_causal_mask or block_causal_size is not None:
             raise NotImplementedError(
-                "Bidirectional attention is not supported with DCP")
+                "Non-token-causal attention is not supported with DCP")
         return dcp_forward(
             mesh,
             q,
@@ -556,6 +564,9 @@ def attention(
             v_scale=v_scale,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
+        if block_causal_size is not None:
+            raise NotImplementedError(
+                "Block-causal attention is not supported with PCP")
         return pcp_forward(
             mesh,
             q,
@@ -591,6 +602,7 @@ def attention(
         chunk_prefill_size=md.rpa_static_query_len,
         update_kv_cache=update_kv_cache,
         use_causal_mask=use_causal_mask,
+        block_causal_size=block_causal_size,
     )
 
     return kv_cache, output

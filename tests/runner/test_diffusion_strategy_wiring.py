@@ -124,3 +124,15 @@ def test_diffusion_passes_request_eos_policy_into_denoising():
     assert "sampling_params.ignore_eos" in decode_source
     assert "stop_on_eos_rows" in denoise_source
     assert "eos_token_ids" in denoise_source
+
+
+def test_prompt_prefill_is_one_block_causal_forward_per_length_group():
+    build_source = ast.unparse(_strategy_method("_build_prompt_batch"))
+    prefill_source = ast.unparse(_strategy_method("_process_prefill"))
+
+    assert "AttentionMaskKind.BLOCK_CAUSAL" in build_source
+    assert "rpa_static_query_len=sequence_length" in build_source
+    assert "request_distribution = np.array([0, num_active, num_active]" in \
+        build_source
+    assert "_forward_prompt_blocks(group, prompts)" in prefill_source
+    assert "for block_index in range" not in prefill_source

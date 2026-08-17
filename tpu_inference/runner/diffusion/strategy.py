@@ -55,6 +55,7 @@ class BlockDiffusionStrategy:
         self.config = config
         self._pending_outputs: dict[str, PendingBlockOutput] = {}
         self._last_denoise_trace: dict[str, Any] | None = None
+        self._last_prefill_trace: dict[str, Any] | None = None
         self._forward_fn = self._model_forward
         self._full_subblock_forward_fn = self._model_forward_full_subblock
         self._partial_subblock_forward_fn = self._model_forward_partial_subblock
@@ -414,23 +415,122 @@ class BlockDiffusionStrategy:
                                                None)
         return logits, kv_caches
 
-    def _forward_blocks(
+    def _build_prompt_batch(
         self,
         req_ids: list[str],
-        block_starts: list[int],
-        canvases: list[list[int]],
-    ) -> np.ndarray:
-        canvas, _, positions, active_rows, metadata = self._build_batch(
-            req_ids, block_starts, canvases)
-        logits, self.runner.kv_caches = self._final_forward_fn(
+        prompt_tokens: list[list[int]],
+    ) -> tuple[jax.Array, jax.Array, jax.Array, AttentionMetadata]:
+        if not req_ids or len(req_ids) != len(prompt_tokens):
+            raise ValueError(
+                "Prompt prefill requires matching non-empty request and token lists"
+            )
+        sequence_length = len(prompt_tokens[0])
+        if sequence_length == 0 or sequence_length % self.block_size != 0:
+            raise ValueError(
+                "Block-causal prompt prefill requires complete diffusion blocks"
+            )
+        if any(len(tokens) != sequence_length for tokens in prompt_tokens):
+            raise ValueError(
+                "Requests in one prompt prefill batch must have equal lengths")
+
+        runner = self.runner
+        num_active = len(req_ids)
+        batch_size = select_diffusion_batch_size(num_active, self.batch_size)
+        total_tokens = num_active * sequence_length
+        padded_tokens = next(
+            (size
+             for size in runner.num_tokens_paddings if size >= total_tokens),
+            None)
+        if padded_tokens is None:
+            raise ValueError(
+                f"Prompt prefill needs {total_tokens} tokens, beyond the "
+                "configured TPU token buckets")
+
+        input_ids = np.full((padded_tokens, ),
+                            runner.pad_token_id,
+                            dtype=np.int32)
+        positions = np.zeros((padded_tokens, ), dtype=np.int32)
+        seq_lens = np.zeros((batch_size, ), dtype=np.int32)
+        query_start_loc = np.full((batch_size + 1, ),
+                                  total_tokens,
+                                  dtype=np.int32)
+        query_start_loc[:num_active + 1] = np.arange(
+            num_active + 1, dtype=np.int32) * sequence_length
+        final_hidden_indices = np.full((batch_size, ),
+                                       total_tokens - 1,
+                                       dtype=np.int32)
+
+        source_block_tables = runner.input_batch.block_table[0].get_cpu_tensor(
+        )
+        block_tables = np.zeros((batch_size, source_block_tables.shape[1]),
+                                dtype=source_block_tables.dtype)
+        token_positions = np.arange(sequence_length, dtype=np.int32)
+        for row, (req_id, tokens) in enumerate(zip(req_ids, prompt_tokens)):
+            req_index = runner.input_batch.req_id_to_index[req_id]
+            required_cache_blocks = (sequence_length + runner.block_size -
+                                     1) // runner.block_size
+            allocated_cache_blocks = int(runner.input_batch.block_table[0].
+                                         num_blocks_per_row[req_index])
+            if required_cache_blocks > allocated_cache_blocks:
+                raise ValueError(
+                    f"Prompt prefill for request {req_id!r} needs "
+                    f"{required_cache_blocks} KV blocks, but the scheduler "
+                    f"allocated {allocated_cache_blocks}")
+            start = row * sequence_length
+            end = start + sequence_length
+            input_ids[start:end] = tokens
+            positions[start:end] = token_positions
+            seq_lens[row] = sequence_length
+            final_hidden_indices[row] = end - 1
+            block_tables[row] = source_block_tables[req_index]
+
+        request_distribution = np.array([0, num_active, num_active],
+                                        dtype=np.int32)
+        (input_ids, positions, seq_lens, query_start_loc, final_hidden_indices,
+         request_distribution,
+         block_tables) = device_array(runner.mesh, (
+             input_ids,
+             positions,
+             seq_lens,
+             query_start_loc,
+             final_hidden_indices,
+             request_distribution,
+             block_tables.reshape(-1),
+         ))
+        metadata = AttentionMetadata(
+            input_positions=positions,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+            padded_num_reqs=batch_size,
+            attention_mask_spec=AttentionMaskSpec(
+                AttentionMaskKind.BLOCK_CAUSAL,
+                block_size=self.block_size,
+            ),
+            rpa_static_query_len=sequence_length,
+        )
+        return input_ids, positions, final_hidden_indices, metadata
+
+    def _forward_prompt_blocks(
+        self,
+        req_ids: list[str],
+        prompt_tokens: list[list[int]],
+    ) -> tuple[np.ndarray, int]:
+        input_ids, positions, final_hidden_indices, metadata = \
+            self._build_prompt_batch(req_ids, prompt_tokens)
+        self.runner.kv_caches, hidden_states = self._run_model(
             self.runner.state_leaves,
-            canvas,
-            positions,
             self.runner.kv_caches,
-            active_rows,
+            input_ids,
+            positions,
             metadata,
         )
-        return np.asarray(jax.device_get(logits[:len(req_ids)]))
+        final_hidden = hidden_states[final_hidden_indices]
+        logits = self.runner.compute_logits_fn(self.runner.state_leaves,
+                                               final_hidden, None)
+        logits = np.asarray(jax.device_get(logits[:len(req_ids)]))
+        return logits, input_ids.shape[0]
 
     def _denoise_blocks(
         self,
@@ -579,6 +679,8 @@ class BlockDiffusionStrategy:
         return np.asarray(canvas_host), np.asarray(anchors_host)
 
     def _process_prefill(self, req_ids: list[str]) -> dict[str, list[int]]:
+        if not req_ids:
+            return {}
         plans = {}
         for req_id in req_ids:
             request = self.runner.requests[req_id]
@@ -601,28 +703,45 @@ class BlockDiffusionStrategy:
             )
 
         aligned_seeds: dict[str, int] = {}
-        max_full_blocks = max(
-            (len(plan.full_blocks) for plan in plans.values()), default=0)
-        for block_index in range(max_full_blocks):
-            group = [
-                req_id for req_id in req_ids
-                if block_index < len(plans[req_id].full_blocks)
-            ]
-            canvases = [
-                list(plans[req_id].full_blocks[block_index])
-                for req_id in group
-            ]
-            logits = self._forward_blocks(
-                group,
-                [block_index * self.block_size] * len(group),
-                canvases,
-            )
+        full_block_groups: dict[int, list[str]] = {}
+        for req_id in req_ids:
+            block_count = len(plans[req_id].full_blocks)
+            if block_count:
+                full_block_groups.setdefault(block_count, []).append(req_id)
+
+        full_prompt_tokens = 0
+        padded_transformer_positions = 0
+        for block_count, group in full_block_groups.items():
+            prompts = [[
+                token for block in plans[req_id].full_blocks for token in block
+            ] for req_id in group]
+            logits, padded_tokens = self._forward_prompt_blocks(group, prompts)
+            full_prompt_tokens += len(group) * block_count * self.block_size
+            padded_transformer_positions += padded_tokens
             anchors = np.argmax(logits, axis=-1)
             for row, req_id in enumerate(group):
                 plan = plans[req_id]
-                if (plan.remainder_size == 0
-                        and block_index == len(plan.full_blocks) - 1):
+                if plan.remainder_size == 0:
                     aligned_seeds[req_id] = int(anchors[row])
+
+        self._last_prefill_trace = {
+            "active_requests":
+            len(req_ids),
+            "requests_with_full_blocks":
+            sum(len(group) for group in full_block_groups.values()),
+            "forward_calls":
+            len(full_block_groups),
+            "full_prompt_tokens":
+            full_prompt_tokens,
+            "padded_transformer_positions":
+            padded_transformer_positions,
+            "prompt_block_counts": {
+                block_count: len(group)
+                for block_count, group in full_block_groups.items()
+            },
+        }
+        logger.info("Fast-dLLM block-causal prefill trace: %s",
+                    self._last_prefill_trace)
 
         outputs = {req_id: [aligned_seeds[req_id]] for req_id in aligned_seeds}
         partial_group = [

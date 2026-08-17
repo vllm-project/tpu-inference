@@ -77,6 +77,7 @@ def ref_ragged_paged_attention(
     distribution: jax.Array,  # i32[3]
     *,
     use_causal_mask: bool = True,
+    block_causal_size: int | None = None,
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -103,6 +104,7 @@ def ref_ragged_paged_attention(
         cu_q_lens,
         distribution,
         use_causal_mask=use_causal_mask,
+        block_causal_size=block_causal_size,
         skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
@@ -185,11 +187,15 @@ def ref_ragged_paged_attention(
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
 
-        if use_causal_mask:
+        if use_causal_mask or block_causal_size is not None:
             q_span = (kv_len - q_len) + jax.lax.broadcasted_iota(
                 jnp.int32, attn.shape, 1)
             kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
-            mask = q_span >= kv_span
+            if block_causal_size is None:
+                mask = q_span >= kv_span
+            else:
+                mask = (q_span // block_causal_size
+                        >= kv_span // block_causal_size)
             if sliding_window is not None:
                 mask = jnp.logical_and(mask, q_span < kv_span + sliding_window)
             attn = jnp.where(mask, attn, mask_value)
@@ -317,6 +323,7 @@ def _ragged_paged_attention_kernel_loop(
     acc_ref,  # [actual_num_kv_heads, bq_sz * num_q_heads_per_kv_head, head_dim],
     *,
     use_causal_mask: bool = True,
+    block_causal_size: int | None = None,
     update_kv_cache: bool = True,  # KV-share: False = skip cache writes
     skip_kv_mask: bool = False,
     sm_scale: float,
@@ -485,6 +492,12 @@ def _ragged_paged_attention_kernel_loop(
         if use_causal_mask:
             assert not skip_kv_mask
             mask = mask_and(mask, q_span >= k_span)
+        elif block_causal_size is not None:
+            assert not skip_kv_mask
+            mask = mask_and(
+                mask,
+                q_span // block_causal_size >= k_span // block_causal_size,
+            )
 
         if not skip_kv_mask:
             mask = mask_and(mask, k_span < effective_kv_len_int)
@@ -943,6 +956,11 @@ def _ragged_paged_attention_kernel_loop(
             if use_causal_mask:
                 effective_kv_len = jnp.minimum(kv_len,
                                                processed_q_len + actual_bq_sz)
+            elif block_causal_size is not None:
+                last_q_block_end = (
+                    cdiv(processed_q_len + actual_bq_sz, block_causal_size) *
+                    block_causal_size)
+                effective_kv_len = jnp.minimum(kv_len, last_q_block_end)
             else:
                 effective_kv_len = kv_len
             end_bkv_idx = cdiv(effective_kv_len, bkv_sz)
@@ -1237,6 +1255,7 @@ def dynamic_validate_inputs(
     distribution: jax.Array,  # i32[3]
     *,
     use_causal_mask: bool = True,
+    block_causal_size: int | None = None,
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -1265,6 +1284,7 @@ def dynamic_validate_inputs(
         cu_q_lens,
         distribution,
         use_causal_mask=use_causal_mask,
+        block_causal_size=block_causal_size,
         skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
@@ -1332,6 +1352,7 @@ def static_validate_inputs(
     distribution: jax.Array,  # i32[3]
     *,
     use_causal_mask: bool = True,
+    block_causal_size: int | None = None,
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
@@ -1350,9 +1371,13 @@ def static_validate_inputs(
     vmem_limit_bytes: int | None = None,
 ):
     """Validate inputs to the RPA kernel statically."""
-    if use_causal_mask:
-        if skip_kv_mask:
-            raise ValueError("Can not skip kv mask when using causal mask.")
+    if block_causal_size is not None and block_causal_size <= 0:
+        raise ValueError("block_causal_size must be positive")
+    if use_causal_mask and block_causal_size is not None:
+        raise ValueError(
+            "Token-causal and block-causal masks are mutually exclusive")
+    if (use_causal_mask or block_causal_size is not None) and skip_kv_mask:
+        raise ValueError("Can not skip kv mask when using an attention mask.")
 
     q, k, v = queries, keys, values
     if not (len(q.shape) == len(k.shape) == len(v.shape) == 3):
@@ -1563,6 +1588,7 @@ def get_default_block_sizes(
 @jax.jit(
     static_argnames=(
         "use_causal_mask",
+        "block_causal_size",
         "update_kv_cache",
         "skip_kv_mask",
         "sm_scale",
@@ -1598,6 +1624,7 @@ def ragged_paged_attention(
     distribution: jax.Array,  # i32[3]
     *,
     use_causal_mask: bool = True,
+    block_causal_size: int | None = None,
     update_kv_cache: bool = True,
     skip_kv_mask: bool = False,
     sm_scale: float = 1.0,
@@ -1640,6 +1667,8 @@ def ragged_paged_attention(
       sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed. The
       k is also the total number of sequences.
     use_causal_mask: if true, use causal mask.
+    block_causal_size: if set, allow each query to attend to its own fixed-size
+      block and all earlier blocks.
     skip_kv_mask: only set to true if use_causal_mask=False and each dynamic
       kv_len % bkv_csz == 0. Set to true can improve performance.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
@@ -1690,6 +1719,7 @@ def ragged_paged_attention(
         cu_q_lens,
         distribution,
         use_causal_mask=use_causal_mask,
+        block_causal_size=block_causal_size,
         skip_kv_mask=skip_kv_mask,
         sm_scale=sm_scale,
         sliding_window=sliding_window,
@@ -1807,12 +1837,15 @@ def ragged_paged_attention(
         )
 
         scope_name = f"RPA{case.symbol}-p_{page_size}-bq_{bq_sz}_{bq_csz}-bkv_{bkv_sz}_{bkv_csz}"
+        if block_causal_size is not None:
+            scope_name += f"-bc_{block_causal_size}"
         if sliding_window is not None:
             scope_name += f"-sw_{sliding_window}"
         kernel = pl.pallas_call(
             functools.partial(
                 _ragged_paged_attention_kernel,
                 use_causal_mask=use_causal_mask,
+                block_causal_size=block_causal_size,
                 update_kv_cache=update_kv_cache,
                 skip_kv_mask=skip_kv_mask,
                 sm_scale=sm_scale,

@@ -24,11 +24,22 @@ from vllm.utils.math_utils import cdiv
 class AttentionMaskKind(str, Enum):
     CAUSAL = "causal"
     BIDIRECTIONAL = "bidirectional"
+    BLOCK_CAUSAL = "block_causal"
 
 
 @dataclass(frozen=True)
 class AttentionMaskSpec:
     kind: AttentionMaskKind = AttentionMaskKind.CAUSAL
+    block_size: int | None = None
+
+    def __post_init__(self):
+        if self.kind is AttentionMaskKind.BLOCK_CAUSAL:
+            if self.block_size is None or self.block_size <= 0:
+                raise ValueError(
+                    "Block-causal attention requires a positive block_size")
+        elif self.block_size is not None:
+            raise ValueError(
+                "block_size is only valid for block-causal attention")
 
     @property
     def use_causal_mask(self) -> bool:
@@ -45,6 +56,18 @@ def resolve_use_causal_mask(
     if override is not None:
         return override
     return attention_metadata.attention_mask_spec.use_causal_mask
+
+
+def resolve_block_causal_size(
+    attention_metadata: "AttentionMetadata",
+    use_causal_mask_override: bool | None = None,
+) -> int | None:
+    if use_causal_mask_override is not None:
+        return None
+    spec = attention_metadata.attention_mask_spec
+    if spec.kind is AttentionMaskKind.BLOCK_CAUSAL:
+        return spec.block_size
+    return None
 
 
 @functools.partial(

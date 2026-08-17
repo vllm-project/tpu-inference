@@ -19,6 +19,7 @@ import types
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 
 def _cdiv(numerator, denominator):
@@ -55,6 +56,7 @@ AttentionMaskKind = attention_metadata.AttentionMaskKind
 AttentionMaskSpec = attention_metadata.AttentionMaskSpec
 AttentionMetadata = attention_metadata.AttentionMetadata
 resolve_use_causal_mask = attention_metadata.resolve_use_causal_mask
+resolve_block_causal_size = attention_metadata.resolve_block_causal_size
 
 
 def _metadata(mask_spec=None):
@@ -90,3 +92,25 @@ def test_explicit_kernel_override_takes_precedence():
         AttentionMaskSpec(AttentionMaskKind.BIDIRECTIONAL))
 
     assert resolve_use_causal_mask(bidirectional, override=True) is True
+
+
+def test_block_causal_mask_carries_static_block_size():
+    block_causal = _metadata(
+        AttentionMaskSpec(AttentionMaskKind.BLOCK_CAUSAL, block_size=32))
+
+    assert resolve_use_causal_mask(block_causal) is False
+    assert resolve_block_causal_size(block_causal) == 32
+    assert resolve_block_causal_size(block_causal,
+                                     use_causal_mask_override=True) is None
+
+
+def test_block_causal_mask_requires_positive_block_size():
+    with pytest.raises(ValueError, match="positive block_size"):
+        AttentionMaskSpec(AttentionMaskKind.BLOCK_CAUSAL)
+    with pytest.raises(ValueError, match="positive block_size"):
+        AttentionMaskSpec(AttentionMaskKind.BLOCK_CAUSAL, block_size=0)
+
+
+def test_non_block_causal_mask_rejects_block_size():
+    with pytest.raises(ValueError, match="only valid"):
+        AttentionMaskSpec(AttentionMaskKind.CAUSAL, block_size=32)

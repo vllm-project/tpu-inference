@@ -189,6 +189,7 @@ def get_kv_cache_shape(
         "debug_mode",
         "out_dtype",
         "use_causal_mask",
+        "block_causal_size",
         "update_kv_cache",
         "kv_layout",
     ),
@@ -224,6 +225,7 @@ def ragged_paged_attention(
     debug_mode: bool = False,
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
+    block_causal_size: int | None = None,
     update_kv_cache: bool = True,
     kv_layout: configs.KVLayout | None = None,
 ) -> tuple[jax.Array, jax.Array]:
@@ -278,6 +280,8 @@ def ragged_paged_attention(
 
     if not use_causal_mask:
         raise ValueError("Only causal attention is supported.")
+    if block_causal_size is not None:
+        raise ValueError("Block-causal attention is not supported.")
     if chunk_prefill_size is not None:
         raise ValueError("Specifying chunk prefill size is not supported.")
     if debug_mode:
