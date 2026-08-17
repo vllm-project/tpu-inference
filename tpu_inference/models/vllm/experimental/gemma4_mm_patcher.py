@@ -64,15 +64,30 @@ def _ple_forward(
     Identical to the vLLM forward except PLE is computed inline from
     input_ids instead of being read from the pre-allocated
     ``per_layer_embeddings`` CUDA-graph buffer (see module docstring).
+
+    Provenance, for review against the upstream source
+    (vllm/model_executor/models/gemma4_mm.py): everything here is copied
+    verbatim from ``Gemma4ForConditionalGeneration.forward`` except the
+    ``per_layer_inputs`` block, which replaces upstream's buffer read
+    (``self.per_layer_embeddings[:n]``) with the producer computation
+    copied from ``embed_input_ids``. Each section is marked below.
     """
+    # [upstream forward, verbatim]
     if intermediate_tensors is not None:
         inputs_embeds = None
 
+    # [replaces upstream forward's buffer read] Upstream forward does
+    #   per_layer_inputs = self.per_layer_embeddings[:inputs_embeds.shape[0]]
+    #   (guarded on per_layer_embeddings/inputs_embeds not None).
+    # Here PLE is computed inline instead, under the equivalent guard
+    # (input_ids replaces the buffer as the data source).
     per_layer_inputs = None
     if inputs_embeds is not None and input_ids is not None:
-        # Reference semantics: embed_input_ids computes PLE with multimodal
-        # placeholder positions masked to token 0. Those positions hold the
-        # image/audio placeholder token ids, so mask by token id.
+        # [new — replaces upstream embed_input_ids' is_multimodal mask]
+        # Upstream masks multimodal placeholder positions to token 0 via the
+        # is_multimodal tensor, which forward does not receive. Those
+        # positions hold the image/audio placeholder token ids, so masking
+        # by token id selects the same positions.
         ple_input_ids = input_ids
         for token_id in self._tpu_ple_mask_token_ids:
             ple_input_ids = torch.where(
@@ -80,6 +95,8 @@ def _ple_forward(
                 torch.zeros_like(ple_input_ids),
                 ple_input_ids,
             )
+        # [upstream embed_input_ids, verbatim] The PLE producer computation
+        # (lookup + reshape), minus the final buffer copy_.
         per_layer_inputs = self.language_model.model.get_per_layer_inputs(
             ple_input_ids)
         if per_layer_inputs is not None:
@@ -89,6 +106,7 @@ def _ple_forward(
                 self.config.text_config.hidden_size_per_layer_input,
             )
 
+    # [upstream forward, verbatim]
     self._clear_mm_prefix_for_full_attn_layers()
 
     hidden_states = self.language_model.model(
