@@ -148,10 +148,15 @@ class MetadataRef:
     s_idx_has_initial_state: Any
     s_idx_to_state_indices: Any
     # Per-sequence state read offset for speculative decoding: the initial
-    # state is read from `s_idx_to_state_indices[s] + s_idx_to_read_offset[s]`
+    # state is read from `s_idx_to_read_indices[s] + s_idx_to_read_offset[s]`
     # (the checkpoint of the last accepted token). Zero everywhere without
     # speculative decoding.
     s_idx_to_read_offset: Any
+    # Slot the initial state is read from. Equal to `s_idx_to_state_indices`
+    # unless mamba prefix caching is on, where a sequence resumes from the
+    # cached state block of the previous block boundary and checkpoints into
+    # a different block (see `cache_config.mamba_cache_mode == "align"`).
+    s_idx_to_read_indices: Any
     shape: tuple[int, ...] = dataclasses.field(metadata=dict(static=True))
 
     def get_record(self, p_id, idx) -> PackedPIdRecord:
@@ -173,6 +178,7 @@ class MetadataRef:
         s_idx_has_initial_state: jax.Array,
         s_idx_to_state_indices: jax.Array,
         s_idx_to_read_offset: jax.Array,
+        s_idx_to_read_indices: jax.Array,
     ):
         # NOTE: First dim does not matter when it comes to calculating stride.
         shape = (1, cfgs.seq_tile_size)
@@ -206,6 +212,7 @@ class MetadataRef:
             s_idx_has_initial_state=s_idx_has_initial_state,
             s_idx_to_state_indices=s_idx_to_state_indices,
             s_idx_to_read_offset=s_idx_to_read_offset,
+            s_idx_to_read_indices=s_idx_to_read_indices,
             shape=shape,
         )
 
@@ -362,7 +369,7 @@ class StateBufferedRef(BaseBufferedRef):
             record = self.metadata_ref.get_record(p_id, idx)
             is_first_tile = record.is_first_tile
             s_idx = record.s_idx
-            state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
+            state_idx = self.metadata_ref.s_idx_to_read_indices[s_idx]
             has_initial_state = self.metadata_ref.s_idx_has_initial_state[
                 s_idx]
             should_read = jnp.logical_and(is_first_tile, has_initial_state)
