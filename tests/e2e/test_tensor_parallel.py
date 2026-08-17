@@ -178,12 +178,10 @@ def test_tp_performance(sampling_params: SamplingParams):
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
-    # The historical short-prompt workload was host-overhead-bound: TP=8
-    # measured the same as TP=1 on both v6e-8 and tpu7x-8, so the old
-    # TP=2 >= 1.05x assert only amplified engine CPU noise (and tracked
-    # vLLM host-path changes like logprobs detokenization, not TPU perf).
-    # Long dense prompts + 128-token decode make TPU compute dominate each
-    # step. No logprobs: they add per-token host work that masks TP scaling.
+    # Long dense prompts and a 128-token decode keep TPU compute dominant
+    # over per-step engine host overhead, so the assert tracks TPU TP
+    # scaling. No logprobs: they add per-token host work that masks TP
+    # scaling.
     #
     # Per-platform config: on tpu7x the long-context attention kernel
     # exceeds the 64M vmem budget at max_model_len >= 2048 on the
