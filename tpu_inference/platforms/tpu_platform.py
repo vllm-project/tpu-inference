@@ -284,6 +284,51 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
+        # The TPU hybrid (mamba/linear-attention) path does not support
+        # reusing cached prefixes yet — cache hits garble the output. Keep
+        # prefix caching disabled for hybrid models until the GDN/mamba
+        # kernels handle cached prefixes.
+        if (cache_config and cache_config.enable_prefix_caching
+                and vllm_config.model_config is not None
+                and getattr(vllm_config.model_config, "is_hybrid", False)):
+            logger.warning(
+                "[tpu_platform] Disabling prefix caching: hybrid "
+                "(mamba/linear-attention) models do not support cached "
+                "prefixes on TPU yet (accuracy garbles on cache hits).")
+            cache_config.enable_prefix_caching = False
+            # Reset the mamba cache fields derived from the enabled state to
+            # their prefix-caching-off defaults; stale values trip vLLM's
+            # "--mamba-block-size can only be set with
+            # --enable-prefix-caching" validator.
+            if getattr(cache_config, "mamba_cache_mode", "none") != "none":
+                cache_config.mamba_cache_mode = "none"
+            if (getattr(cache_config, "mamba_block_size", None) is not None
+                    and not getattr(cache_config,
+                                    "user_specified_mamba_block_size", False)):
+                cache_config.mamba_block_size = (
+                    vllm_config.model_config.max_model_len)
+
+        # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
+        # CPU processor and instead normalizes inside the vLLM model's vision
+        # tower (FusedInputNorm). JAX-native multimodal models consume the
+        # processor's pixel_values directly and have no device-side norm, so
+        # they would silently run the ViT on unnormalized pixels. Keep the
+        # normalization in the CPU processor for the JAX-native path.
+        mm_cfg = getattr(vllm_config.model_config, "multimodal_config", None) \
+            if vllm_config.model_config else None
+        if mm_cfg is not None and getattr(mm_cfg, "mm_device_do_normalize",
+                                          False):
+            from tpu_inference.models.common.model_loader import \
+                resolve_model_impl_type
+            impl = resolve_model_impl_type(vllm_config)
+            if impl != "vllm":
+                logger.warning(
+                    "[tpu_platform] Disabling mm_device_do_normalize: the "
+                    "JAX-native multimodal path normalizes images in the CPU "
+                    "processor; device-side FusedInputNorm only exists in the "
+                    "vLLM model implementation.")
+                mm_cfg.mm_device_do_normalize = False
+
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:
