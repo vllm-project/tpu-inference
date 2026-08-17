@@ -628,12 +628,16 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         return (q, k, v, kv_cache, kv_lens_arr, page_indices, cu_q_lens_arr,
                 distribution)
 
-    def _kv_share_kwargs(self, head_dim: int = 128):
-        return dict(
+    def _kv_share_kwargs(self, q_len: int, head_dim: int = 128):
+        kwargs = dict(
             sm_scale=1.0 / float(head_dim)**0.5,
             update_kv_cache=False,
             m_block_sizes=(64, 256, 32, 128),
         )
+        if q_len > 1:
+            kwargs["chunk_prefill_size"] = q_len
+            kwargs["p_block_sizes"] = (64, 256, 32, 128)
+        return kwargs
 
     def test_kv_share_prefill_input_kv_is_ignored(self):
         """q_len == kv_len. Two calls with different input k,v but the same
@@ -656,10 +660,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         self.assertFalse(np.array_equal(args1[2], args2[2]))
         cache_before = np.asarray(args1[3])
 
-        out1, cache_after_1 = ragged_paged_attention(*args1,
-                                                     **self._kv_share_kwargs())
-        out2, cache_after_2 = ragged_paged_attention(*args2,
-                                                     **self._kv_share_kwargs())
+        out1, cache_after_1 = ragged_paged_attention(
+            *args1, **self._kv_share_kwargs(16))
+        out2, cache_after_2 = ragged_paged_attention(
+            *args2, **self._kv_share_kwargs(16))
 
         # Output invariant to input k,v.
         self.assertArraysEqual(out1, out2)
@@ -691,10 +695,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                                             kv_input_seed=99)
         cache_before = np.asarray(args1[3])
 
-        out1, cache_after_1 = ragged_paged_attention(*args1,
-                                                     **self._kv_share_kwargs())
-        out2, cache_after_2 = ragged_paged_attention(*args2,
-                                                     **self._kv_share_kwargs())
+        out1, cache_after_1 = ragged_paged_attention(
+            *args1, **self._kv_share_kwargs(8))
+        out2, cache_after_2 = ragged_paged_attention(
+            *args2, **self._kv_share_kwargs(8))
 
         # Output invariant to input k,v. The pre-fix kernel would mix
         # source K,V (past 16 positions from cache) with shared raw K,V
@@ -710,6 +714,44 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         np.testing.assert_array_equal(
             np.asarray(cache_after_1)[mask], cache_before[mask])
 
+    @parameterized.parameters(True, False)
+    def test_static_prefill_matches_mixed_bidirectional(self, update_kv_cache):
+        if not jtu.is_device_tpu_at_least(version=4):
+            self.skipTest("Expect TPUv4+")
+        prefill_args = self._build_kv_share_inputs(q_len=8,
+                                                   kv_len=24,
+                                                   kv_input_seed=11)
+        mixed_args = self._build_kv_share_inputs(q_len=8,
+                                                 kv_len=24,
+                                                 kv_input_seed=11)
+        mixed_args = (*mixed_args[:-1], jnp.array([0, 0, 1], dtype=jnp.int32))
+        common = dict(
+            sm_scale=1.0 / 128.0**0.5,
+            update_kv_cache=update_kv_cache,
+            use_causal_mask=False,
+        )
+        prefill_out, prefill_cache = ragged_paged_attention(
+            *prefill_args,
+            chunk_prefill_size=8,
+            p_block_sizes=(64, 256, 32, 128),
+            **common,
+        )
+        mixed_out, mixed_cache = ragged_paged_attention(
+            *mixed_args,
+            m_block_sizes=(64, 256, 32, 128),
+            **common,
+        )
+
+        self.assertAllClose(prefill_out[:8],
+                            mixed_out[:8],
+                            rtol=3e-2,
+                            atol=3e-2)
+        finite = np.isfinite(np.asarray(prefill_cache))
+        self.assertAllClose(np.asarray(prefill_cache)[finite],
+                            np.asarray(mixed_cache)[finite],
+                            rtol=3e-2,
+                            atol=3e-2)
+
     def test_kv_share_decode_input_kv_is_ignored(self):
         """q_len == 1, kv_len > 1 (decode step). Same invariance."""
         if not jtu.is_device_tpu_at_least(version=4):
@@ -722,10 +764,10 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                                             kv_input_seed=99)
         cache_before = np.asarray(args1[3])
 
-        out1, cache_after_1 = ragged_paged_attention(*args1,
-                                                     **self._kv_share_kwargs())
-        out2, cache_after_2 = ragged_paged_attention(*args2,
-                                                     **self._kv_share_kwargs())
+        out1, cache_after_1 = ragged_paged_attention(
+            *args1, **self._kv_share_kwargs(1))
+        out2, cache_after_2 = ragged_paged_attention(
+            *args2, **self._kv_share_kwargs(1))
 
         # Decode emits q_len = 1 token. Compare just that token (the rest of
         # the max_num_batched_tokens buffer is junk padding).

@@ -90,6 +90,7 @@ class PCPMetadata:
         "pcp_cache_pages",
         "attention_mask_spec",
         "replace_cached_kv",
+        "rpa_static_query_len",
     ],
 )
 @dataclass
@@ -135,6 +136,9 @@ class AttentionMetadata(object):
     # Partial block-diffusion forwards replace K/V at existing logical token
     # positions, then attend to the complete cached block.
     replace_cached_kv: bool = False
+
+    # Selects the fixed-query PREFILL RPA path instead of dynamic MIXED RPA.
+    rpa_static_query_len: int | None = None
 
 
 @functools.partial(

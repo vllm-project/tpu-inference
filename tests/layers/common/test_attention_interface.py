@@ -67,7 +67,8 @@ def _test_attention(monkeypatch,
                     mesh,
                     head_dim,
                     use_sinks=False,
-                    attention_mask_spec=None):
+                    attention_mask_spec=None,
+                    rpa_static_query_len=None):
     """
     Tests the main `attention` function.
 
@@ -121,6 +122,7 @@ def _test_attention(monkeypatch,
         seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+        rpa_static_query_len=rpa_static_query_len,
         **metadata_kwargs,
     )
     shared_attention_metadata = SharedAttentionMetadata(
@@ -151,6 +153,8 @@ def _test_attention(monkeypatch,
     if head_dim != 64:
         assert mock_paged_attn_kernel.call_args.kwargs[
             "use_causal_mask"] is expected_causal
+        assert mock_paged_attn_kernel.call_args.kwargs[
+            "chunk_prefill_size"] == rpa_static_query_len
 
     # Check output shapes
     assert final_kv_cache.shape == kv_cache.shape
@@ -179,6 +183,10 @@ def test_attention_bidirectional_from_metadata(monkeypatch, mesh):
         128,
         attention_mask_spec=AttentionMaskSpec(AttentionMaskKind.BIDIRECTIONAL),
     )
+
+
+def test_attention_static_prefill_length(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 128, rpa_static_query_len=8)
 
 
 def test_attention_bidirectional_hd64_fails_loudly(monkeypatch, mesh):

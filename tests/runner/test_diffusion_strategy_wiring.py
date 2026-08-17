@@ -103,6 +103,9 @@ def test_diffusion_uses_configured_capacity_and_partial_cache_metadata():
     assert "batch_size = runner.max_num_reqs" not in build_source
     assert "replace_cached_kv=True" in build_source
     assert "partial_query_start_loc" in build_source
+    assert "[0, num_active, num_active]" in build_source
+    assert "rpa_static_query_len=block_size" in build_source
+    assert "rpa_static_query_len=sub_block_size" in build_source
     assert "diffusion_batch_sizes(self.batch_size)" in precompile_source
 
 

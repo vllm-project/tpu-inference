@@ -386,6 +386,7 @@ def sharded_ragged_paged_attention(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    chunk_prefill_size: int | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
 ):
@@ -445,6 +446,10 @@ def sharded_ragged_paged_attention(
         raise NotImplementedError(
             "Bidirectional attention is not supported on the head_dim==64 "
             "RPA kernel")
+    if use_hd64 and chunk_prefill_size is not None:
+        raise NotImplementedError(
+            "Static-query PREFILL RPA is not supported on the head_dim==64 "
+            "kernel")
 
     def _ragged_paged_attention(*args):
         kwargs = dict(
@@ -460,6 +465,7 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+            kwargs["chunk_prefill_size"] = chunk_prefill_size
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -519,8 +525,8 @@ def attention(
             )
         active_rows = md.cache_update_active_rows
         if active_rows is None:
-            active_rows = (jnp.arange(md.seq_lens.shape[0]) <
-                           md.request_distribution[-1])
+            active_rows = (jnp.arange(md.seq_lens.shape[0])
+                           < md.request_distribution[-1])
         kv_cache = replace_cached_kv(
             kv_cache,
             k,
@@ -582,6 +588,7 @@ def attention(
         q_scale=q_scale,
         k_scale=k_scale,
         v_scale=v_scale,
+        chunk_prefill_size=md.rpa_static_query_len,
         update_kv_cache=update_kv_cache,
         use_causal_mask=use_causal_mask,
     )
