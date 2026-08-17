@@ -452,6 +452,8 @@ def sharded_ragged_paged_attention(
             local_cu_q = jax.lax.dynamic_slice(cu_q_lens, (start_seq,), (local_num_seqs + 1,))
             base_offset = jax.lax.dynamic_index_in_dim(cu_q_lens, start_seq, axis=0)
             args[6] = local_cu_q - base_offset
+            if args[7].shape != (3,):
+                args[7] = jax.lax.dynamic_slice(args[7], (attn_dp_idx * 3,), (3,))
         kwargs = dict(
             sm_scale=sm_scale,
             sliding_window=attention_chunk_size,

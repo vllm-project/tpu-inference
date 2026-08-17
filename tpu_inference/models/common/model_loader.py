@@ -580,20 +580,24 @@ def get_vllm_model(
     pooler_fn = model.build_pooler_func()
     combine_hidden_states_fn = model.jit_combine_hidden_states_func()
 
-    multimodal_fns = MultiModalInterface(
-        precompile_vision_encoder_fn=getattr(
-            model.model.vllm_model,
-            "precompile_vision_encoder",
-            model.wrap_precompile_vision_encoder_fn(params),
-        ),
-        embed_multimodal_fn=model.wrap_embed_multimodal_func(),
-        embed_input_ids_fn=model.wrap_embed_input_ids_func(),
-        get_mrope_input_positions_fn=getattr(
-            model.model.vllm_model,
-            "get_mrope_input_positions",
-            None,
-        ),
-    )
+    is_lm_only = bool(getattr(getattr(vllm_config.model_config, "multimodal_config", None), "language_model_only", False))
+    if is_lm_only or not vllm_config.model_config.is_multimodal_model:
+        multimodal_fns = None
+    else:
+        multimodal_fns = MultiModalInterface(
+            precompile_vision_encoder_fn=getattr(
+                model.model.vllm_model,
+                "precompile_vision_encoder",
+                model.wrap_precompile_vision_encoder_fn(params),
+            ),
+            embed_multimodal_fn=model.wrap_embed_multimodal_func(),
+            embed_input_ids_fn=model.wrap_embed_input_ids_func(),
+            get_mrope_input_positions_fn=getattr(
+                model.model.vllm_model,
+                "get_mrope_input_positions",
+                None,
+            ),
+        )
 
     # the model needs to be returned because lora weights are neither torch.nn.parameter nor torch.nn.buffer. After we load the lora weights and set it to the torch.nn.Module, we can shard it and move it to TPU.
     # For the vllm-impl path the dispatch-side fns accept the params dict

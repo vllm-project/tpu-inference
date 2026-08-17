@@ -1237,11 +1237,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     f"Disabling multi-modality for model because limits are set to 0. {mm_limits=}"
                 )
 
+        is_lm_only = bool(getattr(getattr(self.model_config, "multimodal_config", None), "language_model_only", False))
         self.is_multimodal_model = (self.model_config.is_multimodal_model
                                     and self.embed_multimodal_fn is not None
                                     and hasattr(self.model_config.hf_config,
                                                 "architectures")
-                                    and not disable_mm_from_limits)
+                                    and not disable_mm_from_limits
+                                    and not is_lm_only)
 
         # Clear JIT compilation caches from weight loading to free XLA
         # program reservations (bytes_reserved) on TPU HBM.

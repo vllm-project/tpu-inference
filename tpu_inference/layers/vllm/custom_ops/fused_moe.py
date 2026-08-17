@@ -112,6 +112,7 @@ class VllmMoERunner(MoERunner):
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
+        fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor | None:
         """Early all-reduce path: reduce the shared-expert output on its own.
 
@@ -136,6 +137,7 @@ class VllmMoERunner(MoERunner):
         self,
         states: torch.Tensor,
         trunc_size: int,
+        fused_output_is_reduced: bool | None = None,
     ) -> torch.Tensor:
         """Late all-reduce path: reduce the combined (shared + fused) output.
 
