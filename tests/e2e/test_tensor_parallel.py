@@ -42,7 +42,8 @@ class InferenceConfig:
     enable_prefix_caching: bool = False
 
 
-def generate_test_prompts(num_prompts: int = 256) -> list[str]:
+def generate_test_prompts(num_prompts: int = 256,
+                          repeat: int = 1) -> list[str]:
     base_text = (
         "The rapid advancement of artificial intelligence has transformed "
         "numerous industries and continues to reshape our understanding of "
@@ -52,8 +53,9 @@ def generate_test_prompts(num_prompts: int = 256) -> list[str]:
         "language processing to computer vision, AI systems are now capable "
         "of understanding context, recognizing patterns, and making decisions "
         "with remarkable accuracy. ")
+    body = base_text * repeat
     return [
-        f"Prompt {i}: {base_text} What are your thoughts on this topic?"
+        f"Prompt {i}: {body} What are your thoughts on this topic?"
         for i in range(num_prompts)
     ]
 
@@ -132,10 +134,12 @@ def _test_tensor_parallelism_performance(
     pipeline_parallel_size: int = 1,
     additional_config: dict | None = None,
     min_speedup: float = 1.05,
+    cfg: TestConfig | None = None,
+    prompt_repeat: int = 1,
 ):
     """Performance test for tensor parallelism."""
-    cfg = TestConfig.for_performance()
-    test_prompts = generate_test_prompts(cfg.num_prompts)
+    cfg = cfg or TestConfig.for_performance()
+    test_prompts = generate_test_prompts(cfg.num_prompts, prompt_repeat)
 
     tp_config = InferenceConfig(
         model_name=model_name,
@@ -174,10 +178,48 @@ def test_tp_performance(sampling_params: SamplingParams):
     os.environ['SKIP_JAX_PRECOMPILE'] = '0'
     os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '1'
 
+    # Long dense prompts and a 128-token decode keep TPU compute dominant
+    # over per-step engine host overhead, so the assert tracks TPU TP
+    # scaling. No logprobs: they add per-token host work that masks TP
+    # scaling.
+    #
+    # Per-platform config: on tpu7x the long-context attention kernel
+    # exceeds the 64M vmem budget at max_model_len >= 2048 on the
+    # unsharded leg, so tpu7x runs max_model_len=1024 with shorter
+    # prompts and TP=2. Thresholds sit well below measured floors
+    # (v6e TP=8: 4.16x-4.20x over 6 runs; tpu7x TP=2: 1.41x-1.56x).
+    if os.environ.get('TPU_VERSION') == 'tpu7x':
+        cfg = TestConfig(
+            max_model_len=1024,
+            max_num_batched_tokens=2048,
+            max_num_seqs=256,
+            num_prompts=256,
+        )
+        prompt_repeat = 9
+        tensor_parallel_size = 2
+        min_speedup = 1.25
+    else:
+        cfg = TestConfig(
+            max_model_len=2048,
+            max_num_batched_tokens=2048,
+            max_num_seqs=256,
+            num_prompts=256,
+        )
+        prompt_repeat = 18
+        tensor_parallel_size = 8
+        min_speedup = 3.5
+
+    heavy_sampling = SamplingParams(
+        temperature=0.0,
+        max_tokens=128,
+        ignore_eos=True,
+    )
     _test_tensor_parallelism_performance(
-        sampling_params=sampling_params,
+        sampling_params=heavy_sampling,
         model_name="meta-llama/Llama-3.1-8B-Instruct",
-        tensor_parallel_size=2,
+        tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=1,
-        min_speedup=1.05,
+        min_speedup=min_speedup,
+        cfg=cfg,
+        prompt_repeat=prompt_repeat,
     )
