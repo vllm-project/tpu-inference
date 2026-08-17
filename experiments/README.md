@@ -31,7 +31,8 @@ python3 tpu_profile_vllm.py \
   --output-len 128 \
   --batch-size 4 \
   --tensor-parallel-size 4 \
-  --dtype bfloat16
+  --dtype bfloat16 \
+  --max-model-len 200000
 ```
 
 ### 2. Run a Full Parameter Sweep
