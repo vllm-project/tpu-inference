@@ -70,7 +70,7 @@ case "${MODEL_IMPL_TYPE}" in
     add_kernel_microbenchmarks
     ;;
   "flax_nnx")
-    TARGET_FOLDERS=("quantization" "parallelism" "features")
+    TARGET_FOLDERS=("features")
     ;;
   "vllm")
     TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
@@ -111,10 +111,7 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
       subject_name="${subject_name%"${subject_name##*[![:space:]]}"}"
 
       case "$folder_path" in
-        "models")
-          model_list+=("$subject_name")
-          ;;
-        "features" | "parallelism" | "quantization" | "kernel_microbenchmarks"/* | "rl")
+        "features")
           feature_list+=("${subject_name}")
           ;;
       esac
@@ -124,7 +121,7 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
     # This is required because we wrap them inside a 'group' later
     yml_content=$(grep -v "^steps:" "${yml_file}")
 
-    # Store the content for both hardware types
+    # # Store the content for both hardware types
     if [[ "$subject_name" != "multi-host" ]]; then
       pipeline_v6e_fragments+=("${yml_content}")
     fi
@@ -149,28 +146,28 @@ fi
 
 # --- Upload Dynamic Pipeline ---
 # Final Uploads (Two separate calls to handle variables) ---
-if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
-  echo "--- Uploading TPU v6e Pipeline Group"
-  # Export v6e specific variables
-  export TPU_QUEUE_SINGLE="tpu_v6e_queue"
-  export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
-  export TPU_VERSION="tpu6e"
-  export TENSOR_PARALLEL_SIZE_SINGLE=1
-  export TENSOR_PARALLEL_SIZE_MULTI=8
-  buildkite-agent meta-data set "run_v6_matrix" "true"
-  {
-    echo "priority: ${JOB_PRIORITY:-1}"
-    echo "steps:"
-    echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
-    echo "    key: \"v6e-group\""
-    echo "    depends_on: \"build_docker\""
-    echo "    steps:"
-    printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
-  } | buildkite-agent pipeline upload
-else
-  echo "--- No .yml files found, nothing to upload."
-  exit 0
-fi
+# if [[ "${#pipeline_v6e_fragments[@]}" -gt 0 ]]; then
+#   echo "--- Uploading TPU v6e Pipeline Group"
+#   # Export v6e specific variables
+#   export TPU_QUEUE_SINGLE="tpu_v6e_queue"
+#   export TPU_QUEUE_MULTI="tpu_v6e_8_queue"
+#   export TPU_VERSION="tpu6e"
+#   export TENSOR_PARALLEL_SIZE_SINGLE=1
+#   export TENSOR_PARALLEL_SIZE_MULTI=8
+#   buildkite-agent meta-data set "run_v6_matrix" "true"
+#   {
+#     echo "priority: ${JOB_PRIORITY:-1}"
+#     echo "steps:"
+#     echo "  - group: \"TPU v6e nightly Tests (${MODEL_IMPL_TYPE:-auto})\""
+#     echo "    key: \"v6e-group\""
+#     echo "    depends_on: \"build_docker\""
+#     echo "    steps:"
+#     printf "%s\n" "${pipeline_v6e_fragments[@]}" | sed 's/^/      /'
+#   } | buildkite-agent pipeline upload
+# else
+#   echo "--- No .yml files found, nothing to upload."
+#   exit 0
+# fi
 
 if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v7x Pipeline Group"
