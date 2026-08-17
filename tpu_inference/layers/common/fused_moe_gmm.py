@@ -22,9 +22,8 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
-from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import (
-    fused_moe_func_rs,
-)
+from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
+    fused_moe_func_rs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
@@ -595,21 +594,20 @@ def fused_moe_func(
     """
 
     if use_gmm_fused_rs_kernel:
-        return fused_moe_func_rs(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_bias=w1_bias,
-            w2_bias=w2_bias,
-            gating_output=gating_output,
-            topk=topk,
-            renormalize=renormalize,
-            mesh=mesh,
-            activation=activation,
-            scoring_fn=scoring_fn,
-            fp8_post_gather=all_gather_fp8)
+        return fused_moe_func_rs(hidden_states=hidden_states,
+                                 w1=w1,
+                                 w2=w2,
+                                 w1_scale=w1_scale,
+                                 w2_scale=w2_scale,
+                                 w1_bias=w1_bias,
+                                 w2_bias=w2_bias,
+                                 gating_output=gating_output,
+                                 topk=topk,
+                                 renormalize=renormalize,
+                                 mesh=mesh,
+                                 activation=activation,
+                                 scoring_fn=scoring_fn,
+                                 fp8_post_gather=all_gather_fp8)
 
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape

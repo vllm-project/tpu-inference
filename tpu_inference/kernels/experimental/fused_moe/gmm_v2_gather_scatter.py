@@ -922,9 +922,7 @@ def prepare_gather_tile_metadata(
             src_rows[i] = combined // gather_divisor
         else:
             oi = lhs_indices_ref[m_idx]
-            src_rows[i] = (
-                oi // gather_divisor if gather_divisor != 1 else oi
-            )
+            src_rows[i] = (oi // gather_divisor if gather_divisor != 1 else oi)
 
     return GatherMetadata(
         m_start=m_start,
@@ -971,11 +969,8 @@ def prepare_scatter_tile_metadata(
             dest_chips[i] = combined // cs_tk
         else:
             oi = lhs_indices_ref[m_idx]
-            topk_idx = (
-                topk_indices_ref[m_idx]
-                if topk_indices_ref is not None
-                else jnp.int32(0)
-            )
+            topk_idx = (topk_indices_ref[m_idx]
+                        if topk_indices_ref is not None else jnp.int32(0))
             dest_chips[i] = oi // chunk_size
             local_row = oi % chunk_size
             write_positions[i] = local_row * top_k + topk_idx
@@ -1026,7 +1021,8 @@ def dma_gather_gm_start(
             should_gather = gather_metadata.is_valid[i]
             pltpu.make_async_copy(
                 src_ref=src_ref.at[pl.ds(src_row, should_gather), :, :],
-                dst_ref=dst_ref.at[pl.ds(m_start_local + i, should_gather), :, :],
+                dst_ref=dst_ref.at[pl.ds(m_start_local +
+                                         i, should_gather), :, :],
                 sem=sem_ref,
             ).start()
 
@@ -1050,7 +1046,6 @@ def dma_gather_gm_wait(
         dst_ref=dst_ref.at[pl.ds(m_start_local, num_rows), :, :],
         sem=sem_ref,
     ).wait()
-
 
 
 @jax.named_scope("dma_scatter_gm_start")

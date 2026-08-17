@@ -38,8 +38,8 @@ from jax.experimental.pallas import tpu as pltpu
 # isort: off
 # yapf: disable
 from .gmm_v2_gather_scatter import (
-    Dimensions, FusedDims, FusedWeightsRef, GatherMetadata, GmmConfigs,
-    InputConfigs, MetadataRef, ScatterMetadata, TileSizes, WeightsRef,
+    Dimensions, FusedDims, FusedWeightsRef, GmmConfigs,
+    InputConfigs, MetadataRef, TileSizes, WeightsRef,
     _recover_quant_block_size, align_to, calculate_tiling, dma_gather_gm_start,
     dma_gather_gm_wait, fill_metadata, get_maybe_quantize_lhs, inner_kernel,
     prepare_gather_tile_metadata, prepare_scatter_tile_metadata, zero_out_end_3d,
@@ -1013,27 +1013,27 @@ def kernel_main_fused_rs(
                             # Quantize each completed expert row before the direct
                             # write. Remote ICI then moves FP8 payload plus one
                             # fp32 row scale instead of the full bf16 activation row.
-                            row_f32 = scatter_staging_3x_ref[stg_id,
-                                                             row_idx, :, :].astype(
-                                                                 jnp.float32)
-                            fp8_max = jnp.array(jnp.finfo(jnp.float8_e4m3fn).max,
+                            row_f32 = scatter_staging_3x_ref[
+                                stg_id, row_idx, :, :].astype(jnp.float32)
+                            fp8_max = jnp.array(jnp.finfo(
+                                jnp.float8_e4m3fn).max,
                                                 dtype=jnp.float32)
                             row_scale = (jnp.maximum(
                                 jnp.max(jnp.abs(row_f32)),
                                 jnp.array(1e-6, dtype=jnp.float32),
                             ) / fp8_max)
                             scatter_scale_3x_ref[stg_id, row_idx, :] = (
-                                row_scale + jnp.zeros((128, ), dtype=jnp.float32))
-                            scatter_fp8_staging_3x_ref[stg_id,
-                                                      row_idx, :, :] = jnp.clip(
-                                                          row_f32 / row_scale,
-                                                          -fp8_max,
-                                                          fp8_max).astype(
-                                                              jnp.float8_e4m3fn)
+                                row_scale + jnp.zeros(
+                                    (128, ), dtype=jnp.float32))
+                            scatter_fp8_staging_3x_ref[
+                                stg_id, row_idx, :, :] = jnp.clip(
+                                    row_f32 / row_scale, -fp8_max,
+                                    fp8_max).astype(jnp.float8_e4m3fn)
 
                             pltpu.make_async_remote_copy(
                                 src_ref=scatter_fp8_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, should_send), :, :],
+                                    stg_id,
+                                    pl.ds(row_idx, should_send), :, :],
                                 dst_ref=out_buf_ref.at[
                                     pl.ds(write_pos, should_send), :, :],
                                 send_sem=send_sems_ref.at[stg_id],
@@ -1045,7 +1045,8 @@ def kernel_main_fused_rs(
                             ).start()
                             pltpu.make_async_remote_copy(
                                 src_ref=scatter_scale_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, should_send), :],
+                                    stg_id,
+                                    pl.ds(row_idx, should_send), :],
                                 dst_ref=out_scale_ref.at[
                                     pl.ds(write_pos, should_send), :],
                                 send_sem=scale_send_sems_ref.at[stg_id],
@@ -1058,14 +1059,16 @@ def kernel_main_fused_rs(
 
                             pltpu.make_async_copy(
                                 src_ref=scatter_fp8_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, should_local), :, :],
+                                    stg_id,
+                                    pl.ds(row_idx, should_local), :, :],
                                 dst_ref=out_buf_ref.at[
                                     pl.ds(write_pos, should_local), :, :],
                                 sem=local_write_sems_ref.at[stg_id],
                             ).start()
                             pltpu.make_async_copy(
                                 src_ref=scatter_scale_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, should_local), :],
+                                    stg_id,
+                                    pl.ds(row_idx, should_local), :],
                                 dst_ref=out_scale_ref.at[
                                     pl.ds(write_pos, should_local), :],
                                 sem=scale_local_write_sems_ref.at[stg_id],
@@ -1074,7 +1077,8 @@ def kernel_main_fused_rs(
                         else:
                             pltpu.make_async_remote_copy(
                                 src_ref=scatter_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, should_send), :, :],
+                                    stg_id,
+                                    pl.ds(row_idx, should_send), :, :],
                                 dst_ref=out_buf_ref.at[
                                     pl.ds(write_pos, should_send), :, :],
                                 send_sem=send_sems_ref.at[stg_id],
@@ -1087,7 +1091,8 @@ def kernel_main_fused_rs(
 
                             pltpu.make_async_copy(
                                 src_ref=scatter_staging_3x_ref.at[
-                                    stg_id, pl.ds(row_idx, should_local), :, :],
+                                    stg_id,
+                                    pl.ds(row_idx, should_local), :, :],
                                 dst_ref=out_buf_ref.at[
                                     pl.ds(write_pos, should_local), :, :],
                                 sem=local_write_sems_ref.at[stg_id],
