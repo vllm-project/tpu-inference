@@ -50,6 +50,13 @@ def diffusion_batch_sizes(capacity: int) -> tuple[int, ...]:
             for num_active in range(capacity + 1)))
 
 
+def needs_block_anchor(mask: list[bool], tokens_remaining: int) -> bool:
+    """Return whether the uncached next-block anchor can reach the response."""
+    if tokens_remaining < 0:
+        raise ValueError("tokens_remaining must be non-negative")
+    return tokens_remaining > sum(mask)
+
+
 def required_cache_end(
     prompt_length: int,
     max_new_tokens: int,

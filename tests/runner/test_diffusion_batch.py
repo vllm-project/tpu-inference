@@ -16,6 +16,8 @@ import importlib.util
 import pathlib
 import sys
 
+import pytest
+
 
 def _load_batch_module():
     path = (pathlib.Path(__file__).resolve().parents[2] / "tpu_inference" /
@@ -43,6 +45,20 @@ def test_diffusion_batch_size_uses_smallest_fitting_bucket():
 def test_diffusion_batch_size_supports_non_power_of_two_capacity():
     assert batch.select_diffusion_batch_size(3, 3) == 3
     assert batch.diffusion_batch_sizes(3) == (1, 2, 3)
+
+
+def test_block_anchor_is_skipped_when_it_cannot_reach_the_response():
+    mask = [False, True, True, True]
+
+    assert batch.needs_block_anchor(mask, 0) is False
+    assert batch.needs_block_anchor(mask, 2) is False
+    assert batch.needs_block_anchor(mask, 3) is False
+    assert batch.needs_block_anchor(mask, 4) is True
+
+
+def test_block_anchor_rejects_negative_output_budget():
+    with pytest.raises(ValueError, match="tokens_remaining"):
+        batch.needs_block_anchor([False, True], -1)
 
 
 def test_aligned_prompt_is_split_into_complete_blocks():

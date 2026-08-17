@@ -55,6 +55,7 @@ class DualCacheDenoiseBlockOutput(NamedTuple):
     kv_caches: Any
     q32_forward_calls: jax.Array
     q8_forward_calls: jax.Array
+    final_q32_forward_calls: jax.Array
 
 
 def select_aligned_hidden_states(
@@ -111,6 +112,7 @@ def _denoise_block_jit(
     positions: jax.Array,
     kv_caches: Any,
     active_rows: jax.Array,
+    needs_final_forward: jax.Array,
     confidence_threshold: jax.Array,
     temperature: jax.Array,
     forward_context: Any,
@@ -209,19 +211,29 @@ def _denoise_block_jit(
         (canvas, mask, denoise_steps, kv_caches),
     )
 
-    final_logits, kv_caches = forward_fn(model_state, canvas, positions,
-                                         kv_caches, active_rows,
-                                         forward_context)
-    if next_block_policy is NextBlockPolicy.LAST_LOGIT_ANCHOR:
-        anchor_logits = _exclude_mask_token(final_logits[:, -1:, :],
-                                            mask_token_id)
-        next_anchor = jnp.argmax(anchor_logits[:, 0, :],
-                                 axis=-1).astype(jnp.int32)
-    elif next_block_policy is NextBlockPolicy.ALL_MASKED:
-        next_anchor = jnp.zeros((canvas.shape[0], ), dtype=jnp.int32)
-    else:
-        raise ValueError(f"Unsupported next block policy: {next_block_policy}")
-    next_anchor = jnp.where(active_rows, next_anchor, 0)
+    final_rows = active_rows & needs_final_forward
+
+    def run_final_forward(kv):
+        final_logits, next_kv = forward_fn(model_state, canvas, positions, kv,
+                                           final_rows, forward_context)
+        if next_block_policy is NextBlockPolicy.LAST_LOGIT_ANCHOR:
+            anchor_logits = _exclude_mask_token(final_logits[:, -1:, :],
+                                                mask_token_id)
+            next_anchor = jnp.argmax(anchor_logits[:, 0, :],
+                                     axis=-1).astype(jnp.int32)
+        elif next_block_policy is NextBlockPolicy.ALL_MASKED:
+            next_anchor = jnp.zeros((canvas.shape[0], ), dtype=jnp.int32)
+        else:
+            raise ValueError(
+                f"Unsupported next block policy: {next_block_policy}")
+        return jnp.where(final_rows, next_anchor, 0), next_kv
+
+    def skip_final_forward(kv):
+        return jnp.zeros((canvas.shape[0], ), dtype=jnp.int32), kv
+
+    next_anchor, kv_caches = jax.lax.cond(jnp.any(final_rows),
+                                          run_final_forward,
+                                          skip_final_forward, kv_caches)
     return DenoiseBlockOutput(
         canvas=canvas,
         next_anchor=next_anchor,
@@ -248,6 +260,7 @@ def denoise_block(
     mask_token_id: int,
     sub_block_size: int,
     max_denoise_steps: int = 0,
+    needs_final_forward: jax.Array | None = None,
 ) -> DenoiseBlockOutput:
     """Validate and denoise one model block.
 
@@ -262,6 +275,10 @@ def denoise_block(
         raise ValueError("initial_mask must match initial_canvas")
     if active_rows.shape != (initial_canvas.shape[0], ):
         raise ValueError("active_rows must match the canvas batch size")
+    if needs_final_forward is None:
+        needs_final_forward = active_rows
+    elif needs_final_forward.shape != active_rows.shape:
+        raise ValueError("needs_final_forward must match active_rows")
     if logit_alignment is LogitAlignment.SHIFTED:
         seed_mask, active = jax.device_get((initial_mask[:, 0], active_rows))
         if np.any(
@@ -280,6 +297,7 @@ def denoise_block(
         positions,
         kv_caches,
         active_rows,
+        needs_final_forward,
         confidence_threshold,
         temperature,
         forward_context,
@@ -315,6 +333,7 @@ def _denoise_block_dual_cache_jit(
     positions: jax.Array,
     kv_caches: Any,
     active_rows: jax.Array,
+    needs_final_forward: jax.Array,
     confidence_threshold: jax.Array,
     temperature: jax.Array,
     forward_context: Any,
@@ -507,25 +526,37 @@ def _denoise_block_dual_cache_jit(
          ),
      )
 
-    with jax.named_scope("diffusion_dual_cache_final_q32"):
-        anchor_logits, kv_caches = final_forward_fn(
-            model_state,
-            canvas,
-            positions,
-            kv_caches,
-            active_rows,
-            forward_context,
-        )
-    q32_forward_calls += 1
-    if next_block_policy is NextBlockPolicy.LAST_LOGIT_ANCHOR:
-        anchor_logits = _exclude_mask_token(anchor_logits[:, None, :],
-                                            mask_token_id)[:, 0, :]
-        next_anchor = jnp.argmax(anchor_logits, axis=-1).astype(jnp.int32)
-    elif next_block_policy is NextBlockPolicy.ALL_MASKED:
-        next_anchor = jnp.zeros((canvas.shape[0], ), dtype=jnp.int32)
-    else:
-        raise ValueError(f"Unsupported next block policy: {next_block_policy}")
-    next_anchor = jnp.where(active_rows, next_anchor, 0)
+    final_rows = active_rows & needs_final_forward
+
+    def run_final_forward(kv):
+        with jax.named_scope("diffusion_dual_cache_final_q32"):
+            anchor_logits, next_kv = final_forward_fn(
+                model_state,
+                canvas,
+                positions,
+                kv,
+                final_rows,
+                forward_context,
+            )
+        if next_block_policy is NextBlockPolicy.LAST_LOGIT_ANCHOR:
+            anchor_logits = _exclude_mask_token(anchor_logits[:, None, :],
+                                                mask_token_id)[:, 0, :]
+            next_anchor = jnp.argmax(anchor_logits, axis=-1).astype(jnp.int32)
+        elif next_block_policy is NextBlockPolicy.ALL_MASKED:
+            next_anchor = jnp.zeros((canvas.shape[0], ), dtype=jnp.int32)
+        else:
+            raise ValueError(
+                f"Unsupported next block policy: {next_block_policy}")
+        return (jnp.where(final_rows, next_anchor,
+                          0), next_kv, jnp.array(1, dtype=jnp.int32))
+
+    def skip_final_forward(kv):
+        return (jnp.zeros((canvas.shape[0], ),
+                          dtype=jnp.int32), kv, jnp.array(0, dtype=jnp.int32))
+
+    next_anchor, kv_caches, final_q32_forward_calls = jax.lax.cond(
+        jnp.any(final_rows), run_final_forward, skip_final_forward, kv_caches)
+    q32_forward_calls += final_q32_forward_calls
     return DualCacheDenoiseBlockOutput(
         canvas=canvas,
         next_anchor=next_anchor,
@@ -533,6 +564,7 @@ def _denoise_block_dual_cache_jit(
         kv_caches=kv_caches,
         q32_forward_calls=q32_forward_calls,
         q8_forward_calls=q8_forward_calls,
+        final_q32_forward_calls=final_q32_forward_calls,
     )
 
 
@@ -556,6 +588,7 @@ def denoise_block_dual_cache(
     mask_token_id: int,
     sub_block_size: int,
     max_denoise_steps: int = 0,
+    needs_final_forward: jax.Array | None = None,
 ) -> DualCacheDenoiseBlockOutput:
     """Denoise with aligned q32 refreshes followed by q8 replacements."""
     if initial_canvas.ndim != 2:
@@ -566,6 +599,10 @@ def denoise_block_dual_cache(
         raise ValueError("positions must match initial_canvas")
     if active_rows.shape != (initial_canvas.shape[0], ):
         raise ValueError("active_rows must match the canvas batch size")
+    if needs_final_forward is None:
+        needs_final_forward = active_rows
+    elif needs_final_forward.shape != active_rows.shape:
+        raise ValueError("needs_final_forward must match active_rows")
     if sub_block_size < 1 or initial_canvas.shape[1] % sub_block_size:
         raise ValueError("sub_block_size must divide the model block size")
     if logit_alignment is LogitAlignment.SHIFTED:
@@ -588,6 +625,7 @@ def denoise_block_dual_cache(
         positions,
         kv_caches,
         active_rows,
+        needs_final_forward,
         confidence_threshold,
         temperature,
         forward_context,

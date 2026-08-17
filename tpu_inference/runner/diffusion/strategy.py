@@ -28,8 +28,9 @@ from tpu_inference.logger import init_logger
 from tpu_inference.runner.diffusion.algorithm import get_commit_algorithm
 from tpu_inference.runner.diffusion.batch import (
     PendingBlockOutput, complete_seeded_decode_block, diffusion_batch_sizes,
-    flush_partial_block_output, plan_seeded_prompt, required_cache_end,
-    select_diffusion_batch_size, start_partial_block_output)
+    flush_partial_block_output, needs_block_anchor, plan_seeded_prompt,
+    required_cache_end, select_diffusion_batch_size,
+    start_partial_block_output)
 from tpu_inference.runner.diffusion.config import (CanvasPolicy,
                                                    DiffusionConfig,
                                                    NextBlockPolicy,
@@ -102,6 +103,11 @@ class BlockDiffusionStrategy:
         if runner.kv_cache_config.has_mamba_layers:
             raise ValueError(
                 "Block diffusion does not support hybrid or Mamba models")
+        if runner.cache_config.enable_prefix_caching:
+            raise ValueError("Block diffusion does not support prefix caching")
+        if getattr(runner.vllm_config, "kv_transfer_config", None) is not None:
+            raise ValueError(
+                "Block diffusion does not support KV transfer connectors")
 
     def _validate_requests(self, req_ids: list[str]) -> None:
         input_batch = self.runner.input_batch
@@ -432,10 +438,20 @@ class BlockDiffusionStrategy:
         block_starts: list[int],
         canvases: list[list[int]],
         masks: list[list[bool]],
+        needs_final_forward: list[bool] | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         canvas, mask, positions, active_rows, metadata = self._build_batch(
             req_ids, block_starts, canvases, masks)
         batch_size = canvas.shape[0]
+        if needs_final_forward is None:
+            needs_final_forward = [True] * len(req_ids)
+        if len(needs_final_forward) != len(req_ids):
+            raise ValueError("needs_final_forward must match req_ids")
+        output_candidate_positions = sum(
+            sum(row_mask) for row_mask in masks) + sum(needs_final_forward)
+        final_rows = np.zeros((batch_size, ), dtype=np.bool_)
+        final_rows[:len(req_ids)] = needs_final_forward
+        final_rows = device_array(self.runner.mesh, final_rows)
         thresholds = jnp.full(
             (batch_size, ),
             self.config.runtime.confidence_threshold,
@@ -462,6 +478,7 @@ class BlockDiffusionStrategy:
                 next_block_policy=self.config.model.next_block_policy,
                 sub_block_size=self.config.model.sub_block_size,
                 max_denoise_steps=self.config.runtime.max_denoise_steps,
+                needs_final_forward=final_rows,
             )
         else:
             output = denoise_block(
@@ -481,26 +498,29 @@ class BlockDiffusionStrategy:
                 next_block_policy=self.config.model.next_block_policy,
                 sub_block_size=self.config.model.sub_block_size,
                 max_denoise_steps=self.config.runtime.max_denoise_steps,
+                needs_final_forward=final_rows,
             )
         self.runner.kv_caches = output.kv_caches
         if self.config.runtime.use_dual_cache:
             (canvas_host, anchors_host, denoise_steps_host, q32_calls_host,
-             q8_calls_host) = jax.device_get((
+             q8_calls_host, final_q32_calls_host) = jax.device_get((
                  output.canvas[:len(req_ids)],
                  output.next_anchor[:len(req_ids)],
                  output.denoise_steps[:len(req_ids)],
                  output.q32_forward_calls,
                  output.q8_forward_calls,
+                 output.final_q32_forward_calls,
              ))
             q32_calls = int(q32_calls_host)
             q8_calls = int(q8_calls_host)
+            final_q32_calls = int(final_q32_calls_host)
             static_transformer_positions = batch_size * (
                 q32_calls * self.block_size +
                 q8_calls * self.config.model.sub_block_size)
             static_lm_head_positions = batch_size * (
-                (q32_calls - 1 + q8_calls) * self.config.model.sub_block_size +
-                1)
-            denoise_iterations = q32_calls + q8_calls - 1
+                (q32_calls - final_q32_calls + q8_calls) *
+                self.config.model.sub_block_size + final_q32_calls)
+            denoise_iterations = q32_calls + q8_calls - final_q32_calls
             useful_row_iterations = int(np.asarray(denoise_steps_host).sum())
             static_row_iterations = batch_size * denoise_iterations
             self._last_denoise_trace = {
@@ -512,6 +532,10 @@ class BlockDiffusionStrategy:
                 q32_calls,
                 "q8_forward_calls":
                 q8_calls,
+                "final_q32_forward_calls":
+                final_q32_calls,
+                "output_candidate_positions":
+                output_candidate_positions,
                 "static_transformer_positions":
                 static_transformer_positions,
                 "static_lm_head_positions":
@@ -590,15 +614,29 @@ class BlockDiffusionStrategy:
             canvases = [
                 list(plans[req_id].partial_canvas) for req_id in partial_group
             ]
-            masks = [
-                list(plans[req_id].partial_mask) for req_id in partial_group
-            ]
+            masks = []
+            needs_final_forward = []
+            for req_id in partial_group:
+                plan = plans[req_id]
+                assert plan.partial_mask is not None
+                mask = list(plan.partial_mask)
+                masks.append(mask)
+                needs_final_forward.append(
+                    needs_block_anchor(
+                        mask,
+                        self._remaining_output_capacity(req_id),
+                    ))
             starts = [
                 len(plans[req_id].full_blocks) * self.block_size
                 for req_id in partial_group
             ]
-            committed, anchors = self._denoise_blocks(partial_group, starts,
-                                                      canvases, masks)
+            committed, anchors = self._denoise_blocks(
+                partial_group,
+                starts,
+                canvases,
+                masks,
+                needs_final_forward,
+            )
             for row, req_id in enumerate(partial_group):
                 output, pending = start_partial_block_output(
                     committed[row].tolist(),
@@ -624,6 +662,7 @@ class BlockDiffusionStrategy:
 
         canvases = []
         masks = []
+        needs_final_forward = []
         starts = []
         for req_id in denoise_group:
             request = self.runner.requests[req_id]
@@ -631,24 +670,39 @@ class BlockDiffusionStrategy:
             seed = request.get_token_id(block_start)
             canvases.append([seed] + [self.config.model.mask_token_id] *
                             (self.block_size - 1))
-            masks.append([False] + [True] * (self.block_size - 1))
+            mask = [False] + [True] * (self.block_size - 1)
+            masks.append(mask)
+            needs_final_forward.append(
+                needs_block_anchor(
+                    mask,
+                    self._remaining_output_capacity(req_id),
+                ))
             starts.append(block_start)
 
-        committed, anchors = self._denoise_blocks(denoise_group, starts,
-                                                  canvases, masks)
+        committed, anchors = self._denoise_blocks(
+            denoise_group,
+            starts,
+            canvases,
+            masks,
+            needs_final_forward,
+        )
         for row, req_id in enumerate(denoise_group):
             outputs[req_id] = complete_seeded_decode_block(
                 committed[row].tolist(), int(anchors[row]))
         return outputs
 
-    def _truncate_output(self, req_id: str, tokens: list[int]) -> list[int]:
+    def _remaining_output_capacity(self, req_id: str) -> int:
         request = self.runner.requests[req_id]
         assert request.sampling_params.max_tokens is not None
         max_tokens = int(request.sampling_params.max_tokens)
         output_remaining = max(0, max_tokens - len(request.output_token_ids))
         context_remaining = max(0,
                                 self.runner.max_model_len - request.num_tokens)
-        remaining = min(output_remaining, context_remaining)
+        return min(output_remaining, context_remaining)
+
+    def _truncate_output(self, req_id: str, tokens: list[int]) -> list[int]:
+        request = self.runner.requests[req_id]
+        remaining = self._remaining_output_capacity(req_id)
         tokens = tokens[:remaining]
 
         if not request.sampling_params.ignore_eos:

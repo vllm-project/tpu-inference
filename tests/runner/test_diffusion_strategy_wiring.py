@@ -104,3 +104,11 @@ def test_diffusion_uses_configured_capacity_and_partial_cache_metadata():
     assert "replace_cached_kv=True" in build_source
     assert "partial_query_start_loc" in build_source
     assert "diffusion_batch_sizes(self.batch_size)" in precompile_source
+
+
+def test_diffusion_rejects_cache_reuse_and_transfer():
+    validation_source = ast.unparse(
+        _strategy_method("_validate_runner_capabilities"))
+
+    assert "enable_prefix_caching" in validation_source
+    assert "kv_transfer_config" in validation_source
