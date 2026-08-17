@@ -26,26 +26,22 @@ from tpu_inference.layers.common.attention_metadata import (AttentionMaskKind,
                                                             AttentionMetadata)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.diffusion.algorithm import get_commit_algorithm
-from tpu_inference.runner.diffusion.batch import (PendingBlockOutput,
-                                                  complete_seeded_decode_block,
-                                                  flush_partial_block_output,
-                                                  plan_seeded_prompt,
-                                                  required_cache_end,
-                                                  start_partial_block_output)
+from tpu_inference.runner.diffusion.batch import (
+    PendingBlockOutput, complete_seeded_decode_block, diffusion_batch_sizes,
+    flush_partial_block_output, plan_seeded_prompt, required_cache_end,
+    select_diffusion_batch_size, start_partial_block_output)
 from tpu_inference.runner.diffusion.config import (CanvasPolicy,
                                                    DiffusionConfig,
                                                    NextBlockPolicy,
                                                    PromptRemainderPolicy)
-from tpu_inference.runner.diffusion.program import (denoise_block,
-                                                    denoise_block_dual_cache,
-                                                    select_aligned_hidden_states)
+from tpu_inference.runner.diffusion.program import (
+    denoise_block, denoise_block_dual_cache, select_aligned_hidden_states)
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
     from tpu_inference.runner.tpu_runner import TPUModelRunner
-
 
 logger = init_logger(__name__)
 
@@ -137,8 +133,7 @@ class BlockDiffusionStrategy:
                     "Block diffusion does not support sampling penalties: "
                     f"presence_penalty={sampling_params.presence_penalty}, "
                     f"frequency_penalty={sampling_params.frequency_penalty}, "
-                    f"repetition_penalty={sampling_params.repetition_penalty}"
-                )
+                    f"repetition_penalty={sampling_params.repetition_penalty}")
             if sampling_params.min_tokens != 0:
                 raise ValueError(
                     "Block diffusion does not support min_tokens yet")
@@ -165,14 +160,22 @@ class BlockDiffusionStrategy:
         block_starts: list[int],
         canvases: list[list[int]],
         masks: list[list[bool]] | None = None,
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array,
-               tuple[AttentionMetadata, AttentionMetadata]]:
+        *,
+        padded_batch_size: int | None = None,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, tuple[
+            AttentionMetadata, AttentionMetadata]]:
         runner = self.runner
-        batch_size = self.batch_size
         block_size = self.block_size
         sub_block_size = self.config.model.sub_block_size
         num_active = len(req_ids)
-        if num_active > batch_size:
+        capacity = self.batch_size
+        batch_size = (select_diffusion_batch_size(num_active, capacity)
+                      if padded_batch_size is None else padded_batch_size)
+        if not max(1, num_active) <= batch_size <= capacity:
+            raise ValueError(
+                "Diffusion padded batch size must fit the active requests and "
+                "configured capacity")
+        if num_active > capacity:
             raise ValueError("Diffusion batch exceeds max_num_reqs")
 
         canvas = np.zeros((batch_size, block_size), dtype=np.int32)
@@ -261,8 +264,8 @@ class BlockDiffusionStrategy:
                 AttentionMaskKind.BIDIRECTIONAL),
             replace_cached_kv=True,
         )
-        return (canvas, mask, positions, active_rows,
-                (full_metadata, partial_metadata))
+        return (canvas, mask, positions, active_rows, (full_metadata,
+                                                       partial_metadata))
 
     def _model_forward(
         self,
@@ -432,7 +435,7 @@ class BlockDiffusionStrategy:
     ) -> tuple[np.ndarray, np.ndarray]:
         canvas, mask, positions, active_rows, metadata = self._build_batch(
             req_ids, block_starts, canvases, masks)
-        batch_size = self.batch_size
+        batch_size = canvas.shape[0]
         thresholds = jnp.full(
             (batch_size, ),
             self.config.runtime.confidence_threshold,
@@ -491,20 +494,36 @@ class BlockDiffusionStrategy:
              ))
             q32_calls = int(q32_calls_host)
             q8_calls = int(q8_calls_host)
-            static_transformer_positions = self.batch_size * (
-                q32_calls * self.block_size
-                + q8_calls * self.config.model.sub_block_size)
-            static_lm_head_positions = self.batch_size * (
-                (q32_calls - 1 + q8_calls) *
-                self.config.model.sub_block_size + 1)
+            static_transformer_positions = batch_size * (
+                q32_calls * self.block_size +
+                q8_calls * self.config.model.sub_block_size)
+            static_lm_head_positions = batch_size * (
+                (q32_calls - 1 + q8_calls) * self.config.model.sub_block_size +
+                1)
+            denoise_iterations = q32_calls + q8_calls - 1
+            useful_row_iterations = int(np.asarray(denoise_steps_host).sum())
+            static_row_iterations = batch_size * denoise_iterations
             self._last_denoise_trace = {
-                "active_requests": len(req_ids),
-                "static_batch_rows": self.batch_size,
-                "q32_forward_calls": q32_calls,
-                "q8_forward_calls": q8_calls,
-                "static_transformer_positions": static_transformer_positions,
-                "static_lm_head_positions": static_lm_head_positions,
-                "denoise_steps": np.asarray(denoise_steps_host).tolist(),
+                "active_requests":
+                len(req_ids),
+                "static_batch_rows":
+                batch_size,
+                "q32_forward_calls":
+                q32_calls,
+                "q8_forward_calls":
+                q8_calls,
+                "static_transformer_positions":
+                static_transformer_positions,
+                "static_lm_head_positions":
+                static_lm_head_positions,
+                "useful_row_iterations":
+                useful_row_iterations,
+                "static_row_iterations":
+                static_row_iterations,
+                "wasted_row_iterations":
+                (static_row_iterations - useful_row_iterations),
+                "denoise_steps":
+                np.asarray(denoise_steps_host).tolist(),
             }
             logger.info("Fast-dLLM DualCache trace: %s",
                         self._last_denoise_trace)
@@ -713,62 +732,61 @@ class BlockDiffusionStrategy:
 
     def precompile(self) -> None:
         self._validate_runner_capabilities()
-        canvas, mask, positions, active_rows, metadata = self._build_batch([],
-                                                                           [],
-                                                                           [],
-                                                                           [])
-        logits, self.runner.kv_caches = self._final_forward_fn(
-            self.runner.state_leaves,
-            canvas,
-            positions,
-            self.runner.kv_caches,
-            active_rows,
-            metadata,
-        )
-        thresholds = jnp.full(
-            (self.batch_size, ),
-            self.config.runtime.confidence_threshold,
-            dtype=jnp.float32,
-        )
-        if self.config.runtime.use_dual_cache:
-            output = denoise_block_dual_cache(
-                self._full_subblock_forward_fn,
-                self._partial_subblock_forward_fn,
-                self._final_forward_fn,
-                self._commit_fn,
+        for batch_size in diffusion_batch_sizes(self.batch_size):
+            canvas, mask, positions, active_rows, metadata = self._build_batch(
+                [], [], [], [], padded_batch_size=batch_size)
+            logits, self.runner.kv_caches = self._final_forward_fn(
                 self.runner.state_leaves,
                 canvas,
-                mask,
                 positions,
                 self.runner.kv_caches,
                 active_rows,
-                thresholds,
-                jnp.zeros_like(thresholds),
                 metadata,
-                mask_token_id=self.config.model.mask_token_id,
-                logit_alignment=self.config.model.logit_alignment,
-                next_block_policy=self.config.model.next_block_policy,
-                sub_block_size=self.config.model.sub_block_size,
-                max_denoise_steps=self.config.runtime.max_denoise_steps,
             )
-        else:
-            output = denoise_block(
-                self._forward_fn,
-                self._commit_fn,
-                self.runner.state_leaves,
-                canvas,
-                mask,
-                positions,
-                self.runner.kv_caches,
-                active_rows,
-                thresholds,
-                jnp.zeros_like(thresholds),
-                metadata,
-                mask_token_id=self.config.model.mask_token_id,
-                logit_alignment=self.config.model.logit_alignment,
-                next_block_policy=self.config.model.next_block_policy,
-                sub_block_size=self.config.model.sub_block_size,
-                max_denoise_steps=self.config.runtime.max_denoise_steps,
+            thresholds = jnp.full(
+                (batch_size, ),
+                self.config.runtime.confidence_threshold,
+                dtype=jnp.float32,
             )
-        self.runner.kv_caches = output.kv_caches
-        jax.block_until_ready((logits, output.canvas))
+            if self.config.runtime.use_dual_cache:
+                output = denoise_block_dual_cache(
+                    self._full_subblock_forward_fn,
+                    self._partial_subblock_forward_fn,
+                    self._final_forward_fn,
+                    self._commit_fn,
+                    self.runner.state_leaves,
+                    canvas,
+                    mask,
+                    positions,
+                    self.runner.kv_caches,
+                    active_rows,
+                    thresholds,
+                    jnp.zeros_like(thresholds),
+                    metadata,
+                    mask_token_id=self.config.model.mask_token_id,
+                    logit_alignment=self.config.model.logit_alignment,
+                    next_block_policy=self.config.model.next_block_policy,
+                    sub_block_size=self.config.model.sub_block_size,
+                    max_denoise_steps=self.config.runtime.max_denoise_steps,
+                )
+            else:
+                output = denoise_block(
+                    self._forward_fn,
+                    self._commit_fn,
+                    self.runner.state_leaves,
+                    canvas,
+                    mask,
+                    positions,
+                    self.runner.kv_caches,
+                    active_rows,
+                    thresholds,
+                    jnp.zeros_like(thresholds),
+                    metadata,
+                    mask_token_id=self.config.model.mask_token_id,
+                    logit_alignment=self.config.model.logit_alignment,
+                    next_block_policy=self.config.model.next_block_policy,
+                    sub_block_size=self.config.model.sub_block_size,
+                    max_denoise_steps=self.config.runtime.max_denoise_steps,
+                )
+            self.runner.kv_caches = output.kv_caches
+            jax.block_until_ready((logits, output.canvas))

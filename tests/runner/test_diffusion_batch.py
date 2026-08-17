@@ -31,6 +31,20 @@ def _load_batch_module():
 batch = _load_batch_module()
 
 
+def test_diffusion_batch_size_uses_smallest_fitting_bucket():
+    assert batch.select_diffusion_batch_size(0, 4) == 1
+    assert batch.select_diffusion_batch_size(1, 4) == 1
+    assert batch.select_diffusion_batch_size(2, 4) == 2
+    assert batch.select_diffusion_batch_size(3, 4) == 4
+    assert batch.select_diffusion_batch_size(4, 4) == 4
+    assert batch.diffusion_batch_sizes(4) == (1, 2, 4)
+
+
+def test_diffusion_batch_size_supports_non_power_of_two_capacity():
+    assert batch.select_diffusion_batch_size(3, 3) == 3
+    assert batch.diffusion_batch_sizes(3) == (1, 2, 3)
+
+
 def test_aligned_prompt_is_split_into_complete_blocks():
     plan = batch.plan_seeded_prompt(list(range(8)), 4, 99)
 

@@ -97,8 +97,10 @@ def test_dual_cache_has_distinct_full_partial_and_final_forwards():
 
 def test_diffusion_uses_configured_capacity_and_partial_cache_metadata():
     build_source = ast.unparse(_strategy_method("_build_batch"))
+    precompile_source = ast.unparse(_strategy_method("precompile"))
 
-    assert "batch_size = self.batch_size" in build_source
+    assert "select_diffusion_batch_size(num_active, capacity)" in build_source
     assert "batch_size = runner.max_num_reqs" not in build_source
     assert "replace_cached_kv=True" in build_source
     assert "partial_query_start_loc" in build_source
+    assert "diffusion_batch_sizes(self.batch_size)" in precompile_source

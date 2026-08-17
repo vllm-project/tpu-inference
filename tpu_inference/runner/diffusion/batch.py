@@ -29,6 +29,27 @@ class PendingBlockOutput:
     next_anchor: int
 
 
+def select_diffusion_batch_size(num_active: int, capacity: int) -> int:
+    """Choose the smallest power-of-two request bucket that fits the batch."""
+    if capacity < 1:
+        raise ValueError("capacity must be positive")
+    if not 0 <= num_active <= capacity:
+        raise ValueError("num_active must be within the configured capacity")
+    if num_active <= 1:
+        return 1
+    return min(1 << (num_active - 1).bit_length(), capacity)
+
+
+def diffusion_batch_sizes(capacity: int) -> tuple[int, ...]:
+    """Return every request bucket that must be compiled for a capacity."""
+    if capacity < 1:
+        raise ValueError("capacity must be positive")
+    return tuple(
+        dict.fromkeys(
+            select_diffusion_batch_size(num_active, capacity)
+            for num_active in range(capacity + 1)))
+
+
 def required_cache_end(
     prompt_length: int,
     max_new_tokens: int,
