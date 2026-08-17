@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib.util
+import inspect
 import pathlib
 import sys
 import types
@@ -97,3 +98,19 @@ def test_block_causal_and_token_causal_are_mutually_exclusive():
             use_causal_mask=True,
             block_causal_size=2,
         )
+
+
+def test_block_causal_size_must_be_a_power_of_two():
+    with pytest.raises(ValueError, match="power of two"):
+        kernel.ref_ragged_paged_attention(
+            *_reference_inputs(),
+            use_causal_mask=False,
+            block_causal_size=3,
+        )
+
+
+def test_pallas_block_causal_mask_avoids_vector_integer_division():
+    source = inspect.getsource(kernel._ragged_paged_attention_kernel_loop)
+
+    assert "// block_causal_size" not in source
+    assert "bitwise_and" in source

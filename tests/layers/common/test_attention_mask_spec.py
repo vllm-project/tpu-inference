@@ -109,6 +109,8 @@ def test_block_causal_mask_requires_positive_block_size():
         AttentionMaskSpec(AttentionMaskKind.BLOCK_CAUSAL)
     with pytest.raises(ValueError, match="positive block_size"):
         AttentionMaskSpec(AttentionMaskKind.BLOCK_CAUSAL, block_size=0)
+    with pytest.raises(ValueError, match="power-of-two"):
+        AttentionMaskSpec(AttentionMaskKind.BLOCK_CAUSAL, block_size=3)
 
 
 def test_non_block_causal_mask_rejects_block_size():

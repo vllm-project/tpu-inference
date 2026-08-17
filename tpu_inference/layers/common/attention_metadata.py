@@ -37,6 +37,10 @@ class AttentionMaskSpec:
             if self.block_size is None or self.block_size <= 0:
                 raise ValueError(
                     "Block-causal attention requires a positive block_size")
+            if self.block_size & (self.block_size - 1):
+                raise ValueError(
+                    "Block-causal attention requires a power-of-two block_size"
+                )
         elif self.block_size is not None:
             raise ValueError(
                 "block_size is only valid for block-causal attention")

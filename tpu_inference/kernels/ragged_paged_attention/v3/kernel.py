@@ -194,8 +194,9 @@ def ref_ragged_paged_attention(
             if block_causal_size is None:
                 mask = q_span >= kv_span
             else:
-                mask = (q_span // block_causal_size
-                        >= kv_span // block_causal_size)
+                kv_block_start = kv_span - jnp.bitwise_and(
+                    kv_span, block_causal_size - 1)
+                mask = q_span >= kv_block_start
             if sliding_window is not None:
                 mask = jnp.logical_and(mask, q_span < kv_span + sliding_window)
             attn = jnp.where(mask, attn, mask_value)
@@ -494,9 +495,11 @@ def _ragged_paged_attention_kernel_loop(
             mask = mask_and(mask, q_span >= k_span)
         elif block_causal_size is not None:
             assert not skip_kv_mask
+            k_block_start = k_span - jnp.bitwise_and(k_span,
+                                                     block_causal_size - 1)
             mask = mask_and(
                 mask,
-                q_span // block_causal_size >= k_span // block_causal_size,
+                q_span >= k_block_start,
             )
 
         if not skip_kv_mask:
@@ -957,9 +960,10 @@ def _ragged_paged_attention_kernel_loop(
                 effective_kv_len = jnp.minimum(kv_len,
                                                processed_q_len + actual_bq_sz)
             elif block_causal_size is not None:
-                last_q_block_end = (
-                    cdiv(processed_q_len + actual_bq_sz, block_causal_size) *
-                    block_causal_size)
+                last_q_position = processed_q_len + actual_bq_sz - 1
+                last_q_block_start = last_q_position - jnp.bitwise_and(
+                    last_q_position, block_causal_size - 1)
+                last_q_block_end = last_q_block_start + block_causal_size
                 effective_kv_len = jnp.minimum(kv_len, last_q_block_end)
             else:
                 effective_kv_len = kv_len
@@ -1373,6 +1377,9 @@ def static_validate_inputs(
     """Validate inputs to the RPA kernel statically."""
     if block_causal_size is not None and block_causal_size <= 0:
         raise ValueError("block_causal_size must be positive")
+    if (block_causal_size is not None
+            and block_causal_size & (block_causal_size - 1)):
+        raise ValueError("block_causal_size must be a power of two")
     if use_causal_mask and block_causal_size is not None:
         raise ValueError(
             "Token-causal and block-causal masks are mutually exclusive")
