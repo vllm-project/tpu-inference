@@ -216,6 +216,54 @@ class TestPallasAttentionBackendImpl:
                 shared_attn_metadata=shared_metadata):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
+    def test_forward_kv_shared_layer_does_not_write_cache(self, mesh):
+        """KV-shared layers (kv_sharing_target_layer_name set, e.g. gemma-4
+        E2B/E4B cross-decoder) map to their target layer's cache index, so
+        writing would overwrite the target's entries with this layer's
+        discarded K/V. The write must only happen for non-shared layers."""
+        from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+            get_vllm_model_wrapper_context
+
+        cache_after = {}
+        for shared in (False, True):
+            impl = PallasAttentionBackendImpl(
+                num_heads=NUM_HEADS,
+                head_size=HEAD_DIM,
+                scale=0.088,
+                num_kv_heads=NUM_KV_HEADS,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="auto",
+                attn_type=AttentionType.DECODER,
+                kv_sharing_target_layer_name=("model.layers.0.self_attn.attn"
+                                              if shared else None),
+            )
+
+            layer = MagicMock()
+            layer.layer_name = "0"
+
+            query, key, value, kv_cache, metadata, shared_metadata = \
+                create_inputs(mesh)
+            cache_before = np.asarray(jax.device_get(kv_cache))
+
+            with torchax.default_env(), set_vllm_model_wrapper_context(
+                    kv_caches=[kv_cache],
+                    mesh=mesh,
+                    layer_name_to_kvcache_index={'0': 0},
+                    shared_attn_metadata=shared_metadata):
+                impl.forward(layer, query, key, value, torch.tensor([]),
+                             metadata)
+                ctx = get_vllm_model_wrapper_context()
+                cache_after[shared] = np.asarray(
+                    jax.device_get(ctx.kv_caches[0]))
+
+            if shared:
+                np.testing.assert_array_equal(cache_after[shared],
+                                              cache_before)
+
+        # Sanity: the non-shared layer with identical inputs DID write.
+        assert not np.array_equal(cache_after[True], cache_after[False])
+
     def test_forward_with_3d_qkv(self, mesh):
         impl = PallasAttentionBackendImpl(
             num_heads=NUM_HEADS,
