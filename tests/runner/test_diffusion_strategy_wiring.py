@@ -95,6 +95,13 @@ def test_dual_cache_has_distinct_full_partial_and_final_forwards():
     assert "[:, -1, :]" in final_source
 
 
+def test_dual_cache_trace_separates_padding_and_straggler_waste():
+    denoise_source = ast.unparse(_strategy_method("_denoise_blocks"))
+
+    assert "padding_row_iterations" in denoise_source
+    assert "straggler_row_iterations" in denoise_source
+
+
 def test_diffusion_uses_configured_capacity_and_partial_cache_metadata():
     build_source = ast.unparse(_strategy_method("_build_batch"))
     precompile_source = ast.unparse(_strategy_method("precompile"))

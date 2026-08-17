@@ -14,6 +14,8 @@
 
 from dataclasses import dataclass
 
+_EXACT_BATCH_BUCKET_LIMIT = 4
+
 
 @dataclass(frozen=True)
 class PromptBlockPlan:
@@ -30,13 +32,13 @@ class PendingBlockOutput:
 
 
 def select_diffusion_batch_size(num_active: int, capacity: int) -> int:
-    """Choose the smallest power-of-two request bucket that fits the batch."""
+    """Choose a compact request bucket without compiling every large shape."""
     if capacity < 1:
         raise ValueError("capacity must be positive")
     if not 0 <= num_active <= capacity:
         raise ValueError("num_active must be within the configured capacity")
-    if num_active <= 1:
-        return 1
+    if num_active <= min(capacity, _EXACT_BATCH_BUCKET_LIMIT):
+        return max(1, num_active)
     return min(1 << (num_active - 1).bit_length(), capacity)
 
 

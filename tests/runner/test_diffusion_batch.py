@@ -37,9 +37,16 @@ def test_diffusion_batch_size_uses_smallest_fitting_bucket():
     assert batch.select_diffusion_batch_size(0, 4) == 1
     assert batch.select_diffusion_batch_size(1, 4) == 1
     assert batch.select_diffusion_batch_size(2, 4) == 2
-    assert batch.select_diffusion_batch_size(3, 4) == 4
+    assert batch.select_diffusion_batch_size(3, 4) == 3
     assert batch.select_diffusion_batch_size(4, 4) == 4
-    assert batch.diffusion_batch_sizes(4) == (1, 2, 4)
+    assert batch.diffusion_batch_sizes(4) == (1, 2, 3, 4)
+
+
+def test_diffusion_batch_size_limits_exact_shape_compilation():
+    assert batch.select_diffusion_batch_size(3, 8) == 3
+    assert batch.select_diffusion_batch_size(4, 8) == 4
+    assert batch.select_diffusion_batch_size(5, 8) == 8
+    assert batch.diffusion_batch_sizes(8) == (1, 2, 3, 4, 8)
 
 
 def test_diffusion_batch_size_supports_non_power_of_two_capacity():

@@ -863,6 +863,71 @@ def test_dual_cache_partial_forward_receives_only_rows_with_work():
     assert int(output.q8_forward_calls) == 2
 
 
+def test_dual_cache_three_row_bucket_matches_four_row_padding():
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], 4, 4), dtype=jnp.float32)
+        return logits, kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], 4, 4), dtype=jnp.float32)
+        return logits, kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, forward_context
+        targets = jnp.where(active_rows, 2, 1)
+        return jax.nn.one_hot(targets, 4) * 20.0, kv_caches.at[2].add(1)
+
+    active_canvas = jnp.array([[0, 3, 3, 3], [0, 3, 2, 1], [0, 3, 3, 2]],
+                              dtype=jnp.int32)
+
+    def run(pad_to_four):
+        if pad_to_four:
+            canvas = jnp.concatenate(
+                [active_canvas,
+                 jnp.array([[9, 8, 7, 6]], dtype=jnp.int32)])
+            active_rows = jnp.array([True, True, True, False])
+        else:
+            canvas = active_canvas
+            active_rows = jnp.ones((3, ), dtype=bool)
+        batch_size = canvas.shape[0]
+        return denoise_block_dual_cache(
+            full_forward,
+            partial_forward,
+            final_forward,
+            low_confidence_commit,
+            None,
+            canvas,
+            canvas == 3,
+            jnp.tile(jnp.arange(4, dtype=jnp.int32), (batch_size, 1)),
+            jnp.zeros((3, ), dtype=jnp.int32),
+            active_rows,
+            _thresholds(batch_size, value=1.0),
+            _temperatures(batch_size),
+            None,
+            logit_alignment=LogitAlignment.SHIFTED,
+            next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+            mask_token_id=3,
+            sub_block_size=4,
+        )
+
+    exact = run(False)
+    padded = run(True)
+
+    np.testing.assert_array_equal(exact.canvas, padded.canvas[:3])
+    np.testing.assert_array_equal(exact.next_anchor, padded.next_anchor[:3])
+    np.testing.assert_array_equal(exact.denoise_steps,
+                                  padded.denoise_steps[:3])
+    np.testing.assert_array_equal(exact.kv_caches, padded.kv_caches)
+    assert int(exact.q32_forward_calls) == int(padded.q32_forward_calls)
+    assert int(exact.q8_forward_calls) == int(padded.q8_forward_calls)
+
+
 def test_heterogeneous_rows_preserve_inactive_kv():
 
     def active_aware_forward(model_state, canvas, positions, kv_caches,

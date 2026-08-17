@@ -639,6 +639,7 @@ class BlockDiffusionStrategy:
                 self.config.model.sub_block_size + final_q32_calls)
             denoise_iterations = q32_calls + q8_calls - final_q32_calls
             useful_row_iterations = int(np.asarray(denoise_steps_host).sum())
+            active_row_iterations = len(req_ids) * denoise_iterations
             static_row_iterations = batch_size * denoise_iterations
             self._last_denoise_trace = {
                 "active_requests":
@@ -661,6 +662,10 @@ class BlockDiffusionStrategy:
                 useful_row_iterations,
                 "static_row_iterations":
                 static_row_iterations,
+                "padding_row_iterations":
+                (static_row_iterations - active_row_iterations),
+                "straggler_row_iterations":
+                (active_row_iterations - useful_row_iterations),
                 "wasted_row_iterations":
                 (static_row_iterations - useful_row_iterations),
                 "denoise_steps":
