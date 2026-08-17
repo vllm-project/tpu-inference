@@ -439,6 +439,7 @@ class BlockDiffusionStrategy:
         canvases: list[list[int]],
         masks: list[list[bool]],
         needs_final_forward: list[bool] | None = None,
+        stop_on_eos: list[bool] | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         canvas, mask, positions, active_rows, metadata = self._build_batch(
             req_ids, block_starts, canvases, masks)
@@ -447,11 +448,21 @@ class BlockDiffusionStrategy:
             needs_final_forward = [True] * len(req_ids)
         if len(needs_final_forward) != len(req_ids):
             raise ValueError("needs_final_forward must match req_ids")
+        if stop_on_eos is None:
+            stop_on_eos = [False] * len(req_ids)
+        if len(stop_on_eos) != len(req_ids):
+            raise ValueError("stop_on_eos must match req_ids")
         output_candidate_positions = sum(
             sum(row_mask) for row_mask in masks) + sum(needs_final_forward)
         final_rows = np.zeros((batch_size, ), dtype=np.bool_)
         final_rows[:len(req_ids)] = needs_final_forward
         final_rows = device_array(self.runner.mesh, final_rows)
+        stop_rows = np.zeros((batch_size, ), dtype=np.bool_)
+        stop_rows[:len(req_ids)] = stop_on_eos
+        stop_rows = device_array(self.runner.mesh, stop_rows)
+        eos_token_ids = tuple(
+            int(token_id)
+            for token_id in np.atleast_1d(self.runner.eos_token_id))
         thresholds = jnp.full(
             (batch_size, ),
             self.config.runtime.confidence_threshold,
@@ -479,6 +490,8 @@ class BlockDiffusionStrategy:
                 sub_block_size=self.config.model.sub_block_size,
                 max_denoise_steps=self.config.runtime.max_denoise_steps,
                 needs_final_forward=final_rows,
+                stop_on_eos_rows=stop_rows,
+                eos_token_ids=eos_token_ids,
             )
         else:
             output = denoise_block(
@@ -499,14 +512,18 @@ class BlockDiffusionStrategy:
                 sub_block_size=self.config.model.sub_block_size,
                 max_denoise_steps=self.config.runtime.max_denoise_steps,
                 needs_final_forward=final_rows,
+                stop_on_eos_rows=stop_rows,
+                eos_token_ids=eos_token_ids,
             )
         self.runner.kv_caches = output.kv_caches
         if self.config.runtime.use_dual_cache:
-            (canvas_host, anchors_host, denoise_steps_host, q32_calls_host,
-             q8_calls_host, final_q32_calls_host) = jax.device_get((
+            (canvas_host, anchors_host, denoise_steps_host, stopped_rows_host,
+             q32_calls_host, q8_calls_host,
+             final_q32_calls_host) = jax.device_get((
                  output.canvas[:len(req_ids)],
                  output.next_anchor[:len(req_ids)],
                  output.denoise_steps[:len(req_ids)],
+                 output.stopped_rows[:len(req_ids)],
                  output.q32_forward_calls,
                  output.q8_forward_calls,
                  output.final_q32_forward_calls,
@@ -548,6 +565,8 @@ class BlockDiffusionStrategy:
                 (static_row_iterations - useful_row_iterations),
                 "denoise_steps":
                 np.asarray(denoise_steps_host).tolist(),
+                "eos_stopped_rows":
+                np.asarray(stopped_rows_host).tolist(),
             }
             logger.info("Fast-dLLM DualCache trace: %s",
                         self._last_denoise_trace)
@@ -616,6 +635,7 @@ class BlockDiffusionStrategy:
             ]
             masks = []
             needs_final_forward = []
+            stop_on_eos = []
             for req_id in partial_group:
                 plan = plans[req_id]
                 assert plan.partial_mask is not None
@@ -626,6 +646,8 @@ class BlockDiffusionStrategy:
                         mask,
                         self._remaining_output_capacity(req_id),
                     ))
+                stop_on_eos.append(not self.runner.requests[req_id].
+                                   sampling_params.ignore_eos)
             starts = [
                 len(plans[req_id].full_blocks) * self.block_size
                 for req_id in partial_group
@@ -636,6 +658,7 @@ class BlockDiffusionStrategy:
                 canvases,
                 masks,
                 needs_final_forward,
+                stop_on_eos,
             )
             for row, req_id in enumerate(partial_group):
                 output, pending = start_partial_block_output(
@@ -663,6 +686,7 @@ class BlockDiffusionStrategy:
         canvases = []
         masks = []
         needs_final_forward = []
+        stop_on_eos = []
         starts = []
         for req_id in denoise_group:
             request = self.runner.requests[req_id]
@@ -677,6 +701,7 @@ class BlockDiffusionStrategy:
                     mask,
                     self._remaining_output_capacity(req_id),
                 ))
+            stop_on_eos.append(not request.sampling_params.ignore_eos)
             starts.append(block_start)
 
         committed, anchors = self._denoise_blocks(
@@ -685,6 +710,7 @@ class BlockDiffusionStrategy:
             canvases,
             masks,
             needs_final_forward,
+            stop_on_eos,
         )
         for row, req_id in enumerate(denoise_group):
             outputs[req_id] = complete_seeded_decode_block(
@@ -786,6 +812,9 @@ class BlockDiffusionStrategy:
 
     def precompile(self) -> None:
         self._validate_runner_capabilities()
+        eos_token_ids = tuple(
+            int(token_id)
+            for token_id in np.atleast_1d(self.runner.eos_token_id))
         for batch_size in diffusion_batch_sizes(self.batch_size):
             canvas, mask, positions, active_rows, metadata = self._build_batch(
                 [], [], [], [], padded_batch_size=batch_size)
@@ -822,6 +851,8 @@ class BlockDiffusionStrategy:
                     next_block_policy=self.config.model.next_block_policy,
                     sub_block_size=self.config.model.sub_block_size,
                     max_denoise_steps=self.config.runtime.max_denoise_steps,
+                    stop_on_eos_rows=jnp.zeros_like(active_rows),
+                    eos_token_ids=eos_token_ids,
                 )
             else:
                 output = denoise_block(
@@ -841,6 +872,8 @@ class BlockDiffusionStrategy:
                     next_block_policy=self.config.model.next_block_policy,
                     sub_block_size=self.config.model.sub_block_size,
                     max_denoise_steps=self.config.runtime.max_denoise_steps,
+                    stop_on_eos_rows=jnp.zeros_like(active_rows),
+                    eos_token_ids=eos_token_ids,
                 )
             self.runner.kv_caches = output.kv_caches
             jax.block_until_ready((logits, output.canvas))

@@ -306,6 +306,7 @@ def test_final_forward_refreshes_committed_kv_and_next_anchor():
 
 
 def test_terminal_block_skips_non_dual_cache_final_forward():
+
     def forward(model_state, canvas, positions, kv_caches, active_rows,
                 forward_context):
         del model_state, positions, active_rows, forward_context
@@ -348,6 +349,83 @@ def test_terminal_block_skips_non_dual_cache_final_forward():
                                   nonterminal.denoise_steps)
     assert int(terminal.kv_caches) + 1 == int(nonterminal.kv_caches)
     np.testing.assert_array_equal(terminal.next_anchor, [0])
+
+
+def test_non_dual_cache_stops_after_resolved_eos_prefix():
+    mask_token_id = 4
+    eos_token_id = 2
+    targets = jnp.array([1, eos_token_id, 3, 3], dtype=jnp.int32)
+
+    def forward(model_state, canvas, positions, kv_caches, active_rows,
+                forward_context):
+        del model_state, canvas, positions, forward_context
+        logits = jax.nn.one_hot(targets, 5) * 20.0
+        logits = jnp.broadcast_to(logits, (active_rows.shape[0], 4, 5))
+        return logits, kv_caches + jnp.any(active_rows).astype(jnp.int32)
+
+    output = denoise_block(
+        forward,
+        low_confidence_commit,
+        None,
+        jnp.full((1, 4), mask_token_id, dtype=jnp.int32),
+        jnp.ones((1, 4), dtype=bool),
+        jnp.arange(4, dtype=jnp.int32)[None, :],
+        jnp.array(0, dtype=jnp.int32),
+        jnp.array([True]),
+        _thresholds(1, value=1.0),
+        _temperatures(1),
+        None,
+        logit_alignment=LogitAlignment.SAME_POSITION,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=4,
+        stop_on_eos_rows=jnp.array([True]),
+        eos_token_ids=(eos_token_id, ),
+    )
+
+    np.testing.assert_array_equal(
+        output.canvas, [[1, eos_token_id, mask_token_id, mask_token_id]])
+    np.testing.assert_array_equal(output.denoise_steps, [2])
+    np.testing.assert_array_equal(output.stopped_rows, [True])
+    np.testing.assert_array_equal(output.next_anchor, [0])
+    assert int(output.kv_caches) == 2
+
+
+def test_eos_in_seed_context_does_not_stop_generation():
+    mask_token_id = 4
+    eos_token_id = 2
+    targets = jnp.array([0, 1, 3, 3], dtype=jnp.int32)
+
+    def forward(model_state, canvas, positions, kv_caches, active_rows,
+                forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        logits = jax.nn.one_hot(targets, 5) * 20.0
+        return logits[None, :, :], kv_caches + 1
+
+    output = denoise_block(
+        forward,
+        low_confidence_commit,
+        None,
+        jnp.array(
+            [[eos_token_id, mask_token_id, mask_token_id, mask_token_id]],
+            dtype=jnp.int32),
+        jnp.array([[False, True, True, True]]),
+        jnp.arange(4, dtype=jnp.int32)[None, :],
+        jnp.array(0, dtype=jnp.int32),
+        jnp.array([True]),
+        _thresholds(1, value=1.0),
+        _temperatures(1),
+        None,
+        logit_alignment=LogitAlignment.SAME_POSITION,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=4,
+        stop_on_eos_rows=jnp.array([True]),
+        eos_token_ids=(eos_token_id, ),
+    )
+
+    np.testing.assert_array_equal(output.canvas, [[eos_token_id, 1, 3, 3]])
+    np.testing.assert_array_equal(output.stopped_rows, [False])
 
 
 def test_step_cap_force_fills_and_final_forward_refreshes_kv():
@@ -515,6 +593,120 @@ def test_dual_cache_terminal_block_skips_final_q32():
     assert int(terminal.q8_forward_calls) == int(nonterminal.q8_forward_calls)
     assert int(terminal.final_q32_forward_calls) == 0
     assert int(nonterminal.final_q32_forward_calls) == 1
+
+
+def test_dual_cache_stops_after_resolved_eos_prefix():
+    mask_token_id = 4
+    eos_token_id = 2
+    targets = jnp.array([1, eos_token_id, 3, 3], dtype=jnp.int32)
+
+    def block_logits(batch_size):
+        logits = jax.nn.one_hot(targets, 5) * 20.0
+        return jnp.broadcast_to(logits, (batch_size, 4, 5))
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        return block_logits(canvas.shape[0]), kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        return block_logits(canvas.shape[0]), kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        return jnp.zeros((1, 5), dtype=jnp.float32), kv_caches.at[2].add(1)
+
+    output = denoise_block_dual_cache(
+        full_forward,
+        partial_forward,
+        final_forward,
+        low_confidence_commit,
+        None,
+        jnp.full((1, 4), mask_token_id, dtype=jnp.int32),
+        jnp.ones((1, 4), dtype=bool),
+        jnp.arange(4, dtype=jnp.int32)[None, :],
+        jnp.zeros((3, ), dtype=jnp.int32),
+        jnp.array([True]),
+        _thresholds(1, value=1.0),
+        _temperatures(1),
+        None,
+        logit_alignment=LogitAlignment.SAME_POSITION,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=4,
+        stop_on_eos_rows=jnp.array([True]),
+        eos_token_ids=(eos_token_id, ),
+    )
+
+    np.testing.assert_array_equal(
+        output.canvas, [[1, eos_token_id, mask_token_id, mask_token_id]])
+    np.testing.assert_array_equal(output.stopped_rows, [True])
+    np.testing.assert_array_equal(output.kv_caches, [1, 1, 0])
+    assert int(output.q32_forward_calls) == 1
+    assert int(output.q8_forward_calls) == 1
+    assert int(output.final_q32_forward_calls) == 0
+
+
+def test_dual_cache_eos_termination_is_row_local():
+    mask_token_id = 4
+    eos_token_id = 2
+    targets = jnp.array([1, eos_token_id, 3, 3], dtype=jnp.int32)
+
+    def block_logits(batch_size):
+        logits = jax.nn.one_hot(targets, 5) * 20.0
+        return jnp.broadcast_to(logits, (batch_size, 4, 5))
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        return block_logits(canvas.shape[0]), kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        return block_logits(canvas.shape[0]), kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, forward_context
+        target = jnp.where(active_rows, 1, 0)
+        return jax.nn.one_hot(target, 5) * 20.0, kv_caches.at[2].add(1)
+
+    output = denoise_block_dual_cache(
+        full_forward,
+        partial_forward,
+        final_forward,
+        low_confidence_commit,
+        None,
+        jnp.full((2, 4), mask_token_id, dtype=jnp.int32),
+        jnp.ones((2, 4), dtype=bool),
+        jnp.tile(jnp.arange(4, dtype=jnp.int32), (2, 1)),
+        jnp.zeros((3, ), dtype=jnp.int32),
+        jnp.array([True, True]),
+        _thresholds(2, value=1.0),
+        _temperatures(2),
+        None,
+        logit_alignment=LogitAlignment.SAME_POSITION,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=4,
+        stop_on_eos_rows=jnp.array([True, False]),
+        eos_token_ids=(eos_token_id, ),
+    )
+
+    np.testing.assert_array_equal(
+        output.canvas,
+        [[1, eos_token_id, mask_token_id, mask_token_id],
+         [1, eos_token_id, 3, 3]],
+    )
+    np.testing.assert_array_equal(output.stopped_rows, [True, False])
+    np.testing.assert_array_equal(output.next_anchor, [0, 1])
+    assert int(output.q32_forward_calls) == 2
+    assert int(output.q8_forward_calls) == 3
+    assert int(output.final_q32_forward_calls) == 1
 
 
 def test_dual_cache_mixed_terminal_rows_run_one_batch_final_q32():

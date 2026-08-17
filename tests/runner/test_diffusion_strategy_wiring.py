@@ -113,3 +113,14 @@ def test_diffusion_rejects_cache_reuse_and_transfer():
 
     assert "enable_prefix_caching" in validation_source
     assert "kv_transfer_config" in validation_source
+
+
+def test_diffusion_passes_request_eos_policy_into_denoising():
+    prefill_source = ast.unparse(_strategy_method("_process_prefill"))
+    decode_source = ast.unparse(_strategy_method("_process_decode"))
+    denoise_source = ast.unparse(_strategy_method("_denoise_blocks"))
+
+    assert "sampling_params.ignore_eos" in prefill_source
+    assert "sampling_params.ignore_eos" in decode_source
+    assert "stop_on_eos_rows" in denoise_source
+    assert "eos_token_ids" in denoise_source

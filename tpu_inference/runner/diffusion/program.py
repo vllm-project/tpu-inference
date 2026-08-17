@@ -46,6 +46,7 @@ class DenoiseBlockOutput(NamedTuple):
     next_anchor: jax.Array
     denoise_steps: jax.Array
     kv_caches: Any
+    stopped_rows: jax.Array
 
 
 class DualCacheDenoiseBlockOutput(NamedTuple):
@@ -56,6 +57,33 @@ class DualCacheDenoiseBlockOutput(NamedTuple):
     q32_forward_calls: jax.Array
     q8_forward_calls: jax.Array
     final_q32_forward_calls: jax.Array
+    stopped_rows: jax.Array
+
+
+def _resolved_eos_rows(
+    canvas: jax.Array,
+    mask: jax.Array,
+    generation_positions: jax.Array,
+    stop_on_eos_rows: jax.Array,
+    eos_token_ids: tuple[int, ...],
+) -> jax.Array:
+    if not eos_token_ids:
+        return jnp.zeros((canvas.shape[0], ), dtype=bool)
+
+    is_eos = jnp.zeros_like(mask)
+    for token_id in eos_token_ids:
+        is_eos |= canvas == token_id
+    is_eos &= generation_positions
+
+    has_eos = jnp.any(is_eos, axis=-1)
+    first_eos = jnp.argmax(is_eos, axis=-1)
+    positions = jnp.arange(canvas.shape[1], dtype=jnp.int32)
+    unresolved_before_eos = jnp.any(
+        mask & generation_positions &
+        (positions[None, :] < first_eos[:, None]),
+        axis=-1,
+    )
+    return stop_on_eos_rows & has_eos & ~unresolved_before_eos
 
 
 def select_aligned_hidden_states(
@@ -101,27 +129,30 @@ def _align_logits(
         "mask_token_id",
         "sub_block_size",
         "max_denoise_steps",
+        "eos_token_ids",
     ),
 )
 def _denoise_block_jit(
-    forward_fn: BlockForwardFn,
-    commit_fn: CommitFn,
-    model_state: Any,
-    initial_canvas: jax.Array,
-    initial_mask: jax.Array,
-    positions: jax.Array,
-    kv_caches: Any,
-    active_rows: jax.Array,
-    needs_final_forward: jax.Array,
-    confidence_threshold: jax.Array,
-    temperature: jax.Array,
-    forward_context: Any,
-    *,
-    logit_alignment: LogitAlignment,
-    next_block_policy: NextBlockPolicy,
-    mask_token_id: int,
-    sub_block_size: int,
-    max_denoise_steps: int = 0,
+        forward_fn: BlockForwardFn,
+        commit_fn: CommitFn,
+        model_state: Any,
+        initial_canvas: jax.Array,
+        initial_mask: jax.Array,
+        positions: jax.Array,
+        kv_caches: Any,
+        active_rows: jax.Array,
+        needs_final_forward: jax.Array,
+        stop_on_eos_rows: jax.Array,
+        confidence_threshold: jax.Array,
+        temperature: jax.Array,
+        forward_context: Any,
+        *,
+        logit_alignment: LogitAlignment,
+        next_block_policy: NextBlockPolicy,
+        mask_token_id: int,
+        sub_block_size: int,
+        max_denoise_steps: int = 0,
+        eos_token_ids: tuple[int, ...] = (),
 ) -> DenoiseBlockOutput:
     """Jitted block denoising implementation.
 
@@ -148,13 +179,16 @@ def _denoise_block_jit(
     active_rows = jnp.asarray(active_rows, dtype=bool)
     canvas = initial_canvas.astype(jnp.int32)
     mask = jnp.asarray(initial_mask, dtype=bool) & active_rows[:, None]
+    generation_positions = mask
+    stop_on_eos_rows = jnp.asarray(stop_on_eos_rows, dtype=bool) & active_rows
+    stopped_rows = jnp.zeros_like(active_rows)
     denoise_steps = jnp.zeros((canvas.shape[0], ), dtype=jnp.int32)
     steps_per_sub_block = (sub_block_size
                            if max_denoise_steps <= 0 else max_denoise_steps)
     num_sub_blocks = block_size // sub_block_size
 
     def denoise_sub_block(sub_block_index, carry):
-        canvas, mask, denoise_steps, kv = carry
+        canvas, mask, denoise_steps, kv, stopped_rows = carry
         start = sub_block_index * sub_block_size
         sub_block_positions = (
             (jnp.arange(block_size) >= start) &
@@ -170,17 +204,19 @@ def _denoise_block_jit(
             eligible,
             last_tokens,
             jnp.array(0, dtype=jnp.int32),
+            stopped_rows,
         )
 
         def has_work(state):
-            _, _, _, _, eligible, _, iteration = state
+            _, _, _, _, eligible, _, iteration, _ = state
             return ((iteration < steps_per_sub_block) & jnp.any(eligible))
 
         def denoise_step(state):
-            canvas, mask, steps, kv, eligible, _, iteration = state
+            (canvas, mask, steps, kv, eligible, _, iteration,
+             stopped_rows) = state
             row_has_work = jnp.any(eligible, axis=-1)
             logits, kv = forward_fn(model_state, canvas, positions, kv,
-                                    active_rows, forward_context)
+                                    row_has_work, forward_context)
             aligned_logits = _align_logits(logits, logit_alignment)
             token_ids, remaining = commit_fn(
                 aligned_logits,
@@ -193,25 +229,45 @@ def _denoise_block_jit(
             committed = eligible & ~remaining
             canvas = jnp.where(committed, token_ids, canvas)
             mask &= ~committed
+            newly_stopped = _resolved_eos_rows(
+                canvas,
+                mask,
+                generation_positions,
+                stop_on_eos_rows,
+                eos_token_ids,
+            )
+            stopped_rows |= newly_stopped
+            mask &= ~stopped_rows[:, None]
+            remaining &= ~stopped_rows[:, None]
             steps += row_has_work.astype(jnp.int32)
             return (canvas, mask, steps, kv, remaining, token_ids,
-                    iteration + 1)
+                    iteration + 1, stopped_rows)
 
         state = jax.lax.while_loop(has_work, denoise_step, state)
-        canvas, mask, denoise_steps, kv, remaining, last_tokens, _ = state
+        (canvas, mask, denoise_steps, kv, remaining, last_tokens, _,
+         stopped_rows) = state
 
         canvas = jnp.where(remaining, last_tokens, canvas)
         mask &= ~remaining
-        return canvas, mask, denoise_steps, kv
+        newly_stopped = _resolved_eos_rows(
+            canvas,
+            mask,
+            generation_positions,
+            stop_on_eos_rows,
+            eos_token_ids,
+        )
+        stopped_rows |= newly_stopped
+        mask &= ~stopped_rows[:, None]
+        return canvas, mask, denoise_steps, kv, stopped_rows
 
-    canvas, mask, denoise_steps, kv_caches = jax.lax.fori_loop(
+    canvas, mask, denoise_steps, kv_caches, stopped_rows = jax.lax.fori_loop(
         0,
         num_sub_blocks,
         denoise_sub_block,
-        (canvas, mask, denoise_steps, kv_caches),
+        (canvas, mask, denoise_steps, kv_caches, stopped_rows),
     )
 
-    final_rows = active_rows & needs_final_forward
+    final_rows = active_rows & needs_final_forward & ~stopped_rows
 
     def run_final_forward(kv):
         final_logits, next_kv = forward_fn(model_state, canvas, positions, kv,
@@ -239,28 +295,31 @@ def _denoise_block_jit(
         next_anchor=next_anchor,
         denoise_steps=denoise_steps,
         kv_caches=kv_caches,
+        stopped_rows=stopped_rows,
     )
 
 
 def denoise_block(
-    forward_fn: BlockForwardFn,
-    commit_fn: CommitFn,
-    model_state: Any,
-    initial_canvas: jax.Array,
-    initial_mask: jax.Array,
-    positions: jax.Array,
-    kv_caches: Any,
-    active_rows: jax.Array,
-    confidence_threshold: jax.Array,
-    temperature: jax.Array,
-    forward_context: Any,
-    *,
-    logit_alignment: LogitAlignment,
-    next_block_policy: NextBlockPolicy,
-    mask_token_id: int,
-    sub_block_size: int,
-    max_denoise_steps: int = 0,
-    needs_final_forward: jax.Array | None = None,
+        forward_fn: BlockForwardFn,
+        commit_fn: CommitFn,
+        model_state: Any,
+        initial_canvas: jax.Array,
+        initial_mask: jax.Array,
+        positions: jax.Array,
+        kv_caches: Any,
+        active_rows: jax.Array,
+        confidence_threshold: jax.Array,
+        temperature: jax.Array,
+        forward_context: Any,
+        *,
+        logit_alignment: LogitAlignment,
+        next_block_policy: NextBlockPolicy,
+        mask_token_id: int,
+        sub_block_size: int,
+        max_denoise_steps: int = 0,
+        needs_final_forward: jax.Array | None = None,
+        stop_on_eos_rows: jax.Array | None = None,
+        eos_token_ids: tuple[int, ...] = (),
 ) -> DenoiseBlockOutput:
     """Validate and denoise one model block.
 
@@ -279,6 +338,10 @@ def denoise_block(
         needs_final_forward = active_rows
     elif needs_final_forward.shape != active_rows.shape:
         raise ValueError("needs_final_forward must match active_rows")
+    if stop_on_eos_rows is None:
+        stop_on_eos_rows = jnp.zeros_like(active_rows, dtype=bool)
+    elif stop_on_eos_rows.shape != active_rows.shape:
+        raise ValueError("stop_on_eos_rows must match active_rows")
     if logit_alignment is LogitAlignment.SHIFTED:
         seed_mask, active = jax.device_get((initial_mask[:, 0], active_rows))
         if np.any(
@@ -298,6 +361,7 @@ def denoise_block(
         kv_caches,
         active_rows,
         needs_final_forward,
+        stop_on_eos_rows,
         confidence_threshold,
         temperature,
         forward_context,
@@ -306,6 +370,7 @@ def denoise_block(
         mask_token_id=mask_token_id,
         sub_block_size=sub_block_size,
         max_denoise_steps=max_denoise_steps,
+        eos_token_ids=eos_token_ids,
     )
 
 
@@ -320,40 +385,47 @@ def denoise_block(
         "mask_token_id",
         "sub_block_size",
         "max_denoise_steps",
+        "eos_token_ids",
     ),
 )
 def _denoise_block_dual_cache_jit(
-    full_forward_fn: AlignedSubBlockForwardFn,
-    partial_forward_fn: AlignedSubBlockForwardFn,
-    final_forward_fn: FinalBlockForwardFn,
-    commit_fn: CommitFn,
-    model_state: Any,
-    initial_canvas: jax.Array,
-    initial_mask: jax.Array,
-    positions: jax.Array,
-    kv_caches: Any,
-    active_rows: jax.Array,
-    needs_final_forward: jax.Array,
-    confidence_threshold: jax.Array,
-    temperature: jax.Array,
-    forward_context: Any,
-    *,
-    next_block_policy: NextBlockPolicy,
-    mask_token_id: int,
-    sub_block_size: int,
-    max_denoise_steps: int = 0,
+        full_forward_fn: AlignedSubBlockForwardFn,
+        partial_forward_fn: AlignedSubBlockForwardFn,
+        final_forward_fn: FinalBlockForwardFn,
+        commit_fn: CommitFn,
+        model_state: Any,
+        initial_canvas: jax.Array,
+        initial_mask: jax.Array,
+        positions: jax.Array,
+        kv_caches: Any,
+        active_rows: jax.Array,
+        needs_final_forward: jax.Array,
+        stop_on_eos_rows: jax.Array,
+        confidence_threshold: jax.Array,
+        temperature: jax.Array,
+        forward_context: Any,
+        *,
+        next_block_policy: NextBlockPolicy,
+        mask_token_id: int,
+        sub_block_size: int,
+        max_denoise_steps: int = 0,
+        eos_token_ids: tuple[int, ...] = (),
 ) -> DualCacheDenoiseBlockOutput:
     batch_size, block_size = initial_canvas.shape
     active_rows = jnp.asarray(active_rows, dtype=bool)
     canvas = initial_canvas.astype(jnp.int32)
     mask = jnp.asarray(initial_mask, dtype=bool) & active_rows[:, None]
+    generation_positions = mask
+    stop_on_eos_rows = jnp.asarray(stop_on_eos_rows, dtype=bool) & active_rows
+    stopped_rows = jnp.zeros_like(active_rows)
     denoise_steps = jnp.zeros((batch_size, ), dtype=jnp.int32)
     steps_per_sub_block = (sub_block_size
                            if max_denoise_steps <= 0 else max_denoise_steps)
     num_sub_blocks = block_size // sub_block_size
 
     def denoise_sub_block(sub_block_index, carry):
-        canvas, mask, denoise_steps, kv, q32_calls, q8_calls = carry
+        (canvas, mask, denoise_steps, kv, q32_calls, q8_calls,
+         stopped_rows) = carry
         start = sub_block_index * sub_block_size
         sub_canvas = jax.lax.dynamic_slice(canvas, (0, start),
                                            (batch_size, sub_block_size))
@@ -361,9 +433,30 @@ def _denoise_block_dual_cache_jit(
                                          (batch_size, sub_block_size))
 
         def no_work(_):
-            return canvas, mask, denoise_steps, kv, q32_calls, q8_calls
+            return (canvas, mask, denoise_steps, kv, q32_calls, q8_calls,
+                    stopped_rows)
 
         def work(_):
+
+            def apply_eos_stop(current_sub_canvas, current_sub_mask,
+                               current_remaining, current_stopped_rows):
+                current_canvas = jax.lax.dynamic_update_slice(
+                    canvas, current_sub_canvas, (0, start))
+                current_mask = jax.lax.dynamic_update_slice(
+                    mask, current_sub_mask, (0, start))
+                newly_stopped = _resolved_eos_rows(
+                    current_canvas,
+                    current_mask,
+                    generation_positions,
+                    stop_on_eos_rows,
+                    eos_token_ids,
+                )
+                current_stopped_rows |= newly_stopped
+                current_sub_mask &= ~current_stopped_rows[:, None]
+                current_remaining &= ~current_stopped_rows[:, None]
+                return (current_sub_canvas, current_sub_mask,
+                        current_remaining, current_stopped_rows)
+
             row_has_work = jnp.any(eligible, axis=-1)
             with jax.named_scope("diffusion_dual_cache_q32"):
                 logits, next_kv = full_forward_fn(
@@ -386,6 +479,10 @@ def _denoise_block_dual_cache_jit(
             committed = eligible & ~remaining
             next_sub_canvas = jnp.where(committed, token_ids, sub_canvas)
             next_sub_mask = eligible & ~committed
+            (next_sub_canvas, next_sub_mask, remaining,
+             next_stopped_rows) = apply_eos_stop(next_sub_canvas,
+                                                 next_sub_mask, remaining,
+                                                 stopped_rows)
             next_steps = denoise_steps + row_has_work.astype(jnp.int32)
 
             state = (
@@ -398,17 +495,18 @@ def _denoise_block_dual_cache_jit(
                 jnp.array(1, dtype=jnp.int32),
                 q32_calls + 1,
                 q8_calls,
+                next_stopped_rows,
             )
 
             def needs_full_refresh(state):
-                _, _, _, _, remaining, _, iteration, _, _ = state
+                _, _, _, _, remaining, _, iteration, _, _, _ = state
                 return ((iteration < steps_per_sub_block)
                         & jnp.any(remaining[:, 0]))
 
             def full_refresh_step(state):
                 (current_sub_canvas, current_sub_mask, current_steps,
                  current_kv, remaining, _, iteration, current_q32_calls,
-                 current_q8_calls) = state
+                 current_q8_calls, current_stopped_rows) = state
                 current_canvas = jax.lax.dynamic_update_slice(
                     canvas, current_sub_canvas, (0, start))
                 row_has_work = jnp.any(remaining, axis=-1)
@@ -434,6 +532,10 @@ def _denoise_block_dual_cache_jit(
                 current_sub_canvas = jnp.where(committed, token_ids,
                                                current_sub_canvas)
                 current_sub_mask &= ~committed
+                (current_sub_canvas, current_sub_mask, next_remaining,
+                 current_stopped_rows) = apply_eos_stop(
+                     current_sub_canvas, current_sub_mask, next_remaining,
+                     current_stopped_rows)
                 current_steps += row_has_work.astype(jnp.int32)
                 return (
                     current_sub_canvas,
@@ -445,19 +547,20 @@ def _denoise_block_dual_cache_jit(
                     iteration + 1,
                     current_q32_calls + 1,
                     current_q8_calls,
+                    current_stopped_rows,
                 )
 
             state = jax.lax.while_loop(needs_full_refresh, full_refresh_step,
                                        state)
 
             def has_work(state):
-                _, _, _, _, remaining, _, iteration, _, _ = state
+                _, _, _, _, remaining, _, iteration, _, _, _ = state
                 return ((iteration < steps_per_sub_block) & jnp.any(remaining))
 
             def denoise_step(state):
                 (current_sub_canvas, current_sub_mask, current_steps,
                  current_kv, remaining, _, iteration, current_q32_calls,
-                 current_q8_calls) = state
+                 current_q8_calls, current_stopped_rows) = state
                 current_canvas = jax.lax.dynamic_update_slice(
                     canvas, current_sub_canvas, (0, start))
                 row_has_work = jnp.any(remaining, axis=-1)
@@ -483,6 +586,10 @@ def _denoise_block_dual_cache_jit(
                 current_sub_canvas = jnp.where(committed, token_ids,
                                                current_sub_canvas)
                 current_sub_mask &= ~committed
+                (current_sub_canvas, current_sub_mask, next_remaining,
+                 current_stopped_rows) = apply_eos_stop(
+                     current_sub_canvas, current_sub_mask, next_remaining,
+                     current_stopped_rows)
                 current_steps += row_has_work.astype(jnp.int32)
                 return (
                     current_sub_canvas,
@@ -494,25 +601,34 @@ def _denoise_block_dual_cache_jit(
                     iteration + 1,
                     current_q32_calls,
                     current_q8_calls + 1,
+                    current_stopped_rows,
                 )
 
             state = jax.lax.while_loop(has_work, denoise_step, state)
             (next_sub_canvas, next_sub_mask, next_steps, next_kv, remaining,
-             last_tokens, _, next_q32_calls, next_q8_calls) = state
+             last_tokens, _, next_q32_calls, next_q8_calls,
+             next_stopped_rows) = state
             next_sub_canvas = jnp.where(remaining, last_tokens,
                                         next_sub_canvas)
             next_sub_mask &= ~remaining
+            (next_sub_canvas, next_sub_mask, _,
+             next_stopped_rows) = apply_eos_stop(
+                 next_sub_canvas,
+                 next_sub_mask,
+                 jnp.zeros_like(remaining),
+                 next_stopped_rows,
+             )
             next_canvas = jax.lax.dynamic_update_slice(canvas, next_sub_canvas,
                                                        (0, start))
             next_mask = jax.lax.dynamic_update_slice(mask, next_sub_mask,
                                                      (0, start))
             return (next_canvas, next_mask, next_steps, next_kv,
-                    next_q32_calls, next_q8_calls)
+                    next_q32_calls, next_q8_calls, next_stopped_rows)
 
         return jax.lax.cond(jnp.any(eligible), work, no_work, operand=None)
 
     (canvas, mask, denoise_steps, kv_caches, q32_forward_calls,
-     q8_forward_calls) = jax.lax.fori_loop(
+     q8_forward_calls, stopped_rows) = jax.lax.fori_loop(
          0,
          num_sub_blocks,
          denoise_sub_block,
@@ -523,10 +639,11 @@ def _denoise_block_dual_cache_jit(
              kv_caches,
              jnp.array(0, dtype=jnp.int32),
              jnp.array(0, dtype=jnp.int32),
+             stopped_rows,
          ),
      )
 
-    final_rows = active_rows & needs_final_forward
+    final_rows = active_rows & needs_final_forward & ~stopped_rows
 
     def run_final_forward(kv):
         with jax.named_scope("diffusion_dual_cache_final_q32"):
@@ -565,30 +682,33 @@ def _denoise_block_dual_cache_jit(
         q32_forward_calls=q32_forward_calls,
         q8_forward_calls=q8_forward_calls,
         final_q32_forward_calls=final_q32_forward_calls,
+        stopped_rows=stopped_rows,
     )
 
 
 def denoise_block_dual_cache(
-    full_forward_fn: AlignedSubBlockForwardFn,
-    partial_forward_fn: AlignedSubBlockForwardFn,
-    final_forward_fn: FinalBlockForwardFn,
-    commit_fn: CommitFn,
-    model_state: Any,
-    initial_canvas: jax.Array,
-    initial_mask: jax.Array,
-    positions: jax.Array,
-    kv_caches: Any,
-    active_rows: jax.Array,
-    confidence_threshold: jax.Array,
-    temperature: jax.Array,
-    forward_context: Any,
-    *,
-    logit_alignment: LogitAlignment,
-    next_block_policy: NextBlockPolicy,
-    mask_token_id: int,
-    sub_block_size: int,
-    max_denoise_steps: int = 0,
-    needs_final_forward: jax.Array | None = None,
+        full_forward_fn: AlignedSubBlockForwardFn,
+        partial_forward_fn: AlignedSubBlockForwardFn,
+        final_forward_fn: FinalBlockForwardFn,
+        commit_fn: CommitFn,
+        model_state: Any,
+        initial_canvas: jax.Array,
+        initial_mask: jax.Array,
+        positions: jax.Array,
+        kv_caches: Any,
+        active_rows: jax.Array,
+        confidence_threshold: jax.Array,
+        temperature: jax.Array,
+        forward_context: Any,
+        *,
+        logit_alignment: LogitAlignment,
+        next_block_policy: NextBlockPolicy,
+        mask_token_id: int,
+        sub_block_size: int,
+        max_denoise_steps: int = 0,
+        needs_final_forward: jax.Array | None = None,
+        stop_on_eos_rows: jax.Array | None = None,
+        eos_token_ids: tuple[int, ...] = (),
 ) -> DualCacheDenoiseBlockOutput:
     """Denoise with aligned q32 refreshes followed by q8 replacements."""
     if initial_canvas.ndim != 2:
@@ -603,6 +723,10 @@ def denoise_block_dual_cache(
         needs_final_forward = active_rows
     elif needs_final_forward.shape != active_rows.shape:
         raise ValueError("needs_final_forward must match active_rows")
+    if stop_on_eos_rows is None:
+        stop_on_eos_rows = jnp.zeros_like(active_rows, dtype=bool)
+    elif stop_on_eos_rows.shape != active_rows.shape:
+        raise ValueError("stop_on_eos_rows must match active_rows")
     if sub_block_size < 1 or initial_canvas.shape[1] % sub_block_size:
         raise ValueError("sub_block_size must divide the model block size")
     if logit_alignment is LogitAlignment.SHIFTED:
@@ -626,6 +750,7 @@ def denoise_block_dual_cache(
         kv_caches,
         active_rows,
         needs_final_forward,
+        stop_on_eos_rows,
         confidence_threshold,
         temperature,
         forward_context,
@@ -633,4 +758,5 @@ def denoise_block_dual_cache(
         mask_token_id=mask_token_id,
         sub_block_size=sub_block_size,
         max_denoise_steps=max_denoise_steps,
+        eos_token_ids=eos_token_ids,
     )
