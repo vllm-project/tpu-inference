@@ -81,6 +81,13 @@ steps:
       TEST_MODEL: google/gemma-4-31B-it
       TENSOR_PARALLEL_SIZE: 8
       MINIMUM_THROUGHPUT_THRESHOLD: 1.80
+      # 0.98 (recipe default) leaves ~1.9GiB/chip after KV sizing on tpu7x
+      # (94.74GiB HBM), but the torchax-path compiled programs need ~2.5GiB+
+      # at load: nightly 24382 (MODEL_IMPL_TYPE=vllm) failed with
+      # "Error loading program 'jit__forward': Attempting to allocate 1.13G.
+      # There are 528.72M free." 0.95 frees ~4.7GiB for program load; KV
+      # concurrency only drops 153x -> ~148x, far above benchmark needs.
+      GPU_MEMORY_UTILIZATION: "0.95"
       COMPILATION_CONFIG: '{"cudagraph_mm_encoder": true}'
     commands:
       - |
