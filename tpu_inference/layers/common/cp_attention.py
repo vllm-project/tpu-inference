@@ -284,12 +284,11 @@ def pcp_forward(
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward.
 
-    Inside the shard_map body:
+    Inside the shard_map body, ONE kernel launch per rank:
       1. cache phase           in-kernel ring: KV shards rotate around the pcp
-                               axis while each rank attends with its local Q;
-                               one online softmax accumulates all rounds
+                               axis while each rank attends with its local Q
       2. current phase         local Q (head+tail) attends all-gathered current KV
-      3. merge_attn_states     lse-weighted combine
+    Both phases share one online softmax, so there is no LSE merge.
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
@@ -330,69 +329,51 @@ def pcp_forward(
                                                 *x.shape[1:])[inv_row].reshape(
                                                     padded_q_len, *x.shape[1:])
 
-        # ---- Cache phase --------------------------------------------------
-        if cache_pages == 0:
-            # Nothing cached (first chunk of a chunked prefill): the cache
-            # phase would attend an empty cache, be fully masked, and have its
-            # -inf result discarded by merge_attn_states.  Skip it outright.
-            context_out = context_lse = None
-        else:
-            cu_ring = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(
-                q_local.shape[0])
-            context_out, _, context_lse = _rpa_cp_call(
-                q_local,
-                k_local,
-                v_local,
-                kv_cache_local,
-                kv_lens_local,
-                page_indices_local,
-                cu_ring,
-                jnp.array([0, 0, 1], jnp.int32),
-                cp_rank=cp_rank,
-                cp_group_size=pcp_size,
-                kv_cache_lens=kv_cache_lens_local,
-                pcp_ring_axis_name=pcp_axis,
-                pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
-                skip_current_attn=True,
-                use_causal_mask=False,
-                update_kv_cache=False,
-                **common)
-
-        # Current phase: local Q (head+tail chunks) attends all-gathered current KV.
+        # Current KV: rank order + in-kernel remap when C is page-aligned
+        # (avoids a gather-reorder), else token order.  The ring launch always
+        # takes token order: its ring-sized bkv blocks may cross chunks.
         # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
-        # remap_kv: if C aligns with page_size, all_gather_tokens() avoids an extra gather-reorder.
+        ring = cache_pages != 0
         page_size = kv_cache_local.shape[1]
-        remap_kv = (C >= page_size) and (C % page_size == 0)
+        remap_kv = not ring and (C >= page_size) and (C % page_size == 0)
         k_curr = all_gather_tokens(k_local) if remap_kv else to_token_order(
             k_local)
         v_curr = all_gather_tokens(v_local) if remap_kv else to_token_order(
             v_local)
-        curr_out, kv_cache_updated, curr_lse = _rpa_cp_call(
+        if ring:
+            # Ring cache rounds + causal current phase in ONE launch sharing
+            # the online softmax.  Both seqs (head, tail) are forced to a full
+            # C so every rank runs the same ring schedule (lock-step); tail
+            # pad rows compute garbage the caller discards, exactly like the
+            # all-pad-tail case elsewhere.
+            cu = jnp.zeros_like(
+                pcp_cu_q_lens_local[0]).at[1].set(C).at[2:].set(2 * C)
+            phase_kw = dict(pcp_ring_axis_name=pcp_axis,
+                            pcp_ring_mesh_axis_names=tuple(mesh.axis_names))
+        else:
+            # Nothing cached (first chunk of a chunked prefill): the current
+            # phase already IS the answer.
+            cu = pcp_cu_q_lens_local[0]
+            phase_kw = dict(skip_cache_attn=True)
+        out, kv_cache_updated, _ = _rpa_cp_call(
             q_local,
             k_curr,
             v_curr,
             kv_cache_local,
             kv_lens_local,
             page_indices_local,
-            pcp_cu_q_lens_local[0],
+            cu,
             distribution_local,
             cp_rank=cp_rank,
             cp_group_size=pcp_size,
             kv_cache_lens=kv_cache_lens_local,
             q_pos_offsets=pcp_q_pos_offsets_local[0],
             pcp_chunk_size=(C if remap_kv else None),
-            skip_cache_attn=True,
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
             write_last_seq_only=True,
+            **phase_kw,
             **common)
-
-        # With nothing cached the current phase already IS the answer.
-        if context_out is None:
-            out = curr_out
-        else:
-            out, _ = merge_attn_states(context_out, context_lse, curr_out,
-                                       curr_lse)
         return kv_cache_updated, out.astype(q.dtype)
 
     return jax.shard_map(

@@ -284,6 +284,18 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         self._assert_matches(out, exp, pcp, C, S)
 
     @parameterized.product(pcp=[2, 4])
+    def test_ring_multi_block(self, pcp):
+        """A cache big enough that each rank's shard spans SEVERAL ring bkv
+        blocks (bkv ~ 1024 tokens here): exercises the per-block sync-release
+        schedule and the deferred (seq, bq)-crossing prefetch of the fused
+        launch, which small-cache configs cannot reach."""
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S = 4608, 128
+        out, _, exp, C = self._run(pcp, L, S, S)
+        self._assert_matches(out, exp, pcp, C, S)
+
+    @parameterized.product(pcp=[2, 4])
     def test_chunked_prefill(self, pcp):
         """Wrapper output == full-causal reference, for a chunked prefill: L
         previously-computed tokens in the strided cache + a full current chunk."""

@@ -84,6 +84,7 @@ def ref_ragged_paged_attention(
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
+    update_kv_cache: bool = True,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
@@ -425,6 +426,9 @@ def _ragged_paged_attention_kernel_loop(
         """How much of the `x` cached tokens `rank` owns."""
         return (x + cp_group_size - 1 - rank) // cp_group_size
 
+    # Fused ring: ONE launch runs the ring cache rounds AND the causal current
+    # phase, sharing (m, l, acc) so the whole sequence folds into one online
+    # softmax (no wrapper-level LSE merge).
     ring_enabled = pcp_ring_axis_name is not None
 
     def get_kv_new_len(seq_idx):
@@ -546,6 +550,7 @@ def _ragged_paged_attention_kernel_loop(
         processed_q_len,
         processed_kv_len,
         effective_kv_len,
+        in_ring=None,
     ):
         assert len(q.shape) == 2
         assert q.shape[0] % num_q_heads_per_kv_head == 0
@@ -598,7 +603,12 @@ def _ragged_paged_attention_kernel_loop(
         mask = None
         if use_causal_mask:
             assert not skip_kv_mask
-            mask = mask_and(mask, q_span >= k_span)
+            causal = q_span >= k_span
+            if in_ring is not None:
+                # Ring blocks attend the whole rotated cache shard
+                # (chunk-granular visibility): no token-causal mask.
+                causal = jnp.logical_or(causal, in_ring)
+            mask = mask_and(mask, causal)
 
         if not skip_kv_mask:
             mask = mask_and(mask, k_span < effective_kv_len_int)
@@ -608,13 +618,19 @@ def _ragged_paged_attention_kernel_loop(
         if sliding_window is not None:
             mask = mask_and(mask, q_span < k_span + sliding_window)
 
-        if skip_cache_attn:
-            kv_cache_len_local_int = kv_cache_len_local.astype(int_ty)
-            mask = mask_and(mask, k_span >= kv_cache_len_local_int)
-            v = jnp.where(v_span >= kv_cache_len_local_int, v,
-                          jnp.array(0.0, dtype=v.dtype))
+        if skip_cache_attn or in_ring is not None:
+            # Under ring this is the same skip-cache bound made runtime: the
+            # ring rounds cover [0, kv_cache_len_local), so current-region
+            # blocks mask the cache tail of the boundary block; on ring blocks
+            # the bound drops to 0 (a no-op).
+            lower = kv_cache_len_local
+            if in_ring is not None:
+                lower = jnp.where(in_ring, 0, lower)
+            lower = lower.astype(int_ty)
+            mask = mask_and(mask, k_span >= lower)
+            v = jnp.where(v_span >= lower, v, jnp.array(0.0, dtype=v.dtype))
 
-        if skip_current_attn and not ring_enabled:
+        if skip_current_attn:
             kv_cache_len_local_int = kv_cache_len_local.astype(int_ty)
             mask = mask_and(mask, k_span < kv_cache_len_local_int)
             v = jnp.where(v_span < kv_cache_len_local_int, v,
@@ -676,7 +692,18 @@ def _ragged_paged_attention_kernel_loop(
         else:
             cp.start()
 
-    def _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, *, wait=False):
+    def _fetch_bkv(seq_idx,
+                   bkv_idx,
+                   bkv_sem_idx,
+                   *,
+                   wait=False,
+                   in_ring=None,
+                   ring_wait=None):
+        # in_ring (ring only): runtime scalar; True = ring-region block (fetch
+        # local cache pages only), False = current-region block (fetch new KV
+        # only). Gated by DMA *size* (zero-size copies are no-ops), not
+        # control flow. ring_wait False makes the wait a zero-size no-op
+        # (ring rounds > 0 get their data from the rotation, not this fetch).
         sem = sems.at[0, bkv_sem_idx]
         vmem_ref = bkv_x2_ref.at[
             bkv_sem_idx, :, :num_kv_heads_x2_per_kv_packing]
@@ -743,6 +770,8 @@ def _ragged_paged_attention_kernel_loop(
                     # Ensure only effective kvs are copied.
                     sz = jnp.clip(kv_left_frm_cache - i * page_size, 0,
                                   page_size)
+                    if in_ring is not None:
+                        sz = jnp.where(in_ring, sz, 0)
                     # If the page index is out of bound, we set page_idx to the last page.
                     # And there will be no copy since sz will be 0.
                     page_idx = jnp.minimum(page_indices_offset + i,
@@ -759,6 +788,9 @@ def _ragged_paged_attention_kernel_loop(
             if not skip_current_attn:
                 new_kv_len_start = _seq_kv_new_end - kv_left_frm_new
                 if pcp_chunk_size is not None:
+                    # Rank-order KV remap; the ring passes token-order KV
+                    # instead (its ring-sized blocks may cross chunks).
+                    assert in_ring is None
                     two_p = 2 * cp_group_size
                     chunk_idx = new_kv_len_start // pcp_chunk_size
                     offset_in_chunk = (new_kv_len_start -
@@ -768,20 +800,30 @@ def _ragged_paged_attention_kernel_loop(
                                           2 * (two_p - 1 - chunk_idx) + 1)
                     new_kv_len_start = (rank_slot * pcp_chunk_size +
                                         offset_in_chunk)
+                sz_new = bkv_sz_frm_new
+                if in_ring is not None:
+                    sz_new = jnp.where(in_ring, 0, sz_new)
                 debug_print("[RPA debug] new_kv_len_start={}",
                             new_kv_len_start)
                 _async_copy(
-                    kv_hbm_ref.at[pl.ds(new_kv_len_start, bkv_sz_frm_new)],
-                    vmem_ref.at[pl.ds(bkv_sz_frm_cache, bkv_sz_frm_new)],
+                    kv_hbm_ref.at[pl.ds(new_kv_len_start, sz_new)],
+                    vmem_ref.at[pl.ds(bkv_sz_frm_cache, sz_new)],
                     sem,
                     wait,
                 )
         else:
-            fetch_sz = 0
-            if not skip_cache_attn:
-                fetch_sz += bkv_sz_frm_cache
-            if not skip_current_attn:
-                fetch_sz += bkv_sz_frm_new
+            if in_ring is not None:
+                # Ring round 0 waits the cache-page fetch; current blocks wait
+                # the new-KV fetch; ring rounds > 0 (ring_wait False) get
+                # their data from the rotation: zero-size no-op.
+                fetch_sz = jnp.where(in_ring, bkv_sz_frm_cache, bkv_sz_frm_new)
+                fetch_sz = jnp.where(ring_wait, fetch_sz, 0)
+            else:
+                fetch_sz = 0
+                if not skip_cache_attn:
+                    fetch_sz += bkv_sz_frm_cache
+                if not skip_current_attn:
+                    fetch_sz += bkv_sz_frm_new
             dst = vmem_ref.at[pl.ds(0, fetch_sz)]
             _async_copy(
                 src=dst,
@@ -794,7 +836,11 @@ def _ragged_paged_attention_kernel_loop(
             # bkv buffer, offset only matter when bkv_sz_frm_new > 0
             new_kv_len_start = _seq_kv_new_len - kv_left_frm_new
             offset = new_kv_len_start + (_seq_total_kv_len - _seq_kv_new_len)
-            return offset, bkv_sz_frm_new, bkv_sz_frm_cache,
+            ret_new_sz = bkv_sz_frm_new
+            if in_ring is not None:
+                # Ring-region blocks never write the cache.
+                ret_new_sz = jnp.where(in_ring, 0, bkv_sz_frm_new)
+            return offset, ret_new_sz, bkv_sz_frm_cache,
         else:
             return kv_len_start + bkv_sz_frm_cache, bkv_sz_frm_new, None
 
@@ -1023,11 +1069,11 @@ def _ragged_paged_attention_kernel_loop(
             wait,
         )
 
-    def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
-        return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
+    def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, **kw):
+        return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, **kw)
 
-    def wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
-        return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, wait=True)
+    def wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, **kw):
+        return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx, wait=True, **kw)
 
     def start_fetch_bq(seq_idx, bq_idx, bq_sem_idx):
         return _fetch_bq(seq_idx, bq_idx, bq_sem_idx)
@@ -1291,8 +1337,17 @@ def _ragged_paged_attention_kernel_loop(
                                       start_bkv_idx + 1)
 
             if ring_enabled:
-                # The bkv loop runs cp_group_size rounds per KV block.
-                end_bkv_idx = ring_num_bkv * cp_group_size
+                # Ring region first (cp_group_size rotation rounds per cache
+                # block), then the current-KV blocks, in ONE bkv loop sharing
+                # the online-softmax state. The current region mirrors a
+                # standalone current-phase launch, including the fetch_kv_len
+                # write extension above.
+                ring_region = ring_num_bkv * cp_group_size
+                cur_start_bkv = kv_cache_len_local // bkv_sz
+                fused_fetch_len = kv_len if update_kv_cache \
+                    else effective_kv_len
+                end_bkv_idx = ring_region + jnp.maximum(
+                    cdiv(fused_fetch_len, bkv_sz) - cur_start_bkv, 1)
 
             # Prefetch next bq
             @pl.when(next_seq_idx < end_seq_idx)
@@ -1306,48 +1361,83 @@ def _ragged_paged_attention_kernel_loop(
 
                 # Get next bkv ids.
                 bkv_sem_idx = sem_ids_ref[1]
-                next_seq_idx, _, next_bkv_idx, next_bkv_sem_idx = get_next_bkv_ids(
-                    seq_idx, bq_idx, bkv_idx, bkv_sem_idx, num_bkv=end_bkv_idx)
                 if ring_enabled:
-                    round_idx = lax.rem(bkv_idx, cp_group_size)
-                    bkv_idx = bkv_idx // cp_group_size
-                    next_bkv_idx = next_bkv_idx // cp_group_size
-                    bkv_sem_idx = lax.rem(round_idx, 2)
-                    next_bkv_sem_idx = 0
+                    # Virtual index v: [0, ring_region) = ring rounds over the
+                    # rotating cache shards; [ring_region, end) = current-KV
+                    # blocks, which act as "last round" so the ring predicates
+                    # (~is_last_round) skip them. Slot parity is uniform
+                    # across the region boundary (ring_region even, P even).
+                    def ring_ids(v):
+                        inr = v < ring_region
+                        blk = jnp.where(inr, v // cp_group_size,
+                                        cur_start_bkv + v - ring_region)
+                        rnd = jnp.where(inr, lax.rem(v, cp_group_size),
+                                        cp_group_size - 1)
+                        return inr, blk, rnd, lax.rem(v, 2)
+
+                    v_idx = bkv_idx
+                    in_ring, bkv_idx, round_idx, bkv_sem_idx = ring_ids(v_idx)
                     is_last_round = round_idx == cp_group_size - 1
+                    is_last_v = v_idx + 1 == end_bkv_idx
+                    # The successor of the last block is the next (seq, bq)'s
+                    # ring block 0 (fetch index 0, slot 0).
+                    next_in_ring, next_bkv_idx, _, next_bkv_sem_idx = ring_ids(
+                        v_idx + 1)
+                    next_in_ring = next_in_ring | is_last_v
+                    next_bkv_idx = jnp.where(is_last_v, 0, next_bkv_idx)
+                    next_bkv_sem_idx = jnp.where(is_last_v, 0,
+                                                 next_bkv_sem_idx)
+                    next_seq_idx = jnp.where(
+                        is_last_v & (bq_idx + 1 == num_bq), seq_idx + 1,
+                        seq_idx)
                 else:
+                    next_seq_idx, _, next_bkv_idx, next_bkv_sem_idx = get_next_bkv_ids(
+                        seq_idx,
+                        bq_idx,
+                        bkv_idx,
+                        bkv_sem_idx,
+                        num_bkv=end_bkv_idx)
                     round_idx = 0
                     is_last_round = jnp.bool_(True)
                 processed_kv_len = bkv_idx * bkv_sz
 
                 # Prefetch next bkv
-                @pl.when((next_seq_idx < end_seq_idx) & is_last_round)
+                _prefetch_pred = (next_seq_idx < end_seq_idx) & is_last_round
+                if ring_enabled:
+                    # The (seq, bq)-crossing prefetch targets slot 0 — which
+                    # can be the slot this last block still computes from — so
+                    # it is issued post-attention instead (below).
+                    _prefetch_pred = _prefetch_pred & ~is_last_v
+
+                @pl.when(_prefetch_pred)
                 def prefetch_next_bkv():
                     sem_ids_ref[1] = next_bkv_sem_idx
+                    _kw = dict(in_ring=next_in_ring) if ring_enabled else {}
                     start_fetch_bkv(next_seq_idx, next_bkv_idx,
-                                    next_bkv_sem_idx)
+                                    next_bkv_sem_idx, **_kw)
 
                 # Wait for cur bq if not ready yet
                 @pl.when((bkv_idx == start_bkv_idx) & (round_idx == 0))
                 def wait_cur_bq():
                     wait_fetch_bq(seq_idx, bq_idx, bq_sem_idx)
 
-                if ring_enabled:
+                # Wait for cur bkv. Ring rounds > 0 wait nothing: their data
+                # arrives via the rotation, awaited in finish_rotate below.
+                _kw = {} if not ring_enabled else dict(
+                    in_ring=in_ring, ring_wait=~in_ring | (round_idx == 0))
+                offset, update_sz, src_start_base = wait_fetch_bkv(
+                    seq_idx, bkv_idx, bkv_sem_idx, **_kw)
 
-                    @pl.when(round_idx == 0)
-                    def wait_cur_bkv():
-                        wait_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
-                else:
-                    # Wait for cur bkv
-                    offset, update_sz, src_start_base = wait_fetch_bkv(
-                        seq_idx, bkv_idx, bkv_sem_idx)
-
-                # Send my bkv to next rank in the ring.
+                # Send my bkv to the next rank in the ring; each round is
+                # bounded by the ORIGINATING rank's shard length (current
+                # blocks keep the causal bq-level bound).
                 if ring_enabled:
                     src_rank = lax.rem(my_ring_id + cp_group_size - round_idx,
                                        cp_group_size)
-                    effective_kv_len = get_cp_local_size_of_rank(
-                        global_cache_len, src_rank)
+                    effective_kv_len = jnp.where(
+                        in_ring,
+                        get_cp_local_size_of_rank(global_cache_len, src_rank),
+                        effective_kv_len)
                     next_slot = 1 - bkv_sem_idx
                     # Chain has no predecessor
                     is_first_launch = ((seq_idx == start_seq_idx)
@@ -1438,6 +1528,8 @@ def _ragged_paged_attention_kernel_loop(
                             # `step2_pv` for the previous KV head, which depends on the
                             # softmax output, is overlapped with `step1_qk_softmax` for the
                             # current KV head, reducing overall wait times.
+                            _mask_kw = {} if not ring_enabled else dict(
+                                in_ring=in_ring)
                             cur_p, cur_v, cur_exp_m_diff = flash_attention_step1_qk_softmax(
                                 bq_c,
                                 bk_c,
@@ -1447,6 +1539,7 @@ def _ragged_paged_attention_kernel_loop(
                                 processed_q_len=processed_q_len + bq_start,
                                 processed_kv_len=processed_kv_len + bkv_start,
                                 effective_kv_len=effective_kv_len,
+                                **_mask_kw,
                             )
                             if prev_lm_slice is not None:
                                 flash_attention_step2_pv(
@@ -1476,7 +1569,8 @@ def _ragged_paged_attention_kernel_loop(
                         remote_op.wait()
 
                         # Tell the sender its next write target is free.
-                        # Round P-1 doesn't send to the next rank, so it doesn't a signal from round P-2.
+                        # Round P-1 doesn't send to the next rank, so it
+                        # doesn't need a signal from round P-2.
                         @pl.when(round_idx < cp_group_size - 2)
                         def release_slot_to_sender():
                             pl.semaphore_signal(
@@ -1486,14 +1580,21 @@ def _ragged_paged_attention_kernel_loop(
                                 device_id_type=pl.DeviceIdType.MESH,
                             )
 
-                    is_last_launch = ((seq_idx == end_seq_idx - 1)
-                                      & (bq_idx == num_bq - 1)
-                                      & (bkv_idx == ring_num_bkv - 1)
-                                      & is_last_round)
+                    # Non-last ring blocks release at round P-1: their slot's
+                    # next writer is the very rotation that release enables
+                    # (block b+1's data stream), not a clobber. ONLY the LAST
+                    # ring block's slot stays live through the current region
+                    # (which ping-pongs both slots), so only ITS release is
+                    # deferred to the last virtual block. Signals per bq stay
+                    # = ring_num_bkv, matching the waits.
+                    _is_final_bq = ((seq_idx == end_seq_idx - 1)
+                                    & (bq_idx == num_bq - 1))
+                    _release = (in_ring & is_last_round
+                                & (bkv_idx < ring_num_bkv - 1)) | (
+                                    (v_idx == end_bkv_idx - 1)
+                                    & ~_is_final_bq)
 
-                    # At round P-1, let the round 0 sender know its next
-                    # write target is free.
-                    @pl.when(is_last_round & ~is_last_launch)
+                    @pl.when(_release)
                     def release_block_to_sender():
                         pl.semaphore_signal(
                             ring_sync_sem,
@@ -1501,6 +1602,16 @@ def _ragged_paged_attention_kernel_loop(
                             device_id=ring_prev_id,
                             device_id_type=pl.DeviceIdType.MESH,
                         )
+
+                    # The deferred (seq, bq)-crossing prefetch: safe now —
+                    # this block's attention is done, so slot 0 is free.
+                    @pl.when((v_idx == end_bkv_idx - 1)
+                             & (next_seq_idx < end_seq_idx))
+                    def prefetch_next_bq_ring0():
+                        start_fetch_bkv(next_seq_idx,
+                                        0,
+                                        0,
+                                        in_ring=jnp.bool_(True))
 
             # Load acc and calculate final output.
             acc = acc_ref[...]
@@ -1560,7 +1671,8 @@ def _ragged_paged_attention_kernel_loop(
         start_fetch_bq(seq_idx=start_seq_idx, bq_idx=0, bq_sem_idx=0)
         start_fetch_bkv(seq_idx=start_seq_idx,
                         bkv_idx=cur_seq_start_bkv_idx,
-                        bkv_sem_idx=0)
+                        bkv_sem_idx=0,
+                        in_ring=jnp.bool_(True) if ring_enabled else None)
 
     @pl.when(jnp.logical_and(start_seq_idx <= seq_idx, seq_idx < end_seq_idx))
     def pipeline():
@@ -1813,7 +1925,6 @@ def static_validate_inputs(
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
-    update_kv_cache: bool = True,
     sm_scale: float = 1.0,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
@@ -1984,11 +2095,12 @@ def static_validate_inputs(
             raise ValueError(
                 "pcp_ring_axis_name requires cp_group_size and cp_rank, and "
                 "cp_group_size must be even.")
-        if not skip_current_attn or update_kv_cache or use_causal_mask:
+        # Fused ring: ring cache rounds + causal current phase in ONE launch
+        # with a shared online softmax.
+        if not use_causal_mask or skip_cache_attn or skip_current_attn:
             raise NotImplementedError(
-                "pcp_ring_axis_name is a cache-phase path and requires "
-                "skip_current_attn=True, update_kv_cache=False, and "
-                "use_causal_mask=False")
+                "pcp_ring_axis_name requires use_causal_mask=True, "
+                "skip_cache_attn=False, and skip_current_attn=False")
         if sliding_window is not None:
             raise NotImplementedError(
                 "pcp_ring_axis_name does not support sliding_window")
@@ -2231,8 +2343,9 @@ def ragged_paged_attention(
     cp_rank: the rank of the current device in the context parallelism group.
     cp_group_size: the size of the context parallelism group.
     q_pos_offsets: the position of the query tokens in the global sequence, only needed for PCP.
-    pcp_ring_axis_name: PCP only. When set, the cache phase streams the striped
-      KV cache around this axis.
+    pcp_ring_axis_name: PCP only. When set, the launch streams the striped KV
+      cache around this axis (ring) and runs the causal current phase in the
+      same launch, sharing one online softmax.
     pcp_ring_mesh_axis_names: all axis names of the mesh the ring runs on, in
       order. Defaults to a one-axis mesh.
     use_causal_mask: if true, use causal mask.
