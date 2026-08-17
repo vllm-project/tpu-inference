@@ -253,6 +253,8 @@ async def run_grpo_stream(
         ttft = None
         usage = None
         full_response_text = []
+        full_tool_calls: Dict[int, Dict[str, Any]] = {}
+        full_reasoning_text = []
 
         try:
             async with session.post(url, json=payload,
@@ -283,6 +285,43 @@ async def run_grpo_stream(
                                 content = delta.get("content", "")
                                 if content:
                                     full_response_text.append(content)
+                                reasoning = (delta.get("reasoning_content") or
+                                             delta.get("reasoning"))
+                                if reasoning:
+                                    full_reasoning_text.append(reasoning)
+                                if delta.get("tool_calls"):
+                                    for tc in delta["tool_calls"]:
+                                        idx = tc.get("index", 0)
+                                        if idx not in full_tool_calls:
+                                            full_tool_calls[idx] = {
+                                                "id":
+                                                tc.get("id", f"call_{idx}"),
+                                                "type":
+                                                tc.get("type", "function"),
+                                                "function": {
+                                                    "name":
+                                                    tc.get("function",
+                                                           {}).get("name", ""),
+                                                    "arguments":
+                                                    tc.get("function", {}).get(
+                                                        "arguments", ""),
+                                                },
+                                            }
+                                        else:
+                                            fn = tc.get("function", {})
+                                            if "name" in fn and fn["name"]:
+                                                full_tool_calls[idx][
+                                                    "function"][
+                                                        "name"] += fn["name"]
+                                            if "arguments" in fn and fn[
+                                                    "arguments"]:
+                                                full_tool_calls[idx][
+                                                    "function"][
+                                                        "arguments"] += fn[
+                                                            "arguments"]
+                                            if tc.get("id"):
+                                                full_tool_calls[idx]["id"] = tc[
+                                                    "id"]
                         except Exception:
                             pass
 
@@ -290,6 +329,7 @@ async def run_grpo_stream(
             total_time_ms = (end_time - start_time) * 1000.0
 
             assistant_response = "".join(full_response_text)
+            reasoning_response = "".join(full_reasoning_text)
 
             # Token counts come from the server: they are what the engine
             # actually processed. Counting client-side instead is inaccurate
@@ -312,10 +352,26 @@ async def run_grpo_stream(
             else:
                 tpot = total_time_ms
 
-            messages.append({
-                "role": "assistant",
-                "content": assistant_response
-            })
+            # Build assistant message and environment observation according to OpenAI format
+            assistant_msg: Dict[str, Any] = {"role": "assistant"}
+            if assistant_response:
+                assistant_msg["content"] = assistant_response
+            elif not full_tool_calls:
+                assistant_msg["content"] = ""
+            else:
+                assistant_msg["content"] = None
+
+            if reasoning_response:
+                assistant_msg["reasoning_content"] = reasoning_response
+
+            if full_tool_calls:
+                tool_calls_list = [
+                    full_tool_calls[i] for i in sorted(full_tool_calls.keys())
+                ]
+                assistant_msg["tool_calls"] = tool_calls_list
+                messages.append(assistant_msg)
+            else:
+                messages.append(assistant_msg)
 
             turn_stat = {
                 "group_idx": group_idx,
@@ -338,7 +394,15 @@ async def run_grpo_stream(
                 env_len = random.randint(args.env_len_min, args.env_len_max)
             env_text = make_token_text(tokenizer, env_len, random)
 
-            messages.append({"role": "user", "content": env_text})
+            if full_tool_calls:
+                for tc in tool_calls_list:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": env_text,
+                    })
+            else:
+                messages.append({"role": "user", "content": env_text})
             turn_stat["env_tokens"] = len(tokenizer.encode(env_text))
 
             # The stream is idle while the environment executes the tool
