@@ -857,3 +857,124 @@ class GDNAttentionTest(parameterized.TestCase):
                                    output_ref[half:],
                                    rtol=2e-2,
                                    atol=2e-2)
+
+    def test_split_read_write_state_slots(self):
+        """Resume from one state slot while checkpointing into another.
+
+        This is the mamba prefix-caching path (`mamba_cache_mode="align"`):
+        a request continues from the state block cached at the last block
+        boundary and writes its new checkpoint into the block covering the
+        current position. The continuation must be numerically identical to
+        reading and writing one slot, and the slot that was read must be
+        left untouched so other requests can still hit it in the cache.
+        """
+
+        kq_head_dim = 128
+        v_head_dim = 128
+        n_kq = 2
+        n_v = 8
+        kernel_size = 4
+
+        half = 32
+        full = 64
+        # Slot 0 is the null block; step A writes slot 1, step B reads slot 1
+        # and writes slot 2.
+        read_slot, write_slot = 1, 2
+        num_blocks = 3
+
+        rngs = iter(jax.random.split(jax.random.key(23), 12))
+        query = jax.random.normal(next(rngs), (full, n_kq * kq_head_dim))
+        key = jax.random.normal(next(rngs), (full, n_kq * kq_head_dim))
+        value = jax.random.normal(next(rngs), (full, n_v * v_head_dim))
+        b = jax.random.normal(next(rngs), (full, n_v))
+        a = jax.random.normal(next(rngs), (full, n_v))
+
+        conv_dim = (n_kq * kq_head_dim) * 2 + n_v * v_head_dim
+        conv_weight = jax.random.normal(next(rngs), (conv_dim, 1, kernel_size))
+        conv_bias = jax.random.normal(next(rngs), (conv_dim, ))
+        A_log = jax.random.normal(next(rngs), (n_v, ))
+        dt_bias = jax.random.normal(next(rngs), (n_v, ))
+
+        mixed_qkv_full = jnp.concatenate([query, key, value], axis=-1)
+
+        conv_state_zero = jnp.zeros((num_blocks, kernel_size - 1, conv_dim))
+        recurrent_state_zero = jnp.zeros(
+            (num_blocks, n_v, kq_head_dim, v_head_dim))
+
+        run_jitted = jax.jit(
+            wrapper.fused_conv1d_gdn,
+            static_argnames=["n_kq", "n_v", "d_k", "d_v", "kernel_size"],
+        )
+        common_static = dict(
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            a_log=A_log,
+            dt_bias=dt_bias,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=kq_head_dim,
+            d_v=v_head_dim,
+            kernel_size=kernel_size,
+        )
+
+        # Single-shot reference over all 64 tokens from a zero state.
+        (_, _), output_ref = run_jitted(
+            qkv=mixed_qkv_full,
+            b=b,
+            a=a,
+            conv_state=conv_state_zero,
+            recurrent_state=recurrent_state_zero,
+            query_start_loc=jnp.array([0, full]),
+            state_indices=jnp.array([read_slot]),
+            distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
+            seq_lens=jnp.array([full], dtype=jnp.int32),
+            **common_static,
+        )
+
+        # Step A: first half from a zero state, checkpointing into read_slot.
+        (conv_after_a, rec_after_a), _ = run_jitted(
+            qkv=mixed_qkv_full[:half],
+            b=b[:half],
+            a=a[:half],
+            conv_state=conv_state_zero,
+            recurrent_state=recurrent_state_zero,
+            query_start_loc=jnp.array([0, half]),
+            state_indices=jnp.array([read_slot]),
+            distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
+            seq_lens=jnp.array([half], dtype=jnp.int32),
+            **common_static,
+        )
+
+        # Step B: second half, resuming from read_slot but checkpointing into
+        # write_slot — the block-boundary crossing that align mode performs.
+        (conv_after_b, rec_after_b), output_b = run_jitted(
+            qkv=mixed_qkv_full[half:],
+            b=b[half:],
+            a=a[half:],
+            conv_state=conv_after_a,
+            recurrent_state=rec_after_a,
+            query_start_loc=jnp.array([0, half]),
+            state_indices=jnp.array([write_slot]),
+            read_state_indices=jnp.array([read_slot]),
+            distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
+            seq_lens=jnp.array([full], dtype=jnp.int32),
+            **common_static,
+        )
+
+        # Splitting the slots must not change the numerics.
+        np.testing.assert_allclose(output_b,
+                                   output_ref[half:],
+                                   rtol=2e-2,
+                                   atol=2e-2)
+
+        # The slot that was read is the cached prefix state; leaving it intact
+        # is what lets a later request hit it.
+        np.testing.assert_array_equal(conv_after_b[read_slot],
+                                      conv_after_a[read_slot])
+        np.testing.assert_array_equal(rec_after_b[read_slot],
+                                      rec_after_a[read_slot])
+
+        # The new checkpoint landed in write_slot, which started out zeroed.
+        self.assertTrue(
+            np.any(np.asarray(rec_after_b[write_slot]) != 0.0),
+            "write_slot should hold the step's final recurrent state")
