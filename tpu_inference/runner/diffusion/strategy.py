@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +26,8 @@ from tpu_inference.layers.common.attention_metadata import (AttentionMaskKind,
                                                             AttentionMaskSpec,
                                                             AttentionMetadata)
 from tpu_inference.logger import init_logger
-from tpu_inference.runner.diffusion.algorithm import get_commit_algorithm
+from tpu_inference.runner.diffusion.algorithm import (
+    get_commit_algorithm, get_commit_diagnostics_algorithm)
 from tpu_inference.runner.diffusion.batch import (
     PendingBlockOutput, complete_seeded_decode_block, diffusion_batch_sizes,
     flush_partial_block_output, needs_block_anchor, plan_seeded_prompt,
@@ -36,7 +38,8 @@ from tpu_inference.runner.diffusion.config import (CanvasPolicy,
                                                    NextBlockPolicy,
                                                    PromptRemainderPolicy)
 from tpu_inference.runner.diffusion.program import (
-    denoise_block, denoise_block_dual_cache, select_aligned_hidden_states)
+    DUAL_CACHE_Q32, DUAL_CACHE_Q8, DualCacheAcceptanceTrace, denoise_block,
+    denoise_block_dual_cache, select_aligned_hidden_states)
 from tpu_inference.utils import device_array
 
 if TYPE_CHECKING:
@@ -45,6 +48,65 @@ if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
+
+DUAL_CACHE_ACCEPTANCE_TRACE_PREFIX = \
+    "Fast-dLLM DualCache acceptance step: "
+
+
+def _eligible_finite_values(values: np.ndarray,
+                            eligible: np.ndarray) -> list[float | None]:
+    return [
+        float(value) if is_eligible and np.isfinite(value) else None
+        for value, is_eligible in zip(values, eligible, strict=True)
+    ]
+
+
+def _log_dual_cache_acceptance_trace(trace: DualCacheAcceptanceTrace) -> None:
+    trace_host = jax.device_get(trace)
+    count = int(trace_host.count)
+    block_start = int(trace_host.block_start)
+    forward_kinds = {
+        DUAL_CACHE_Q32: "q32",
+        DUAL_CACHE_Q8: "q8",
+    }
+    for index in range(count):
+        eligible = np.asarray(trace_host.row0_eligible[index], dtype=bool)
+        record = {
+            "block_start":
+            block_start,
+            "subblock_start":
+            int(trace_host.sub_block_starts[index]),
+            "iteration":
+            int(trace_host.iterations[index]),
+            "forward_kind":
+            forward_kinds[int(trace_host.forward_kinds[index])],
+            "row0_token_ids":
+            np.asarray(trace_host.row0_token_ids[index]).tolist(),
+            "row0_eligible":
+            eligible.tolist(),
+            "row0_commit":
+            np.asarray(trace_host.row0_commit[index], dtype=bool).tolist(),
+            "row0_remaining":
+            np.asarray(trace_host.row0_remaining[index], dtype=bool).tolist(),
+            "row0_selected_log_confidence":
+            _eligible_finite_values(
+                np.asarray(trace_host.row0_selected_log_confidence[index]),
+                eligible,
+            ),
+            "row0_threshold_margin":
+            _eligible_finite_values(
+                np.asarray(trace_host.row0_threshold_margin[index]),
+                eligible,
+            ),
+        }
+        logger.info(
+            "%s%s",
+            DUAL_CACHE_ACCEPTANCE_TRACE_PREFIX,
+            json.dumps(record,
+                       allow_nan=False,
+                       separators=(",", ":"),
+                       sort_keys=True),
+        )
 
 
 class BlockDiffusionStrategy:
@@ -61,6 +123,8 @@ class BlockDiffusionStrategy:
         self._partial_subblock_forward_fn = self._model_forward_partial_subblock
         self._final_forward_fn = self._model_forward_final
         self._commit_fn = get_commit_algorithm(config.runtime.algorithm)
+        self._commit_diagnostics_fn = get_commit_diagnostics_algorithm(
+            config.runtime.algorithm)
 
         model = config.model
         if model.canvas_policy is not CanvasPolicy.SEED_AND_MASK:
@@ -270,6 +334,7 @@ class BlockDiffusionStrategy:
             attention_mask_spec=AttentionMaskSpec(
                 AttentionMaskKind.BIDIRECTIONAL),
             replace_cached_kv=True,
+            fp32_rpa_accumulator=self.config.runtime.fp32_partial_rpa,
         )
         return (canvas, mask, positions, active_rows, (full_metadata,
                                                        partial_metadata))
@@ -592,6 +657,11 @@ class BlockDiffusionStrategy:
                 needs_final_forward=final_rows,
                 stop_on_eos_rows=stop_rows,
                 eos_token_ids=eos_token_ids,
+                commit_diagnostics_fn=self._commit_diagnostics_fn,
+                trace_acceptance_steps=(
+                    self.config.runtime.trace_acceptance_steps),
+                q8_log_confidence_bias=(
+                    self.config.runtime.q8_log_confidence_bias),
             )
         else:
             output = denoise_block(
@@ -617,17 +687,22 @@ class BlockDiffusionStrategy:
             )
         self.runner.kv_caches = output.kv_caches
         if self.config.runtime.use_dual_cache:
+            device_outputs = (
+                output.canvas[:len(req_ids)],
+                output.next_anchor[:len(req_ids)],
+                output.denoise_steps[:len(req_ids)],
+                output.stopped_rows[:len(req_ids)],
+                output.q32_forward_calls,
+                output.q8_forward_calls,
+                output.final_q32_forward_calls,
+            )
+            if self.config.runtime.trace_acceptance_steps:
+                assert output.acceptance_trace is not None
+                device_outputs += (output.acceptance_trace, )
+            host_outputs = jax.device_get(device_outputs)
             (canvas_host, anchors_host, denoise_steps_host, stopped_rows_host,
              q32_calls_host, q8_calls_host,
-             final_q32_calls_host) = jax.device_get((
-                 output.canvas[:len(req_ids)],
-                 output.next_anchor[:len(req_ids)],
-                 output.denoise_steps[:len(req_ids)],
-                 output.stopped_rows[:len(req_ids)],
-                 output.q32_forward_calls,
-                 output.q8_forward_calls,
-                 output.final_q32_forward_calls,
-             ))
+             final_q32_calls_host) = host_outputs[:7]
             q32_calls = int(q32_calls_host)
             q8_calls = int(q8_calls_host)
             final_q32_calls = int(final_q32_calls_host)
@@ -654,6 +729,15 @@ class BlockDiffusionStrategy:
                 final_q32_calls,
                 "output_candidate_positions":
                 output_candidate_positions,
+                "confidence_threshold":
+                self.config.runtime.confidence_threshold,
+                "q8_log_confidence_bias":
+                self.config.runtime.q8_log_confidence_bias,
+                "q8_effective_confidence_threshold":
+                (self.config.runtime.confidence_threshold *
+                 np.exp(-self.config.runtime.q8_log_confidence_bias)
+                 if 0.0 < self.config.runtime.confidence_threshold < 1.0 else
+                 self.config.runtime.confidence_threshold),
                 "static_transformer_positions":
                 static_transformer_positions,
                 "static_lm_head_positions":
@@ -675,6 +759,8 @@ class BlockDiffusionStrategy:
             }
             logger.info("Fast-dLLM DualCache trace: %s",
                         self._last_denoise_trace)
+            if self.config.runtime.trace_acceptance_steps:
+                _log_dual_cache_acceptance_trace(host_outputs[7])
         else:
             canvas_host, anchors_host = jax.device_get((
                 output.canvas[:len(req_ids)],
@@ -977,6 +1063,11 @@ class BlockDiffusionStrategy:
                     max_denoise_steps=self.config.runtime.max_denoise_steps,
                     stop_on_eos_rows=jnp.zeros_like(active_rows),
                     eos_token_ids=eos_token_ids,
+                    commit_diagnostics_fn=self._commit_diagnostics_fn,
+                    trace_acceptance_steps=(
+                        self.config.runtime.trace_acceptance_steps),
+                    q8_log_confidence_bias=(
+                        self.config.runtime.q8_log_confidence_bias),
                 )
             else:
                 output = denoise_block(

@@ -120,6 +120,64 @@ def test_runtime_and_model_overrides_are_separate():
     assert resolved.diffusion.runtime.temperature == 0.2
     assert resolved.diffusion.runtime.max_denoise_steps == 12
     assert resolved.diffusion.runtime.use_dual_cache is True
+    assert resolved.diffusion.runtime.trace_acceptance_steps is False
+    assert resolved.diffusion.runtime.fp32_partial_rpa is False
+    assert resolved.diffusion.runtime.q8_log_confidence_bias == 0.0
+
+
+def test_resolves_opt_in_dual_cache_acceptance_trace():
+    resolved = resolve_generation_strategy(
+        _vllm_config({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "block_size": 16,
+                "mask_token_id": 99,
+                "sub_block_size": 4,
+                "use_dual_cache": True,
+                "trace_acceptance_steps": True,
+            },
+        }))
+
+    assert resolved.diffusion is not None
+    assert resolved.diffusion.runtime.trace_acceptance_steps is True
+
+
+def test_resolves_opt_in_fp32_partial_rpa():
+    resolved = resolve_generation_strategy(
+        _vllm_config({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "block_size": 16,
+                "mask_token_id": 99,
+                "sub_block_size": 4,
+                "use_dual_cache": True,
+                "fp32_partial_rpa": True,
+            },
+        }))
+
+    assert resolved.diffusion is not None
+    assert resolved.diffusion.runtime.fp32_partial_rpa is True
+
+
+def test_resolves_opt_in_q8_log_confidence_bias():
+    resolved = resolve_generation_strategy(
+        _vllm_config({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "block_size": 16,
+                "mask_token_id": 99,
+                "sub_block_size": 4,
+                "confidence_threshold": 0.9,
+                "use_dual_cache": True,
+                "q8_log_confidence_bias": 0.05,
+            },
+        }))
+
+    assert resolved.diffusion is not None
+    assert resolved.diffusion.runtime.q8_log_confidence_bias == 0.05
 
 
 def test_new_model_adapter_does_not_change_strategy_resolution():
@@ -175,6 +233,51 @@ def test_new_model_adapter_does_not_change_strategy_resolution():
                 "confidence_threshold": 2.0,
             },
         }, "confidence_threshold"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "trace_acceptance_steps": True,
+            },
+        }, "requires use_dual_cache"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "fp32_partial_rpa": True,
+            },
+        }, "fp32_partial_rpa requires use_dual_cache"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "q8_log_confidence_bias": 0.05,
+            },
+        }, "q8_log_confidence_bias requires use_dual_cache"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "use_dual_cache": True,
+                "q8_log_confidence_bias": 0.51,
+            },
+        }, "must not exceed 0.5"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "use_dual_cache": True,
+                "q8_log_confidence_bias": -0.01,
+            },
+        }, "finite and non-negative"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "use_dual_cache": True,
+                "q8_log_confidence_bias": float("inf"),
+            },
+        }, "finite and non-negative"),
     ],
 )
 def test_invalid_configuration_fails_at_resolution(additional_config, match):

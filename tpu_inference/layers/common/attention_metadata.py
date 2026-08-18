@@ -118,6 +118,7 @@ class PCPMetadata:
         "attention_mask_spec",
         "replace_cached_kv",
         "rpa_static_query_len",
+        "fp32_rpa_accumulator",
     ],
 )
 @dataclass
@@ -166,6 +167,10 @@ class AttentionMetadata(object):
 
     # Selects the fixed-query PREFILL RPA path instead of dynamic MIXED RPA.
     rpa_static_query_len: int | None = None
+
+    # Runs RPA attention statistics and accumulation in float32, then restores
+    # the query dtype before the output projection.
+    fp32_rpa_accumulator: bool = False
 
 
 @functools.partial(

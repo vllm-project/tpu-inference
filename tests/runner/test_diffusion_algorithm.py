@@ -57,6 +57,9 @@ _PROGRAM = _MODULES["tpu_inference.runner.diffusion.program"]
 LogitAlignment = _CONFIG.LogitAlignment
 NextBlockPolicy = _CONFIG.NextBlockPolicy
 low_confidence_commit = _ALGORITHM.low_confidence_commit
+low_confidence_diagnostics = _ALGORITHM.low_confidence_diagnostics
+confidence_threshold_with_log_bias = (
+    _ALGORITHM.confidence_threshold_with_log_bias)
 denoise_block = _PROGRAM.denoise_block
 denoise_block_dual_cache = _PROGRAM.denoise_block_dual_cache
 select_aligned_hidden_states = _PROGRAM.select_aligned_hidden_states
@@ -68,6 +71,46 @@ def _thresholds(batch_size, value=0.9):
 
 def _temperatures(batch_size):
     return jnp.zeros((batch_size, ), dtype=jnp.float32)
+
+
+def _official_gpu_reference_commit(logits, eligible_mask, active_rows,
+                                   confidence_threshold):
+    probabilities = jax.nn.softmax(logits, axis=-1)
+    token_ids = jnp.argmax(probabilities, axis=-1).astype(jnp.int32)
+    selected_probabilities = jnp.take_along_axis(probabilities,
+                                                 token_ids[..., None],
+                                                 axis=-1)[..., 0]
+    thresholds = jnp.asarray(confidence_threshold, dtype=probabilities.dtype)
+    eligible = jnp.asarray(eligible_mask, dtype=bool) & active_rows[:, None]
+    commit = eligible & (selected_probabilities > thresholds[:, None])
+
+    masked_probabilities = jnp.where(eligible, selected_probabilities,
+                                     -jnp.inf)
+    forced_indices = jnp.argmax(masked_probabilities, axis=-1)
+    forced = jax.nn.one_hot(forced_indices, logits.shape[1], dtype=bool)
+    forced &= jnp.any(eligible, axis=-1)[:, None]
+    commit |= forced
+    return token_ids, eligible & ~commit
+
+
+def test_log_confidence_bias_preserves_zero_and_lowers_threshold():
+    thresholds = _thresholds(2, value=0.9)
+
+    unchanged = confidence_threshold_with_log_bias(thresholds, 0.0)
+    biased = confidence_threshold_with_log_bias(thresholds, 0.05)
+
+    assert unchanged is thresholds
+    np.testing.assert_array_equal(unchanged, thresholds)
+    np.testing.assert_allclose(
+        biased,
+        np.asarray(thresholds) * np.exp(-0.05),
+        rtol=1e-6,
+    )
+    boundary_thresholds = jnp.array([0.0, 1.0], dtype=jnp.float32)
+    np.testing.assert_array_equal(
+        confidence_threshold_with_log_bias(boundary_thresholds, 0.5),
+        boundary_thresholds,
+    )
 
 
 def test_low_confidence_commit_threshold_and_forced_progress():
@@ -89,6 +132,185 @@ def test_low_confidence_commit_threshold_and_forced_progress():
     np.testing.assert_array_equal(tokens, [[0, 0, 1], [0, 1, 0]])
     assert remaining[0].sum() == 2
     assert remaining[1].sum() == 2
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16],
+                         ids=["float32", "bfloat16"])
+def test_low_confidence_commit_matches_official_gpu_reference(dtype):
+    logits = jnp.array([
+        [[5.0, 0.0, -4.0, -20.0], [2.5, 0.0, -4.0, -20.0],
+         [0.25, 0.0, -4.0, -20.0]],
+        [[0.2, 0.0, -4.0, -20.0], [0.4, 0.0, -4.0, -20.0],
+         [0.3, 0.0, -4.0, -20.0]],
+    ],
+                       dtype=dtype)
+    eligible = jnp.ones((2, 3), dtype=bool)
+    active_rows = jnp.array([True, True])
+    thresholds = _thresholds(2)
+
+    actual_tokens, actual_remaining = low_confidence_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+        _temperatures(2),
+        3,
+    )
+    expected_tokens, expected_remaining = _official_gpu_reference_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+    )
+
+    np.testing.assert_array_equal(actual_tokens, expected_tokens)
+    np.testing.assert_array_equal(actual_remaining, expected_remaining)
+
+
+def test_float32_probability_boundary_documents_log_space_rounding_contract():
+    threshold = jnp.asarray(0.9, dtype=jnp.float32)
+    boundary_gap = jnp.log(jnp.asarray(9.0, dtype=jnp.float32))
+    position_logits = jnp.array([
+        [8.0, 0.0, -jnp.inf],
+        [boundary_gap, 0.0, -jnp.inf],
+        [0.0, 0.0, -jnp.inf],
+    ],
+                                dtype=jnp.float32)
+    boundary_probability = jax.nn.softmax(position_logits[1])[0]
+    np.testing.assert_array_equal(boundary_probability, threshold)
+    thresholds = jnp.array([
+        jnp.nextafter(boundary_probability, -jnp.inf),
+        boundary_probability,
+        jnp.nextafter(boundary_probability, jnp.inf),
+    ])
+    logits = jnp.broadcast_to(position_logits, (3, 3, 3))
+    eligible = jnp.ones((3, 3), dtype=bool)
+    active_rows = jnp.ones((3, ), dtype=bool)
+
+    _, official_remaining = _official_gpu_reference_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+    )
+    _, current_remaining = low_confidence_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+        _temperatures(3),
+        2,
+    )
+
+    np.testing.assert_array_equal(
+        official_remaining,
+        [[False, False, True], [False, True, True], [False, True, True]],
+    )
+    # At the exactly-equal boundary, the current FP32 log-space comparison
+    # rounds differently from the official probability-space comparison.
+    np.testing.assert_array_equal(
+        current_remaining,
+        [[False, False, True], [False, False, True], [False, True, True]],
+    )
+
+
+def test_bfloat16_probability_boundary_matches_official_gpu_reference():
+    boundary_gap = jnp.log(jnp.asarray(9.0, dtype=jnp.float32))
+    position_logits = jnp.array([
+        [8.0, 0.0, -jnp.inf],
+        [boundary_gap, 0.0, -jnp.inf],
+        [0.0, 0.0, -jnp.inf],
+    ],
+                                dtype=jnp.bfloat16)
+    boundary_probability = jax.nn.softmax(position_logits[1])[0]
+    thresholds = jnp.array([
+        jnp.nextafter(boundary_probability, -jnp.inf),
+        boundary_probability,
+        jnp.nextafter(boundary_probability, jnp.inf),
+    ],
+                           dtype=jnp.bfloat16)
+    logits = jnp.broadcast_to(position_logits, (3, 3, 3))
+    eligible = jnp.ones((3, 3), dtype=bool)
+    active_rows = jnp.ones((3, ), dtype=bool)
+
+    _, official_remaining = _official_gpu_reference_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+    )
+    _, current_remaining = low_confidence_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+        _temperatures(3),
+        2,
+    )
+
+    np.testing.assert_array_equal(
+        official_remaining,
+        [[False, False, True], [False, True, True], [False, True, True]],
+    )
+    np.testing.assert_array_equal(current_remaining, official_remaining)
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.bfloat16],
+                         ids=["float32", "bfloat16"])
+def test_threshold_one_commits_exactly_one_forced_position(dtype):
+    logits = jnp.array([
+        [[8.0, 0.0, -4.0, -20.0], [2.0, 0.0, -4.0, -20.0],
+         [1.0, 0.0, -4.0, -20.0]],
+        [[0.2, 0.0, -4.0, -20.0], [0.4, 0.0, -4.0, -20.0],
+         [0.3, 0.0, -4.0, -20.0]],
+    ],
+                       dtype=dtype)
+    eligible = jnp.ones((2, 3), dtype=bool)
+    active_rows = jnp.ones((2, ), dtype=bool)
+    thresholds = _thresholds(2, value=1.0)
+
+    actual_tokens, actual_remaining = low_confidence_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+        _temperatures(2),
+        3,
+    )
+    expected_tokens, expected_remaining = _official_gpu_reference_commit(
+        logits,
+        eligible,
+        active_rows,
+        thresholds,
+    )
+
+    np.testing.assert_array_equal(actual_tokens, expected_tokens)
+    np.testing.assert_array_equal(actual_remaining, expected_remaining)
+    committed = np.asarray(eligible & ~actual_remaining)
+    np.testing.assert_array_equal(committed.sum(axis=-1), [1, 1])
+    np.testing.assert_array_equal(np.argmax(committed, axis=-1), [0, 1])
+
+
+def test_low_confidence_diagnostics_report_selected_log_probability_margin():
+    logits = jnp.array([[[2.0, 0.0, -10.0]]], dtype=jnp.float32)
+
+    diagnostics = low_confidence_diagnostics(
+        logits,
+        _thresholds(1, value=0.5),
+        _temperatures(1),
+        2,
+    )
+
+    selected_probability = np.exp(
+        float(diagnostics.selected_log_confidence[0, 0]))
+    np.testing.assert_allclose(selected_probability,
+                               np.exp(2.0) / (np.exp(2.0) + 1.0),
+                               rtol=1e-6)
+    np.testing.assert_allclose(
+        diagnostics.threshold_margin[0, 0],
+        diagnostics.selected_log_confidence[0, 0] - np.log(0.5),
+        rtol=1e-6,
+    )
 
 
 def test_dual_cache_hidden_selection_matches_reference_shift_rules():
@@ -473,7 +695,211 @@ def test_step_cap_force_fills_and_final_forward_refreshes_kv():
     np.testing.assert_array_equal(next_block_token(initial_canvas), [1])
 
 
-def test_dual_cache_uses_q32_once_then_q8_for_each_sub_block():
+def test_dual_cache_acceptance_trace_is_opt_in_and_semantics_preserving():
+    mask_token_id = 3
+    sub_block_size = 2
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        return jnp.zeros((1, 4), dtype=jnp.float32), kv_caches.at[2].add(1)
+
+    def run(trace_acceptance_steps):
+        return denoise_block_dual_cache(
+            full_forward,
+            partial_forward,
+            final_forward,
+            low_confidence_commit,
+            None,
+            jnp.array([[0, mask_token_id, mask_token_id, mask_token_id]],
+                      dtype=jnp.int32),
+            jnp.array([[False, True, True, True]]),
+            jnp.arange(40, 44, dtype=jnp.int32)[None, :],
+            jnp.zeros((3, ), dtype=jnp.int32),
+            jnp.array([True]),
+            _thresholds(1, value=1.0),
+            _temperatures(1),
+            None,
+            logit_alignment=LogitAlignment.SHIFTED,
+            next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+            mask_token_id=mask_token_id,
+            sub_block_size=sub_block_size,
+            commit_diagnostics_fn=low_confidence_diagnostics,
+            trace_acceptance_steps=trace_acceptance_steps,
+        )
+
+    untraced = run(False)
+    traced = run(True)
+
+    assert untraced.acceptance_trace is None
+    np.testing.assert_array_equal(traced.canvas, untraced.canvas)
+    np.testing.assert_array_equal(traced.next_anchor, untraced.next_anchor)
+    np.testing.assert_array_equal(traced.denoise_steps, untraced.denoise_steps)
+    np.testing.assert_array_equal(traced.kv_caches, untraced.kv_caches)
+    assert int(traced.q32_forward_calls) == int(untraced.q32_forward_calls)
+    assert int(traced.q8_forward_calls) == int(untraced.q8_forward_calls)
+
+    trace = traced.acceptance_trace
+    assert trace is not None
+    count = int(trace.count)
+    assert count == 3
+    assert int(trace.block_start) == 40
+    np.testing.assert_array_equal(trace.sub_block_starts[:count], [40, 42, 42])
+    np.testing.assert_array_equal(trace.iterations[:count], [0, 0, 1])
+    np.testing.assert_array_equal(trace.forward_kinds[:count], [0, 0, 1])
+    np.testing.assert_array_equal(
+        trace.row0_eligible[:count],
+        [[False, True], [True, True], [False, True]],
+    )
+    np.testing.assert_array_equal(
+        trace.row0_commit[:count],
+        [[False, True], [True, False], [False, True]],
+    )
+    np.testing.assert_array_equal(
+        trace.row0_remaining[:count],
+        [[False, False], [False, True], [False, False]],
+    )
+    assert np.all(np.isfinite(trace.row0_selected_log_confidence[:count]))
+    assert np.all(trace.row0_threshold_margin[:count] < 0.0)
+
+
+def test_dual_cache_acceptance_trace_requires_diagnostics_function():
+    with pytest.raises(ValueError, match="requires commit_diagnostics_fn"):
+        denoise_block_dual_cache(
+            lambda *args: (jnp.zeros((1, 2, 4)), args[3]),
+            lambda *args: (jnp.zeros((1, 2, 4)), args[3]),
+            lambda *args: (jnp.zeros((1, 4)), args[3]),
+            low_confidence_commit,
+            None,
+            jnp.array([[0, 3]], dtype=jnp.int32),
+            jnp.array([[False, True]]),
+            jnp.array([[0, 1]], dtype=jnp.int32),
+            jnp.zeros((1, ), dtype=jnp.int32),
+            jnp.array([True]),
+            _thresholds(1),
+            _temperatures(1),
+            None,
+            logit_alignment=LogitAlignment.SHIFTED,
+            next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+            mask_token_id=3,
+            sub_block_size=2,
+            trace_acceptance_steps=True,
+        )
+
+
+def test_q8_log_confidence_bias_changes_only_partial_commit_threshold():
+    mask_token_id = 3
+    threshold = 0.9
+
+    def logits_for_probability(probability):
+        gap = np.log(probability / (1.0 - probability))
+        return jnp.array([gap, 0.0, -20.0, -20.0], dtype=jnp.float32)
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], 4, 4), dtype=jnp.float32)
+        return logits, kv_caches.at[0].add(1)
+
+    partial_logits = jnp.stack([
+        logits_for_probability(0.5),
+        logits_for_probability(0.88),
+        logits_for_probability(0.87),
+        logits_for_probability(0.5),
+    ])[None, ...]
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, canvas, positions, active_rows, forward_context, start
+        return partial_logits, kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        return jnp.zeros((1, 4), dtype=jnp.float32), kv_caches.at[2].add(1)
+
+    def run(q8_log_confidence_bias=0.0):
+        return denoise_block_dual_cache(
+            full_forward,
+            partial_forward,
+            final_forward,
+            low_confidence_commit,
+            None,
+            jnp.full((1, 4), mask_token_id, dtype=jnp.int32),
+            jnp.ones((1, 4), dtype=bool),
+            jnp.arange(4, dtype=jnp.int32)[None, :],
+            jnp.zeros((3, ), dtype=jnp.int32),
+            jnp.array([True]),
+            _thresholds(1, value=threshold),
+            _temperatures(1),
+            None,
+            logit_alignment=LogitAlignment.SAME_POSITION,
+            next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+            mask_token_id=mask_token_id,
+            sub_block_size=4,
+            needs_final_forward=jnp.array([False]),
+            commit_diagnostics_fn=low_confidence_diagnostics,
+            trace_acceptance_steps=True,
+            q8_log_confidence_bias=q8_log_confidence_bias,
+        )
+
+    default = run()
+    explicit_zero = run(0.0)
+    biased = run(0.05)
+
+    assert jax.tree_util.tree_structure(
+        default) == jax.tree_util.tree_structure(explicit_zero)
+    for default_value, explicit_value in zip(
+            jax.tree_util.tree_leaves(default),
+            jax.tree_util.tree_leaves(explicit_zero),
+            strict=True):
+        np.testing.assert_array_equal(default_value, explicit_value)
+
+    assert int(default.q32_forward_calls) == 1
+    assert int(biased.q32_forward_calls) == 1
+    assert int(default.final_q32_forward_calls) == 0
+    assert int(biased.final_q32_forward_calls) == 0
+    assert int(default.q8_forward_calls) == 3
+    assert int(biased.q8_forward_calls) == 2
+
+    trace = biased.acceptance_trace
+    assert trace is not None
+    trace_count = int(trace.count)
+    q32_steps = np.asarray(trace.forward_kinds[:trace_count]) == 0
+    q8_steps = ~q32_steps
+    assert np.all(
+        np.asarray(trace.row0_threshold_margin[:trace_count])[q32_steps] < 0.0)
+    first_q8_log_confidence = np.asarray(
+        trace.row0_selected_log_confidence[:trace_count])[q8_steps][0]
+    np.testing.assert_allclose(
+        first_q8_log_confidence[1:3],
+        np.log([0.88, 0.87]),
+        atol=1e-6,
+    )
+    first_q8_margins = np.asarray(
+        trace.row0_threshold_margin[:trace_count])[q8_steps][0]
+    assert first_q8_margins[1] > 0.0
+    assert first_q8_margins[2] > 0.0
+    assert first_q8_margins[3] < 0.0
+
+
+@pytest.mark.parametrize("q8_log_confidence_bias", [0.0, 0.5])
+def test_threshold_one_uses_q32_once_then_q8_for_each_sub_block(
+        q8_log_confidence_bias):
     block_size = 32
     sub_block_size = 8
     mask_token_id = 3
@@ -519,6 +945,7 @@ def test_dual_cache_uses_q32_once_then_q8_for_each_sub_block():
         next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
         mask_token_id=mask_token_id,
         sub_block_size=sub_block_size,
+        q8_log_confidence_bias=q8_log_confidence_bias,
     )
 
     np.testing.assert_array_equal(output.canvas, np.zeros((1, block_size)))
@@ -907,13 +1334,14 @@ def test_dual_cache_three_row_bucket_matches_four_row_padding():
             jnp.tile(jnp.arange(4, dtype=jnp.int32), (batch_size, 1)),
             jnp.zeros((3, ), dtype=jnp.int32),
             active_rows,
-            _thresholds(batch_size, value=1.0),
+            _thresholds(batch_size, value=0.9),
             _temperatures(batch_size),
             None,
             logit_alignment=LogitAlignment.SHIFTED,
             next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
             mask_token_id=3,
             sub_block_size=4,
+            q8_log_confidence_bias=0.05,
         )
 
     exact = run(False)

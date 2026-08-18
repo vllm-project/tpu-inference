@@ -90,10 +90,12 @@ def ref_ragged_paged_attention(
 ):
     if out_dtype is None:
         out_dtype = jnp.float32 if queries.dtype == jnp.float32 else jnp.bfloat16
+    accumulator_dtype = out_dtype
+    output_dtype = queries.dtype
 
     if mask_value is None:
         # We do not set to -inf directly because (-inf) - (-inf) is nan.
-        mask_value = jnp.finfo(out_dtype).min
+        mask_value = jnp.finfo(accumulator_dtype).min
     dynamic_validate_inputs(
         queries,
         keys,
@@ -178,7 +180,8 @@ def ref_ragged_paged_attention(
         attn = jnp.einsum("qhd,khd->hqk",
                           q,
                           k,
-                          preferred_element_type=jnp.float32).astype(out_dtype)
+                          preferred_element_type=jnp.float32).astype(
+                              accumulator_dtype)
         attn *= sm_scale
         if k_scale is not None:
             attn *= k_scale
@@ -202,13 +205,14 @@ def ref_ragged_paged_attention(
             attn = jnp.where(mask, attn, mask_value)
         attn = jax.nn.softmax(attn, axis=-1).astype(v.dtype)
 
-        out = jnp.einsum("hqk,khd->qhd", attn, v).astype(out_dtype)
+        out = jnp.einsum("hqk,khd->qhd", attn, v).astype(
+            accumulator_dtype)
         if v_scale is not None:
             out *= v_scale
 
         outputs.append(out)
 
-    result = jnp.concatenate(outputs, axis=0)
+    result = jnp.concatenate(outputs, axis=0).astype(output_dtype)
     return result, kv_cache
 
 
@@ -348,7 +352,7 @@ def _ragged_paged_attention_kernel_loop(
     if case == RpaCase.DECODE:
         use_causal_mask = False
 
-    out_dtype = acc_ref.dtype
+    accumulator_dtype = acc_ref.dtype
     (
         actual_num_kv_heads,
         max_num_tokens,
@@ -375,8 +379,9 @@ def _ragged_paged_attention_kernel_loop(
     # num_kv_heads_x2 = num_kv_heads_x2_per_kv_packing * kv_packing
     num_q_heads_per_kv_head = num_q_heads_per_kv_head_per_packing * q_packing
     q_dtype = q_hbm_ref.dtype
+    output_dtype = o_hbm_ref.dtype
     kv_dtype = kv_cache_hbm_ref.dtype
-    assert o_hbm_ref.dtype == q_dtype
+    assert output_dtype == q_dtype
     assert get_dtype_packing(q_dtype) == q_packing
     assert get_dtype_packing(kv_dtype) == kv_packing
     assert head_dim % 128 == 0
@@ -515,13 +520,14 @@ def _ragged_paged_attention_kernel_loop(
         s_rowmax = jnp.max(s, axis=1, keepdims=True)
 
         # if converting the type too early, there will be accuracy issue.
-        s_rowmax = s_rowmax.astype(out_dtype)
+        s_rowmax = s_rowmax.astype(accumulator_dtype)
         m_prev = m_ref[...]
         m_curr = jnp.maximum(m_prev, s_rowmax)
         m_ref[...] = m_curr
         p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
 
-        p_rowsum = jnp.sum(p, axis=1, keepdims=True, dtype=out_dtype)
+        p_rowsum = jnp.sum(
+            p, axis=1, keepdims=True, dtype=accumulator_dtype)
         exp_m_diff = jnp.exp(m_prev - m_curr)
         l_prev = l_ref[...]
         l_ref[...] = exp_m_diff * l_prev + p_rowsum
@@ -548,7 +554,7 @@ def _ragged_paged_attention_kernel_loop(
         if v_scale is not None:
             pv *= v_scale
         # if converting the type too early, there will be accuracy issue.
-        pv = pv.astype(out_dtype)
+        pv = pv.astype(accumulator_dtype)
         o_prev = o_ref[...]
         o_ref[...] = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
 
@@ -1093,8 +1099,8 @@ def _ragged_paged_attention_kernel_loop(
             acc = acc_ref[...]
             l = broadcast_minor(l_ref[...], acc.shape)  # noqa
             out = (acc * pl.reciprocal(l, approx=True) if
-                   (l.dtype == jnp.float32 and out_dtype != jnp.float32) else
-                   lax.div(acc, l)).astype(out_dtype)
+                   (l.dtype == jnp.float32 and output_dtype != jnp.float32) else
+                   lax.div(acc, l)).astype(output_dtype)
 
             # Wait for previous bo to be fully sent before storing new bo.
             bo_sem_idx = sem_ids_ref[2]
@@ -1681,9 +1687,9 @@ def ragged_paged_attention(
     sm_scale: the softmax scale which will be applied to the Q@K^T.
     sliding_window: the sliding window size for the attention.
     soft_cap: the logit soft cap for the attention.
-    out_dtype: the dtype of the output and the accumulator for matmul. Set
-      lower for better performance, set higher for better accuracy. If None, it
-      uses q.dtype.
+    out_dtype: the dtype of the softmax and PV accumulators. The returned
+      output always uses the query dtype. Set lower for better performance and
+      higher for better accuracy. If None, it uses q.dtype.
     mask_value: mask value for causal mask.
     q_scale: the scale for the query.
     k_scale: the scale for the key.

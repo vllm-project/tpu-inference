@@ -391,6 +391,7 @@ def sharded_ragged_paged_attention(
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
     block_causal_size: int | None = None,
+    out_dtype: Any = None,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -443,6 +444,10 @@ def sharded_ragged_paged_attention(
         raise NotImplementedError(
             "update_kv_cache=False (KV-share) is not supported on the "
             "head_dim==64 RPA kernel.")
+    if use_hd64 and out_dtype is not None:
+        raise NotImplementedError(
+            "Custom RPA accumulator dtype is not supported on the "
+            "head_dim==64 RPA kernel.")
 
     if use_causal_mask and block_causal_size is not None:
         raise ValueError(
@@ -473,6 +478,7 @@ def sharded_ragged_paged_attention(
             kwargs["use_causal_mask"] = use_causal_mask
             kwargs["block_causal_size"] = block_causal_size
             kwargs["chunk_prefill_size"] = chunk_prefill_size
+            kwargs["out_dtype"] = out_dtype
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -523,6 +529,8 @@ def attention(
     md = attention_metadata
     block_causal_size = resolve_block_causal_size(md, use_causal_mask)
     use_causal_mask = resolve_use_causal_mask(md, use_causal_mask)
+    rpa_accumulator_dtype = (
+        jnp.float32 if md.fp32_rpa_accumulator else None)
     # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
     shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
 
@@ -546,6 +554,9 @@ def attention(
         update_kv_cache = False
 
     if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
+        if rpa_accumulator_dtype is not None:
+            raise NotImplementedError(
+                "FP32 RPA accumulation is not supported with DCP")
         if not use_causal_mask or block_causal_size is not None:
             raise NotImplementedError(
                 "Non-token-causal attention is not supported with DCP")
@@ -564,6 +575,9 @@ def attention(
             v_scale=v_scale,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
+        if rpa_accumulator_dtype is not None:
+            raise NotImplementedError(
+                "FP32 RPA accumulation is not supported with PCP")
         if block_causal_size is not None:
             raise NotImplementedError(
                 "Block-causal attention is not supported with PCP")
@@ -603,6 +617,7 @@ def attention(
         update_kv_cache=update_kv_cache,
         use_causal_mask=use_causal_mask,
         block_causal_size=block_causal_size,
+        out_dtype=rpa_accumulator_dtype,
     )
 
     return kv_cache, output

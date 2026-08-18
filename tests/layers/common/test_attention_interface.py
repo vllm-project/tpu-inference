@@ -68,7 +68,8 @@ def _test_attention(monkeypatch,
                     head_dim,
                     use_sinks=False,
                     attention_mask_spec=None,
-                    rpa_static_query_len=None):
+                    rpa_static_query_len=None,
+                    fp32_rpa_accumulator=False):
     """
     Tests the main `attention` function.
 
@@ -79,8 +80,8 @@ def _test_attention(monkeypatch,
     # 1. Arrange
 
     # Create input tensors
-    q_dtype = jnp.float32
-    kv_dtype = jnp.float32
+    q_dtype = jnp.bfloat16 if fp32_rpa_accumulator else jnp.float32
+    kv_dtype = q_dtype
     q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim), dtype=q_dtype)
     k = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
     v = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
@@ -98,7 +99,8 @@ def _test_attention(monkeypatch,
 
     # Mock ragged_paged_attention to return a tensor of the correct shape
     mock_paged_attn_kernel = MagicMock(return_value=(jnp.ones(
-        (TOTAL_TOKENS, NUM_HEADS, head_dim)), kv_cache), )
+        (TOTAL_TOKENS, NUM_HEADS, head_dim),
+        dtype=q_dtype), kv_cache), )
 
     if head_dim == 64:
         monkeypatch.setattr(
@@ -123,6 +125,7 @@ def _test_attention(monkeypatch,
         query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
         rpa_static_query_len=rpa_static_query_len,
+        fp32_rpa_accumulator=fp32_rpa_accumulator,
         **metadata_kwargs,
     )
     shared_attention_metadata = SharedAttentionMetadata(
@@ -159,10 +162,14 @@ def _test_attention(monkeypatch,
             "block_causal_size"] == expected_block_size
         assert mock_paged_attn_kernel.call_args.kwargs[
             "chunk_prefill_size"] == rpa_static_query_len
+        expected_out_dtype = (jnp.float32 if fp32_rpa_accumulator else None)
+        assert mock_paged_attn_kernel.call_args.kwargs[
+            "out_dtype"] == expected_out_dtype
 
     # Check output shapes
     assert final_kv_cache.shape == kv_cache.shape
     assert output.shape == q.shape
+    assert output.dtype == q.dtype
 
     # Check that the output is the one from our mock
     assert jnp.all(output == 1.0)
@@ -187,6 +194,42 @@ def test_attention_bidirectional_from_metadata(monkeypatch, mesh):
         128,
         attention_mask_spec=AttentionMaskSpec(AttentionMaskKind.BIDIRECTIONAL),
     )
+
+
+def test_attention_fp32_rpa_accumulator_preserves_query_output_dtype(
+        monkeypatch, mesh):
+    _test_attention(
+        monkeypatch,
+        mesh,
+        128,
+        attention_mask_spec=AttentionMaskSpec(AttentionMaskKind.BIDIRECTIONAL),
+        fp32_rpa_accumulator=True,
+    )
+
+
+@pytest.mark.parametrize("mesh_axis", ["dcp", "pcp"])
+def test_attention_fp32_rpa_accumulator_rejects_context_parallelism(mesh_axis):
+    head_dim = 128
+    q = jnp.ones((1, NUM_HEADS, head_dim), dtype=jnp.bfloat16)
+    k = jnp.ones((1, NUM_KV_HEADS, head_dim), dtype=jnp.bfloat16)
+    v = jnp.ones((1, NUM_KV_HEADS, head_dim), dtype=jnp.bfloat16)
+    metadata = AttentionMetadata(
+        input_positions=jnp.array([0], dtype=jnp.int32),
+        fp32_rpa_accumulator=True,
+    )
+
+    class ContextParallelMesh:
+        shape = {mesh_axis: 2}
+
+    with pytest.raises(NotImplementedError, match=mesh_axis.upper()):
+        attention(
+            kv_cache=jnp.zeros((1, ), dtype=jnp.bfloat16),
+            q=q,
+            k=k,
+            v=v,
+            attention_metadata=metadata,
+            mesh=ContextParallelMesh(),
+        )
 
 
 def test_attention_static_prefill_length(monkeypatch, mesh):
@@ -370,7 +413,10 @@ def test_sharded_ragged_paged_attention_gqa_incompatible_raises_error(
         )
 
 
-def _run_sharded_rpa_capturing_kwargs(monkeypatch, gqa_mesh, update_kv_cache):
+def _run_sharded_rpa_capturing_kwargs(monkeypatch,
+                                      gqa_mesh,
+                                      update_kv_cache,
+                                      out_dtype=None):
     """Helper: run `sharded_ragged_paged_attention` with a stubbed
     `ragged_paged_attention` (the module-level binding) and a passthrough
     `jax.shard_map`. Returns the kwargs forwarded by the closure to the
@@ -418,6 +464,7 @@ def _run_sharded_rpa_capturing_kwargs(monkeypatch, gqa_mesh, update_kv_cache):
         attention_sink=None,
         sm_scale=1.0,
         update_kv_cache=update_kv_cache,
+        out_dtype=out_dtype,
     )
     return captured
 
@@ -434,6 +481,18 @@ def test_sharded_rpa_forwards_update_kv_cache_when_not_hd64(
 
     assert captured.get("update_kv_cache") is False, (
         f"non-hd64 path must forward update_kv_cache=False; got {captured!r}")
+
+
+def test_sharded_rpa_forwards_output_dtype_when_not_hd64(
+        monkeypatch, gqa_mesh):
+    captured = _run_sharded_rpa_capturing_kwargs(
+        monkeypatch,
+        gqa_mesh,
+        update_kv_cache=True,
+        out_dtype=jnp.float32,
+    )
+
+    assert captured.get("out_dtype") == jnp.float32
 
 
 def test_batched_rpa_wrapper_accepts_update_kv_cache():
@@ -487,6 +546,36 @@ def test_sharded_rpa_rejects_update_kv_cache_false_on_hd64(gqa_mesh):
             attention_sink=None,
             sm_scale=1.0,
             update_kv_cache=False,
+        )
+
+
+def test_sharded_rpa_rejects_custom_output_dtype_on_hd64(gqa_mesh):
+    head_dim = 64
+    num_kv_heads = 4
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
+    k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    v = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
+    kv_cache = jnp.zeros((num_kv_heads, NUM_BLOCKS, BLOCK_SIZE, head_dim))
+    kv_lens = jnp.zeros((MAX_NUM_SEQS, ), dtype=jnp.int32)
+    page_indices = jnp.zeros((MAX_NUM_SEQS, MAX_BLOCKS_PER_SEQ),
+                             dtype=jnp.int32)
+    cu_q_lens = jnp.zeros((MAX_NUM_SEQS + 1, ), dtype=jnp.int32)
+    distribution = jnp.zeros((3, ), dtype=jnp.int32)
+
+    with pytest.raises(NotImplementedError, match="accumulator dtype"):
+        sharded_ragged_paged_attention(
+            mesh=gqa_mesh,
+            q=q,
+            k=k,
+            v=v,
+            kv_cache=kv_cache,
+            kv_lens=kv_lens,
+            page_indices=page_indices,
+            cu_q_lens=cu_q_lens,
+            distribution=distribution,
+            attention_sink=None,
+            sm_scale=1.0,
+            out_dtype=jnp.float32,
         )
 
 

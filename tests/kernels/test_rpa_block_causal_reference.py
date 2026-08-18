@@ -81,6 +81,16 @@ def _reference_inputs():
     )
 
 
+def _bfloat16_reference_inputs():
+    inputs = list(_reference_inputs())
+    inputs[:3] = [value.astype(jnp.bfloat16) for value in inputs[:3]]
+    inputs[3] = jnp.zeros(
+        kernel.get_kv_cache_shape(1, 4, 1, 128, jnp.bfloat16),
+        dtype=jnp.bfloat16,
+    )
+    return tuple(inputs)
+
+
 def test_reference_block_causal_attention_is_bidirectional_within_blocks():
     output, _ = kernel.ref_ragged_paged_attention(
         *_reference_inputs(),
@@ -89,6 +99,16 @@ def test_reference_block_causal_attention_is_bidirectional_within_blocks():
     )
 
     np.testing.assert_allclose(output[:, 0, 0], [1.5, 1.5, 3.75, 3.75])
+
+
+def test_reference_fp32_accumulator_preserves_bfloat16_output_storage():
+    output, _ = kernel.ref_ragged_paged_attention(
+        *_bfloat16_reference_inputs(),
+        use_causal_mask=False,
+        out_dtype=jnp.float32,
+    )
+
+    assert output.dtype == jnp.bfloat16
 
 
 def test_block_causal_and_token_causal_are_mutually_exclusive():
@@ -114,3 +134,13 @@ def test_pallas_block_causal_mask_avoids_vector_integer_division():
 
     assert "// block_causal_size" not in source
     assert "bitwise_and" in source
+
+
+def test_pallas_fp32_accumulator_casts_to_output_storage_before_packed_store():
+    source = inspect.getsource(kernel._ragged_paged_attention_kernel_loop)
+
+    assert "accumulator_dtype = acc_ref.dtype" in source
+    assert "output_dtype = o_hbm_ref.dtype" in source
+    assert ").astype(output_dtype)" in source
+    assert source.index(").astype(output_dtype)") < source.index(
+        "pltpu.bitcast(out, out_ref.dtype)")

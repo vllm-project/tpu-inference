@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -93,6 +94,9 @@ class DiffusionRuntimeConfig:
     temperature: float = 0.0
     max_denoise_steps: int = 0
     use_dual_cache: bool = False
+    trace_acceptance_steps: bool = False
+    fp32_partial_rpa: bool = False
+    q8_log_confidence_bias: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence_threshold <= 1.0:
@@ -103,6 +107,23 @@ class DiffusionRuntimeConfig:
         if self.max_denoise_steps < 0:
             raise ValueError(
                 "Diffusion max_denoise_steps must be non-negative")
+        if self.trace_acceptance_steps and not self.use_dual_cache:
+            raise ValueError(
+                "Diffusion trace_acceptance_steps requires use_dual_cache")
+        if self.fp32_partial_rpa and not self.use_dual_cache:
+            raise ValueError(
+                "Diffusion fp32_partial_rpa requires use_dual_cache")
+        if (not math.isfinite(self.q8_log_confidence_bias)
+                or self.q8_log_confidence_bias < 0.0):
+            raise ValueError(
+                "Diffusion q8_log_confidence_bias must be finite and "
+                "non-negative")
+        if self.q8_log_confidence_bias > 0.5:
+            raise ValueError(
+                "Diffusion q8_log_confidence_bias must not exceed 0.5")
+        if self.q8_log_confidence_bias and not self.use_dual_cache:
+            raise ValueError(
+                "Diffusion q8_log_confidence_bias requires use_dual_cache")
 
 
 @dataclass(frozen=True)
@@ -248,6 +269,11 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
         temperature=float(diffusion_values.get("temperature", 0.0)),
         max_denoise_steps=int(diffusion_values.get("max_denoise_steps", 0)),
         use_dual_cache=bool(diffusion_values.get("use_dual_cache", False)),
+        trace_acceptance_steps=bool(
+            diffusion_values.get("trace_acceptance_steps", False)),
+        fp32_partial_rpa=bool(diffusion_values.get("fp32_partial_rpa", False)),
+        q8_log_confidence_bias=float(
+            diffusion_values.get("q8_log_confidence_bias", 0.0)),
     )
     return GenerationStrategyConfig(
         strategy=strategy,

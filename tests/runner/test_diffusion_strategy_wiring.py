@@ -43,6 +43,12 @@ def _strategy_method(name):
     raise AssertionError(f"Strategy method {name!r} not found")
 
 
+def _module_function(name):
+    module = ast.parse(STRATEGY.read_text())
+    return next(node for node in module.body
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
 def test_runner_resolves_generation_strategy_once_at_startup():
     init_source = ast.unparse(_method("__init__"))
 
@@ -102,6 +108,31 @@ def test_dual_cache_trace_separates_padding_and_straggler_waste():
     assert "straggler_row_iterations" in denoise_source
 
 
+def test_dual_cache_acceptance_trace_is_opt_in_and_host_formatted():
+    init_source = ast.unparse(_strategy_method("__init__"))
+    denoise_source = ast.unparse(_strategy_method("_denoise_blocks"))
+    precompile_source = ast.unparse(_strategy_method("precompile"))
+    log_source = ast.unparse(
+        _module_function("_log_dual_cache_acceptance_trace"))
+    program_source = (STRATEGY.parent / "program.py").read_text()
+
+    assert "get_commit_diagnostics_algorithm" in init_source
+    assert "trace_acceptance_steps=self.config.runtime.trace_acceptance_steps" \
+        in denoise_source
+    assert "if self.config.runtime.trace_acceptance_steps" in denoise_source
+    assert "device_outputs += (output.acceptance_trace,)" in denoise_source
+    assert "trace_acceptance_steps=self.config.runtime.trace_acceptance_steps" \
+        in precompile_source
+    assert "q8_log_confidence_bias=self.config.runtime.q8_log_confidence_bias" \
+        in denoise_source
+    assert "q8_log_confidence_bias=self.config.runtime.q8_log_confidence_bias" \
+        in precompile_source
+    assert "row0_selected_log_confidence" in log_source
+    assert "row0_threshold_margin" in log_source
+    assert "json.dumps" in log_source
+    assert "debug.callback" not in program_source
+
+
 def test_diffusion_uses_configured_capacity_and_partial_cache_metadata():
     build_source = ast.unparse(_strategy_method("_build_batch"))
     precompile_source = ast.unparse(_strategy_method("precompile"))
@@ -109,6 +140,9 @@ def test_diffusion_uses_configured_capacity_and_partial_cache_metadata():
     assert "select_diffusion_batch_size(num_active, capacity)" in build_source
     assert "batch_size = runner.max_num_reqs" not in build_source
     assert "replace_cached_kv=True" in build_source
+    assert build_source.count("fp32_rpa_accumulator") == 1
+    assert "fp32_rpa_accumulator=self.config.runtime.fp32_partial_rpa" \
+        in build_source
     assert "partial_query_start_loc" in build_source
     assert "[0, 0, num_active]" in build_source
     assert "diffusion_batch_sizes(self.batch_size)" in precompile_source
