@@ -168,6 +168,18 @@ class VllmModelWrapper:
             return self.mesh.shape["model"]
         return self.vllm_config.parallel_config.tensor_parallel_size
 
+    def _get_activation_sharding_divisor(self) -> int:
+        """Returns the total divisor required for activation axis 0 across all active sharding axes."""
+        divisor = 1
+        if self.mesh is not None and hasattr(self.mesh, "shape"):
+            axes = (*ShardingAxisName.ATTN_DATA, ShardingAxisName.MODEL)
+            for ax in axes:
+                if ax in self.mesh.shape:
+                    divisor = math.lcm(divisor, self.mesh.shape[ax])
+        else:
+            divisor = self.vllm_config.parallel_config.tensor_parallel_size
+        return max(1, divisor)
+
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
         import sys
@@ -618,11 +630,11 @@ class VllmModelWrapper:
                     spatial_merge_size = getattr(visual, "spatial_merge_size", 1) if visual else 1
                     merge_factor = spatial_merge_size * spatial_merge_size
 
-                    # 2. Determine tensor parallel size from mesh axis or config
-                    tp_size = self._get_model_tp_size()
+                    # 2. Determine total activation sharding divisor across all active mesh axes (model, attn_dp, pcp, data)
+                    sharding_divisor = self._get_activation_sharding_divisor()
 
-                    # Pad factor is LCM of TP size and merged patch block size
-                    pad_factor = math.lcm(tp_size, merge_factor)
+                    # Pad factor is LCM of all active sharding divisors and merged patch block size
+                    pad_factor = math.lcm(sharding_divisor, merge_factor)
 
                     # Ensure sequence length is divisible by pad_factor
                     seq_len = pixels.shape[0]
