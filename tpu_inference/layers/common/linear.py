@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -109,6 +111,17 @@ def sharded_matmul(x: jax.Array,
     # x may have extra leading batch dims.
     batch_dims = (None, ) * (x.ndim - 2)
     x_spec = P(ShardingAxisName.ATTN_DATA, *batch_dims, in_axis)
+
+    orig_len = x.shape[0]
+    if mesh is not None and hasattr(mesh, "shape") and orig_len > 0:
+        attn_axis = x_spec[0]
+        axes = attn_axis if isinstance(attn_axis,
+                                       (tuple, list, set)) else (attn_axis, )
+        divisor = math.prod(mesh.shape.get(ax, 1) for ax in axes if ax)
+        pad_len = -orig_len % divisor
+        if pad_len > 0:
+            x = jnp.pad(x, ((0, pad_len), *([(0, 0)] * (x.ndim - 1))))
+
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_spec) if mesh else x_spec)
@@ -119,13 +132,15 @@ def sharded_matmul(x: jax.Array,
             out = jax.lax.psum(out, axis_name=in_axis)
         return out
 
-    return jax.shard_map(
+    out = jax.shard_map(
         wrapper,
         mesh=mesh,
         in_specs=(x_spec, weight_sharding),
         out_specs=P(ShardingAxisName.ATTN_DATA, *batch_dims, out_axis),
         check_vma=False,
     )(x, w)
+
+    return out[:orig_len]
 
 
 def sharded_quantized_matmul(x: jax.Array,
