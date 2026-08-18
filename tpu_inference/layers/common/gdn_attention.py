@@ -95,14 +95,14 @@ def run_jax_gdn_attention(
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
+    dp_state_axis = None if read_state_indices is not None else ShardingAxisName.ATTN_DATA
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(ShardingAxisName.ATTN_DATA, None,
-          ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+        P(dp_state_axis, None, ShardingAxisName.ATTN_HEAD),  # conv_state
+        P(dp_state_axis, ShardingAxisName.ATTN_HEAD, None,
           None),  # recurrent_state
         P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
         P(ShardingAxisName.ATTN_HEAD)
@@ -119,9 +119,9 @@ def run_jax_gdn_attention(
 
     out_specs = (
         (
-            P(ShardingAxisName.ATTN_DATA, None,
+            P(dp_state_axis, None,
               ShardingAxisName.ATTN_HEAD),  # new_conv_state
-            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+            P(dp_state_axis, ShardingAxisName.ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # output
@@ -137,7 +137,7 @@ def run_jax_gdn_attention(
             else None
         if read_state_indices is not None:
             kernel_args = kernel_args[:-1]
-        return wrapper.fused_conv1d_gdn(
+        (new_conv, new_rec), out = wrapper.fused_conv1d_gdn(
             *kernel_args,
             read_state_indices=read_indices,
             n_kq=n_kq // tp_size,
@@ -146,6 +146,16 @@ def run_jax_gdn_attention(
             d_v=d_v,
             kernel_size=kernel_size,
         )
+        if read_state_indices is not None:
+            # When Mamba state is replicated across DP, merge the per-rank updates
+            # across the DP axis.
+            old_conv = kernel_args[3]
+            old_rec = kernel_args[4]
+            new_conv = old_conv + jax.lax.psum(new_conv - old_conv,
+                                               ShardingAxisName.ATTN_DATA)
+            new_rec = old_rec + jax.lax.psum(new_rec - old_rec,
+                                             ShardingAxisName.ATTN_DATA)
+        return (new_conv, new_rec), out
 
     p_run_jax_gdn_attention_local = _fused_conv1d_gdn_local
 

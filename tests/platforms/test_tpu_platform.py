@@ -233,7 +233,7 @@ class TestTpuPlatform:
 
     @pytest.mark.parametrize("is_hybrid,unsupported,expected_prefix_caching", [
         (True, None, True),
-        (True, "dp", False),
+        (True, "dp", True),
         (True, "spec", False),
         (True, "continue_decode", True),
         (False, None, True),
