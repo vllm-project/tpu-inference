@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,6 +21,7 @@ import pytest
 from jax.sharding import Mesh
 
 import tpu_inference.layers.common.attention_interface as attention_interface
+import tpu_inference.layers.vllm.ops.scaled_dot_product_attention as sdpa_ops
 from tpu_inference.layers.vllm.ops.scaled_dot_product_attention import (
     scaled_dot_product_attention, vllm_vit_sdpa)
 
@@ -72,3 +75,35 @@ class TestAttnDpBatchAxisFix:
             out = vllm_vit_sdpa(q, k, v, cu_seqlens=[0, 64, 128])
 
         assert out.shape == (1, 128, 2, 64)
+
+
+class TestVitVmemLimit:
+    """The ViT flash attention must raise the scoped-vmem limit above the
+    32MiB pallas default: large flattened image sequences exceed it
+    (CompileTimeScopedVmemOom at bf16[1,16,25344,80])."""
+
+    def test_vit_vmem_limit_covers_failing_shape(self):
+        # 37.22M was the observed scoped allocation that OOMed at 32M.
+        assert sdpa_ops._VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES >= int(
+            38 * 1024 * 1024)
+
+    @pytest.mark.parametrize('op,extra_kwargs', [
+        (scaled_dot_product_attention, {}),
+        (vllm_vit_sdpa, {
+            'cu_seqlens': [0, 128]
+        }),
+    ])
+    def test_ops_pass_vmem_limit_to_flash_attention(self, op, extra_kwargs):
+        q = k = v = jnp.ones((1, 2, 128, 64), dtype=jnp.float32)
+        if op is vllm_vit_sdpa:
+            q = k = v = jnp.ones((1, 128, 2, 64), dtype=jnp.float32)
+
+        with mock.patch.object(sdpa_ops,
+                               'sharded_flash_attention') as mock_sfa:
+            mock_sfa.return_value = mock.MagicMock(
+                return_value=jnp.ones((1, 2, 128, 64), dtype=jnp.float32))
+            op(q, k, v, **extra_kwargs)
+
+        assert mock_sfa.call_count == 1
+        assert mock_sfa.call_args.kwargs['vmem_limit_bytes'] == \
+            sdpa_ops._VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES
