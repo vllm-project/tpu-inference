@@ -308,6 +308,27 @@ class TpuPlatform(Platform):
                 cache_config.mamba_block_size = (
                     vllm_config.model_config.max_model_len)
 
+        # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
+        # CPU processor and instead normalizes inside the vLLM model's vision
+        # tower (FusedInputNorm). JAX-native multimodal models consume the
+        # processor's pixel_values directly and have no device-side norm, so
+        # they would silently run the ViT on unnormalized pixels. Keep the
+        # normalization in the CPU processor for the JAX-native path.
+        mm_cfg = getattr(vllm_config.model_config, "multimodal_config", None) \
+            if vllm_config.model_config else None
+        if mm_cfg is not None and getattr(mm_cfg, "mm_device_do_normalize",
+                                          False):
+            from tpu_inference.models.common.model_loader import \
+                resolve_model_impl_type
+            impl = resolve_model_impl_type(vllm_config)
+            if impl != "vllm":
+                logger.warning(
+                    "[tpu_platform] Disabling mm_device_do_normalize: the "
+                    "JAX-native multimodal path normalizes images in the CPU "
+                    "processor; device-side FusedInputNorm only exists in the "
+                    "vLLM model implementation.")
+                mm_cfg.mm_device_do_normalize = False
+
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:

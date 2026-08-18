@@ -21,6 +21,12 @@ from torchax.ops.jtorch import register_function
 from tpu_inference.layers.common.attention_interface import \
     sharded_flash_attention
 
+# ViT flash-attention on large flattened image sequences needs more scoped
+# vmem than the 32MiB pallas default (~37MiB at bf16[1,16,25344,80]); 64MiB
+# covers such shapes with headroom. The RPA kernels already run with up to
+# 100MiB on both v6e and v7x.
+_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES = 64 * 1024 * 1024
+
 
 @register_function(torch.nn.functional.scaled_dot_product_attention)
 def scaled_dot_product_attention(
@@ -83,11 +89,13 @@ def scaled_dot_product_attention(
     # into one sequence via cu_seqlens/segment_ids, no real batch axis), so
     # it must stay replicated rather than sharded by the DP ('data') axis --
     # sharding a size-1 axis by DP>1 fails divisibility under enable_dp_attention.
-    attn_fn = sharded_flash_attention(mesh,
-                                      causal=is_causal,
-                                      sm_scale=scale,
-                                      use_attention_bias=True,
-                                      batch_axis=None)
+    attn_fn = sharded_flash_attention(
+        mesh,
+        causal=is_causal,
+        sm_scale=scale,
+        vmem_limit_bytes=_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES,
+        use_attention_bias=True,
+        batch_axis=None)
     out = attn_fn(query, key, value, attention_bias, None)
 
     if q_pad > 0:
@@ -175,11 +183,13 @@ def vllm_vit_sdpa(
     #    flattened into one sequence via cu_seqlens/segment_ids), so it must
     #    stay replicated -- sharding a size-1 axis by DP>1 fails divisibility
     #    under enable_dp_attention.
-    attn_fn = sharded_flash_attention(mesh,
-                                      causal=False,
-                                      sm_scale=scale,
-                                      use_attention_bias=False,
-                                      batch_axis=None)
+    attn_fn = sharded_flash_attention(
+        mesh,
+        causal=False,
+        sm_scale=scale,
+        vmem_limit_bytes=_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES,
+        use_attention_bias=False,
+        batch_axis=None)
 
     out = attn_fn(query, key, value, seg_ids)
 

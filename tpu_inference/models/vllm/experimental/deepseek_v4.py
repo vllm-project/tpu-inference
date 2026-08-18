@@ -35,6 +35,8 @@ from vllm.sequence import IntermediateTensors
 
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
     VllmDeepseekV4MLAAttention
+from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
+    VllmDeepseekCompressor
 from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 
 
@@ -201,7 +203,10 @@ class DeepseekV4MoE(nn.Module):
                 "DeepSeek V4 hash MoE routing requires input_ids.")
 
         org_shape = hidden_states.shape
-        if self.experts.is_internal_router:
+        # getattr guard: not every runner FusedMoEFactory can produce
+        # declares is_internal_router (VllmMoERunner lacks it, and the
+        # pinned vLLM LKG does not define it either).
+        if getattr(self.experts, "is_internal_router", False):
             # In this case, the gate/router runs inside the MoE runner.
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
@@ -416,8 +421,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None,
                torch.Tensor | None]:
-        return self._forward_unfused_post_pre(x, positions, input_ids,
-                                              post_mix, res_mix, residual)
+        # The fused seam path: each layer defers its post into the next
+        # layer's pre, so the pair runs as one Pallas kernel
+        # (MHCFusedPostPreOp). ``_forward_unfused_post_pre`` above is the
+        # sequential semantics this must match.
+        return self._forward_fused_post_pre(x, positions, input_ids, post_mix,
+                                            res_mix, residual)
 
 
 class DeepseekV4Model(nn.Module):
@@ -444,6 +453,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_mult = config.hc_mult
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
+        self.mhc_post = MHCPostOp()
 
         aux_stream_list = (None)
 
@@ -564,6 +574,11 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+
+        if post_mix is not None:
+            # Fused path: complete the deferred final post.
+            hidden_states = self.mhc_post(hidden_states, residual, post_mix,
+                                          res_mix)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -800,6 +815,15 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights,
                                             mapper=self.hf_to_vllm_mapper)
+
+        # Post-load weight surgery goes here.
+        # The TPU compress-and-store kernel wants ``fused_wkv_wgate`` as
+        # [hidden_size, 2 * coff * head_dim]; transpose it once here instead of
+        # on every forward pass.
+        for module in self.modules():
+            if isinstance(module, VllmDeepseekCompressor):
+                module.transpose_wkv_wgate()
+
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

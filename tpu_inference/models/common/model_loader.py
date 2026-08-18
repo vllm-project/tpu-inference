@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 from typing import Any, Optional
 
 import jax
@@ -372,7 +373,13 @@ def get_flax_model(
     # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
     _state_treedef = jax.tree_util.tree_structure(state)
 
-    @jax.jit(
+    def run_model_impl(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
+        model = nnx.merge(graphdef, state)
+        return model(*args)
+
+    _wrap_with_jit = functools.partial(
+        jax.jit,
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
@@ -383,12 +390,19 @@ def get_flax_model(
         static_argnums=(
             6, 9, 10
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
+    )
+
+    # `continue_decode` calls the step fn from inside a `jax.lax.while_loop`
+    # body, where JAX forbids `compiler_options` on a nested jit. Build an
+    # options-free twin for that path; the loop jit in `runner/decode_loop.py`
+    # supplies the options for the whole fused program. Mirrors the torchax
+    # path in `models/vllm/vllm_model_wrapper.py`.
+    run_model_no_options = _wrap_with_jit(run_model_impl)
+
+    run_model = _wrap_with_jit(
+        run_model_impl,
         compiler_options=get_step_fn_compiler_options(),
     )
-    def run_model(state_leaves, *args):
-        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
-        model = nnx.merge(graphdef, state)
-        return model(*args)
 
     @jax.jit(
         out_shardings=(
@@ -470,6 +484,17 @@ def get_flax_model(
         kwargs.pop("shared_attention_metadata", None)
         return jitted_model_fn(*args, **kwargs)
 
+    # Exposed as `step_fn_no_options` below for `continue_decode`. The draft
+    # model's jit already carries no compiler options, so it is its own twin.
+    jitted_model_fn_no_options = (run_draft_model
+                                  if is_draft_model else run_model_no_options)
+
+    def wrapped_model_fn_no_options(*args, **kwargs):
+        if not model_supports_spec_step:
+            kwargs.pop("spec_step_idx", None)
+        kwargs.pop("shared_attention_metadata", None)
+        return jitted_model_fn_no_options(*args, **kwargs)
+
     compute_logits_fn = run_compute_logits
     embed_input_ids_fn = run_embed_input_ids
 
@@ -542,6 +567,12 @@ def get_flax_model(
         pooler_fn = _not_support
 
     state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    # `runner/tpu_runner.py` and `runner/compilation_manager.py` read
+    # `self.model.step_fn_no_options`, where `self.model` is
+    # `ModelInterface.model`. The torchax path sets the same attribute in
+    # `models/vllm/vllm_model_wrapper.py`, so both paths define it.
+    jit_model.step_fn_no_options = wrapped_model_fn_no_options
 
     return ModelInterface(
         model_fn=wrapped_model_fn,
@@ -618,14 +649,10 @@ def get_model(
     is_draft_model: bool = False,
     shared_params: Optional[dict[str, jax.Array]] = None,
 ) -> ModelInterface:
-    if is_draft_model:
-        impl = envs.DRAFT_MODEL_IMPL_TYPE
-    else:
-        impl = envs.MODEL_IMPL_TYPE
-    logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
-    if impl == "auto":
-        impl = resolve_model_architecture(vllm_config, is_draft_model)
-        logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
+    logger.info(
+        "Loading model with MODEL_IMPL_TYPE=%s",
+        envs.DRAFT_MODEL_IMPL_TYPE if is_draft_model else envs.MODEL_IMPL_TYPE)
+    impl = resolve_model_impl_type(vllm_config, is_draft_model)
 
     match impl:
         case "flax_nnx":
@@ -656,6 +683,18 @@ def get_model(
                                   shared_params)
         case _:
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
+
+
+def resolve_model_impl_type(vllm_config: VllmConfig,
+                            is_draft_model: bool = False) -> str:
+    """Effective model impl type ("flax_nnx" | "vllm"), resolving "auto"
+    from the model architecture."""
+    impl = (envs.DRAFT_MODEL_IMPL_TYPE
+            if is_draft_model else envs.MODEL_IMPL_TYPE)
+    if impl == "auto":
+        impl = resolve_model_architecture(vllm_config, is_draft_model)
+        logger.info("Resolved MODEL_IMPL_TYPE 'auto' to '%s'", impl)
+    return impl
 
 
 def resolve_model_architecture(vllm_config: VllmConfig,

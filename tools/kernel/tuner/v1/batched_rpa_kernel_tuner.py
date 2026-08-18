@@ -90,10 +90,10 @@ def _get_page_indices(kv_lens, page_size, max_decode_seqs, max_prefill_seqs,
     return page_indices
 
 
-def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
-                                         rng: np.random.Generator
-                                         | None = None):
-    """Generates inputs for the batched RPA kernel Prefill case ONLY.
+def _generate_batched_rpa_inputs(tuning_key: TuningKey,
+                                 rng: np.random.Generator
+                                 | None = None):
+    """Generates inputs for the batched RPA kernel based on tuning_key.case.
 
   Args:
     tuning_key: TuningKey object containing the configuration for the kernel.
@@ -124,6 +124,9 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
   """
+    assert tuning_key.case in [
+        'decode', 'prefill'
+    ], f'Only support tuning for prefill and decode case but receives {tuning_key.case=}'
     if rng is None:
         rng = np.random.default_rng(1234)
 
@@ -155,22 +158,41 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
         (num_page_indices, page_size, cdiv(
             num_kv_heads * 2, kv_packing), kv_packing, head_dim), kv_dtype)
 
-    max_input_len = 1024  # This depends on the bench serve command line input-len flag
-    max_prefill_seqs = min(num_seqs, total_q_tokens // max_input_len)
-    remaining_tokens = total_q_tokens - max_prefill_seqs * max_input_len
-    max_decode_seqs = min(num_seqs - max_prefill_seqs, remaining_tokens)
-    assert max_decode_seqs == 0, "Only pack prefill sequences in prefill case, expect max_decode_seqs to be 0"
+    # prefill and decode context length is from Gemma-4 1k/500 Case
+    prefill_input_len = 1024 if total_q_tokens >= 1024 else total_q_tokens
+    decode_kv_len = 1523
 
-    pages_per_seq = num_page_indices // num_seqs
-    kv_lens = jnp.pad(jnp.full((max_prefill_seqs, ),
-                               max_input_len,
-                               dtype=jnp.int32),
-                      (0, num_seqs - max_prefill_seqs),
-                      constant_values=0)
-    cu_q_lens = jnp.pad(jnp.arange(max_prefill_seqs + 1) * max_input_len,
-                        (0, num_seqs - max_prefill_seqs),
-                        constant_values=total_q_tokens)
-    distribution = jnp.array([0, 0, max_prefill_seqs], dtype=jnp.int32)
+    # The 1524 here is because in Gemma-4 1k/500 case, prefill 1024 tokens and decode 500 tokens
+    pages_per_seq = (1524 + page_size - 1) // page_size
+    if tuning_key.case == 'prefill':
+        assert total_q_tokens % prefill_input_len == 0, f'Expect prefill_input_len to align with total_q_tokens, got {prefill_input_len=} and {total_q_tokens=} '
+        max_prefill_seqs = min(num_seqs, total_q_tokens // prefill_input_len)
+        assert max_prefill_seqs * pages_per_seq <= num_page_indices, f'Expect max_prefill_seqs * pages_per_seq <= num_page_indices, got {total_q_tokens=}, {prefill_input_len=}, {num_seqs=} and {pages_per_seq=} and {num_page_indices=}'
+        max_decode_seqs = 0
+        kv_lens = jnp.pad(jnp.full((max_prefill_seqs, ),
+                                   prefill_input_len,
+                                   dtype=jnp.int32),
+                          (0, num_seqs - max_prefill_seqs),
+                          constant_values=0)
+        cu_q_lens = jnp.pad(
+            jnp.arange(max_prefill_seqs + 1) * prefill_input_len,
+            (0, num_seqs - max_prefill_seqs),
+            constant_values=max_prefill_seqs * prefill_input_len)
+    else:
+        max_prefill_seqs = 0
+        max_decode_seqs = min(num_seqs, total_q_tokens)
+        kv_lens = jnp.pad(jnp.full((max_decode_seqs, ),
+                                   decode_kv_len,
+                                   dtype=jnp.int32),
+                          (0, num_seqs - max_decode_seqs),
+                          constant_values=0)
+        cu_q_lens = jnp.pad(jnp.arange(max_decode_seqs + 1),
+                            (0, num_seqs - max_decode_seqs),
+                            constant_values=max_decode_seqs)
+
+    distribution = jnp.array(
+        [max_decode_seqs, max_decode_seqs, max_decode_seqs + max_prefill_seqs],
+        dtype=jnp.int32)
     page_indices = _get_page_indices(kv_lens, page_size, max_decode_seqs,
                                      max_prefill_seqs, pages_per_seq,
                                      num_page_indices)
@@ -199,18 +221,19 @@ def _generate_batched_rpa_inputs_prefill(tuning_key: TuningKey,
 
 class BatchedRpaKernelTuner(KernelTunerBase):
 
-    def __init__(self, run_config: RunConfig):
+    def __init__(self, run_config: RunConfig, lightweight: bool = False):
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
             kernel_tuner_name="batched_rpa_kernel_tuner",
             support_bayesian_optimization=True,
             n_bayesian_trials=100,
-            # (TODO) This only measure prefill case, need to refactor to support decode case as well
-            # maybe make this jit_kernel_pattern a runtime TuningKey dependent attribute
-            jit_kernel_pattern=r"RPAm-",
+            jit_kernel_pattern=lambda tuning_key: r"RPAm-"
+            if tuning_key.case == 'prefill' else r"RPAd-",
         )
-        super().__init__(tuner_config=self.tuner_config, run_config=run_config)
+        super().__init__(tuner_config=self.tuner_config,
+                         run_config=run_config,
+                         lightweight=lightweight)
 
     def generate_cases(self) -> list[TuningCase]:
         from tools.kernel.tuner.v1.common.tuning_case_logger import \
@@ -224,18 +247,15 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         # This is just a setup for tuning for Gemma4 Specific Prefill Case Only.
         # For tuning more cases, modify this and add more tuning cases to the
         # tuning_cases/batched_rpa_gemma4_tuning_cases.json file via using the TuningCaseLogger class.
-        # Collect unique TuningKeys from the log (prefill cases with large
-        # enough token count only).
         seen_keys: set[TuningKey] = set()
         unique_keys: list[TuningKey] = []
+        cases: list[TuningCase] = []
         for case in tuning_case_logger.get_logged_tuning_cases():
-            if (case.tuning_key.total_q_tokens >= 16 * 1024
-                    and case.tuning_key.case == 'prefill'
-                    and case.tuning_key not in seen_keys):
+            if (case.tuning_key not in seen_keys):
                 seen_keys.add(case.tuning_key)
                 unique_keys.append(case.tuning_key)
+                cases.append(case)
         # Build the full Cartesian product of the search space for every key.
-        cases: list[TuningCase] = []
         for tuning_key in unique_keys:
             space = self.get_search_space(tuning_key)
             param_names = list(space.keys())
@@ -256,15 +276,19 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         bkv_sz values are filtered to multiples of page_size as required by the
         scheduler.
         """
-        # TODO: This is only for PREFILL Case. Refactor this when support DECODE Case
         bkv_sz_list = [
             v for v in range(256, 2049, 256) if v % tuning_key.page_size == 0
         ]
         return {
-            'batch_size': [1, 2, 3, 4],
-            'bq_sz': list(range(256, 2049, 256)),
-            'bq_c_sz': [8, 16, 32, 64, 128],
-            'bkv_sz': bkv_sz_list,
+            'batch_size': [1, 2, 3, 4]
+            if tuning_key.case == 'prefill' else [1, 2, 4, 8, 16, 32],
+            'bq_sz':
+            list(range(256, 2049, 256))
+            if tuning_key.case == 'prefill' else [1],
+            'bq_c_sz':
+            [8, 16, 32, 64, 128] if tuning_key.case == 'prefill' else [1],
+            'bkv_sz':
+            bkv_sz_list,
             'n_buffer': [2, 3],
         }
 
@@ -273,8 +297,7 @@ class BatchedRpaKernelTuner(KernelTunerBase):
         if tuning_key == self._tuning_key:
             return self._kernel_inputs_cache
         self._tuning_key = tuning_key
-        self._kernel_inputs_cache = _generate_batched_rpa_inputs_prefill(
-            tuning_key)
+        self._kernel_inputs_cache = _generate_batched_rpa_inputs(tuning_key)
 
         return self._kernel_inputs_cache
 
@@ -282,44 +305,53 @@ class BatchedRpaKernelTuner(KernelTunerBase):
             tuning_key: TuningKey,
             tunable_params: TunableParams,
             iters: int = 1) -> tuple[TuningStatus, float, float]:
-        if iters == 1:
-            logger.info(
-                f"Running batched RPA kernel for tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}"
-            )
         input_cache = self.generate_inputs(tuning_key)
-        prefill_block_sizes = tunable_params.to_block_sizes()
+        block_sizes = tunable_params.to_block_sizes()
         try:
             start_ns = time.perf_counter_ns()
             for _ in range(iters):
+                copied_inputs = jax.tree.map(
+                    lambda x: x.copy()
+                    if isinstance(x, jax.Array) else x, input_cache)
+                queries = copied_inputs.pop('queries')
+                keys = copied_inputs.pop('keys')
+                values = copied_inputs.pop('values')
+                kv_cache = copied_inputs.pop('kv_cache')
+                kv_lens = copied_inputs.pop('kv_lens')
+                page_indices = copied_inputs.pop('page_indices')
+                cu_q_lens = copied_inputs.pop('cu_q_lens')
+                distribution = copied_inputs.pop('distribution')
+
                 input_cache['queries'], input_cache[
                     'kv_cache'] = jax.block_until_ready(
                         ragged_paged_attention(
-                            **jax.tree.map(
-                                lambda x: x.copy()
-                                if isinstance(x, jax.Array) else x,
-                                input_cache),
+                            queries,
+                            keys,
+                            values,
+                            kv_cache,
+                            kv_lens,
+                            page_indices,
+                            cu_q_lens,
+                            distribution,
+                            **copied_inputs,
                             chunk_prefill_size=None,  # not used inside
-                            decode_block_sizes=None,
-                            prefill_block_sizes=prefill_block_sizes,
+                            decode_block_sizes=block_sizes
+                            if tuning_key.case == 'decode' else None,
+                            prefill_block_sizes=block_sizes
+                            if tuning_key.case == 'prefill' else None,
                             vmem_limit_bytes=
                             None,  # use default vmem limit from the wrapper
                         ))
             end_ns = time.perf_counter_ns()
             latency_ns = (end_ns - start_ns)
-            if iters > 1:
-                logger.debug(
-                    f"latency_ns={latency_ns}, average_latency_ns={latency_ns / iters}"
-                )
             return TuningStatus.SUCCESS, latency_ns // iters, latency_ns  # status, average latency, total latency
         except Exception as err:
             if "RESOURCE_EXHAUSTED:" in str(err):
-                logger.warning(
+                logger.info(
                     f"Kernel run failed with OOM for {tuning_key=}, {tunable_params=}"
                 )
                 return TuningStatus.FAILED_OOM, float("inf"), float("inf")
-            logger.warning(
-                f"Failed with {tuning_key=}, {tunable_params=}, got error: {err=}"
+            logger.critical(
+                f"Unknown exception happened for {tuning_key}, {tunable_params}, {iters=} got error: {err=}"
             )
-            raise Exception(
-                f"Kernel run failed with tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}, got error: {err=}"
-            )
+            return TuningStatus.UNKNOWN_ERROR, float("inf"), float("inf")
