@@ -113,6 +113,8 @@ class TestDPScheduler:
 
                 # Verify processes and connections were created
                 assert scheduler.dp_size == 2
+                assert scheduler.connector is None
+                assert scheduler.ec_connector is None
                 assert len(scheduler.processes) == 2
                 # One input conn and one output conn per rank
                 assert len(scheduler.input_conns) == 2
