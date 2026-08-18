@@ -163,6 +163,27 @@ class LazyShardingAxisName:
                 return self.SEQUENCE
         return self.ATTN_DATA
 
+    def reduce_scatter_axes(self, weight_spec):
+        """Contraction axes a row-parallel matmul reduce-scatters its output
+        tokens over instead of all-reducing: 'pcp' when the weight contracts
+        over it (GDN out_proj). Tokens are replicated across pcp in the GDN
+        domain, so scattering lands the output token-sharded like the
+        residual stream for a fraction of the all-reduce bytes.
+        """
+        in_axis = weight_spec[0]
+        pcp = self.PREFILL_CONTEXT
+        if pcp and in_axis and (in_axis == pcp or
+                                (isinstance(in_axis, tuple) and pcp in in_axis)):
+            return (pcp, )
+        return ()
+
+    def out_token_axes(self, weight_spec):
+        """Token-dim axes of a matmul's output: token-sharded (ATTN_DATA)
+        after a reduce-scatter over pcp, else the same as the input's."""
+        if self.reduce_scatter_axes(weight_spec):
+            return self.ATTN_DATA
+        return self.token_axes(weight_spec)
+
 
 ShardingAxisName = LazyShardingAxisName()
 
