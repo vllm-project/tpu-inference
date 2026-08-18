@@ -235,7 +235,7 @@ class TestTpuPlatform:
         (True, None, True),
         (True, "dp", False),
         (True, "spec", False),
-        (True, "continue_decode", False),
+        (True, "continue_decode", True),
         (False, None, True),
     ])
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",

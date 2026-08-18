@@ -286,11 +286,9 @@ class TpuPlatform(Platform):
         cache_config = vllm_config.cache_config
         # Hybrid (mamba/linear-attention) models now reuse cached prefixes
         # via `mamba_cache_mode="align"`, which addresses recurrent state by
-        # block id (see `runner/mamba_prefix_caching.py`). Three setups still
-        # cannot: DP attention shards the mamba state over the DP axis while
-        # block ids address the whole pool, speculative decoding needs
-        # consecutive state slots for its verify window, and continue_decode
-        # reuses one set of slots for every step of its on-device loop.
+        # block id derived on TPU. Two setups still cannot: DP attention shards
+        # the mamba state over the DP axis while block ids address the whole pool,
+        # and speculative decoding needs consecutive state slots for its verify window.
         # Turning prefix caching off here keeps those configurations working
         # instead of failing at runtime.
         unsupported_reason = None
@@ -301,9 +299,6 @@ class TpuPlatform(Platform):
                 unsupported_reason = "DP attention"
             elif vllm_config.speculative_config is not None:
                 unsupported_reason = "speculative decoding"
-            elif vllm_config.additional_config.get("enable_continue_decode",
-                                                   False):
-                unsupported_reason = "continue_decode"
         if unsupported_reason is not None:
             logger.warning(
                 "[tpu_platform] Disabling prefix caching: hybrid "

@@ -431,10 +431,11 @@ class CompilationManager:
                 cache_pages=pcp_cache_pages,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
-        # populate for hybrid attn+mamba models — for pure-attention models we
-        # pass None at runtime (see `_prepare_inputs`), and the precompile
+        # populate for hybrid attn+mamba models without align mode — for pure-attention models
+        # and mamba align mode we pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
-        if self.runner.kv_cache_config.has_mamba_layers:
+        if (self.runner.kv_cache_config.has_mamba_layers
+                and self.runner.mamba_align_group_id is None):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -442,15 +443,6 @@ class CompilationManager:
                                                sharding=metadata_attn_sharding)
         else:
             mamba_state_indices = None
-        # Mamba prefix caching passes a second slot array at runtime; the
-        # primer must carry it too or the cached HLO is not reused.
-        if self.runner.mamba_align_group_id is not None:
-            mamba_read_state_indices = device_array(
-                self.runner.mesh,
-                np.zeros(self.runner.max_num_reqs, dtype=np.int32),
-                sharding=metadata_attn_sharding)
-        else:
-            mamba_read_state_indices = None
 
         def build_block_table(kv_cache_gid: int) -> jax.Array:
             block_table_obj = self.runner.input_batch.block_table[kv_cache_gid]
@@ -471,7 +463,6 @@ class CompilationManager:
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
-                mamba_read_state_indices=mamba_read_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
             )
@@ -485,7 +476,6 @@ class CompilationManager:
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
-                mamba_read_state_indices=mamba_read_state_indices,
                 padded_num_reqs=num_reqs,
             )
 
