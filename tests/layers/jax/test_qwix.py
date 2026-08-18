@@ -560,11 +560,11 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
             self.rng, self.model, self.mesh, self.quantization_config)
 
         # Assert weight is updated
-        self.assertIs(mock_weight_param[...], mock_random_array)
+        self.assertIs(mock_weight_param.get_value(), mock_random_array)
         # Assert scale is updated
-        self.assertIs(mock_scale_var[...], mock_random_array)
+        self.assertIs(mock_scale_var.get_value(), mock_random_array)
         # Assert RNG key is updated with the passed-in RNG
-        self.assertIs(mock_rng_var[...], self.rng)
+        self.assertIs(mock_rng_var.get_value(), self.rng)
 
     def test_invalid_config_raises_assertion_error(self):
         """Test that an invalid quantization_block_sizes config raises an error."""
@@ -620,8 +620,8 @@ class TestLoadRandomWeightsIntoQwixAbstractModel(unittest.TestCase):
             quantize_qwix.load_random_weights_into_qwix_abstract_model(
                 self.rng, self.model, self.mesh, self.quantization_config)
 
-        new_weight_param_val = mock_weight_param[...]
-        new_scale_var_val = mock_scale_var[...]
+        new_weight_param_val = mock_weight_param.get_value()
+        new_scale_var_val = mock_scale_var.get_value()
 
         actual_scale_shape = new_scale_var_val.shape
 

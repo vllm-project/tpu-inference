@@ -591,11 +591,11 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
         if not isinstance(param, nnx.Variable):
             continue
         if path[0] == 'rng' and path[-1] == "key":
-            param[...] = rng
+            param.set_value(rng)
             continue
         is_qwix_scale = (path[-1] == 'scale' and path[-2] == "array")
-        param_dtype = scale_dtype if is_qwix_scale else param[...].dtype
-        param_shape = param[...].shape
+        param_dtype = scale_dtype if is_qwix_scale else param.get_value().dtype
+        param_shape = param.get_value().shape
         if is_qwix_scale:
             # structure of path is ('layers', NUM_NUM, RELEVANT_MODULE_NAME, .... , RELEVANT_MODULE_NAME, 'scale', 'array')
             key = ".".join(path[2:-2])
@@ -604,9 +604,9 @@ def load_random_weights_into_qwix_abstract_model(rng: PRNGKey,
             else:
                 raise ValueError(
                     f"Scale shape for {key} not found in scale_shape_map.")
-        param[...] = get_random_sharded_array(
-            rng, mesh, param, param_shape, param_dtype,
-            ".".join([str(x) for x in path]))
+        param.set_value(
+            get_random_sharded_array(rng, mesh, param, param_shape, param_dtype,
+                                     ".".join([str(x) for x in path])))
 
     logger.info("Done initializing Qwix-quantized model with random weights")
 
