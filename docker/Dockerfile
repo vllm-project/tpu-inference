@@ -63,7 +63,15 @@ RUN git clone $VLLM_REPO . && \
 
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
 RUN --mount=type=cache,target=/root/.cache/pip pip install setuptools-rust>=1.9.0
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
+# Editable only for test images. An editable install leaves no package in
+# site-packages, so /workspace/vllm shadows it as a namespace package for any
+# process whose cwd is /workspace, and `from vllm import LLM` then fails.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$IS_TEST" = "true" ]; then \
+        VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .; \
+    else \
+        VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation .; \
+    fi
 
 # Install test dependencies
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils
@@ -88,7 +96,13 @@ RUN  --mount=type=cache,target=/root/.cache/pip if [ "$IS_TEST" = "true" ]; then
         pip install -r requirements_test.txt --retries 3; \
     fi
 COPY . .
-RUN --mount=type=cache,target=/root/.cache/pip pip install -e .
+# Editable only for test images, for the same reason as the vLLM install above.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$IS_TEST" = "true" ]; then \
+        pip install -e .; \
+    else \
+        pip install .; \
+    fi
 
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
