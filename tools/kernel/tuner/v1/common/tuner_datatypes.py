@@ -95,17 +95,13 @@ class TuningCase:
         })
 
     @classmethod
-    def from_dict(cls, data: dict, tuning_key_class, tunable_params_class):
+    def from_string(cls, string, tuning_key_class, tunable_params_class):
+        data = json.loads(string)
         tuning_key = tuning_key_class(**data['tuning_key'])
         tunable_params = tunable_params_class(**data['tunable_params'])
         case = TuningCase(tuning_key, tunable_params)
         case.is_baseline = data.get('is_baseline', False)
         return case
-
-    @classmethod
-    def from_string(cls, string, tuning_key_class, tunable_params_class):
-        data = json.loads(string)
-        return cls.from_dict(data, tuning_key_class, tunable_params_class)
 
 
 @dataclass

@@ -199,9 +199,7 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
     start_col = (min(col_size, max_safe_col) // 128) * 128
     for chunk in range(start_col, 127, -128):
         if col_size % chunk == 0:
-            print(f"[DEBUG] Selected col_chunk_size of {chunk} for {col_size}")
             return chunk
-    print(f"[DEBUG] Using default col_chunk_size of 128 for {col_size}")
     return 128
 
 
@@ -624,7 +622,7 @@ def ragged_gather_reduce(
     # plain TC gather-reduce beats routing through SparseCore and HBM. This
     # also keeps the kernel off configs with num_row_partitions > num_simd_lanes.
     dtype_bytes = jax.dtypes.itemsize_bits(x.dtype) // 8
-    if (tunable_params is None and jnp.size(x) * dtype_bytes * 2
+    if (jnp.size(x) * dtype_bytes * 2
             < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6):
         return _fallback_implementation(x, indices, topk_weights,
                                         valid_rows_mask, reduce_group_size)
@@ -645,13 +643,27 @@ def ragged_gather_reduce(
         )
         tunable_params = get_tuned_params(tuning_key)
 
-    num_column_partitions = tunable_params.num_column_partitions
-    num_row_partitions = tunable_params.num_row_partitions
-    num_row_subchunks = tunable_params.num_row_subchunks
-    row_chunk_size = tunable_params.row_chunk_size
-    aligned_hidden_size = tunable_params.aligned_hidden_size
-    col_size = tunable_params.col_size
-    col_chunk_size = tunable_params.col_chunk_size
+    if tunable_params is not None:
+        num_column_partitions = tunable_params.num_column_partitions
+        num_row_partitions = tunable_params.num_row_partitions
+        num_row_subchunks = tunable_params.num_row_subchunks
+        row_chunk_size = tunable_params.row_chunk_size
+        aligned_hidden_size = tunable_params.aligned_hidden_size
+        col_size = tunable_params.col_size
+        col_chunk_size = tunable_params.col_chunk_size
+    else:
+        num_column_partitions = _calculate_num_column_partitions(
+            hidden_size, input_size, num_cores, num_lanes, num_simd_lanes)
+        num_row_partitions = num_cores // num_column_partitions
+        assert (num_row_partitions <= num_simd_lanes
+                ), f"{num_row_partitions=} must be <= {num_simd_lanes=}"
+        num_row_subchunks, row_chunk_size = _calculate_row_tiling(
+            input_size, num_simd_lanes, num_row_partitions)
+
+        aligned_hidden_size = _align_to(hidden_size,
+                                        128 * num_column_partitions)
+        col_size = aligned_hidden_size // num_column_partitions
+        col_chunk_size = _calculate_col_chunk_size(col_size, num_simd_lanes)
 
     # Step 3: Pre-process inputs (weights, padding, sort by validity).
     # The kernel gathers x through a uint32 reinterpretation; carry the weights

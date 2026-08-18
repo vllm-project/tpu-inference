@@ -21,14 +21,12 @@ How to use this kernel tuner locally:
         --tpu_version=tpu7x --tpu_cores=2
 """
 
-import itertools
 import logging
 import time
 from pathlib import Path
 
 import jax
 import jax.experimental.pallas as pl
-import jax.experimental.pallas.tpu as pltpu
 import jax.numpy as jnp
 import numpy as np
 
@@ -47,8 +45,8 @@ logger = logging.getLogger(__name__)
 
 
 def _generate_ragged_gather_reduce_inputs(tuning_key: TuningKey,
-                                           rng: np.random.Generator
-                                           | None = None):
+                                          rng: np.random.Generator
+                                          | None = None):
     """Generates synthetic input arrays for ragged_gather_reduce."""
     if rng is None:
         rng = np.random.default_rng(1234)
@@ -61,9 +59,13 @@ def _generate_ragged_gather_reduce_inputs(tuning_key: TuningKey,
     start = min(int(0.01 * out_size), out_size)
     end = min(int(0.1 * out_size), out_size)
 
-    x = jnp.array(rng.standard_normal((out_size, hidden_size), dtype=np.float32)).astype(dtype)
+    x = jnp.array(
+        rng.standard_normal((out_size, hidden_size),
+                            dtype=np.float32)).astype(dtype)
     indices = jnp.array(rng.permutation(out_size), dtype=jnp.int32)
-    topk_weights = jnp.array(rng.standard_normal((out_size, ), dtype=np.float32)).astype(jnp.bfloat16)
+    topk_weights = jnp.array(
+        rng.standard_normal((out_size, ),
+                            dtype=np.float32)).astype(jnp.bfloat16)
     valid_rows_mask = jnp.where(
         jnp.logical_and(
             jnp.array([start], jnp.int32) <= indices,
@@ -120,8 +122,8 @@ class RaggedGatherReduceKernelTuner(KernelTunerBase):
             for num_row_subchunks in [1, 2, 3, 4, 8]:
                 row_chunk_size = num_simd_lanes * num_row_subchunks
 
-                base_aligned = pl.cdiv(hidden_size, 128 * num_col_part) * (
-                    128 * num_col_part)
+                base_aligned = pl.cdiv(
+                    hidden_size, 128 * num_col_part) * (128 * num_col_part)
                 aligned_candidates = [base_aligned]
 
                 for aligned_hidden_size in aligned_candidates:
@@ -136,9 +138,8 @@ class RaggedGatherReduceKernelTuner(KernelTunerBase):
                             col_chunk_candidates.append(chunk)
 
                     for col_chunk_size in col_chunk_candidates:
-                        vmem_needed_bytes = (
-                            num_simd_lanes * col_chunk_size + col_size + 6 * row_chunk_size
-                        ) * 4
+                        vmem_needed_bytes = (num_simd_lanes * col_chunk_size +
+                                             col_size + 6 * row_chunk_size) * 4
                         if vmem_needed_bytes > 450 * 1024:
                             continue
 
@@ -157,29 +158,31 @@ class RaggedGatherReduceKernelTuner(KernelTunerBase):
     def generate_cases(self) -> list[TuningCase]:
         current_dir = Path(__file__).parent
         tuning_case_logger = TuningCaseLogger(
-            current_dir / 'tuning_cases/ragged_gather_reduce_tuning_cases.json',
+            current_dir /
+            'tuning_cases/ragged_gather_reduce_tuning_cases.json',
             key_class=TuningKey,
             params_class=TunableParams,
         )
 
-        seen_keys: set[TuningKey] = set()
-        unique_keys: list[TuningKey] = []
+        seen_cases: set[str] = set()
+        unique_keys: set[TuningKey] = set()
         cases: list[TuningCase] = []
 
         for case in tuning_case_logger.get_logged_tuning_cases():
-            # if case.tuning_key not in seen_keys:
-                # seen_keys.add(case.tuning_key)
-            unique_keys.append(case.tuning_key)
-            cases.append(case)
+            unique_keys.add(case.tuning_key)
+            if str(case) not in seen_cases:
+                seen_cases.add(str(case))
+                cases.append(case)
 
-        # for tuning_key in unique_keys:
-        #     valid_params = self._generate_valid_tunable_params(tuning_key)
-        #     for tp in valid_params:
-        #         cases.append(
-        #             TuningCase(tuning_key=tuning_key, tunable_params=tp))
+        for tuning_key in unique_keys:
+            valid_params = self._generate_valid_tunable_params(tuning_key)
+            for tp in valid_params:
+                cases.append(
+                    TuningCase(tuning_key=tuning_key, tunable_params=tp))
 
         logger.info(
-            f"Generated {len(cases)} tuning cases for ragged_gather_reduce from log file.")
+            f"Generated {len(cases)} tuning cases for ragged_gather_reduce from log file."
+        )
         return cases
 
     def get_search_space(self, tuning_key: TuningKey) -> dict[str, list]:
