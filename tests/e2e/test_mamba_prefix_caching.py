@@ -54,7 +54,7 @@ QUESTIONS = [
 ]
 
 
-def _generate(mode: str, out_path: str) -> None:
+def _generate(mode: str, out_path: str, dp_size: int = 1) -> None:
     """Generate the prompt set in this process and dump the result.
 
     Only called in the child process (see `__main__` below), so vllm is
@@ -63,14 +63,25 @@ def _generate(mode: str, out_path: str) -> None:
     """
     from vllm import LLM, SamplingParams
 
+    additional_config = {}
+    if dp_size > 1:
+        additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": True
+                }
+            }
+        }
+
     llm = LLM(
         model=MODEL_NAME,
         max_model_len=2048,
-        tensor_parallel_size=1,
+        tensor_parallel_size=dp_size,
         gpu_memory_utilization=0.85,
         max_num_batched_tokens=1024,
         max_num_seqs=8,
         enable_prefix_caching=(mode == "on"),
+        additional_config=additional_config,
         # Qwen3.5 carries a vision tower, but these prompts are text-only.
         limit_mm_per_prompt={
             "image": 0,
@@ -101,49 +112,44 @@ def _generate(mode: str, out_path: str) -> None:
             }, f)
 
 
-def _run_case(mode: str) -> dict:
+def _run_case(mode: str, dp_size: int = 1) -> dict:
     """Run one engine in a subprocess and return its result."""
     with tempfile.TemporaryDirectory() as tmp:
-        out_path = os.path.join(tmp, f"{mode}.json")
+        out_path = os.path.join(tmp, f"{mode}_dp{dp_size}.json")
         env = dict(os.environ,
                    MODEL_IMPL_TYPE="vllm",
                    SKIP_JAX_PRECOMPILE="1",
                    VLLM_XLA_CHECK_RECOMPILATION="0")
-        proc = subprocess.run([sys.executable, __file__, mode, out_path],
-                              env=env,
-                              capture_output=True,
-                              text=True,
-                              timeout=1800)
+        proc = subprocess.run(
+            [sys.executable, __file__, mode, out_path,
+             str(dp_size)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=1800)
         if not os.path.exists(out_path):
             raise AssertionError(
-                f"prefix-caching-{mode} run produced no output\n"
+                f"prefix-caching-{mode} (dp={dp_size}) run produced no output\n"
                 f"--- stdout ---\n{proc.stdout[-4000:]}\n"
                 f"--- stderr ---\n{proc.stderr[-4000:]}")
         with open(out_path) as f:
             return json.load(f)
 
 
-def test_mamba_prefix_caching_matches_baseline():
-    """Greedy output must not change when prefix caching is enabled.
-
-    All prompts share a long prefix, so every request after the first hits
-    the cache and resumes its linear-attention state from a block another
-    request wrote. Any mis-addressing of those state blocks shows up as a
-    token divergence here.
-    """
-    baseline = _run_case("off")
-    cached = _run_case("on")
+def _verify_mamba_prefix_caching(dp_size: int = 1):
+    """Verify greedy output consistency with prefix caching on vs off."""
+    baseline = _run_case("off", dp_size=dp_size)
+    cached = _run_case("on", dp_size=dp_size)
 
     queries = cached["metrics"].get("vllm:prefix_cache_queries", 0)
     hits = cached["metrics"].get("vllm:prefix_cache_hits", 0)
-    print(f"  prefix cache: {hits:.0f}/{queries:.0f} tokens hit "
-          f"({hits / queries if queries else 0:.1%})")
+    print(
+        f"  prefix cache (dp={dp_size}): {hits:.0f}/{queries:.0f} tokens hit "
+        f"({hits / queries if queries else 0:.1%})")
 
-    # Without hits the comparison below would pass trivially, having
-    # exercised none of the state-reuse path.
     assert hits > 0, (
-        "no prefix cache hits: the shared prefix was never reused, so this "
-        "test did not exercise mamba state reuse")
+        f"no prefix cache hits (dp={dp_size}): the shared prefix was never "
+        f"reused, so this test did not exercise mamba state reuse")
 
     mismatched = [
         i for i, (
@@ -157,10 +163,21 @@ def test_mamba_prefix_caching_matches_baseline():
 
     assert not mismatched, (
         f"{len(mismatched)}/{len(QUESTIONS)} prompts changed when prefix "
-        f"caching was enabled; linear-attention state is not being reused "
-        f"correctly")
+        f"caching was enabled (dp={dp_size}); linear-attention state is not "
+        f"being reused correctly")
+
+
+def test_mamba_prefix_caching_matches_baseline():
+    """Greedy output must not change when prefix caching is enabled (DP=1)."""
+    _verify_mamba_prefix_caching(dp_size=1)
+
+
+def test_mamba_prefix_caching_dp_matches_baseline():
+    """Greedy output must not change when prefix caching is enabled under DP attention (DP=2)."""
+    _verify_mamba_prefix_caching(dp_size=2)
 
 
 if __name__ == "__main__":
     # Child entry point for `_run_case`.
-    _generate(sys.argv[1], sys.argv[2])
+    dp = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+    _generate(sys.argv[1], sys.argv[2], dp)

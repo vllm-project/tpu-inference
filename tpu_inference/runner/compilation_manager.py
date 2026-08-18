@@ -1960,7 +1960,8 @@ class CompilationManager:
                                                 request_distribution,
                                                 sharding=dp_sharding)
 
-            if self.runner.kv_cache_config.has_mamba_layers:
+            if (self.runner.kv_cache_config.has_mamba_layers
+                    and self.runner.mamba_align_group_id is None):
                 mamba_state_indices = device_array(
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),
