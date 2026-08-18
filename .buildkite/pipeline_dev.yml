@@ -75,4 +75,4 @@ steps:
           "curl http://localhost:8000/v1/completions \
             -X POST \
             -H 'Content-Type: application/json' \
-            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
+            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
