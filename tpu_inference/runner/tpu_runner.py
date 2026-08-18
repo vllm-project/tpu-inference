@@ -70,7 +70,6 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.common.model_loader import get_model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.runner import mamba_prefix_caching
 from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
@@ -815,11 +814,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rank = rank
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
-        # Set for real in `_init_mamba_prefix_caching` once the kv cache
-        # config is known; None means mamba state is addressed by the
-        # per-request slot pool rather than by prefix-cacheable blocks.
+        # Set in `_init_mamba_prefix_caching` once the kv cache config is known;
+        # None means mamba state is addressed by the per-request slot pool.
         self.mamba_align_group_id: int | None = None
-        self.mamba_align_block_size: int = 0
 
         self._init_random()
         self._init_mesh()
@@ -1323,73 +1320,25 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                    kv_cache_config: KVCacheConfig) -> None:
         """Set up mamba prefix caching (`mamba_cache_mode == "align"`).
 
-        In align mode a request's recurrent state lives in prefix-cacheable
-        blocks addressed by the mamba group's block table, not in the
-        per-request slot pool that `InputBatch` hands out. Record the group
-        id and block size so `_prepare_inputs` can derive the read/write
-        state slots from that block table.
+        In align mode, a request's recurrent state is addressed by prefix-cacheable
+        blocks from the mamba group's block table directly on TPU.
         """
         self.mamba_align_group_id = None
-        self.mamba_align_block_size = 0
 
-        if not kv_cache_config.has_mamba_layers:
-            return
-        if getattr(self.cache_config, "mamba_cache_mode", "none") != "align":
+        if (not kv_cache_config.has_mamba_layers or getattr(
+                self.cache_config, "mamba_cache_mode", "none") != "align"):
             return
 
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):
             if isinstance(group.kv_cache_spec, MambaSpec):
                 self.mamba_align_group_id = gid
-                self.mamba_align_block_size = group.kv_cache_spec.block_size
                 break
 
-        if self.mamba_align_group_id is None:
-            return
-
-        unsupported = None
-        if self.dp_size > 1:
-            unsupported = (
-                "DP attention: the mamba state arrays are sharded over the "
-                "DP axis and hold a slice of the slots, while vLLM's block "
-                "ids address the whole pool")
-        elif self.speculative_config is not None:
-            # A verify window checkpoints one state per window position into
-            # consecutive slots; block ids from the block table are not
-            # consecutive, so the two schemes cannot both hold.
-            unsupported = ("speculative decoding: verify windows need "
-                           "consecutive state slots")
-        elif self.enable_continue_decode:
-            # The on-device decode loop reuses one set of state slots for all
-            # of its steps, so a request crossing a mamba block boundary
-            # mid-loop would checkpoint into the block it already left.
-            unsupported = ("continue_decode: the on-device decode loop "
-                           "cannot re-address state mid-loop")
-        if unsupported is not None:
-            raise NotImplementedError(
-                f"Mamba prefix caching (mamba_cache_mode='align') is not "
-                f"supported with {unsupported}. Pass "
-                f"--no-enable-prefix-caching to run this configuration.")
-
-        logger.info(
-            "Mamba prefix caching enabled: recurrent state is addressed by "
-            "the block table of kv-cache group %d (mamba block size %d).",
-            self.mamba_align_group_id, self.mamba_align_block_size)
-
-    def _build_mamba_align_state_indices(
-        self,
-        req_indices: np.ndarray,
-        num_scheduled_tokens_per_req: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Mamba read/write state slots for this step, from the block table."""
-        return mamba_prefix_caching.build_align_state_indices(
-            block_table=self.input_batch.block_table[
-                self.mamba_align_group_id].get_cpu_tensor(),
-            num_computed_tokens=self.input_batch.num_computed_tokens_cpu,
-            num_scheduled_tokens=num_scheduled_tokens_per_req,
-            block_size=self.mamba_align_block_size,
-            max_num_reqs=self.max_num_reqs,
-            req_indices=req_indices,
-        )
+        if self.mamba_align_group_id is not None:
+            logger.info(
+                "Mamba prefix caching enabled: recurrent state is addressed by "
+                "the block table of kv-cache group %d.",
+                self.mamba_align_group_id)
 
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
@@ -3110,20 +3059,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # pure-attention models, leaving the field None keeps AttentionMetadata
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
-        mamba_read_state_indices = None
-        if self.mamba_align_group_id is not None:
-            # Mamba prefix caching: the state slots come from the mamba block
-            # table, so no slot-pool remap (and no DP-local wrap) applies.
-            (mamba_state_indices_cpu,
-             mamba_read_state_indices_cpu) = self._build_mamba_align_state_indices(
-                 req_indices_dp[0], scheduled_tokens_per_dp_rank[0])
-            (request_distribution, mamba_state_indices,
-             mamba_read_state_indices, dev_arrays_payload) = device_array(
-                 self.mesh,
-                 (request_distribution, mamba_state_indices_cpu,
-                  mamba_read_state_indices_cpu, metadata_blob),
-                 sharding=metadata_attn_sharding)
-        elif self.kv_cache_config.has_mamba_layers:
+        # In align mode (prefix caching), mamba state indices are derived on-device
+        # from the block tables, so mamba_state_indices is None.
+        if self.kv_cache_config.has_mamba_layers and self.mamba_align_group_id is None:
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.
@@ -3173,7 +3111,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
-                mamba_read_state_indices=mamba_read_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
             )
@@ -3187,7 +3124,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
-                mamba_read_state_indices=mamba_read_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
             )
 

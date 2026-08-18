@@ -235,3 +235,210 @@ class TestVllmGatedDeltaNetAttention:
 
         assert torch.all(output[:num_tokens] == 5)
         assert torch.all(output[num_tokens:] == 0)
+
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.torch_view",
+        side_effect=lambda t: torch.as_tensor(np.array(t)),
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.jax_view",
+        side_effect=lambda t: jax.numpy.array(t.detach().cpu().numpy())
+        if isinstance(t, torch.Tensor) else t,
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.run_jax_gdn_attention"
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.get_forward_context"
+    )
+    def test_gdn_attention_core_tpu_align_mode(self, mock_get_fc, mock_run_jax,
+                                               mock_jax_v, mock_torch_v, mesh):
+        from tpu_inference.layers.common.attention_metadata import \
+            AttentionMetadata
+        from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
+            gdn_attention_core_tpu
+
+        layer_name = "test_layer"
+        num_tokens = 4
+        n_kq = 2
+        n_v = 4
+        d_k = 16
+        d_v = 16
+        kernel_size = 4
+        mamba_block_size = 16
+
+        # Layer mock
+        layer_module = MagicMock()
+        layer_module.num_k_heads = n_kq
+        layer_module.num_v_heads = n_v
+        layer_module.head_k_dim = d_k
+        layer_module.head_v_dim = d_v
+        layer_module.conv_kernel_size = kernel_size
+        layer_module.conv1d.weight = torch.randn((n_kq * d_k) * 2 + n_v * d_v,
+                                                 1, kernel_size)
+        layer_module.conv1d.bias = None
+        layer_module.A_log = torch.randn(n_v)
+        layer_module.dt_bias = torch.randn(n_v)
+        layer_module.cache_config.mamba_cache_mode = "align"
+        layer_module.cache_config.mamba_block_size = mamba_block_size
+
+        # AttentionMetadata: 2 requests
+        # Request 0: computed 16 tokens, scheduled 16 tokens -> crosses from block 0 to block 1
+        # Request 1: computed 0 tokens, scheduled 16 tokens -> first block 0
+        block_tables = jax.numpy.array([[10, 11], [20, 21]],
+                                       dtype=jax.numpy.int32)
+        seq_lens = jax.numpy.array([32, 16], dtype=jax.numpy.int32)
+        query_start_loc = jax.numpy.array([0, 16, 32], dtype=jax.numpy.int32)
+        request_distribution = jax.numpy.array([0, 2, 2],
+                                               dtype=jax.numpy.int32)
+
+        attn_metadata = AttentionMetadata(
+            input_positions=jax.numpy.zeros(32, dtype=jax.numpy.int32),
+            block_tables=block_tables,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+            padded_num_reqs=2,
+        )
+
+        fc = MagicMock()
+        fc.attn_metadata = {layer_name: attn_metadata}
+        fc.no_compile_layers = {layer_name: layer_module}
+        mock_get_fc.return_value = fc
+
+        # KV cache tensors
+        conv_dim = (n_kq * d_k) * 2 + n_v * d_v
+        conv_state = jax.numpy.zeros((30, kernel_size - 1, conv_dim))
+        recurrent_state = jax.numpy.zeros((30, n_v, d_k, d_v))
+
+        mock_run_jax.return_value = (
+            (conv_state[:2], recurrent_state[:2]),
+            jax.numpy.zeros((num_tokens, n_v * d_v)),
+        )
+
+        mixed_qkv = torch.randn(num_tokens, conv_dim)
+        b = torch.randn(num_tokens, n_v)
+        a = torch.randn(num_tokens, n_v)
+        core_attn_out = torch.zeros(num_tokens, n_v, d_v)
+
+        with set_vllm_model_wrapper_context(
+                kv_caches=[(conv_state, recurrent_state)],
+                mesh=mesh,
+                layer_name_to_kvcache_index={layer_name: 0},
+        ):
+            gdn_attention_core_tpu(mixed_qkv, b, a, core_attn_out, layer_name,
+                                   mesh)
+
+        assert mock_run_jax.call_count == 1
+        call_kwargs = mock_run_jax.call_args[1]
+        call_args = mock_run_jax.call_args[0]
+
+        # state_indices (write slots) should be [11, 20]
+        # read_state_indices (read slots) should be [10, 20]
+        actual_state_indices = call_args[9]  # 10th positional arg
+        actual_read_state_indices = call_kwargs["read_state_indices"]
+
+        np.testing.assert_array_equal(np.array(actual_state_indices), [11, 20])
+        np.testing.assert_array_equal(np.array(actual_read_state_indices),
+                                      [10, 20])
+
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.torch_view",
+        side_effect=lambda t: torch.as_tensor(np.array(t)),
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.jax_view",
+        side_effect=lambda t: jax.numpy.array(t.detach().cpu().numpy())
+        if isinstance(t, torch.Tensor) else t,
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.run_jax_gdn_attention"
+    )
+    @patch(
+        "tpu_inference.layers.vllm.custom_ops.gdn_attention_op.get_forward_context"
+    )
+    def test_gdn_attention_core_tpu_non_align_mode(self, mock_get_fc,
+                                                   mock_run_jax, mock_jax_v,
+                                                   mock_torch_v, mesh):
+        from tpu_inference.layers.common.attention_metadata import \
+            AttentionMetadata
+        from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
+            gdn_attention_core_tpu
+
+        layer_name = "test_layer"
+        num_tokens = 4
+        n_kq = 2
+        n_v = 4
+        d_k = 16
+        d_v = 16
+        kernel_size = 4
+
+        # Layer mock (mamba_cache_mode is none)
+        layer_module = MagicMock()
+        layer_module.num_k_heads = n_kq
+        layer_module.num_v_heads = n_v
+        layer_module.head_k_dim = d_k
+        layer_module.head_v_dim = d_v
+        layer_module.conv_kernel_size = kernel_size
+        layer_module.conv1d.weight = torch.randn((n_kq * d_k) * 2 + n_v * d_v,
+                                                 1, kernel_size)
+        layer_module.conv1d.bias = None
+        layer_module.A_log = torch.randn(n_v)
+        layer_module.dt_bias = torch.randn(n_v)
+        layer_module.cache_config.mamba_cache_mode = "none"
+
+        # AttentionMetadata: compact slot pool indices
+        mamba_state_indices = jax.numpy.array([3, 7], dtype=jax.numpy.int32)
+        seq_lens = jax.numpy.array([32, 16], dtype=jax.numpy.int32)
+        query_start_loc = jax.numpy.array([0, 16, 32], dtype=jax.numpy.int32)
+        request_distribution = jax.numpy.array([0, 2, 2],
+                                               dtype=jax.numpy.int32)
+
+        attn_metadata = AttentionMetadata(
+            input_positions=jax.numpy.zeros(32, dtype=jax.numpy.int32),
+            block_tables=None,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            request_distribution=request_distribution,
+            mamba_state_indices=mamba_state_indices,
+            padded_num_reqs=2,
+        )
+
+        fc = MagicMock()
+        fc.attn_metadata = {layer_name: attn_metadata}
+        fc.no_compile_layers = {layer_name: layer_module}
+        mock_get_fc.return_value = fc
+
+        # KV cache tensors
+        conv_dim = (n_kq * d_k) * 2 + n_v * d_v
+        conv_state = jax.numpy.zeros((30, kernel_size - 1, conv_dim))
+        recurrent_state = jax.numpy.zeros((30, n_v, d_k, d_v))
+
+        mock_run_jax.return_value = (
+            (conv_state[:2], recurrent_state[:2]),
+            jax.numpy.zeros((num_tokens, n_v * d_v)),
+        )
+
+        mixed_qkv = torch.randn(num_tokens, conv_dim)
+        b = torch.randn(num_tokens, n_v)
+        a = torch.randn(num_tokens, n_v)
+        core_attn_out = torch.zeros(num_tokens, n_v, d_v)
+
+        with set_vllm_model_wrapper_context(
+                kv_caches=[(conv_state, recurrent_state)],
+                mesh=mesh,
+                layer_name_to_kvcache_index={layer_name: 0},
+        ):
+            gdn_attention_core_tpu(mixed_qkv, b, a, core_attn_out, layer_name,
+                                   mesh)
+
+        assert mock_run_jax.call_count == 1
+        call_kwargs = mock_run_jax.call_args[1]
+        call_args = mock_run_jax.call_args[0]
+
+        # state_indices should be [3, 7] and read_state_indices should be None
+        actual_state_indices = call_args[9]  # 10th positional arg
+        actual_read_state_indices = call_kwargs["read_state_indices"]
+
+        np.testing.assert_array_equal(np.array(actual_state_indices), [3, 7])
+        assert actual_read_state_indices is None

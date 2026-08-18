@@ -24,7 +24,6 @@ import subprocess
 import sys
 import tempfile
 
-
 MODEL_NAME = "Qwen/Qwen3.5-4B"
 
 # Long enough that the shared part spans several mamba blocks, so a cache
@@ -73,11 +72,17 @@ def _generate(mode: str, out_path: str) -> None:
         max_num_seqs=8,
         enable_prefix_caching=(mode == "on"),
         # Qwen3.5 carries a vision tower, but these prompts are text-only.
-        limit_mm_per_prompt={"image": 0, "video": 0},
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": 0
+        },
         disable_log_stats=False,  # get_metrics() needs the stat loggers
     )
-    outputs = llm.generate([SHARED_PREFIX + q for q in QUESTIONS],
-                           SamplingParams(temperature=0.0, max_tokens=32))
+    outputs = [
+        llm.generate(SHARED_PREFIX + q,
+                     SamplingParams(temperature=0.0, max_tokens=32))[0]
+        for q in QUESTIONS
+    ]
 
     metrics: dict[str, float] = {}
     for m in llm.get_metrics():
@@ -141,8 +146,9 @@ def test_mamba_prefix_caching_matches_baseline():
         "test did not exercise mamba state reuse")
 
     mismatched = [
-        i for i, (b, c) in enumerate(
-            zip(baseline["token_ids"], cached["token_ids"])) if b != c
+        i for i, (
+            b, c) in enumerate(zip(baseline["token_ids"], cached["token_ids"]))
+        if b != c
     ]
     for i in mismatched:
         print(f"Token mismatch for prompt {i} ({QUESTIONS[i]!r}):")
