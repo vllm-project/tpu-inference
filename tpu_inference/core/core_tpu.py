@@ -151,6 +151,7 @@ class _DisaggOrchestrator:
         # Start all threads
         for t in self._all_threads:
             t.start()
+        self.request_condition = threading.Condition()
 
     def add_request(self, request: Request):
         """
@@ -160,21 +161,23 @@ class _DisaggOrchestrator:
         internal state tracking and hands it off to the first stage of the
         processing pipeline (the prefill scheduler).
         """
-        # Hand off the request to the prefill scheduler to be batched for execution.
-        self._prefill_engines[0].scheduler.add_request(request)
+        with self.request_condition:
+            # Hand off the request to the prefill scheduler to be batched for execution.
+            self._prefill_engines[0].scheduler.add_request(request)
 
-        # Add to internal state for tracking by other threads.
-        # The key is the request_id, the value is the request object.
-        self._requests[request.request_id] = request
+            # Add to internal state for tracking by other threads.
+            # The key is the request_id, the value is the request object.
+            self._requests[request.request_id] = request
+            self.request_condition.notify()
 
     def _prefill(self, idx: int):
         prefill_engine = self._prefill_engines[idx]
         transfer_backlog = self._transfer_backlogs[idx]
 
         while self.live:
-            if not prefill_engine.scheduler.has_requests():
-                time.sleep(0.05)
-                continue
+            with self.request_condition:
+                self.request_condition.wait_for(
+                    lambda: prefill_engine.scheduler.has_requests())
 
             scheduler_output = prefill_engine.scheduler.schedule()
             with LatencyTracker(f"prefill-{idx}"):
