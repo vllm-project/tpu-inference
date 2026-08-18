@@ -37,13 +37,14 @@ PROFILE_STEPS  = int(os.environ.get("PROFILE_STEPS",    5))
 OUTPUT_DIR     = os.environ.get("OUTPUT_DIR", "profiles/decode_bench")
 KV_DTYPE = jnp.bfloat16
 PHYSICAL_BLOCK_SIZE = PAGE_SIZE * DCP_SIZE  # global page size, sharded by CONTEXT=dcp
-TP8_MODEL = 8
-DECODE_KV_LENS = [k * 1024 for k in (4, 32, 128, 256)]
+TP_MODEL = int(os.environ.get("TP_MODEL", 8))
+_KV_LENS_K   = os.environ.get("KV_LENS_K", "4,32,128,256,512")
+DECODE_KV_LENS = [int(k) * 1024 for k in _KV_LENS_K.split(",")]
 
 # ── Meshes ────────────────────────────────────────────────────────────────────
 devices = sorted(jax.devices(), key=lambda d: d.id)
-assert len(devices) >= max(MODEL_SIZE * DCP_SIZE, TP8_MODEL), (
-    f"Need {max(MODEL_SIZE * DCP_SIZE, TP8_MODEL)} devices, got {len(devices)}"
+assert len(devices) >= max(MODEL_SIZE * DCP_SIZE, TP_MODEL), (
+    f"Need {max(MODEL_SIZE * DCP_SIZE, TP_MODEL)} devices, got {len(devices)}"
 )
 
 # DCP: attention() sees dcp>1 → routes to forward_decode
@@ -52,9 +53,9 @@ mesh = Mesh(
     axis_names=MESH_AXIS_NAMES,
 )
 
-# TP8: attention() sees dcp=1 → routes to sharded_ragged_paged_attention
+# TP baseline: attention() sees dcp=1 → routes to sharded_ragged_paged_attention
 mesh_tp8 = Mesh(
-    np.array(devices[:TP8_MODEL]).reshape((1, 1, 1, 1, TP8_MODEL, 1, 1)),
+    np.array(devices[:TP_MODEL]).reshape((1, 1, 1, 1, TP_MODEL, 1, 1)),
     axis_names=MESH_AXIS_NAMES,
 )
 
@@ -160,7 +161,7 @@ def bench_kv_len(global_kv_len: int):
     sm_scale = HEAD_DIM ** -0.5
     model_axis = MESH_AXIS_NAMES[4]
     dcp_axis = MESH_AXIS_NAMES[5]
-    print(f"\n  ── KV={kv_k}K  DCP: {kv_k // DCP_SIZE}K/shard (no dup)  TP8: {kv_k}K/dev (2× KV dup) ──")
+    print(f"\n  ── KV={kv_k}K  DCP: {kv_k // DCP_SIZE}K/shard (no dup)  TP{TP_MODEL}: {kv_k}K/dev ──")
     print(">>")
 
     # ==========================================================================
@@ -168,7 +169,7 @@ def bench_kv_len(global_kv_len: int):
     # ==========================================================================
     pages_per_seq_tp8 = math.ceil(global_kv_len / PAGE_SIZE)
     total_pages_tp8 = MAX_NUM_SEQS * pages_per_seq_tp8
-    factor = max(1, TP8_MODEL // NUM_KV_HEADS)
+    factor = max(1, TP_MODEL // NUM_KV_HEADS)
     tp8_cache_shape = get_kv_cache_shape(
         total_pages_tp8, PAGE_SIZE, NUM_KV_HEADS * factor, HEAD_DIM, KV_DTYPE
     )
@@ -198,7 +199,7 @@ def bench_kv_len(global_kv_len: int):
         updated_cache, out = attention(cache, q, k, v, md, mesh_tp8, sm_scale=sm_scale, use_causal_mask=True)
         return updated_cache, out
 
-    tp8_cache = _bench(f"tp8   model=8,dcp=1  (2× KV cache dup)", tp8_fn, tp8_cache, tp8_args)
+    tp8_cache = _bench(f"tp{TP_MODEL}  model={TP_MODEL},dcp=1", tp8_fn, tp8_cache, tp8_args)
     tp8_cache = _profile_fn("tp8", tp8_fn, tp8_cache, tp8_args, f"{OUTPUT_DIR}/kv{kv_k}K/tp8")
 
     # Explicitly free TP8 memory before allocating DCP cache to avoid OOM.
@@ -244,7 +245,7 @@ def bench_kv_len(global_kv_len: int):
 
     for decode_only_opt, label, tag in [
         (True,  "DCP decode_only_opt  (write-first)", "decode_only"),
-        (False, "DCP pure dcp_forward (two-phase)",   "dcp_forward"),
+        # (False, "DCP pure dcp_forward (two-phase)",   "dcp_forward"),
     ]:
         dcp_fn = make_dcp_fn(decode_only_opt)
         dcp_cache = _bench(label, dcp_fn, dcp_cache, dcp_args)
@@ -256,10 +257,10 @@ def bench_kv_len(global_kv_len: int):
 
 def main():
     print("=" * 80, flush=True)
-    print("  forward_decode  —  DCP vs TP8 [No-Init-Overhead]")
+    print(f"  forward_decode  —  DCP vs TP{TP_MODEL} [No-Init-Overhead]")
     print("=" * 80, flush=True)
     print(f"  q_heads={NUM_Q_HEADS}  kv_heads={NUM_KV_HEADS}  head_dim={HEAD_DIM}"
-          f"  DCP: phys_block={PHYSICAL_BLOCK_SIZE}  TP8: page={PAGE_SIZE}", flush=True)
+          f"  DCP: phys_block={PHYSICAL_BLOCK_SIZE}  TP{TP_MODEL}: page={PAGE_SIZE}", flush=True)
     print(f"  real_seqs={NUM_SEQS_REAL}  padded={MAX_NUM_SEQS}  warmup={WARMUP}  bench={BENCH}", flush=True)
     print(flush=True)
 

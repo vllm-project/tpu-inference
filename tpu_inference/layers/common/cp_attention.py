@@ -588,17 +588,20 @@ def dcp_forward_decode_only(
     dcp_size = mesh.shape[dcp_axis]
 
     # GQA/MQA: replicate KV heads to match ATTN_HEAD sharding before shard_map.
+    # kv_repeat_factor is captured by _shard_fn to undo the duplication after
+    # all-gathering K/V back to num_kv_heads/model heads for the cache write.
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
-    if tp_size > 1:
-        num_kv_heads = k.shape[1]
-        if num_kv_heads < tp_size:
-            if tp_size % num_kv_heads != 0:
-                raise ValueError(
-                    f"tp_size {tp_size} must be divisible by num_kv_heads {num_kv_heads}"
-                )
-            factor = tp_size // num_kv_heads
-            k = jnp.repeat(k, factor, axis=1)
-            v = jnp.repeat(v, factor, axis=1)
+    num_kv_heads = k.shape[1]
+    if tp_size > 1 and num_kv_heads < tp_size:
+        if tp_size % num_kv_heads != 0:
+            raise ValueError(
+                f"tp_size {tp_size} must be divisible by num_kv_heads {num_kv_heads}"
+            )
+        kv_repeat_factor = tp_size // num_kv_heads
+        k = jnp.repeat(k, kv_repeat_factor, axis=1)
+        v = jnp.repeat(v, kv_repeat_factor, axis=1)
+    else:
+        kv_repeat_factor = 1
 
     cp_rank_global = jnp.arange(dcp_size, dtype=jnp.int32)
 
@@ -622,6 +625,18 @@ def dcp_forward_decode_only(
         # batched_rpa supports page level interleaved.
         # rpa_v3_cp supports token level interleaved.
         cp_kv_cache_interleaved_size = kv_cache_local.shape[1] if envs.USE_BATCHED_RPA_KERNEL else 1
+
+        # K/V are sharded by ATTN_HEAD (model × dcp). When num_kv_heads < tp_size,
+        # jnp.repeat in the outer scope duplicates heads so each DCP rank at the
+        # same model rank holds a copy of the same head. All-gather across dcp
+        # collects those dcp copies; stride-slicing by (gathered / cache_heads)
+        # picks the unique heads, giving num_kv_heads/model to match the cache.
+        # kv_cache_local.shape[2] = num_kv_heads/model (from KV_HEAD sharding).
+        k_gathered = lax.all_gather(k_local, dcp_axis, axis=1, tiled=True)
+        v_gathered = lax.all_gather(v_local, dcp_axis, axis=1, tiled=True)
+        kv_head_stride = k_gathered.shape[1] // kv_cache_local.shape[2]
+        k_local = k_gathered[:, ::kv_head_stride, :]
+        v_local = v_gathered[:, ::kv_head_stride, :]
 
         # Write new decode token first, then attend to the full updated cache.
         merged_kv = merge_kv(k_local, v_local)
