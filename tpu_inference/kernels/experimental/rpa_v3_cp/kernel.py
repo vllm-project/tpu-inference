@@ -2459,22 +2459,30 @@ def ragged_paged_attention(
         # input_output_aliases indices are offset by the non-None count only.
         num_active_scalers = sum(1 for s in scalar_prefetches if s is not None)
 
+        # A read-only launch (update_kv_cache=False) never touches the
+        # updated-cache output ref, so it neither aliases the cache nor gets a
+        # full-size output: aliasing it would make a second in-place consumer
+        # of the same buffer (pcp runs a ring launch and a write launch on one
+        # cache), which forces XLA to copy the whole cache each layer.
+        kv_out_shape = kv_cache.shape if update_kv_cache else (1, ) * kv_cache.ndim
         out_shape = [
             pltpu.HBM(shape=q.shape, dtype=q.dtype),
-            pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
+            pltpu.HBM(shape=kv_out_shape, dtype=kv_cache.dtype),
             pltpu.HBM(shape=lse_hbm.shape, dtype=lse_hbm.dtype)
             if return_lse else None,
         ] if tpu_version >= 7 else [
             jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
-            jax.ShapeDtypeStruct(shape=kv_cache.shape, dtype=kv_cache.dtype),
+            jax.ShapeDtypeStruct(shape=kv_out_shape, dtype=kv_cache.dtype),
             jax.ShapeDtypeStruct(shape=lse_hbm.shape, dtype=lse_hbm.dtype)
             if return_lse else None,
         ]
 
         input_output_aliases = {
             num_active_scalers: 0,  # q -> o
-            num_active_scalers + 2: 1,  # kv_cache -> updated_kv_cache
         }
+        if update_kv_cache:
+            input_output_aliases[num_active_scalers +
+                                 2] = 1  # kv_cache -> updated_kv_cache
         in_specs.append(
             pl.BlockSpec(memory_space=pltpu.HBM) if return_lse else None)
         out_specs.append(
@@ -2554,11 +2562,12 @@ def ragged_paged_attention(
                 return kernel(*scalar_prefetches, *hbms)
 
         outputs = run(scalar_prefetches, hbm_buffers)
-        # (o, updated_kv_cache, lse)
+        # (o, updated_kv_cache, lse); a read-only launch leaves the cache as is.
+        updated_kv_cache = outputs[1] if update_kv_cache else kv_cache
         if return_lse:
-            return outputs
+            return outputs[0], updated_kv_cache, outputs[2]
         else:
-            return outputs[0], outputs[1], None
+            return outputs[0], updated_kv_cache, None
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:
