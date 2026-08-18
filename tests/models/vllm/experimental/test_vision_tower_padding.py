@@ -129,6 +129,31 @@ def test_get_model_tp_size_helper():
     assert wrapper._get_model_tp_size() == 8
 
 
+def test_get_activation_sharding_divisor():
+    from unittest.mock import MagicMock
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+
+    wrapper = MagicMock(spec=VllmModelWrapper)
+    wrapper._get_activation_sharding_divisor = (
+        VllmModelWrapper._get_activation_sharding_divisor.__get__(wrapper)
+    )
+
+    # Case 1: DP attention mesh ('attn_dp': 8, 'model': 1)
+    mock_mesh = MagicMock()
+    mock_mesh.shape = {"data": 1, "attn_dp": 8, "model": 1}
+    wrapper.mesh = mock_mesh
+    assert wrapper._get_activation_sharding_divisor() == 8
+
+    # Case 2: Hybrid PCP + DP attention ('pcp': 2, 'attn_dp': 4)
+    mock_mesh.shape = {"data": 1, "pcp": 2, "attn_dp": 4, "model": 1}
+    assert wrapper._get_activation_sharding_divisor() == 4  # lcm(1, 2, 4, 1) = 4
+
+    # Case 3: Fallback when mesh is None
+    wrapper.mesh = None
+    wrapper.vllm_config.parallel_config.tensor_parallel_size = 8
+    assert wrapper._get_activation_sharding_divisor() == 8
+
+
 def test_padding_metadata_synchronization():
     # Initial tensors for 1 video (100 patches, 1 timestamp entry)
     grid = GridTHW([(1, 10, 10)])
