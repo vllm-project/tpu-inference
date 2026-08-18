@@ -19,4 +19,6 @@ kernel_autotune_mapping = {
     '/workspace/tpu_inference/tpu_inference/kernels/experimental/batched_rpa/tuned_params.py',
     'flash_attention_kernel_tuner':
     '/workspace/tpu_inference/tpu_inference/kernels/flash_attention/tuned_params.py',
+    'ragged_gather_reduce_kernel_tuner':
+    '/workspace/tpu_inference/tpu_inference/kernels/sparse_core/ragged_gather_reduce_tuned_params.py',
 }

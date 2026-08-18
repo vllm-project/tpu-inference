@@ -23,6 +23,8 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
 from tpu_inference.kernels.sparse_core import core_map_helper
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_tuned_params import (
+    TunableParams, TuningKey, get_tuned_params)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -194,11 +196,12 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
 
     # Larger chunk sizes cause larger pipeline bubbles, so cap it at 1024.
     max_safe_col = min(max_safe_col, _CostModelConstants.MAX_COL_CHUNK_SIZE)
-
     start_col = (min(col_size, max_safe_col) // 128) * 128
     for chunk in range(start_col, 127, -128):
         if col_size % chunk == 0:
+            print(f"[DEBUG] Selected col_chunk_size of {chunk} for {col_size}")
             return chunk
+    print(f"[DEBUG] Using default col_chunk_size of 128 for {col_size}")
     return 128
 
 
@@ -583,13 +586,20 @@ def main_kernel(
     )
 
 
-@functools.partial(jax.jit, static_argnames=("reduce_group_size", ))
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "reduce_group_size",
+        "tunable_params",
+    ),
+)
 def ragged_gather_reduce(
     x: jax.Array,
     indices: jax.Array,
     topk_weights: jax.Array,
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
+    tunable_params: TunableParams | None = None,
 ) -> jax.Array:
     """Gathers ``x`` by ``indices``, weights and masks, then reduces by group.
 
@@ -599,6 +609,7 @@ def ragged_gather_reduce(
     topk_weights: 1-D per-row weights, ``(input_size,)``.
     valid_rows_mask: 1-D bool mask of valid gathered rows, ``(input_size,)``.
     reduce_group_size: number of consecutive rows summed into one output row.
+    tunable_params: optional tuned parameters for the kernel.
 
   Returns:
     Reduced output, ``(input_size // reduce_group_size, hidden_size)``.
@@ -613,7 +624,7 @@ def ragged_gather_reduce(
     # plain TC gather-reduce beats routing through SparseCore and HBM. This
     # also keeps the kernel off configs with num_row_partitions > num_simd_lanes.
     dtype_bytes = jax.dtypes.itemsize_bits(x.dtype) // 8
-    if (jnp.size(x) * dtype_bytes * 2
+    if (tunable_params is None and jnp.size(x) * dtype_bytes * 2
             < pltpu.get_tpu_info().vmem_capacity_bytes * 0.6):
         return _fallback_implementation(x, indices, topk_weights,
                                         valid_rows_mask, reduce_group_size)
@@ -625,17 +636,22 @@ def ragged_gather_reduce(
     num_lanes = pltpu.get_tpu_info().num_lanes
     num_cores = sc_info.num_cores * sc_info.num_subcores
 
-    num_column_partitions = _calculate_num_column_partitions(
-        hidden_size, input_size, num_cores, num_lanes, num_simd_lanes)
-    num_row_partitions = num_cores // num_column_partitions
-    assert (num_row_partitions <= num_simd_lanes
-            ), f"{num_row_partitions=} must be <= {num_simd_lanes=}"
-    num_row_subchunks, row_chunk_size = _calculate_row_tiling(
-        input_size, num_simd_lanes, num_row_partitions)
+    if tunable_params is None:
+        tuning_key = TuningKey(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            reduce_group_size=reduce_group_size,
+            dtype=jnp.dtype(x.dtype).name,
+        )
+        tunable_params = get_tuned_params(tuning_key)
 
-    aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
-    col_size = aligned_hidden_size // num_column_partitions
-    col_chunk_size = _calculate_col_chunk_size(col_size, num_simd_lanes)
+    num_column_partitions = tunable_params.num_column_partitions
+    num_row_partitions = tunable_params.num_row_partitions
+    num_row_subchunks = tunable_params.num_row_subchunks
+    row_chunk_size = tunable_params.row_chunk_size
+    aligned_hidden_size = tunable_params.aligned_hidden_size
+    col_size = tunable_params.col_size
+    col_chunk_size = tunable_params.col_chunk_size
 
     # Step 3: Pre-process inputs (weights, padding, sort by validity).
     # The kernel gathers x through a uint32 reinterpretation; carry the weights

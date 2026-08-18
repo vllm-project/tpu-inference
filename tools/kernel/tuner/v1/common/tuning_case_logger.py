@@ -50,15 +50,46 @@ class TuningCaseLogger:
         with open(self.log_file_path, 'a') as f:
             f.write(f"{str(tuning_case)}\n")
 
-    def get_logged_tuning_cases(self, ) -> list[TuningCase]:
+    def get_logged_tuning_cases(self) -> list[TuningCase]:
         tuning_cases = []
         with open(self.log_file_path, 'r') as f:
-            for line in f:
-                if not line:
-                    continue
+            content = f.read().strip()
+        if not content:
+            return tuning_cases
+
+        try:
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            for line in lines:
                 tuning_cases.append(
                     TuningCase.from_string(
-                        line.strip(),
+                        line,
                         tuning_key_class=self.key_class,
                         tunable_params_class=self.params_class))
-        return tuning_cases
+            return tuning_cases
+        except Exception:
+            import json
+            tuning_cases = []
+            decoder = json.JSONDecoder()
+            idx = 0
+            if content.startswith('['):
+                raw_list = json.loads(content)
+                for item in raw_list:
+                    tuning_cases.append(
+                        TuningCase.from_dict(
+                            item,
+                            tuning_key_class=self.key_class,
+                            tunable_params_class=self.params_class))
+            else:
+                while idx < len(content):
+                    content_str = content[idx:].lstrip()
+                    if not content_str:
+                        break
+                    idx += len(content[idx:]) - len(content_str)
+                    obj, end_idx = decoder.raw_decode(content_str)
+                    idx += end_idx
+                    tuning_cases.append(
+                        TuningCase.from_dict(
+                            obj,
+                            tuning_key_class=self.key_class,
+                            tunable_params_class=self.params_class))
+            return tuning_cases
