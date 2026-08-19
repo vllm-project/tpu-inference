@@ -135,7 +135,10 @@ def gdn_attention_core_tpu(
                                                         block_tables.shape[-1])
         mamba_block_size = (getattr(cache_config, "mamba_block_size", None)
                             or cache_config.block_size)
-        query_lens = query_start_loc_sliced[1:] - query_start_loc_sliced[:-1]
+        query_start_loc_reshaped = query_start_loc_sliced.reshape(
+            dp_size, padded_num_reqs_per_dp + 1)
+        query_lens = (query_start_loc_reshaped[:, 1:] -
+                      query_start_loc_reshaped[:, :-1]).reshape(-1)
         num_computed = seq_lens_sliced - query_lens
 
         read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
