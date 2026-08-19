@@ -55,13 +55,14 @@ class SpeculativeDecodingManager:
             return DraftTokenIds(req_ids, draft_token_ids)
 
         # reorders per-rank outputs back to the original batch ordering
+        num_spec = self.runner.speculative_config.num_speculative_tokens
         reorded_draft_token_ids = [[] for _ in range(len(draft_token_ids))]
         max_num_reqs_per_dp_rank = self.runner.max_num_reqs // self.runner.dp_size
         for rank in range(self.runner.dp_size):
             req_indices = self._req_indices_dp[rank]
             for j, req_idx in enumerate(req_indices):
-                reorded_draft_token_ids[req_idx] = draft_token_ids[
-                    j + rank * max_num_reqs_per_dp_rank]
+                tokens = draft_token_ids[j + rank * max_num_reqs_per_dp_rank]
+                reorded_draft_token_ids[req_idx] = tokens[:num_spec]
         self._draft_token_ids = None
         self._req_indices_dp = None
         return DraftTokenIds(req_ids, reorded_draft_token_ids)
@@ -93,11 +94,13 @@ class SpeculativeDecodingManager:
                 self.runner, spec_decode_metadata, sampled_output,
                 logits_indices_selector, discard_sampled_tokens_req_indices,
                 self.runner.input_batch.num_reqs)
-            self._draft_token_ids = self.runner.drafter.propose(
-                self.runner.speculative_config.num_speculative_tokens,
+            num_spec = self.runner.speculative_config.num_speculative_tokens
+            proposed = self.runner.drafter.propose(
+                num_spec,
                 valid_sampled_token_ids[:self.runner.input_batch.num_reqs],
                 self.runner.input_batch.num_tokens_no_spec,
                 self.runner.input_batch.token_ids_cpu)
+            self._draft_token_ids = [tokens[:num_spec] for tokens in proposed]
         elif self.runner.speculative_config.use_eagle(
         ) or self.runner.speculative_config.method == "dflash":
             assert input_ids is not None
@@ -209,15 +212,16 @@ class SpeculativeDecodingManager:
             target_hidden_states=target_hidden_states,
         )
 
+        num_spec = self.runner.speculative_config.num_speculative_tokens
         if async_scheduling:
             if jnp.ndim(draft_token_ids) == 1:
                 draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
-            return draft_token_ids
+            return draft_token_ids[:, :num_spec]
         else:
             draft_token_ids = np.array(draft_token_ids)
             if draft_token_ids.ndim == 1:
                 draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
-            return draft_token_ids.tolist()
+            return draft_token_ids[:, :num_spec].tolist()
 
     def propose_eagle3_draft_token_ids(
         self,
@@ -304,15 +308,16 @@ class SpeculativeDecodingManager:
             target_hidden_states=target_hidden_states,
         )
 
+        num_spec = self.runner.speculative_config.num_speculative_tokens
         if async_scheduling:
             if jnp.ndim(draft_token_ids) == 1:
                 draft_token_ids = jnp.expand_dims(draft_token_ids, 1)
-            return draft_token_ids
+            return draft_token_ids[:, :num_spec]
         else:
             draft_token_ids = np.array(draft_token_ids)
             if draft_token_ids.ndim == 1:
                 draft_token_ids = np.expand_dims(draft_token_ids, axis=-1)
-            return draft_token_ids.tolist()
+            return draft_token_ids[:, :num_spec].tolist()
 
     def get_spec_decode_metadata(
         self,
