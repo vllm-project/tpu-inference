@@ -2005,15 +2005,17 @@ def static_validate_inputs(
             raise NotImplementedError(
                 "pcp_ring_axis_name does not support sliding_window")
 
-    for name, arr in (("kv_new_starts", kv_new_starts),
-                      ("kv_write_seq_mask", kv_write_seq_mask)):
+    for name, arr in (("kv_new_starts", kv_new_starts), ("kv_write_seq_mask",
+                                                         kv_write_seq_mask)):
         if arr is None:
             continue
         if arr.dtype != jnp.int32:
-            raise ValueError(f"Expected int32 dtype for {name}, got {arr.dtype}")
+            raise ValueError(
+                f"Expected int32 dtype for {name}, got {arr.dtype}")
         if arr.shape != (max_num_seqs, ):
             raise ValueError(
-                f"Expected {name}.shape to be ({max_num_seqs},), got {arr.shape}")
+                f"Expected {name}.shape to be ({max_num_seqs},), got {arr.shape}"
+            )
 
     if kv_new_starts is not None:
         if kv_cache_lens is None:
