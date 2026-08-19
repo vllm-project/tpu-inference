@@ -1774,7 +1774,8 @@ def gmm_v2_fused_rs(
     )
     pallas_name = (f"gmm_v2_fused_rs-E_{size_group}-M_{size_m}"
                    f"-K1_{size_k1}-N1_{size_n1}-K2_{size_k2}-N2_{size_n2}"
-                   f"-EP_{ep_size}-TK_{top_k}"
+                   f"-TM_{tile_m}-TPK1_{tile_k1}-TN1_{tile_n1}"
+                   f"-TK2_{tile_k2}-TN2_{tile_n2}-EP_{ep_size}-TK_{top_k}"
                    f"{'-packed' if pack_indices else ''}")
     kernel_kwargs = dict(
         fused_dims=fused_dims,
