@@ -47,6 +47,57 @@ _RS_VMEM_OUT = os.environ.get("RS_VMEM_OUT", "0") == "1"
 _RS_VMEM_INPUT_OVERRIDE = os.environ.get("RS_VMEM_INPUT")
 _RS_VMEM_FRAC_OVERRIDE = os.environ.get("RS_VMEM_FRAC")
 
+
+@functools.lru_cache(maxsize=1)
+def _memory_space_constraint_survives() -> bool:
+    """Will a with_memory_space_constraint aval survive an ordinary primitive?
+
+    jax 0.11 gave jax.core its own MemorySpace enum and made
+    `check_avals_context_mesh` assert `isinstance(aval.memory_space,
+    MemorySpace)` for every primitive traced under a mesh. The space that
+    `with_memory_space_constraint` attaches is Pallas's MemorySpace -- a
+    different enum -- so once the annotated aval reaches a non-Pallas primitive
+    under shard_map, abstract eval raises
+
+        TypeError: Primitive broadcast_in_dim got aval bfloat16<vmem>[...]
+                   with unknown memory_space type: <enum 'MemorySpace'>
+
+    On jax 0.10 there was no such check and the identical code pinned the
+    operand fine -- every EXP-017/021/024 pinned arm was measured that way.
+
+    This evaluates jax's own predicate rather than tracing a probe function: the
+    check is skipped unless BOTH the context mesh and the aval's mesh are
+    non-empty, which only holds inside shard_map, so a standalone eval_shape
+    probe reports "survives" no matter what and is worse than useless. If a
+    later JAX teaches core about Pallas spaces, pinning switches itself back on
+    with no code change here.
+    """
+    try:
+        from jax._src import core as jax_core
+    except Exception:  # noqa: BLE001 - unknown JAX layout, assume the old one
+        return True
+    core_space = getattr(jax_core, "MemorySpace", None)
+    if core_space is None:
+        # No core-level memory space enum -> no type check to trip over.
+        return True
+    return isinstance(pltpu.VMEM, core_space)
+
+
+_PIN_UNSUPPORTED_WARNED = False
+
+
+def _pin_unsupported_once() -> None:
+    global _PIN_UNSUPPORTED_WARNED
+    if not _PIN_UNSUPPORTED_WARNED:
+        _PIN_UNSUPPORTED_WARNED = True
+        print(
+            "hierrs_tc: VMEM operand pinning disabled -- this JAX "
+            f"({jax.__version__}) rejects a Pallas memory-space annotation on "
+            "an aval that escapes into an ordinary primitive. The kernel runs "
+            "unpinned (correct, and the measured cost is ~0.3% on the fp8 wire "
+            "and ~2.2% on bf16). Set RS_VMEM_INPUT=2 to force the old path.",
+            flush=True)
+
 # Default scoped claim when we are NOT pinning. Deliberately generous: it is a
 # ceiling, not a reservation (EXP-016 measured 60.80 MiB claimed vs 8.00 MiB
 # used), and shrinking it buys nothing unless we are also pinning.
@@ -179,6 +230,14 @@ def hierarchical_reduce_scatter_local(
         vmem_pin = int(_RS_VMEM_INPUT_OVERRIDE) == 2
     if _RS_VMEM_FRAC_OVERRIDE is not None:
         vmem_frac = float(_RS_VMEM_FRAC_OVERRIDE)
+    # Pinning needs a memory-space annotation that survives shard_map tracing.
+    # Where it does not, fall back to the unpinned plan rather than crashing;
+    # an explicit RS_VMEM_INPUT=2 is still honoured so the failure stays
+    # reproducible.
+    if (vmem_pin and _RS_VMEM_INPUT_OVERRIDE is None
+            and not _memory_space_constraint_survives()):
+        _pin_unsupported_once()
+        vmem_pin = False
 
     vector_width = pltpu.get_tpu_info().num_lanes
     mb_size = next_multiple_of(hidden_dim_size // num_micro_batches,
