@@ -369,6 +369,25 @@ def sharded_splash_attention(
         ))
 
 
+def _rpa_block_size_kwargs() -> dict[str, tuple[int, int, int, int]]:
+    """Optional RPA v3 block-size overrides from env, for the call site to
+    forward with ``**``.
+
+    The kernel is self-contained and never reads env, so the caller must supply
+    these; layers/jax/attention/attention.py does the same. Without it the
+    RPA_V3_*_BLOCK_SIZES vars are silently ignored on this path and the kernel
+    falls back to get_default_block_sizes(). Each var is a comma-separated
+    4-tuple ``(bq_sz, bkv_sz, bq_csz, bkv_csz)``; a key is included only when
+    its var is non-empty, so the default call is unchanged.
+    """
+    env_to_kwarg = {
+        "d_block_sizes": envs.RPA_V3_DECODE_BLOCK_SIZES,
+        "p_block_sizes": envs.RPA_V3_PREFILL_BLOCK_SIZES,
+        "m_block_sizes": envs.RPA_V3_MIXED_BLOCK_SIZES,
+    }
+    return {k: tuple(v) for k, v in env_to_kwarg.items() if v}
+
+
 def sharded_ragged_paged_attention(
     mesh: Mesh,
     q: jax.Array,
@@ -456,6 +475,7 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+            kwargs.update(_rpa_block_size_kwargs())
         return func(*args, **kwargs)
 
     return jax.shard_map(

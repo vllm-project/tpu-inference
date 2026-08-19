@@ -499,3 +499,92 @@ def test_mla_attention(monkeypatch, mesh):
     assert kernel_kwargs["num_queries_per_block"] == (1, 16, 16)
     assert kernel_kwargs["mixed_q_split"] == 1
     assert kernel_kwargs["sm_scale"] == 0.1
+
+
+# ---- Tests for the RPA v3 block-size env overrides ----
+
+
+def _capture_rpa_kwargs(monkeypatch, mesh, head_dim=128):
+    """Call `attention` with a stubbed RPA kernel and return its kwargs.
+
+    Deliberately does not reuse `_test_attention`: that helper installs its own
+    kernel mock, which would replace the stub whose call we need to inspect.
+
+    The env vars are set with monkeypatch.setenv rather than patched onto the
+    `envs` module: `envs` resolves these lazily through a module-level
+    __getattr__, so setattr would install a real attribute that shadows the
+    lazy lookup for the rest of the session. setenv also exercises the real
+    env -> env_int_list parsing.
+    """
+    q_dtype = kv_dtype = jnp.float32
+    q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim), dtype=q_dtype)
+    k = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
+    v = jnp.ones((TOTAL_TOKENS, NUM_KV_HEADS, head_dim), dtype=kv_dtype)
+    kv_cache_shape = get_kv_cache_shape_with_mesh(mesh, NUM_BLOCKS, BLOCK_SIZE,
+                                                  NUM_KV_HEADS, head_dim,
+                                                  kv_dtype)
+    kv_cache = jnp.zeros(kv_cache_shape, dtype=kv_dtype)
+
+    mock_kernel = MagicMock(return_value=(jnp.ones((TOTAL_TOKENS, NUM_HEADS,
+                                                    head_dim)), kv_cache))
+    monkeypatch.setattr(
+        "tpu_inference.layers.common.attention_interface.ragged_paged_attention",
+        mock_kernel,
+    )
+
+    attention_metadata = AttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        block_tables=jnp.zeros((MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ, ),
+                               dtype=jnp.int32),
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+    )
+    shared_attention_metadata = SharedAttentionMetadata(
+        input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
+        seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+    )
+
+    attention(
+        kv_cache=kv_cache,
+        q=q,
+        k=k,
+        v=v,
+        attention_metadata=attention_metadata,
+        mesh=mesh,
+        head_dim_original=head_dim,
+        sinks=None,
+        shared_attention_metadata=shared_attention_metadata,
+    )
+    mock_kernel.assert_called_once()
+    return mock_kernel.call_args.kwargs
+
+
+def test_rpa_block_sizes_absent_when_env_unset(monkeypatch, mesh):
+    """Unset env leaves the stock call untouched -- no v3-only kwargs."""
+    monkeypatch.delenv("RPA_V3_DECODE_BLOCK_SIZES", raising=False)
+    monkeypatch.delenv("RPA_V3_PREFILL_BLOCK_SIZES", raising=False)
+    monkeypatch.delenv("RPA_V3_MIXED_BLOCK_SIZES", raising=False)
+    kwargs = _capture_rpa_kwargs(monkeypatch, mesh)
+    assert "d_block_sizes" not in kwargs
+    assert "p_block_sizes" not in kwargs
+    assert "m_block_sizes" not in kwargs
+
+
+def test_rpa_block_sizes_forwarded_from_env(monkeypatch, mesh):
+    """RPA_V3_*_BLOCK_SIZES reach the kernel through this entry point too.
+
+    Regression test: the override was wired into
+    layers/jax/attention/attention.py only, so callers arriving through
+    sharded_ragged_paged_attention silently got get_default_block_sizes().
+    Only non-empty vars are forwarded.
+    """
+    monkeypatch.setenv("RPA_V3_DECODE_BLOCK_SIZES", "1,16384,1,4096")
+    monkeypatch.delenv("RPA_V3_PREFILL_BLOCK_SIZES", raising=False)
+    monkeypatch.setenv("RPA_V3_MIXED_BLOCK_SIZES", "8,512,4,256")
+    kwargs = _capture_rpa_kwargs(monkeypatch, mesh)
+    assert kwargs["d_block_sizes"] == (1, 16384, 1, 4096)
+    assert kwargs["m_block_sizes"] == (8, 512, 4, 256)
+    assert "p_block_sizes" not in kwargs
