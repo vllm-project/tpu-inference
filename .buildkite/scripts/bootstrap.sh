@@ -28,7 +28,7 @@ determine_job_priority() {
   echo "--- Determining job priority" >&2
   if [[ "${NIGHTLY:-0}" == "1" ]]; then
     # Nightly build (Lowest priority)
-    priority="$PRIORITY_NIGHTLY"
+    priority="10"
     echo "Build type: Nightly - Priority: $priority" >&2
   elif [[ "$BUILDKITE_PIPELINE_SLUG" == "tpu-vllm-integration" ]]; then
     # Integration pipeline
