@@ -81,8 +81,6 @@ class ServingConfigs:
 
     @property
     def max_decode_bkv_p_new(self) -> int:
-        if self.decode_query_size <= 1:
-            return 1
         return 1 + pl.cdiv(self.decode_query_size - 1, self.page_size)
 
     @property

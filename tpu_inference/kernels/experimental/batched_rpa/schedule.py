@@ -400,7 +400,7 @@ def compute_metadata(
                 dma_entry.set_flags(dma_sz, dma_sz)
 
         if cfgs.bkv_p_new < cfgs.bkv_p:
-            # General decode path for any bkv_p_new (1, 2, 3, etc.)
+            # General decode path for any bkv_p_new
             curr_vmem = bkv_sz_cache
             curr_rem = new_sz
 
