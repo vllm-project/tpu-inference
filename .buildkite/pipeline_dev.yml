@@ -50,10 +50,38 @@ steps:
       - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
   # -----------------------------------------------------------------
+  # Multi-Host Step (Ray-based 16-chip test with MODEL_IMPL_TYPE=vllm)
+  # -----------------------------------------------------------------
+  - label: "tpu7x [dev] Ray-based multi-host (vllm test)"
+    key: tpu7x_multihost_vllm
+    depends_on: tpu7x_build_docker
+    env:
+      TPU_VERSION: "tpu7x"
+      MODEL_IMPL_TYPE: "vllm"
+    agents:
+      queue: tpu_v7x_16_queue
+    commands:
+      - |
+        MODEL="google/gemma-4-26B-A4B-it"
+        .buildkite/scripts/run_multihost.sh \
+          "vllm serve \${MODEL} \
+            --port 8000 \
+            --tensor-parallel-size 16 \
+            --trust-remote-code \
+            --max-model-len 1024 \
+            --async-scheduling \
+            --no-enable-prefix-caching" \
+          "curl http://localhost:8000/v1/completions \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'"
+
+
+  # -----------------------------------------------------------------
   # Multi-Host Step (Ray-based 16-chip test with MODEL_IMPL_TYPE=flax_nnx)
   # -----------------------------------------------------------------
-  - label: "tpu7x [dev] Ray-based multi-host (flax_nnx fallback test)"
-    key: tpu7x_demo_multihost
+  - label: "tpu7x [dev] Ray-based multi-host (flax_nnx test)"
+    key: tpu7x_multihost_flax_nnx
     depends_on: tpu7x_build_docker
     env:
       TPU_VERSION: "tpu7x"
@@ -62,7 +90,7 @@ steps:
       queue: tpu_v7x_16_queue
     commands:
       - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+        MODEL="google/gemma-4-26B-A4B-it"
         .buildkite/scripts/run_multihost.sh \
           "vllm serve \${MODEL} \
             --port 8000 \
@@ -70,7 +98,6 @@ steps:
             --trust-remote-code \
             --max-model-len 1024 \
             --async-scheduling \
-            --load-format=runai_streamer \
             --no-enable-prefix-caching" \
           "curl http://localhost:8000/v1/completions \
             -X POST \
