@@ -73,38 +73,9 @@ def _weight_init(random_init: bool):
 
 modeling_flax_utils = FlaxUtils()
 
-# TODO: read these configs from HF config.
-num_local_experts: int = 256
-vocab_size: int = 129280
-hidden_size: int = 7168
-num_attention_heads: int = 128
-num_key_value_heads: int = 128
-ffw_intermediate_size: int = 18432
-moe_intermediate_size: int = 2048
-num_experts_per_token: int = 8
-n_group: int = 8
-interleave_moe_layer_step: int = 1  # Deepseek V3 has moe_layer_freq=1 in hf config.
-hidden_act: str = "silu"
-rms_norm_eps: float = 1e-06
-routed_scaling_factor: float = 2.5
-first_k_dense_replace: int = 3  # replace the first few MOE layers to dense layer.
-
-num_shared_experts = 1
-rope_theta = 10000
-rope_scaling = {
-    "beta_fast": 32,
-    "beta_slow": 1,
-    "factor": 40,
-    "mscale": 1.0,
-    "mscale_all_dim": 1.0,
-    "original_max_position_embeddings": 4096,
-    "type": "yarn"
-}
-q_lora_rank = 1536
-kv_lora_rank = 512
-qk_nope_head_dim = 128
-qk_rope_head_dim = 64
-v_head_dim = 128
+# Routed-expert sharding axis: a parallelism choice, not a model
+# hyperparameter, so it stays a module constant. The rest of the model config is
+# read from the HF config in DeepSeekV3.__init__.
 expert_axis_name = ShardingAxisName.ATTN_DATA_EXPERT
 
 
@@ -852,6 +823,16 @@ class DeepseekV2Moe(JaxModule):
                  quant_config,
                  scoring_func,
                  rng,
+                 hidden_size: int,
+                 num_local_experts: int,
+                 num_experts_per_token: int,
+                 n_group: int,
+                 topk_group: int,
+                 norm_topk_prob: bool,
+                 routed_scaling_factor: float,
+                 hidden_act: str,
+                 num_shared_experts: int,
+                 moe_intermediate_size: int,
                  prefix: str = "",
                  enable_return_routed_experts: bool = False):
 
@@ -860,8 +841,8 @@ class DeepseekV2Moe(JaxModule):
             num_experts=num_local_experts,
             num_experts_per_tok=num_experts_per_token,
             n_groups=n_group,
-            topk_groups=4,
-            norm_topk_prob=True,
+            topk_groups=topk_group,
+            norm_topk_prob=norm_topk_prob,
             rngs=rng,
             routed_scaling_factor=routed_scaling_factor,
             dtype=dtype,
@@ -1157,6 +1138,35 @@ class DeepSeekV3(JaxModule):
         dtype = vllm_config.model_config.dtype
         scoring_func = getattr(hf_config, "scoring_func", "sigmoid")
 
+        # Model hyperparameters from the HF config (config.json).
+        vocab_size = hf_config.vocab_size
+        hidden_size = hf_config.hidden_size
+        num_attention_heads = hf_config.num_attention_heads
+        num_key_value_heads = hf_config.num_key_value_heads
+        ffw_intermediate_size = hf_config.intermediate_size
+        moe_intermediate_size = hf_config.moe_intermediate_size
+        num_local_experts = hf_config.n_routed_experts
+        num_shared_experts = hf_config.n_shared_experts
+        num_experts_per_token = hf_config.num_experts_per_tok
+        n_group = hf_config.n_group
+        topk_group = hf_config.topk_group
+        norm_topk_prob = hf_config.norm_topk_prob
+        routed_scaling_factor = hf_config.routed_scaling_factor
+        first_k_dense_replace = hf_config.first_k_dense_replace
+        interleave_moe_layer_step = hf_config.moe_layer_freq
+        hidden_act = hf_config.hidden_act
+        rms_norm_eps = hf_config.rms_norm_eps
+        q_lora_rank = hf_config.q_lora_rank
+        kv_lora_rank = hf_config.kv_lora_rank
+        qk_nope_head_dim = hf_config.qk_nope_head_dim
+        qk_rope_head_dim = hf_config.qk_rope_head_dim
+        v_head_dim = hf_config.v_head_dim
+        rope_scaling = hf_config.rope_scaling
+        # transformers exposes the base RoPE theta nested inside rope_scaling
+        # (YaRN) rather than as a top-level attribute on this config.
+        rope_theta = getattr(hf_config, "rope_theta",
+                             None) or rope_scaling.get("rope_theta", 10000)
+
         if self.is_first_rank:
             self.embed_tokens = JaxEmbed(
                 num_embeddings=vocab_size,
@@ -1302,6 +1312,16 @@ class DeepSeekV3(JaxModule):
                     quant_config=quant_config,
                     scoring_func=scoring_func,
                     rng=rng,
+                    hidden_size=hidden_size,
+                    num_local_experts=num_local_experts,
+                    num_experts_per_token=num_experts_per_token,
+                    n_group=n_group,
+                    topk_group=topk_group,
+                    norm_topk_prob=norm_topk_prob,
+                    routed_scaling_factor=routed_scaling_factor,
+                    hidden_act=hidden_act,
+                    num_shared_experts=num_shared_experts,
+                    moe_intermediate_size=moe_intermediate_size,
                     prefix=f"{prefix}.layers.{layer_index}.mlp",
                     enable_return_routed_experts=self.
                     enable_return_routed_experts)
