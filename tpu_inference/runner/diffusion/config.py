@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+MAX_COHORT_WAIT_MS = 100.0
+
 
 class GenerationStrategy(str, Enum):
     AUTOREGRESSIVE = "autoregressive"
@@ -97,6 +99,7 @@ class DiffusionRuntimeConfig:
     trace_acceptance_steps: bool = False
     fp32_partial_rpa: bool = False
     q8_log_confidence_bias: float = 0.0
+    cohort_max_wait_ms: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence_threshold <= 1.0:
@@ -124,6 +127,13 @@ class DiffusionRuntimeConfig:
         if self.q8_log_confidence_bias and not self.use_dual_cache:
             raise ValueError(
                 "Diffusion q8_log_confidence_bias requires use_dual_cache")
+        if (not math.isfinite(self.cohort_max_wait_ms)
+                or self.cohort_max_wait_ms < 0.0):
+            raise ValueError(
+                "Diffusion cohort_max_wait_ms must be finite and non-negative")
+        if self.cohort_max_wait_ms > MAX_COHORT_WAIT_MS:
+            raise ValueError("Diffusion cohort_max_wait_ms must not exceed "
+                             f"{MAX_COHORT_WAIT_MS:g}")
 
 
 @dataclass(frozen=True)
@@ -274,6 +284,8 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
         fp32_partial_rpa=bool(diffusion_values.get("fp32_partial_rpa", False)),
         q8_log_confidence_bias=float(
             diffusion_values.get("q8_log_confidence_bias", 0.0)),
+        cohort_max_wait_ms=float(
+            diffusion_values.get("cohort_max_wait_ms", 0.0)),
     )
     return GenerationStrategyConfig(
         strategy=strategy,

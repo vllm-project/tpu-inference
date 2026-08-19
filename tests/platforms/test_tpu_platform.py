@@ -21,6 +21,8 @@ import pytest
 import torch
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
+from tpu_inference.core.sched.diffusion_cohort_scheduler import \
+    BlockDiffusionCohortScheduler
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
 
@@ -597,15 +599,19 @@ class TestTpuPlatform:
     )
     def test_check_and_update_config_continue_decode_success(
             self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
+        original_scheduler_cls = object()
         vllm_config.additional_config = {"enable_continue_decode": True}
         vllm_config.parallel_config.pipeline_parallel_size = 1
         vllm_config.model_config.runner_type = "generate"  # not pooling
         vllm_config.scheduler_config.async_scheduling = False
+        vllm_config.scheduler_config.scheduler_cls = original_scheduler_cls
         vllm_config.cache_config = None
 
         TpuPlatform.check_and_update_config(vllm_config)
 
         mock_patch.assert_called_once()
+        assert (vllm_config.scheduler_config.scheduler_cls
+                is original_scheduler_cls)
 
     @pytest.mark.parametrize(
         "pp_size, runner_type, async_sched, expected_error",
@@ -653,13 +659,42 @@ class TestTpuPlatform:
     )
     def test_check_and_update_config_block_diffusion_success(
             self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
+        original_scheduler_cls = object()
         self._enable_block_diffusion(vllm_config)
+        vllm_config.scheduler_config.scheduler_cls = original_scheduler_cls
 
         TpuPlatform.check_and_update_config(vllm_config)
 
         assert vllm_config.additional_config[
             "multi_token_decode_lookahead"] == 31
         assert vllm_config.scheduler_config.max_num_seqs == 64
+        assert (vllm_config.scheduler_config.scheduler_cls
+                is original_scheduler_cls)
+        mock_patch.assert_called_once()
+
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
+    )
+    def test_check_and_update_config_enables_diffusion_cohort_scheduler(
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
+        original_scheduler_cls = object()
+        self._enable_block_diffusion(vllm_config)
+        vllm_config.additional_config["diffusion"]["cohort_max_wait_ms"] = 5.0
+        vllm_config.scheduler_config.scheduler_cls = original_scheduler_cls
+        scheduler_classes_seen_by_dp_update = []
+        mock_dp_update.side_effect = lambda config: (
+            scheduler_classes_seen_by_dp_update.append(config.scheduler_config.
+                                                       scheduler_cls))
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        assert scheduler_classes_seen_by_dp_update == [original_scheduler_cls]
+        assert (vllm_config.scheduler_config.scheduler_cls
+                is BlockDiffusionCohortScheduler)
         mock_patch.assert_called_once()
 
     @pytest.mark.parametrize(

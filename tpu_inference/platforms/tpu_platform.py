@@ -403,6 +403,19 @@ class TpuPlatform(Platform):
         from tpu_inference.core.sched.dp_scheduler import \
             update_vllm_config_for_dp_scheduler
         update_vllm_config_for_dp_scheduler(vllm_config)
+        if (enable_block_diffusion
+                and generation_strategy.diffusion is not None
+                and generation_strategy.diffusion.runtime.cohort_max_wait_ms
+                > 0.0):
+            from tpu_inference.core.sched.diffusion_cohort_scheduler import \
+                BlockDiffusionCohortScheduler
+            scheduler_config.scheduler_cls = BlockDiffusionCohortScheduler
+            logger.info(
+                "Enabled block-diffusion cohort admission with max wait %.3f "
+                "ms and target size %d",
+                generation_strategy.diffusion.runtime.cohort_max_wait_ms,
+                scheduler_config.max_num_seqs,
+            )
 
         if enable_continue_decode or enable_block_diffusion:
             mode = ("continue_decode"
