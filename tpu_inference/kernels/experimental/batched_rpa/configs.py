@@ -51,6 +51,19 @@ class ModelConfigs:
         return self.num_q_heads // self.num_kv_heads
 
 
+class AttentionScope(enum.StrEnum):
+    """Which KV positions to attend to.
+
+  FULL:            attend all positions (default).
+  CACHE_ONLY:      attend only cached tokens, skip new tokens.
+  NEW_TOKENS_ONLY: attend only new tokens, skip cached tokens.
+  """
+
+    FULL = enum.auto()
+    CACHE_ONLY = enum.auto()
+    NEW_TOKENS_ONLY = enum.auto()
+
+
 class KVLayout(enum.StrEnum):
     """Represents the different layouts for KV cache.
 
@@ -60,6 +73,14 @@ class KVLayout(enum.StrEnum):
 
     HEAD_ALONG_SUBLANE = enum.auto()
     SEQ_ALONG_LANE = enum.auto()
+
+    @property
+    def symbol(self):
+        match self:
+            case KVLayout.HEAD_ALONG_SUBLANE:
+                return "nhs"
+            case KVLayout.SEQ_ALONG_LANE:
+                return "snh"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,6 +98,11 @@ class ServingConfigs:
     scale_k: int | None = None
     scale_v: int | None = None
     kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
+    smem_fraction_limit_for_schedule_generation: float = 0.33
+    max_schedule_size_multiplier: int = 16
+    cp_group_size: int | None = None
+    attention_scope: AttentionScope = AttentionScope.FULL
+    return_lse: bool = False
 
     @property
     def pages_per_seq(self) -> int:
@@ -89,17 +115,6 @@ class ServingConfigs:
     @property
     def page_size_mask(self) -> int:
         return self.page_size - 1
-
-    @property
-    def int_ty(self) -> jnp.dtype:
-        if utils.get_dtype_packing(self.dtype_q) == 1:
-            return jnp.int32
-
-        match pltpu.get_tpu_info().generation:
-            case 6 | 7:
-                return jnp.int16
-            case _:
-                return jnp.int32
 
     @property
     def packing_q(self) -> int:
@@ -124,11 +139,13 @@ class RpaCase(enum.StrEnum):
 
     @property
     def symbol(self):
-        return {
-            RpaCase.DECODE: "d",
-            RpaCase.PREFILL: "p",
-            RpaCase.MIXED: "m",
-        }[self]
+        match self:
+            case RpaCase.DECODE:
+                return "d"
+            case RpaCase.PREFILL:
+                return "p"
+            case RpaCase.MIXED:
+                return "m"
 
     def get_range(
         self, distribution: jax.Array
@@ -191,7 +208,9 @@ class RpaConfigs:
         word_size_bytes = 4
         fixed_bytes *= word_size_bytes
 
-        smem_limit_bytes = pltpu.get_tpu_info().smem_capacity_bytes - 32 * 1024
+        smem_limit_bytes = (
+            pltpu.get_tpu_info().smem_capacity_bytes -
+            32 * 1024) * self.serve.smem_fraction_limit_for_schedule_generation
         available_bytes = smem_limit_bytes - fixed_bytes
 
         # Per step per batch item:
@@ -202,16 +221,19 @@ class RpaConfigs:
         bytes_per_step = (28 + 12 * self.bkv_p_cache +
                           4 * self.dma_kv_new_size * self.bkv_p_new)
         bytes_per_step *= self.block.batch_size
+        # Add 20 bytes for the 5 total_wait fields (total_wait_kv_in, total_wait_kv_out,
+        # total_wait_q_in, total_wait_o_out, total_wait_lse_out) which are 1D arrays (not multiplied by batch_size).
+        bytes_per_step += 20
 
         max_steps_ub = available_bytes // bytes_per_step
 
         num_lanes = pltpu.get_tpu_info().num_lanes
         max_steps_ub = max(1, max_steps_ub // num_lanes) * num_lanes
-        return max_steps_ub
+        return int(max_steps_ub)
 
     @property
     def bkv_p(self) -> int:
-        return self.block.bkv_sz // self.serve.page_size
+        return pl.cdiv(self.block.bkv_sz, self.serve.page_size)
 
     @property
     def bkv_p_cache(self) -> int:
@@ -221,7 +243,7 @@ class RpaConfigs:
 
     @property
     def bkv_p_new(self) -> int:
-        if self.mode == RpaCase.DECODE:
+        if self.mode == RpaCase.DECODE or self.block.bq_sz == 1:
             return 1
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return self.bkv_p + 1
@@ -253,6 +275,8 @@ class RpaConfigs:
 
     @property
     def aligned_num_kv_heads_x2(self) -> int:
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            return self.model.num_kv_heads * 2
         packing_kv = self.serve.packing_kv
         return utils.align_to(self.model.num_kv_heads * 2, packing_kv)
 
@@ -272,6 +296,26 @@ class RpaConfigs:
     @property
     def fuse_accum(self) -> bool:
         return self.mode == RpaCase.DECODE
+
+    @property
+    def kv_bytes_per_token(self) -> int:
+        if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+            num_elements = self.model.num_kv_heads * 2 * self.aligned_kv_head_dim
+        else:
+            num_elements = self.aligned_num_kv_heads_x2 * self.aligned_kv_head_dim
+        return num_elements * self.serve.dtype_kv.itemsize
+
+    @property
+    def q_bytes_per_token(self) -> int:
+        return (self.model.num_kv_heads *
+                self.aligned_num_q_heads_per_kv_head *
+                self.aligned_q_head_dim * self.serve.dtype_q.itemsize)
+
+    @property
+    def o_bytes_per_token(self) -> int:
+        return (self.model.num_kv_heads *
+                self.aligned_num_q_heads_per_kv_head *
+                self.aligned_q_head_dim * self.serve.dtype_out.itemsize)
 
     @property
     def q_vmem_shape(self):
@@ -308,10 +352,22 @@ class RpaConfigs:
     def dma_kv_new_size(self) -> int:
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return 5
+        if (self.serve.kv_layout == KVLayout.HEAD_ALONG_SUBLANE
+                and self.serve.cp_group_size is not None):
+            return 5
         return 4
 
     @property
     def lm_scratch_shape(self):
+        num_lanes = pltpu.get_tpu_info().num_lanes
+        return (
+            self.model.num_kv_heads,
+            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
+            num_lanes,
+        )
+
+    @property
+    def lse_vmem_shape(self):
         num_lanes = pltpu.get_tpu_info().num_lanes
         return (
             self.block.batch_size,
@@ -323,11 +379,15 @@ class RpaConfigs:
     @property
     def acc_scratch_shape(self):
         return (
-            self.block.batch_size,
             self.model.num_kv_heads,
             self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
             self.aligned_kv_head_dim,
         )
+
+    @property
+    def max_schedule_size_multiplier(self) -> int:
+        # By default, setting an upper bound of ~5x the SMEM capacity on schedule.
+        return self.serve.max_schedule_size_multiplier
 
     def validate_inputs(
         self,
@@ -357,10 +417,10 @@ class RpaConfigs:
                 f" but got {q.shape[2]=}, {k.shape[2]=}, and {v.shape[2]=}")
 
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
-            if self.serve.page_size != 128:
+            if self.serve.page_size % 128 != 0:
                 raise ValueError(
-                    "Expected page_size=128 for SEQ_ALONG_LANE tile alignment, but got"
-                    f" {self.serve.page_size=}")
+                    "Expected page_size to be a multiple of 128 for SEQ_ALONG_LANE"
+                    f" tile alignment, but got {self.serve.page_size=}")
             expected_kv_cache_shape = (
                 kv_cache.shape[0],
                 self.model.num_kv_heads * 2,
@@ -412,3 +472,14 @@ class RpaConfigs:
                 f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},).")
         if distribution.shape != (3, ):
             raise ValueError(f"Expected {distribution.shape=} to be (3,).")
+
+        # Context Parallel Support
+        if self.serve.cp_group_size is not None:
+            if self.serve.attention_scope == AttentionScope.FULL:
+                raise ValueError(
+                    "Context Parallel does not support AttentionScope.FULL"
+                    " where cache is sharded but current tokens is sequential")
+            if self.model.sliding_window is not None:
+                raise ValueError(
+                    "Context Parallel does not support sliding window right now"
+                )
