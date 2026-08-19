@@ -131,16 +131,27 @@ class TestGemma4ForConditionalGeneration:
             )
         assert jax_output is not None
 
+    # model_name is the innermost parametrize on purpose, so that it varies
+    # slowest and all four pp configurations for one checkpoint run together.
+    #
+    # Stacked parametrize varies the topmost decorator fastest, so with
+    # model_name on top these sixteen cases ran round-robin - 31B, 26B-A4B,
+    # 31B-FP8, 26B-A4B-FP8, then back to 31B, four times over. Each checkpoint
+    # was therefore fetched four separate times, always with the other three
+    # in between, which is the worst possible order for a cache: whatever holds
+    # 31B has been evicted by the other three before 31B comes round again,
+    # and this block dominated the step's checkpoint-loading time. Grouped,
+    # each checkpoint is fetched once and reused three times.
+    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
+                                                       (3, 4)])
+    @pytest.mark.parametrize("load_format",
+                             ["skip_layers_model_loader_for_test"])
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
         "google/gemma-4-26B-A4B-it",
         "RedHatAI/gemma-4-31B-it-FP8-Dynamic",
         "RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic",
     ])
-    @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
-                                                       (3, 4)])
-    @pytest.mark.parametrize("load_format",
-                             ["skip_layers_model_loader_for_test"])
     def test_model_loading(
             self,
             model_name,
