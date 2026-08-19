@@ -593,7 +593,8 @@ def fused_moe_func(
         Output of moe operation [num_tokens, hidden_size]
     """
 
-    if use_gmm_fused_rs_kernel:
+    if use_ep and use_gmm_fused_rs_kernel:
+        logger.info("fused_moe_rs kernel in use")
         return fused_moe_func_rs(hidden_states=hidden_states,
                                  w1=w1,
                                  w2=w2,
