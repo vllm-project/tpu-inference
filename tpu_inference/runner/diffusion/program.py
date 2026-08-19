@@ -20,11 +20,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tpu_inference.runner.diffusion.algorithm import (CommitDiagnostics,
-                                                      CommitDiagnosticsFn,
-                                                      CommitFn,
-                                                      _exclude_mask_token,
-                                                      confidence_threshold_with_log_bias)
+from tpu_inference.runner.diffusion.algorithm import (
+    CommitDiagnostics, CommitDiagnosticsFn, CommitFn, _exclude_mask_token,
+    confidence_threshold_with_log_bias)
 from tpu_inference.runner.diffusion.config import (LogitAlignment,
                                                    NextBlockPolicy)
 
@@ -65,6 +63,7 @@ class DualCacheAcceptanceTrace(NamedTuple):
     row0_eligible: jax.Array
     row0_commit: jax.Array
     row0_remaining: jax.Array
+    row0_forced_anchor: jax.Array
     row0_selected_log_confidence: jax.Array
     row0_threshold_margin: jax.Array
 
@@ -77,6 +76,7 @@ class DualCacheDenoiseBlockOutput(NamedTuple):
     q32_forward_calls: jax.Array
     q8_forward_calls: jax.Array
     final_q32_forward_calls: jax.Array
+    forced_q32_anchor_commits: jax.Array
     stopped_rows: jax.Array
     acceptance_trace: DualCacheAcceptanceTrace | None
 
@@ -98,6 +98,7 @@ def _empty_dual_cache_acceptance_trace(
         row0_eligible=jnp.zeros(row_shape, dtype=bool),
         row0_commit=jnp.zeros(row_shape, dtype=bool),
         row0_remaining=jnp.zeros(row_shape, dtype=bool),
+        row0_forced_anchor=jnp.zeros(step_shape, dtype=bool),
         row0_selected_log_confidence=jnp.zeros(row_shape, dtype=jnp.float32),
         row0_threshold_margin=jnp.zeros(row_shape, dtype=jnp.float32),
     )
@@ -111,6 +112,7 @@ def _record_dual_cache_acceptance_step(
     token_ids: jax.Array,
     eligible: jax.Array,
     remaining: jax.Array,
+    forced_anchor_rows: jax.Array,
     diagnostics: CommitDiagnostics,
 ) -> DualCacheAcceptanceTrace:
     index = trace.count
@@ -125,6 +127,8 @@ def _record_dual_cache_acceptance_step(
         row0_eligible=trace.row0_eligible.at[index].set(eligible[0]),
         row0_commit=trace.row0_commit.at[index].set(committed[0]),
         row0_remaining=trace.row0_remaining.at[index].set(remaining[0]),
+        row0_forced_anchor=trace.row0_forced_anchor.at[index].set(
+            forced_anchor_rows[0]),
         row0_selected_log_confidence=(
             trace.row0_selected_log_confidence.at[index].set(
                 diagnostics.selected_log_confidence[0])),
@@ -462,6 +466,7 @@ def denoise_block(
         "eos_token_ids",
         "trace_acceptance_steps",
         "q8_log_confidence_bias",
+        "force_q32_anchor_commit",
     ),
 )
 def _denoise_block_dual_cache_jit(
@@ -489,6 +494,7 @@ def _denoise_block_dual_cache_jit(
     eos_token_ids: tuple[int, ...] = (),
     trace_acceptance_steps: bool = False,
     q8_log_confidence_bias: float = 0.0,
+    force_q32_anchor_commit: bool = False,
 ) -> DualCacheDenoiseBlockOutput:
     batch_size, block_size = initial_canvas.shape
     active_rows = jnp.asarray(active_rows, dtype=bool)
@@ -518,6 +524,7 @@ def _denoise_block_dual_cache_jit(
         token_ids,
         eligible,
         remaining,
+        forced_anchor_rows,
         step_confidence_threshold,
     ):
         if not trace_acceptance_steps:
@@ -537,12 +544,13 @@ def _denoise_block_dual_cache_jit(
             token_ids,
             eligible,
             remaining,
+            forced_anchor_rows,
             diagnostics,
         )
 
     def denoise_sub_block(sub_block_index, carry):
-        (canvas, mask, denoise_steps, kv, q32_calls, q8_calls, stopped_rows,
-         acceptance_trace) = carry
+        (canvas, mask, denoise_steps, kv, q32_calls, q8_calls,
+         forced_anchor_commits, stopped_rows, acceptance_trace) = carry
         start = sub_block_index * sub_block_size
         sub_canvas = jax.lax.dynamic_slice(canvas, (0, start),
                                            (batch_size, sub_block_size))
@@ -551,7 +559,7 @@ def _denoise_block_dual_cache_jit(
 
         def no_work(_):
             return (canvas, mask, denoise_steps, kv, q32_calls, q8_calls,
-                    stopped_rows, acceptance_trace)
+                    forced_anchor_commits, stopped_rows, acceptance_trace)
 
         def work(_):
 
@@ -593,6 +601,14 @@ def _denoise_block_dual_cache_jit(
                 temperature,
                 mask_token_id,
             )
+            if force_q32_anchor_commit:
+                forced_anchor_rows = remaining[:, 0]
+                remaining = remaining.at[:, 0].set(False)
+            else:
+                forced_anchor_rows = jnp.zeros_like(remaining[:, 0])
+            next_forced_anchor_commits = (
+                forced_anchor_commits +
+                jnp.sum(forced_anchor_rows.astype(jnp.int32)))
             next_acceptance_trace = record_acceptance_step(
                 acceptance_trace,
                 start,
@@ -602,6 +618,7 @@ def _denoise_block_dual_cache_jit(
                 token_ids,
                 eligible,
                 remaining,
+                forced_anchor_rows,
                 confidence_threshold,
             )
             committed = eligible & ~remaining
@@ -667,6 +684,7 @@ def _denoise_block_dual_cache_jit(
                     token_ids,
                     remaining,
                     next_remaining,
+                    jnp.zeros((batch_size, ), dtype=bool),
                     confidence_threshold,
                 )
                 committed = remaining & ~next_remaining
@@ -734,6 +752,7 @@ def _denoise_block_dual_cache_jit(
                     token_ids,
                     remaining,
                     next_remaining,
+                    jnp.zeros((batch_size, ), dtype=bool),
                     q8_confidence_threshold,
                 )
                 committed = remaining & ~next_remaining
@@ -778,13 +797,14 @@ def _denoise_block_dual_cache_jit(
             next_mask = jax.lax.dynamic_update_slice(mask, next_sub_mask,
                                                      (0, start))
             return (next_canvas, next_mask, next_steps, next_kv,
-                    next_q32_calls, next_q8_calls, next_stopped_rows,
-                    next_acceptance_trace)
+                    next_q32_calls, next_q8_calls, next_forced_anchor_commits,
+                    next_stopped_rows, next_acceptance_trace)
 
         return jax.lax.cond(jnp.any(eligible), work, no_work, operand=None)
 
     (canvas, mask, denoise_steps, kv_caches, q32_forward_calls,
-     q8_forward_calls, stopped_rows, acceptance_trace) = jax.lax.fori_loop(
+     q8_forward_calls, forced_q32_anchor_commits, stopped_rows,
+     acceptance_trace) = jax.lax.fori_loop(
          0,
          num_sub_blocks,
          denoise_sub_block,
@@ -793,6 +813,7 @@ def _denoise_block_dual_cache_jit(
              mask,
              denoise_steps,
              kv_caches,
+             jnp.array(0, dtype=jnp.int32),
              jnp.array(0, dtype=jnp.int32),
              jnp.array(0, dtype=jnp.int32),
              stopped_rows,
@@ -839,6 +860,7 @@ def _denoise_block_dual_cache_jit(
         q32_forward_calls=q32_forward_calls,
         q8_forward_calls=q8_forward_calls,
         final_q32_forward_calls=final_q32_forward_calls,
+        forced_q32_anchor_commits=forced_q32_anchor_commits,
         stopped_rows=stopped_rows,
         acceptance_trace=acceptance_trace,
     )
@@ -870,6 +892,7 @@ def denoise_block_dual_cache(
     commit_diagnostics_fn: CommitDiagnosticsFn | None = None,
     trace_acceptance_steps: bool = False,
     q8_log_confidence_bias: float = 0.0,
+    force_q32_anchor_commit: bool = False,
 ) -> DualCacheDenoiseBlockOutput:
     """Denoise with aligned q32 refreshes followed by q8 replacements."""
     if initial_canvas.ndim != 2:
@@ -899,6 +922,10 @@ def denoise_block_dual_cache(
             "q8_log_confidence_bias must be finite and non-negative")
     if q8_log_confidence_bias > 0.5:
         raise ValueError("q8_log_confidence_bias must not exceed 0.5")
+    if (force_q32_anchor_commit
+            and logit_alignment is not LogitAlignment.SHIFTED):
+        raise ValueError(
+            "force_q32_anchor_commit requires shifted logit alignment")
     if logit_alignment is LogitAlignment.SHIFTED:
         seed_mask, active = jax.device_get((initial_mask[:, 0], active_rows))
         if np.any(
@@ -932,4 +959,5 @@ def denoise_block_dual_cache(
         eos_token_ids=eos_token_ids,
         trace_acceptance_steps=trace_acceptance_steps,
         q8_log_confidence_bias=q8_log_confidence_bias,
+        force_q32_anchor_commit=force_q32_anchor_commit,
     )

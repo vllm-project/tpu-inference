@@ -99,6 +99,7 @@ class DiffusionRuntimeConfig:
     trace_acceptance_steps: bool = False
     fp32_partial_rpa: bool = False
     q8_log_confidence_bias: float = 0.0
+    force_q32_anchor_commit: bool = False
     cohort_max_wait_ms: float = 0.0
     cohort_quiet_wait_ms: float = 0.0
 
@@ -128,6 +129,9 @@ class DiffusionRuntimeConfig:
         if self.q8_log_confidence_bias and not self.use_dual_cache:
             raise ValueError(
                 "Diffusion q8_log_confidence_bias requires use_dual_cache")
+        if self.force_q32_anchor_commit and not self.use_dual_cache:
+            raise ValueError(
+                "Diffusion force_q32_anchor_commit requires use_dual_cache")
         if (not math.isfinite(self.cohort_max_wait_ms)
                 or self.cohort_max_wait_ms < 0.0):
             raise ValueError(
@@ -159,6 +163,11 @@ class DiffusionConfig:
             raise ValueError(
                 f"Diffusion algorithm {self.runtime.algorithm.value!r} is not "
                 f"supported by model adapter {self.model.name!r}")
+        if (self.runtime.force_q32_anchor_commit
+                and self.model.logit_alignment is not LogitAlignment.SHIFTED):
+            raise ValueError(
+                "Diffusion force_q32_anchor_commit requires shifted logit "
+                "alignment")
 
 
 @dataclass(frozen=True)
@@ -297,6 +306,8 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
         fp32_partial_rpa=bool(diffusion_values.get("fp32_partial_rpa", False)),
         q8_log_confidence_bias=float(
             diffusion_values.get("q8_log_confidence_bias", 0.0)),
+        force_q32_anchor_commit=bool(
+            diffusion_values.get("force_q32_anchor_commit", False)),
         cohort_max_wait_ms=float(
             diffusion_values.get("cohort_max_wait_ms", 0.0)),
         cohort_quiet_wait_ms=float(

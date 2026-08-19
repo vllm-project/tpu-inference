@@ -127,6 +127,12 @@ def test_dual_cache_acceptance_trace_is_opt_in_and_host_formatted():
         in denoise_source
     assert "q8_log_confidence_bias=self.config.runtime.q8_log_confidence_bias" \
         in precompile_source
+    assert "force_q32_anchor_commit=self.config.runtime.force_q32_anchor_commit" \
+        in denoise_source
+    assert "force_q32_anchor_commit=self.config.runtime.force_q32_anchor_commit" \
+        in precompile_source
+    assert "forced_q32_anchor_commits" in denoise_source
+    assert "row0_forced_anchor" in log_source
     assert "row0_selected_log_confidence" in log_source
     assert "row0_threshold_margin" in log_source
     assert "json.dumps" in log_source

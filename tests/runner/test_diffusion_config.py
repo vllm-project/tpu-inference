@@ -21,10 +21,10 @@ import pytest
 
 try:
     from tpu_inference.runner.diffusion.config import (
-        AttentionPolicy, CanvasPolicy, DiffusionAlgorithm, DiffusionModelSpec,
-        GenerationStrategy, LogitAlignment, NextBlockPolicy,
-        PromptRemainderPolicy, register_diffusion_model_adapter,
-        resolve_generation_strategy)
+        AttentionPolicy, CanvasPolicy, DiffusionAlgorithm, DiffusionConfig,
+        DiffusionModelSpec, DiffusionRuntimeConfig, GenerationStrategy,
+        LogitAlignment, NextBlockPolicy, PromptRemainderPolicy,
+        register_diffusion_model_adapter, resolve_generation_strategy)
 except ModuleNotFoundError:
     config_path = (pathlib.Path(__file__).resolve().parents[2] /
                    "tpu_inference" / "runner" / "diffusion" / "config.py")
@@ -36,7 +36,9 @@ except ModuleNotFoundError:
     AttentionPolicy = module.AttentionPolicy
     CanvasPolicy = module.CanvasPolicy
     DiffusionAlgorithm = module.DiffusionAlgorithm
+    DiffusionConfig = module.DiffusionConfig
     DiffusionModelSpec = module.DiffusionModelSpec
+    DiffusionRuntimeConfig = module.DiffusionRuntimeConfig
     GenerationStrategy = module.GenerationStrategy
     LogitAlignment = module.LogitAlignment
     NextBlockPolicy = module.NextBlockPolicy
@@ -127,6 +129,7 @@ def test_runtime_and_model_overrides_are_separate():
     assert resolved.diffusion.runtime.trace_acceptance_steps is False
     assert resolved.diffusion.runtime.fp32_partial_rpa is False
     assert resolved.diffusion.runtime.q8_log_confidence_bias == 0.0
+    assert resolved.diffusion.runtime.force_q32_anchor_commit is False
     assert resolved.diffusion.runtime.cohort_max_wait_ms == 7.5
     assert resolved.diffusion.runtime.cohort_quiet_wait_ms == 1.5
 
@@ -184,6 +187,24 @@ def test_resolves_opt_in_q8_log_confidence_bias():
 
     assert resolved.diffusion is not None
     assert resolved.diffusion.runtime.q8_log_confidence_bias == 0.05
+
+
+def test_resolves_opt_in_forced_q32_anchor_commit():
+    resolved = resolve_generation_strategy(
+        _vllm_config({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "block_size": 16,
+                "mask_token_id": 99,
+                "sub_block_size": 4,
+                "use_dual_cache": True,
+                "force_q32_anchor_commit": True,
+            },
+        }))
+
+    assert resolved.diffusion is not None
+    assert resolved.diffusion.runtime.force_q32_anchor_commit is True
 
 
 def test_new_model_adapter_does_not_change_strategy_resolution():
@@ -260,6 +281,13 @@ def test_new_model_adapter_does_not_change_strategy_resolution():
                 "q8_log_confidence_bias": 0.05,
             },
         }, "q8_log_confidence_bias requires use_dual_cache"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "force_q32_anchor_commit": True,
+            },
+        }, "force_q32_anchor_commit requires use_dual_cache"),
         ({
             "generation_strategy": "block_diffusion",
             "diffusion": {
@@ -352,6 +380,28 @@ def test_model_spec_rejects_incompatible_sub_block_size():
             sub_block_size=4,
             supported_algorithms=(DiffusionAlgorithm.LOW_CONFIDENCE, ),
         )
+
+
+def test_forced_q32_anchor_commit_rejects_same_position_alignment():
+    model = DiffusionModelSpec(
+        name="same-position",
+        block_size=4,
+        mask_token_id=7,
+        attention_policy=AttentionPolicy.BLOCK_CAUSAL,
+        logit_alignment=LogitAlignment.SAME_POSITION,
+        canvas_policy=CanvasPolicy.ALL_MASKED,
+        prompt_remainder_policy=(PromptRemainderPolicy.REQUIRE_BLOCK_ALIGNED),
+        next_block_policy=NextBlockPolicy.ALL_MASKED,
+        sub_block_size=4,
+        supported_algorithms=(DiffusionAlgorithm.LOW_CONFIDENCE, ),
+    )
+    runtime = DiffusionRuntimeConfig(
+        use_dual_cache=True,
+        force_q32_anchor_commit=True,
+    )
+
+    with pytest.raises(ValueError, match="requires shifted logit alignment"):
+        DiffusionConfig(model=model, runtime=runtime)
 
 
 def test_model_spec_rejects_shifted_all_masked_canvas():

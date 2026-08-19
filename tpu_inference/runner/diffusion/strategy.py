@@ -88,6 +88,8 @@ def _log_dual_cache_acceptance_trace(trace: DualCacheAcceptanceTrace) -> None:
             np.asarray(trace_host.row0_commit[index], dtype=bool).tolist(),
             "row0_remaining":
             np.asarray(trace_host.row0_remaining[index], dtype=bool).tolist(),
+            "row0_forced_anchor":
+            bool(trace_host.row0_forced_anchor[index]),
             "row0_selected_log_confidence":
             _eligible_finite_values(
                 np.asarray(trace_host.row0_selected_log_confidence[index]),
@@ -662,6 +664,8 @@ class BlockDiffusionStrategy:
                     self.config.runtime.trace_acceptance_steps),
                 q8_log_confidence_bias=(
                     self.config.runtime.q8_log_confidence_bias),
+                force_q32_anchor_commit=(
+                    self.config.runtime.force_q32_anchor_commit),
             )
         else:
             output = denoise_block(
@@ -695,14 +699,15 @@ class BlockDiffusionStrategy:
                 output.q32_forward_calls,
                 output.q8_forward_calls,
                 output.final_q32_forward_calls,
+                output.forced_q32_anchor_commits,
             )
             if self.config.runtime.trace_acceptance_steps:
                 assert output.acceptance_trace is not None
                 device_outputs += (output.acceptance_trace, )
             host_outputs = jax.device_get(device_outputs)
             (canvas_host, anchors_host, denoise_steps_host, stopped_rows_host,
-             q32_calls_host, q8_calls_host,
-             final_q32_calls_host) = host_outputs[:7]
+             q32_calls_host, q8_calls_host, final_q32_calls_host,
+             forced_q32_anchor_commits_host) = (host_outputs[:8])
             q32_calls = int(q32_calls_host)
             q8_calls = int(q8_calls_host)
             final_q32_calls = int(final_q32_calls_host)
@@ -727,6 +732,10 @@ class BlockDiffusionStrategy:
                 q8_calls,
                 "final_q32_forward_calls":
                 final_q32_calls,
+                "force_q32_anchor_commit":
+                self.config.runtime.force_q32_anchor_commit,
+                "forced_q32_anchor_commits":
+                int(forced_q32_anchor_commits_host),
                 "output_candidate_positions":
                 output_candidate_positions,
                 "confidence_threshold":
@@ -760,7 +769,7 @@ class BlockDiffusionStrategy:
             logger.info("Fast-dLLM DualCache trace: %s",
                         self._last_denoise_trace)
             if self.config.runtime.trace_acceptance_steps:
-                _log_dual_cache_acceptance_trace(host_outputs[7])
+                _log_dual_cache_acceptance_trace(host_outputs[8])
         else:
             canvas_host, anchors_host = jax.device_get((
                 output.canvas[:len(req_ids)],
@@ -1068,6 +1077,8 @@ class BlockDiffusionStrategy:
                         self.config.runtime.trace_acceptance_steps),
                     q8_log_confidence_bias=(
                         self.config.runtime.q8_log_confidence_bias),
+                    force_q32_anchor_commit=(
+                        self.config.runtime.force_q32_anchor_commit),
                 )
             else:
                 output = denoise_block(

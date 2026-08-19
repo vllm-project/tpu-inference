@@ -1244,6 +1244,210 @@ def test_dual_cache_keeps_q32_until_shifted_sub_block_anchor_is_committed():
     np.testing.assert_array_equal(output.kv_caches, [3, 0, 1])
     assert int(output.q32_forward_calls) == 4
     assert int(output.q8_forward_calls) == 0
+    assert int(output.forced_q32_anchor_commits) == 0
+
+
+def test_forced_q32_anchor_commit_transitions_to_q8_after_initial_refresh():
+    mask_token_id = 5
+    sub_block_size = 4
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 6),
+                           dtype=jnp.float32)
+        logits = logits.at[:, 1, 2].set(20.0)
+        return logits, kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 6),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        return jnp.zeros((2, 6), dtype=jnp.float32), kv_caches.at[2].add(1)
+
+    initial_canvas = jnp.array([[
+        1, 2, 3, 4, mask_token_id, mask_token_id, mask_token_id, mask_token_id
+    ], [4, 4, 4, 4, 4, 4, 4, 4]],
+                               dtype=jnp.int32)
+    initial_mask = jnp.array(
+        [[False, False, False, False, True, True, True, True],
+         [False, False, False, False, False, False, False, False]])
+
+    def run(force_q32_anchor_commit=None,
+            confidence_threshold=0.9,
+            q8_log_confidence_bias=0.0,
+            needs_final_forward=False):
+        force_kwargs = ({} if force_q32_anchor_commit is None else {
+            "force_q32_anchor_commit": force_q32_anchor_commit
+        })
+        return denoise_block_dual_cache(
+            full_forward,
+            partial_forward,
+            final_forward,
+            low_confidence_commit,
+            None,
+            initial_canvas,
+            initial_mask,
+            jnp.tile(jnp.arange(8, dtype=jnp.int32), (2, 1)),
+            jnp.zeros((3, ), dtype=jnp.int32),
+            jnp.array([True, False]),
+            _thresholds(2, value=confidence_threshold),
+            _temperatures(2),
+            None,
+            logit_alignment=LogitAlignment.SHIFTED,
+            next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+            mask_token_id=mask_token_id,
+            sub_block_size=sub_block_size,
+            needs_final_forward=jnp.array([needs_final_forward, False]),
+            commit_diagnostics_fn=low_confidence_diagnostics,
+            trace_acceptance_steps=True,
+            q8_log_confidence_bias=q8_log_confidence_bias,
+            **force_kwargs,
+        )
+
+    implicit_default = run()
+    default = run(False)
+    forced = run(True)
+
+    assert jax.tree_util.tree_structure(
+        implicit_default) == jax.tree_util.tree_structure(default)
+    for implicit_value, explicit_value in zip(
+            jax.tree_util.tree_leaves(implicit_default),
+            jax.tree_util.tree_leaves(default),
+            strict=True):
+        np.testing.assert_array_equal(implicit_value, explicit_value)
+    np.testing.assert_array_equal(default.canvas, forced.canvas)
+    np.testing.assert_array_equal(forced.canvas[1], initial_canvas[1])
+    assert int(default.q32_forward_calls) == 2
+    assert int(forced.q32_forward_calls) == 1
+    assert int(default.q8_forward_calls) == int(forced.q8_forward_calls) == 2
+    assert int(default.final_q32_forward_calls) == 0
+    assert int(forced.final_q32_forward_calls) == 0
+    assert int(default.forced_q32_anchor_commits) == 0
+    assert int(forced.forced_q32_anchor_commits) == 1
+
+    trace = forced.acceptance_trace
+    assert trace is not None
+    np.testing.assert_array_equal(trace.row0_commit[0],
+                                  [True, True, False, False])
+    np.testing.assert_array_equal(trace.row0_remaining[0],
+                                  [False, False, True, True])
+    assert bool(trace.row0_forced_anchor[0])
+    assert not np.any(trace.row0_forced_anchor[1:int(trace.count)])
+
+    nonterminal = run(True, needs_final_forward=True)
+    assert int(nonterminal.q32_forward_calls) == 2
+    assert int(nonterminal.final_q32_forward_calls) == 1
+    assert int(nonterminal.forced_q32_anchor_commits) == 1
+
+    threshold_one = run(True, confidence_threshold=1.0)
+    threshold_one_biased = run(
+        True,
+        confidence_threshold=1.0,
+        q8_log_confidence_bias=0.5,
+    )
+    np.testing.assert_array_equal(threshold_one.canvas,
+                                  threshold_one_biased.canvas)
+    np.testing.assert_array_equal(threshold_one.denoise_steps,
+                                  threshold_one_biased.denoise_steps)
+    assert int(threshold_one.q32_forward_calls) == int(
+        threshold_one_biased.q32_forward_calls)
+    assert int(threshold_one.q8_forward_calls) == int(
+        threshold_one_biased.q8_forward_calls)
+    assert int(threshold_one.forced_q32_anchor_commits) == int(
+        threshold_one_biased.forced_q32_anchor_commits) == 1
+
+
+def test_forced_q32_anchor_commit_requires_shifted_alignment():
+    with pytest.raises(ValueError, match="requires shifted logit alignment"):
+        denoise_block_dual_cache(
+            lambda *args: (jnp.zeros((1, 2, 4)), args[3]),
+            lambda *args: (jnp.zeros((1, 2, 4)), args[3]),
+            lambda *args: (jnp.zeros((1, 4)), args[3]),
+            low_confidence_commit,
+            None,
+            jnp.full((1, 2), 3, dtype=jnp.int32),
+            jnp.ones((1, 2), dtype=bool),
+            jnp.arange(2, dtype=jnp.int32)[None, :],
+            jnp.zeros((1, ), dtype=jnp.int32),
+            jnp.array([True]),
+            _thresholds(1),
+            _temperatures(1),
+            None,
+            logit_alignment=LogitAlignment.SAME_POSITION,
+            next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+            mask_token_id=3,
+            sub_block_size=2,
+            force_q32_anchor_commit=True,
+        )
+
+
+def test_forced_q32_anchor_commit_honors_row_local_eos_stop():
+    mask_token_id = 5
+    eos_token_id = 2
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], 4, 6), dtype=jnp.float32)
+        logits = logits.at[:, 0, eos_token_id].set(0.1)
+        logits = logits.at[:, 1, 1].set(20.0)
+        return logits, kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        return jnp.zeros((1, 4, 6), dtype=jnp.float32), kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        return jnp.zeros((1, 6), dtype=jnp.float32), kv_caches.at[2].add(1)
+
+    output = denoise_block_dual_cache(
+        full_forward,
+        partial_forward,
+        final_forward,
+        low_confidence_commit,
+        None,
+        jnp.array([[
+            1, 1, 1, 1, mask_token_id, mask_token_id, mask_token_id,
+            mask_token_id
+        ]],
+                  dtype=jnp.int32),
+        jnp.array([[False, False, False, False, True, True, True, True]]),
+        jnp.arange(8, dtype=jnp.int32)[None, :],
+        jnp.zeros((3, ), dtype=jnp.int32),
+        jnp.array([True]),
+        _thresholds(1, value=0.9),
+        _temperatures(1),
+        None,
+        logit_alignment=LogitAlignment.SHIFTED,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=4,
+        needs_final_forward=jnp.array([True]),
+        stop_on_eos_rows=jnp.array([True]),
+        eos_token_ids=(eos_token_id, ),
+        force_q32_anchor_commit=True,
+    )
+
+    np.testing.assert_array_equal(
+        output.canvas,
+        [[1, 1, 1, 1, eos_token_id, 1, mask_token_id, mask_token_id]],
+    )
+    np.testing.assert_array_equal(output.stopped_rows, [True])
+    np.testing.assert_array_equal(output.denoise_steps, [1])
+    assert int(output.q32_forward_calls) == 1
+    assert int(output.q8_forward_calls) == 0
+    assert int(output.final_q32_forward_calls) == 0
+    assert int(output.forced_q32_anchor_commits) == 1
 
 
 def test_dual_cache_partial_forward_receives_only_rows_with_work():
