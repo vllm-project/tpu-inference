@@ -22,8 +22,6 @@ from jax.sharding import PartitionSpec as P
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
-from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
-    fused_moe_func_rs
 from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
@@ -594,6 +592,13 @@ def fused_moe_func(
     """
 
     if use_ep and use_gmm_fused_rs_kernel:
+        # Deferred import: fused_moe_rs reads ShardingAxisName at module top,
+        # which would latch the lazy sharding-axis singleton to the 2D axis
+        # names when this module is imported before NEW_MODEL_DESIGN is set,
+        # breaking dp_attention weight sharding. Import only when the kernel
+        # is actually enabled.
+        from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
+            fused_moe_func_rs
         logger.info("fused_moe_rs kernel in use")
         return fused_moe_func_rs(hidden_states=hidden_states,
                                  w1=w1,
