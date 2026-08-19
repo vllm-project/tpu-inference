@@ -45,6 +45,7 @@ class TestTpuPlatform:
         vllm_config.model_config = MagicMock(dtype='bfloat16')
         vllm_config.model_config.use_mla = False
         vllm_config.model_config.is_hybrid = False
+        vllm_config.model_config.multimodal_config = None
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
         vllm_config.parallel_config.data_parallel_size = 1
@@ -191,6 +192,44 @@ class TestTpuPlatform:
         with pytest.raises(AssertionError,
                            match="VLLM_ENABLE_V1_MULTIPROCESSING must be 0"):
             TpuPlatform.check_and_update_config(vllm_config)
+
+    @pytest.mark.parametrize("impl_type,resolved,expected_flag", [
+        ("auto", "flax_nnx", False),
+        ("flax_nnx", None, False),
+        ("vllm", None, True),
+    ])
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_mm_device_do_normalize(
+            self, mock_update, mock_sharding, vllm_config, impl_type, resolved,
+            expected_flag):
+        """mm_device_do_normalize must be forced off for JAX-native multimodal
+        models: they consume the processor's pixel_values directly and have no
+        device-side FusedInputNorm, so leaving it on feeds the ViT
+        unnormalized pixels (silently wrong outputs). The vllm (torchax) path
+        keeps the flag: FusedInputNorm lives in the vLLM model."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = True
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.max_model_len = 4096
+        mm_cfg = MagicMock()
+        mm_cfg.mm_device_do_normalize = True
+        vllm_config.model_config.multimodal_config = mm_cfg
+
+        with patch(
+                "tpu_inference.platforms.tpu_platform.envs.MODEL_IMPL_TYPE",
+                impl_type), \
+             patch("tpu_inference.models.common.model_loader."
+                   "resolve_model_architecture",
+                   return_value=resolved):
+            TpuPlatform.check_and_update_config(vllm_config)
+
+        assert mm_cfg.mm_device_do_normalize == expected_flag
 
     @pytest.mark.parametrize("is_hybrid,expected_prefix_caching", [
         (True, False),

@@ -133,6 +133,39 @@ def test_get_model_architecture_unsupported():
         model_loader._get_model_architecture(config)
 
 
+@pytest.mark.parametrize("env_value,is_draft", [
+    ("flax_nnx", False),
+    ("vllm", False),
+    ("flax_nnx", True),
+    ("vllm", True),
+])
+def test_resolve_model_impl_type_explicit(env_value, is_draft):
+    """An explicit (non-auto) impl type is returned as-is, from
+    MODEL_IMPL_TYPE for the target model and DRAFT_MODEL_IMPL_TYPE for the
+    draft model, without consulting the architecture."""
+    env_attr = "DRAFT_MODEL_IMPL_TYPE" if is_draft else "MODEL_IMPL_TYPE"
+    with patch.object(model_loader.envs, env_attr, env_value), \
+         patch.object(model_loader, "resolve_model_architecture") as mock_res:
+        impl = model_loader.resolve_model_impl_type(MagicMock(),
+                                                    is_draft_model=is_draft)
+    assert impl == env_value
+    mock_res.assert_not_called()
+
+
+@pytest.mark.parametrize("is_draft", [False, True])
+def test_resolve_model_impl_type_auto(is_draft):
+    """'auto' delegates to resolve_model_architecture with the draft flag."""
+    env_attr = "DRAFT_MODEL_IMPL_TYPE" if is_draft else "MODEL_IMPL_TYPE"
+    cfg = MagicMock()
+    with patch.object(model_loader.envs, env_attr, "auto"), \
+         patch.object(model_loader, "resolve_model_architecture",
+                      return_value="flax_nnx") as mock_res:
+        impl = model_loader.resolve_model_impl_type(cfg,
+                                                    is_draft_model=is_draft)
+    assert impl == "flax_nnx"
+    mock_res.assert_called_once_with(cfg, is_draft)
+
+
 @pytest.fixture(autouse=True)
 def clear_model_registry_after_test():
     """Clear the model registry after each test to prevent side effects."""
