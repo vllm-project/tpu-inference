@@ -377,12 +377,22 @@ class RpaConfigs:
         )
 
     @property
+    def lse_row_stride(self) -> int:
+        # LSE rows per token, padded to the sublane tile so the HBM
+        # writeback offset (token * stride) is provably tile-aligned for
+        # packed dtypes (e.g. bf16, whose tiled memref slices require
+        # 8-aligned offsets along the sublane dimension).
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
+        return utils.align_to(self.aligned_num_q_heads_per_kv_head,
+                              num_sublanes)
+
+    @property
     def lse_vmem_shape(self):
         num_lanes = pltpu.get_tpu_info().num_lanes
         return (
             self.block.batch_size,
             self.model.num_kv_heads,
-            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
+            self.block.bq_sz * self.lse_row_stride,
             num_lanes,
         )
 

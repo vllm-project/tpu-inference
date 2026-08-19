@@ -104,7 +104,18 @@ def calculate_and_store_out(
 
     def _stage_lse(b_idx: int, batch_m: jax.Array, batch_l: jax.Array):
         lse_val = batch_m + jnp.log(jnp.maximum(batch_l, 1e-9))
-        lse_o_vref[b_idx] = lse_val.astype(cfgs.serve.dtype_out)
+        lse_val = lse_val.astype(cfgs.serve.dtype_out)
+        aligned_q = cfgs.aligned_num_q_heads_per_kv_head
+        if cfgs.lse_row_stride != aligned_q:
+            # Pad each token's rows to the sublane-aligned stride the HBM
+            # buffer is laid out with.
+            kv, tq, lanes = lse_val.shape
+            lse_val = jnp.pad(
+                lse_val.reshape(kv, tq // aligned_q, aligned_q, lanes),
+                ((0, 0), (0, 0), (0, cfgs.lse_row_stride - aligned_q),
+                 (0, 0)),
+            ).reshape(kv, -1, lanes)
+        lse_o_vref[b_idx] = lse_val
 
     if cfgs.fuse_accum:
         for b in range(cfgs.batch_size):

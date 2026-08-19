@@ -563,15 +563,20 @@ def ragged_paged_attention(
     lse_hbm_init: jax.Array | None = None
     if return_lse:
         num_lanes = pltpu.get_tpu_info().num_lanes
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
         q_packing = utils.get_dtype_packing(queries.dtype)
         num_q_heads_per_kv_head = num_q_heads // num_kv_heads
         aligned_num_q_heads_per_kv_head = utils.align_to(
             num_q_heads_per_kv_head, q_packing)
+        # Rows per token are padded to the sublane tile so the kernel's
+        # writeback offsets are tile-aligned (see RpaConfigs.lse_row_stride).
+        lse_row_stride = utils.align_to(aligned_num_q_heads_per_kv_head,
+                                        num_sublanes)
         max_tokens = queries.shape[0]
         lse_hbm_init = jnp.full(
             [
                 num_kv_heads,
-                max_tokens * aligned_num_q_heads_per_kv_head,
+                max_tokens * lse_row_stride,
                 num_lanes,
             ],
             -jnp.inf,
@@ -650,12 +655,11 @@ def ragged_paged_attention(
     if not return_lse:
         return o_hbm, kv_cache
 
-    # Reshape LSE from [num_kv_heads, max_tokens * aligned_num_q_heads_per_kv_head, num_lanes] to
-    # [max_tokens, num_q_heads].
+    # Reshape LSE from [num_kv_heads, max_tokens * lse_row_stride, num_lanes]
+    # to [max_tokens, num_q_heads].
     max_tokens = queries.shape[0]
     # Extract first lane (scalar LSE value per token-head pair).
-    lse = lse_hbm.reshape(num_kv_heads, max_tokens,
-                          aligned_num_q_heads_per_kv_head,
+    lse = lse_hbm.reshape(num_kv_heads, max_tokens, lse_row_stride,
                           num_lanes)[:, :max_tokens, :num_q_heads_per_kv_head,
                                      0]
     lse = lse.swapaxes(0, 1).reshape(max_tokens, num_q_heads)
