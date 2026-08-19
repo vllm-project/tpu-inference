@@ -43,13 +43,11 @@ class PCPMetadata:
     # Sharded as P('pcp', None).
     q_pos_offsets: jax.Array
     # STATIC (meta field): a rung of `pcp_cache_page_buckets` giving an UPPER
-    # bound on the KV pages this request's cached tokens occupy, used to bound
-    # the gather-KV cache all-gather.  0 means nothing is cached, in which case
-    # the cache phase is elided entirely.  REQUIRED: a default would silently
-    # elide the cache phase for any caller that forgot to set it.
-    # With several requests in flight this bounds EVERY request (it is taken
-    # over the batch), which is all the `== 0` elision and the strategy choice
-    # need; gather-KV itself is disabled for num_reqs > 1.
+    # bound on the KV pages any request's cached tokens occupy (taken over the
+    # batch).  0 means nothing is cached, in which case the cache phase is
+    # elided entirely; that elision is the only thing the value decides now
+    # that the cache phase is the in-kernel ring.  REQUIRED: a default would
+    # silently elide the cache phase for any caller that forgot to set it.
     cache_pages: int
     # (max_num_seqs,) int32 — base offset of each fused seq's current-KV block
     # inside the all-gathered new-KV buffer.  Replicated (P()).  None for a
@@ -63,7 +61,8 @@ class PCPMetadata:
     kv_token_order: jax.Array | None = None
     # STATIC (meta field): number of requests fused into this launch, padded to
     # its own bucket ladder.  1 keeps the batch on exactly the single-request
-    # code path (including gather-KV) rather than the multi-request one.
+    # code path (kernel-side rank-order remap of the current K/V, no
+    # kv_new_starts) rather than the multi-request one.
     num_reqs: int = 1
 
 
@@ -112,7 +111,7 @@ class AttentionMetadata(object):
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
 
-    # PCP gather-KV only. Number of kv pages occupied by the current request.
+    # PCP only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
 
 
@@ -187,7 +186,11 @@ jax.tree_util.register_pytree_node(
         groups, layer_names_per_group),
 )
 
-PCP_CACHE_PAGE_BUCKET_COUNT = 5
+# After PR #3277 (in-kernel ring cache phase) `cache_pages` only decides whether
+# the cache phase runs at all (0 elides it); every nonzero rung compiles the
+# same kernel, so the ladder is just {0, max}. Each rung multiplies the PCP
+# precompile set, so keep this at 2 unless the value gains another use.
+PCP_CACHE_PAGE_BUCKET_COUNT = 2
 
 
 def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
@@ -218,12 +221,7 @@ def pcp_token_layout(num_scheduled_tokens: list[int],
     two_p = 2 * pcp_size
     off, acc, C = [], 0, []
     for n in num_scheduled_tokens:
-        # max(1, ...) only bites for n == 0, i.e. the slots that pad the live
-        # request count up to its static bucket. Those still need a nonzero
-        # chunk: the cache phase derives its seq boundaries from these offsets,
-        # and two slots sharing an offset make a zero-length sequence, which
-        # hangs the kernel.
-        c = max(1, cdiv(n, two_p))
+        c = cdiv(n, two_p)
         C.append(c)
         off.append(acc)
         acc += 2 * c

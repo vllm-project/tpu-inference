@@ -420,14 +420,13 @@ class CompilationManager:
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
             repl = NamedSharding(self.runner.mesh, PartitionSpec())
-            # The layout must be WELL FORMED, not merely the right shape. With
-            # num_reqs > 1 the cache phase derives each request's slot offset
-            # from query_start_loc, so an all-zero array claims num_reqs
-            # sequences that all start at the same place -- every one but the
-            # last has q_len == 0, and the kernel's per-sequence state machine
-            # hangs on them. That is a state the runtime never produces (every
-            # real C_i >= 1), so it is worth constructing a realistic dummy
-            # rather than teaching the kernel to tolerate a degenerate one.
+            # Build a well-formed layout rather than an all-zero one. Both
+            # attention phases iterate the seq count from request_distribution
+            # (all zeros here, so the kernel body does not run during
+            # precompile), but the traced program still slices these arrays,
+            # and a realistic dummy keeps this path honest if that ever
+            # changes: query_start_loc entries that repeat inside the iterated
+            # range would be zero-length seqs, which hang the kernel.
             cu_np = np.zeros((pcp_size, n_reqs + 1), np.int32)
             qpos_np = np.zeros((pcp_size, n_reqs), np.int32)
             kv_starts_np = np.zeros(n_reqs, np.int32)
@@ -453,17 +452,15 @@ class CompilationManager:
                                            qpos_np,
                                            sharding=pcp_spec),
                 cache_pages=pcp_cache_pages,
-                kv_new_starts=device_array(self.runner.mesh,
-                                           kv_starts_np,
-                                           sharding=repl)
+                kv_new_starts=device_array(
+                    self.runner.mesh, kv_starts_np, sharding=repl)
                 if pcp_num_reqs > 1 else None,
                 # A real permutation: jnp.take with out-of-range or duplicated
                 # indices is not what the runtime does.
-                kv_token_order=device_array(self.runner.mesh,
-                                            np.arange(num_tokens,
-                                                      dtype=np.int32),
-                                            sharding=repl)
-                if pcp_num_reqs > 1 else None,
+                kv_token_order=device_array(
+                    self.runner.mesh,
+                    np.arange(num_tokens, dtype=np.int32),
+                    sharding=repl) if pcp_num_reqs > 1 else None,
                 num_reqs=pcp_num_reqs,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
@@ -753,13 +750,9 @@ class CompilationManager:
                 _pcp = self.runner.vllm_config.sharding_config.prefill_cp_size
                 for _cache_pages in _cache_rungs:
                     for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
-                        # With more than one request gather-KV is disabled, so
                         # cache_pages only decides whether the cache phase is
-                        # elided at all (== 0). Warming the intermediate rungs
-                        # for that case compiles graphs nothing can select.
-                        if (_pcp_reqs > 1 and _cache_pages != 0
-                                and _cache_pages != _cache_rungs[-1]):
-                            continue
+                        # elided at all (== 0); the ladder is {0, max}, so
+                        # every rung here is reachable.
                         # A bucket that cannot give every request a chunk of at
                         # least one token per rank can never carry that many
                         # requests at runtime, so the variant is unreachable.
