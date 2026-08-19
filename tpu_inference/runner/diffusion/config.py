@@ -100,6 +100,7 @@ class DiffusionRuntimeConfig:
     fp32_partial_rpa: bool = False
     q8_log_confidence_bias: float = 0.0
     cohort_max_wait_ms: float = 0.0
+    cohort_quiet_wait_ms: float = 0.0
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence_threshold <= 1.0:
@@ -134,6 +135,18 @@ class DiffusionRuntimeConfig:
         if self.cohort_max_wait_ms > MAX_COHORT_WAIT_MS:
             raise ValueError("Diffusion cohort_max_wait_ms must not exceed "
                              f"{MAX_COHORT_WAIT_MS:g}")
+        if (not math.isfinite(self.cohort_quiet_wait_ms)
+                or self.cohort_quiet_wait_ms < 0.0):
+            raise ValueError(
+                "Diffusion cohort_quiet_wait_ms must be finite and "
+                "non-negative")
+        if self.cohort_quiet_wait_ms and self.cohort_max_wait_ms <= 0.0:
+            raise ValueError(
+                "Diffusion cohort_quiet_wait_ms requires positive "
+                "cohort_max_wait_ms")
+        if self.cohort_quiet_wait_ms > self.cohort_max_wait_ms:
+            raise ValueError("Diffusion cohort_quiet_wait_ms must not exceed "
+                             "cohort_max_wait_ms")
 
 
 @dataclass(frozen=True)
@@ -286,6 +299,8 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
             diffusion_values.get("q8_log_confidence_bias", 0.0)),
         cohort_max_wait_ms=float(
             diffusion_values.get("cohort_max_wait_ms", 0.0)),
+        cohort_quiet_wait_ms=float(
+            diffusion_values.get("cohort_quiet_wait_ms", 0.0)),
     )
     return GenerationStrategyConfig(
         strategy=strategy,

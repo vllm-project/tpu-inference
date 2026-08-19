@@ -38,14 +38,22 @@ class CohortAdmissionQueue(Generic[_ItemT]):
         self,
         max_size: int,
         max_wait_ms: float,
+        quiet_wait_ms: float = 0.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
         if max_size < 1:
             raise ValueError("Cohort max_size must be positive")
         if not math.isfinite(max_wait_ms) or max_wait_ms <= 0.0:
             raise ValueError("Cohort max_wait_ms must be finite and positive")
+        if not math.isfinite(quiet_wait_ms) or quiet_wait_ms < 0.0:
+            raise ValueError(
+                "Cohort quiet_wait_ms must be finite and non-negative")
+        if quiet_wait_ms > max_wait_ms:
+            raise ValueError(
+                "Cohort quiet_wait_ms must not exceed max_wait_ms")
         self.max_size = max_size
         self.max_wait_seconds = max_wait_ms / 1000.0
+        self.quiet_wait_seconds = quiet_wait_ms / 1000.0
         self._clock = monotonic if clock is None else clock
         self._pending: deque[tuple[_ItemT, float]] = deque()
 
@@ -56,7 +64,11 @@ class CohortAdmissionQueue(Generic[_ItemT]):
     def deadline(self) -> float | None:
         if not self._pending:
             return None
-        return self._pending[0][1] + self.max_wait_seconds
+        deadline = self._pending[0][1] + self.max_wait_seconds
+        if self.quiet_wait_seconds:
+            deadline = min(deadline,
+                           self._pending[-1][1] + self.quiet_wait_seconds)
+        return deadline
 
     def add(self, item: _ItemT) -> None:
         self._pending.append((item, self._clock()))
@@ -117,6 +129,8 @@ class BlockDiffusionCohortScheduler(Scheduler):
         generation_strategy = resolve_generation_strategy(vllm_config)
         assert generation_strategy.diffusion is not None
         max_wait_ms = generation_strategy.diffusion.runtime.cohort_max_wait_ms
+        quiet_wait_ms = (
+            generation_strategy.diffusion.runtime.cohort_quiet_wait_ms)
         if max_wait_ms <= 0.0:
             raise ValueError(
                 "BlockDiffusionCohortScheduler requires positive cohort_max_wait_ms"
@@ -124,6 +138,7 @@ class BlockDiffusionCohortScheduler(Scheduler):
         self._cohort = CohortAdmissionQueue[Request](
             max_size=vllm_config.scheduler_config.max_num_seqs,
             max_wait_ms=max_wait_ms,
+            quiet_wait_ms=quiet_wait_ms,
         )
         self._cohort_request_ids: set[str] = set()
 

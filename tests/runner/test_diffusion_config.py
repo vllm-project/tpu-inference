@@ -96,6 +96,7 @@ def test_resolves_seeded_shifted_semantics_from_hf_config():
         supported_algorithms=(DiffusionAlgorithm.LOW_CONFIDENCE, ),
     )
     assert resolved.diffusion.runtime.cohort_max_wait_ms == 0.0
+    assert resolved.diffusion.runtime.cohort_quiet_wait_ms == 0.0
 
 
 def test_runtime_and_model_overrides_are_separate():
@@ -112,6 +113,7 @@ def test_runtime_and_model_overrides_are_separate():
                 "max_denoise_steps": 12,
                 "use_dual_cache": True,
                 "cohort_max_wait_ms": 7.5,
+                "cohort_quiet_wait_ms": 1.5,
             },
         }))
 
@@ -126,6 +128,7 @@ def test_runtime_and_model_overrides_are_separate():
     assert resolved.diffusion.runtime.fp32_partial_rpa is False
     assert resolved.diffusion.runtime.q8_log_confidence_bias == 0.0
     assert resolved.diffusion.runtime.cohort_max_wait_ms == 7.5
+    assert resolved.diffusion.runtime.cohort_quiet_wait_ms == 1.5
 
 
 def test_resolves_opt_in_dual_cache_acceptance_trace():
@@ -302,6 +305,29 @@ def test_new_model_adapter_does_not_change_strategy_resolution():
                 "cohort_max_wait_ms": 100.01,
             },
         }, "cohort_max_wait_ms must not exceed 100"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "cohort_max_wait_ms": 20.0,
+                "cohort_quiet_wait_ms": -0.01,
+            },
+        }, "cohort_quiet_wait_ms must be finite and non-negative"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "cohort_quiet_wait_ms": 2.0,
+            },
+        }, "cohort_quiet_wait_ms requires positive cohort_max_wait_ms"),
+        ({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "cohort_max_wait_ms": 2.0,
+                "cohort_quiet_wait_ms": 2.01,
+            },
+        }, "cohort_quiet_wait_ms must not exceed cohort_max_wait_ms"),
     ],
 )
 def test_invalid_configuration_fails_at_resolution(additional_config, match):

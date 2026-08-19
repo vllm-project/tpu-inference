@@ -412,8 +412,9 @@ class TpuPlatform(Platform):
             scheduler_config.scheduler_cls = BlockDiffusionCohortScheduler
             logger.info(
                 "Enabled block-diffusion cohort admission with max wait %.3f "
-                "ms and target size %d",
+                "ms, quiet wait %.3f ms, and target size %d",
                 generation_strategy.diffusion.runtime.cohort_max_wait_ms,
+                generation_strategy.diffusion.runtime.cohort_quiet_wait_ms,
                 scheduler_config.max_num_seqs,
             )
 

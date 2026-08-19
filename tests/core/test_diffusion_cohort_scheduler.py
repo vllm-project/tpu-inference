@@ -94,8 +94,11 @@ def _load_scheduler_with_fake_vllm(monkeypatch):
     def resolve_generation_strategy(vllm_config):
         max_wait_ms = vllm_config.additional_config["diffusion"][
             "cohort_max_wait_ms"]
+        quiet_wait_ms = vllm_config.additional_config["diffusion"].get(
+            "cohort_quiet_wait_ms", 0.0)
         return SimpleNamespace(diffusion=SimpleNamespace(
-            runtime=SimpleNamespace(cohort_max_wait_ms=max_wait_ms)))
+            runtime=SimpleNamespace(cohort_max_wait_ms=max_wait_ms,
+                                    cohort_quiet_wait_ms=quiet_wait_ms)))
 
     modules = {
         "vllm":
@@ -153,11 +156,12 @@ def _load_scheduler_with_fake_vllm(monkeypatch):
     return module, Request, RequestStatus
 
 
-def _vllm_config(max_num_seqs=2, max_wait_ms=10.0):
+def _vllm_config(max_num_seqs=2, max_wait_ms=10.0, quiet_wait_ms=0.0):
     return SimpleNamespace(
         additional_config={
             "diffusion": {
                 "cohort_max_wait_ms": max_wait_ms,
+                "cohort_quiet_wait_ms": quiet_wait_ms,
             },
         },
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
@@ -209,6 +213,31 @@ def test_cohort_queue_deadline_tracks_oldest_remaining_item(monkeypatch):
     assert queue.drain_ready() == ["remaining"]
 
 
+def test_cohort_queue_releases_after_quiet_period_with_hard_cap(monkeypatch):
+    module, _, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    clock = _Clock()
+    queue = module.CohortAdmissionQueue(max_size=32,
+                                        max_wait_ms=20.0,
+                                        quiet_wait_ms=2.0,
+                                        clock=clock)
+    queue.add("first")
+    clock.now = 0.004
+    queue.add("second")
+
+    assert queue.deadline == 0.006
+    clock.now = 0.005
+    assert not queue.is_ready()
+    clock.now = 0.006
+    assert queue.drain_ready() == ["first", "second"]
+
+    clock.now = 1.0
+    queue.add("hard-cap-first")
+    for index, now in enumerate((1.005, 1.010, 1.015, 1.019)):
+        clock.now = now
+        queue.add(index)
+    assert queue.deadline == 1.02
+
+
 def test_scheduler_keeps_running_work_moving_before_cohort_is_ready(
         monkeypatch):
     module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
@@ -227,6 +256,25 @@ def test_scheduler_keeps_running_work_moving_before_cohort_is_ready(
     clock.now = 0.01
     scheduler.schedule()
     assert scheduler.admitted == ["new"]
+
+
+def test_scheduler_uses_quiet_period_for_burst_admission(monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=32, max_wait_ms=20.0, quiet_wait_ms=2.0))
+    scheduler.add_request(Request("first"))
+    clock.now = 0.004
+    scheduler.add_request(Request("second"))
+
+    clock.now = 0.005
+    scheduler.schedule()
+    assert scheduler.admitted == []
+    clock.now = 0.006
+    scheduler.schedule()
+    assert scheduler.admitted == ["first", "second"]
 
 
 def test_scheduler_releases_full_cohort_and_cancels_held_requests(monkeypatch):
