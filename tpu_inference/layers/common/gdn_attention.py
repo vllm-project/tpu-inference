@@ -95,7 +95,7 @@ def run_jax_gdn_attention(
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
-    dp_state_axis = None if read_state_indices is not None else ShardingAxisName.ATTN_DATA
+    dp_state_axis = ShardingAxisName.ATTN_DATA
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
@@ -146,15 +146,6 @@ def run_jax_gdn_attention(
             d_v=d_v,
             kernel_size=kernel_size,
         )
-        if read_state_indices is not None:
-            # When Mamba state is replicated across DP, merge the per-rank updates
-            # across the DP axis.
-            old_conv = kernel_args[3]
-            old_rec = kernel_args[4]
-            new_conv = old_conv + jax.lax.psum(new_conv - old_conv,
-                                               ShardingAxisName.ATTN_DATA)
-            new_rec = old_rec + jax.lax.psum(new_rec - old_rec,
-                                             ShardingAxisName.ATTN_DATA)
         return (new_conv, new_rec), out
 
     p_run_jax_gdn_attention_local = _fused_conv1d_gdn_local
