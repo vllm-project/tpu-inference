@@ -73,3 +73,25 @@ python benchmarks/benchmark_agentic.py \
     --env-len-max 20 \
     --concurrency 16
 ```
+
+---
+
+## 3. Replaying a Recorded Rollout Trace
+
+Pass `--trace-file` to replay measured trajectories.
+
+### Trace file format
+
+One JSON object per line, one line per trajectory:
+
+```json
+{"group": 0, "stream": 0, "prompt_len": 7570, "out_lens": [399, 65, 57], "obs_lens": [23, 942, 2126]}
+```
+
+| field | meaning |
+| --- | --- |
+| `group` | Problem index. Streams sharing a `group` share one initial prompt, which is what exercises prefix caching. |
+| `stream` | Generation index within the group, `0..G-1`. |
+| `prompt_len` | Initial prompt length in tokens. Taken from the first stream of each group. |
+| `out_lens` | Assistant tokens generated on each turn, in order. Its length sets the turn count. |
+| `obs_lens` | Environment observation tokens appended after each turn, in order. |

@@ -15,7 +15,7 @@
 import json
 from dataclasses import asdict, dataclass
 from enum import Enum
-from typing import Any, Optional, Protocol, Type, runtime_checkable
+from typing import Any, NamedTuple, Optional, Protocol, Type, runtime_checkable
 
 
 @runtime_checkable
@@ -46,6 +46,21 @@ class TuningStatus(Enum):
     XPROF_MEASUREMENT_ERROR = 'XPROF_MEASUREMENT_ERROR'
     UNKNOWN_ERROR = 'UNKNOWN_ERROR'
     SKIPPED = 'SKIPPED'
+
+
+class BucketStatus(Enum):
+    INITIALIZED = 'INITIALIZED'
+    IN_PROGRESS = 'IN_PROGRESS'
+    COMPLETED = 'COMPLETED'
+    # The Bucket failed to complete due to errors after maximum bucket level retries in worker process
+    FAILED = 'FAILED'
+    # When run in non local mode, if RunConfig.max_execute_minutes is reached, it will yield to other CI jobs
+    YIELDED = 'YIELDED'
+
+
+class ProcessedCaseStatus(NamedTuple):
+    case_id: int
+    status: str
 
 
 @dataclass
@@ -132,3 +147,10 @@ class RunConfig:
     use_bayesian_optimization: bool = False
     # Runtime override for number of Bayesian trials per tuning key bucket.
     n_bayesian_trials: Optional[int] = None
+    # Runtime override for minimum cases required for Bayesian optimization.
+    min_cases_for_bayesian: Optional[int] = None
+    # Local database directory path (used when run_locally=True).
+    local_db_path: Optional[str] = None
+
+    def subbucket_yml_path(self, end_case_id: int) -> str:
+        return f'/tmp/kernel_tuning/subbucket_{end_case_id}_pipeline.yml'

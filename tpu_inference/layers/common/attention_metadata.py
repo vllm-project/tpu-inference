@@ -133,6 +133,39 @@ class SharedAttentionMetadata(object):
     padded_num_reqs: int = -1
 
 
+class GroupedAttentionMetadata(dict):
+    """``{layer_name: AttentionMetadata}`` that flattens once per KV-cache group.
+
+    Every layer in a KV-cache group shares one ``block_tables`` array,  it
+    flattens to the unique per-group entries. After unflattening inside the
+    trace, every layer of a group holds the *same* ``AttentionMetadata`` object,
+    so anything derived from the block tables gets computed once per group instead
+    of once per layer.
+    """
+
+    def __init__(
+        self,
+        groups: "tuple[AttentionMetadata, ...]",
+        layer_names_per_group: "tuple[tuple[str, ...], ...]",
+    ):
+        self.groups = tuple(groups)
+        self.layer_names_per_group = tuple(
+            tuple(names) for names in layer_names_per_group)
+        assert len(self.groups) == len(self.layer_names_per_group)
+        super().__init__({
+            name: self.groups[gid]
+            for gid, names in enumerate(self.layer_names_per_group)
+            for name in names
+        })
+
+
+jax.tree_util.register_pytree_node(
+    GroupedAttentionMetadata,
+    lambda m: (m.groups, m.layer_names_per_group),
+    lambda layer_names_per_group, groups: GroupedAttentionMetadata(
+        groups, layer_names_per_group),
+)
+
 PCP_CACHE_PAGE_BUCKET_COUNT = 5
 
 

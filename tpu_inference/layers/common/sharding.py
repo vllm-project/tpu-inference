@@ -342,6 +342,11 @@ class ShardingConfigManager:
                 raise ValueError(
                     "Must run Prefill Context Parallelism with NEW_MODEL_DESIGN "
                     "enabled. Please set NEW_MODEL_DESIGN=True")
+            if sharding_strategy.prefill_context_parallelism % 2 != 0:
+                raise ValueError(
+                    "Prefill context parallelism size must be even: the ring "
+                    "cache phase rotates KV shards between rank pairs, got "
+                    f"{sharding_strategy.prefill_context_parallelism}.")
             if sharding_strategy.decode_context_parallelism > 1:
                 raise ValueError(
                     "Only one of prefill/decode context parallelism may be "

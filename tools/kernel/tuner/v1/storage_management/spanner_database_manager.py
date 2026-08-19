@@ -15,8 +15,11 @@
 from google.api_core import retry
 from google.cloud import spanner
 
+from tools.kernel.tuner.v1.common.tuner_datatypes import (BucketStatus,
+                                                          ProcessedCaseStatus)
 from tools.kernel.tuner.v1.storage_management.storage_manager import \
     StorageManager
+from tools.kernel.tuner.v1.utils import get_worker_id
 
 BATCH_SIZE = 1000
 
@@ -36,7 +39,7 @@ class SpannerStorageManager(StorageManager):
         self.current_case_id = 0
         self.invalid_count = 0
         self.buffer = []
-        self.worker_id = worker_id
+        self.worker_id = get_worker_id(worker_id)
         self.dry_run = dry_run
         if not self.dry_run:
             self.client = spanner.Client(project=gcp_project_id,
@@ -210,34 +213,22 @@ class SpannerStorageManager(StorageManager):
                     ]))
 
     # tuner agents working on the a bucket will mark the bucket as IN_PROGRESS/COMPLETED
-    def mark_bucket_in_progress(self, cs_id, r_id, b_id):
+    def update_bucket_status(self, cs_id, r_id, b_id, status: BucketStatus):
         self.database.run_in_transaction(lambda tx: tx.execute_update(
-            "UPDATE WorkBuckets SET Status = 'IN_PROGRESS', WorkerID = @wid, UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
+            "UPDATE WorkBuckets SET Status = @s, WorkerID = @wid, UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
             params={
                 'id': cs_id,
                 'rid': r_id,
                 'bid': b_id,
-                'wid': self.worker_id
+                'wid': self.worker_id,
+                's': status.value
             },
             param_types={
                 'id': spanner.param_types.STRING,
                 'rid': spanner.param_types.STRING,
                 'bid': spanner.param_types.INT64,
-                'wid': spanner.param_types.STRING
-            }))
-
-    def mark_bucket_completed(self, cs_id, r_id, b_id):
-        self.database.run_in_transaction(lambda tx: tx.execute_update(
-            "UPDATE WorkBuckets SET Status = 'COMPLETED', UpdatedAt = PENDING_COMMIT_TIMESTAMP() WHERE ID = @id AND RunId = @rid AND BucketId = @bid",
-            params={
-                'id': cs_id,
-                'rid': r_id,
-                'bid': b_id
-            },
-            param_types={
-                'id': spanner.param_types.STRING,
-                'rid': spanner.param_types.STRING,
-                'bid': spanner.param_types.INT64
+                'wid': spanner.param_types.STRING,
+                's': spanner.param_types.STRING
             }))
 
     def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
@@ -258,18 +249,20 @@ class SpannerStorageManager(StorageManager):
             }))
 
     def get_already_processed_ids(self, cs_id, r_id, start, end):
-        query = "SELECT CaseId FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
+        query = "SELECT CaseId, ProcessedStatus FROM CaseResults WHERE ID = @id AND RunId = @rid AND CaseId BETWEEN @s AND @e"
         with self.database.snapshot() as snp:
-            return {
-                row[0]
-                for row in snp.execute_sql(query,
-                                           params={
-                                               'id': cs_id,
-                                               'rid': r_id,
-                                               's': start,
-                                               'e': end
-                                           })
-            }
+            return [
+                ProcessedCaseStatus(case_id=row[0], status=row[1])
+                for row in snp.execute_sql(
+                    query,
+                    params={
+                        'id': cs_id,
+                        'rid': r_id,
+                        's': start,
+                        'e': end,
+                    },
+                )
+            ]
 
     def save_results_batch(self):
         if not self.results_buffer:

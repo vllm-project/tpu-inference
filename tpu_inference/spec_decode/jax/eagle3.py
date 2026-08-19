@@ -23,12 +23,11 @@ from jax import lax
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.config import VllmConfig
 
-from tpu_inference import envs
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
-from tpu_inference.models.common.model_loader import (
-    get_model, resolve_model_architecture)
+from tpu_inference.models.common.model_loader import (get_model,
+                                                      resolve_model_impl_type)
 from tpu_inference.utils import device_array
 
 logger = init_logger(__name__)
@@ -96,14 +95,10 @@ class Eagle3Proposer:
         self.state_leaves = model.state_leaves
         self.model = model.model
 
-        draft_model_impl = envs.DRAFT_MODEL_IMPL_TYPE
-        target_model_impl = envs.MODEL_IMPL_TYPE
-        if draft_model_impl == 'auto':
-            draft_model_impl = resolve_model_architecture(
-                self.vllm_config, True)
-        if target_model_impl == 'auto':
-            target_model_impl = resolve_model_architecture(
-                self.vllm_config, False)
+        draft_model_impl = resolve_model_impl_type(self.vllm_config,
+                                                   is_draft_model=True)
+        target_model_impl = resolve_model_impl_type(self.vllm_config,
+                                                    is_draft_model=False)
         if draft_model_impl != target_model_impl:
             raise ValueError(
                 "The implementation of the draft model must be the same as the target model."

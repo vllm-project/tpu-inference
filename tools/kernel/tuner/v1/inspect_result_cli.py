@@ -28,6 +28,8 @@ Commands:
                         FIELD can be any key in tuning_key or tunable_params. show_all includes unsuccessful cases;
                         By default only successful cases are shown. --show-baseline adds baseline_latency and
                         latency_improvement%% columns (baseline is the is_baseline=True case for each TuningKey).
+    dump_tuned_params_mapping Dump best tunable_param for each TuningKey to /tmp/tuned_params.py
+                        (--case_set_id ID --run_id ID [--output_path PATH])
 """
 
 import argparse
@@ -188,6 +190,32 @@ def local_query_min_latency(db_path, case_set_id, run_id):
 
     return sorted(key_best.values(),
                   key=lambda x: json.dumps(x['tuning_key'], sort_keys=True))
+
+
+def dump_tuned_params_mapping(results, output_path='/tmp/tuned_params.py'):
+    """Dump query_min_latency results to output_path as a Python dictionary mapping TuningKey to TunableParams."""
+    chunks = ["tuned_params_mapping: dict[TuningKey, TunableParams] = {\n"]
+    for item in results:
+        tk = item.get('tuning_key') or {}
+        tp = item.get('tunable_params') or {}
+        chunks.append("    TuningKey(\n")
+        for k, v in tk.items():
+            chunks.append(f"        {k}={repr(v)},\n")
+        chunks.append("    ): TunableParams(\n")
+        for k, v in tp.items():
+            chunks.append(f"        {k}={repr(v)},\n")
+        chunks.append("    ),\n")
+    chunks.append("}\n")
+
+    content = "".join(chunks)
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    print(f"Wrote tuned params mapping to {output_path}")
+    return output_path
 
 
 def local_get_baseline_latency_map(db_path, case_set_id, run_id):
@@ -754,6 +782,59 @@ def _might_add_baseline_latency(baseline_map: dict, row: dict,
             formated_row['latency_improvement%'] = 'N/A'
 
 
+def _check_duplicate_shown_tuning_keys(rows, show_fields):
+    """Check if multiple distinct TuningKeys collapse to identical displayed tuning_key fields
+
+    and print debug information describing which hidden tuning_key fields differ.
+    """
+    if not rows or not show_fields:
+        return
+
+    all_tk_fields = set()
+    for r in rows:
+        if r.get('tuning_key'):
+            all_tk_fields.update(r['tuning_key'].keys())
+
+    tk_show_cols = [f for f in show_fields if f in all_tk_fields]
+    if not tk_show_cols:
+        return
+
+    groups = defaultdict(list)
+    for r in rows:
+        tk = r.get('tuning_key') or {}
+        key = tuple((col, tk.get(col)) for col in tk_show_cols)
+        groups[key].append(r)
+
+    debug_messages = []
+    for key, group in sorted(groups.items(), key=lambda x: str(x[0])):
+        if len(group) > 1:
+            differing_hidden_fields = {}
+            for field in sorted(all_tk_fields):
+                if field not in tk_show_cols:
+                    vals = [r.get('tuning_key', {}).get(field) for r in group]
+                    if len(set(vals)) > 1:
+                        differing_hidden_fields[field] = vals
+
+            disp_str = ', '.join(f'{col}={val}' for col, val in key)
+            msg_lines = [
+                f'  Debug: {len(group)} distinct TuningKeys share identical displayed key field(s) ({disp_str}):'
+            ]
+            for r in group:
+                tk = r.get('tuning_key', {})
+                diff_str = (', '.join(f'{f}={tk.get(f)}'
+                                      for f in sorted(differing_hidden_fields))
+                            if differing_hidden_fields else
+                            '(no hidden field differences)')
+                msg_lines.append(
+                    f'    - CaseId {r.get("CaseId")}: latency={r.get("Latency")} us | hidden differing fields: {diff_str}'
+                )
+            debug_messages.extend(msg_lines)
+
+    if debug_messages:
+        print('\n'.join(debug_messages))
+        print()
+
+
 def _print_min_latency(rows, show_fields=None, baseline_map=None):
     """Print query_min_latency results as a table.
 
@@ -776,6 +857,8 @@ def _print_min_latency(rows, show_fields=None, baseline_map=None):
                                     row=r,
                                     formated_row=row)
         return row
+
+    _check_duplicate_shown_tuning_keys(rows, show_fields)
 
     _print_flattened_table(
         rows,
@@ -966,6 +1049,18 @@ def _build_parser():
               'or when the row itself is not a SUCCESS.'),
     )
 
+    p = sub.add_parser(
+        'dump_tuned_params_mapping',
+        help='Dump best tunable_param for each TuningKey to a Python file.',
+    )
+    p.add_argument('--case_set_id', required=True)
+    p.add_argument('--run_id', required=True)
+    p.add_argument(
+        '--output_path',
+        default='/tmp/tuned_params.py',
+        help='Output file path (default: /tmp/tuned_params.py).',
+    )
+
     return parser
 
 
@@ -1140,6 +1235,10 @@ def _run_command(args, source, db_path=None, spanner_db=None):
                 show_all=args.show_all),
                                 show_fields=args.show_fields,
                                 baseline_map=baseline_map)
+        elif args.command == 'dump_tuned_params_mapping':
+            results = spanner_query_min_latency(spanner_db, args.case_set_id,
+                                                args.run_id)
+            dump_tuned_params_mapping(results, output_path=args.output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1264,7 @@ Commands:
       --show_all: include unsuccessful rows (default shows only successful rows)
       --show-baseline: add baseline_latency and latency_improvement% columns
       Example: query_case_latency --show_all --show processed_status --show latency_us
+  dump_tuned_params_mapping [--case_set_id ID] [--run_id ID] [--output_path PATH]
   Use Up/Down arrows to recall command history
   help
   exit / quit
@@ -1272,11 +1372,13 @@ def _console_loop(source, db_path, spanner_db, global_args):
         # that actually accept those flags.
         _cmds_with_case_set_id = {
             'list_runs', 'count_buckets', 'list_bucket_status',
-            'query_run_status', 'query_min_latency', 'query_case_latency'
+            'query_run_status', 'query_min_latency', 'query_case_latency',
+            'dump_tuned_params_mapping'
         }
         _cmds_with_run_id = {
             'count_buckets', 'list_bucket_status', 'query_run_status',
-            'query_min_latency', 'query_case_latency'
+            'query_min_latency', 'query_case_latency',
+            'dump_tuned_params_mapping'
         }
         cmd = tokens[0]
         if '--case_set_id' not in line and session_case_set_id is not None \
