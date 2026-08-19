@@ -28,7 +28,8 @@ steps:
       # 1. Start vLLM with specific model and tensor parallel size
       # 2. Run curl commands against it
       - |
-        MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+        # MODEL="gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+        MODEL="google/gemma-4-26B-A4B-it"
         .buildkite/scripts/run_multihost.sh \
           "vllm serve \${MODEL} \
             --port 8000 \
@@ -36,7 +37,6 @@ steps:
             --trust-remote-code \
             --max-model-len 1024 \
             --async-scheduling \
-            --load-format=runai_streamer \
             --no-enable-prefix-caching" \
           "curl http://localhost:8000/v1/completions \
             -X POST \
