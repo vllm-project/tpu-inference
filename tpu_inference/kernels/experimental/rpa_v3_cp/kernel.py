@@ -319,6 +319,8 @@ def _ragged_paged_attention_kernel_loop(
     bkv_update_ids_ref,  # [6 or 8] (bkv_sem_0_seq_idx, bkv_sem_1_seq_idx, bkv_sem_0_offset, bkv_sem_1_offset, bkv_sem_0_sz, bkv_sem_1_sz) (bkv_smem_0_src_start_base, bkv_smem_1_src_start_base)
     cp_rank_ref: jax.Array | None,  # i32[1]
     q_pos_offset_ref: jax.Array | None,  # i32[max_num_seqs]
+    kv_new_starts_ref: jax.Array | None,  # i32[max_num_seqs]
+    kv_write_seq_mask_ref: jax.Array | None,  # i32[max_num_seqs]
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -349,7 +351,6 @@ def _ragged_paged_attention_kernel_loop(
     cp_group_size: int | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
-    write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -437,7 +438,14 @@ def _ragged_paged_attention_kernel_loop(
         return cu_q_lens_ref[seq_idx + 1] - cu_q_lens_ref[seq_idx]
 
     def get_kv_new_end(seq_idx):
+        # End of this seq's current-KV block *inside the new-KV buffer*, used
+        # only as a read offset into kv_hbm_ref. Under PCP that buffer holds
+        # the all-gathered current K/V; with one request its block starts at 0,
+        # so the length is also the end. With several requests packed back to
+        # back, kv_new_starts gives each seq's base.
         if kv_cache_lens_ref is not None:
+            if kv_new_starts_ref is not None:
+                return kv_new_starts_ref[seq_idx] + get_kv_new_len(seq_idx)
             return get_kv_new_len(seq_idx)
         return cu_q_lens_ref[seq_idx + 1]
 
@@ -1383,10 +1391,11 @@ def _ragged_paged_attention_kernel_loop(
                     # PCP fuses a request's head+tail chunks into ONE launch as
                     # two "sequences" that share the same request (same
                     # kv_lens/kv_cache_lens), so each would write the SAME
-                    # strided current KV. Write on exactly one of them.
-                    if write_last_seq_only:
-                        _do_write = jnp.logical_and(_do_write,
-                                                    seq_idx == end_seq_idx - 1)
+                    # strided current KV. Write on exactly one of them --
+                    # kv_write_seq_mask marks which (each request's tail).
+                    if kv_write_seq_mask_ref is not None:
+                        _do_write = jnp.logical_and(
+                            _do_write, kv_write_seq_mask_ref[seq_idx] != 0)
 
                     @pl.when(_do_write)
                     def update_cur_bkv_to_cache():
@@ -1806,6 +1815,9 @@ def static_validate_inputs(
     *,
     kv_cache_lens: jax.Array | None = None,  # i32[max_num_seqs] - PCP
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs] - PCP
+    kv_new_starts: jax.Array | None = None,  # i32[max_num_seqs] - PCP
+    kv_write_seq_mask: jax.Array | None = None,  # i32[max_num_seqs] - PCP
+    pcp_chunk_size: int | None = None,
     cp_group_size: int | None = None,
     cp_rank: jax.Array | int | None = None,
     pcp_ring_axis_name: str | None = None,
@@ -1993,6 +2005,29 @@ def static_validate_inputs(
             raise NotImplementedError(
                 "pcp_ring_axis_name does not support sliding_window")
 
+    for name, arr in (("kv_new_starts", kv_new_starts),
+                      ("kv_write_seq_mask", kv_write_seq_mask)):
+        if arr is None:
+            continue
+        if arr.dtype != jnp.int32:
+            raise ValueError(f"Expected int32 dtype for {name}, got {arr.dtype}")
+        if arr.shape != (max_num_seqs, ):
+            raise ValueError(
+                f"Expected {name}.shape to be ({max_num_seqs},), got {arr.shape}")
+
+    if kv_new_starts is not None:
+        if kv_cache_lens is None:
+            raise ValueError("PCP (kv_new_starts) requires kv_cache_lens.")
+        if pcp_chunk_size is not None:
+            # The remap at fetch time rewrites a token-order offset into rank
+            # order assuming the new-KV buffer holds exactly one request's
+            # chunks. Per-request bases are only meaningful once the buffer has
+            # been reordered in JAX, which is the path that leaves
+            # pcp_chunk_size unset.
+            raise ValueError(
+                "kv_new_starts and pcp_chunk_size are mutually exclusive: the "
+                "rank-order remap assumes a single request's new-KV buffer.")
+
     # No constraints for the following inputs.
     del sm_scale
     del mask_value
@@ -2152,7 +2187,6 @@ def get_default_block_sizes(
         "disable_bounds_checks",
         "disable_semaphore_checks",
         "update_kv_cache",
-        "write_last_seq_only",
         "cp_group_size",
         "pcp_chunk_size",
         "pcp_ring_axis_name",
@@ -2178,12 +2212,13 @@ def ragged_paged_attention(
     | None = None,  # i32[1] - per-device rank, sharded along the DCP axis
     cp_group_size: int | None = None,
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs]
+    kv_new_starts: jax.Array | None = None,  # i32[max_num_seqs]
+    kv_write_seq_mask: jax.Array | None = None,  # i32[max_num_seqs]
     pcp_chunk_size: int | None = None,
     pcp_ring_axis_name: str | None = None,
     pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
-    write_last_seq_only: bool = False,
     skip_kv_mask: bool = False,
     skip_cache_attn: bool = False,
     skip_current_attn: bool = False,
@@ -2235,12 +2270,17 @@ def ragged_paged_attention(
       KV cache around this axis.
     pcp_ring_mesh_axis_names: all axis names of the mesh the ring runs on, in
       order. Defaults to a one-axis mesh.
-    use_causal_mask: if true, use causal mask.
-    write_last_seq_only: PCP only. PCP fuses a request's head and tail chunk
-      into one launch as two "sequences" that are really the same request (same
+    kv_new_starts: PCP only. Base offset of each sequence's current-KV block
+      inside the all-gathered new-KV buffer (`keys`/`values`). Needed when that
+      buffer holds more than one request, packed back to back in request order;
+      leave None for a single request, where every block starts at 0.
+    kv_write_seq_mask: PCP only. Nonzero on the sequences that perform the fused
+      strided KV-cache write. PCP fuses a request's head and tail chunk into one
+      launch as two "sequences" that are really the same request (same
       kv_lens/kv_cache_lens), so each of them would redundantly write the same
-      strided current KV to the cache. When true, the write is performed by the
-      tail seq only.
+      strided current KV; the mask selects exactly one per request (its tail).
+      Leave None to let every sequence write, as in the non-PCP path.
+    use_causal_mask: if true, use causal mask.
     skip_kv_mask: only set to true if use_causal_mask=False and each dynamic
       kv_len % bkv_csz == 0. Set to true can improve performance.
     sm_scale: the softmax scale which will be applied to the Q@K^T.
@@ -2295,6 +2335,9 @@ def ragged_paged_attention(
         distribution,
         kv_cache_lens=kv_cache_lens,
         q_pos_offsets=q_pos_offsets,
+        kv_new_starts=kv_new_starts,
+        kv_write_seq_mask=kv_write_seq_mask,
+        pcp_chunk_size=pcp_chunk_size,
         cp_group_size=cp_group_size,
         cp_rank=cp_rank,
         pcp_ring_axis_name=pcp_ring_axis_name,
@@ -2452,7 +2495,9 @@ def ragged_paged_attention(
             init_bo_ids,
             init_bkv_update_ids,
             cp_rank if cp_group_size is not None else None,
-            q_pos_offsets)
+            q_pos_offsets,
+            kv_new_starts,
+            kv_write_seq_mask)
 
         num_scalers = len(scalar_prefetches)
         # None in scalar_prefetches contribute 0 pytree leaves, so
@@ -2491,7 +2536,6 @@ def ragged_paged_attention(
                 cp_group_size=cp_group_size,
                 pcp_ring_axis_name=pcp_ring_axis_name,
                 pcp_ring_mesh_axis_names=pcp_ring_mesh_axis_names,
-                write_last_seq_only=write_last_seq_only,
                 use_causal_mask=use_causal_mask,
                 skip_kv_mask=skip_kv_mask,
                 skip_cache_attn=skip_cache_attn,
