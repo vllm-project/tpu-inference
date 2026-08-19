@@ -30,6 +30,7 @@ Note: batched_rpa is build on top / derived from RPA3.
 """
 
 import jax
+import jax.experimental.pallas as pl
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 
@@ -389,6 +390,8 @@ def calculate_block_sizes(
         "cp_group_size",
         "attention_scope",
         "return_lse",
+        "pcp_ring_axis_name",
+        "pcp_ring_mesh_axis_names",
     ),
     # Donation of transient inputs can fail for some runtime buffer layouts in
     # the experimental tuning path. Keep donation only for kv_cache, which is
@@ -425,6 +428,8 @@ def ragged_paged_attention(
     cp_rank: jax.Array | None = None,
     attention_scope: configs.AttentionScope = configs.AttentionScope.FULL,
     return_lse: bool = False,
+    pcp_ring_axis_name: str | None = None,
+    pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
 ) -> tuple[jax.Array, jax.Array] | tuple[jax.Array, jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -470,6 +475,13 @@ def ragged_paged_attention(
       tokens. Defaults to FULL.
     return_lse: If True, return log-sum-exp (lse) values along with the
       output. Defaults to False.
+    pcp_ring_axis_name: PCP cache phase only. When set, CACHE_ONLY streams
+      each rank's KV cache shard around this mesh axis in-kernel so every
+      rank attends the full cache with its local Q; one online softmax
+      accumulates all rounds. Requires CACHE_ONLY, an even cp_group_size,
+      and the HEAD_ALONG_SUBLANE layout.
+    pcp_ring_mesh_axis_names: All axis names of the mesh the ring runs on,
+      in order. Defaults to a one-axis mesh.
 
   Returns:
     out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
@@ -531,6 +543,8 @@ def ragged_paged_attention(
         cp_group_size=cp_group_size,
         attention_scope=attention_scope,
         return_lse=return_lse,
+        pcp_ring_axis_name=pcp_ring_axis_name,
+        pcp_ring_mesh_axis_names=pcp_ring_mesh_axis_names,
     )
 
     q_hbm, new_kv_hbm = prepare_inputs(
@@ -549,15 +563,20 @@ def ragged_paged_attention(
     lse_hbm_init: jax.Array | None = None
     if return_lse:
         num_lanes = pltpu.get_tpu_info().num_lanes
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
         q_packing = utils.get_dtype_packing(queries.dtype)
         num_q_heads_per_kv_head = num_q_heads // num_kv_heads
         aligned_num_q_heads_per_kv_head = utils.align_to(
             num_q_heads_per_kv_head, q_packing)
+        # Rows per token are padded to the sublane tile so the kernel's
+        # writeback offsets are tile-aligned (see RpaConfigs.lse_row_stride).
+        lse_row_stride = utils.align_to(aligned_num_q_heads_per_kv_head,
+                                        num_sublanes)
         max_tokens = queries.shape[0]
         lse_hbm_init = jnp.full(
             [
                 num_kv_heads,
-                max_tokens * aligned_num_q_heads_per_kv_head,
+                max_tokens * lse_row_stride,
                 num_lanes,
             ],
             -jnp.inf,
@@ -636,12 +655,11 @@ def ragged_paged_attention(
     if not return_lse:
         return o_hbm, kv_cache
 
-    # Reshape LSE from [num_kv_heads, max_tokens * aligned_num_q_heads_per_kv_head, num_lanes] to
-    # [max_tokens, num_q_heads].
+    # Reshape LSE from [num_kv_heads, max_tokens * lse_row_stride, num_lanes]
+    # to [max_tokens, num_q_heads].
     max_tokens = queries.shape[0]
     # Extract first lane (scalar LSE value per token-head pair).
-    lse = lse_hbm.reshape(num_kv_heads, max_tokens,
-                          aligned_num_q_heads_per_kv_head,
+    lse = lse_hbm.reshape(num_kv_heads, max_tokens, lse_row_stride,
                           num_lanes)[:, :max_tokens, :num_q_heads_per_kv_head,
                                      0]
     lse = lse.swapaxes(0, 1).reshape(max_tokens, num_q_heads)

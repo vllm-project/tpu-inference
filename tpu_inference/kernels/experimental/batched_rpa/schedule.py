@@ -23,7 +23,8 @@ import numpy as np
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.experimental.batched_rpa import configs, utils
+from tpu_inference.kernels.experimental.batched_rpa import (configs, ring,
+                                                            utils)
 
 
 class FieldOffset:
@@ -497,7 +498,7 @@ def _compute_waits(
 
         # LSE OUT
         lse_bytes_per_token = (cfgs.model.num_kv_heads *
-                               cfgs.aligned_num_q_heads_per_kv_head * 128 *
+                               cfgs.lse_row_stride * 128 *
                                cfgs.serve.dtype_out.itemsize)
         schedule.total_wait_lse_out[step] = (
             o_out_tokens * lse_bytes_per_token) // dma_chunk_size
@@ -583,8 +584,14 @@ def compute_metadata(
         schedule.dma_q[step, target_lane, 0] = q_src
         schedule.dma_q[step, target_lane, 1] = q_sz_task
 
-        kv_len_start = k_idx * cfgs.bkv_sz
-        kv_p_start = k_idx * cfgs.bkv_p
+        if cfgs.ring_enabled:
+            # k_idx is ring-encoded (see ring.py); decode before any block
+            # arithmetic.
+            k_block, ring_is_round0 = ring.decode_k(k_idx, cfgs)
+        else:
+            k_block, ring_is_round0 = k_idx, None
+        kv_len_start = k_block * cfgs.bkv_sz
+        kv_p_start = k_block * cfgs.bkv_p
         kv_left = k_len - kv_len_start
         if cfgs.serve.attention_scope is not configs.AttentionScope.CACHE_ONLY:
             kv_left_frm_cache = jnp.maximum(kv_left - q_len, 0)
@@ -598,6 +605,8 @@ def compute_metadata(
             dst_vmem = i << cfgs.serve.page_size_log2
             dma_sz = kv_left_frm_cache - dst_vmem
             dma_sz = jnp.clip(dma_sz, 0, cfgs.serve.page_size)
+            if cfgs.ring_enabled:
+                dma_sz = ring.gate_fetch(dma_sz, ring_is_round0)
 
             src_hbm = jnp.minimum(p_offset + i,
                                   cfgs.serve.num_page_indices - 1)
@@ -804,6 +813,10 @@ def compute_metadata(
             k_len = local_cache_len
             end_k_idx = jnp.minimum(end_k_idx,
                                     pl.cdiv(local_cache_len, cfgs.bkv_sz))
+            if cfgs.ring_enabled:
+                # k_len stays at this rank's local length so round-0 fetch
+                # sizes clip to the pages this rank actually owns.
+                start_k_idx, end_k_idx = ring.block_range(cache_len, cfgs)
 
         k_loop_fn = functools.partial(
             k_loop,

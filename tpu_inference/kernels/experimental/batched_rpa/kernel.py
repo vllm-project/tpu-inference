@@ -25,6 +25,7 @@ from jax import lax
 from tpu_inference.kernels.experimental.batched_rpa import (bref_override,
                                                             configs,
                                                             flash_attention,
+                                                            ring,
                                                             schedule,
                                                             stitch_utils,
                                                             utils)
@@ -104,7 +105,18 @@ def calculate_and_store_out(
 
     def _stage_lse(b_idx: int, batch_m: jax.Array, batch_l: jax.Array):
         lse_val = batch_m + jnp.log(jnp.maximum(batch_l, 1e-9))
-        lse_o_vref[b_idx] = lse_val.astype(cfgs.serve.dtype_out)
+        lse_val = lse_val.astype(cfgs.serve.dtype_out)
+        aligned_q = cfgs.aligned_num_q_heads_per_kv_head
+        if cfgs.lse_row_stride != aligned_q:
+            # Pad each token's rows to the sublane-aligned stride the HBM
+            # buffer is laid out with.
+            kv, tq, lanes = lse_val.shape
+            lse_val = jnp.pad(
+                lse_val.reshape(kv, tq // aligned_q, aligned_q, lanes),
+                ((0, 0), (0, 0), (0, cfgs.lse_row_stride - aligned_q),
+                 (0, 0)),
+            ).reshape(kv, -1, lanes)
+        lse_o_vref[b_idx] = lse_val
 
     if cfgs.fuse_accum:
         for b in range(cfgs.batch_size):
@@ -144,14 +156,20 @@ def rpa_body(
     l_scratch_ref: jax.Ref,
     acc_scratch_ref: jax.Ref,
     cp_rank_ref: jax.Array | None,
+    ring_refs: ring.RingRefs | None = None,
     *,
     # Passed refs
     cu_q_lens_ref: jax.Ref,
     kv_lens_ref: jax.Ref,
     # Configs.
     cfgs: configs.RpaConfigs,
+    chunk_start: jax.Array | int = 0,
 ):
     step = pl.program_id(0)
+
+    pcp_ring = (ring.PcpRing(cfgs, ring_refs, step=step,
+                             chunk_start=chunk_start)
+                if cfgs.ring_enabled else None)
 
     # Step 1: Fetch metadata.
     processed_q_len = []
@@ -168,6 +186,10 @@ def rpa_body(
         is_valid = s_idx != -1
         q_idx = schedule_ref.q_idx[step, b_idx]
         k_idx = schedule_ref.k_idx[step, b_idx]
+        if pcp_ring is not None:
+            # k_idx is ring-encoded (see schedule.py); decode before any
+            # block arithmetic.
+            k_idx, ring_round_b = pcp_ring.lane(k_idx, is_valid)
         k_id = jnp.where(is_valid, k_idx * cfgs.bkv_sz, 0)
         kv_len = jnp.where(is_valid, kv_lens_ref[s_idx], 0)
         q_start = jnp.where(is_valid, cu_q_lens_ref[s_idx], 0)
@@ -181,6 +203,9 @@ def rpa_body(
             if cfgs.serve.cp_group_size is not None:
                 cp_group_size = cfgs.serve.cp_group_size
                 rank = cp_rank_ref[0]
+                if pcp_ring is not None:
+                    # Mask by the source rank's shard length, not our own.
+                    rank = pcp_ring.src_rank(ring_round_b)
                 local_cache_len = utils.cp_local_cache_len(
                     offset, cp_group_size, rank, cfgs.serve.page_size)
             # We add this to make sure flash_attention.py can mask non-cache tokens out.
@@ -213,6 +238,12 @@ def rpa_body(
             start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
         if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
             start_k_idx = jnp.maximum(start_k_idx, offset // cfgs.bkv_sz)
+
+    if pcp_ring is not None:
+        # Rotate the KV blocks one micro-step per lane and stage received
+        # blocks into kv_in_vref, so Step 2 below reads every lane the same
+        # way whether or not the ring is on. See ring.py for the protocol.
+        pcp_ring.stage(kv_in_vref)
 
     # Step 2: Fetch inputs.
     q_p = cfgs.aligned_num_q_heads_per_kv_head // cfgs.serve.packing_q
@@ -596,7 +627,7 @@ def rpa_kernel(
                     cfgs.acc_scratch_shape,
                     dtype=cfgs.serve.dtype_out,
                 ),  # acc
-            ),
+            ) + ring.scratch_refs(cfgs),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
             # Initialize KV cache to zeros.
@@ -618,6 +649,9 @@ def rpa_kernel(
             kv_ref_flat = kv_alloc.window_ref.bitcast(jnp.uint32).reshape(
                 -1, num_lanes)
             kv_ref_flat[...] = jnp.zeros_like(kv_ref_flat)
+
+            if cfgs.ring_enabled:
+                ring.zero_init(scratches[3])
 
             def execute_schedule_chunk(start_step, num_steps):
                 # All reads are aligned to 128 and some extra steps are copied in the
@@ -652,6 +686,7 @@ def rpa_kernel(
                         cfgs=cfgs,
                         cu_q_lens_ref=cu_q_lens_ref,
                         kv_lens_ref=kv_lens_ref,
+                        chunk_start=aligned_start_step,
                     ),
                     grid=(num_steps + prefix_steps, ),
                     in_specs=(q_alloc.spec, kv_cache_alloc.spec),
@@ -664,7 +699,8 @@ def rpa_kernel(
                      page_indices_ref),
                     (o_hbm_ref, schedule_ref),
                     (lse_hbm_ref, schedule_ref) if return_lse else None,
-                    scratches=(schedule_ref, ) + scratches + (cp_rank_ref, ),
+                    scratches=(schedule_ref, ) + scratches[:3] +
+                    (cp_rank_ref, ) + scratches[3:],
                     allocations=final_allocs,
                 )
 
@@ -724,6 +760,7 @@ def rpa_kernel(
         compiler_params=pltpu.CompilerParams(
             vmem_limit_bytes=cfgs.vmem_limit_bytes,
             disable_bounds_checks=True,
+            **ring.compiler_params(cfgs),
         ),
         input_output_aliases=input_output_aliases,
         name=get_kernel_name(cfgs),
