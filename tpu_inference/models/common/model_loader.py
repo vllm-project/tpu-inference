@@ -14,11 +14,12 @@
 from typing import Any, Optional
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from flax import nnx
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec, PartitionSpec as P, SingleDeviceSharding
 from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader import get_model_loader
@@ -89,11 +90,15 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
+    from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepseekV3ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
+    _MODEL_REGISTRY["Qwen3MoeForCausalLM"] = Qwen3MoeForCausalLM
+    _MODEL_REGISTRY["Qwen3_5MoeForConditionalGeneration"] = Qwen3MoeForCausalLM
+    _MODEL_REGISTRY["Qwen3_5ForCausalLM"] = Qwen3MoeForCausalLM
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
@@ -296,12 +301,34 @@ def _get_nnx_model(
                 # flax_nnx model whose load_weights function does not accept the
                 # weights_iterator keyword argument.
                 model_config.runai_model_weights_iterator = weights_iterator
-                model.load_weights(rng)
-                del model_config.runai_model_weights_iterator
             else:
                 model.load_weights(rng)
             if hasattr(vllm_config, "pytorch_pooler"):
                 del vllm_config.pytorch_pooler
+            
+            # Ensure all model parameters/states are placed on the TPU mesh
+            graphdef, state = nnx.split(model)
+            for path, var in state.flat_state():
+                if isinstance(var, nnx.Variable):
+                    val = var.get_raw_value() if hasattr(var, "get_raw_value") else getattr(var, "raw_value", None)
+                    spec = var.get_metadata().get("out_sharding", ())
+                    if isinstance(spec, NamedSharding):
+                        spec = spec.spec
+                    elif isinstance(spec, SingleDeviceSharding):
+                        spec = ()
+                    elif not isinstance(spec, PartitionSpec):
+                        spec = PartitionSpec(*spec) if isinstance(spec, (list, tuple)) else PartitionSpec()
+                    if isinstance(val, jax.ShapeDtypeStruct):
+                        logger.warning(f"Unloaded ShapeDtypeStruct parameter at {path}: shape={val.shape}, dtype={val.dtype}. Initializing zeros on TPU mesh.")
+                        with jax.set_mesh(mesh):
+                            var.set_value(jax.device_put(jnp.zeros(val.shape, dtype=val.dtype), NamedSharding(mesh, spec)))
+                    elif isinstance(val, (jax.Array, np.ndarray)):
+                        if not hasattr(val, "devices") or any(d.platform == "cpu" for d in val.devices()):
+                            logger.warning(f"Moving CPU state to TPU mesh at {path}: shape={getattr(val, 'shape', None)}, sharding={spec}")
+                            with jax.set_mesh(mesh):
+                                var.set_value(jax.device_put(jnp.asarray(val), NamedSharding(mesh, spec)))
+            model = nnx.merge(graphdef, state)
+
             jit_model = create_jit_model(
                 model,
                 use_qwix_on_abstract_model=should_apply_qwix_on_abstract_model)
@@ -493,12 +520,12 @@ def get_flax_model(
         # all JAX multimodal models to go through MMEncoderJITManager.
         embed_multimodal_fn = run_embed_multimodal
 
+    get_mrope_input_positions_fn = getattr(
+        model, "get_mrope_input_positions", None) or getattr(
+            model_class, "get_mrope_input_positions", None)
+
     lora_manager, model = None, None
     combine_hidden_states_fn = combine_hidden_states
-
-    get_mrope_input_positions_fn = None if not hasattr(
-        jit_model,
-        "get_mrope_input_positions") else jit_model.get_mrope_input_positions
 
     multimodal_fns = MultiModalInterface(
         precompile_vision_encoder_fn=precompile_vision_encoder_fn,

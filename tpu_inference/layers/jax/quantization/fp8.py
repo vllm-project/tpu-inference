@@ -650,10 +650,6 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
                 w2_weight_scale = jnp.concatenate(getattr(
                     layer, down_scale_name)._weights_to_load,
                                                   axis=0)
-
-                # Fuse the weights into w13: [Gate, Up]. w2 is expected to be
-                # (num_experts, hidden_size, intermediate_size), w13 is expected to
-                # be (num_experts, 2 * intermediate_size, hidden_size,)
                 w13_weight = jnp.concatenate([w_gate, w_up], axis=1)
                 w13_weight_scale = jnp.concatenate([s_gate, s_up], axis=1)
 
@@ -737,6 +733,7 @@ class Fp8FusedMoEMethod(QuantizeMethodBase):
 
             w2_weight_scale = getattr(
                 layer, f"kernel_down_proj_EFD_{self.weight_scale_name}")[...]
+
 
             # TODO (jacobplatin/bzgoogle): we should support bias
             weights = FusedMoEWeights(

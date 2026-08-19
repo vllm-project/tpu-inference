@@ -25,7 +25,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -69,7 +69,7 @@ class SharedExpertMLP(JaxModule):
             intermediate_size,
             use_bias=False,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, (None, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".gate_proj",
@@ -79,7 +79,7 @@ class SharedExpertMLP(JaxModule):
             intermediate_size,
             use_bias=False,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+            kernel_init=nnx.with_partitioning(init_fn, (None, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".up_proj",
@@ -89,7 +89,7 @@ class SharedExpertMLP(JaxModule):
             hidden_size,
             use_bias=False,
             dtype=dtype,
-            kernel_init=nnx.with_partitioning(init_fn, ("model", None)),
+            kernel_init=nnx.with_partitioning(init_fn, (None, None)),
             rngs=rng,
             quant_config=quant_config,
             prefix=prefix + ".down_proj",
@@ -146,7 +146,7 @@ class Qwen3MoeSparseMoeBlock(JaxModule):
                 1,
                 use_bias=False,
                 dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
+                kernel_init=nnx.with_partitioning(init_fn, (None, None)),
                 rngs=rng,
                 quant_config=quant_config,
                 prefix=prefix + ".shared_expert_gate",
@@ -246,7 +246,7 @@ class JaxGatedDeltaNetAttention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".in_proj_z",
         )
-        self.b_proj = JaxLinear(
+        self.in_proj_b = JaxLinear(
             self.hidden_size,
             self.n_v,
             use_bias=False,
@@ -254,9 +254,9 @@ class JaxGatedDeltaNetAttention(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
-            prefix=prefix + ".b_proj",
+            prefix=prefix + ".in_proj_b",
         )
-        self.a_proj = JaxLinear(
+        self.in_proj_a = JaxLinear(
             self.hidden_size,
             self.n_v,
             use_bias=False,
@@ -264,7 +264,7 @@ class JaxGatedDeltaNetAttention(JaxModule):
             kernel_init=nnx.with_partitioning(init_fn, (None, "model")),
             rngs=rng,
             quant_config=quant_config,
-            prefix=prefix + ".a_proj",
+            prefix=prefix + ".in_proj_a",
         )
         self.out_proj = JaxLinear(
             value_dim,
@@ -288,25 +288,19 @@ class JaxGatedDeltaNetAttention(JaxModule):
         self.conv1d_weight = create_param(
             rngs=rng,
             shape=(conv_dim, 1, self.kernel_size),
-            sharding=(None, None, None),
-            dtype=dtype,
-        )
-        self.conv1d_bias = create_param(
-            rngs=rng,
-            shape=(conv_dim,),
-            sharding=(None,),
+            sharding=("model", None, None),
             dtype=dtype,
         )
         self.A_log = create_param(
             rngs=rng,
             shape=(self.n_v,),
-            sharding=(None,),
+            sharding=("model",),
             dtype=jnp.float32,
         )
         self.dt_bias = create_param(
             rngs=rng,
             shape=(self.n_v,),
-            sharding=(None,),
+            sharding=("model",),
             dtype=jnp.float32,
         )
 
@@ -324,8 +318,8 @@ class JaxGatedDeltaNetAttention(JaxModule):
             recurrent_state = jnp.zeros((x.shape[0], self.n_v, self.d_k, self.d_v), dtype=jnp.float32)
 
         mixed_qkv = self.in_proj_qkv(x)
-        b = self.b_proj(x)
-        a = self.a_proj(x)
+        b = self.in_proj_b(x)
+        a = self.in_proj_a(x)
 
         query_start_loc = getattr(attention_metadata, "query_start_loc", jnp.array([0, x.shape[0]], dtype=jnp.int32))
         num_seqs = query_start_loc.shape[0] - 1
@@ -345,7 +339,7 @@ class JaxGatedDeltaNetAttention(JaxModule):
             conv_state=conv_state,
             recurrent_state=recurrent_state,
             j_conv_weight=self.conv1d_weight.value if hasattr(self.conv1d_weight, 'value') else self.conv1d_weight,
-            j_conv_bias=self.conv1d_bias.value if hasattr(self.conv1d_bias, 'value') else self.conv1d_bias,
+            j_conv_bias=None,
             j_A_log=self.A_log.value if hasattr(self.A_log, 'value') else self.A_log,
             j_dt_bias=self.dt_bias.value if hasattr(self.dt_bias, 'value') else self.dt_bias,
             state_indices=state_indices,
@@ -389,6 +383,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
+        zero_centered_gamma = True
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -397,6 +392,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".input_layernorm",
         )
 
@@ -438,6 +434,7 @@ class Qwen3MoeDecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".post_attention_layernorm",
         )
 
@@ -535,6 +532,7 @@ class Qwen3MoeModel(JaxModule):
             ))
 
         if self.is_last_rank:
+            zero_centered_gamma = True
             self.norm = JaxRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
@@ -543,7 +541,8 @@ class Qwen3MoeModel(JaxModule):
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
-                prefix=prefix + ".final_layernorm",
+                zero_centered_gamma=zero_centered_gamma,
+                prefix=prefix + ".norm",
             )
         else:
             self.norm = PPMissingLayer()
@@ -556,13 +555,12 @@ class Qwen3MoeModel(JaxModule):
         inputs_embeds: Optional[jax.Array] = None,
     ) -> Tuple[List[jax.Array], jax.Array] | Tuple[List[jax.Array], jax.Array,
                                                    jax.Array]:
-        if self.is_first_rank:
-            assert inputs_embeds is None
-            inputs_embeds = self.embed_tokens(input_ids)
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        elif self.is_first_rank:
+            x = self.embed_tokens(input_ids)
         else:
-            assert inputs_embeds is not None
-
-        x = inputs_embeds
+            raise ValueError("inputs_embeds must be provided if not first rank")
         new_kv_caches = []
         all_expert_ids = []
         for i, layer in enumerate(self.layers):
@@ -645,8 +643,31 @@ class Qwen3MoeForCausalLM(JaxModule, LoadableWithIterator):
         return kv_caches, x, [], expert_indices
 
     def compute_logits(self, hidden_states: jax.Array) -> jax.Array:
-        if hasattr(self, 'lm_head'):
+        if hasattr(self,
+                   'lm_head') and not isinstance(self.lm_head, PPMissingLayer):
             return self.lm_head(hidden_states)
 
         assert isinstance(self.model.embed_tokens, JaxEmbed)
         return self.model.embed_tokens.decode(hidden_states)
+
+    def embed_input_ids(
+        self,
+        input_ids: jax.Array,
+        multimodal_embeddings: jax.Array | None = None,
+        *,
+        is_multimodal: jax.Array | None = None,
+    ) -> jax.Array:
+        del multimodal_embeddings, is_multimodal
+        return self.model.embed_tokens(input_ids)
+
+    @staticmethod
+    def get_mrope_input_positions(
+        input_tokens: list[int],
+        mm_features: list[Any] | None = None,
+    ) -> tuple[jax.Array, int]:
+        del mm_features
+        n = len(input_tokens)
+        positions = jnp.broadcast_to(
+            jnp.arange(n, dtype=jnp.int32).reshape(1, -1), (3, n)
+        )
+        return positions, 0

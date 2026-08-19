@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -105,6 +105,7 @@ class Qwen3Attention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".q_proj",
         )
+        zero_centered_gamma = True
         self.q_norm = JaxRmsNorm(
             self.head_dim,
             epsilon=self.rms_norm_eps,
@@ -113,6 +114,7 @@ class Qwen3Attention(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".q_norm",
         )
         self.k_proj = JaxEinsum(
@@ -133,6 +135,7 @@ class Qwen3Attention(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".k_norm",
         )
         self.v_proj = JaxEinsum(
@@ -173,7 +176,9 @@ class Qwen3Attention(JaxModule):
         md = attention_metadata
         if self.attn_output_gate:
             q_gate = self.q_proj(x)
-            q, gate = jnp.split(q_gate, 2, axis=1)
+            q_gate = q_gate.reshape(q_gate.shape[0], self.num_heads, 2, self.head_dim)
+            q = q_gate[:, :, 0, :]
+            gate = q_gate[:, :, 1, :]
         else:
             q = self.q_proj(x)
             gate = None
@@ -199,6 +204,10 @@ class Qwen3Attention(JaxModule):
             v_scale = self._v_scale
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
+        else:
+            q = q.astype(x.dtype)
+            k = k.astype(x.dtype)
+            v = v.astype(x.dtype)
 
         new_kv_cache, outputs = attention(
             kv_cache,
@@ -232,6 +241,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
+        zero_centered_gamma = True
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -240,6 +250,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".input_layernorm",
         )
         self.self_attn = Qwen3Attention(config=config,
@@ -257,6 +268,7 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
+            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".post_attention_layernorm",
         )
         self.mlp = Qwen3MLP(
@@ -267,31 +279,49 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             prefix=prefix + ".mlp",
         )
 
+    def __call__(
+        self,
+        kv_cache: Optional[jax.Array],
+        x: jax.Array,
+        attention_metadata: AttentionMetadata,
+    ) -> Tuple[jax.Array, jax.Array]:
+        hidden_states = self.input_layernorm(x)
+        kv_cache, attn_output = self.self_attn(
+            kv_cache,
+            hidden_states,
+            attention_metadata,
+        )
+        attn_output += x
 
-class Qwen3Model(Qwen2Model):
+        residual = attn_output
+        attn_output = self.post_attention_layernorm(attn_output)
+        mlp_output = self.mlp(attn_output)
+        outputs = residual + mlp_output
+
+        return kv_cache, outputs
+
+
+class Qwen3Model(JaxModule):
 
     def __init__(self,
                  vllm_config: VllmConfig,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 prefix: str = "model") -> None:
+                 prefix: str = "") -> None:
         model_config = vllm_config.model_config
-        hf_config = model_config.hf_config
+        hf_config = getattr(model_config.hf_config, "text_config", model_config.hf_config)
         vocab_size = model_config.get_vocab_size()
         dtype = model_config.dtype
-        rms_norm_eps = getattr(hf_config, "rms_norm_eps", getattr(hf_config, "layer_norm_epsilon", getattr(hf_config, "norm_eps", 1e-6)))
+        rms_norm_eps = getattr(hf_config, "rms_norm_eps", getattr(hf_config, "rms_norm_epsilon", getattr(hf_config, "layer_norm_epsilon", 1e-6)))
         hidden_size = hf_config.hidden_size
 
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
-        tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config.parallel_config is not None else 1
-        padded_vocab_size = utils.align_to(vocab_size, tp_size)
-
         if self.is_first_rank or (hf_config.tie_word_embeddings
                                   and self.is_last_rank):
             self.embed_tokens = JaxEmbed(
-                num_embeddings=padded_vocab_size,
+                num_embeddings=vocab_size,
                 features=hidden_size,
                 dtype=dtype,
                 param_dtype=dtype,
@@ -316,6 +346,7 @@ class Qwen3Model(Qwen2Model):
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
         if self.is_last_rank:
+            zero_centered_gamma = True
             self.norm = JaxRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
@@ -324,6 +355,7 @@ class Qwen3Model(Qwen2Model):
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
+                zero_centered_gamma=zero_centered_gamma,
                 prefix=prefix + ".norm",
             )
         else:
@@ -450,3 +482,25 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
 
         assert isinstance(self.model.embed_tokens, JaxEmbed)
         return self.model.embed_tokens.decode(hidden_states)
+
+    def embed_input_ids(
+        self,
+        input_ids: jax.Array,
+        multimodal_embeddings: jax.Array | None = None,
+        *,
+        is_multimodal: jax.Array | None = None,
+    ) -> jax.Array:
+        del multimodal_embeddings, is_multimodal
+        return self.model.embed_tokens(input_ids)
+
+    @staticmethod
+    def get_mrope_input_positions(
+        input_tokens: list[int],
+        mm_features: list[Any] | None = None,
+    ) -> tuple[jax.Array, int]:
+        del mm_features
+        n = len(input_tokens)
+        positions = jnp.broadcast_to(
+            jnp.arange(n, dtype=jnp.int32).reshape(1, -1), (3, n)
+        )
+        return positions, 0

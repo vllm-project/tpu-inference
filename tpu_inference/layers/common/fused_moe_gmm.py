@@ -591,9 +591,16 @@ def fused_moe_func(
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
-    assert (num_tokens * topk) % 16 == 0, (
-        "The kernel requires num_tokens * topk to be a multiple of "
-        f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
+    orig_num_tokens = num_tokens
+    if (num_tokens * topk) % 16 != 0:
+        pad_tokens = 0
+        while ((num_tokens + pad_tokens) * topk) % 16 != 0:
+            pad_tokens += 1
+        hidden_states = jnp.pad(hidden_states, ((0, pad_tokens), (0, 0)))
+        gating_output = jnp.pad(gating_output, ((0, pad_tokens), (0, 0)))
+        if num_valid_tokens is None:
+            num_valid_tokens = orig_num_tokens
+        num_tokens = hidden_states.shape[0]
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
@@ -764,4 +771,4 @@ def fused_moe_func(
             defer_all_reduce=defer_all_reduce,
         )
 
-    return x[:num_tokens, :hidden_size]
+    return x[:orig_num_tokens, :hidden_size]

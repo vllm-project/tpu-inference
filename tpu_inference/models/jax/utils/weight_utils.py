@@ -42,7 +42,8 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.common.utils import (cpu_mesh_context,
-                                               general_device_put)
+                                               general_device_put,
+                                               reorder_concatenated_tensor_for_sharding)
 from tpu_inference.layers.jax import JaxModule, JaxModuleList
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
@@ -756,7 +757,32 @@ def jax_array_from_reshaped_torch(
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
     """
     if reshape_dims is not None:
-        torch_weight = torch_weight.reshape(reshape_dims)
+        if torch_weight.numel() == math.prod(reshape_dims):
+            torch_weight = torch_weight.reshape(reshape_dims)
+        elif len(reshape_dims) == 3:
+            N_target, H_target, D_target = reshape_dims
+            if torch_weight.ndim == 2 and torch_weight.shape[1] == D_target and torch_weight.shape[0] % H_target == 0:
+                N_orig = torch_weight.shape[0] // H_target
+                if N_target % N_orig == 0:
+                    torch_weight = torch_weight.reshape(N_orig, H_target, D_target)
+                    torch_weight = torch_weight.repeat_interleave(N_target // N_orig, dim=0)
+                else:
+                    torch_weight = torch_weight.reshape(reshape_dims)
+            else:
+                torch_weight = torch_weight.reshape(reshape_dims)
+        elif len(reshape_dims) == 2:
+            N_target, H_target = reshape_dims
+            if torch_weight.ndim == 1 and torch_weight.shape[0] % H_target == 0:
+                N_orig = torch_weight.shape[0] // H_target
+                if N_target % N_orig == 0:
+                    torch_weight = torch_weight.reshape(N_orig, H_target)
+                    torch_weight = torch_weight.repeat_interleave(N_target // N_orig, dim=0)
+                else:
+                    torch_weight = torch_weight.reshape(reshape_dims)
+            else:
+                torch_weight = torch_weight.reshape(reshape_dims)
+        else:
+            torch_weight = torch_weight.reshape(reshape_dims)
     if permute_dims is None and torch_weight.ndim == 2:
         permute_dims = (1, 0)
     if permute_dims is not None:
@@ -857,6 +883,41 @@ def load_nnx_param_from_reshaped_torch(
                 jax_weight_np = np.pad(np.asarray(jax_weight), pad_width)
                 with cpu_mesh_context():
                     jax_weight = jnp.array(jax_weight_np)
+        elif any(substr in param_name for substr in ["k_proj", "v_proj"]) and (
+                len(jax_weight.shape) == len(jax_param.get_value().shape) and
+                jax_weight.shape[:-1] == jax_param.get_value().shape[:-1] and
+                jax_param.get_value().shape[-1] % jax_weight.shape[-1] == 0):
+            ratio = jax_param.get_value().shape[-1] // jax_weight.shape[-1]
+            try:
+                vllm_config = get_current_vllm_config()
+                hf_text_config = getattr(vllm_config.model_config, "hf_text_config", vllm_config.model_config.hf_config)
+                num_kv_heads = getattr(hf_text_config, "num_key_value_heads", getattr(hf_text_config, "num_attention_heads", 1))
+            except Exception:
+                num_kv_heads = 1
+            if jax_weight.shape[-1] % num_kv_heads == 0:
+                block_dim = jax_weight.shape[-1] // num_kv_heads
+                jax_weight_np = np.asarray(jax_weight)
+                orig_shape = jax_weight_np.shape
+                reshaped = jax_weight_np.reshape(*orig_shape[:-1], num_kv_heads, block_dim)
+                repeated = np.repeat(reshaped, ratio, axis=-2)
+                jax_weight_np = repeated.reshape(jax_param.get_value().shape)
+                logger.info(
+                    f"Replicated KV heads for '{param_name}' from {jax_weight.shape} to {jax_param.get_value().shape} (ratio {ratio})"
+                )
+                with cpu_mesh_context():
+                    jax_weight = jnp.array(jax_weight_np)
+        elif any(substr in param_name for substr in ["k_proj", "v_proj"]) and (
+                len(jax_weight.shape) == 3 and len(jax_param.get_value().shape) == 3 and
+                jax_weight.shape[0] == jax_param.get_value().shape[0] and
+                jax_weight.shape[2] == jax_param.get_value().shape[2] and
+                jax_param.get_value().shape[1] % jax_weight.shape[1] == 0):
+            ratio = jax_param.get_value().shape[1] // jax_weight.shape[1]
+            jax_weight_np = np.repeat(np.asarray(jax_weight), ratio, axis=1)
+            logger.info(
+                f"Replicated KV heads for '{param_name}' from {jax_weight.shape} to {jax_param.get_value().shape} (ratio {ratio})"
+            )
+            with cpu_mesh_context():
+                jax_weight = jnp.array(jax_weight_np)
         else:
             raise ValueError(
                 f"Shape mismatch in non-vocab layer '{param_name}': torch {jax_weight.shape} vs jax {jax_param.get_value().shape}"
@@ -864,6 +925,56 @@ def load_nnx_param_from_reshaped_torch(
 
     assert tuple(jax_weight.shape) == jax_param.get_value().shape, \
         f"Shape mismatch when loading weight '{param_name}': torch {jax_weight.shape} vs jax {jax_param.get_value().shape}"
+
+    if any(k in param_name for k in ["in_proj_qkv", "conv1d_weight", "conv1d_bias"]):
+        try:
+            vllm_config = get_current_vllm_config()
+            tp_size = getattr(vllm_config.parallel_config, "tensor_parallel_size", 1)
+            hf_text_config = getattr(vllm_config.model_config, "hf_text_config", vllm_config.model_config.hf_config)
+        except Exception:
+            tp_size = 1
+            hf_text_config = None
+        if tp_size <= 1:
+            try:
+                param_mesh = jax_param.get_metadata().get("mesh") or get_mesh()
+                if param_mesh is not None and hasattr(param_mesh, "shape"):
+                    tp_size = param_mesh.shape.get("model", param_mesh.shape.get("tensor", 1))
+            except Exception:
+                pass
+        if tp_size > 1:
+
+            n_kq = getattr(hf_text_config, "linear_num_key_heads", 16) if hf_text_config else 16
+            n_v = getattr(hf_text_config, "linear_num_value_heads", 32) if hf_text_config else 32
+            d_k = getattr(hf_text_config, "linear_key_head_dim", 128) if hf_text_config else 128
+            d_v = getattr(hf_text_config, "linear_value_head_dim", 128) if hf_text_config else 128
+            key_dim = n_kq * d_k
+            value_dim = n_v * d_v
+            total_dim = key_dim + key_dim + value_dim
+
+            if "in_proj_qkv" in param_name:
+                last_dim = jax_weight.shape[-1]
+                if last_dim == total_dim:
+                    split_sizes = [key_dim, key_dim, value_dim]
+                elif total_dim % last_dim == 0:
+                    blk = total_dim // last_dim
+                    split_sizes = [key_dim // blk, key_dim // blk, value_dim // blk]
+                else:
+                    split_sizes = None
+                if split_sizes is not None:
+                    logger.info(f"Reordering GDN in_proj_qkv '{param_name}' with split_sizes={split_sizes}, tp_size={tp_size}")
+                    with cpu_mesh_context():
+                        jax_weight = reorder_concatenated_tensor_for_sharding(
+                            jax_weight, split_sizes, tp_size, dim=-1
+                        )
+            elif "conv1d_weight" in param_name or "conv1d_bias" in param_name:
+                first_dim = jax_weight.shape[0]
+                if first_dim == total_dim:
+                    split_sizes = [key_dim, key_dim, value_dim]
+                    logger.info(f"Reordering GDN conv1d '{param_name}' with split_sizes={split_sizes}, tp_size={tp_size}")
+                    with cpu_mesh_context():
+                        jax_weight = reorder_concatenated_tensor_for_sharding(
+                            jax_weight, split_sizes, tp_size, dim=0
+                        )
 
     assign_and_shard_param(jax_param, jax_weight, param_name)
 
@@ -911,6 +1022,8 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 elif "embed_tokens.weight" in name:
                     permute_dims = (0, 1)
                 elif "lm_head" in name:
+                    permute_dims = (1, 0)
+                elif name.endswith(".weight") and len(param.get_value().shape) == 2:
                     permute_dims = (1, 0)
 
                 param.set_metadata(
@@ -1044,10 +1157,6 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                     name = name.replace(".conv1d.weight", ".conv1d_weight")
                 if ".conv1d.bias" in name:
                     name = name.replace(".conv1d.bias", ".conv1d_bias")
-                if ".in_proj_a." in name:
-                    name = name.replace(".in_proj_a.", ".a_proj.")
-                if ".in_proj_b." in name:
-                    name = name.replace(".in_proj_b.", ".b_proj.")
 
                 if self.pytorch_pooler is not None:
                     match = re.match(r"^(?:model\.)?pooler\.(.*)$", name)
