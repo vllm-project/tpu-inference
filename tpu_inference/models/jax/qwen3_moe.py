@@ -383,7 +383,6 @@ class Qwen3MoeDecoderLayer(JaxModule):
         rms_norm_eps = config.rms_norm_eps
         hidden_size = config.hidden_size
 
-        zero_centered_gamma = True
         self.input_layernorm = JaxRmsNorm(
             hidden_size,
             epsilon=rms_norm_eps,
@@ -392,7 +391,6 @@ class Qwen3MoeDecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
-            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".input_layernorm",
         )
 
@@ -434,7 +432,6 @@ class Qwen3MoeDecoderLayer(JaxModule):
             scale_init=nnx.with_partitioning(init_fn, (None, )),
             rngs=rng,
             quant_config=quant_config,
-            zero_centered_gamma=zero_centered_gamma,
             prefix=prefix + ".post_attention_layernorm",
         )
 
@@ -532,7 +529,6 @@ class Qwen3MoeModel(JaxModule):
             ))
 
         if self.is_last_rank:
-            zero_centered_gamma = True
             self.norm = JaxRmsNorm(
                 hidden_size,
                 epsilon=rms_norm_eps,
@@ -541,7 +537,6 @@ class Qwen3MoeModel(JaxModule):
                 scale_init=nnx.with_partitioning(init_fn, (None, )),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
-                zero_centered_gamma=zero_centered_gamma,
                 prefix=prefix + ".norm",
             )
         else:
