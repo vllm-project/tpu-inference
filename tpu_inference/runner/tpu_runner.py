@@ -53,7 +53,8 @@ import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
+    SharedAttentionMetadata, round_up_pcp_cache_pages)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -853,8 +854,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         """Generative model or pooling model select different computations."""
         self.enable_continue_decode = self.vllm_config.additional_config.get(
             "enable_continue_decode", False)
-        self.continue_decode_eos_check_interval = self.vllm_config.additional_config.get(
-            "continue_decode_eos_check_interval", 1)
+        # continue_decode EOS-check interval: how often the fused decode loop
+        # observes the any-sequence-hit-EOS early exit (see decode_loop.py). Set
+        # via the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var so it can be retuned
+        # per model family / serving fleet without a rebuild. Default 1 = stock
+        # every-step check.
+        self.continue_decode_eos_check_interval = (
+            envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL)
         self.static_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
@@ -971,10 +977,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.vllm_config.sharding_config.device_indexes is not None
             and len(self.vllm_config.sharding_config.device_indexes) > 0)
 
+        num_devices = int(np.prod(mesh_shape))
+        if len(self.devices) < num_devices:
+            raise ValueError(
+                f"Insufficient devices for 2D mesh: found {len(self.devices)}, "
+                f"expected {num_devices} for mesh shape {mesh_shape}.")
+
         if enforce_device_order:
-            return jax.make_mesh(mesh_shape,
-                                 MESH_AXIS_NAMES_2D,
-                                 devices=self.devices)
+            return jax.sharding.Mesh(
+                np.array(self.devices[:num_devices]).reshape(mesh_shape),
+                MESH_AXIS_NAMES_2D,  # preserves given order; defaults to AxisType.Auto
+            )
         else:
             return make_optimized_mesh(mesh_shape,
                                        MESH_AXIS_NAMES_2D,
@@ -1306,6 +1319,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     def reinitialize_kv_cache(self) -> None:
         self.kv_cache_manager.reinitialize_kv_cache()
 
+    def reset_encoder_cache(self) -> None:
+        self.encoder_cache.clear()
+
     def capture_model(self) -> None:
         self.compilation_manager.capture_model()
 
@@ -1467,7 +1483,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     req_id, []))
 
             end_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            num_sampled_tokens = len(sampled_ids)
+            num_sampled_tokens = min(len(sampled_ids),
+                                     pre_num_placeholder_tokens)
             assert num_sampled_tokens <= pre_num_placeholder_tokens
             start_idx = end_idx - pre_num_placeholder_tokens
             assert end_idx <= self.max_model_len, (
@@ -1475,8 +1492,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
-                                           num_sampled_tokens] = sampled_ids
+            self.input_batch.token_ids_cpu[
+                req_idx, start_idx:start_idx +
+                num_sampled_tokens] = sampled_ids[:num_sampled_tokens]
             self.input_batch.num_tokens_no_spec[
                 req_idx] = start_idx + num_sampled_tokens
             self.input_batch.num_tokens[
@@ -1797,8 +1815,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             (generated_tokens, final_kv_caches, final_state, final_rng,
              all_expert_indices, logprobs_tensors) = continue_decode(
                  state=self.state_leaves,
-                 model_fn=getattr(self.model, "step_fn_no_options",
-                                  self.model_fn),
+                 model_fn=self.model.step_fn_no_options,
                  compute_logits_fn=self.compute_logits_fn,
                  sample_fn=sample,
                  mesh=self.mesh,
@@ -2209,15 +2226,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not sampled_ids:
                 continue
 
+            num_sampled = len(sampled_ids)
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            end_idx = start_idx + len(sampled_ids)
+            end_idx = start_idx + num_sampled
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
+            self.input_batch.token_ids_cpu[
+                req_idx, start_idx:end_idx] = sampled_ids[:num_sampled]
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_state.output_token_ids.extend(sampled_ids)
@@ -2833,9 +2851,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Prefill context parallelism (single request, prefill only): head-tail
         # arrange this request's current tokens into rank order
-        pcp_kv_cache_lens = None
-        pcp_query_start_loc = None
-        pcp_q_pos_offsets = None
+        pcp_metadata = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             counts = scheduled_tokens_per_dp_rank[0]
@@ -2898,13 +2914,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
                                          None))
             repl = NamedSharding(self.mesh, PartitionSpec())
-            pcp_kv_cache_lens = device_array(self.mesh,
-                                             kv_cache_lens_np,
-                                             sharding=repl)
             (pcp_query_start_loc,
              pcp_q_pos_offsets) = device_array(self.mesh,
                                                (pcp_cu_np, pcp_qpos_np),
                                                sharding=pcp_spec)
+            pcp_metadata = PCPMetadata(
+                query_start_loc=pcp_query_start_loc,
+                kv_cache_lens=device_array(self.mesh,
+                                           kv_cache_lens_np,
+                                           sharding=repl),
+                q_pos_offsets=pcp_q_pos_offsets,
+                # Snap the request's live cached-page count up to the shared
+                # ladder that precompilation warms (0 == nothing cached, which
+                # elides the cache phase entirely).
+                cache_pages=round_up_pcp_cache_pages(
+                    num_computed, self.block_size,
+                    self.max_num_blocks_per_req),
+            )
         spec_decode_metadata = None
         if self.speculative_config:
             spec_decode_metadata = (
@@ -3024,8 +3050,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         metadata = common_utils.DeviceBuffer.unpack_arrays(
             dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
-        query_start_loc = (pcp_query_start_loc
-                           if pcp_size > 1 else metadata["query_start_loc"])
+        query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]
         logits_indices = metadata["logits_indices"]
 
@@ -3045,8 +3070,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
-                pcp_kv_cache_lens=pcp_kv_cache_lens,
-                pcp_q_pos_offsets=pcp_q_pos_offsets,
+                pcp=pcp_metadata,
             )
 
             return attention_metadata_gid
@@ -3071,12 +3095,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             attention_metadata = build_attn(block_tables)
             shared_attention_metadata = build_shared_attn()
         else:
-            attention_metadata = {
-                name: build_attn(metadata[f"block_tables_gid_{gid}"])
-                for gid, kv_cache_group in enumerate(
-                    self.kv_cache_config.kv_cache_groups)
-                for name in kv_cache_group.layer_names
-            }
+            # One AttentionMetadata per group, layers of a group
+            # share the block tables, and GroupedAttentionMetadata keeps that
+            # sharing across the jit boundary. See its docstring.
+            attention_metadata = GroupedAttentionMetadata(
+                groups=tuple(
+                    build_attn(metadata[f"block_tables_gid_{gid}"]) for gid in
+                    range(len(self.kv_cache_config.kv_cache_groups))),
+                layer_names_per_group=tuple(
+                    tuple(group.layer_names)
+                    for group in self.kv_cache_config.kv_cache_groups),
+            )
             shared_attention_metadata = build_shared_attn()
 
         # Async scheduling: substitute placeholder tokens for DP

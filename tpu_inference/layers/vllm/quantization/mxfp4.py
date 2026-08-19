@@ -105,6 +105,12 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
         # specific post processing to the weights.
         self.mxfp4_backend = Mxfp4MoeBackend.TRITON
 
+        # vLLM's Mxfp4MoEMethod.__init__ (intentionally skipped above) sets
+        # is_k3_situ_aiter for the ROCm AITER Kimi-K3 path, and inherited
+        # methods such as create_weights read it. That path never applies on
+        # TPU, so pin it to False.
+        self.is_k3_situ_aiter = False
+
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 

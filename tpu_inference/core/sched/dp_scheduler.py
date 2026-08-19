@@ -25,7 +25,7 @@ from enum import Enum
 from multiprocessing import Process
 from multiprocessing.connection import Connection, wait
 from time import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import cloudpickle
 import numpy as np
@@ -74,6 +74,17 @@ class SchedulerCommand(Enum):
     SET_PAUSE_STATE = "set_pause_state"
     GET_PAUSE_STATE = "get_pause_state"
     SHUTDOWN = "shutdown"
+
+
+class FinishedRequestInfo(NamedTuple):
+    """The part of a finished `Request` that has to cross the DP boundary.
+
+    `EngineCoreProc._send_abort_outputs` reads exactly these two attributes, so
+    this is a drop-in stand-in for `Request` there without pickling the whole
+    object back from a rank scheduler process.
+    """
+    request_id: str
+    client_index: int
 
 
 class SchedulerWorkerError(Exception):
@@ -203,8 +214,10 @@ def _scheduler_worker_process(
 
                 case SchedulerCommand.FINISH_REQUESTS:
                     request_ids, finished_status = data
-                    scheduler.finish_requests(request_ids, finished_status)
-                    _send_result(None)  # Signal completion
+                    finished = scheduler.finish_requests(
+                        request_ids, finished_status)
+                    _send_result([(r.request_id, r.client_index)
+                                  for r in (finished or [])])
 
                 case SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
                     draft_token_ids = data
@@ -417,6 +430,7 @@ class DPScheduler(SchedulerInterface):
         self.hash_block_size = hash_block_size if hash_block_size is not None else block_size
         self.log_stats = log_stats
         self.connector = None
+        self.ec_connector = None
         self.structured_output_manager = structured_output_manager
 
         # DP state
@@ -684,67 +698,46 @@ class DPScheduler(SchedulerInterface):
                 rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
         return result
 
-    def _get_rank_routing_state(
-            self) -> Tuple[Dict[int, int], Dict[int, int], Dict[int, int]]:
-        """Per-rank (pending_prefill_tokens, inflight_reqs,
-        min_remaining_output) collected in a single round-trip.
+    def _find_best_rank_for_request(self, request: Request) -> int:
+        """Pick the rank minimising the resulting maximum load.
 
-        Send all comments first and collect all results after to
-        allow pipelinening across ranks, minimizing the overhead."""
+        Ties on load with fewest in-flight requests, then the rank whose
+        running request is closest to its max_tokens (so most likely to free
+        a slot soonest).
+        """
+        enable_cache = self.vllm_config.cache_config.enable_prefix_caching
+
+        # Send every query first, then collect, so ranks answer in parallel.
         for rank in range(self.dp_size):
+            if enable_cache:
+                self._send_command(rank,
+                                   SchedulerCommand.PROBE_COMPUTED_BLOCKS,
+                                   request)
             self._send_command(rank,
                                SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
             self._send_command(rank, SchedulerCommand.GET_REQUEST_COUNTS)
             self._send_command(rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
 
-        pending: Dict[int, int] = {}
+        num_tokens = request.num_tokens
+        loads: Dict[int, int] = {}
         inflight: Dict[int, int] = {}
         min_remaining: Dict[int, int] = {}
         for rank in range(self.dp_size):
-            pending[rank] = self._get_result(
+            cached = 0
+            if enable_cache:
+                cached = self._get_result(
+                    rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
+            pending = self._get_result(
                 rank, SchedulerCommand.GET_PENDING_PREFILL_TOKENS)
             running, waiting = self._get_result(
                 rank, SchedulerCommand.GET_REQUEST_COUNTS)
+            loads[rank] = pending + max(0, num_tokens - cached)
             inflight[rank] = running + waiting
             min_remaining[rank] = self._get_result(
                 rank, SchedulerCommand.GET_MIN_REMAINING_OUTPUT)
-        return pending, inflight, min_remaining
 
-    def _find_best_rank_for_request(self, request: Request) -> int:
-        """Find the best DP rank for a new request based on load balancing.
-
-        Two-tier strategy:
-        1. Prefix cache hit: assign to rank with best cache hit.
-        2. Otherwise:
-           - Primary key: fewest pending prefill tokens (keeps prefill
-             balanced across ranks).
-           - Secondary key: fewest in-flight reqs (balances decode load
-             across ranks under DP lockstep once prefills finish).
-           - Tertiary key: rank whose running req is closest to its
-             max_tokens (smallest remaining output tokens), which is
-             most likely to free a slot soon.
-        """
-        # First, try to find a rank with prefix cache hit.
-        if self.vllm_config.cache_config.enable_prefix_caching:
-            for rank in range(self.dp_size):
-                self._send_command(rank,
-                                   SchedulerCommand.PROBE_COMPUTED_BLOCKS,
-                                   request)
-
-            best_cache_rank = None
-            best_cache_tokens = 0
-            for rank in range(self.dp_size):
-                cached_tokens = self._get_result(
-                    rank, SchedulerCommand.PROBE_COMPUTED_BLOCKS)
-                if cached_tokens > best_cache_tokens:
-                    best_cache_tokens = cached_tokens
-                    best_cache_rank = rank
-            if best_cache_tokens > 0:
-                return best_cache_rank
-
-        pending, inflight, min_remaining = self._get_rank_routing_state()
         return min(range(self.dp_size),
-                   key=lambda r: (pending[r], inflight[r], min_remaining[r]))
+                   key=lambda r: (loads[r], inflight[r], min_remaining[r]))
 
     def add_request(self, request: Request) -> None:
         """
@@ -1321,7 +1314,8 @@ class DPScheduler(SchedulerInterface):
         for req_id in finished_req_ids:
             self.assigned_dp_rank.pop(req_id, None)
 
-    def finish_requests(self, request_ids, finished_status) -> None:
+    def finish_requests(self, request_ids,
+                        finished_status) -> List[FinishedRequestInfo]:
         """Forward request finish signals to the appropriate DP rank schedulers."""
         if isinstance(request_ids, str):
             request_ids = [request_ids]
@@ -1331,12 +1325,17 @@ class DPScheduler(SchedulerInterface):
             ]
 
         # If any request is still held in the pending queue, drop it.
+        finished: List[FinishedRequestInfo] = []
         if self._pending_new_requests:
             request_id_set = set(request_ids)
-            self._pending_new_requests = [
-                r for r in self._pending_new_requests
-                if r.request_id not in request_id_set
-            ]
+            kept = []
+            for r in self._pending_new_requests:
+                if r.request_id in request_id_set:
+                    finished.append(
+                        FinishedRequestInfo(r.request_id, r.client_index))
+                else:
+                    kept.append(r)
+            self._pending_new_requests = kept
 
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
@@ -1350,7 +1349,12 @@ class DPScheduler(SchedulerInterface):
         for rank, req_ids in rank_request_ids.items():
             self._send_command(rank, SchedulerCommand.FINISH_REQUESTS,
                                (req_ids, finished_status))
-            self._get_result(rank, SchedulerCommand.FINISH_REQUESTS)
+        for rank in rank_request_ids:
+            finished.extend(
+                FinishedRequestInfo(req_id, client_index)
+                for req_id, client_index in self._get_result(
+                    rank, SchedulerCommand.FINISH_REQUESTS))
+        return finished
 
     def get_num_unfinished_requests(self) -> int:
         """Get total number of unfinished requests across all DP ranks.

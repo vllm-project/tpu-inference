@@ -14,6 +14,7 @@
 # limitations under the License.
 """TPU-compatible DeepSeek-V4 Lightning Indexer."""
 
+import functools
 from typing import Optional, Tuple
 
 import jax
@@ -31,9 +32,9 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 # =====================================================================
 # IMPORT TPU CUSTOM OPS TO TRIGGER vLLM @register_oot DECORATORS
 # =====================================================================
-from tpu_inference.kernels.experimental.deepseek_v4.streamindex_topk import \
+from tpu_inference.kernels.experimental.deepseek_v4.indexer.streamindex_topk import \
     streamindex_topk
-from tpu_inference.layers.common import quantization
+from tpu_inference.kernels.experimental.deepseek_v4.rope import rope_quant
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
     VllmDeepseekCompressor
@@ -57,33 +58,24 @@ def fused_indexer_q_rope_quant(
     q: torch.Tensor,
     positions: torch.Tensor,
     rotary_emb: torch.nn.Module,
+    mesh,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Applies RoPE and dynamically quantizes the queries
-
-  Args:
-      q: Un-rotated query tensor of shape [num_tokens, num_heads, head_dim]
-      positions: Token positions of shape [num_tokens]
-      rotary_emb: The vLLM RoPE CustomOp module (Intercepted by TPU rope.py)
-
-  Returns:
-      q_quant: Int8 quantized, RoPE-applied queries
-      q_scales: Quantization scales
   """
+    data_spec = P(ShardingAxisName.ATTN_DATA)
 
-    # Apply the custom rotary embedding op directly in-place on the query tensor.
-    q, _ = rotary_emb(positions, q)
-
-    q = jax_view(q)
-    q_quant_jax, q_scales_jax = quantization.quantize_tensor(jnp.float8_e4m3fn,
-                                                             q,
-                                                             axis=-1)
-    q_quant = torch_view(q_quant_jax)
-    q_scales = torch_view(q_scales_jax)
+    q_quant_jax, q_scales_jax = jax.shard_map(
+        functools.partial(rope_quant, quant_dtype=jnp.float8_e4m3fn),
+        mesh=mesh,
+        in_specs=(data_spec, data_spec, P()),
+        out_specs=(data_spec, data_spec),
+        check_vma=False,
+    )(jax_view(q), jax_view(positions), jax_view(rotary_emb.cos_sin_cache))
 
     # Note: vLLM's implementation rounds the scale factors up to the
-    # next power of 2, but the standard division scale returned by quantize_tensor
-    # is sufficient here.
-    return q_quant, q_scales.squeeze(-1)
+    # next power of 2, but the standard division scale returned by the kernel
+    # (abs_max / dtype_max, one per row) is sufficient here.
+    return torch_view(q_quant_jax), torch_view(q_scales_jax)
 
 
 class VllmDeepseekV4IndexerCache(DeepseekV4IndexerCache):
@@ -134,30 +126,30 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
         self,
         hidden_states: torch.Tensor,
         query: torch.Tensor,
-        compressed_kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
         slot_mapping: Optional[torch.Tensor] = None,
     ):
 
+        wrapper_ctx = get_vllm_model_wrapper_context()
+        mesh = wrapper_ctx.mesh
+
         q, _ = self.wq_b(query)
         q = q.view(-1, self.n_head, self.head_dim)
 
         q_quant, q_scales = fused_indexer_q_rope_quant(q, positions,
-                                                       rotary_emb)
+                                                       rotary_emb, mesh)
 
-        # Fold the query quantization scales into the weights
+        # Fold the query quantization scales into the weights.
         weights = (indexer_weights.to(q.dtype) * self.softmax_scale *
-                   (self.head_dim**-0.5) * q_scales)
+                   (self.n_head**-0.5) * q_scales)
 
-        self.compressor(compressed_kv_score, positions, rotary_emb)
+        self.compressor(hidden_states, positions, rotary_emb)
 
-        wrapper_ctx = get_vllm_model_wrapper_context()
         kv_cache_index = wrapper_ctx.layer_name_to_kvcache_index[
             self.k_cache.prefix]
         kv_cache = wrapper_ctx.kv_caches[kv_cache_index]
-        mesh = wrapper_ctx.mesh
         attn_metadata_dict = get_forward_context().attn_metadata
         attn_metadata = attn_metadata_dict[self.k_cache.prefix]
 
@@ -190,8 +182,8 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
                 k=self.topk_tokens,
                 compression_ratio=self.compress_ratio,
                 # TODO(hwanginho): Tune num_kv_pages_per_block, num_queries_per_block
-                num_kv_pages_per_block=1,
-                num_queries_per_block=1,
+                num_kv_pages_per_block=(3, 2, 2),
+                num_queries_per_block=(1, 128, 128),
             )
 
         topk_indices = jax.shard_map(

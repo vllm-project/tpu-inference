@@ -26,7 +26,7 @@ steps:
     commands:
       - |
         if [ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]; then
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness" "skipped (only for tpu7x)"
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness" "skipped"
         else
           # 1. Run the fast correctness test
           .buildkite/scripts/run_in_docker.sh \

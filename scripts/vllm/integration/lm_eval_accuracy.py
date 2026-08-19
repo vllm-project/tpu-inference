@@ -97,10 +97,7 @@ def main() -> None:
     if args.output_path or args.log_samples:
         from lm_eval.loggers import EvaluationTracker
 
-        evaluation_tracker = EvaluationTracker(
-            output_path=args.output_path,
-            log_samples=args.log_samples,
-        )
+        evaluation_tracker = EvaluationTracker(output_path=args.output_path, )
 
     results = evaluate_with_vllm(
         model_args=_parse_model_args(args.model_args),
@@ -111,10 +108,14 @@ def main() -> None:
         num_fewshot=args.num_fewshot,
         limit=args.limit,
         apply_chat_template=args.apply_chat_template,
+        log_samples=args.log_samples,
         evaluation_tracker=evaluation_tracker,
     )
     if results is None:
         return
+
+    if evaluation_tracker is not None:
+        evaluation_tracker.save_results_aggregated(results=results, )
 
     from lm_eval.utils import make_table
 

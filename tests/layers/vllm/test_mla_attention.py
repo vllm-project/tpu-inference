@@ -272,6 +272,7 @@ class TestVllmTPUMultiHeadLatentAttentionWrapper:
         mla_modules.indexer = None
         mla_modules.indexer_rotary_emb = "indexer_rotary_emb"
         mla_modules.is_sparse = False
+        mla_modules.g_proj = "g_proj"
 
         wrapper = VllmMultiHeadLatentAttentionWrapper(
             hidden_size=128,
@@ -286,6 +287,7 @@ class TestVllmTPUMultiHeadLatentAttentionWrapper:
             cache_config=None,
             quant_config=None,
             prefix="test_wrapper",
+            non_causal_multi_token_decode=True,
         )
 
         assert wrapper.hidden_size == 128
@@ -301,6 +303,7 @@ class TestVllmTPUMultiHeadLatentAttentionWrapper:
         assert wrapper.o_proj == "o_proj"
         assert wrapper.indexer is None
         assert wrapper.is_sparse is False
+        assert wrapper.g_proj == "g_proj"
 
         mock_tpu_mla_attn.assert_called_once_with(
             num_heads=8,
@@ -316,5 +319,38 @@ class TestVllmTPUMultiHeadLatentAttentionWrapper:
             kv_b_proj=mla_modules.kv_b_proj,
             use_sparse=False,
             indexer=None,
+            non_causal_multi_token_decode=True,
         )
         assert wrapper.mla_attn == mock_tpu_mla_attn.return_value
+
+    def test_forward_applies_gate_and_skips_indexer(self):
+        wrapper = VllmMultiHeadLatentAttentionWrapper.__new__(
+            VllmMultiHeadLatentAttentionWrapper)
+        torch.nn.Module.__init__(wrapper)
+
+        wrapper.q_lora_rank = None
+        wrapper.kv_lora_rank = 2
+        wrapper.qk_nope_head_dim = 2
+        wrapper.qk_rope_head_dim = 1
+        wrapper.qk_head_dim = 3
+        wrapper.v_head_dim = 2
+        wrapper.num_heads = 1
+        wrapper.kv_a_proj_with_mqa = MagicMock(
+            return_value=(torch.zeros(2, 3), ))
+        wrapper.q_proj = MagicMock(return_value=(torch.zeros(2, 3), ))
+        wrapper.kv_a_layernorm = MagicMock(side_effect=lambda value: value)
+        wrapper.rotary_emb = None
+        wrapper.indexer = MagicMock()
+        wrapper.indexer_rope_emb = None
+        wrapper.is_sparse = True
+        wrapper.skip_topk = True
+        wrapper.mla_attn = MagicMock(return_value=torch.full((2, 2), 4.0))
+        wrapper.g_proj = MagicMock(return_value=(torch.zeros(2, 2), ))
+        wrapper.o_proj = MagicMock(side_effect=lambda value: (value, ))
+
+        hidden_states = torch.ones(2, 3)
+        output = wrapper.forward(torch.arange(2), hidden_states)
+
+        wrapper.indexer.assert_not_called()
+        wrapper.g_proj.assert_called_once_with(hidden_states)
+        torch.testing.assert_close(output, torch.full((2, 2), 2.0))

@@ -424,7 +424,12 @@ class TPUWorker(WorkerBase):
         self.parallel_config.data_parallel_size = 1
         try:
             with set_current_vllm_config(self.vllm_config):
-                temp_file = tempfile.mkstemp()[1]
+                # Close the file descriptor returned by mkstemp to prevent a resource leak.
+                # In multihost environments, leaving this fd open on Host 0 (which runs both
+                # Ray GCS and the engine core) can conflict with Gloo's file locking and socket
+                # binding, resulting in a startup hang.
+                fd, temp_file = tempfile.mkstemp()
+                os.close(fd)
                 init_distributed_environment(
                     world_size=1,
                     rank=0,
@@ -770,6 +775,22 @@ class TPUWorker(WorkerBase):
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
+
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
+
+    def sleep(self, level: int = 1) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU: there is no analogue of "
+            "CUDA's virtual-memory allocator for offloading weights. Use "
+            "`pause_generation()` to stop scheduling (equivalent to sleep "
+            "level 0), and the weight-update session "
+            "(`start_weight_update`/`finish_weight_update`) to release and "
+            "restore KV cache memory.")
+
+    def wake_up(self, tags: list[str] | None = None) -> None:
+        raise NotImplementedError(
+            "Sleep mode is not supported on TPU; see TPUWorker.sleep.")
 
     def add_lora(self, lora_request: Any) -> bool:
         return self.model_runner.add_lora(lora_request)

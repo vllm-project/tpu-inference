@@ -27,6 +27,7 @@ import torch.nn
 import torchax
 import vllm.envs as vllm_envs
 from flax.typing import PRNGKey
+from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import TORCH_DTYPE_TO_JAX, t2j
@@ -72,6 +73,35 @@ from tpu_inference.runner.mm_encoder_jit_manager import (
     MMEncoderJITManager, maybe_create_mm_encoder_jit_manager)
 
 logger = init_logger(__name__)
+
+
+def _to_row_major(arr: jax.Array, key: str) -> jax.Array:
+    """Materializes ``arr`` in row-major layout.
+
+    XLA:TPU picks the layout of a device array from its shape alone. For a
+    narrow 2-D table -- the rope ``cos_sin_cache`` ([max_position, 64]), the
+    hash-MoE ``hash_indices_table`` ([vocab_size, 6]) -- the minor-most
+    dimension would be padded out to a full 128-lane tile, so XLA prefers the
+    transposed layout {0,1}, which needs no padding. Consumers of the table
+    (the rope kernels and any other custom call, an XLA gather) want the
+    default {1,0}, so the compiler inserts a ``copy(t[N,c]{0,1}) -> t[N,c]{1,0}``
+    of the whole table into the step function -- on every forward pass.
+    Committing the buffer in {1,0} at load time moves that relayout to load
+    time; the buffer then pays the lane padding permanently (2x HBM for a
+    64-wide f32 table, 21x for a 6-wide one).
+    """
+    fmt = getattr(arr, "format", None)
+    if fmt is None or fmt.layout is None:
+        return arr
+    row_major = Layout(tuple(range(arr.ndim)))
+    if fmt.layout.major_to_minor == row_major.major_to_minor:
+        return arr
+    out = jax.device_put(arr, Format(row_major, arr.sharding))
+    logger.info(
+        "Relaid out %s %s from layout %s to %s at load time to avoid a "
+        "per-step XLA layout copy", key, arr.shape, fmt.layout.major_to_minor,
+        row_major.major_to_minor)
+    return out
 
 
 class _VllmRunner(torch.nn.Module):
@@ -258,19 +288,29 @@ class VllmModelWrapper:
         # positions are 1-D and bounded by max_model_len (standard text RoPE);
         # MRoPE video positions are structural and can exceed max_model_len, so
         # skip the slice there to avoid an out-of-bounds cos_sin_cache gather.
-        if envs.SLICE_ROPE_CACHE and \
-                not self.vllm_config.model_config.uses_mrope:
-            max_len = self.vllm_config.model_config.max_model_len
+        slice_rope_cache = envs.SLICE_ROPE_CACHE and \
+            not self.vllm_config.model_config.uses_mrope
+        max_len = self.vllm_config.model_config.max_model_len
+        for key, val in list(params_and_buffers.items()):
+            if not key.endswith("rotary_emb.cos_sin_cache"):
+                continue
+            arr = jax_view(val)
+            if slice_rope_cache and arr.shape[0] > max_len:
+                arr = arr[:max_len]
+                logger.info(
+                    "Sliced rope cache %s rows %d -> %d. Assumes "
+                    "positions are 1-D and bounded by max_model_len "
+                    "(%d); MRoPE (video) can exceed it and is excluded", key,
+                    jax_view(val).shape[0], max_len, max_len)
+            if envs.ROPE_CACHE_ROW_MAJOR:
+                arr = _to_row_major(arr, key)
+            params_and_buffers[key] = torch_view(arr)
+
+        if envs.HASH_TABLE_ROW_MAJOR:
             for key, val in list(params_and_buffers.items()):
-                if key.endswith("rotary_emb.cos_sin_cache"):
-                    arr = jax_view(val)
-                    if arr.shape[0] > max_len:
-                        params_and_buffers[key] = torch_view(arr[:max_len])
-                        logger.info(
-                            "Sliced rope cache %s rows %d -> %d. Assumes "
-                            "positions are 1-D and bounded by max_model_len "
-                            "(%d); MRoPE (video) can exceed it and is excluded",
-                            key, arr.shape[0], max_len, max_len)
+                if key.endswith("hash_indices_table"):
+                    params_and_buffers[key] = torch_view(
+                        _to_row_major(jax_view(val), key))
 
         self._pooler: Pooler | None = self.model.pooler
 
