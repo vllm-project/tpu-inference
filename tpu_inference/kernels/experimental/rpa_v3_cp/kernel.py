@@ -631,10 +631,12 @@ def _ragged_paged_attention_kernel_loop(
                 # new token t (head for t < C, tail after) is causal by its
                 # global position and must be real (< kv_new_len_global).
                 t = k_span - ring_src_cache_len.astype(int_ty)
-                pos = jnp.where(
-                    t < ring_chunk, ring_src * ring_chunk + t,
-                    (2 * cp_group_size - 1 - ring_src) * ring_chunk + t -
-                    ring_chunk)
+                # Scalar bases in int32 (Mosaic has no packed-int multiply),
+                # then cast so the vector math keeps one layout.
+                head_base = (ring_src * ring_chunk).astype(int_ty)
+                tail_base = ((2 * cp_group_size - 1 - ring_src) * ring_chunk -
+                             ring_chunk).astype(int_ty)
+                pos = jnp.where(t < ring_chunk, head_base + t, tail_base + t)
                 q_pos = q_span - kv_cache_len_local.astype(int_ty)
                 mask = mask_and(mask, (t < 0) |
                                 ((q_pos >= pos) &

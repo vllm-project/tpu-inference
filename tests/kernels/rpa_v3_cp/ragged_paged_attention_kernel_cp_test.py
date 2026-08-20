@@ -645,7 +645,7 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         cu = self._padcu([0, C, 2 * C])
         dist = jnp.array([0, 0, 2], jnp.int32)
         pi = self._pi2(pps)
-        blocks = (128, 64, 128, 64)  # bkv 64 -> several ring blocks
+        blocks = (128, 128, 128, 128)  # small bkv -> several ring blocks
 
         mesh = Mesh(np.array(jax.devices()[:P]), ("pcp", ))
         sh = PS("pcp")
