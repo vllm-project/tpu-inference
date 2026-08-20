@@ -68,6 +68,44 @@ def test_block_anchor_rejects_negative_output_budget():
         batch.needs_block_anchor([False, True], -1)
 
 
+@pytest.mark.parametrize(
+    "tokens_remaining,expected",
+    [
+        (0, [False, False, False, False]),
+        (1, [False, False, True, False]),
+        (2, [False, False, True, True]),
+        (3, [False, False, True, True]),
+    ],
+)
+def test_generation_mask_is_trimmed_to_remaining_output(
+        tokens_remaining, expected):
+    mask = [False, False, True, True]
+
+    assert batch.trim_generation_mask(mask, tokens_remaining) == expected
+    assert mask == [False, False, True, True]
+
+
+def test_generation_mask_preserves_noncontiguous_order():
+    assert batch.trim_generation_mask(
+        [False, True, False, True, True], 2) == [False, True, False, True, False]
+
+
+def test_generation_mask_rejects_negative_output_budget():
+    with pytest.raises(ValueError, match="tokens_remaining"):
+        batch.trim_generation_mask([False, True], -1)
+
+
+@pytest.mark.parametrize("tokens_remaining", [0, 1, 13, 31, 32, 33])
+def test_trimmed_seeded_block_has_exact_candidate_budget(tokens_remaining):
+    mask = batch.trim_generation_mask(
+        [False] + [True] * 31,
+        tokens_remaining,
+    )
+    candidates = sum(mask) + batch.needs_block_anchor(mask, tokens_remaining)
+
+    assert candidates == min(tokens_remaining, 32)
+
+
 def test_aligned_prompt_is_split_into_complete_blocks():
     plan = batch.plan_seeded_prompt(list(range(8)), 4, 99)
 

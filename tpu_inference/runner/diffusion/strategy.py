@@ -32,7 +32,7 @@ from tpu_inference.runner.diffusion.batch import (
     PendingBlockOutput, complete_seeded_decode_block, diffusion_batch_sizes,
     flush_partial_block_output, needs_block_anchor, plan_seeded_prompt,
     required_cache_end, select_diffusion_batch_size,
-    start_partial_block_output)
+    start_partial_block_output, trim_generation_mask)
 from tpu_inference.runner.diffusion.config import (CanvasPolicy,
                                                    DiffusionConfig,
                                                    NextBlockPolicy,
@@ -738,6 +738,8 @@ class BlockDiffusionStrategy:
                 int(forced_q32_anchor_commits_host),
                 "output_candidate_positions":
                 output_candidate_positions,
+                "trim_final_block_candidates":
+                self.config.runtime.trim_final_block_candidates,
                 "confidence_threshold":
                 self.config.runtime.confidence_threshold,
                 "q8_log_confidence_bias":
@@ -859,6 +861,11 @@ class BlockDiffusionStrategy:
                 plan = plans[req_id]
                 assert plan.partial_mask is not None
                 mask = list(plan.partial_mask)
+                if self.config.runtime.trim_final_block_candidates:
+                    mask = trim_generation_mask(
+                        mask,
+                        self._remaining_output_capacity(req_id),
+                    )
                 masks.append(mask)
                 needs_final_forward.append(
                     needs_block_anchor(
@@ -914,6 +921,11 @@ class BlockDiffusionStrategy:
             canvases.append([seed] + [self.config.model.mask_token_id] *
                             (self.block_size - 1))
             mask = [False] + [True] * (self.block_size - 1)
+            if self.config.runtime.trim_final_block_candidates:
+                mask = trim_generation_mask(
+                    mask,
+                    self._remaining_output_capacity(req_id),
+                )
             masks.append(mask)
             needs_final_forward.append(
                 needs_block_anchor(

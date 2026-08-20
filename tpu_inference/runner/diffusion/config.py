@@ -100,6 +100,7 @@ class DiffusionRuntimeConfig:
     fp32_partial_rpa: bool = False
     q8_log_confidence_bias: float = 0.0
     force_q32_anchor_commit: bool = False
+    trim_final_block_candidates: bool = False
     cohort_max_wait_ms: float = 0.0
     cohort_quiet_wait_ms: float = 0.0
 
@@ -308,6 +309,8 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
             diffusion_values.get("q8_log_confidence_bias", 0.0)),
         force_q32_anchor_commit=bool(
             diffusion_values.get("force_q32_anchor_commit", False)),
+        trim_final_block_candidates=bool(
+            diffusion_values.get("trim_final_block_candidates", False)),
         cohort_max_wait_ms=float(
             diffusion_values.get("cohort_max_wait_ms", 0.0)),
         cohort_quiet_wait_ms=float(

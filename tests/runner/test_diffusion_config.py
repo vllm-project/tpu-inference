@@ -130,6 +130,7 @@ def test_runtime_and_model_overrides_are_separate():
     assert resolved.diffusion.runtime.fp32_partial_rpa is False
     assert resolved.diffusion.runtime.q8_log_confidence_bias == 0.0
     assert resolved.diffusion.runtime.force_q32_anchor_commit is False
+    assert resolved.diffusion.runtime.trim_final_block_candidates is False
     assert resolved.diffusion.runtime.cohort_max_wait_ms == 7.5
     assert resolved.diffusion.runtime.cohort_quiet_wait_ms == 1.5
 
@@ -205,6 +206,22 @@ def test_resolves_opt_in_forced_q32_anchor_commit():
 
     assert resolved.diffusion is not None
     assert resolved.diffusion.runtime.force_q32_anchor_commit is True
+
+
+def test_resolves_opt_in_final_block_candidate_trimming():
+    resolved = resolve_generation_strategy(
+        _vllm_config({
+            "generation_strategy": "block_diffusion",
+            "diffusion": {
+                "model_adapter": "seeded_shifted",
+                "block_size": 16,
+                "mask_token_id": 99,
+                "trim_final_block_candidates": True,
+            },
+        }))
+
+    assert resolved.diffusion is not None
+    assert resolved.diffusion.runtime.trim_final_block_candidates is True
 
 
 def test_new_model_adapter_does_not_change_strategy_resolution():

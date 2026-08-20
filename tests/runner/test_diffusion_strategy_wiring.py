@@ -173,6 +173,20 @@ def test_diffusion_passes_request_eos_policy_into_denoising():
     assert "eos_token_ids" in denoise_source
 
 
+def test_final_block_candidate_trimming_is_opt_in_and_host_side():
+    prefill_source = ast.unparse(_strategy_method("_process_prefill"))
+    decode_source = ast.unparse(_strategy_method("_process_decode"))
+    denoise_source = ast.unparse(_strategy_method("_denoise_blocks"))
+    precompile_source = ast.unparse(_strategy_method("precompile"))
+
+    assert "self.config.runtime.trim_final_block_candidates" in prefill_source
+    assert "trim_generation_mask" in prefill_source
+    assert "self.config.runtime.trim_final_block_candidates" in decode_source
+    assert "trim_generation_mask" in decode_source
+    assert "trim_final_block_candidates" in denoise_source
+    assert "trim_generation_mask" not in precompile_source
+
+
 def test_prompt_prefill_is_one_block_causal_forward_per_length_group():
     build_source = ast.unparse(_strategy_method("_build_prompt_batch"))
     prefill_source = ast.unparse(_strategy_method("_process_prefill"))

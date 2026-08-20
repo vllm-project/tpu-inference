@@ -59,6 +59,18 @@ def needs_block_anchor(mask: list[bool], tokens_remaining: int) -> bool:
     return tokens_remaining > sum(mask)
 
 
+def trim_generation_mask(mask: list[bool], tokens_remaining: int) -> list[bool]:
+    if tokens_remaining < 0:
+        raise ValueError("tokens_remaining must be non-negative")
+    remaining = tokens_remaining
+    trimmed = []
+    for eligible in mask:
+        keep = eligible and remaining > 0
+        trimmed.append(keep)
+        remaining -= int(keep)
+    return trimmed
+
+
 def required_cache_end(
     prompt_length: int,
     max_new_tokens: int,
