@@ -329,18 +329,12 @@ def pcp_forward(
                                                 *x.shape[1:])[inv_row].reshape(
                                                     padded_q_len, *x.shape[1:])
 
-        # Current KV: rank order + in-kernel remap when C is page-aligned
-        # (avoids a gather-reorder), else token order.  The ring launch always
-        # takes token order: its ring-sized bkv blocks may cross chunks.
+        # The all-gathered current KV goes in TOKEN order (ring-sized bkv
+        # blocks may cross the rank-order head/tail chunks).
         # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
-        ring = cache_pages != 0
-        page_size = kv_cache_local.shape[1]
-        remap_kv = not ring and (C >= page_size) and (C % page_size == 0)
-        k_curr = all_gather_tokens(k_local) if remap_kv else to_token_order(
-            k_local)
-        v_curr = all_gather_tokens(v_local) if remap_kv else to_token_order(
-            v_local)
-        if ring:
+        k_curr = to_token_order(k_local)
+        v_curr = to_token_order(v_local)
+        if cache_pages != 0:
             # Ring cache rounds + causal current phase in ONE launch sharing
             # the online softmax.  Both seqs (head, tail) are forced to a full
             # C so every rank runs the same ring schedule (lock-step); tail
@@ -368,7 +362,6 @@ def pcp_forward(
             cp_group_size=pcp_size,
             kv_cache_lens=kv_cache_lens_local,
             q_pos_offsets=pcp_q_pos_offsets_local[0],
-            pcp_chunk_size=(C if remap_kv else None),
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
             write_last_seq_only=True,

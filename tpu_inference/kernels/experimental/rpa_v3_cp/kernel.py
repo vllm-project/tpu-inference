@@ -362,7 +362,6 @@ def _ragged_paged_attention_kernel_loop(
     k_scale: float | None = None,
     v_scale: float | None = None,
     static_q_len: int | None = None,
-    pcp_chunk_size: int | None = None,
     bq_sz,  # bq fetch size
     bkv_sz,  # bkv prefetch size
     bq_csz,  # bq compute size
@@ -787,19 +786,6 @@ def _ragged_paged_attention_kernel_loop(
             # Fetch new kvs.
             if not skip_current_attn:
                 new_kv_len_start = _seq_kv_new_end - kv_left_frm_new
-                if pcp_chunk_size is not None:
-                    # Rank-order KV remap; the ring passes token-order KV
-                    # instead (its ring-sized blocks may cross chunks).
-                    assert in_ring is None
-                    two_p = 2 * cp_group_size
-                    chunk_idx = new_kv_len_start // pcp_chunk_size
-                    offset_in_chunk = (new_kv_len_start -
-                                       chunk_idx * pcp_chunk_size)
-                    rank_slot = jnp.where(chunk_idx < cp_group_size,
-                                          2 * chunk_idx,
-                                          2 * (two_p - 1 - chunk_idx) + 1)
-                    new_kv_len_start = (rank_slot * pcp_chunk_size +
-                                        offset_in_chunk)
                 sz_new = bkv_sz_frm_new
                 if in_ring is not None:
                     sz_new = jnp.where(in_ring, 0, sz_new)
@@ -2126,7 +2112,6 @@ def get_default_block_sizes(
     pages_per_seq,
     *,
     case: RpaCase = RpaCase.MIXED,
-    pcp_chunk_size: int | None = None,
     pcp_ring: bool = False,
     vmem_limit_bytes: int | None = None,
 ):
@@ -2198,17 +2183,6 @@ def get_default_block_sizes(
         "bkv_csz": align_to(bkv_csz, page_size),
     }
 
-    # PCP current phase (rank-ordered KV remap) needs the prefetch block to
-    # stay within one head-tail chunk of size C, i.e. bkv_sz <= C.
-    if pcp_chunk_size is not None and case == RpaCase.MIXED:
-        bkv_sz = min(bs["bkv_sz"], pcp_chunk_size)
-        while bkv_sz > page_size and pcp_chunk_size % bkv_sz != 0:
-            bkv_sz -= page_size
-        bkv_csz = min(bs["bkv_csz"], bkv_sz)
-        while bkv_csz > page_size and bkv_sz % bkv_csz != 0:
-            bkv_csz -= page_size
-        bs = {**bs, "bkv_sz": bkv_sz, "bkv_csz": bkv_csz}
-
     if pcp_ring and case == RpaCase.MIXED:
         # Ring sizing is the opposite of the default heuristic.  The default
         # picks small Q tiles because re-streaming KV per tile is nearly free
@@ -2266,7 +2240,6 @@ def get_default_block_sizes(
         "update_kv_cache",
         "write_last_seq_only",
         "cp_group_size",
-        "pcp_chunk_size",
         "pcp_ring_axis_name",
         "pcp_ring_mesh_axis_names",
     ),
@@ -2290,7 +2263,6 @@ def ragged_paged_attention(
     | None = None,  # i32[1] - per-device rank, sharded along the DCP axis
     cp_group_size: int | None = None,
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs]
-    pcp_chunk_size: int | None = None,
     pcp_ring_axis_name: str | None = None,
     pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
     use_causal_mask: bool = True,
@@ -2344,8 +2316,7 @@ def ragged_paged_attention(
     cp_group_size: the size of the context parallelism group.
     q_pos_offsets: the position of the query tokens in the global sequence, only needed for PCP.
     pcp_ring_axis_name: PCP only. When set, the launch streams the striped KV
-      cache around this axis (ring) and runs the causal current phase in the
-      same launch, sharing one online softmax.
+      cache around this axis.
     pcp_ring_mesh_axis_names: all axis names of the mesh the ring runs on, in
       order. Defaults to a one-axis mesh.
     use_causal_mask: if true, use causal mask.
@@ -2617,7 +2588,6 @@ def ragged_paged_attention(
                 k_scale=k_scale,
                 v_scale=v_scale,
                 static_q_len=static_q_len,
-                pcp_chunk_size=pcp_chunk_size,
                 bq_sz=bq_sz,
                 bkv_sz=bkv_sz,
                 bq_csz=bq_csz,
@@ -2686,7 +2656,6 @@ def ragged_paged_attention(
                 max_num_seqs,
                 pages_per_seq,
                 case=case,
-                pcp_chunk_size=pcp_chunk_size,
                 pcp_ring=pcp_ring_axis_name is not None,
                 vmem_limit_bytes=vmem_limit_bytes,
             )
