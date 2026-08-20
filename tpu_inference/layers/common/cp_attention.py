@@ -290,13 +290,6 @@ def pcp_forward(
     padded_q_len = q.shape[0]
     C = padded_q_len // two_p
 
-    # Precompute inv_row on host: maps rank-order chunk index → token order.
-    _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
-    _inv = [0] * two_p
-    for _i, _c in enumerate(_row):
-        _inv[_c] = _i
-    inv_row = jnp.array(_inv, jnp.int32)
-
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
@@ -313,21 +306,15 @@ def pcp_forward(
         axis_idx = lax.axis_index(pcp_axis)
         cp_rank = jnp.reshape(axis_idx, (1, )).astype(jnp.int32)
 
-        def all_gather_tokens(x):
-            return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
-
-        def to_token_order(x):  # rank-order chunks -> global token order
-            return all_gather_tokens(x).reshape(two_p, C,
-                                                *x.shape[1:])[inv_row].reshape(
-                                                    padded_q_len, *x.shape[1:])
-
         # pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
         cu = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1].set(C).at[2:].set(2 *
                                                                             C)
+        # k/v stay LOCAL (this rank's head+tail chunks, same layout as q):
+        # the kernel rotates [cache shard | own new KV] around the ring.
         out, kv_cache_updated, _ = _rpa_cp_call(
             q_local,
-            to_token_order(k_local),
-            to_token_order(v_local),
+            k_local,
+            v_local,
             kv_cache_local,
             kv_lens_local,
             page_indices_local,

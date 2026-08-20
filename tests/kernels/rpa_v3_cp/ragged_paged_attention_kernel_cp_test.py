@@ -32,7 +32,6 @@ from tpu_inference.kernels.ragged_paged_attention.v3.util import (
 jax.config.parse_flags_with_absl()
 
 
-@jtu.with_config(jax_numpy_dtype_promotion="standard")
 def _cp_local_len(n, P, r, page):
     """Tokens of the first n that CP rank r owns under page interleave:
     global page p -> rank p % P, local page p // P."""
@@ -45,6 +44,7 @@ def _cp_global_token(m, P, r, page):
     return (m // page * P + r) * page + m % page
 
 
+@jtu.with_config(jax_numpy_dtype_promotion="standard")
 class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     NUM_PAGES = 512
@@ -577,6 +577,128 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         self.assertGreater(float(np.abs(recon).max()), 0.0)
         self.assertLess(float((recon == 0).mean()), 0.5)
         self.assertArraysEqual(recon, ref)
+
+    # ----------------------- multi-device PCP ring ---------------------------
+    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], P=[2, 4])
+    def test_pcp_ring_matches_reference(self, dtype, P):
+        """Ring launch: every rank passes [its page-interleaved cache shard |
+        its OWN head+tail new KV] and its local Q; the kernel rotates the
+        streams around the pcp axis (no all-gather) and writes the pages it
+        owns of the new KV as they pass.
+
+        Output must equal full-causal attention over the whole sequence and
+        the re-assembled cache must equal merge_kv of the current KV. The
+        cache length is not a multiple of P*PAGE (ranks' shards differ, one
+        has a partial page), the last tail chunk is partially padding, and
+        bkv is small enough that each stream spans several ring blocks.
+        """
+        if jax.device_count() < P:
+            self.skipTest(f"needs >= {P} devices")
+        self.PAGE = 16
+        Lprev, C, nq, nkv, hd = 1000, 64, 8, 2, 128
+        two_p = 2 * P
+        num_current = (two_p - 1) * C + 40  # last tail chunk: 40 real rows
+        S = two_p * C  # padded current length
+        kv_total = Lprev + num_current
+        c = self._cfg(dtype)
+        rng = np.random.default_rng(23)
+        k_prev = self._rand(rng, (Lprev, nkv, hd), dtype)
+        v_prev = self._rand(rng, (Lprev, nkv, hd), dtype)
+        q = self._rand(rng, (num_current, nq, hd), dtype)
+        k = self._rand(rng, (num_current, nkv, hd), dtype)
+        v = self._rand(rng, (num_current, nkv, hd), dtype)
+        kv_merged = np.asarray(merge_kv(k, v))
+
+        # Reference: whole sequence, full causal.
+        ref_pps = cdiv(kv_total, self.PAGE)
+        exp, _ = ref_ragged_paged_attention(
+            q, k, v, self._cache_from_kv(k_prev, v_prev, Lprev, dtype),
+            self._pad1([kv_total]), self._pi(ref_pps),
+            self._padcu([0, num_current]), jnp.array([0, 0, 1], jnp.int32))
+        exp = np.asarray(exp[:num_current], np.float32)
+
+        def pad(x):
+            return jnp.zeros((S, *x.shape[1:]), dtype).at[:num_current].set(x)
+
+        # Rank r's local Q/K/V: head chunk r then tail chunk 2P-1-r.
+        def rank_order(x):
+            x = pad(x).reshape(two_p, C, *x.shape[1:])
+            return jnp.stack(
+                [jnp.concatenate([x[r], x[two_p - 1 - r]]) for r in range(P)])
+
+        q_l, k_l, v_l = rank_order(q), rank_order(k), rank_order(v)
+
+        # Rank r's page-interleaved cache shard: the tokens of global pages
+        # p with p % P == r, at local page p // P.
+        g = np.arange(Lprev)
+        pps = cdiv(cdiv(kv_total, self.PAGE), P)  # local pages per rank
+        cache_l = jnp.stack([
+            self._cache_from_kv(k_prev[g[(g // self.PAGE) % P == r]],
+                                v_prev[g[(g // self.PAGE) % P == r]],
+                                _cp_local_len(Lprev, P, r, self.PAGE), dtype)
+            for r in range(P)
+        ])
+        qpos_l = jnp.stack(
+            [self._pad1([r * C, (two_p - 1 - r) * C]) for r in range(P)])
+        kv_lens = self._pad1([kv_total, kv_total])
+        kv_cache_lens = self._pad1([Lprev, Lprev])
+        cu = self._padcu([0, C, 2 * C])
+        dist = jnp.array([0, 0, 2], jnp.int32)
+        pi = self._pi2(pps)
+        blocks = (128, 64, 128, 64)  # bkv 64 -> several ring blocks
+
+        mesh = Mesh(np.array(jax.devices()[:P]), ("pcp", ))
+        sh = PS("pcp")
+
+        @partial(shard_map,
+                 mesh=mesh,
+                 in_specs=(sh, sh, sh, sh, sh),
+                 out_specs=(sh, sh),
+                 check_rep=False)
+        def ring(q_l, k_l, v_l, c_l, qpos_l):
+            r = jax.lax.axis_index("pcp")
+            o, nc, _ = ragged_paged_attention(q_l[0],
+                                              k_l[0],
+                                              v_l[0],
+                                              c_l[0],
+                                              kv_lens,
+                                              pi,
+                                              cu,
+                                              dist,
+                                              kv_cache_lens=kv_cache_lens,
+                                              cp_rank=jax.lax.reshape(
+                                                  r, (1, )).astype(jnp.int32),
+                                              cp_group_size=P,
+                                              q_pos_offsets=qpos_l[0],
+                                              pcp_ring_axis_name="pcp",
+                                              use_causal_mask=True,
+                                              update_kv_cache=True,
+                                              write_last_seq_only=True,
+                                              return_lse=True,
+                                              m_block_sizes=blocks)
+            return o[None], nc[None]
+
+        out, caches = jax.jit(ring)(q_l, k_l, v_l, cache_l, qpos_l)
+        out = np.asarray(out, np.float32)
+        tol = self._tol(dtype)
+        for r in range(P):
+            for s, chunk in enumerate((r, two_p - 1 - r)):
+                real = int(np.clip(num_current - chunk * C, 0, C))
+                got = out[r, s * C:s * C + real]
+                self.assertTrue(np.all(np.isfinite(got)), (r, chunk))
+                self.assertAllClose(got,
+                                    exp[chunk * C:chunk * C + real],
+                                    atol=tol,
+                                    rtol=tol)
+        # Cache write: every current token landed on the page owner.
+        flat = np.asarray(caches).reshape(P, -1, c["nkv2"] // c["kvp"],
+                                          c["kvp"], c["phd"])
+        for r in range(P):
+            n_local = _cp_local_len(kv_total, P, r, self.PAGE)
+            for m in range(_cp_local_len(Lprev, P, r, self.PAGE), n_local):
+                gtok = _cp_global_token(m, P, r, self.PAGE)
+                slot = (m // self.PAGE) * self.PAGE + m % self.PAGE
+                self.assertArraysEqual(flat[r, slot], kv_merged[gtok - Lprev])
 
 
 if __name__ == "__main__":
