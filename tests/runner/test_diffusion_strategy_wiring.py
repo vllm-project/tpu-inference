@@ -20,6 +20,7 @@ RUNNER = (pathlib.Path(__file__).resolve().parents[2] / "tpu_inference" /
 STRATEGY = (pathlib.Path(__file__).resolve().parents[2] / "tpu_inference" /
             "runner" / "diffusion" / "strategy.py")
 PROGRAM = STRATEGY.parent / "program.py"
+DECODE_LOOP = STRATEGY.parent.parent / "decode_loop.py"
 
 
 def _method(name):
@@ -54,6 +55,15 @@ def _program_function(name):
     module = ast.parse(PROGRAM.read_text())
     return next(node for node in module.body
                 if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def _decorator_keyword(function, name):
+    jit_decorator = next(
+        decorator for decorator in function.decorator_list
+        if isinstance(decorator, ast.Call) and ast.unparse(decorator.func) ==
+        "functools.partial" and ast.unparse(decorator.args[0]) == "jax.jit")
+    return next(keyword.value for keyword in jit_decorator.keywords
+                if keyword.arg == name)
 
 
 def _calls(node, name):
@@ -136,13 +146,30 @@ def test_dual_cache_jit_donates_the_kv_cache_argument():
     positional_args = [argument.arg for argument in function.args.args]
     assert positional_args[9] == "kv_caches"
 
-    jit_decorator = next(
-        decorator for decorator in function.decorator_list
-        if isinstance(decorator, ast.Call) and ast.unparse(decorator.func) ==
-        "functools.partial" and ast.unparse(decorator.args[0]) == "jax.jit")
-    donate_argnums = next(keyword.value for keyword in jit_decorator.keywords
-                          if keyword.arg == "donate_argnums")
+    donate_argnums = _decorator_keyword(function, "donate_argnums")
     assert ast.literal_eval(donate_argnums) == (9, )
+
+
+def test_dual_cache_jit_uses_ar_collective_matmul_compiler_options():
+    function = _program_function("_denoise_block_dual_cache_jit")
+    compiler_options = ast.literal_eval(
+        _decorator_keyword(function, "compiler_options"))
+
+    decode_module = ast.parse(DECODE_LOOP.read_text())
+    decode_core = next(
+        node for node in decode_module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_decode_core")
+    ar_compiler_options = ast.literal_eval(
+        _decorator_keyword(decode_core, "compiler_options"))
+
+    expected_options = {
+        "xla_tpu_all_gather_collective_matmul_mode": "post_spmd_conservative",
+        "xla_tpu_reduce_scatter_collective_matmul_mode":
+        "post_spmd_conservative",
+        "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+    }
+    assert compiler_options == expected_options
+    assert compiler_options == ar_compiler_options
 
 
 def test_runtime_and_precompile_immediately_replace_donated_kv_cache():

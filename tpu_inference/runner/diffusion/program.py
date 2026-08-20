@@ -454,6 +454,14 @@ def denoise_block(
 @functools.partial(
     jax.jit,
     donate_argnums=(9, ),
+    # Model forwards are nested no-options JITs, so TPU compiler options must
+    # live on this top-level denoise-loop JIT.
+    compiler_options={
+        "xla_tpu_all_gather_collective_matmul_mode": "post_spmd_conservative",
+        "xla_tpu_reduce_scatter_collective_matmul_mode":
+        "post_spmd_conservative",
+        "xla_tpu_use_minor_sharding_for_major_trivial_input": "true",
+    },
     static_argnames=(
         "full_forward_fn",
         "partial_forward_fn",
