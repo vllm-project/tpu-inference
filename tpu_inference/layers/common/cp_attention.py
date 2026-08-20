@@ -283,12 +283,6 @@ def pcp_forward(
     use_causal_mask: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward.
-
-    Inside the shard_map body, ONE kernel launch per rank:
-      1. cache phase           in-kernel ring: KV shards rotate around the pcp
-                               axis while each rank attends with its local Q
-      2. current phase         local Q (head+tail) attends all-gathered current KV
-    Both phases share one online softmax, so there is no LSE merge.
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
@@ -327,14 +321,6 @@ def pcp_forward(
                                                 *x.shape[1:])[inv_row].reshape(
                                                     padded_q_len, *x.shape[1:])
 
-        # Ring cache rounds + causal current phase in ONE launch sharing the
-        # online softmax.  Both seqs (head, tail) are forced to a full C so
-        # every rank runs the same ring schedule (lock-step); tail pad rows
-        # compute garbage the caller discards, exactly like the all-pad-tail
-        # case elsewhere.  An empty cache (first chunk of a chunked prefill)
-        # needs no special case: its ring rounds are fully masked.
-        # The all-gathered current KV goes in TOKEN order (ring-sized bkv
-        # blocks may cross the rank-order head/tail chunks).
         # pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
         cu = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1].set(C).at[2:].set(2 *
                                                                             C)

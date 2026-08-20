@@ -33,6 +33,18 @@ jax.config.parse_flags_with_absl()
 
 
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
+def _cp_local_len(n, P, r, page):
+    """Tokens of the first n that CP rank r owns under page interleave:
+    global page p -> rank p % P, local page p // P."""
+    sp = P * page
+    return (n // sp) * page + int(np.clip(n % sp - r * page, 0, page))
+
+
+def _cp_global_token(m, P, r, page):
+    """Global token held at local slot m of CP rank r."""
+    return (m // page * P + r) * page + m % page
+
+
 class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     NUM_PAGES = 512
@@ -221,10 +233,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_strided_cache_write(self, P):
-        """Interleaved (strided) write of the current KV, non-causal.
+        """Page-interleaved write of the current KV, non-causal.
 
-        Each rank writes its 1/P round-robin share (global token g -> rank g%P,
-        local slot g//P); de-strided it must equal ``merge_kv`` of the current.
+        Each rank writes the pages it owns (global page p -> rank p % P, local
+        page p // P); re-assembled it must equal ``merge_kv`` of the current.
         """
         dtype = jnp.float32
         self.PAGE = 16
@@ -254,10 +266,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                                               skip_cache_attn=True,
                                               use_causal_mask=False)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P  # rank r's local slot m holds global token g
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
@@ -296,10 +308,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 skip_cache_attn=True,
                 use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
@@ -346,10 +358,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 skip_cache_attn=True,
                 use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
         self.assertTrue(
@@ -403,10 +415,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 skip_cache_attn=True,
                 use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
@@ -514,8 +526,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_kv_cache_write_matches_merged(self, P):
-        """De-strided PCP cache write == merge_kv(current KV), across P devices
-        (whole-sequence view of test_pcp_strided_cache_write)."""
+        """Re-assembled PCP cache write == merge_kv(current KV), across P
+        devices (whole-sequence view of test_pcp_strided_cache_write)."""
         if jax.device_count() < P:
             self.skipTest(f"needs >= {P} devices")
         dtype = jnp.float32
@@ -558,8 +570,9 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         caches = np.asarray(jax.jit(fn)(k, v))  # [P, npages, page, h1, h2, hd]
         flat = caches.reshape(P, -1, caches.shape[3], caches.shape[4], hd)
         g = np.arange(S)
-        recon = flat[g % P,
-                     g // P]  # DCP-strided: token g -> rank g%P, slot g//P
+        # Page-interleaved: token g -> rank (g//page) % P, local slot
+        # (g//page//P)*page + g%page.
+        recon = flat[(g // page) % P, (g // page // P) * page + g % page]
         self.assertTrue(np.all(np.isfinite(recon)))
         self.assertGreater(float(np.abs(recon).max()), 0.0)
         self.assertLess(float((recon == 0).mean()), 0.5)

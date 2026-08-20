@@ -56,6 +56,13 @@ def _to_rank_order(x, pcp, C):
         x.reshape(2 * pcp, C, *x.shape[1:])[_row_perm(pcp)].reshape(x.shape))
 
 
+def _rank_tokens(ntok, pcp, r):
+    """Global tokens rank r holds, in local-slot order (page-interleaved:
+    global page p -> rank p % pcp, local page p // pcp)."""
+    g = np.arange(ntok)
+    return g[(g // PAGE) % pcp == r]
+
+
 def _pcp_meta(pcp, C, num_current):
     """The per-rank fused current-phase metadata, exactly as _prepare_inputs
     builds it: cu = [0, C, C + tail_real] and q_pos_offsets = [head, tail]."""
@@ -114,13 +121,14 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         return cache.at[:kv.shape[0]].set(kv)
 
     def _strided_cache(self, k, v, ntok, pcp, npages):
-        """The GLOBAL pcp cache. Build each rank's local shard (its g % pcp
-        round-robin share at local slot g // pcp) and concatenate along the
-        page_size dim -- which is exactly how KV_CONTEXT partitions it."""
+        """The GLOBAL pcp cache. Build each rank's local shard (page-
+        interleaved: global page p -> rank p % pcp, local page p // pcp) and
+        concatenate along the page_size dim -- which is exactly how KV_CONTEXT
+        partitions it."""
         dims = self._cache_dims(pcp)
         shards = []
         for r in range(pcp):
-            idx = np.arange(r, ntok, pcp)
+            idx = _rank_tokens(ntok, pcp, r)
             kv = np.asarray(merge_kv(k[idx], v[idx])) if len(idx) else None
             shard = np.full((npages, PAGE, *dims), np.nan, np.float32)
             if kv is not None:
@@ -152,7 +160,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         dims = self._cache_dims(1)
         shards = []
         for r in range(pcp):
-            idx = np.arange(r, ntok, pcp)
+            idx = _rank_tokens(ntok, pcp, r)
             kv = np.asarray(merge_kv(k[idx], v[idx])) if len(idx) else None
             shard = np.full((npages, PAGE, *dims), np.nan, np.float32)
             if kv is not None:
@@ -174,7 +182,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
     def _run(self, pcp, L, num_current, padded_s):
         """Drive the wrapper; return (out_rank_order, kv_cache, exp_token_order).
 
-        L = num_computed (already in the strided cache), num_current = the real
+        L = num_computed (already in the sharded cache), num_current = the real
         current tokens, padded_s = 2*pcp*C (what the token buffers are sized to).
         """
         C = padded_s // (2 * pcp)
@@ -329,9 +337,9 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     @parameterized.product(pcp=[2, 4])
     def test_kv_cache_write(self, pcp):
-        """The current KV must land in the strided cache: global token g at
-        rank g % pcp, local slot g // pcp -- i.e. global column
-        (g % pcp) * PAGE + (g // pcp) % PAGE of page (g // pcp) // PAGE.
+        """The current KV must land in the page-interleaved cache: global
+        token g at rank (g // PAGE) % pcp, local page g // PAGE // pcp,
+        offset g % PAGE -- i.e. global column r * PAGE + g % PAGE of that page.
 
         This is what `write_last_seq_only` + the duplicated page-index row buy;
         a stale page_indices slice would send every write to page 0."""
@@ -348,8 +356,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         _, cache, _, _ = self._run(pcp, L, S, S)
         for i in range(S):
             g = L + i  # global position of current token i
-            r, local = g % pcp, g // pcp
-            page, off = local // PAGE, local % PAGE
+            r = (g // PAGE) % pcp
+            page, off = g // PAGE // pcp, g % PAGE
             got = cache[page, r * PAGE + off]
             self.assertAllClose(got, ref[i], atol=2e-2, rtol=2e-2)
 
