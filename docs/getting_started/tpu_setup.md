@@ -2,13 +2,16 @@
 
 This guide provides information on setting up and provisioning Google Cloud TPUs for use with `tpu-inference`.
 
-## TPU Generations
+## TPU Versions and Topologies
 
-Tensor Processing Units (TPUs) are Google's custom-developed application-specific integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs are available in different versions each with different hardware specifications. For more information about TPUs, see [TPU System Architecture](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm).
+Tensor Processing Units (TPUs) are Google's custom-developed application-specific
+integrated circuits (ASICs) used to accelerate machine learning workloads. TPUs
+are available in different versions each with different hardware specifications.
+For more information about TPUs, see [TPU System Architecture](https://cloud.google.com/tpu/docs/system-architecture-tpu-vm).
 
 The following TPU versions are compatible with `tpu-inference`. Selecting a topology allows you to configure the physical arrangements of the TPU chips, improving throughput and networking performance.
 
-**Recommended**
+### Recommended
 
 <div class="grid cards" markdown>
 
@@ -38,7 +41,7 @@ The following TPU versions are compatible with `tpu-inference`. Selecting a topo
 
 </div>
 
-**Experimental**
+### Experimental
 
 <div class="grid cards" markdown>
 
