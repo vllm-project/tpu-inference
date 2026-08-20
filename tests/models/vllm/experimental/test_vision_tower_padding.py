@@ -148,7 +148,11 @@ def test_get_activation_sharding_divisor():
     mock_mesh.shape = {"data": 1, "pcp": 2, "attn_dp": 4, "model": 1}
     assert wrapper._get_activation_sharding_divisor() == 4  # lcm(1, 2, 4, 1) = 4
 
-    # Case 3: Fallback when mesh is None
+    # Case 3: 2D mesh with string ShardingAxisName.ATTN_DATA ('data': 4, 'model': 2)
+    mock_mesh.shape = {"data": 4, "model": 2}
+    assert wrapper._get_activation_sharding_divisor() == 4  # lcm(4, 2) = 4
+
+    # Case 4: Fallback when mesh is None
     wrapper.mesh = None
     wrapper.vllm_config.parallel_config.tensor_parallel_size = 8
     assert wrapper._get_activation_sharding_divisor() == 8
