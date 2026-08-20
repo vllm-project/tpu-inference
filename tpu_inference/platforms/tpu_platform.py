@@ -448,11 +448,12 @@ class TpuPlatform(Platform):
                     )
                 total_dp_size = getattr(vllm_config.sharding_config,
                                         "total_dp_size", 1)
-                if (requested_data_parallel_size > 1 or
+                if ((requested_data_parallel_size > 1
+                     and not envs.TPU_MULTIPROCESS_DP) or
                     (isinstance(total_dp_size, int) and total_dp_size > 1)):
                     raise ValueError(
-                        "block_diffusion currently requires data_parallel_size=1"
-                    )
+                        "block_diffusion currently requires "
+                        "data_parallel_size=1 within each process")
                 if getattr(scheduler_config, "enable_chunked_prefill", False):
                     raise ValueError(
                         "block_diffusion currently requires chunked prefill "

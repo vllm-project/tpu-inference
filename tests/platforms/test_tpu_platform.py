@@ -679,6 +679,25 @@ class TestTpuPlatform:
     @patch(
         "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
     )
+    def test_check_and_update_config_block_diffusion_allows_multiprocess_dp(
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config,
+            monkeypatch):
+        self._enable_block_diffusion(vllm_config)
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        vllm_config.parallel_config.data_parallel_size = 4
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        mock_patch.assert_called_once()
+
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
+    )
     def test_check_and_update_config_enables_diffusion_cohort_scheduler(
             self, mock_patch, mock_dp_update, mock_sharding, vllm_config):
         original_scheduler_cls = object()
@@ -720,6 +739,7 @@ class TestTpuPlatform:
         mock_dp_update,
         mock_sharding,
         vllm_config,
+        monkeypatch,
         unsupported,
         expected_error,
     ):
@@ -729,6 +749,7 @@ class TestTpuPlatform:
             vllm_config.kv_transfer_config = SimpleNamespace(
                 kv_connector="TPUConnector")
         elif unsupported == "requested_dp":
+            monkeypatch.setenv("TPU_MULTIPROCESS_DP", "0")
             vllm_config.parallel_config.data_parallel_size = 2
         elif unsupported == "sharding_dp":
             mock_sharding.from_vllm_config.return_value.total_dp_size = 2
