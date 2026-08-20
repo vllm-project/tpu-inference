@@ -144,6 +144,9 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         """
         Verify update_kv_caches function.
         """
+        if jax.default_backend() != "tpu":
+            self.skipTest("Pallas TPU kernel needs TPU hardware")
+
         num_blocks_to_update = 2
         update_indices = [1, 3]
 
@@ -309,6 +312,9 @@ class TestTPUOffloadUtilsFn(unittest.TestCase):
         """
         Verify update_kv_caches function with hybrid shapes.
         """
+        if jax.default_backend() != "tpu":
+            self.skipTest("Pallas TPU kernel needs TPU hardware")
+
         num_blocks_to_update = 2
         update_indices = [1, 3]
 
