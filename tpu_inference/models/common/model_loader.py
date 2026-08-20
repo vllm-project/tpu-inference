@@ -649,6 +649,8 @@ def get_model(
     is_draft_model: bool = False,
     shared_params: Optional[dict[str, jax.Array]] = None,
 ) -> ModelInterface:
+    # Warning: Please DO NOT remove the below logging line.
+    # If you are making changes, inform/reach out to https://github.com/sethiay.
     logger.info(
         "Loading model with MODEL_IMPL_TYPE=%s",
         envs.DRAFT_MODEL_IMPL_TYPE if is_draft_model else envs.MODEL_IMPL_TYPE)
