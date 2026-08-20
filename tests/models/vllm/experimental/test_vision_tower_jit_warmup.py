@@ -147,6 +147,13 @@ def test_env_var_overrides():
 
         precompile_fn(mock_run_compilation)
 
-        # Only video frames 2 and 8 should be present
-        for name, kwargs in compilation_calls:
-            assert "video_grid_thw" in kwargs
+        # Verify image calls respect VISION_MIN_SHIFT=5 (first bucket 1<<5 = 32 patches)
+        image_calls = [c for c in compilation_calls if "image_grid_thw" in c[1]]
+        assert len(image_calls) > 0
+        assert image_calls[0][1]["pixel_values"].shape[0] >= 32
+
+        # Verify video calls respect VISION_PRECOMPILE_FRAMES="2,8"
+        video_calls = [c for c in compilation_calls if "video_grid_thw" in c[1]]
+        assert len(video_calls) == 2
+        video_frames = [c[1]["video_grid_thw"][0][0] for c in video_calls]
+        assert video_frames == [2, 8]
