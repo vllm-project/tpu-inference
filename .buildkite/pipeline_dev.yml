@@ -23,7 +23,7 @@ steps:
       queue: tpu_v7x_2_queue
       hostname: tpu7x-2-ci-11-cicd-us-central1-c
     commands:
-      - bash -c 'echo "hook_digest=$(printf %s "${HF_TOKEN:-}" | sha256sum | cut -c1-12)"; source /etc/environment; echo "etc_environment_digest=$(printf %s "${HF_TOKEN:-}" | sha256sum | cut -c1-12) hf_lines=$(grep -c "^HF_TOKEN=" /etc/environment)"; echo "gated_http=$(curl -s -o /dev/null -w "%{http_code}" -L -I -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct/resolve/main/config.json)"'
+      - bash .buildkite/scripts/hf_token_check.sh
 
   - label: "hf-token in-job check tpu7x-8-ci-17"
     key: hf_check_v7x8_17
@@ -31,7 +31,7 @@ steps:
       queue: tpu_v7x_8_queue
       hostname: tpu7x-8-ci-17-cicd-us-central1-c
     commands:
-      - bash -c 'echo "hook_digest=$(printf %s "${HF_TOKEN:-}" | sha256sum | cut -c1-12)"; source /etc/environment; echo "etc_environment_digest=$(printf %s "${HF_TOKEN:-}" | sha256sum | cut -c1-12) hf_lines=$(grep -c "^HF_TOKEN=" /etc/environment)"; echo "gated_http=$(curl -s -o /dev/null -w "%{http_code}" -L -I -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct/resolve/main/config.json)"'
+      - bash .buildkite/scripts/hf_token_check.sh
 
   - label: ":docker: Build and Push Base Image (tpu7x)"
     key: tpu7x_build_docker
