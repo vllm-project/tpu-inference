@@ -535,6 +535,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "scoring_fn",
     "all_gather_fp8",
     "enable_rs_kernel",
+    "use_gmm_fused_rs_kernel",
     "onehot_moe_permute_threshold",
     "scatter_results",
     "moe_chunk_size",
@@ -557,6 +558,7 @@ def fused_moe_func(
     scoring_fn: str,
     all_gather_fp8: bool = False,
     enable_rs_kernel: bool = False,
+    use_gmm_fused_rs_kernel: bool = False,
     onehot_moe_permute_threshold: int = 0,
     scatter_results: bool = False,
     defer_all_reduce: bool = False,
@@ -583,10 +585,31 @@ def fused_moe_func(
         activation: activation function to perform on the output of w1.
         scoring_fn: scoring function to apply on gating_output.
         enable_rs_kernel: enable custom Hierarchical Reduce-Scatter kernel.
+        use_gmm_fused_rs_kernel: enable fused GMM reduce-scatter kernel.
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
     """
+
+    if use_ep and use_gmm_fused_rs_kernel:
+        from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
+            fused_moe_func_rs
+        logger.info("fused_moe_rs kernel in use")
+        return fused_moe_func_rs(hidden_states=hidden_states,
+                                 w1=w1,
+                                 w2=w2,
+                                 w1_scale=w1_scale,
+                                 w2_scale=w2_scale,
+                                 w1_bias=w1_bias,
+                                 w2_bias=w2_bias,
+                                 gating_output=gating_output,
+                                 topk=topk,
+                                 renormalize=renormalize,
+                                 mesh=mesh,
+                                 activation=activation,
+                                 scoring_fn=scoring_fn,
+                                 fp8_post_gather=all_gather_fp8)
+
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
