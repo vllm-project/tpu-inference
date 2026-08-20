@@ -34,6 +34,8 @@ from tpu_inference.models.vllm.experimental.qwen3_omni_patcher import \
     maybe_apply_qwen3_omni_patches
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import \
     maybe_apply_qwen3_vl_patches
+from tpu_inference.models.vllm.experimental.gemma4_patcher import \
+    maybe_apply_gemma4_patches
 
 if TYPE_CHECKING:
     from tpu_inference.models.vllm.vllm_model_wrapper import _VllmRunner
@@ -212,3 +214,4 @@ def apply_model_specific_patches(vllm_model) -> None:
     """
     maybe_apply_qwen3_vl_patches(vllm_model)
     maybe_apply_qwen3_omni_patches(vllm_model)
+    maybe_apply_gemma4_patches(vllm_model)
