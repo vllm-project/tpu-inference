@@ -452,6 +452,18 @@ class TestTpuPlatform:
             with pytest.raises(ValueError, match=expected_msg):
                 TpuPlatform.check_and_update_config(vllm_config)
 
+            # NEW_MODEL_DESIGN is required even with an explicit dp-attention
+            # opt-out.
+            vllm_config.additional_config = {
+                "sharding": {
+                    "sharding_strategy": {
+                        "enable_dp_attention": False
+                    }
+                }
+            }
+            with pytest.raises(ValueError, match=expected_msg):
+                TpuPlatform.check_and_update_config(vllm_config)
+
         # Next, test set NEW_MODEL_DESIGN and unset additional_config to ensure it is required
         with patch("tpu_inference.envs.NEW_MODEL_DESIGN", True):
             vllm_config.additional_config = {}
@@ -463,17 +475,6 @@ class TestTpuPlatform:
                 "sharding": {
                     "sharding_strategy": {
                         "debug_key": True
-                    }
-                }
-            }
-            with pytest.raises(ValueError, match=expected_msg):
-                TpuPlatform.check_and_update_config(vllm_config)
-
-            # Test where `enable_dp_attention` exists but is explicitly set to False
-            vllm_config.additional_config = {
-                "sharding": {
-                    "sharding_strategy": {
-                        "enable_dp_attention": False
                     }
                 }
             }
@@ -500,6 +501,38 @@ class TestTpuPlatform:
                             pytest.fail(
                                 f"MLA check failed even when config was correct: {e}"
                             )
+
+    def test_check_and_update_config_mla_explicit_dp_attention_opt_out(self):
+        # An EXPLICIT `enable_dp_attention: False` (key present) is honored as
+        # a user opt-out: no raise, and a self-contained warning is logged.
+        vllm_config = MagicMock()
+        vllm_config.model_config.use_mla = True
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.additional_config = {
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": False
+                }
+            }
+        }
+
+        with patch("tpu_inference.envs.NEW_MODEL_DESIGN", True), \
+             patch.object(TpuPlatform, "_initialize_sharding_config"), \
+             patch("vllm.config.CompilationMode"), \
+             patch("tpu_inference.platforms.tpu_platform.logger") as mock_logger:
+            try:
+                TpuPlatform.check_and_update_config(vllm_config)
+            except Exception as e:
+                if isinstance(e,
+                              ValueError) and "MLA models require" in str(e):
+                    pytest.fail(
+                        f"MLA check raised despite explicit dp-attention opt-out: {e}"
+                    )
+            assert any(
+                "WITHOUT DP attention" in str(call.args[0])
+                for call in mock_logger.warning.call_args_list), (
+                    "expected a warning stating MLA is served without DP "
+                    "attention at the user's explicit request")
 
     def test_check_and_update_config_mla_disabled_via_env(self, vllm_config):
         vllm_config.additional_config = {}
