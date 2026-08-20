@@ -15,6 +15,12 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.JAX_PLATFORMS == "tpu"
     assert envs.PHASED_PROFILING_DIR == "/tmp/profiling"
 
+    # Unset rather than assumed unset: on GKE the TPU device plugin injects
+    # TPU_ACCELERATOR_TYPE, TPU_WORKER_ID and friends into every TPU pod, so
+    # these are already populated there. libtpu needs them, so the environment
+    # is right and the assumption was wrong.
+    monkeypatch.delenv("TPU_NAME", raising=False)
+    monkeypatch.delenv("TPU_ACCELERATOR_TYPE", raising=False)
     assert envs.TPU_NAME is None
     assert envs.TPU_ACCELERATOR_TYPE is None
     monkeypatch.setenv("TPU_NAME", "my-tpu")
