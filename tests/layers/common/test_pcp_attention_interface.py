@@ -318,9 +318,9 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     @parameterized.product(pcp=[2, 4])
     def test_first_chunk_no_cache(self, pcp):
-        """num_computed == 0: the cache phase has nothing to attend, so every
-        cache-term LSE is -inf and the combine must fall back cleanly to the
-        current term (no NaNs)."""
+        """num_computed == 0: the ring rounds have nothing to attend (every
+        shard length is 0) and must fold into the current term cleanly (no
+        NaNs)."""
         if jax.device_count() < pcp:
             self.skipTest(f"needs >= {pcp} devices")
         S = 128
@@ -454,8 +454,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     @parameterized.parameters(2, 4)
     def test_first_chunk_skips_cache_phase(self, pcp):
-        """cache_pages=0 elides the cache phase; with no cached tokens the
-        result must still match plain attention over the current chunk."""
+        """cache_pages=0 (first chunk): with no cached tokens the fused ring
+        launch must still match plain attention over the current chunk."""
         if jax.device_count() < pcp:
             self.skipTest(f"needs {pcp} devices")
         rng = np.random.default_rng(1)
