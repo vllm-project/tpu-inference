@@ -703,6 +703,8 @@ class TestTpuPlatform:
         original_scheduler_cls = object()
         self._enable_block_diffusion(vllm_config)
         vllm_config.additional_config["diffusion"]["cohort_max_wait_ms"] = 5.0
+        vllm_config.additional_config["diffusion"][
+            "cohort_strict_waves"] = True
         vllm_config.scheduler_config.scheduler_cls = original_scheduler_cls
         scheduler_classes_seen_by_dp_update = []
         mock_dp_update.side_effect = lambda config: (

@@ -103,6 +103,7 @@ class DiffusionRuntimeConfig:
     trim_final_block_candidates: bool = False
     cohort_max_wait_ms: float = 0.0
     cohort_quiet_wait_ms: float = 0.0
+    cohort_strict_waves: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence_threshold <= 1.0:
@@ -151,6 +152,9 @@ class DiffusionRuntimeConfig:
                 "cohort_max_wait_ms")
         if self.cohort_quiet_wait_ms > self.cohort_max_wait_ms:
             raise ValueError("Diffusion cohort_quiet_wait_ms must not exceed "
+                             "cohort_max_wait_ms")
+        if self.cohort_strict_waves and self.cohort_max_wait_ms <= 0.0:
+            raise ValueError("Diffusion cohort_strict_waves requires positive "
                              "cohort_max_wait_ms")
 
 
@@ -315,6 +319,8 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
             diffusion_values.get("cohort_max_wait_ms", 0.0)),
         cohort_quiet_wait_ms=float(
             diffusion_values.get("cohort_quiet_wait_ms", 0.0)),
+        cohort_strict_waves=bool(
+            diffusion_values.get("cohort_strict_waves", False)),
     )
     return GenerationStrategyConfig(
         strategy=strategy,

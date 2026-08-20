@@ -32,8 +32,9 @@ def _load_scheduler_with_fake_vllm(monkeypatch):
 
     class Request:
 
-        def __init__(self, request_id):
+        def __init__(self, request_id, client_index=0):
             self.request_id = request_id
+            self.client_index = client_index
 
     class RequestStatus:
         pass
@@ -78,15 +79,25 @@ def _load_scheduler_with_fake_vllm(monkeypatch):
 
         def finish_requests(self, request_ids, finished_status):
             self.finished.append((list(request_ids), finished_status))
+            finished_requests = []
+            for request_id in request_ids:
+                request = self.requests.get(request_id)
+                if request is not None:
+                    finished_requests.append(
+                        (request.request_id, request.client_index))
             self.base_unfinished.difference_update(request_ids)
             for request_id in request_ids:
                 self.requests.pop(request_id, None)
+            return finished_requests
 
         def get_num_unfinished_requests(self):
             return len(self.base_unfinished)
 
+        def get_request_counts(self):
+            return len(self.base_unfinished), 0
+
         def has_unfinished_requests(self):
-            return bool(self.base_unfinished)
+            return self.get_num_unfinished_requests() > 0
 
     class Placeholder:
         pass
@@ -96,9 +107,12 @@ def _load_scheduler_with_fake_vllm(monkeypatch):
             "cohort_max_wait_ms"]
         quiet_wait_ms = vllm_config.additional_config["diffusion"].get(
             "cohort_quiet_wait_ms", 0.0)
+        strict_waves = vllm_config.additional_config["diffusion"].get(
+            "cohort_strict_waves", False)
         return SimpleNamespace(diffusion=SimpleNamespace(
             runtime=SimpleNamespace(cohort_max_wait_ms=max_wait_ms,
-                                    cohort_quiet_wait_ms=quiet_wait_ms)))
+                                    cohort_quiet_wait_ms=quiet_wait_ms,
+                                    cohort_strict_waves=strict_waves)))
 
     modules = {
         "vllm":
@@ -156,12 +170,16 @@ def _load_scheduler_with_fake_vllm(monkeypatch):
     return module, Request, RequestStatus
 
 
-def _vllm_config(max_num_seqs=2, max_wait_ms=10.0, quiet_wait_ms=0.0):
+def _vllm_config(max_num_seqs=2,
+                 max_wait_ms=10.0,
+                 quiet_wait_ms=0.0,
+                 strict_waves=False):
     return SimpleNamespace(
         additional_config={
             "diffusion": {
                 "cohort_max_wait_ms": max_wait_ms,
                 "cohort_quiet_wait_ms": quiet_wait_ms,
+                "cohort_strict_waves": strict_waves,
             },
         },
         scheduler_config=SimpleNamespace(max_num_seqs=max_num_seqs),
@@ -258,6 +276,126 @@ def test_scheduler_keeps_running_work_moving_before_cohort_is_ready(
     assert scheduler.admitted == ["new"]
 
 
+def test_strict_waves_keep_running_work_moving_without_admitting_full_cohort(
+        monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    scheduler = _scheduler(module, _vllm_config(strict_waves=True))
+    scheduler.base_unfinished.add("running")
+    scheduler.add_request(Request("first"))
+    scheduler.add_request(Request("second"))
+
+    assert scheduler.schedule("step") == (("step", ), {})
+    assert scheduler.schedule_calls == 1
+    assert scheduler.admitted == []
+    assert scheduler.get_num_unfinished_requests() == 3
+    assert scheduler.get_request_counts() == (1, 2)
+
+
+def test_strict_waves_admit_first_ready_wave_when_held_requests_are_unfinished(
+        monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    scheduler = _scheduler(module, _vllm_config(strict_waves=True))
+    scheduler.add_request(Request("first"))
+    scheduler.add_request(Request("second"))
+
+    assert scheduler.has_unfinished_requests()
+    assert scheduler.get_num_unfinished_requests() == 2
+
+    scheduler.schedule()
+
+    assert scheduler.admitted == ["first", "second"]
+
+
+def test_strict_waves_accumulate_continuous_arrivals_for_next_full_wave(
+        monkeypatch):
+    module, Request, RequestStatus = _load_scheduler_with_fake_vllm(
+        monkeypatch)
+    scheduler = _scheduler(module,
+                           _vllm_config(max_num_seqs=3, strict_waves=True))
+    scheduler.base_unfinished.add("running")
+
+    for request_id in ("first", "second", "third"):
+        scheduler.add_request(Request(request_id))
+        scheduler.schedule()
+        assert scheduler.admitted == []
+
+    scheduler.finish_requests("running", RequestStatus)
+    scheduler.schedule()
+
+    assert scheduler.admitted == ["first", "second", "third"]
+
+
+def test_strict_waves_pass_continuation_for_admitted_request_to_base(
+        monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    scheduler = _scheduler(module, _vllm_config(strict_waves=True))
+    scheduler.add_request(Request("streaming"))
+    scheduler.add_request(Request("peer"))
+    scheduler.schedule()
+
+    scheduler.add_request(Request("streaming"))
+
+    assert scheduler.admitted == ["streaming", "peer", "streaming"]
+    assert scheduler._cohort_request_ids == set()
+    assert scheduler.get_num_unfinished_requests() == 2
+
+
+def test_strict_waves_release_timed_out_cohort_only_after_base_is_idle(
+        monkeypatch):
+    module, Request, RequestStatus = _load_scheduler_with_fake_vllm(
+        monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=4, max_wait_ms=10.0, strict_waves=True))
+    scheduler.base_unfinished.add("running")
+    scheduler.add_request(Request("timed-out"))
+
+    clock.now = 0.01
+    scheduler.schedule()
+    assert scheduler.admitted == []
+
+    scheduler.finish_requests("running", RequestStatus)
+    scheduler.schedule()
+    assert scheduler.admitted == ["timed-out"]
+
+
+def test_strict_waves_cancel_held_request_without_blocking_remaining_timeout(
+        monkeypatch):
+    module, Request, RequestStatus = _load_scheduler_with_fake_vllm(
+        monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=2, max_wait_ms=10.0, strict_waves=True))
+    scheduler.base_unfinished.add("running")
+    scheduler.add_request(Request("remaining"))
+    scheduler.add_request(Request("cancelled"))
+
+    scheduler.finish_requests("cancelled", RequestStatus)
+    clock.now = 0.01
+    scheduler.finish_requests("running", RequestStatus)
+    scheduler.schedule()
+
+    assert scheduler.admitted == ["remaining"]
+    assert scheduler.finished == [(["running"], RequestStatus)]
+
+
+def test_default_cohort_mode_admits_full_cohort_while_base_is_running(
+        monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    scheduler = _scheduler(module, _vllm_config(strict_waves=False))
+    scheduler.base_unfinished.add("running")
+    scheduler.add_request(Request("first"))
+    scheduler.add_request(Request("second"))
+
+    scheduler.schedule()
+
+    assert scheduler.admitted == ["first", "second"]
+
+
 def test_scheduler_uses_quiet_period_for_burst_admission(monkeypatch):
     module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
     clock = _Clock()
@@ -302,11 +440,12 @@ def test_scheduler_cancel_all_removes_held_and_admitted_requests(monkeypatch):
         monkeypatch)
     scheduler = _scheduler(module, _vllm_config())
     scheduler.base_unfinished.add("running")
-    scheduler.requests["running"] = Request("running")
-    scheduler.add_request(Request("held"))
+    scheduler.requests["running"] = Request("running", client_index=1)
+    scheduler.add_request(Request("held", client_index=2))
 
-    scheduler.finish_requests(None, RequestStatus)
+    finished_requests = scheduler.finish_requests(None, RequestStatus)
 
+    assert finished_requests == [("held", 2), ("running", 1)]
     assert scheduler.finished == [(["running"], RequestStatus)]
     assert scheduler.get_num_unfinished_requests() == 0
     assert not scheduler.has_unfinished_requests()

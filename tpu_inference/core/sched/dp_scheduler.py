@@ -269,9 +269,7 @@ def _scheduler_worker_process(
                     _send_result(result)
 
                 case SchedulerCommand.GET_REQUEST_COUNTS:
-                    running = len(scheduler.running)
-                    waiting = len(scheduler.waiting)
-                    _send_result((running, waiting))
+                    _send_result(scheduler.get_request_counts())
 
                 case SchedulerCommand.GET_TOKEN_COUNT:
                     # Calculate total tokens across running and waiting requests

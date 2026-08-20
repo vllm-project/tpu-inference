@@ -131,6 +131,8 @@ class BlockDiffusionCohortScheduler(Scheduler):
         max_wait_ms = generation_strategy.diffusion.runtime.cohort_max_wait_ms
         quiet_wait_ms = (
             generation_strategy.diffusion.runtime.cohort_quiet_wait_ms)
+        self._strict_waves = (
+            generation_strategy.diffusion.runtime.cohort_strict_waves)
         if max_wait_ms <= 0.0:
             raise ValueError(
                 "BlockDiffusionCohortScheduler requires positive cohort_max_wait_ms"
@@ -143,6 +145,9 @@ class BlockDiffusionCohortScheduler(Scheduler):
         self._cohort_request_ids: set[str] = set()
 
     def add_request(self, request: Request) -> None:
+        if request.request_id in self.requests:
+            super().add_request(request)
+            return
         if request.request_id in self._cohort_request_ids:
             raise ValueError(
                 f"Request {request.request_id!r} is already awaiting admission"
@@ -151,16 +156,18 @@ class BlockDiffusionCohortScheduler(Scheduler):
         self._cohort_request_ids.add(request.request_id)
 
     def schedule(self, *args: Any, **kwargs: Any) -> SchedulerOutput:
-        for request in self._cohort.drain_ready():
-            self._cohort_request_ids.remove(request.request_id)
-            super().add_request(request)
+        base_is_idle = super().get_num_unfinished_requests() == 0
+        if not self._strict_waves or base_is_idle:
+            for request in self._cohort.drain_ready():
+                self._cohort_request_ids.remove(request.request_id)
+                super().add_request(request)
         return super().schedule(*args, **kwargs)
 
     def finish_requests(
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: RequestStatus,
-    ) -> None:
+    ) -> list[tuple[str, int]]:
         if request_ids is None:
             normalized_ids = list(self._cohort_request_ids)
             normalized_ids.extend(self.requests)
@@ -172,15 +179,23 @@ class BlockDiffusionCohortScheduler(Scheduler):
             lambda request: request.request_id in request_id_set)
         discarded_ids = {request.request_id for request in discarded}
         self._cohort_request_ids.difference_update(discarded_ids)
+        finished_requests = [(request.request_id, request.client_index)
+                             for request in discarded]
         admitted_ids = [
             request_id for request_id in normalized_ids
             if request_id not in discarded_ids
         ]
         if admitted_ids:
-            super().finish_requests(admitted_ids, finished_status)
+            finished_requests.extend(super().finish_requests(
+                admitted_ids, finished_status))
+        return finished_requests
 
     def get_num_unfinished_requests(self) -> int:
         return super().get_num_unfinished_requests() + len(self._cohort)
+
+    def get_request_counts(self) -> tuple[int, int]:
+        running, waiting = super().get_request_counts()
+        return running, waiting + len(self._cohort)
 
     def has_unfinished_requests(self) -> bool:
         return bool(self._cohort) or super().has_unfinished_requests()
