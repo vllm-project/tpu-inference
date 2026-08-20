@@ -20,6 +20,7 @@ import multiprocessing.reduction
 import os
 import signal
 from collections import defaultdict, deque
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from multiprocessing import Process
@@ -42,7 +43,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, ModelRunnerOutput,
                              RoutedExpertsLists)
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -203,8 +204,9 @@ def _scheduler_worker_process(
 
                 case SchedulerCommand.FINISH_REQUESTS:
                     request_ids, finished_status = data
-                    scheduler.finish_requests(request_ids, finished_status)
-                    _send_result(None)  # Signal completion
+                    result = scheduler.finish_requests(request_ids,
+                                                       finished_status)
+                    _send_result(result)
 
                 case SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
                     draft_token_ids = data
@@ -1319,26 +1321,45 @@ class DPScheduler(SchedulerInterface):
         for req_id in finished_req_ids:
             self.assigned_dp_rank.pop(req_id, None)
 
-    def finish_requests(self, request_ids, finished_status) -> None:
+    def finish_requests(
+        self,
+        request_ids: str | Iterable[str] | None,
+        finished_status: RequestStatus,
+    ) -> list[tuple[str, int]]:
         """Forward request finish signals to the appropriate DP rank schedulers."""
         if isinstance(request_ids, str):
-            request_ids = [request_ids]
+            requested_ids = [request_ids]
         elif request_ids is None:
-            request_ids = list(self.assigned_dp_rank.keys()) + [
+            requested_ids = list(self.assigned_dp_rank.keys()) + [
                 r.request_id for r in self._pending_new_requests
             ]
+        else:
+            requested_ids = list(request_ids)
+
+        normalized_ids = []
+        seen_ids = set()
+        for request_id in requested_ids:
+            if request_id not in seen_ids:
+                normalized_ids.append(request_id)
+                seen_ids.add(request_id)
 
         # If any request is still held in the pending queue, drop it.
+        finished_by_id = {}
         if self._pending_new_requests:
-            request_id_set = set(request_ids)
-            self._pending_new_requests = [
-                r for r in self._pending_new_requests
-                if r.request_id not in request_id_set
-            ]
+            remaining_requests = []
+            for request in self._pending_new_requests:
+                if request.request_id in seen_ids:
+                    finished_by_id.setdefault(
+                        request.request_id,
+                        (request.request_id, request.client_index),
+                    )
+                else:
+                    remaining_requests.append(request)
+            self._pending_new_requests = remaining_requests
 
         # Route finish signals to appropriate schedulers
         rank_request_ids = defaultdict(list)
-        for req_id in request_ids:
+        for req_id in normalized_ids:
             if req_id not in self.assigned_dp_rank:
                 continue
             rank = self.assigned_dp_rank[req_id]
@@ -1348,7 +1369,18 @@ class DPScheduler(SchedulerInterface):
         for rank, req_ids in rank_request_ids.items():
             self._send_command(rank, SchedulerCommand.FINISH_REQUESTS,
                                (req_ids, finished_status))
-            self._get_result(rank, SchedulerCommand.FINISH_REQUESTS)
+        for rank in rank_request_ids:
+            finished_requests = self._get_result(
+                rank, SchedulerCommand.FINISH_REQUESTS)
+            for req_id, client_index in finished_requests:
+                if req_id in seen_ids:
+                    finished_by_id.setdefault(req_id, (req_id, client_index))
+
+        self._cleanup_finished_requests(set(finished_by_id))
+        return [
+            finished_by_id[req_id] for req_id in normalized_ids
+            if req_id in finished_by_id
+        ]
 
     def get_num_unfinished_requests(self) -> int:
         """Get total number of unfinished requests across all DP ranks.
