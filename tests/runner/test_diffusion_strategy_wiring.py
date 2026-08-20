@@ -19,6 +19,7 @@ RUNNER = (pathlib.Path(__file__).resolve().parents[2] / "tpu_inference" /
           "runner" / "tpu_runner.py")
 STRATEGY = (pathlib.Path(__file__).resolve().parents[2] / "tpu_inference" /
             "runner" / "diffusion" / "strategy.py")
+PROGRAM = STRATEGY.parent / "program.py"
 
 
 def _method(name):
@@ -47,6 +48,35 @@ def _module_function(name):
     module = ast.parse(STRATEGY.read_text())
     return next(node for node in module.body
                 if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def _program_function(name):
+    module = ast.parse(PROGRAM.read_text())
+    return next(node for node in module.body
+                if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def _calls(node, name):
+    return any(
+        isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+        and child.func.id == name for child in ast.walk(node))
+
+
+def _assert_donated_cache_is_immediately_replaced(method):
+    for node in ast.walk(method):
+        for _, value in ast.iter_fields(node):
+            if not isinstance(value, list):
+                continue
+            for index, statement in enumerate(value[:-1]):
+                if not isinstance(statement, ast.If) or not _calls(
+                        statement, "denoise_block_dual_cache"):
+                    continue
+                assert _calls(statement.body[-1], "denoise_block_dual_cache")
+                replacement = value[index + 1]
+                assert ast.unparse(
+                    replacement) == "self.runner.kv_caches = output.kv_caches"
+                return
+    raise AssertionError("dual-cache branch not found")
 
 
 def test_runner_resolves_generation_strategy_once_at_startup():
@@ -99,6 +129,27 @@ def test_dual_cache_has_distinct_full_partial_and_final_forwards():
     assert "dynamic_slice" in partial_source
     assert "sub_block_size" in partial_source
     assert "[:, -1, :]" in final_source
+
+
+def test_dual_cache_jit_donates_the_kv_cache_argument():
+    function = _program_function("_denoise_block_dual_cache_jit")
+    positional_args = [argument.arg for argument in function.args.args]
+    assert positional_args[9] == "kv_caches"
+
+    jit_decorator = next(
+        decorator for decorator in function.decorator_list
+        if isinstance(decorator, ast.Call) and ast.unparse(decorator.func) ==
+        "functools.partial" and ast.unparse(decorator.args[0]) == "jax.jit")
+    donate_argnums = next(keyword.value for keyword in jit_decorator.keywords
+                          if keyword.arg == "donate_argnums")
+    assert ast.literal_eval(donate_argnums) == (9, )
+
+
+def test_runtime_and_precompile_immediately_replace_donated_kv_cache():
+    _assert_donated_cache_is_immediately_replaced(
+        _strategy_method("_denoise_blocks"))
+    _assert_donated_cache_is_immediately_replaced(
+        _strategy_method("precompile"))
 
 
 def test_dual_cache_trace_separates_padding_and_straggler_waste():

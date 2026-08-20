@@ -777,6 +777,55 @@ def test_dual_cache_acceptance_trace_is_opt_in_and_semantics_preserving():
     assert np.all(trace.row0_threshold_margin[:count] < 0.0)
 
 
+def test_dual_cache_donates_kv_cache_buffer():
+    mask_token_id = 3
+    sub_block_size = 2
+
+    def full_forward(model_state, canvas, positions, kv_caches, active_rows,
+                     forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[0].add(1)
+
+    def partial_forward(model_state, canvas, positions, kv_caches, active_rows,
+                        forward_context, start):
+        del model_state, positions, active_rows, forward_context, start
+        logits = jnp.zeros((canvas.shape[0], sub_block_size, 4),
+                           dtype=jnp.float32)
+        return logits, kv_caches.at[1].add(1)
+
+    def final_forward(model_state, canvas, positions, kv_caches, active_rows,
+                      forward_context):
+        del model_state, canvas, positions, active_rows, forward_context
+        return jnp.zeros((1, 4), dtype=jnp.float32), kv_caches.at[2].add(1)
+
+    kv_caches = jnp.zeros((3, ), dtype=jnp.int32)
+    output = denoise_block_dual_cache(
+        full_forward,
+        partial_forward,
+        final_forward,
+        low_confidence_commit,
+        None,
+        jnp.array([[0, mask_token_id]], dtype=jnp.int32),
+        jnp.array([[False, True]]),
+        jnp.arange(2, dtype=jnp.int32)[None, :],
+        kv_caches,
+        jnp.array([True]),
+        _thresholds(1, value=1.0),
+        _temperatures(1),
+        None,
+        logit_alignment=LogitAlignment.SHIFTED,
+        next_block_policy=NextBlockPolicy.LAST_LOGIT_ANCHOR,
+        mask_token_id=mask_token_id,
+        sub_block_size=sub_block_size,
+    )
+    output.kv_caches.block_until_ready()
+
+    assert kv_caches.is_deleted()
+    np.testing.assert_array_equal(output.kv_caches, [1, 0, 1])
+
+
 def test_dual_cache_acceptance_trace_requires_diagnostics_function():
     with pytest.raises(ValueError, match="requires commit_diagnostics_fn"):
         denoise_block_dual_cache(

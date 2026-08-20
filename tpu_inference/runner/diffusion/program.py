@@ -453,6 +453,7 @@ def denoise_block(
 
 @functools.partial(
     jax.jit,
+    donate_argnums=(9, ),
     static_argnames=(
         "full_forward_fn",
         "partial_forward_fn",
