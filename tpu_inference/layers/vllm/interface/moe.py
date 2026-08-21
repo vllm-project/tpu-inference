@@ -31,7 +31,7 @@ from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend, moe_apply
 from tpu_inference.layers.common.process_weights.moe_weights import \
     FusedMoEWeights
-from tpu_inference.layers.common.sharding import is_attn_dp
+from tpu_inference.layers.common.sharding import is_attn_replicated
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -114,7 +114,7 @@ def vllm_moe_apply(layer: RoutedExperts,
                 pass
 
     mesh = quant_method_instance.mesh
-    is_dp = is_attn_dp(mesh)
+    is_dp = is_attn_replicated(mesh)
 
     extra_kwargs = dict(quant_method_instance.extra_backend_kwargs)
     extra_kwargs["scatter_results"] = is_dp

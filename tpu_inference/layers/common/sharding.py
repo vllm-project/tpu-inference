@@ -45,6 +45,10 @@ class ShardingAxisNameBase:
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
     ATTN_HEAD = ('model', 'expert', 'dcp')  # Q heads
+    # GDN linear-attention heads are independent, so unlike softmax attention
+    # they can also shard over 'pcp' (tokens are replicated across pcp in the
+    # GDN domain; see gdn_attention.py).
+    GDN_ATTN_HEAD = ('model', 'expert', 'dcp', 'pcp')
     KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
@@ -79,6 +83,7 @@ class ShardingAxisName2D:
     """
     SEQUENCE = 'data'
     ATTN_DATA = 'data'
+    GDN_ATTN_HEAD = 'model'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
     KV_HEAD = 'model'
@@ -134,21 +139,80 @@ class LazyShardingAxisName:
         self._initialize()
         return getattr(self._cls, name)
 
+    def attn_head(self, layer_prefix: str = ""):
+        """Head-sharding axis for a layer, selected by its prefix.
+
+        GDN linear-attention layers shard heads over GDN_ATTN_HEAD (which
+        includes 'pcp': GDN heads are independent, and tokens are replicated
+        across pcp in the GDN domain). Everything else uses ATTN_HEAD.
+        """
+        if "linear_attn" in layer_prefix:
+            return self.GDN_ATTN_HEAD
+        return self.ATTN_HEAD
+
+    def token_axes(self, weight_spec):
+        """Token-dim axes for the activations of a matmul with this weight
+        spec: SEQUENCE when the weight uses 'pcp' (GDN projections shard
+        heads over it, and a mesh axis may appear on at most one dim of a
+        spec), ATTN_DATA otherwise.
+        """
+        pcp = self.PREFILL_CONTEXT
+        for dim in weight_spec:
+            if pcp and (dim == pcp or
+                        (isinstance(dim, tuple) and pcp in dim)):
+                return self.SEQUENCE
+        return self.ATTN_DATA
+
+    def reduce_scatter_axes(self, weight_spec):
+        """Contraction axes a row-parallel matmul reduce-scatters its output
+        tokens over instead of all-reducing: 'pcp' when the weight contracts
+        over it (GDN out_proj). Tokens are replicated across pcp in the GDN
+        domain, so scattering lands the output token-sharded like the
+        residual stream for a fraction of the all-reduce bytes.
+        """
+        in_axis = weight_spec[0]
+        pcp = self.PREFILL_CONTEXT
+        if pcp and in_axis and (in_axis == pcp or
+                                (isinstance(in_axis, tuple) and pcp in in_axis)):
+            return (pcp, )
+        return ()
+
+    def out_token_axes(self, weight_spec):
+        """Token-dim axes of a matmul's output: token-sharded (ATTN_DATA)
+        after a reduce-scatter over pcp, else the same as the input's."""
+        if self.reduce_scatter_axes(weight_spec):
+            return self.ATTN_DATA
+        return self.token_axes(weight_spec)
+
 
 ShardingAxisName = LazyShardingAxisName()
 
 
 def is_attn_dp(mesh: Mesh) -> bool:
-    """Whether attention data-parallelism is active on ``mesh``.
+    """Whether attention data parallelism proper is active on ``mesh``.
 
-    True when the attention-data axes carry a factor beyond plain data
-    parallelism (i.e. ``attn_dp`` * ``attn_dp_expert`` > 1), meaning attention
-    is replicated over more data-parallel shards than the MLP/data axis alone.
+    True when the token stream is split into independent request groups
+    beyond plain data parallelism (``attn_dp`` * ``attn_dp_expert`` > 1).
+    'pcp' does not count: it splits within a request, not across requests
+    — use is_attn_replicated for that.
     """
-    attn_dp_size = utils.get_mesh_shape_product(mesh,
-                                                ShardingAxisName.ATTN_DATA)
+    seq_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.SEQUENCE)
     dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
-    return (attn_dp_size // dp_size) > 1
+    return (seq_size // dp_size) > 1
+
+
+def is_attn_replicated(mesh: Mesh) -> bool:
+    """Whether attention weights are replicated over extra mesh axes.
+
+    True when attention-domain tokens are distributed across more ranks
+    than the MLP data axis (``attn_dp``, ``attn_dp_expert``, or ``pcp``
+    > 1); MoE outputs must then be scattered back to the attention layout
+    rather than late-reduced.
+    """
+    attn_data_size = utils.get_mesh_shape_product(mesh,
+                                                  ShardingAxisName.ATTN_DATA)
+    dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
+    return (attn_data_size // dp_size) > 1
 
 
 @dataclass

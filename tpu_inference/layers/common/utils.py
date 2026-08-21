@@ -178,3 +178,26 @@ def cpu_mesh() -> Mesh:
 def cpu_mesh_context():
     """A context to enforce using CPU mesh, used for loading weights on CPU."""
     return jax.set_mesh(cpu_mesh())
+
+
+def replicate_kv_heads_for_tp(mesh, k, v):
+    """Replicate KV heads (dim 1) when the head-sharding axis exceeds them.
+
+    GQA/MQA models can have fewer KV heads than the ATTN_HEAD mesh product;
+    replicating makes the head dim evenly shardable. Returns (k, v) unchanged
+    when no replication is needed.
+    """
+    from tpu_inference.layers.common.sharding import ShardingAxisName
+    from tpu_inference.utils import get_mesh_shape_product
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    if tp_size > 1:
+        num_kv_heads = k.shape[1]
+        if num_kv_heads < tp_size:
+            if tp_size % num_kv_heads != 0:
+                raise ValueError(
+                    f"tp_size {tp_size} must be divisible by num_kv_heads "
+                    f"{num_kv_heads}")
+            factor = tp_size // num_kv_heads
+            k = jnp.repeat(k, factor, axis=1)
+            v = jnp.repeat(v, factor, axis=1)
+    return k, v

@@ -50,15 +50,14 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         self.tp_size = get_mesh_shape_product(self.mesh,
                                               ShardingAxisName.MLP_TENSOR)
 
-        self.n_shards = get_mesh_shape_product(self.mesh,
-                                               self.weight_sharding[1])
+        _head_axis = ShardingAxisName.attn_head(getattr(layer, "prefix", ""))
 
         if isinstance(layer, RowParallelLinear):
-            self.weight_sharding = P(ShardingAxisName.ATTN_HEAD, None)
+            self.weight_sharding = P(_head_axis, None)
             if self.enable_sp:
                 self.output_sharding = P(ShardingAxisName.MLP_TENSOR, None)
         elif isinstance(layer, ColumnParallelLinear):
-            self.weight_sharding = P(None, ShardingAxisName.ATTN_HEAD)
+            self.weight_sharding = P(None, _head_axis)
 
             if self.enable_sp:
                 self.input_sharding = P(ShardingAxisName.MLP_TENSOR, None)

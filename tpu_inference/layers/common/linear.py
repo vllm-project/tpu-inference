@@ -90,6 +90,27 @@ def xla_quantized_matmul(
     return out.astype(x.dtype)
 
 
+def _reduce_partials(out: jax.Array, weight_spec, defer_all_reduce: bool):
+    """Complete a row-parallel matmul's contraction inside shard_map.
+
+    All-reduces over the contraction axis, except axes named by
+    ShardingAxisName.reduce_scatter_axes (pcp for GDN out_proj), which are
+    reduce-scattered over the token dim so the output lands token-sharded.
+    """
+    in_axis = weight_spec[0]
+    if not in_axis or defer_all_reduce:
+        return out
+    scatter = ShardingAxisName.reduce_scatter_axes(weight_spec)
+    if not scatter:
+        return jax.lax.psum(out, axis_name=in_axis)
+    out = jax.lax.psum_scatter(out, scatter, scatter_dimension=0, tiled=True)
+    axes = in_axis if isinstance(in_axis, tuple) else (in_axis, )
+    rest = tuple(a for a in axes if a not in scatter)
+    if rest:
+        out = jax.lax.psum(out, axis_name=rest)
+    return out
+
+
 def sharded_matmul(x: jax.Array,
                    w: jax.Array,
                    weight_sharding: P | NamedSharding,
@@ -106,24 +127,23 @@ def sharded_matmul(x: jax.Array,
         mesh = mesh or weight_sharding.mesh
         weight_sharding = weight_sharding.spec
     in_axis, out_axis = weight_sharding
+    token_axes = ShardingAxisName.token_axes(weight_sharding)
     # x may have extra leading batch dims.
     batch_dims = (None, ) * (x.ndim - 2)
-    x_spec = P(ShardingAxisName.ATTN_DATA, *batch_dims, in_axis)
+    x_spec = P(token_axes, *batch_dims, in_axis)
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_spec) if mesh else x_spec)
 
     def wrapper(x, w):
-        out = x @ w
-        if in_axis and not defer_all_reduce:
-            out = jax.lax.psum(out, axis_name=in_axis)
-        return out
+        return _reduce_partials(x @ w, weight_sharding, defer_all_reduce)
 
+    out_token_axes = ShardingAxisName.out_token_axes(weight_sharding)
     return jax.shard_map(
         wrapper,
         mesh=mesh,
         in_specs=(x_spec, weight_sharding),
-        out_specs=P(ShardingAxisName.ATTN_DATA, *batch_dims, out_axis),
+        out_specs=P(out_token_axes, *batch_dims, out_axis),
         check_vma=False,
     )(x, w)
 
@@ -167,7 +187,8 @@ def sharded_quantized_matmul(x: jax.Array,
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
     in_axis, out_axis = weight_spec
-    x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
+    token_axes = ShardingAxisName.token_axes(weight_spec)
+    x_sharding = P(token_axes, in_axis)
     enable_quantized_matmul_kernel = w_s is not None and (len(
         w_s.shape) == 3 or len(w_s.shape) == 4)
     if enable_quantized_matmul_kernel:
@@ -186,7 +207,7 @@ def sharded_quantized_matmul(x: jax.Array,
         else:
             # 1D (channelwise) case
             scale_sharding = P(out_axis, )
-    out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
+    out_sharding = P(ShardingAxisName.out_token_axes(weight_spec), out_axis)
 
     x = jax.lax.with_sharding_constraint(
         x,
@@ -210,9 +231,7 @@ def sharded_quantized_matmul(x: jax.Array,
                                           w_q,
                                           w_s,
                                           quantize_activation=maybe_quantize_x)
-        if in_axis and not defer_all_reduce:
-            output = jax.lax.psum(output, axis_name=in_axis)
-        return output
+        return _reduce_partials(output, weight_spec, defer_all_reduce)
 
     return jax.shard_map(
         wrapper,

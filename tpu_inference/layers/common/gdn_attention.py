@@ -90,36 +90,36 @@ def run_jax_gdn_attention(
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
     in_specs = (
-        P(ShardingAxisName.ATTN_DATA,
-          ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(ShardingAxisName.ATTN_DATA, None,
-          ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+        P(ShardingAxisName.SEQUENCE,
+          ShardingAxisName.GDN_ATTN_HEAD),  # j_mixed_qkv
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD),  # j_b
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD),  # j_a
+        P(ShardingAxisName.SEQUENCE, None,
+          ShardingAxisName.GDN_ATTN_HEAD),  # conv_state
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD, None,
           None),  # recurrent_state
-        P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
-        P(ShardingAxisName.ATTN_HEAD)
+        P(ShardingAxisName.GDN_ATTN_HEAD, None, None),  # j_conv_weight
+        P(ShardingAxisName.GDN_ATTN_HEAD)
         if j_conv_bias is not None else None,  # j_conv_bias
-        P(ShardingAxisName.ATTN_HEAD),  # j_A_log
-        P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
-        P(ShardingAxisName.ATTN_DATA),  # query_start_loc
-        P(ShardingAxisName.ATTN_DATA),  # state_indices
-        P(ShardingAxisName.ATTN_DATA),  # distribution
-        P(ShardingAxisName.ATTN_DATA),  # seq_lens
+        P(ShardingAxisName.GDN_ATTN_HEAD),  # j_A_log
+        P(ShardingAxisName.GDN_ATTN_HEAD),  # j_dt_bias
+        P(ShardingAxisName.SEQUENCE),  # query_start_loc
+        P(ShardingAxisName.SEQUENCE),  # state_indices
+        P(ShardingAxisName.SEQUENCE),  # distribution
+        P(ShardingAxisName.SEQUENCE),  # seq_lens
     )
 
     out_specs = (
         (
-            P(ShardingAxisName.ATTN_DATA, None,
-              ShardingAxisName.ATTN_HEAD),  # new_conv_state
-            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+            P(ShardingAxisName.SEQUENCE, None,
+              ShardingAxisName.GDN_ATTN_HEAD),  # new_conv_state
+            P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # output
+        P(ShardingAxisName.SEQUENCE, ShardingAxisName.GDN_ATTN_HEAD),  # output
     )
 
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.GDN_ATTN_HEAD)
 
     p_run_jax_gdn_attention_local = functools.partial(
         wrapper.fused_conv1d_gdn,
