@@ -904,25 +904,36 @@ def _ragged_paged_attention_kernel_loop(
                 wait=True,
             )
 
-    def _write_owned_pages(seq_idx, bkv_sem_idx, g0, n, buf_start, *, wait):
-        """DMA the tokens of global range [g0, g0+n) whose pages this CP rank
-        owns (page-interleaved layout, see get_cp_local_size_of_rank) from
-        bkv buffer offset `buf_start` into the paged cache; other ranks'
-        pages are zero-size copies. Returns this rank's token count."""
+    def _update_kv_cache_partial(seq_idx,
+                                 bkv_sem_idx,
+                                 offset,
+                                 update_sz,
+                                 src_start_base,
+                                 *,
+                                 wait=False):
+        """CP: DMA the new tokens of global range [offset, offset+update_sz)
+        whose pages this rank owns (page-interleaved layout, see
+        get_cp_local_size_of_rank) from bkv buffer offset `src_start_base`
+        into the paged cache; other ranks' pages are zero-size copies.
+        Returns this rank's token count (the wait size)."""
+        debug_print(
+            "[RPA debug]"
+            f" -----------{'wait' if wait else 'start'}_update_kv_cache_partial-----------"
+        )
         sem = sems.at[3, bkv_sem_idx]
         vmem_ref = bkv_x2_ref.at[
             bkv_sem_idx, :, :num_kv_heads_x2_per_kv_packing]
         cache_hbm_shape = updated_kv_cache_hbm_ref.shape
         cache_hbm_ref = updated_kv_cache_hbm_ref.reshape(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
-        owned = (get_cp_local_size_of_rank(g0 + n, cp_rank) -
-                 get_cp_local_size_of_rank(g0, cp_rank))
+        owned = (get_cp_local_size_of_rank(offset + update_sz, cp_rank) -
+                 get_cp_local_size_of_rank(offset, cp_rank))
         if wait:
             dst = cache_hbm_ref.at[pl.ds(0, owned)]
             _async_copy(src=dst, dst=dst, sem=sem, wait=True)
             return owned
-        kv_p_start = g0 // page_size
-        kv_p_end = cdiv(g0 + n, page_size)
+        kv_p_start = offset // page_size
+        kv_p_end = cdiv(offset + update_sz, page_size)
         page_indices_offset = seq_idx * pages_per_seq
 
         def loop_body(i, states):
@@ -931,7 +942,8 @@ def _ragged_paged_attention_kernel_loop(
             gp = kv_p_start + i
             sz_own = jnp.where(lax.rem(gp, cp_group_size) == cp_rank, sz, 0)
             _async_copy(
-                vmem_ref.at[pl.ds(buf_start + (n - remaining_sz), sz_own)],
+                vmem_ref.at[pl.ds(src_start_base + (update_sz - remaining_sz),
+                                  sz_own)],
                 cache_hbm_ref.at[pl.ds(
                     page_indices_ref[page_indices_offset + gp // cp_group_size]
                     * page_size + ignore,
@@ -945,29 +957,9 @@ def _ragged_paged_attention_kernel_loop(
 
         lax.fori_loop(0,
                       kv_p_end - kv_p_start,
-                      loop_body, (n, g0 % page_size),
+                      loop_body, (update_sz, offset % page_size),
                       unroll=False)
         return owned
-
-    def _update_kv_cache_partial(seq_idx,
-                                 bkv_sem_idx,
-                                 offset,
-                                 update_sz,
-                                 src_start_base,
-                                 *,
-                                 wait=False):
-        """CP (non-ring): write this rank's pages of the new KV held in the
-        bkv buffer at `src_start_base` (global tokens [offset, offset+sz))."""
-        debug_print(
-            "[RPA debug]"
-            f" -----------{'wait' if wait else 'start'}_update_kv_cache_partial-----------"
-        )
-        _write_owned_pages(seq_idx,
-                           bkv_sem_idx,
-                           offset,
-                           update_sz,
-                           src_start_base,
-                           wait=wait)
 
     def _update_kv_cache_ring(seq_idx, bkv_sem_idx, src, blk, *, wait=False):
         """Ring: the bkv buffer holds block `blk` of rank `src`'s stream
@@ -989,12 +981,12 @@ def _ragged_paged_attention_kernel_loop(
             # Clip the run to this block and to the request's real tokens.
             n = jnp.clip(
                 jnp.minimum(tb, num_current - base) - ta, 0, 2 * ring_chunk)
-            total += _write_owned_pages(seq_idx,
-                                        bkv_sem_idx,
-                                        cache_len_global + base + ta,
-                                        n,
-                                        src_cache_len + ta - p0,
-                                        wait=wait)
+            total += _update_kv_cache_partial(seq_idx,
+                                              bkv_sem_idx,
+                                              cache_len_global + base + ta,
+                                              n,
+                                              src_cache_len + ta - p0,
+                                              wait=wait)
         return total
 
     def _fetch_bq(seq_idx, bq_idx, bq_sem_idx, *, wait=False):
