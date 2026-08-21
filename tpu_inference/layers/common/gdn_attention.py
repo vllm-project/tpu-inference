@@ -95,14 +95,14 @@ def run_jax_gdn_attention(
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
-    dp_state_axis = ShardingAxisName.ATTN_DATA
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(dp_state_axis, None, ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(dp_state_axis, ShardingAxisName.ATTN_HEAD, None,
+        P(ShardingAxisName.ATTN_DATA, None,
+          ShardingAxisName.ATTN_HEAD),  # conv_state
+        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
           None),  # recurrent_state
         P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
         P(ShardingAxisName.ATTN_HEAD)
@@ -119,9 +119,9 @@ def run_jax_gdn_attention(
 
     out_specs = (
         (
-            P(dp_state_axis, None,
+            P(ShardingAxisName.ATTN_DATA, None,
               ShardingAxisName.ATTN_HEAD),  # new_conv_state
-            P(dp_state_axis, ShardingAxisName.ATTN_HEAD, None,
+            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
               None),  # new_recurrent_state
         ),
         P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # output
