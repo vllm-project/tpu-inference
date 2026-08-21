@@ -421,31 +421,22 @@ def _ragged_paged_attention_kernel_loop(
 
     # Helper functions for context parallelism.
     def get_cp_local_size_of_rank(x, rank):
-        """How many of the first `x` cache tokens `rank` owns.
-
-        The cache is page-interleaved across the CP group: global page p
-        (of page_size tokens) lives on rank p % cp_group_size at local page
-        p // cp_group_size, so rank r owns token g iff
-        (g // page_size) % cp_group_size == r.
-        """
-        super_page = cp_group_size * page_size
-        full = (x // super_page) * page_size
-        rem = jnp.clip(x % super_page - rank * page_size, 0, page_size)
+        """How many of the first `x` cache tokens `rank` owns."""
+        global_page_size = cp_group_size * page_size
+        full = (x // global_page_size) * page_size
+        rem = jnp.clip(x % global_page_size - rank * page_size, 0, page_size)
         return full + rem
 
-    # Ring (PCP): every rank's KV stream is [its cache shard | its OWN new
-    # KV], and the whole stream rotates around the ring; no all-gather. The
-    # new KV shares Q's head/tail layout, so rank j's chunk s sits at
-    # q_pos_offset(j, s): head j*C, tail (2P-1-j)*C, with C = half the
-    # local new-KV buffer.
     ring_enabled = pcp_ring_axis_name is not None
     ring_chunk = kv_hbm_ref.shape[0] // 2 if ring_enabled else None
 
     def get_kv_new_len(seq_idx):
-        # Under PCP ring, new KV is this rank's own head+tail chunks (the
-        # other ranks' arrive by rotation); otherwise under PCP it is
-        # all-gathered into token order (padded length pcp * local_q_len,
-        # non-padded length from kv_cache_lens).
+        # PCP (ring): new KV is this rank's own head+tail chunks; the other
+        # ranks' chunks arrive by rotation.
+        # kv_cache_lens without ring is a standalone current-phase CP launch
+        # over all-gathered, token-order new KV of length
+        # kv_lens - kv_cache_lens; only the kernel tests use it (PCP itself
+        # always rings).
         # Under DCP / non-CP, new KV length = local Q length.
         if ring_enabled:
             return kv_hbm_ref.shape[0]
@@ -1321,11 +1312,12 @@ def _ragged_paged_attention_kernel_loop(
                 effective_kv_len = jnp.minimum(effective_kv_len,
                                                kv_cache_len_local)
 
-            # Under PCP the all-gathered current KV is written to the cache
-            # page-interleaved across the CP group. A single head-tail chunk's
-            # causal range does not cover this rank's full share, so when this
-            # launch writes the cache (`update_kv_cache`) extend the BKV loop to
-            # the full current KV. Flash attention on the extra blocks is a no-op
+            # Standalone current-phase CP launch (skip_cache_attn; kernel tests
+            # only, PCP itself rings): the all-gathered current KV is written to
+            # the cache page-interleaved across the CP group. A single head-tail
+            # chunk's causal range does not cover this rank's full share, so
+            # when this launch writes the cache (`update_kv_cache`) extend the
+            # BKV loop to the full current KV. Flash attention on the extra blocks is a no-op
             # (`effective_bkv_sz` clamps to 0 past `effective_kv_len`); only the
             # cache write runs there. The caller enables this on the tail
             # launch only, so the whole current KV is written exactly once.
