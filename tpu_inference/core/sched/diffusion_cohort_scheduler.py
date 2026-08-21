@@ -61,10 +61,16 @@ class CohortAdmissionQueue(Generic[_ItemT]):
         return len(self._pending)
 
     @property
-    def deadline(self) -> float | None:
+    def hard_deadline(self) -> float | None:
         if not self._pending:
             return None
-        deadline = self._pending[0][1] + self.max_wait_seconds
+        return self._pending[0][1] + self.max_wait_seconds
+
+    @property
+    def deadline(self) -> float | None:
+        deadline = self.hard_deadline
+        if deadline is None:
+            return None
         if self.quiet_wait_seconds:
             deadline = min(deadline,
                            self._pending[-1][1] + self.quiet_wait_seconds)
@@ -73,17 +79,27 @@ class CohortAdmissionQueue(Generic[_ItemT]):
     def add(self, item: _ItemT) -> None:
         self._pending.append((item, self._clock()))
 
-    def is_ready(self, now: float | None = None) -> bool:
+    def is_ready(
+        self,
+        now: float | None = None,
+        *,
+        ignore_quiet_wait: bool = False,
+    ) -> bool:
         if not self._pending:
             return False
         if len(self._pending) >= self.max_size:
             return True
-        deadline = self.deadline
+        deadline = self.hard_deadline if ignore_quiet_wait else self.deadline
         assert deadline is not None
         return (self._clock() if now is None else now) >= deadline
 
-    def drain_ready(self, now: float | None = None) -> list[_ItemT]:
-        if not self.is_ready(now):
+    def drain_ready(
+        self,
+        now: float | None = None,
+        *,
+        ignore_quiet_wait: bool = False,
+    ) -> list[_ItemT]:
+        if not self.is_ready(now, ignore_quiet_wait=ignore_quiet_wait):
             return []
         cohort_size = min(len(self._pending), self.max_size)
         return [self._pending.popleft()[0] for _ in range(cohort_size)]
@@ -143,6 +159,20 @@ class BlockDiffusionCohortScheduler(Scheduler):
             quiet_wait_ms=quiet_wait_ms,
         )
         self._cohort_request_ids: set[str] = set()
+        self._last_admitted_cohort_was_full = False
+        self._full_refill_deadline: float | None = None
+        self._clock = monotonic
+
+    def _update_full_refill_window(self, base_is_idle: bool,
+                                   now: float) -> None:
+        if (not self._strict_waves or not self._last_admitted_cohort_was_full
+                or not base_is_idle):
+            return
+        if self._full_refill_deadline is None:
+            self._full_refill_deadline = (now + self._cohort.max_wait_seconds)
+        elif now >= self._full_refill_deadline:
+            self._last_admitted_cohort_was_full = False
+            self._full_refill_deadline = None
 
     def add_request(self, request: Request) -> None:
         if request.request_id in self.requests:
@@ -157,11 +187,28 @@ class BlockDiffusionCohortScheduler(Scheduler):
 
     def schedule(self, *args: Any, **kwargs: Any) -> SchedulerOutput:
         base_is_idle = super().get_num_unfinished_requests() == 0
+        if self._strict_waves:
+            self._update_full_refill_window(base_is_idle, self._clock())
         if not self._strict_waves or base_is_idle:
-            for request in self._cohort.drain_ready():
+            wait_for_full_refill = (self._strict_waves
+                                    and self._last_admitted_cohort_was_full)
+            cohort = self._cohort.drain_ready(
+                ignore_quiet_wait=wait_for_full_refill)
+            if cohort:
+                self._last_admitted_cohort_was_full = (
+                    len(cohort) == self._cohort.max_size)
+                self._full_refill_deadline = None
+            for request in cohort:
                 self._cohort_request_ids.remove(request.request_id)
                 super().add_request(request)
         return super().schedule(*args, **kwargs)
+
+    def update_from_output(self, *args: Any, **kwargs: Any) -> Any:
+        outputs = super().update_from_output(*args, **kwargs)
+        if self._strict_waves:
+            self._update_full_refill_window(
+                super().get_num_unfinished_requests() == 0, self._clock())
+        return outputs
 
     def finish_requests(
         self,
@@ -188,6 +235,12 @@ class BlockDiffusionCohortScheduler(Scheduler):
         if admitted_ids:
             finished_requests.extend(super().finish_requests(
                 admitted_ids, finished_status))
+        if request_ids is None:
+            self._last_admitted_cohort_was_full = False
+            self._full_refill_deadline = None
+        elif self._strict_waves:
+            self._update_full_refill_window(
+                super().get_num_unfinished_requests() == 0, self._clock())
         return finished_requests
 
     def get_num_unfinished_requests(self) -> int:

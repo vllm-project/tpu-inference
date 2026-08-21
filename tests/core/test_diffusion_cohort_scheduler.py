@@ -77,6 +77,12 @@ def _load_scheduler_with_fake_vllm(monkeypatch):
             self.schedule_calls += 1
             return args, kwargs
 
+        def update_from_output(self, request_ids):
+            self.base_unfinished.difference_update(request_ids)
+            for request_id in request_ids:
+                self.requests.pop(request_id, None)
+            return list(request_ids)
+
         def finish_requests(self, request_ids, finished_status):
             self.finished.append((list(request_ids), finished_status))
             finished_requests = []
@@ -323,6 +329,199 @@ def test_strict_waves_accumulate_continuous_arrivals_for_next_full_wave(
     scheduler.schedule()
 
     assert scheduler.admitted == ["first", "second", "third"]
+
+
+def test_strict_waves_first_partial_cohort_uses_quiet_wait(monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=4,
+                     max_wait_ms=10.0,
+                     quiet_wait_ms=2.0,
+                     strict_waves=True))
+    scheduler.add_request(Request("first"))
+
+    clock.now = 0.001
+    scheduler.schedule()
+    assert scheduler.admitted == []
+
+    clock.now = 0.002
+    scheduler.schedule()
+    assert scheduler.admitted == ["first"]
+    assert not scheduler._last_admitted_cohort_was_full
+
+
+def test_strict_waves_hold_partial_refill_past_quiet_wait(monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=3,
+                     max_wait_ms=10.0,
+                     quiet_wait_ms=2.0,
+                     strict_waves=True))
+    first_wave = ["first", "second", "third"]
+    for request_id in first_wave:
+        scheduler.add_request(Request(request_id))
+    scheduler.schedule()
+
+    clock.now = 0.001
+    scheduler.add_request(Request("refill"))
+    clock.now = 0.003
+    scheduler.update_from_output(first_wave)
+    scheduler.schedule()
+
+    assert scheduler.admitted == first_wave
+    assert scheduler._last_admitted_cohort_was_full
+
+
+def test_strict_waves_admit_full_refill_only_after_base_is_idle(monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    scheduler = _scheduler(module,
+                           _vllm_config(max_num_seqs=2, strict_waves=True))
+    first_wave = ["first", "second"]
+    refill_wave = ["third", "fourth"]
+    for request_id in first_wave:
+        scheduler.add_request(Request(request_id))
+    scheduler.schedule()
+
+    for request_id in refill_wave:
+        scheduler.add_request(Request(request_id))
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave
+
+    scheduler.update_from_output(first_wave)
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave + refill_wave
+    assert scheduler._last_admitted_cohort_was_full
+
+
+def test_strict_waves_hard_timeout_partial_refill_then_restore_quiet_wait(
+        monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=2,
+                     max_wait_ms=10.0,
+                     quiet_wait_ms=2.0,
+                     strict_waves=True))
+    first_wave = ["first", "second"]
+    for request_id in first_wave:
+        scheduler.add_request(Request(request_id))
+    scheduler.schedule()
+
+    clock.now = 0.001
+    scheduler.add_request(Request("timed-out-refill"))
+    scheduler.update_from_output(first_wave)
+    clock.now = 0.003
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave
+
+    clock.now = 0.011
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave + ["timed-out-refill"]
+    assert not scheduler._last_admitted_cohort_was_full
+
+    scheduler.update_from_output(["timed-out-refill"])
+    clock.now = 0.012
+    scheduler.add_request(Request("next-partial"))
+    clock.now = 0.014
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave + [
+        "timed-out-refill", "next-partial"
+    ]
+
+
+def test_strict_waves_full_refill_requirement_expires_while_idle(monkeypatch):
+    module, Request, _ = _load_scheduler_with_fake_vllm(monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=2,
+                     max_wait_ms=10.0,
+                     quiet_wait_ms=2.0,
+                     strict_waves=True))
+    first_wave = ["first", "second"]
+    for request_id in first_wave:
+        scheduler.add_request(Request(request_id))
+    scheduler.schedule()
+
+    clock.now = 0.001
+    scheduler.update_from_output(first_wave)
+    clock.now = 0.020
+    scheduler.add_request(Request("new-first"))
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave
+
+    clock.now = 0.022
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave + ["new-first"]
+    assert not scheduler._last_admitted_cohort_was_full
+
+
+def test_strict_waves_abort_all_resets_full_refill_requirement(monkeypatch):
+    module, Request, RequestStatus = _load_scheduler_with_fake_vllm(
+        monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=2,
+                     max_wait_ms=10.0,
+                     quiet_wait_ms=2.0,
+                     strict_waves=True))
+    scheduler.add_request(Request("first"))
+    scheduler.add_request(Request("second"))
+    scheduler.schedule()
+    scheduler.add_request(Request("held"))
+
+    scheduler.finish_requests(None, RequestStatus)
+    clock.now = 0.001
+    scheduler.add_request(Request("new-first"))
+    clock.now = 0.003
+    scheduler.schedule()
+
+    assert scheduler.admitted == ["first", "second", "new-first"]
+    assert not scheduler._last_admitted_cohort_was_full
+
+
+def test_strict_waves_cancelled_refill_uses_remaining_hard_deadline(
+        monkeypatch):
+    module, Request, RequestStatus = _load_scheduler_with_fake_vllm(
+        monkeypatch)
+    clock = _Clock()
+    monkeypatch.setattr(module, "monotonic", clock)
+    scheduler = _scheduler(
+        module,
+        _vllm_config(max_num_seqs=2,
+                     max_wait_ms=10.0,
+                     quiet_wait_ms=2.0,
+                     strict_waves=True))
+    first_wave = ["first", "second"]
+    for request_id in first_wave:
+        scheduler.add_request(Request(request_id))
+    scheduler.schedule()
+
+    clock.now = 0.001
+    scheduler.add_request(Request("cancelled"))
+    clock.now = 0.002
+    scheduler.add_request(Request("remaining"))
+    scheduler.update_from_output(first_wave)
+    scheduler.finish_requests("cancelled", RequestStatus)
+
+    clock.now = 0.011
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave
+
+    clock.now = 0.012
+    scheduler.schedule()
+    assert scheduler.admitted == first_wave + ["remaining"]
 
 
 def test_strict_waves_pass_continuation_for_admitted_request_to_base(

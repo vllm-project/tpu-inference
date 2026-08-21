@@ -100,6 +100,7 @@ def test_resolves_seeded_shifted_semantics_from_hf_config():
     assert resolved.diffusion.runtime.cohort_max_wait_ms == 0.0
     assert resolved.diffusion.runtime.cohort_quiet_wait_ms == 0.0
     assert resolved.diffusion.runtime.cohort_strict_waves is False
+    assert resolved.diffusion.runtime.cohort_round_robin_dp is False
 
 
 def test_runtime_and_model_overrides_are_separate():
@@ -115,9 +116,10 @@ def test_runtime_and_model_overrides_are_separate():
                 "temperature": 0.2,
                 "max_denoise_steps": 12,
                 "use_dual_cache": True,
-                "cohort_max_wait_ms": 7.5,
+                "cohort_max_wait_ms": 5000.0,
                 "cohort_quiet_wait_ms": 1.5,
                 "cohort_strict_waves": True,
+                "cohort_round_robin_dp": True,
             },
         }))
 
@@ -133,9 +135,10 @@ def test_runtime_and_model_overrides_are_separate():
     assert resolved.diffusion.runtime.q8_log_confidence_bias == 0.0
     assert resolved.diffusion.runtime.force_q32_anchor_commit is False
     assert resolved.diffusion.runtime.trim_final_block_candidates is False
-    assert resolved.diffusion.runtime.cohort_max_wait_ms == 7.5
+    assert resolved.diffusion.runtime.cohort_max_wait_ms == 5000.0
     assert resolved.diffusion.runtime.cohort_quiet_wait_ms == 1.5
     assert resolved.diffusion.runtime.cohort_strict_waves is True
+    assert resolved.diffusion.runtime.cohort_round_robin_dp is True
 
 
 def test_resolves_opt_in_dual_cache_acceptance_trace():
@@ -350,9 +353,9 @@ def test_new_model_adapter_does_not_change_strategy_resolution():
             "generation_strategy": "block_diffusion",
             "diffusion": {
                 "model_adapter": "seeded_shifted",
-                "cohort_max_wait_ms": 100.01,
+                "cohort_max_wait_ms": 5000.01,
             },
-        }, "cohort_max_wait_ms must not exceed 100"),
+        }, "cohort_max_wait_ms must not exceed 5000"),
         ({
             "generation_strategy": "block_diffusion",
             "diffusion": {

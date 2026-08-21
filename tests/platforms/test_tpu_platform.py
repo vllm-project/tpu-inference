@@ -23,7 +23,8 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 from tpu_inference.core.sched.diffusion_cohort_scheduler import \
     BlockDiffusionCohortScheduler
-from tpu_inference.platforms.tpu_platform import TpuPlatform
+from tpu_inference.platforms.tpu_platform import (
+    _DIFFUSION_ROUND_ROBIN_VALIDATED_DP_SIZE, TpuPlatform)
 
 
 class TestTpuPlatform:
@@ -690,6 +691,122 @@ class TestTpuPlatform:
         TpuPlatform.check_and_update_config(vllm_config)
 
         mock_patch.assert_called_once()
+
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
+    )
+    def test_check_and_update_config_enables_diffusion_round_robin_dp(
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config,
+            monkeypatch):
+        self._enable_block_diffusion(vllm_config)
+        vllm_config.additional_config["diffusion"][
+            "cohort_round_robin_dp"] = True
+        vllm_config.parallel_config.data_parallel_size = 2
+        vllm_config.parallel_config.data_parallel_external_lb = False
+        vllm_config.parallel_config.data_parallel_hybrid_lb = False
+        vllm_config.parallel_config.data_parallel_index = 0
+        vllm_config.parallel_config._api_process_count = 1
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+
+        with patch("tpu_inference.core.diffusion_dp_router."
+                   "patch_vllm_dp_client_for_block_diffusion_round_robin"
+                   ) as mock_round_robin_patch:
+            TpuPlatform.check_and_update_config(vllm_config)
+
+        mock_round_robin_patch.assert_called_once_with()
+        assert vllm_config.additional_config[
+            _DIFFUSION_ROUND_ROBIN_VALIDATED_DP_SIZE] == 2
+        mock_patch.assert_called_once()
+
+    @pytest.mark.parametrize("data_parallel_index", [0, 1])
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
+    )
+    def test_check_and_update_config_skips_round_robin_hook_in_dp_child(
+            self, mock_patch, mock_dp_update, mock_sharding, vllm_config,
+            monkeypatch, data_parallel_index):
+        self._enable_block_diffusion(vllm_config)
+        vllm_config.additional_config["diffusion"][
+            "cohort_round_robin_dp"] = True
+        vllm_config.additional_config[
+            _DIFFUSION_ROUND_ROBIN_VALIDATED_DP_SIZE] = 2
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.data_parallel_size_local = 1
+        vllm_config.parallel_config.data_parallel_rank = 0
+        vllm_config.parallel_config.data_parallel_index = data_parallel_index
+        vllm_config.parallel_config.data_parallel_external_lb = False
+        vllm_config.parallel_config.data_parallel_hybrid_lb = False
+        vllm_config.parallel_config._api_process_count = 1
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", "1")
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+
+        with patch("tpu_inference.core.diffusion_dp_router."
+                   "patch_vllm_dp_client_for_block_diffusion_round_robin"
+                   ) as mock_round_robin_patch:
+            TpuPlatform.check_and_update_config(vllm_config)
+
+        mock_round_robin_patch.assert_not_called()
+        mock_patch.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "data_parallel_size,multiprocess_dp,external_lb,hybrid_lb,"
+        "api_process_count,expected_error",
+        [
+            (1, "0", False, False, 1,
+             "requires native multiprocess data parallelism"),
+            (1, "1", False, False, 1,
+             "requires native multiprocess data parallelism"),
+            (2, "0", False, False, 1,
+             "requires native multiprocess data parallelism"),
+            (2, "1", True, False, 1, "requires vLLM's internal data-parallel"),
+            (2, "1", False, True, 1, "does not support data-parallel hybrid"),
+            (2, "1", False, False, 2, "requires --api-server-count=1"),
+        ],
+    )
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_multi_token_decode"
+    )
+    def test_check_and_update_config_rejects_invalid_diffusion_round_robin_dp(
+        self,
+        mock_patch,
+        mock_dp_update,
+        mock_sharding,
+        vllm_config,
+        monkeypatch,
+        data_parallel_size,
+        multiprocess_dp,
+        external_lb,
+        hybrid_lb,
+        api_process_count,
+        expected_error,
+    ):
+        self._enable_block_diffusion(vllm_config)
+        vllm_config.additional_config["diffusion"][
+            "cohort_round_robin_dp"] = True
+        vllm_config.parallel_config.data_parallel_size = data_parallel_size
+        vllm_config.parallel_config.data_parallel_external_lb = external_lb
+        vllm_config.parallel_config.data_parallel_hybrid_lb = hybrid_lb
+        vllm_config.parallel_config._api_process_count = api_process_count
+        monkeypatch.setenv("TPU_MULTIPROCESS_DP", multiprocess_dp)
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+
+        with pytest.raises(ValueError, match=expected_error):
+            TpuPlatform.check_and_update_config(vllm_config)
+
+        mock_patch.assert_not_called()
 
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
     @patch(

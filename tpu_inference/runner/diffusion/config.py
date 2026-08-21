@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-MAX_COHORT_WAIT_MS = 100.0
+MAX_COHORT_WAIT_MS = 5000.0
 
 
 class GenerationStrategy(str, Enum):
@@ -104,6 +104,7 @@ class DiffusionRuntimeConfig:
     cohort_max_wait_ms: float = 0.0
     cohort_quiet_wait_ms: float = 0.0
     cohort_strict_waves: bool = False
+    cohort_round_robin_dp: bool = False
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence_threshold <= 1.0:
@@ -321,6 +322,8 @@ def resolve_generation_strategy(vllm_config: Any) -> GenerationStrategyConfig:
             diffusion_values.get("cohort_quiet_wait_ms", 0.0)),
         cohort_strict_waves=bool(
             diffusion_values.get("cohort_strict_waves", False)),
+        cohort_round_robin_dp=bool(
+            diffusion_values.get("cohort_round_robin_dp", False)),
     )
     return GenerationStrategyConfig(
         strategy=strategy,

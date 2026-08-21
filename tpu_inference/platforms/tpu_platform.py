@@ -98,6 +98,9 @@ else:
 
 logger = init_logger(__name__)
 
+_DIFFUSION_ROUND_ROBIN_VALIDATED_DP_SIZE = \
+    "_tpu_diffusion_round_robin_validated_dp_size"
+
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
@@ -371,6 +374,7 @@ class TpuPlatform(Platform):
         generation_strategy = resolve_generation_strategy(vllm_config)
         enable_block_diffusion = (generation_strategy.strategy
                                   is GenerationStrategy.BLOCK_DIFFUSION)
+        install_diffusion_round_robin_dp = False
         if enable_continue_decode and enable_block_diffusion:
             raise ValueError(
                 "continue_decode and block_diffusion are mutually exclusive")
@@ -397,6 +401,41 @@ class TpuPlatform(Platform):
                 MULTI_TOKEN_LOOKAHEAD_CONFIG
             vllm_config.additional_config[
                 MULTI_TOKEN_LOOKAHEAD_CONFIG] = diffusion.model.block_size - 1
+            if diffusion.runtime.cohort_round_robin_dp:
+                data_parallel_index = getattr(parallel_config,
+                                              "data_parallel_index", None)
+                validated_dp_size = vllm_config.additional_config.get(
+                    _DIFFUSION_ROUND_ROBIN_VALIDATED_DP_SIZE)
+                is_validated_dp_child = (
+                    requested_data_parallel_size == 1
+                    and type(validated_dp_size) is int
+                    and validated_dp_size > 1
+                    and isinstance(data_parallel_index, int)
+                    and 0 <= data_parallel_index < validated_dp_size)
+                if not is_validated_dp_child:
+                    if (requested_data_parallel_size <= 1
+                            or not envs.TPU_MULTIPROCESS_DP):
+                        raise ValueError(
+                            "Diffusion cohort_round_robin_dp requires native "
+                            "multiprocess data parallelism with "
+                            "data_parallel_size greater than 1")
+                    if getattr(parallel_config, "data_parallel_external_lb",
+                               False):
+                        raise ValueError(
+                            "Diffusion cohort_round_robin_dp requires vLLM's "
+                            "internal data-parallel load balancer")
+                    if getattr(parallel_config, "data_parallel_hybrid_lb",
+                               False):
+                        raise ValueError(
+                            "Diffusion cohort_round_robin_dp does not support "
+                            "data-parallel hybrid load balancing")
+                    api_process_count = getattr(parallel_config,
+                                                "_api_process_count", None)
+                    if api_process_count != 1:
+                        raise ValueError(
+                            "Diffusion cohort_round_robin_dp requires "
+                            "--api-server-count=1")
+                    install_diffusion_round_robin_dp = True
         is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         # Late initialization to avoid circular import.
@@ -478,6 +517,16 @@ class TpuPlatform(Platform):
                            False):
                     raise ValueError(
                         "block_diffusion is not supported with prefix caching")
+                if install_diffusion_round_robin_dp:
+                    from tpu_inference.core.diffusion_dp_router import \
+                        patch_vllm_dp_client_for_block_diffusion_round_robin
+                    patch_vllm_dp_client_for_block_diffusion_round_robin()
+                    vllm_config.additional_config[
+                        _DIFFUSION_ROUND_ROBIN_VALIDATED_DP_SIZE] = (
+                            requested_data_parallel_size)
+                    logger.info(
+                        "Enabled deterministic round-robin routing for "
+                        "block-diffusion DP cohorts")
 
             if enable_continue_decode:
                 from tpu_inference.core.sched.utils import \
