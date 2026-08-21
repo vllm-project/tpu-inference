@@ -1429,12 +1429,15 @@ def _ragged_paged_attention_kernel_loop(
                     @pl.when(_do_write)
                     def update_cur_bkv_to_cache():
                         if ring_enabled:
-                            # Each rotated block carries some rank's new KV;
-                            # write the pages this rank owns as they pass
-                            # (issued before this block's compute, so the DMA
-                            # overlaps it). The slot's previous write has
-                            # normally been waited already (release / fetch);
-                            # this keeps the bookkeeping exact.
+                            # The block is source rank src_rank's new KV, but
+                            # the cache is page-interleaved (global page p is
+                            # stored on rank p % P), so its tokens' pages are
+                            # spread over all ranks: as the block rotates by,
+                            # each rank DMAs out the pages it stores. Issued
+                            # before this block's compute so the DMA overlaps
+                            # it. The slot's previous write has normally been
+                            # waited already (release / fetch); this keeps
+                            # the bookkeeping exact.
                             wait_update_kv_cache(bkv_sem_idx)
                             for run in ring_new_kv_runs(
                                     seq_idx, src_rank, bkv_idx):
