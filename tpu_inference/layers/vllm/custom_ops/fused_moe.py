@@ -41,8 +41,16 @@ def _get_mesh() -> Mesh | None:
 
 def _all_reduce_over_tp(t: torch.Tensor,
                         mesh: Mesh,
-                        axis_name=ShardingAxisName.MLP_TENSOR) -> torch.Tensor:
-    """All-reduce an unreduced local sum over the TP axis."""
+                        axis_name=None) -> torch.Tensor:
+    """All-reduce an unreduced local sum over the TP axis.
+
+    ``axis_name`` is resolved inside the function on purpose: ``ShardingAxisName``
+    is lazily initialized from the environment on first attribute access, so
+    reading it in a default argument (at import time, before NEW_MODEL_DESIGN is
+    set) would latch the 2D axis set for the whole process.
+    """
+    if axis_name is None:
+        axis_name = ShardingAxisName.MLP_TENSOR
     spec = P(ShardingAxisName.ATTN_DATA, None)
 
     @shard_map(mesh=mesh, in_specs=spec, out_specs=spec, check_vma=False)
