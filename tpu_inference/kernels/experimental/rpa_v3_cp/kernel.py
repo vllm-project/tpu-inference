@@ -915,7 +915,8 @@ def _ragged_paged_attention_kernel_loop(
         whose pages this rank owns (page-interleaved layout, see
         get_cp_local_size_of_rank) from bkv buffer offset `src_start_base`
         into the paged cache; other ranks' pages are zero-size copies.
-        Returns this rank's token count (the wait size)."""
+        Start returns this rank's token count; wait takes that count as
+        `update_sz` (offset/src_start_base unused) and waits for it."""
         debug_print(
             "[RPA debug]"
             f" -----------{'wait' if wait else 'start'}_update_kv_cache_partial-----------"
@@ -926,13 +927,12 @@ def _ragged_paged_attention_kernel_loop(
         cache_hbm_shape = updated_kv_cache_hbm_ref.shape
         cache_hbm_ref = updated_kv_cache_hbm_ref.reshape(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
-        owned = (get_cp_local_size_of_rank(offset + update_sz, cp_rank) -
-                 get_cp_local_size_of_rank(offset, cp_rank))
-        kv_p_start = offset // page_size
-        kv_p_end = cdiv(offset + update_sz, page_size)
-        page_indices_offset = seq_idx * pages_per_seq
-
         if not wait:
+            owned = (get_cp_local_size_of_rank(offset + update_sz, cp_rank) -
+                     get_cp_local_size_of_rank(offset, cp_rank))
+            kv_p_start = offset // page_size
+            kv_p_end = cdiv(offset + update_sz, page_size)
+            page_indices_offset = seq_idx * pages_per_seq
 
             def loop_body(i, states):
                 remaining_sz, ignore = states
@@ -962,43 +962,41 @@ def _ragged_paged_attention_kernel_loop(
                 (update_sz, offset % page_size),
                 unroll=False,
             )
+            return owned
         else:
-            dst = cache_hbm_ref.at[pl.ds(0, owned)]
+            dst = cache_hbm_ref.at[pl.ds(0, update_sz)]
             _async_copy(
                 src=dst,
                 dst=dst,
                 sem=sem,
                 wait=True,
             )
-        return owned
 
-    def _update_kv_cache_ring(seq_idx, bkv_sem_idx, src, blk, *, wait=False):
+    def ring_new_kv_runs(seq_idx, src, blk):
         """Ring: the bkv buffer holds block `blk` of rank `src`'s stream
-        [cache shard | own head chunk | own tail chunk]; write this rank's
-        pages of the (real) new tokens in it. The head and tail chunks are
-        two separate global runs."""
+        [cache shard | own head chunk | own tail chunk]. Return the (real)
+        new tokens in it as (offset, update_sz, src_start_base) runs in the
+        form start_update_kv_cache takes: the head and tail chunks are two
+        disjoint global ranges, so there are up to two (one is empty unless
+        the block straddles the source's head/tail boundary)."""
         cache_len_global = get_kv_cache_len_global(seq_idx)
         src_cache_len = get_cp_local_size_of_rank(cache_len_global, src)
         num_current = get_kv_new_len_global(seq_idx)
         p0 = blk * bkv_sz
+        # New-token index range of this block within the source's stream.
         t0 = jnp.maximum(p0 - src_cache_len, 0)
         t1 = jnp.clip(p0 + bkv_sz - src_cache_len, 0, 2 * ring_chunk)
-        total = 0
-        for ta, tb, base in (
-            (t0, jnp.minimum(t1, ring_chunk), src * ring_chunk),
-            (jnp.maximum(t0, ring_chunk), t1,
-             (2 * cp_group_size - 1 - src) * ring_chunk - ring_chunk),
-        ):
+        head = (t0, jnp.minimum(t1, ring_chunk), src * ring_chunk)
+        tail = (jnp.maximum(t0, ring_chunk), t1,
+                (2 * cp_group_size - 1 - src) * ring_chunk - ring_chunk)
+        runs = []
+        for ta, tb, base in (head, tail):
             # Clip the run to this block and to the request's real tokens.
             n = jnp.clip(
                 jnp.minimum(tb, num_current - base) - ta, 0, 2 * ring_chunk)
-            total += _update_kv_cache_partial(seq_idx,
-                                              bkv_sem_idx,
-                                              cache_len_global + base + ta,
-                                              n,
-                                              src_cache_len + ta - p0,
-                                              wait=wait)
-        return total
+            runs.append(
+                (cache_len_global + base + ta, n, src_cache_len + ta - p0))
+        return runs
 
     def _fetch_bq(seq_idx, bq_idx, bq_sem_idx, *, wait=False):
         sem = sems.at[1, bq_sem_idx]
@@ -1082,46 +1080,38 @@ def _ragged_paged_attention_kernel_loop(
                               src_start_base=None):
         bkv_update_ids_ref[bkv_sem_idx] = seq_idx
         bkv_update_ids_ref[bkv_sem_idx + 2] = offset
-        bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
 
         if cp_group_size is None:
+            bkv_update_ids_ref[bkv_sem_idx + 4] = update_sz
             _update_kv_cache_full(seq_idx, bkv_sem_idx, offset, update_sz)
         else:
             bkv_update_ids_ref[bkv_sem_idx + 6] = src_start_base
-            _update_kv_cache_partial(seq_idx, bkv_sem_idx, offset, update_sz,
-                                     src_start_base)
-
-    def start_update_kv_cache_ring(seq_idx, bkv_sem_idx, src, blk):
-        # Never stack two writes on one slot: the slot's previous write
-        # (two rounds ago) must have landed before its bookkeeping is reused.
-        wait_update_kv_cache(bkv_sem_idx)
-        bkv_update_ids_ref[bkv_sem_idx] = seq_idx
-        bkv_update_ids_ref[bkv_sem_idx + 2] = src
-        bkv_update_ids_ref[bkv_sem_idx + 6] = blk
-        bkv_update_ids_ref[bkv_sem_idx + 4] = _update_kv_cache_ring(
-            seq_idx, bkv_sem_idx, src, blk)
+            # This rank's token count, the size the wait needs. Accumulate
+            # (explicit load/add/store: `ref[i] += x` is addupdate, which is
+            # not reliable for this SMEM scalar): the ring may issue two runs
+            # on one slot back to back, and the slot is always waited, which
+            # zeroes it, before its first run.
+            pending = bkv_update_ids_ref[bkv_sem_idx + 4]
+            bkv_update_ids_ref[bkv_sem_idx +
+                               4] = pending + _update_kv_cache_partial(
+                                   seq_idx, bkv_sem_idx, offset, update_sz,
+                                   src_start_base)
 
     def wait_update_kv_cache(bkv_sem_idx):
         update_sz = bkv_update_ids_ref[bkv_sem_idx + 4]
+        # Leave the slot at exactly 0 (the scratch is not initialized, and
+        # the CP start accumulates onto it).
+        bkv_update_ids_ref[bkv_sem_idx + 4] = 0
 
         @pl.when(update_sz > 0)
         def _():
             seq_idx = bkv_update_ids_ref[bkv_sem_idx]
             offset = bkv_update_ids_ref[bkv_sem_idx + 2]
-            bkv_update_ids_ref[bkv_sem_idx + 4] = 0
             if cp_group_size is None:
                 _update_kv_cache_full(seq_idx,
                                       bkv_sem_idx,
                                       offset,
                                       update_sz,
-                                      wait=True)
-            elif ring_enabled:
-                # Under ring the slot's [+2] entry is the source rank and
-                # [+6] the block index (see start_update_kv_cache_ring).
-                _update_kv_cache_ring(seq_idx,
-                                      bkv_sem_idx,
-                                      offset,
-                                      bkv_update_ids_ref[bkv_sem_idx + 6],
                                       wait=True)
             else:
                 src_start_base = bkv_update_ids_ref[bkv_sem_idx + 6]
@@ -1440,9 +1430,16 @@ def _ragged_paged_attention_kernel_loop(
                     def update_cur_bkv_to_cache():
                         if ring_enabled:
                             # Each rotated block carries some rank's new KV;
-                            # write the pages this rank owns as they pass.
-                            start_update_kv_cache_ring(seq_idx, bkv_sem_idx,
-                                                       src_rank, bkv_idx)
+                            # write the pages this rank owns as they pass
+                            # (issued before this block's compute, so the DMA
+                            # overlaps it). The slot's previous write has
+                            # normally been waited already (release / fetch);
+                            # this keeps the bookkeeping exact.
+                            wait_update_kv_cache(bkv_sem_idx)
+                            for run in ring_new_kv_runs(
+                                    seq_idx, src_rank, bkv_idx):
+                                start_update_kv_cache(seq_idx, bkv_sem_idx,
+                                                      *run)
                         else:
                             start_update_kv_cache(seq_idx, bkv_sem_idx, offset,
                                                   update_sz, src_start_base)
