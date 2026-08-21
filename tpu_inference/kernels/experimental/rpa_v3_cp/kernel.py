@@ -928,37 +928,48 @@ def _ragged_paged_attention_kernel_loop(
             cache_hbm_shape[0] * cache_hbm_shape[1], *cache_hbm_shape[2:])
         owned = (get_cp_local_size_of_rank(offset + update_sz, cp_rank) -
                  get_cp_local_size_of_rank(offset, cp_rank))
-        if wait:
-            dst = cache_hbm_ref.at[pl.ds(0, owned)]
-            _async_copy(src=dst, dst=dst, sem=sem, wait=True)
-            return owned
         kv_p_start = offset // page_size
         kv_p_end = cdiv(offset + update_sz, page_size)
         page_indices_offset = seq_idx * pages_per_seq
 
-        def loop_body(i, states):
-            remaining_sz, ignore = states
-            sz = jnp.minimum(page_size - ignore, remaining_sz)
-            gp = kv_p_start + i
-            sz_own = jnp.where(lax.rem(gp, cp_group_size) == cp_rank, sz, 0)
-            _async_copy(
-                vmem_ref.at[pl.ds(src_start_base + (update_sz - remaining_sz),
-                                  sz_own)],
-                cache_hbm_ref.at[pl.ds(
-                    page_indices_ref[page_indices_offset + gp // cp_group_size]
-                    * page_size + ignore,
-                    sz_own,
-                )],
-                sem,
-                wait=False,
-            )
-            debug_print("[RPA debug] loop_body i={}, sz_own={}", i, sz_own)
-            return remaining_sz - sz, 0
+        if not wait:
 
-        lax.fori_loop(0,
-                      kv_p_end - kv_p_start,
-                      loop_body, (update_sz, offset % page_size),
-                      unroll=False)
+            def loop_body(i, states):
+                remaining_sz, ignore = states
+                sz = jnp.minimum(page_size - ignore, remaining_sz)
+                gp = kv_p_start + i
+                sz_own = jnp.where(
+                    lax.rem(gp, cp_group_size) == cp_rank, sz, 0)
+                _async_copy(
+                    vmem_ref.at[pl.ds(
+                        src_start_base + (update_sz - remaining_sz), sz_own)],
+                    cache_hbm_ref.at[pl.ds(
+                        page_indices_ref[page_indices_offset +
+                                         gp // cp_group_size] * page_size +
+                        ignore,
+                        sz_own,
+                    )],
+                    sem,
+                    wait,
+                )
+                debug_print("[RPA debug] loop_body i={}, sz_own={}", i, sz_own)
+                return remaining_sz - sz, 0
+
+            lax.fori_loop(
+                0,
+                kv_p_end - kv_p_start,
+                loop_body,
+                (update_sz, offset % page_size),
+                unroll=False,
+            )
+        else:
+            dst = cache_hbm_ref.at[pl.ds(0, owned)]
+            _async_copy(
+                src=dst,
+                dst=dst,
+                sem=sem,
+                wait=True,
+            )
         return owned
 
     def _update_kv_cache_ring(seq_idx, bkv_sem_idx, src, blk, *, wait=False):
