@@ -1364,19 +1364,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         reqs = self.input_batch.num_reqs
         toks = scheduler_output.total_num_scheduled_tokens
 
-        if getattr(scheduler_output, "kv_cache_block_copies", None):
-            # Mamba prefix caching asks the worker to copy state between
-            # blocks when a request partially hits a cached block, which
-            # only arises when block hashes are finer than the block size
-            # (DCP, or an explicit --prefix-match-unit). Nothing on the TPU
-            # side performs those copies, and skipping them would resume a
-            # request from an unwritten block.
-            raise NotImplementedError(
-                "Scheduler requested KV cache block copies, which the TPU "
-                "runner does not implement. This happens with mamba prefix "
-                "caching when prefix_match_unit is smaller than the block "
-                "size; leave --prefix-match-unit unset.")
-
         req_id_kwargs = {}
         if jax.profiler.TraceAnnotation.is_enabled():
             req_id_kwargs = runner_utils.extract_request_ids_for_tracing(

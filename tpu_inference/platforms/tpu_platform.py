@@ -330,6 +330,19 @@ class TpuPlatform(Platform):
                 and getattr(vllm_config.model_config, "is_hybrid", False)):
             if vllm_config.speculative_config is not None:
                 unsupported_reason = "speculative decoding"
+            elif (cache_config.prefix_match_unit is not None and
+                  cache_config.prefix_match_unit < cache_config.block_size):
+                # Mamba prefix caching asks the worker to copy state between
+                # blocks when a request partially hits a cached block, which
+                # only arises when block hashes are finer than the block size
+                # (DCP, or an explicit --prefix-match-unit). Nothing on the TPU
+                # side performs those copies, and skipping them would resume a
+                # request from an unwritten block.
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
         if unsupported_reason is not None:
             logger.warning(
                 "[tpu_platform] Disabling prefix caching: hybrid "
@@ -497,6 +510,13 @@ class TpuPlatform(Platform):
                     "block size (was %d) for mamba prefix caching.",
                     cache_config.block_size, cache_config.mamba_block_size)
                 cache_config.mamba_block_size = cache_config.block_size
+            if (cache_config.prefix_match_unit is not None and
+                    cache_config.prefix_match_unit < cache_config.block_size):
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
 
     @classmethod
     def is_pin_memory_available(cls):
