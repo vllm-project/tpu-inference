@@ -29,7 +29,8 @@ from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
-    SharedAttentionMetadata, pcp_cache_page_buckets)
+    SharedAttentionMetadata, pcp_cache_page_buckets, pcp_seq_arrays,
+    pcp_token_layout)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -384,7 +385,8 @@ class CompilationManager:
                                     is_first_rank=True,
                                     is_last_rank=True,
                                     num_reqs: int,
-                                    pcp_cache_pages: int = 0) -> None:
+                                    pcp_cache_pages: int = 0,
+                                    pcp_num_reqs: int = 1) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -398,11 +400,13 @@ class CompilationManager:
         pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
 
         # Keep existing pattern for complex array operations
-        seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                             jnp.int32, metadata_attn_sharding)
+        # Under PCP each request becomes two fused seqs, so the attention
+        # metadata buffers are twice as wide (see runner.attn_max_num_seqs).
+        attn_seqs = self.runner.attn_max_num_seqs
+        seq_lens = self._create_dummy_tensor((attn_seqs, ), jnp.int32,
+                                             metadata_attn_sharding)
         query_start_loc = self._create_dummy_tensor(
-            (self.runner.max_num_reqs + dp_size, ), jnp.int32,
-            metadata_attn_sharding)
+            (attn_seqs + dp_size, ), jnp.int32, metadata_attn_sharding)
 
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
@@ -411,24 +415,53 @@ class CompilationManager:
                                             sharding=metadata_attn_sharding)
         pcp = None
         if pcp_size > 1:
-            n_reqs = self.runner.max_num_reqs
+            n_reqs = attn_seqs
             pcp_spec = NamedSharding(
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
             repl = NamedSharding(self.runner.mesh, PartitionSpec())
+            # Build a well-formed layout rather than an all-zero one. Both
+            # attention phases iterate the seq count from request_distribution
+            # (all zeros here, so the kernel body does not run during
+            # precompile), but the traced program still slices these arrays,
+            # and a realistic dummy keeps this path honest if that ever
+            # changes: query_start_loc entries that repeat inside the iterated
+            # range would be zero-length seqs, which hang the kernel.
+            cu_np = np.zeros((pcp_size, n_reqs + 1), np.int32)
+            qpos_np = np.zeros((pcp_size, n_reqs), np.int32)
+            kv_starts_np = np.zeros(n_reqs, np.int32)
+            if pcp_num_reqs > 1:
+                chunk = num_tokens // (2 * pcp_size * pcp_num_reqs)
+                assert chunk >= 1, (
+                    f"{num_tokens=} cannot hold {pcp_num_reqs} PCP requests; "
+                    "this bucket should have been skipped")
+                chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
+                                                   pcp_num_reqs, pcp_size)
+                cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
+                    chunks, offs, pcp_size, n_reqs)
+                cu_np = np.tile(cu_row, (pcp_size, 1))
+
             pcp = PCPMetadata(
                 query_start_loc=device_array(self.runner.mesh,
-                                             np.zeros((pcp_size, n_reqs + 1),
-                                                      dtype=np.int32),
+                                             cu_np,
                                              sharding=pcp_spec),
                 kv_cache_lens=device_array(self.runner.mesh,
                                            np.zeros(n_reqs, dtype=np.int32),
                                            sharding=repl),
                 q_pos_offsets=device_array(self.runner.mesh,
-                                           np.zeros((pcp_size, n_reqs),
-                                                    dtype=np.int32),
+                                           qpos_np,
                                            sharding=pcp_spec),
                 cache_pages=pcp_cache_pages,
+                kv_new_starts=device_array(
+                    self.runner.mesh, kv_starts_np, sharding=repl)
+                if pcp_num_reqs > 1 else None,
+                # A real permutation: jnp.take with out-of-range or duplicated
+                # indices is not what the runtime does.
+                kv_token_order=device_array(
+                    self.runner.mesh,
+                    np.arange(num_tokens, dtype=np.int32),
+                    sharding=repl) if pcp_num_reqs > 1 else None,
+                num_reqs=pcp_num_reqs,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
         # populate for hybrid attn+mamba models — for pure-attention models we
@@ -713,17 +746,30 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
-                for _cache_pages in self._pcp_cache_page_buckets():
-                    self._precompile_backbone_helper(
-                        f"worker{self.runner.rank} backbone",
-                        input_ids=input_ids,
-                        positions=positions,
-                        inputs_embeds=None,
-                        intermediate_tensors=intermediate_tensors,
-                        is_first_rank=is_first_rank,
-                        is_last_rank=is_last_rank,
-                        num_reqs=num_reqs,
-                        pcp_cache_pages=_cache_pages)
+                _cache_rungs = self._pcp_cache_page_buckets()
+                _pcp = self.runner.vllm_config.sharding_config.prefill_cp_size
+                for _cache_pages in _cache_rungs:
+                    for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
+                        # cache_pages only decides whether the cache phase is
+                        # elided at all (== 0); the ladder is {0, max}, so
+                        # every rung here is reachable.
+                        # A bucket that cannot give every request a chunk of at
+                        # least one token per rank can never carry that many
+                        # requests at runtime, so the variant is unreachable.
+                        if (_pcp_reqs > 1
+                                and num_tokens < 2 * _pcp * _pcp_reqs):
+                            continue
+                        self._precompile_backbone_helper(
+                            f"worker{self.runner.rank} backbone",
+                            input_ids=input_ids,
+                            positions=positions,
+                            inputs_embeds=None,
+                            intermediate_tensors=intermediate_tensors,
+                            is_first_rank=is_first_rank,
+                            is_last_rank=is_last_rank,
+                            num_reqs=num_reqs,
+                            pcp_cache_pages=_cache_pages,
+                            pcp_num_reqs=_pcp_reqs)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()

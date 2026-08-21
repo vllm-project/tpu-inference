@@ -17,13 +17,17 @@ import math
 from dataclasses import dataclass
 
 import jax
+import numpy as np
 from vllm.utils.math_utils import cdiv
 
 
 @functools.partial(
     jax.tree_util.register_dataclass,
-    data_fields=["query_start_loc", "kv_cache_lens", "q_pos_offsets"],
-    meta_fields=["cache_pages"],
+    data_fields=[
+        "query_start_loc", "kv_cache_lens", "q_pos_offsets", "kv_new_starts",
+        "kv_token_order"
+    ],
+    meta_fields=["cache_pages", "num_reqs"],
 )
 @dataclass
 class PCPMetadata:
@@ -39,11 +43,27 @@ class PCPMetadata:
     # Sharded as P('pcp', None).
     q_pos_offsets: jax.Array
     # STATIC (meta field): a rung of `pcp_cache_page_buckets` giving an UPPER
-    # bound on the KV pages this request's cached tokens occupy, used to bound
-    # the gather-KV cache all-gather.  0 means nothing is cached, in which case
-    # the cache phase is elided entirely.  REQUIRED: a default would silently
-    # elide the cache phase for any caller that forgot to set it.
+    # bound on the KV pages any request's cached tokens occupy (taken over the
+    # batch).  0 means nothing is cached, in which case the cache phase is
+    # elided entirely; that elision is the only thing the value decides now
+    # that the cache phase is the in-kernel ring.  REQUIRED: a default would
+    # silently elide the cache phase for any caller that forgot to set it.
     cache_pages: int
+    # (max_num_seqs,) int32 — base offset of each fused seq's current-KV block
+    # inside the all-gathered new-KV buffer.  Replicated (P()).  None for a
+    # single request, where every block starts at 0 and the kernel's implicit
+    # base of 0 is already right.
+    kv_new_starts: jax.Array | None = None
+    # (padded_num_tokens,) int32 — permutation taking the all-gathered current
+    # K/V from rank order to request-major token order.  Replicated (P()).
+    # None keeps the single-request fast path, where the kernel remaps
+    # addresses itself via `pcp_chunk_size`.
+    kv_token_order: jax.Array | None = None
+    # STATIC (meta field): number of requests fused into this launch, padded to
+    # its own bucket ladder.  1 keeps the batch on exactly the single-request
+    # code path (kernel-side rank-order remap of the current K/V, no
+    # kv_new_starts) rather than the multi-request one.
+    num_reqs: int = 1
 
 
 @functools.partial(
@@ -91,7 +111,7 @@ class AttentionMetadata(object):
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
 
-    # PCP gather-KV only. Number of kv pages occupied by the current request.
+    # PCP only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
 
 
@@ -166,7 +186,11 @@ jax.tree_util.register_pytree_node(
         groups, layer_names_per_group),
 )
 
-PCP_CACHE_PAGE_BUCKET_COUNT = 5
+# After PR #3277 (in-kernel ring cache phase) `cache_pages` only decides whether
+# the cache phase runs at all (0 elides it); every nonzero rung compiles the
+# same kernel, so the ladder is just {0, max}. Each rung multiplies the PCP
+# precompile set, so keep this at 2 unless the value gains another use.
+PCP_CACHE_PAGE_BUCKET_COUNT = 2
 
 
 def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
@@ -180,6 +204,65 @@ def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
             v = 1 << max(0, round(math.exp(step * i)).bit_length() - 1)
             buckets.add(min(max(v, 1), max_num_blocks_per_req))
     return sorted(buckets)
+
+
+def pcp_token_layout(num_scheduled_tokens: list[int],
+                     pcp_size: int) -> tuple[list[int], list[int], int]:
+    """Per-request zigzag chunking for multi-request PCP.
+
+    Each request is split into its own 2*pcp_size chunks, and its head+tail
+    pair occupies a fixed-width slot in every rank's region of the token
+    buffer. Returns (C, off, S):
+
+      C[i]   chunk size of request i, ceil(n_i / 2P)
+      off[i] start of request i's slot within one rank's region
+      S      live tokens per rank; the global buffer needs pcp_size * S rows
+    """
+    two_p = 2 * pcp_size
+    off, acc, C = [], 0, []
+    for n in num_scheduled_tokens:
+        c = cdiv(n, two_p)
+        C.append(c)
+        off.append(acc)
+        acc += 2 * c
+    return C, off, acc
+
+
+def pcp_seq_arrays(chunk: list[int], off: list[int], pcp_size: int,
+                   n_off: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-seq attention metadata for a `pcp_token_layout` result.
+
+    Request i is presented to the kernel as seqs 2i (head chunk) and 2i+1
+    (tail chunk). Returns int32 arrays (cu_row, q_pos, kv_new_starts):
+
+      cu_row[n_off + 1]          cumulative query rows per seq. Rank-invariant
+                                 (both halves are full length). Entries past
+                                 2R repeat the last value: they are never
+                                 iterated, and a repeat inside the iterated
+                                 range would be a zero-length seq, which
+                                 hangs the kernel.
+      q_pos[pcp_size, n_off]     each seq's query position offset on each
+                                 rank: rank r holds chunk r (head) and chunk
+                                 2P-1-r (tail) of every request.
+      kv_new_starts[n_off]       base of request i's block in the
+                                 request-major current K/V buffer,
+                                 2P * sum(chunk[:i]) == pcp_size * off[i].
+    """
+    n_reqs = len(chunk)
+    assert 2 * n_reqs <= n_off, (n_reqs, n_off)
+    c = np.asarray(chunk, np.int64)
+    o = np.asarray(off, np.int64)
+    ranks = np.arange(pcp_size)
+    cu_row = np.zeros(n_off + 1, np.int32)
+    cu_row[1:2 * n_reqs + 1:2] = o + c
+    cu_row[2:2 * n_reqs + 2:2] = o + 2 * c
+    cu_row[2 * n_reqs + 1:] = cu_row[2 * n_reqs]
+    q_pos = np.zeros((pcp_size, n_off), np.int32)
+    q_pos[:, 0:2 * n_reqs:2] = ranks[:, None] * c
+    q_pos[:, 1:2 * n_reqs:2] = (2 * pcp_size - 1 - ranks)[:, None] * c
+    kv_new_starts = np.zeros(n_off, np.int32)
+    kv_new_starts[:2 * n_reqs] = np.repeat(pcp_size * o, 2)
+    return cu_row, q_pos, kv_new_starts
 
 
 def round_up_pcp_cache_pages(num_computed_tokens: int, block_size: int,
