@@ -1110,18 +1110,13 @@ def mla_sliding_window_ragged_paged_attention(
             in_m,
         )
 
-    # Decode-only
+    # Initialize carry-in buffers for input-output aliasing across decode,
+    # prefill, and mixed stages. Zero initialization ensures unused/padding
+    # token slots do not contain NaNs.
     num_l_heads = align_to(num_q_heads, 128)
-    if unnormalized_output:
-        # output of swa attn is consumed by csa, hca attn, padding tokens'
-        # data won't be used downstream at all, so un-initialized buffer is fine.
-        l_sum = jnp.empty((q.shape[0], num_l_heads), dtype=jnp.float32)
-        m = jnp.empty((q.shape[0], num_l_heads), dtype=jnp.float32)
-        in_output = jnp.empty_like(q)
-    else:
-        l_sum = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
-        m = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
-        in_output = jnp.zeros_like(q)
+    l_sum = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+    m = jnp.zeros((q.shape[0], num_l_heads), dtype=jnp.float32)
+    in_output = jnp.zeros_like(q)
     output, updated_kv, out_l, out_m = run_mla_kernel(
         q,
         new_kv,
