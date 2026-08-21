@@ -459,6 +459,11 @@ def _ragged_paged_attention_kernel_loop(
             return kv_cache_lens_ref[seq_idx]
         return kv_lens_ref[seq_idx] - get_kv_new_len(seq_idx)
 
+    def get_kv_new_len_global(seq_idx):
+        # Real current tokens of the whole request (all ranks' chunks); under
+        # the ring, rotated new KV past this is padding.
+        return kv_lens_ref[seq_idx] - get_kv_cache_len_global(seq_idx)
+
     def get_kv_cache_len_local(seq_idx):
         return get_cp_local_size_of_rank(get_kv_cache_len_global(seq_idx),
                                          cp_rank)
@@ -501,10 +506,7 @@ def _ragged_paged_attention_kernel_loop(
         kv_q_gap = kv_cache_len_local + get_q_pos_offset(seq_idx)
 
         if ring_enabled:
-            # Real current tokens of the whole request (all ranks); rotated
-            # new KV past this is padding.
-            kv_new_len_global = kv_lens_ref[seq_idx] - kv_cache_lens_ref[
-                seq_idx]
+            kv_new_len_global = get_kv_new_len_global(seq_idx)
 
         cur_seq_start_bkv_idx = get_start_bkv_idx(seq_idx)
         next_seq_idx = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
@@ -974,7 +976,7 @@ def _ragged_paged_attention_kernel_loop(
         two separate global runs."""
         cache_len_global = get_kv_cache_len_global(seq_idx)
         src_cache_len = get_cp_local_size_of_rank(cache_len_global, src)
-        num_current = kv_lens_ref[seq_idx] - cache_len_global
+        num_current = get_kv_new_len_global(seq_idx)
         p0 = blk * bkv_sz
         t0 = jnp.maximum(p0 - src_cache_len, 0)
         t1 = jnp.clip(p0 + bkv_sz - src_cache_len, 0, 2 * ring_chunk)
