@@ -206,7 +206,12 @@ def _scheduler_worker_process(
                     request_ids, finished_status = data
                     result = scheduler.finish_requests(request_ids,
                                                        finished_status)
-                    _send_result(result)
+                    retained_request_ids = set(scheduler.requests)
+                    retained_request_ids.update(scheduler.finished_req_ids)
+                    for cached_output in _cached_scheduler_outputs:
+                        retained_request_ids.update(
+                            cached_output.finished_req_ids)
+                    _send_result((result, retained_request_ids))
 
                 case SchedulerCommand.UPDATE_DRAFT_TOKEN_IDS:
                     draft_token_ids = data
@@ -1367,16 +1372,20 @@ class DPScheduler(SchedulerInterface):
 
         # Forward to each scheduler
         for rank, req_ids in rank_request_ids.items():
+            worker_request_ids = None if request_ids is None else req_ids
             self._send_command(rank, SchedulerCommand.FINISH_REQUESTS,
-                               (req_ids, finished_status))
+                               (worker_request_ids, finished_status))
+        reusable_assigned_ids = set()
         for rank in rank_request_ids:
-            finished_requests = self._get_result(
+            finished_requests, retained_request_ids = self._get_result(
                 rank, SchedulerCommand.FINISH_REQUESTS)
             for req_id, client_index in finished_requests:
                 if req_id in seen_ids:
                     finished_by_id.setdefault(req_id, (req_id, client_index))
+            reusable_assigned_ids.update(
+                set(rank_request_ids[rank]) - retained_request_ids)
 
-        self._cleanup_finished_requests(set(finished_by_id))
+        self._cleanup_finished_requests(reusable_assigned_ids)
         return [
             finished_by_id[req_id] for req_id in normalized_ids
             if req_id in finished_by_id

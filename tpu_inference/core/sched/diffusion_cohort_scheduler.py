@@ -21,6 +21,7 @@ from typing import Any, Generic, TypeVar
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -186,10 +187,11 @@ class BlockDiffusionCohortScheduler(Scheduler):
         self._cohort_request_ids.add(request.request_id)
 
     def schedule(self, *args: Any, **kwargs: Any) -> SchedulerOutput:
-        base_is_idle = super().get_num_unfinished_requests() == 0
-        if self._strict_waves:
+        base_is_idle = super().get_request_counts() == (0, 0)
+        is_unpaused = self.pause_state == PauseState.UNPAUSED
+        if self._strict_waves and is_unpaused:
             self._update_full_refill_window(base_is_idle, self._clock())
-        if not self._strict_waves or base_is_idle:
+        if is_unpaused and (not self._strict_waves or base_is_idle):
             wait_for_full_refill = (self._strict_waves
                                     and self._last_admitted_cohort_was_full)
             cohort = self._cohort.drain_ready(
@@ -205,9 +207,9 @@ class BlockDiffusionCohortScheduler(Scheduler):
 
     def update_from_output(self, *args: Any, **kwargs: Any) -> Any:
         outputs = super().update_from_output(*args, **kwargs)
-        if self._strict_waves:
+        if self._strict_waves and self.pause_state == PauseState.UNPAUSED:
             self._update_full_refill_window(
-                super().get_num_unfinished_requests() == 0, self._clock())
+                super().get_request_counts() == (0, 0), self._clock())
         return outputs
 
     def finish_requests(
@@ -215,6 +217,8 @@ class BlockDiffusionCohortScheduler(Scheduler):
         request_ids: str | Iterable[str] | None,
         finished_status: RequestStatus,
     ) -> list[tuple[str, int]]:
+        assert RequestStatus.is_finished(finished_status)
+        publish_finished = request_ids is not None
         if request_ids is None:
             normalized_ids = list(self._cohort_request_ids)
             normalized_ids.extend(self.requests)
@@ -226,8 +230,18 @@ class BlockDiffusionCohortScheduler(Scheduler):
             lambda request: request.request_id in request_id_set)
         discarded_ids = {request.request_id for request in discarded}
         self._cohort_request_ids.difference_update(discarded_ids)
-        finished_requests = [(request.request_id, request.client_index)
-                             for request in discarded]
+        finished_requests = []
+        for request in discarded:
+            if request.is_finished():
+                continue
+            request.status = finished_status
+            finished_requests.append(
+                (request.request_id, request.client_index))
+            if publish_finished:
+                self.finished_req_ids.add(request.request_id)
+                if self.finished_req_ids_dict is not None:
+                    self.finished_req_ids_dict[request.client_index].add(
+                        request.request_id)
         admitted_ids = [
             request_id for request_id in normalized_ids
             if request_id not in discarded_ids
@@ -238,17 +252,25 @@ class BlockDiffusionCohortScheduler(Scheduler):
         if request_ids is None:
             self._last_admitted_cohort_was_full = False
             self._full_refill_deadline = None
-        elif self._strict_waves:
+        elif (self._strict_waves and self.pause_state == PauseState.UNPAUSED):
             self._update_full_refill_window(
-                super().get_num_unfinished_requests() == 0, self._clock())
+                super().get_request_counts() == (0, 0), self._clock())
         return finished_requests
 
     def get_num_unfinished_requests(self) -> int:
-        return super().get_num_unfinished_requests() + len(self._cohort)
+        base_unfinished = super().get_num_unfinished_requests()
+        if self.pause_state == PauseState.UNPAUSED:
+            return base_unfinished + len(self._cohort)
+        return base_unfinished
 
     def get_request_counts(self) -> tuple[int, int]:
         running, waiting = super().get_request_counts()
         return running, waiting + len(self._cohort)
 
     def has_unfinished_requests(self) -> bool:
-        return bool(self._cohort) or super().has_unfinished_requests()
+        return self.get_num_unfinished_requests() > 0
+
+    def set_pause_state(self, pause_state: PauseState) -> None:
+        if pause_state != PauseState.UNPAUSED:
+            self._full_refill_deadline = None
+        super().set_pause_state(pause_state)

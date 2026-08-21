@@ -52,7 +52,8 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 # NOTE: this kernel is experimental and not fully tested.  See
 # tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
 # for details
-if envs.USE_BATCHED_RPA_KERNEL:
+_USE_BATCHED_RPA_KERNEL = envs.USE_BATCHED_RPA_KERNEL
+if _USE_BATCHED_RPA_KERNEL:
     import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
     logger.info_once("Using experimental batched RPA kernel")
 else:
@@ -64,6 +65,24 @@ get_kv_cache_shape = rpa.get_kv_cache_shape
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
 get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
+
+
+def _rpa_v3_block_size_kwargs() -> dict[str, tuple[int, int, int, int]]:
+    block_size_kwargs = {}
+    for env_name, kwarg in (
+        ("RPA_V3_DECODE_BLOCK_SIZES", "d_block_sizes"),
+        ("RPA_V3_PREFILL_BLOCK_SIZES", "p_block_sizes"),
+        ("RPA_V3_MIXED_BLOCK_SIZES", "m_block_sizes"),
+    ):
+        block_sizes = getattr(envs, env_name)
+        if not block_sizes:
+            continue
+        if len(block_sizes) != 4:
+            raise ValueError(
+                f"{env_name} must contain exactly four comma-separated integers"
+            )
+        block_size_kwargs[kwarg] = tuple(block_sizes)
+    return block_size_kwargs
 
 
 def sharded_flash_attention(
@@ -428,6 +447,8 @@ def sharded_ragged_paged_attention(
 
     use_hd64 = q.shape[-1] == 64
     func = ragged_paged_attention_hd64 if use_hd64 else ragged_paged_attention
+    block_size_kwargs = (_rpa_v3_block_size_kwargs() if not use_hd64
+                         and not _USE_BATCHED_RPA_KERNEL else {})
 
     if attention_sink is not None:
         if not use_hd64:
@@ -479,6 +500,7 @@ def sharded_ragged_paged_attention(
             kwargs["block_causal_size"] = block_causal_size
             kwargs["chunk_prefill_size"] = chunk_prefill_size
             kwargs["out_dtype"] = out_dtype
+            kwargs.update(block_size_kwargs)
         return func(*args, **kwargs)
 
     return jax.shard_map(

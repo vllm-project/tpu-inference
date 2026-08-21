@@ -31,6 +31,8 @@ _EXPECTED_CLIENT_INIT_PARAMETERS = (
     "client_index",
 )
 _EXPECTED_ROUTER_PARAMETERS = ("self", "request")
+_EXPECTED_OUTPUT_HANDLER_PARAMETERS = ("self", "outputs")
+_EXPECTED_ABORT_PARAMETERS = ("self", "request_ids")
 _EXPECTED_FACTORY_PARAMETERS = (
     "vllm_config",
     "executor_class",
@@ -74,6 +76,12 @@ def patch_vllm_dp_client_for_block_diffusion_round_robin() -> None:
     _require_parameters(original_client.get_core_engine_for_request,
                         _EXPECTED_ROUTER_PARAMETERS,
                         "DPLBAsyncMPClient.get_core_engine_for_request")
+    _require_parameters(original_client.process_engine_outputs,
+                        _EXPECTED_OUTPUT_HANDLER_PARAMETERS,
+                        "DPLBAsyncMPClient.process_engine_outputs")
+    _require_parameters(original_client.abort_requests_async,
+                        _EXPECTED_ABORT_PARAMETERS,
+                        "DPLBAsyncMPClient.abort_requests_async")
     factory = core_client.EngineCoreClient.make_async_mp_client
     _require_parameters(factory, _EXPECTED_FACTORY_PARAMETERS,
                         "EngineCoreClient.make_async_mp_client")
@@ -107,6 +115,12 @@ def patch_vllm_dp_client_for_block_diffusion_round_robin() -> None:
                     raise ValueError(
                         "diffusion cohort_round_robin_dp requires positive "
                         "scheduler_config.max_num_seqs")
+            self._cohort_round_robin_dp_enabled = round_robin_enabled
+            self._cohort_round_robin_dp_cohort_size = cohort_size
+            self._cohort_round_robin_dp_active_engine_index = None
+            self._cohort_round_robin_dp_requests_in_cohort = 0
+            self._cohort_round_robin_dp_active_request_ids: set[str] = set()
+            self._cohort_round_robin_dp_epoch = 0
             super().__init__(
                 vllm_config,
                 executor_class,
@@ -115,14 +129,24 @@ def patch_vllm_dp_client_for_block_diffusion_round_robin() -> None:
                 client_count,
                 client_index,
             )
-            self._cohort_round_robin_dp_enabled = round_robin_enabled
-            self._cohort_round_robin_dp_cohort_size = cohort_size
             self._cohort_round_robin_dp_next_engine_index = \
                 self.eng_start_index
-            self._cohort_round_robin_dp_active_engine_index = None
-            self._cohort_round_robin_dp_requests_in_cohort = 0
+
+        def _finish_partial_cohort_requests(
+            self,
+            request_ids: tuple[str, ...],
+        ) -> None:
+            if (not self._cohort_round_robin_dp_enabled
+                    or not self._cohort_round_robin_dp_active_request_ids):
+                return
+            self._cohort_round_robin_dp_active_request_ids.difference_update(
+                request_ids)
+            if not self._cohort_round_robin_dp_active_request_ids:
+                self._cohort_round_robin_dp_requests_in_cohort = 0
+                self._cohort_round_robin_dp_active_engine_index = None
 
         def _start_next_cohort(self) -> int:
+            self._cohort_round_robin_dp_epoch += 1
             num_engines = len(self.core_engines)
             start_index = (self._cohort_round_robin_dp_next_engine_index %
                            num_engines)
@@ -165,13 +189,38 @@ def patch_vllm_dp_client_for_block_diffusion_round_robin() -> None:
                 engine_index = self._cohort_round_robin_dp_active_engine_index
                 assert engine_index is not None
             self._cohort_round_robin_dp_requests_in_cohort += 1
+            self._cohort_round_robin_dp_active_request_ids.add(
+                request.request_id)
             if (self._cohort_round_robin_dp_requests_in_cohort
                     >= self._cohort_round_robin_dp_cohort_size):
                 self._cohort_round_robin_dp_requests_in_cohort = 0
                 self._cohort_round_robin_dp_active_engine_index = None
+                self._cohort_round_robin_dp_active_request_ids.clear()
             self.lb_engines[engine_index][0] += 1
             chosen_engine = self.core_engines[engine_index]
             self.reqs_in_flight[request.request_id] = chosen_engine
             return chosen_engine
+
+        @staticmethod
+        async def process_engine_outputs(self: Any, outputs: Any) -> None:
+            cohort_epoch = self._cohort_round_robin_dp_epoch
+            finished_request_ids = tuple(outputs.finished_requests or ())
+            await original_client.process_engine_outputs(self, outputs)
+            if (self._cohort_round_robin_dp_enabled
+                    and self._cohort_round_robin_dp_epoch == cohort_epoch):
+                self._finish_partial_cohort_requests(finished_request_ids)
+
+        async def abort_requests_async(self, request_ids: list[str]) -> None:
+            if not self._cohort_round_robin_dp_enabled:
+                await super().abort_requests_async(request_ids)
+                return
+            cohort_epoch = self._cohort_round_robin_dp_epoch
+            tracked_request_ids = tuple(
+                request_id for request_id in request_ids
+                if request_id in self.reqs_in_flight and request_id in
+                self._cohort_round_robin_dp_active_request_ids)
+            await super().abort_requests_async(request_ids)
+            if self._cohort_round_robin_dp_epoch == cohort_epoch:
+                self._finish_partial_cohort_requests(tracked_request_ids)
 
     core_client.DPLBAsyncMPClient = CohortRoundRobinDPLBAsyncMPClient

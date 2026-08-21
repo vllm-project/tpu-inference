@@ -20,6 +20,8 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 
+from tpu_inference import envs
+from tpu_inference.layers.common import attention_interface
 from tpu_inference.layers.common.attention_interface import (
     attention, mla_attention, sharded_ragged_paged_attention)
 from tpu_inference.layers.common.attention_metadata import (
@@ -416,13 +418,13 @@ def test_sharded_ragged_paged_attention_gqa_incompatible_raises_error(
 def _run_sharded_rpa_capturing_kwargs(monkeypatch,
                                       gqa_mesh,
                                       update_kv_cache,
-                                      out_dtype=None):
+                                      out_dtype=None,
+                                      head_dim=128):
     """Helper: run `sharded_ragged_paged_attention` with a stubbed
     `ragged_paged_attention` (the module-level binding) and a passthrough
     `jax.shard_map`. Returns the kwargs forwarded by the closure to the
     underlying kernel.
     """
-    head_dim = 128  # non-hd64
     num_kv_heads = 4
     q = jnp.ones((TOTAL_TOKENS, NUM_HEADS, head_dim))
     k = jnp.ones((TOTAL_TOKENS, num_kv_heads, head_dim))
@@ -440,10 +442,9 @@ def _run_sharded_rpa_capturing_kwargs(monkeypatch,
         captured.update(kwargs)
         return jnp.ones_like(q), kv_cache
 
-    monkeypatch.setattr(
-        "tpu_inference.layers.common.attention_interface.ragged_paged_attention",
-        fake_kernel,
-    )
+    kernel_name = ("ragged_paged_attention_hd64"
+                   if head_dim == 64 else "ragged_paged_attention")
+    monkeypatch.setattr(attention_interface, kernel_name, fake_kernel)
 
     # Passthrough shard_map so the closure actually executes.
     def passthrough_shard_map(inner_fn, **_):
@@ -467,6 +468,82 @@ def _run_sharded_rpa_capturing_kwargs(monkeypatch,
         out_dtype=out_dtype,
     )
     return captured
+
+
+def test_sharded_rpa_forwards_only_mixed_block_sizes_from_env(
+        monkeypatch, gqa_mesh):
+    monkeypatch.setenv("RPA_V3_MIXED_BLOCK_SIZES", "32,2048,32,512")
+    monkeypatch.setattr(envs, "RPA_V3_DECODE_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, "RPA_V3_PREFILL_BLOCK_SIZES", [])
+    monkeypatch.setattr(
+        envs,
+        "RPA_V3_MIXED_BLOCK_SIZES",
+        envs.environment_variables["RPA_V3_MIXED_BLOCK_SIZES"](),
+    )
+
+    captured = _run_sharded_rpa_capturing_kwargs(monkeypatch,
+                                                 gqa_mesh,
+                                                 update_kv_cache=True)
+
+    assert captured["m_block_sizes"] == (32, 2048, 32, 512)
+    assert "d_block_sizes" not in captured
+    assert "p_block_sizes" not in captured
+
+
+def test_sharded_rpa_omits_unset_block_size_kwargs(monkeypatch, gqa_mesh):
+    monkeypatch.setattr(envs, "RPA_V3_DECODE_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, "RPA_V3_PREFILL_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, "RPA_V3_MIXED_BLOCK_SIZES", [])
+
+    captured = _run_sharded_rpa_capturing_kwargs(monkeypatch,
+                                                 gqa_mesh,
+                                                 update_kv_cache=True)
+
+    assert "d_block_sizes" not in captured
+    assert "p_block_sizes" not in captured
+    assert "m_block_sizes" not in captured
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        "RPA_V3_DECODE_BLOCK_SIZES",
+        "RPA_V3_PREFILL_BLOCK_SIZES",
+        "RPA_V3_MIXED_BLOCK_SIZES",
+    ],
+)
+def test_sharded_rpa_rejects_invalid_block_size_tuple(monkeypatch, gqa_mesh,
+                                                      env_name):
+    monkeypatch.setattr(envs, "RPA_V3_DECODE_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, "RPA_V3_PREFILL_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, "RPA_V3_MIXED_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, env_name, [32, 2048, 32])
+
+    with pytest.raises(ValueError, match=env_name):
+        _run_sharded_rpa_capturing_kwargs(monkeypatch,
+                                          gqa_mesh,
+                                          update_kv_cache=True)
+
+
+@pytest.mark.parametrize("head_dim,use_batched", [(64, False), (128, True)])
+def test_sharded_rpa_does_not_read_v3_block_sizes_on_other_kernels(
+        monkeypatch, gqa_mesh, head_dim, use_batched):
+    monkeypatch.setattr(envs, "RPA_V3_DECODE_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, "RPA_V3_PREFILL_BLOCK_SIZES", [])
+    monkeypatch.setattr(envs, "RPA_V3_MIXED_BLOCK_SIZES", [32, 2048, 32])
+    monkeypatch.setattr(attention_interface, "_USE_BATCHED_RPA_KERNEL",
+                        use_batched)
+
+    captured = _run_sharded_rpa_capturing_kwargs(
+        monkeypatch,
+        gqa_mesh,
+        update_kv_cache=True,
+        head_dim=head_dim,
+    )
+
+    assert "d_block_sizes" not in captured
+    assert "p_block_sizes" not in captured
+    assert "m_block_sizes" not in captured
 
 
 def test_sharded_rpa_forwards_update_kv_cache_when_not_hd64(

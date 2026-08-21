@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import cloudpickle
@@ -536,8 +537,8 @@ class TestDPScheduler:
 
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[
-            [("req1", 10)],
-            [("req2", 20)],
+            ([("req2", 20)], {"req2"}),
+            ([("req1", 10)], {"req1"}),
         ])
 
         scheduler.assigned_dp_rank = {
@@ -561,7 +562,7 @@ class TestDPScheduler:
             1, SchedulerCommand.FINISH_REQUESTS, (["req2"], "completed"))
         assert finished == [("req2", 20), ("pending", 30), ("req1", 10)]
         assert scheduler._pending_new_requests == []
-        assert scheduler.assigned_dp_rank == {"stale": 0}
+        assert scheduler.assigned_dp_rank == {"req1": 0, "req2": 1}
 
     def test_finish_requests_accepts_single_unknown_id(
             self, mock_vllm_config, mock_kv_cache_config,
@@ -584,8 +585,8 @@ class TestDPScheduler:
                                            mock_structured_output_manager)
         scheduler._send_command = MagicMock()
         scheduler._get_result = MagicMock(side_effect=[
-            [("req0", 10)],
-            [("req1", 11)],
+            ([("req0", 10)], {"req0"}),
+            ([("req1", 11)], {"req1"}),
         ])
         scheduler.assigned_dp_rank = {
             "req0": 0,
@@ -603,10 +604,9 @@ class TestDPScheduler:
         finished = scheduler.finish_requests(None, "completed")
 
         scheduler._send_command.assert_any_call(
-            0, SchedulerCommand.FINISH_REQUESTS,
-            (["req0", "stale"], "completed"))
+            0, SchedulerCommand.FINISH_REQUESTS, (None, "completed"))
         scheduler._send_command.assert_any_call(
-            1, SchedulerCommand.FINISH_REQUESTS, (["req1"], "completed"))
+            1, SchedulerCommand.FINISH_REQUESTS, (None, "completed"))
         assert finished == [
             ("req0", 10),
             ("req1", 11),
@@ -614,7 +614,54 @@ class TestDPScheduler:
             ("pending1", 21),
         ]
         assert scheduler._pending_new_requests == []
-        assert scheduler.assigned_dp_rank == {"stale": 0}
+        assert scheduler.assigned_dp_rank == {"req0": 0, "req1": 1}
+
+    def test_finish_requests_releases_stale_assignment_for_request_id_reuse(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(return_value=([], set()))
+        scheduler.assigned_dp_rank = {"reused": 0}
+
+        assert scheduler.finish_requests("reused", "completed") == []
+        assert scheduler.assigned_dp_rank == {}
+
+        scheduler._find_best_rank_for_request = MagicMock(return_value=1)
+        scheduler._get_result = MagicMock(return_value=None)
+        replacement = MagicMock(spec=Request)
+        replacement.request_id = "reused"
+        scheduler.add_request(replacement)
+
+        assert scheduler.assigned_dp_rank == {"reused": 1}
+        scheduler._send_command.assert_called_with(
+            1, SchedulerCommand.ADD_REQUEST, replacement)
+
+    def test_finish_requests_keeps_assignment_until_old_finish_is_consumed(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(return_value=([], {"reused"}))
+        scheduler.assigned_dp_rank = {"reused": 0}
+
+        assert scheduler.finish_requests("reused", "completed") == []
+        assert scheduler.assigned_dp_rank == {"reused": 0}
+
+        replacement = MagicMock(spec=Request)
+        replacement.request_id = "reused"
+        with pytest.raises(AssertionError, match="already assigned"):
+            scheduler.add_request(replacement)
+
+        scheduler._cleanup_finished_requests({"reused"})
+        scheduler._find_best_rank_for_request = MagicMock(return_value=1)
+        scheduler._get_result = MagicMock(return_value=None)
+        scheduler.add_request(replacement)
+        assert scheduler.assigned_dp_rank == {"reused": 1}
 
     def test_finish_requests_worker_returns_scheduler_result(self):
 
@@ -633,7 +680,8 @@ class TestDPScheduler:
                 include_finished_set,
                 log_stats,
             ):
-                pass
+                self.requests = {}
+                self.finished_req_ids = {"req"}
 
             def finish_requests(self, request_ids, finished_status):
                 assert request_ids == ["req"]
@@ -671,7 +719,61 @@ class TestDPScheduler:
                 )
 
         result = cloudpickle.loads(output_conn.send_bytes.call_args.args[0])
-        assert result == [("req", 7)]
+        assert result == ([("req", 7)], {"req"})
+
+    def test_finish_worker_retains_ids_in_cached_scheduler_output(self):
+
+        class WorkerExit(BaseException):
+            pass
+
+        class WorkerScheduler:
+
+            def __init__(self, **_kwargs):
+                self.requests = {}
+                self.finished_req_ids = set()
+
+            def schedule(self):
+                return SimpleNamespace(finished_req_ids={"reused"})
+
+            def finish_requests(self, request_ids, finished_status):
+                assert request_ids == ["reused"]
+                assert finished_status == "completed"
+                return []
+
+            def shutdown(self):
+                pass
+
+        input_conn = MagicMock()
+        input_conn.recv_bytes.side_effect = [
+            cloudpickle.dumps((SchedulerCommand.SCHEDULE, ((), {}))),
+            cloudpickle.dumps(
+                (SchedulerCommand.FINISH_REQUESTS, (["reused"], "completed"))),
+            KeyboardInterrupt(),
+        ]
+        output_conn = MagicMock()
+
+        with patch("atexit._clear"), patch(
+                "tpu_inference.core.sched.dp_scheduler.os._exit",
+                side_effect=WorkerExit):
+            with pytest.raises(WorkerExit):
+                _scheduler_worker_process(
+                    rank=0,
+                    input_conn=input_conn,
+                    output_conn=output_conn,
+                    vllm_config=object(),
+                    kv_cache_config=object(),
+                    structured_output_manager=object(),
+                    block_size=16,
+                    hash_block_size=16,
+                    mm_registry=object(),
+                    include_finished_set=False,
+                    log_stats=False,
+                    original_scheduler_cls=WorkerScheduler,
+                )
+
+        finish_result = cloudpickle.loads(
+            output_conn.send_bytes.call_args_list[1].args[0])
+        assert finish_result == ([], {"reused"})
 
     def test_get_num_unfinished_requests(self, mock_vllm_config,
                                          mock_kv_cache_config,

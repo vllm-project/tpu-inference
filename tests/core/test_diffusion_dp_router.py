@@ -291,6 +291,146 @@ def test_partial_cohort_stays_on_one_engine(monkeypatch, request_count):
     assert client.added_engines == [b"engine-0"] * request_count
 
 
+def test_completed_partial_cohort_starts_next_engine(monkeypatch):
+    router = _load_router(monkeypatch)
+    core_client = _install_fake_vllm(monkeypatch)
+    router.patch_vllm_dp_client_for_block_diffusion_round_robin()
+    client = core_client.DPLBAsyncMPClient(_config(True, max_num_seqs=4),
+                                           object, False)
+    partial = [_request("partial-0"), _request("partial-1")]
+    asyncio.run(_add_requests(client, partial))
+
+    asyncio.run(
+        type(client).process_engine_outputs(
+            client,
+            SimpleNamespace(
+                finished_requests=[request.request_id for request in partial]),
+        ))
+    asyncio.run(
+        _add_requests(client,
+                      [_request(f"next-{index}") for index in range(4)]))
+
+    assert client.added_engines == [b"engine-0"] * 2 + [b"engine-1"] * 4
+
+
+def test_partial_cohort_resets_only_after_all_members_finish(monkeypatch):
+    router = _load_router(monkeypatch)
+    core_client = _install_fake_vllm(monkeypatch)
+    router.patch_vllm_dp_client_for_block_diffusion_round_robin()
+    client = core_client.DPLBAsyncMPClient(_config(True, max_num_seqs=4),
+                                           object, False)
+    asyncio.run(
+        _add_requests(client, [_request("partial-0"),
+                               _request("partial-1")]))
+
+    asyncio.run(
+        type(client).process_engine_outputs(
+            client, SimpleNamespace(finished_requests=["partial-0"])))
+    asyncio.run(client.add_request_async(_request("partial-2")))
+    asyncio.run(
+        type(client).process_engine_outputs(
+            client,
+            SimpleNamespace(finished_requests=["partial-1", "partial-2"]),
+        ))
+    asyncio.run(client.add_request_async(_request("next")))
+
+    assert client.added_engines == [
+        b"engine-0", b"engine-0", b"engine-0", b"engine-1"
+    ]
+
+
+def test_successful_batched_abort_resets_partial_cohort(monkeypatch):
+    router = _load_router(monkeypatch)
+    core_client = _install_fake_vllm(monkeypatch)
+    router.patch_vllm_dp_client_for_block_diffusion_round_robin()
+    client = core_client.DPLBAsyncMPClient(_config(True, max_num_seqs=4),
+                                           object, False)
+    partial = [_request("partial-0"), _request("partial-1")]
+    asyncio.run(_add_requests(client, partial))
+
+    asyncio.run(
+        client.abort_requests_async(
+            [request.request_id for request in partial]))
+    asyncio.run(client.add_request_async(_request("next")))
+
+    assert client.added_engines == [b"engine-0", b"engine-0", b"engine-1"]
+    assert client.reqs_in_flight["partial-0"] == b"engine-0"
+    assert client.reqs_in_flight["partial-1"] == b"engine-0"
+
+
+def test_failed_abort_does_not_reset_partial_cohort(monkeypatch):
+    router = _load_router(monkeypatch)
+    core_client = _install_fake_vllm(monkeypatch)
+    router.patch_vllm_dp_client_for_block_diffusion_round_robin()
+    client = core_client.DPLBAsyncMPClient(_config(True, max_num_seqs=4),
+                                           object, False)
+    asyncio.run(client.add_request_async(_request("partial")))
+
+    async def fail_abort(_self, _request_ids):
+        raise RuntimeError("abort failed")
+
+    monkeypatch.setattr(
+        type(client).__mro__[1], "abort_requests_async", fail_abort)
+    with pytest.raises(RuntimeError, match="abort failed"):
+        asyncio.run(client.abort_requests_async(["partial"]))
+    asyncio.run(client.add_request_async(_request("same-cohort")))
+
+    assert client.added_engines == [b"engine-0", b"engine-0"]
+    assert client._cohort_round_robin_dp_active_request_ids == {
+        "partial", "same-cohort"
+    }
+
+
+def test_abort_completion_race_does_not_clear_reused_id_from_new_cohort(
+        monkeypatch):
+    router = _load_router(monkeypatch)
+    core_client = _install_fake_vllm(monkeypatch)
+    router.patch_vllm_dp_client_for_block_diffusion_round_robin()
+    client = core_client.DPLBAsyncMPClient(_config(True, max_num_seqs=4),
+                                           object, False)
+    asyncio.run(client.add_request_async(_request("reused")))
+
+    async def finish_and_reuse(_self, _request_ids):
+        await type(client).process_engine_outputs(
+            client, SimpleNamespace(finished_requests=["reused"]))
+        await client.add_request_async(_request("reused"))
+
+    monkeypatch.setattr(
+        type(client).__mro__[1], "abort_requests_async", finish_and_reuse)
+    asyncio.run(client.abort_requests_async(["reused"]))
+    asyncio.run(client.add_request_async(_request("same-new-cohort")))
+
+    assert client.added_engines == [b"engine-0", b"engine-1", b"engine-1"]
+    assert client._cohort_round_robin_dp_active_request_ids == {
+        "reused", "same-new-cohort"
+    }
+
+
+def test_full_cohort_late_completions_do_not_reset_next_partial(monkeypatch):
+    router = _load_router(monkeypatch)
+    core_client = _install_fake_vllm(monkeypatch)
+    router.patch_vllm_dp_client_for_block_diffusion_round_robin()
+    client = core_client.DPLBAsyncMPClient(_config(True, max_num_seqs=2),
+                                           object, False)
+    first_wave = [_request("full-0"), _request("full-1")]
+    asyncio.run(_add_requests(client, first_wave))
+    asyncio.run(client.add_request_async(_request("partial-0")))
+
+    asyncio.run(
+        type(client).process_engine_outputs(
+            client,
+            SimpleNamespace(finished_requests=[
+                request.request_id for request in first_wave
+            ]),
+        ))
+    asyncio.run(client.add_request_async(_request("partial-1")))
+    asyncio.run(client.add_request_async(_request("next")))
+
+    assert client.added_engines == [
+        b"engine-0", b"engine-0", b"engine-1", b"engine-1", b"engine-0"
+    ]
+
+
 def test_explicit_late_and_existing_requests_do_not_advance_cohort_block(
         monkeypatch):
     router = _load_router(monkeypatch)
@@ -316,6 +456,7 @@ def test_explicit_late_and_existing_requests_do_not_advance_cohort_block(
     assert client.added_engines[4:19] == [b"engine-0"] * 15
     assert client.added_engines[19] == b"engine-1"
     assert client.original_router_calls == 2
+    assert client._cohort_round_robin_dp_active_request_ids == {"next-cohort"}
 
 
 def test_abort_uses_round_robin_request_mapping(monkeypatch):
