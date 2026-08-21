@@ -225,6 +225,49 @@ class ShardingConfigManager:
         decode_context_parallelism = parallel_config.decode_context_parallel_size
         prefill_context_parallelism = parallel_config.prefill_context_parallel_size
 
+        # The mesh shards the KV cache page dim over KV_CONTEXT =
+        # ('pcp', 'dcp'), but vLLM scales its block accounting by DCP alone
+        # (one block covers cache_config.block_size * dcp tokens). The two
+        # must agree, so with PCP > 1 we request DCP == PCP, which upstream
+        # defines as one KV shard per PCP rank, and leave the mesh 'dcp' axis
+        # at 1.
+        #
+        # This does not exempt us from ModelConfig.verify_with_parallel_config:
+        # EngineCore re-runs VllmConfig.__post_init__ after its handshake, so
+        # its GQA DCP limit (tp > num_kv_heads) still sees the value set here,
+        # even though a DCP group spanning the PCP axis splits no KV heads.
+        # GQA models with tp <= num_kv_heads are rejected upstream today.
+        if prefill_context_parallelism > 1:
+            # DCP == 1 cannot be honored: KV_CONTEXT always includes 'pcp'.
+            # DCP == tp * pcp is a mode we do not implement.
+            if decode_context_parallelism not in (1,
+                                                  prefill_context_parallelism):
+                raise ValueError(
+                    "decode_context_parallel_size="
+                    f"{decode_context_parallelism} is not supported with "
+                    "prefill_context_parallel_size="
+                    f"{prefill_context_parallelism}. tpu-inference always "
+                    "shards the KV cache across the PCP ranks, which vLLM "
+                    "expresses as DCP == PCP; that value is set "
+                    "automatically, so --decode-context-parallel-size should "
+                    "be left unset on a PCP-enabled server. Sharding the KV "
+                    "cache across the full TP x PCP axis (upstream's "
+                    "DCP == tp * pcp) is not implemented on TPU.")
+            parallel_config.decode_context_parallel_size = (
+                prefill_context_parallelism)
+            decode_context_parallelism = 1
+
+        # Post-condition: a mismatch here means the scheduler and the runner
+        # disagree on how many tokens a block holds, and nothing downstream
+        # raises.
+        assert (prefill_context_parallelism * decode_context_parallelism ==
+                parallel_config.decode_context_parallel_size), (
+                    "KV cache shard count "
+                    f"({prefill_context_parallelism} * "
+                    f"{decode_context_parallelism}) does not match vLLM's "
+                    "block scaling factor decode_context_parallel_size="
+                    f"{parallel_config.decode_context_parallel_size}")
+
         if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
             # The user has explicitly set the tensor parallelism in the sharding config.
             tensor_parallelism = ss_tensor_parallelsim
@@ -348,9 +391,16 @@ class ShardingConfigManager:
                     "cache phase rotates KV shards between rank pairs, got "
                     f"{sharding_strategy.prefill_context_parallelism}.")
             if sharding_strategy.decode_context_parallelism > 1:
+                # Not reachable via from_vllm_config, which resolves 'dcp' to
+                # 1 whenever PCP > 1; guards hand-built strategies.
                 raise ValueError(
-                    "Only one of prefill/decode context parallelism may be "
-                    "enabled at a time.")
+                    "The KV cache cannot be sharded on both the 'pcp' and "
+                    "'dcp' mesh axes: got prefill_context_parallelism="
+                    f"{sharding_strategy.prefill_context_parallelism} and "
+                    "decode_context_parallelism="
+                    f"{sharding_strategy.decode_context_parallelism}. "
+                    "Prefill context parallelism shards the KV cache on the "
+                    "'pcp' axis, so the 'dcp' axis must be 1.")
             if sharding_strategy.data_parallelism > 1:
                 raise ValueError(
                     "Prefill context parallelism is not compatible with data parallelism yet."
