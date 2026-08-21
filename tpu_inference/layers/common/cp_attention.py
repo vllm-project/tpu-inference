@@ -306,9 +306,10 @@ def pcp_forward(
         axis_idx = lax.axis_index(pcp_axis)
         cp_rank = jnp.reshape(axis_idx, (1, )).astype(jnp.int32)
 
-        # pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
-        cu = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1].set(C).at[2:].set(2 *
-                                                                            C)
+        # ONE seq: this rank's [head chunk | tail chunk] (2C rows, tail pad
+        # rows discarded by the caller); pcp_q_pos_offsets_local[0] =
+        # [head_offset, tail_offset] places both halves.
+        cu = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(2 * C)
         # k/v stay LOCAL (this rank's head+tail chunks, same layout as q):
         # the kernel rotates [cache shard | own new KV] around the ring.
         out, kv_cache_updated, _ = _rpa_cp_call(
@@ -319,7 +320,7 @@ def pcp_forward(
             kv_lens_local,
             page_indices_local,
             cu,
-            distribution_local,
+            jnp.array([0, 0, 1], jnp.int32),
             cp_rank=cp_rank,
             cp_group_size=pcp_size,
             kv_cache_lens=kv_cache_lens_local,
@@ -328,7 +329,6 @@ def pcp_forward(
             pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
-            write_last_seq_only=True,
             **common)
         return kv_cache_updated, out.astype(q.dtype)
 

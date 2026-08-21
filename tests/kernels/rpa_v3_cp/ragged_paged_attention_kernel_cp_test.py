@@ -640,11 +640,11 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         ])
         qpos_l = jnp.stack(
             [self._pad1([r * C, (two_p - 1 - r) * C]) for r in range(P)])
-        kv_lens = self._pad1([kv_total, kv_total])
-        kv_cache_lens = self._pad1([Lprev, Lprev])
-        cu = self._padcu([0, C, 2 * C])
-        dist = jnp.array([0, 0, 2], jnp.int32)
-        pi = self._pi2(pps)
+        kv_lens = self._pad1([kv_total])
+        kv_cache_lens = self._pad1([Lprev])
+        cu = self._padcu([0, 2 * C])  # one seq: [head | tail]
+        dist = jnp.array([0, 0, 1], jnp.int32)
+        pi = self._pi(pps)
         blocks = (128, 128, 128, 128)  # small bkv -> several ring blocks
 
         mesh = Mesh(np.array(jax.devices()[:P]), ("pcp", ))
@@ -673,7 +673,6 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                                               pcp_ring_axis_name="pcp",
                                               use_causal_mask=True,
                                               update_kv_cache=True,
-                                              write_last_seq_only=True,
                                               return_lse=True,
                                               m_block_sizes=blocks)
             return o[None], nc[None]

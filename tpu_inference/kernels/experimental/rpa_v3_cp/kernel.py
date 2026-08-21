@@ -505,8 +505,12 @@ def _ragged_paged_attention_kernel_loop(
         # kv_q_gap is used to calculate processed_q_len.
         kv_q_gap = kv_cache_len_local + get_q_pos_offset(seq_idx)
 
+        kv_new_len_global = get_kv_new_len_global(seq_idx)
         if ring_enabled:
-            kv_new_len_global = get_kv_new_len_global(seq_idx)
+            # Ring contract: ONE seq whose Q rows are [head chunk | tail
+            # chunk] (C rows each) and q_pos_offsets = [head_off, tail_off];
+            # kv_q_gap carries the head offset, the tail offset is read here.
+            ring_q_tail_off = q_pos_offset_ref[1]
 
         cur_seq_start_bkv_idx = get_start_bkv_idx(seq_idx)
         next_seq_idx = jnp.minimum(seq_idx + 1, end_seq_idx - 1)
@@ -630,7 +634,12 @@ def _ragged_paged_attention_kernel_loop(
                 tail_base = ((2 * cp_group_size - 1 - ring_src) * pcp_chunk -
                              pcp_chunk).astype(int_ty)
                 pos = jnp.where(t < pcp_chunk, head_base + t, tail_base + t)
-                q_pos = q_span - kv_cache_len_local.astype(int_ty)
+                # Q rows are [head C | tail C] of this rank: row i's global
+                # position is head_off + i for i < C, tail_off + (i - C) after.
+                q_row = q_span - kv_q_gap.astype(int_ty)
+                q_pos = jnp.where(
+                    q_row < pcp_chunk, q_span - kv_cache_len_local.astype(int_ty),
+                    ring_q_tail_off.astype(int_ty) + q_row - pcp_chunk)
                 mask = mask_and(mask, (t < 0) |
                                 ((q_pos >= pos) &
                                  (pos < kv_new_len_global.astype(int_ty))))
@@ -2304,7 +2313,9 @@ def ragged_paged_attention(
       shard | its OWN new KV (k/v in Q's head-tail layout, NOT all-gathered)]
       rotates around this axis; every rank attends its local Q against all
       streams in one online softmax, and writes the pages it owns of the new
-      KV as they pass.
+      KV as they pass. The launch is ONE seq whose Q rows are [head chunk |
+      tail chunk] (C rows each, C = half the k/v rows) with
+      q_pos_offsets = [head_off, tail_off].
     pcp_ring_mesh_axis_names: all axis names of the mesh the ring runs on, in
       order. Defaults to a one-axis mesh.
     use_causal_mask: if true, use causal mask.
