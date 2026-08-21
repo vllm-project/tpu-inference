@@ -294,6 +294,31 @@ class TestTpuPlatform:
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
     )
+    def test_check_and_update_config_hybrid_prefix_match_unit_raises(
+            self, mock_update, mock_sharding, vllm_config):
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.block_size = 16
+        vllm_config.cache_config.prefix_match_unit = 8
+        vllm_config.speculative_config = None
+
+        with pytest.raises(
+                NotImplementedError,
+                match=
+                "Prefix match unit smaller than the block size is not supported"
+        ):
+            TpuPlatform.check_and_update_config(vllm_config)
+
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
     def test_check_and_update_config_single_host_uni(self, mock_update,
                                                      mock_sharding,
                                                      vllm_config):
@@ -454,6 +479,20 @@ class TestTpuPlatform:
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
         assert vllm_config.cache_config.block_size == expected_block_size
+
+    def test_update_block_size_for_backend_prefix_match_unit_raises(
+            self, vllm_config):
+        vllm_config.cache_config.block_size = 16
+        vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.prefix_match_unit = 8
+
+        with pytest.raises(
+                NotImplementedError,
+                match=
+                "Prefix match unit smaller than the block size is not supported"
+        ):
+            TpuPlatform.update_block_size_for_backend(vllm_config)
 
     def test_check_and_update_config_mla_checks(self):
         vllm_config = MagicMock()
