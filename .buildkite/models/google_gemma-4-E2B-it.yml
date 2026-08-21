@@ -67,16 +67,7 @@ steps:
       MINIMUM_ACCURACY_THRESHOLD: 0.35
     commands:
       - |
-        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
-          echo "gemma-4 E2B on the vllm (torchax) path has never passed" \
-               "accuracy: the model's per_layer_embeddings CUDA-graph buffer" \
-               "is incompatible with torchax and its KV-shared layers corrupt" \
-               "the target layer's cache. Recording as unverified until the" \
-               "torchax path is fixed."
-          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy" "unverified"
-        else
-          .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
-        fi
+        .buildkite/scripts/run_in_docker.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
 
   - label: "${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-E2B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
