@@ -428,7 +428,7 @@ def _ragged_paged_attention_kernel_loop(
         return full + rem
 
     ring_enabled = pcp_ring_axis_name is not None
-    ring_chunk = kv_hbm_ref.shape[0] // 2 if ring_enabled else None
+    pcp_chunk = kv_hbm_ref.shape[0] // 2 if ring_enabled else None
 
     def get_kv_new_len(seq_idx):
         # PCP (ring): new KV is this rank's own head+tail chunks; the other
@@ -626,10 +626,10 @@ def _ragged_paged_attention_kernel_loop(
                 t = k_span - ring_src_cache_len.astype(int_ty)
                 # Scalar bases in int32 (Mosaic has no packed-int multiply),
                 # then cast so the vector math keeps one layout.
-                head_base = (ring_src * ring_chunk).astype(int_ty)
-                tail_base = ((2 * cp_group_size - 1 - ring_src) * ring_chunk -
-                             ring_chunk).astype(int_ty)
-                pos = jnp.where(t < ring_chunk, head_base + t, tail_base + t)
+                head_base = (ring_src * pcp_chunk).astype(int_ty)
+                tail_base = ((2 * cp_group_size - 1 - ring_src) * pcp_chunk -
+                             pcp_chunk).astype(int_ty)
+                pos = jnp.where(t < pcp_chunk, head_base + t, tail_base + t)
                 q_pos = q_span - kv_cache_len_local.astype(int_ty)
                 mask = mask_and(mask, (t < 0) |
                                 ((q_pos >= pos) &
@@ -985,15 +985,15 @@ def _ragged_paged_attention_kernel_loop(
         p0 = blk * bkv_sz
         # New-token index range of this block within the source's stream.
         t0 = jnp.maximum(p0 - src_cache_len, 0)
-        t1 = jnp.clip(p0 + bkv_sz - src_cache_len, 0, 2 * ring_chunk)
-        head = (t0, jnp.minimum(t1, ring_chunk), src * ring_chunk)
-        tail = (jnp.maximum(t0, ring_chunk), t1,
-                (2 * cp_group_size - 1 - src) * ring_chunk - ring_chunk)
+        t1 = jnp.clip(p0 + bkv_sz - src_cache_len, 0, 2 * pcp_chunk)
+        head = (t0, jnp.minimum(t1, pcp_chunk), src * pcp_chunk)
+        tail = (jnp.maximum(t0, pcp_chunk), t1,
+                (2 * cp_group_size - 1 - src) * pcp_chunk - pcp_chunk)
         runs = []
         for ta, tb, base in (head, tail):
             # Clip the run to this block and to the request's real tokens.
             n = jnp.clip(
-                jnp.minimum(tb, num_current - base) - ta, 0, 2 * ring_chunk)
+                jnp.minimum(tb, num_current - base) - ta, 0, 2 * pcp_chunk)
             runs.append(
                 (cache_len_global + base + ta, n, src_cache_len + ta - p0))
         return runs
