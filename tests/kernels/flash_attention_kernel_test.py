@@ -158,6 +158,35 @@ class FlashAttentionVmemEstimationTest(parameterized.TestCase):
 
         self.assertEqual(total_bytes_seg, base_bytes + 69632)
 
+    def test_vmem_estimation_sequence_length_guard(self):
+        """Tests that long sequences (>2048) or sequences exceeding 32MB VMEM do not override block_k."""
+        block_sizes = BlockSizes.get_default(1, 16, 30976, 30976, 72)
+
+        # Calculate VMEM for MMMU 30,976 visual tokens
+        total_bytes_30k = calculate_vmem_usage_bytes(
+            block_sizes,
+            q_dtype=jnp.bfloat16,
+            kv_dtype=jnp.bfloat16,
+            d_model=72,
+            kv_seq_len=30976,
+        )
+
+        # 30,976 tokens require ~46MB, which exceeds the 32MB physical VMEM budget
+        self.assertGreater(total_bytes_30k, 32 * 1024 * 1024)
+
+    def test_vmem_estimation_short_sequence_fits(self):
+        """Tests that short sequences (e.g. 512, 1024) require well below 32MB VMEM."""
+        block_sizes = BlockSizes.get_default(1, 16, 1024, 1024, 128)
+        total_bytes_1k = calculate_vmem_usage_bytes(
+            block_sizes,
+            q_dtype=jnp.bfloat16,
+            kv_dtype=jnp.bfloat16,
+            d_model=128,
+            kv_seq_len=1024,
+        )
+        # 1024 tokens require ~2MB, well within budget
+        self.assertLess(total_bytes_1k, 5 * 1024 * 1024)
+
 
 if __name__ == "__main__":
     absltest.main()

@@ -332,8 +332,10 @@ def flash_attention(
             estimated_vmem = calculate_vmem_usage_bytes(
                 block_sizes, q.dtype, k.dtype, d_model, kv_seq_len, ab,
                 segment_ids)
-            vmem_limit = pltpu.get_tpu_info(
+            raw_limit = pltpu.get_tpu_info(
             ).vmem_capacity_bytes if vmem_limit_bytes is None else vmem_limit_bytes
+            # Cap vmem_limit to physical per-core Scoped VMEM budget (32 MB on TPU v6e/v7x)
+            vmem_limit = min(raw_limit, 32 * 1024 * 1024)
             if estimated_vmem <= vmem_limit * 0.9:
                 # Override block_k/block_k_major to use `_flash_attention_kernel_single_batch_single_step`.
                 block_sizes = BlockSizes(block_q=block_sizes.block_q,
