@@ -94,15 +94,44 @@ checkThroughput() {
     fi
     echo
 
+    # Throughput alone does not prove the run worked. If the EngineCore dies
+    # mid-benchmark, `vllm bench serve` still counts every request whose HTTP
+    # response headers arrived before the death as "successful", so it reports a
+    # short duration and a high req/s with no tokens produced at all. Require
+    # actual decoded output so a dead engine cannot score a pass.
+    generated_tokens=$(awk '/Total generated tokens:/ {print $NF}' "$BENCHMARK_LOG_FILE")
+
+    case "$generated_tokens" in
+        '' )
+            echo "Total generated tokens: NOT FOUND"
+            tokens_pass=0
+            ;;
+        *[!0-9]* )
+            echo "Total generated tokens: '$generated_tokens' (not a number)"
+            tokens_pass=0
+            ;;
+        0 )
+            echo "Total generated tokens: 0"
+            tokens_pass=0
+            ;;
+        * )
+            echo "Total generated tokens: $generated_tokens"
+            tokens_pass=1
+            ;;
+    esac
+    echo
+
     echo "--- Summary ---"
     # Ensure pass flags are initialized if extraction fails
     : "${throughput_pass:=0}"
+    : "${tokens_pass:=0}"
 
-    if [ "$throughput_pass" -eq 1 ]; then
+    if [ "$throughput_pass" -eq 1 ] && [ "$tokens_pass" -eq 1 ]; then
         echo "Overall: PASSED"
     else
         echo "Overall: FAILED"
         [ "$throughput_pass" -eq 0 ] && echo "Reason: Throughput check failed or value not found."
+        [ "$tokens_pass" -eq 0 ] && echo "Reason: Benchmark produced no decoded tokens -- the server likely died mid-run (grep the server log for EngineDeadError / RESOURCE_EXHAUSTED)."
         exit_code=1
     fi
 }
