@@ -82,11 +82,12 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         return embed_multimodal_func_jax
 
 
+@jax.tree_util.register_pytree_node_class
 class GridTHW(tuple):
     """Tensor-like wrapper for image/video grid_thw arguments.
 
     - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
-    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
+    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026).
     - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
     _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
 
@@ -102,6 +103,12 @@ class GridTHW(tuple):
 
         flat: tuple = _nested_to_tuple(values)
         return super().__new__(cls, flat)
+
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        if isinstance(key, slice):
+            return type(self)(val)
+        return val
 
     # ---- tensor-like API expected by _process_image_input ----
 
@@ -123,6 +130,13 @@ class GridTHW(tuple):
 
     def __repr__(self):
         return f"GridTHW({tuple(self)})"
+
+    def tree_flatten(self):
+        return (), tuple(self)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(aux_data)
 
 
 def maybe_precompile_vision_encoder_fn(
@@ -185,7 +199,7 @@ def maybe_precompile_vision_encoder_fn(
 
 def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     """Convert certain kwargs to JIT-friendly formats, if needed.
-    
+
     Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
     GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
     """
