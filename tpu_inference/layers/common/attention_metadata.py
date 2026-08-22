@@ -57,7 +57,7 @@ class PCPMetadata:
         "mamba_state_indices",
         "pcp",
     ],
-    meta_fields=["padded_num_reqs", "pcp_cache_pages"],
+    meta_fields=["padded_num_reqs", "pcp_cache_pages", "is_decode"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -90,6 +90,7 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+    is_decode: bool = False
 
     # PCP gather-KV only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
@@ -104,7 +105,7 @@ class AttentionMetadata(object):
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "is_decode"],
 )
 @dataclass
 class SharedAttentionMetadata(object):
@@ -131,6 +132,7 @@ class SharedAttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+    is_decode: bool = False
 
 
 class GroupedAttentionMetadata(dict):
@@ -170,8 +172,7 @@ PCP_CACHE_PAGE_BUCKET_COUNT = 5
 
 
 def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
-    """The buckets for the `pcp_cache_pages` value, including 0.
-    """
+    """The buckets for the `pcp_cache_pages` value, including 0."""
     buckets = {0, max_num_blocks_per_req}
     n = PCP_CACHE_PAGE_BUCKET_COUNT - len(buckets)
     if n > 0 and max_num_blocks_per_req > 1:
@@ -184,8 +185,7 @@ def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
 
 def round_up_pcp_cache_pages(num_computed_tokens: int, block_size: int,
                              max_num_blocks_per_req: int) -> int:
-    """Round a request's number of kv pages up to the nearest bucket.
-    """
+    """Round a request's number of kv pages up to the nearest bucket."""
     if num_computed_tokens <= 0:
         return 0
     live_pages = cdiv(num_computed_tokens, block_size)

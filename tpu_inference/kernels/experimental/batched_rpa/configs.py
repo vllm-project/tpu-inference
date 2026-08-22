@@ -51,6 +51,19 @@ class ModelConfigs:
         return self.num_q_heads // self.num_kv_heads
 
 
+class AttentionScope(enum.StrEnum):
+    """Which KV positions to attend to.
+
+    FULL:            attend all positions (default).
+    CACHE_ONLY:      attend only cached tokens, skip new tokens.
+    NEW_TOKENS_ONLY: attend only new tokens, skip cached tokens.
+    """
+
+    FULL = enum.auto()
+    CACHE_ONLY = enum.auto()
+    NEW_TOKENS_ONLY = enum.auto()
+
+
 class KVLayout(enum.StrEnum):
     """Represents the different layouts for KV cache.
 
@@ -77,6 +90,10 @@ class ServingConfigs:
     scale_k: int | None = None
     scale_v: int | None = None
     kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
+    cp_group_size: int | None = None
+    attention_scope: AttentionScope = AttentionScope.FULL
+    return_lse: bool = False
+    update_kv_cache: bool = True
 
     @property
     def pages_per_seq(self) -> int:
@@ -308,6 +325,9 @@ class RpaConfigs:
     def dma_kv_new_size(self) -> int:
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return 5
+        if (self.serve.kv_layout == KVLayout.HEAD_ALONG_SUBLANE
+            and self.serve.cp_group_size is not None):
+            return 5
         return 4
 
     @property
@@ -412,3 +432,21 @@ class RpaConfigs:
                 f"Expected {cu_q_lens.shape=} to be ({max_num_seqs + 1},).")
         if distribution.shape != (3, ):
             raise ValueError(f"Expected {distribution.shape=} to be (3,).")
+
+        # Context Parallel Support
+        if self.serve.cp_group_size is not None:
+            if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
+                raise ValueError(
+                    "Context Parallel does not support KVLayout.SEQ_ALONG_LANE yet."
+                )
+            if self.serve.attention_scope == AttentionScope.FULL:
+                raise ValueError(
+                    "Context Parallel does not support AttentionScope.FULL"
+                    " where cache is sharded but current tokens is sequential"
+                )
+        # Attention Scope
+        if (self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE 
+            and self.serve.attention_scope != AttentionScope.FULL):
+            raise ValueError(
+                f"SEQ_ALONG_LANE do not supports {self.serve.attention_scope} yet."
+            )

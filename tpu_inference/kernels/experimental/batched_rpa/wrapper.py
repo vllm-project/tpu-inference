@@ -191,14 +191,14 @@ def get_kv_cache_shape(
         "use_causal_mask",
         "update_kv_cache",
         "kv_layout",
+        "cp_group_size",
+        "attention_scope",
+        "return_lse",
     ),
     # Donation of transient inputs can fail for some runtime buffer layouts in
     # the experimental tuning path. Keep donation only for kv_cache, which is
     # the intended long-lived mutable state.
-    donate_argnames=(
-        "queries",
-        "kv_cache",
-    ),
+    donate_argnames=("kv_cache", ),
 )
 def ragged_paged_attention(
     queries: jax.Array,
@@ -226,7 +226,11 @@ def ragged_paged_attention(
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     kv_layout: configs.KVLayout | None = None,
-) -> tuple[jax.Array, jax.Array]:
+    cp_group_size: int | None = None,
+    cp_rank: jax.Array | None = None,
+    attention_scope: configs.AttentionScope = configs.AttentionScope.FULL,
+    return_lse: bool = False,
+) -> tuple[jax.Array, jax.Array] | tuple[jax.Array, jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
     Args:
@@ -262,12 +266,20 @@ def ragged_paged_attention(
         debug_mode: Not used.
         out_dtype: Dtype of output. Defaults to dtype of queries.
         use_causal_mask: Not used.
+        cp_group_size: Size of the context parallelism (CP) group. KV cache is sharded across devices in this group. Defaults to None.
+        cp_rank: Rank of the current device within the CP group, which determine the token ownership. Defaults to None. 
+        attention_scope: Which KV positions to attend to. FULL attends all positions,
+            CACHE_ONLY skips new tokens, NEW_TOKENS_ONLY skips cached tokens. Defaults to FULL.
+        return_lse: If True, return log-sum-exp (lse) values along with the output. Defaults to False.
 
     Returns:
         out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
         new_kv_cache: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
             kv_packing, head_dim]. Result of new kv cache where k & vs are
             concatenated along num kv heads dim.
+        lse (only when return_lse=True): [max_num_tokens, num_q_heads].
+            Log-sum-exp values (m + log(l)) for each query token and head,
+            needed for merging partial attention results in CP.
     """
 
     if kv_layout is None:
@@ -322,6 +334,10 @@ def ragged_paged_attention(
         scale_k=k_scale,
         scale_v=v_scale,
         kv_layout=kv_layout,
+        cp_group_size=cp_group_size,
+        attention_scope=attention_scope,
+        return_lse=return_lse,
+        update_kv_cache=update_kv_cache,
     )
 
     q_hbm, new_kv_hbm = prepare_inputs(
@@ -333,10 +349,23 @@ def ragged_paged_attention(
         kv_layout=kv_layout,
     )
 
+    # Pre-allocate LSE buffer.
+    lse_hbm_init: jax.Array | None = None
+    if return_lse:
+        gqh = num_q_heads // num_kv_heads
+        num_lanes = pltpu.get_tpu_info().num_lanes
+        max_tokens = queries.shape[0]
+        lse_hbm_init = jnp.full(
+            [num_kv_heads, max_tokens * gqh, num_lanes],
+            -jnp.inf,
+            dtype=out_dtype,
+        )
+
     def run_rpa_kernel(
         mode: configs.RpaCase,
         o_hbm_alias_q_hbm: jax.Array,
         kv_cache: jax.Array,
+        lse_hbm_in: jax.Array | None,
     ):
         if mode == configs.RpaCase.DECODE:
             effective_blocks = decode_block_sizes or get_tuned_params(
@@ -374,9 +403,10 @@ def ragged_paged_attention(
             kv_lens,
             distribution,
             cfgs=cfgs,
+            cp_rank=cp_rank if cp_group_size is not None else None,
             update_kv_cache=update_kv_cache,
         )
-        return kernel.rpa_kernel(
+        result = kernel.rpa_kernel(
             cu_q_lens,
             kv_lens,
             page_indices,
@@ -384,13 +414,21 @@ def ragged_paged_attention(
             o_hbm_alias_q_hbm,
             new_kv_hbm,
             kv_cache,
+            lse_hbm_in,
+            cp_rank if cp_group_size is not None else None,
             cfgs=cfgs,
         )
+        if return_lse:
+            o_out, kv_out, lse_out = result
+        else:
+            o_out, kv_out, _ = result
+            lse_out = None
+        return o_out, kv_out, lse_out
 
-    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(configs.RpaCase.DECODE, q_hbm,
-                                                 kv_cache)
-    o_hbm_alias_q_hbm, kv_cache = run_rpa_kernel(configs.RpaCase.MIXED,
-                                                 o_hbm_alias_q_hbm, kv_cache)
+    o_hbm_alias_q_hbm, kv_cache, lse_hbm = run_rpa_kernel(
+        configs.RpaCase.DECODE, q_hbm, kv_cache, lse_hbm_init)
+    o_hbm_alias_q_hbm, kv_cache, lse_hbm = run_rpa_kernel(
+        configs.RpaCase.MIXED, o_hbm_alias_q_hbm, kv_cache, lse_hbm)
 
     # before: [kv_heads, max_tokens, q_per_kv // q_packing, q_packing, d]
     o_hbm = prepare_outputs(o_hbm_alias_q_hbm)
@@ -401,4 +439,15 @@ def ragged_paged_attention(
     o_hbm = o_hbm[:, :, :num_q_heads_per_kv_head, :head_dim]
     o_hbm = o_hbm.swapaxes(1, 0).reshape(queries.shape)
 
-    return o_hbm, kv_cache
+    if not return_lse:
+        return o_hbm, kv_cache
+
+    # Reshape LSE from [num_kv_heads, max_tokens * num_q_heads_per_kv_head, num_lanes] to
+    # [max_tokens, num_q_heads].
+    max_tokens = queries.shape[0]
+    # Extract first lane (scalar LSE value per token-head pair).
+    lse = lse_hbm[:, :max_tokens * num_q_heads_per_kv_head, 0]
+    lse = lse.reshape(num_kv_heads, max_tokens, num_q_heads_per_kv_head)
+    lse = lse.transpose(1, 0, 2).reshape(max_tokens, num_q_heads)
+
+    return o_hbm, kv_cache, lse

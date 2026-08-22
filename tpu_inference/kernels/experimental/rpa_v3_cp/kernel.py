@@ -2482,7 +2482,7 @@ def ragged_paged_attention(
         if return_lse:
             input_output_aliases[num_active_scalers + 3] = 2  # lse -> lse_out
 
-        scope_name = f"RPA{case.symbol}-p_{page_size}-bq_{bq_sz}_{bq_csz}-bkv_{bkv_sz}_{bkv_csz}"
+        scope_name = f"RPA{case.symbol}-p_{page_size}-bq_{bq_sz}_{bq_csz}-bkv_{bkv_sz}_{bkv_csz}_skip_cache={skip_cache_attn}_skip_curr={skip_current_attn}"
         if sliding_window is not None:
             scope_name += f"-sw_{sliding_window}"
         kernel = pl.pallas_call(

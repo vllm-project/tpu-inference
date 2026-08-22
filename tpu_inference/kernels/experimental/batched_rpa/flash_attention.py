@@ -27,7 +27,9 @@ def flash_attention_qk_softmax(
     *,
     processed_q_len: list[jax.Array],  # [B]
     processed_kv_len: list[jax.Array],  # [B]
-    effective_kv_len: list[jax.Array],  # [B]
+    sequence_len: list[jax.Array],  # [B]
+    kv_new_start: list[jax.Array],  # [B]
+    cache_len: list[jax.Array],  # [B]
     cfgs: configs.RpaConfigs,
     bq_start: int,
 ):
@@ -81,13 +83,21 @@ def flash_attention_qk_softmax(
                    cfgs.aligned_num_q_heads_per_kv_head +
                    bq_start).astype(int_ty) + processed_q_len[b_idx]
 
-        eff_kv_len_b = effective_kv_len[b_idx]
-        mask_b = q_idx_b < eff_kv_len_b
+        seq_len_b = sequence_len[b_idx]
+        mask_b = q_idx_b < seq_len_b
         mask_b = jnp.logical_and(mask_b, q_idx_b >= kv_idx_b)
 
         if (sliding_window := cfgs.model.sliding_window) is not None:
             mask_b = jnp.logical_and(mask_b, q_idx_b
                                      < kv_idx_b + sliding_window)
+
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+            kv_new_start_b = kv_new_start[b_idx].astype(int_ty)
+            mask_b = jnp.logical_and(mask_b, kv_idx_b >= kv_new_start_b)
+
+        if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
+            cache_len_b = cache_len[b_idx].astype(int_ty)
+            mask_b = jnp.logical_and(mask_b, kv_idx_b < cache_len_b)
 
         qk_masked.append(jnp.where(mask_b, qk[b_idx], cfgs.model.mask_value))
     qk = jnp.stack(qk_masked, axis=0)
