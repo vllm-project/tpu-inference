@@ -273,13 +273,14 @@ def _pcp_write_new_kv(kv_cache, new_kv_all, kv_len, cache_len, page_indices,
                       max_num_seqs, rank):
     """Write this rank's pages of the current chunk's KV into the
     page-interleaved cache (global page p lives on rank p % P at local page
-    p // P), in place.
+    p // P), in place: one gather + one scatter over the owned pages.
 
     new_kv_all: [P, 2C, ...] in kv-cache row layout, rank order (row r =
     rank r's [head chunk r | tail chunk 2P-1-r]); the real tokens are global
-    positions [cache_len, kv_len). Each of the (statically bounded) pages
-    the chunk can touch is read, patched where this rank owns it and the
-    rows are real, and written back with dynamic_update_slice.
+    positions [cache_len, kv_len). The chunk touches a statically bounded
+    run of global pages; this rank owns every P-th of them. Each owned page
+    is read, patched where the rows are real, and scattered back (pages
+    past the real tokens get out-of-bounds indices and are dropped).
     """
     pcp, two_c = new_kv_all.shape[:2]
     C = two_c // 2
@@ -297,23 +298,28 @@ def _pcp_write_new_kv(kv_cache, new_kv_all, kv_len, cache_len, page_indices,
     tok_pad = jnp.concatenate([zpad, tok, zpad])
     num_current = kv_len - cache_len
     first_gp = cache_len // page
-    n_pages = cdiv(2 * pcp * C, page) + 1  # static bound on touched pages
-
-    def body(j, cache):
-        gp = first_gp + j  # global page
-        owned = (gp % pcp == rank) & (gp * page < cache_len + num_current)
-        phys = page_indices[jnp.minimum(gp // pcp, pages_per_seq - 1)]
-        cur = lax.dynamic_index_in_dim(cache, phys, 0, keepdims=False)
-        new_page = lax.dynamic_slice_in_dim(tok_pad,
-                                            gp * page - cache_len + page, page,
-                                            0)
-        pos = gp * page + jnp.arange(page)
-        keep = owned & (pos >= cache_len) & (pos < cache_len + num_current)
-        val = jnp.where(keep.reshape((page, ) + (1, ) * (cur.ndim - 1)),
-                        new_page, cur)
-        return lax.dynamic_update_slice_in_dim(cache, val[None], phys, 0)
-
-    return lax.fori_loop(0, n_pages, body, kv_cache)
+    # Owned global pages gp = first_owned + P*j, first_owned = the first
+    # page >= first_gp with gp % P == rank; m bounds how many the chunk can
+    # touch.
+    m = cdiv(cdiv(2 * pcp * C, page) + 1, pcp) + 1
+    first_owned = first_gp + (rank - first_gp) % pcp
+    gps = first_owned + pcp * jnp.arange(m, dtype=jnp.int32)  # [m]
+    valid = gps * page < cache_len + num_current
+    lp = jnp.minimum(gps // pcp, pages_per_seq - 1)
+    # Invalid pages: unique out-of-bounds indices (dropped by the scatter,
+    # zero-filled by the gather).
+    phys = jnp.where(valid, page_indices[lp],
+                     kv_cache.shape[0] + jnp.arange(m, dtype=jnp.int32))
+    starts = jnp.clip(gps * page - cache_len + page, 0,
+                      tok_pad.shape[0] - page)
+    new_pages = tok_pad[starts[:, None] +
+                        jnp.arange(page)[None, :]]  # [m, page, ...]
+    cur = kv_cache.at[phys].get(mode="fill", fill_value=0)  # [m, page, ...]
+    pos = gps[:, None] * page + jnp.arange(page)[None, :]
+    keep = (pos >= cache_len) & (pos < cache_len + num_current)
+    val = jnp.where(keep.reshape((m, page) + (1, ) * (cur.ndim - 2)),
+                    new_pages, cur)
+    return kv_cache.at[phys].set(val, mode="drop", unique_indices=True)
 
 
 def pcp_forward(
