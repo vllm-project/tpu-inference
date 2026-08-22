@@ -2006,7 +2006,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         processed_bonus_logits = None
         if spec_decode_metadata is None:
-            logits = logits.astype(jnp.float32)
+            # Logits enter sample() in the model's native dtype; the f32
+            # widening happens inside sample() after the argmax. The sampling
+            # precompile menu is keyed on this dtype (_precompile_sampling),
+            # so a dtype change here must be mirrored there.
             with self.maybe_forbid_compile:
                 next_tokens, processed_logits = sample(
                     step_rng,
@@ -2046,7 +2049,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 key=rejection_rng,
             )
 
-        logits = logits.astype(jnp.float32)
+        if tpu_sampling_metadata.logprobs:
+            # Only the logprobs consumers below need f32 logits; skip the
+            # full-vocab widening otherwise.
+            logits = logits.astype(jnp.float32)
         if full_logits is not None:
             full_logits = full_logits.astype(jnp.float32)
         with self.maybe_forbid_compile:
