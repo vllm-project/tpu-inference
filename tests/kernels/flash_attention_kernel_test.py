@@ -161,7 +161,7 @@ class FlashAttentionVmemEstimationTest(parameterized.TestCase):
     def test_vmem_estimation_sequence_length_guard(self):
         """Tests that long sequences (>2048) or sequences exceeding 32MB VMEM do not override block_k."""
         block_sizes = BlockSizes.get_default(1, 16, 30976, 30976, 72)
-        
+
         # Calculate VMEM for MMMU 30,976 visual tokens
         total_bytes_30k = calculate_vmem_usage_bytes(
             block_sizes,
@@ -170,7 +170,7 @@ class FlashAttentionVmemEstimationTest(parameterized.TestCase):
             d_model=72,
             kv_seq_len=30976,
         )
-        
+
         # 30,976 tokens require ~46MB, which exceeds the 32MB physical VMEM budget
         self.assertGreater(total_bytes_30k, 32 * 1024 * 1024)
 
@@ -190,4 +190,3 @@ class FlashAttentionVmemEstimationTest(parameterized.TestCase):
 
 if __name__ == "__main__":
     absltest.main()
-
