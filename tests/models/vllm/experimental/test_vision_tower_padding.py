@@ -201,6 +201,3 @@ def test_padding_metadata_synchronization():
     assert len(second_per_grid_ts_list) == 2
     assert len(timestamps_list) == 2
     assert pixels.shape[0] % tp_size == 0
-
-
-
