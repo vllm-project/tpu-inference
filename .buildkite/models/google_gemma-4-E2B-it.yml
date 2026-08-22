@@ -113,7 +113,15 @@ steps:
       MINIMUM_THROUGHPUT_THRESHOLD: 0.0
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          echo "gemma-4 E2B on the vllm (torchax) path has never passed" \
+               "accuracy: the model's per_layer_embeddings CUDA-graph buffer" \
+               "is incompatible with torchax and its KV-shared layers corrupt" \
+               "the target layer's cache. Recording as unverified until the" \
+               "torchax path is fixed."
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark" "unverified"
+         else
+          .buildkite/scripts/run_in_docker.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
 
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E2B-it"
     key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Benchmark"
