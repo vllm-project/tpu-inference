@@ -26,18 +26,22 @@ def compute_batched_seq_metadata(
     state_indices: jax.Array,
     read_offsets: jax.Array,
     end_seq: jax.Array,
+    read_indices: jax.Array | None = None,
 ) -> memory_ref.MetadataRef:
     """Metadata for computing multiple sequences per tile.
 
     A sequence contributes exactly one tile holding all of its query tokens:
     a single decoded token, or a speculative verify window of up to
     `cfg.window_size` of them. The initial state is read from
-    `state_indices[s] + read_offsets[s]` and one state checkpoint per window
-    position is written back to `state_indices[s] + t`.
+    `read_indices[s] + read_offsets[s]` and one state checkpoint per window
+    position is written back to `state_indices[s] + t`. `read_indices`
+    defaults to `state_indices` (read and write the same slot).
     """
 
     max_seqs = seq_lens.size
     all_seqs = jnp.arange(max_seqs)
+    if read_indices is None:
+        read_indices = state_indices
 
     # NOTE: Only supports use case where query_lens[i] <= cfg.window_size where
     # i < end_seq. This must be guaranteed by the function caller.
@@ -58,6 +62,7 @@ def compute_batched_seq_metadata(
         s_idx_has_initial_state=has_initial_state,
         s_idx_to_state_indices=state_indices,
         s_idx_to_read_offset=read_offsets,
+        s_idx_to_read_indices=read_indices,
     )
 
 
@@ -68,6 +73,7 @@ def compute_per_seq_metadata(
     state_indices: jax.Array,
     start_seq: jax.Array,
     end_seq: jax.Array,
+    read_indices: jax.Array | None = None,
 ) -> memory_ref.MetadataRef:
     """Metadata for computing single sequence per tile."""
 
@@ -75,11 +81,14 @@ def compute_per_seq_metadata(
     max_tokens = cfg.batch_size
     all_seqs = jnp.arange(max_seqs)
     all_tokens = jnp.arange(max_tokens)
+    if read_indices is None:
+        read_indices = state_indices
 
     # Shift to ensure first element is for start_seq.
     query_start_loc = jnp.roll(query_start_loc, shift=-start_seq)
     seq_lens = jnp.roll(seq_lens, shift=-start_seq)
     state_indices = jnp.roll(state_indices, shift=-start_seq)
+    read_indices = jnp.roll(read_indices, shift=-start_seq)
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     # NOTE: query_lens is used for calculating num_tiles. Defensive programming
@@ -144,4 +153,5 @@ def compute_per_seq_metadata(
         s_idx_to_state_indices=state_indices,
         # Prefill/mixed sequences always resume from the group's base slot.
         s_idx_to_read_offset=jnp.zeros_like(state_indices),
+        s_idx_to_read_indices=read_indices,
     )

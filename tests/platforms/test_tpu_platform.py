@@ -231,9 +231,12 @@ class TestTpuPlatform:
 
         assert mm_cfg.mm_device_do_normalize == expected_flag
 
-    @pytest.mark.parametrize("is_hybrid,expected_prefix_caching", [
-        (True, False),
-        (False, True),
+    @pytest.mark.parametrize("is_hybrid,unsupported,expected_prefix_caching", [
+        (True, None, True),
+        (True, "dp", True),
+        (True, "spec", False),
+        (True, "continue_decode", True),
+        (False, None, True),
     ])
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
@@ -243,10 +246,14 @@ class TestTpuPlatform:
     )
     def test_check_and_update_config_hybrid_prefix_caching(
             self, mock_update, mock_sharding, vllm_config, is_hybrid,
-            expected_prefix_caching):
-        """Prefix caching is force-disabled for hybrid (mamba/linear-attention)
-        models on TPU — cached-prefix reuse garbles GDN outputs — and left
-        untouched for non-hybrid models."""
+            unsupported, expected_prefix_caching):
+        """Hybrid (mamba/linear-attention) models keep prefix caching.
+
+        Their recurrent state is addressed by block id in
+        `mamba_cache_mode="align"`. It is turned off only for the setups that
+        addressing scheme cannot serve, so those keep working rather than
+        failing at runtime.
+        """
         vllm_config.parallel_config.pipeline_parallel_size = 1
         vllm_config.scheduler_config.is_multimodal_model = False
         vllm_config.compilation_config.mode = "dummy"
@@ -260,16 +267,51 @@ class TestTpuPlatform:
         vllm_config.cache_config.mamba_cache_mode = "align"
         vllm_config.cache_config.mamba_block_size = 256
 
+        # check_and_update_config replaces sharding_config with the manager's
+        # output, so the DP size has to come from the patched manager.
+        mock_sharding.from_vllm_config.return_value.total_dp_size = (
+            2 if unsupported == "dp" else 1)
+        vllm_config.speculative_config = (object()
+                                          if unsupported == "spec" else None)
+        vllm_config.additional_config = {
+            "enable_continue_decode": unsupported == "continue_decode"
+        }
+
         TpuPlatform.check_and_update_config(vllm_config)
 
         assert (vllm_config.cache_config.enable_prefix_caching ==
                 expected_prefix_caching)
-        if is_hybrid:
+        if not expected_prefix_caching:
             # Derived mamba fields must be reset to their prefix-caching-off
             # defaults or vLLM's "--mamba-block-size can only be set with
             # --enable-prefix-caching" validator rejects the config.
             assert vllm_config.cache_config.mamba_cache_mode == "none"
             assert vllm_config.cache_config.mamba_block_size == 4096
+
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_hybrid_prefix_match_unit_raises(
+            self, mock_update, mock_sharding, vllm_config):
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.block_size = 16
+        vllm_config.cache_config.prefix_match_unit = 8
+        vllm_config.speculative_config = None
+
+        with pytest.raises(
+                NotImplementedError,
+                match=
+                "Prefix match unit smaller than the block size is not supported"
+        ):
+            TpuPlatform.check_and_update_config(vllm_config)
 
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
@@ -437,6 +479,20 @@ class TestTpuPlatform:
             TpuPlatform.update_block_size_for_backend(vllm_config)
 
         assert vllm_config.cache_config.block_size == expected_block_size
+
+    def test_update_block_size_for_backend_prefix_match_unit_raises(
+            self, vllm_config):
+        vllm_config.cache_config.block_size = 16
+        vllm_config.cache_config.mamba_block_size = 16
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.prefix_match_unit = 8
+
+        with pytest.raises(
+                NotImplementedError,
+                match=
+                "Prefix match unit smaller than the block size is not supported"
+        ):
+            TpuPlatform.update_block_size_for_backend(vllm_config)
 
     def test_check_and_update_config_mla_checks(self):
         vllm_config = MagicMock()

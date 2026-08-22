@@ -286,6 +286,7 @@ def fused_conv1d_gdn(
     distribution: jax.Array,  # [3]
     seq_lens: jax.Array,  # [num_seqs]
     read_offsets: jax.Array | None = None,  # [num_seqs]
+    read_state_indices: jax.Array | None = None,  # [num_seqs]
     *,
     n_kq: int,
     n_v: int,
@@ -334,6 +335,12 @@ def fused_conv1d_gdn(
             `state_indices[s] + read_offsets[s]` and write one checkpoint
             per window position to `state_indices[s] + t`. Required when
             `num_spec_tokens > 0`.
+        read_state_indices: Optional [num_seqs] int32 — slot each sequence
+            reads its initial state from, defaulting to `state_indices`.
+            Mamba prefix caching ("align" mode) resumes a sequence from the
+            cached state block of the last block boundary and checkpoints
+            into the block that covers the current position, so the read and
+            write slots differ. `read_offsets` still applies on top of it.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Key/query dimension.
@@ -379,6 +386,10 @@ def fused_conv1d_gdn(
         read_offsets = jnp.zeros((num_seqs, ), dtype=jnp.int32)
     assert read_offsets.shape == (num_seqs, )
     read_offsets = read_offsets.astype(jnp.int32)
+    if read_state_indices is None:
+        read_state_indices = state_indices
+    assert read_state_indices.shape == (num_seqs, )
+    read_state_indices = read_state_indices.astype(state_indices.dtype)
     act_in_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
@@ -486,6 +497,7 @@ def fused_conv1d_gdn(
                 state_indices=state_indices,
                 read_offsets=read_offsets,
                 end_seq=distribution[0],
+                read_indices=read_state_indices,
             )
         else:
             metadata_obj = metadata.compute_per_seq_metadata(
@@ -495,6 +507,7 @@ def fused_conv1d_gdn(
                 state_indices=state_indices,
                 start_seq=distribution[0],
                 end_seq=distribution[-1],
+                read_indices=read_state_indices,
             )
 
         metadata_spec = jax.tree.map(lambda _: smem_spec, metadata_obj)
