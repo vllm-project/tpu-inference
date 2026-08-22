@@ -14,7 +14,7 @@ set -e
 SCRIPT="python3 tests/layers/common/benchmark_dcp_forward_perf.py"
 BASE="USE_BATCHED_RPA_KERNEL=1 PAGE_SIZE=256 NUM_Q_HEADS=128 NUM_KV_HEADS=16 TP_MODEL=16 KV_LENS_K=4,32,64,128"
 
-for BS in 32 64 128; do
+for BS in 32; do
   echo ""
   echo "######################################################################"
   echo "# BATCH_SIZE = $BS"

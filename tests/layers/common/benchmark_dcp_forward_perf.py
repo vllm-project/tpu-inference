@@ -7,6 +7,11 @@ The KV cache is allocated once outside the jit and passed via donate_argnums=(0,
 so the same physical buffer is reused each step via input_output_aliases in the
 pallas_call.  Allocating inside the jit would cause XLA to emit a broadcast_in_dim
 (zero-fill) of the multi-GB cache on every call, dominating benchmark latency.
+
+When VLLM_DCP_PROJ_REPLICATE=1, an additional benchmark variant runs that includes
+explicit q_proj / kv_proj matmuls (simulating replicated projection weights across
+DCP ranks).  This measures the full cost of the replicate strategy: redundant
+projection compute avoids the K/V all-gather inside shard_map.
 """
 
 import math, os, time
@@ -29,6 +34,7 @@ PAGE_SIZE     = int(os.environ.get("PAGE_SIZE",     128))  # local tokens/page
 NUM_Q_HEADS   = int(os.environ.get("NUM_Q_HEADS",    32))
 NUM_KV_HEADS  = int(os.environ.get("NUM_KV_HEADS",    4))
 HEAD_DIM      = int(os.environ.get("HEAD_DIM",      128))
+D_MODEL       = int(os.environ.get("D_MODEL",      4096))  # hidden dim for proj
 NUM_SEQS_REAL = int(os.environ.get("NUM_SEQS_REAL",  64))
 MAX_NUM_SEQS  = int(os.environ.get("MAX_NUM_SEQS",  64))
 WARMUP         = int(os.environ.get("WARMUP",           5))
@@ -40,6 +46,7 @@ PHYSICAL_BLOCK_SIZE = PAGE_SIZE * DCP_SIZE  # global page size, sharded by CONTE
 TP_MODEL = int(os.environ.get("TP_MODEL", 8))
 _KV_LENS_K   = os.environ.get("KV_LENS_K", "4,32,128,256,512")
 DECODE_KV_LENS = [int(k) * 1024 for k in _KV_LENS_K.split(",")]
+PROJ_REPLICATE = os.environ.get("VLLM_DCP_PROJ_REPLICATE", "0") == "1"
 
 # ── Meshes ────────────────────────────────────────────────────────────────────
 devices = sorted(jax.devices(), key=lambda d: d.id)
@@ -59,7 +66,7 @@ mesh_tp8 = Mesh(
     axis_names=MESH_AXIS_NAMES,
 )
 
-# ── Pre-sharding Helper ───────────────────────────────────────────────────────
+# ── Pre-sharding Helpers ───────────────────────────────────────────────────────
 def preshard_inputs(q, k, v, bt, sl, qsl, dist, current_mesh):
     """Puts Q, K, V and metadata on the mesh with explicit sharding."""
     model_axis = MESH_AXIS_NAMES[4]
@@ -93,6 +100,39 @@ def preshard_inputs(q, k, v, bt, sl, qsl, dist, current_mesh):
     dist_s = put(dist, rep)
 
     return q_s, k_s, v_s, bt_s, sl_s, qsl_s, dist_s
+
+
+def preshard_proj_inputs(bt, sl, qsl, dist, current_mesh):
+    """Puts projection weights and hidden states on the DCP mesh for PROJ_REPLICATE.
+
+    With PROJ_REPLICATE, Q and K/V projections are replicated across DCP so that
+    every DCP rank has the full model-shard head slice after the matmul.  This
+    avoids the K/V all-gather inside shard_map at the cost of redundant compute.
+    """
+    model_axis = MESH_AXIS_NAMES[4]
+    put = lambda x, s: jax.device_put(x, NamedSharding(current_mesh, s))
+
+    # Synthetic hidden states: (tokens, d_model), replicated across all devices.
+    hidden = jnp.zeros((MAX_NUM_SEQS, D_MODEL), dtype=KV_DTYPE)
+    hidden_s = put(hidden, P(None, None))
+
+    # Projection weights sharded by model only (replicated across DCP).
+    # Shape convention: (d_model, num_heads, head_dim) — heads axis sharded.
+    q_w = jnp.zeros((D_MODEL, NUM_Q_HEADS,  HEAD_DIM), dtype=KV_DTYPE)
+    k_w = jnp.zeros((D_MODEL, NUM_KV_HEADS, HEAD_DIM), dtype=KV_DTYPE)
+    v_w = jnp.zeros((D_MODEL, NUM_KV_HEADS, HEAD_DIM), dtype=KV_DTYPE)
+    q_w_s = put(q_w, P(None, model_axis, None))
+    k_w_s = put(k_w, P(None, model_axis, None))
+    v_w_s = put(v_w, P(None, model_axis, None))
+
+    rep = P()
+    bt_s   = put(bt, rep)
+    sl_s   = put(sl, rep)
+    qsl_s  = put(qsl, rep)
+    dist_s = put(dist, rep)
+
+    return hidden_s, q_w_s, k_w_s, v_w_s, bt_s, sl_s, qsl_s, dist_s
+
 
 # ── Inputs Generator ──────────────────────────────────────────────────────────
 def _make_inputs_raw(global_kv_len, page_size):
@@ -229,6 +269,7 @@ def bench_kv_len(global_kv_len: int):
 
     def make_dcp_fn(decode_only_opt: bool):
         os.environ["DCP_DECODE_ONLY_OPT"] = "1" if decode_only_opt else ""
+        os.environ.pop("VLLM_DCP_PROJ_REPLICATE", None)  # ensure regular DCP path
         @jax.jit(donate_argnums=(0,))
         def fn(cache, q, k, v, bt, sl, qsl, dist):
             md = AttentionMetadata(
@@ -251,6 +292,43 @@ def bench_kv_len(global_kv_len: int):
         dcp_cache = _bench(label, dcp_fn, dcp_cache, dcp_args)
         dcp_cache = _profile_fn(tag, dcp_fn, dcp_cache, dcp_args, f"{OUTPUT_DIR}/kv{kv_k}K/{tag}")
 
+    # ==========================================================================
+    #  3. DCP + PROJ_REPLICATE: q_proj / kv_proj step included in timing
+    #     Each DCP rank holds the full model-shard heads after projection →
+    #     no all-gather needed inside shard_map for K/V or Q.
+    # ==========================================================================
+    if PROJ_REPLICATE:
+        proj_args = preshard_proj_inputs(bt_raw, sl_raw, qsl_raw, dist_raw, mesh)
+
+        os.environ["DCP_DECODE_ONLY_OPT"] = "1"
+        os.environ["VLLM_DCP_PROJ_REPLICATE"] = "1"
+
+        @jax.jit(donate_argnums=(0,))
+        def dcp_proj_fn(cache, hidden, q_w, k_w, v_w, bt, sl, qsl, dist):
+            # q_proj step: (tokens, d_model) × (d_model, q_heads/model, head_dim)
+            q = jnp.einsum('td,dhf->thf', hidden, q_w)
+            # kv_proj step: (tokens, d_model) × (d_model, kv_heads/model, head_dim)
+            k = jnp.einsum('td,dhf->thf', hidden, k_w)
+            v = jnp.einsum('td,dhf->thf', hidden, v_w)
+            md = AttentionMetadata(
+                input_positions=jnp.zeros(MAX_NUM_SEQS, dtype=jnp.int32),
+                block_tables=bt,
+                seq_lens=sl,
+                query_start_loc=qsl,
+                request_distribution=dist,
+                is_decode=True,
+            )
+            updated_cache, out = attention(cache, q, k, v, md, mesh, sm_scale=sm_scale, use_causal_mask=True)
+            return updated_cache, out
+
+        label = f"DCP proj_replicate  (q_proj+kv_proj+attn, no kv-all-gather)"
+        dcp_cache = _bench(label, dcp_proj_fn, dcp_cache, proj_args)
+        dcp_cache = _profile_fn("proj_replicate", dcp_proj_fn, dcp_cache, proj_args,
+                                f"{OUTPUT_DIR}/kv{kv_k}K/proj_replicate")
+
+        # Restore flag so subsequent kv_len iterations behave correctly.
+        os.environ.pop("VLLM_DCP_PROJ_REPLICATE", None)
+
     # Free DCP cache before the next kv_len iteration to avoid OOM.
     dcp_cache.delete()
     del dcp_cache, dcp_args
@@ -262,6 +340,8 @@ def main():
     print(f"  q_heads={NUM_Q_HEADS}  kv_heads={NUM_KV_HEADS}  head_dim={HEAD_DIM}"
           f"  DCP: phys_block={PHYSICAL_BLOCK_SIZE}  TP{TP_MODEL}: page={PAGE_SIZE}", flush=True)
     print(f"  real_seqs={NUM_SEQS_REAL}  padded={MAX_NUM_SEQS}  warmup={WARMUP}  bench={BENCH}", flush=True)
+    if PROJ_REPLICATE:
+        print(f"  VLLM_DCP_PROJ_REPLICATE=1  d_model={D_MODEL}  (proj+attn timing for DCP)", flush=True)
     print(flush=True)
 
     for kv_len in DECODE_KV_LENS:
