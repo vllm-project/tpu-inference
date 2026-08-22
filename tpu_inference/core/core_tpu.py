@@ -16,6 +16,7 @@ import jax
 # ======================================================================================
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
@@ -513,7 +514,8 @@ class DisaggEngineCore(vLLMEngineCore):
         self.step_fn = (self.step if self.batch_queue is None else
                         self.step_with_batch_queue)
 
-        self.mm_receiver_cache = None
+        self.mm_receiver_cache = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(
+            vllm_config.model_config)
         self._orchestrator = _DisaggOrchestrator(
             config=vllm_config,
             output_queue=self.output_queue,
@@ -739,7 +741,8 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
 
-        self.mm_receiver_cache = None
+        self.mm_receiver_cache = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(
+            vllm_config.model_config)
         self._orchestrator = _DisaggOrchestrator(
             config=vllm_config,
             output_queue=self.output_queue,
@@ -753,6 +756,18 @@ class DisaggEngineCoreProc(vLLMEngineCoreProc):
         if not isinstance(request.request_id, str):
             raise TypeError(
                 f"request_id must be a string, got {type(request.request_id)}")
+
+        if self.mm_receiver_cache is not None and getattr(
+                request, "mm_inputs", None):
+            request.mm_inputs = self.mm_receiver_cache.get_and_update_features(
+                request.mm_inputs)
+        elif self.mm_receiver_cache is not None and getattr(
+                request, "mm_positions", None) and hasattr(
+                    request, "mm_features"):
+            # Older vllm might use mm_features, checking both to be safe
+            if request.mm_features:
+                request.mm_features = self.mm_receiver_cache.get_and_update_features(
+                    request.mm_features)
 
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
