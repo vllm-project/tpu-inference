@@ -217,9 +217,13 @@ def test_continue_decode_early_exit():
     )
     assert np.array_equal(token_buffer, expected_tokens)
 
-    # Verify final state (state at the start of step 2, which did not run)
+    # Verify final state (state at the start of step 2, which did not run).
+    # A finished slot keeps its last input token (43) rather than padding:
+    # masked slots re-feed that token at their frozen position so any masked
+    # iteration rewrites the same KV it already holds. With the every-step EOS
+    # check no masked iteration runs, so this only shows up in the carry.
     assert np.array_equal(final_state.active_mask, [True, False])
-    assert np.array_equal(final_state.current_tokens, [44, -1])
+    assert np.array_equal(final_state.current_tokens, [44, 43])
     assert np.array_equal(final_state.attn_metadata.input_positions, [2, 1])
     assert np.array_equal(final_state.attn_metadata.seq_lens, [3, 2])
     assert all_expert_indices is None
@@ -385,15 +389,17 @@ def test_continue_decode_no_exit_on_eos():
         continue_decode_eos_check_interval=-1,
     )
 
-    # Verify loop ran all 5 steps despite EOS hit
-    assert int(final_state.step_counter) == 5
+    # With interval <= 0 an EOS never breaks the window: req 1 finishing at
+    # step 1 does not stop the loop. The loop only exits once every sequence
+    # has finished (after step 2) or at the static depth, whichever is first.
+    assert int(final_state.step_counter) == 3
 
     # Expected tokens:
     # Step 0: [42, 43]
     # Step 1: [44, 99] (req 1 hits EOS)
     # Step 2: [99, -1] (req 0 hits EOS; req 1 inactive -> -1)
-    # Step 3: [-1, -1] (both inactive)
-    # Step 4: [-1, -1] (both inactive)
+    # Step 3: [-1, -1] (not executed: all sequences finished)
+    # Step 4: [-1, -1] (not executed)
     expected_tokens = np.array(
         [
             [42, 43],
@@ -406,6 +412,118 @@ def test_continue_decode_no_exit_on_eos():
     )
     assert np.array_equal(token_buffer, expected_tokens)
     assert np.array_equal(final_state.active_mask, [False, False])
+
+
+def test_continue_decode_no_exit_on_eos_while_any_active():
+    """interval <= 0: the window runs to its static depth while any sequence
+    is still active; finished slots stay masked (padding in the buffer, frozen
+    position / seq_len, last input token re-fed)."""
+    batch_size = 2
+    max_decode_steps = 5
+    static_max_decode_steps = 5
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+
+    attn_metadata = AttentionMetadata(
+        input_positions=jnp.array([0, 0], dtype=jnp.int32),
+        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+        mamba_state_indices=None,
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=attn_metadata,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    kv_caches = [jnp.zeros((2, 10))]
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        pos = hidden_states[:, 0, 0]
+        logits = jnp.zeros((batch_size, 100))
+        logits = logits.at[:, 0].set(pos)
+        return logits
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata):
+        pos = logits[:, 0].astype(jnp.int32)
+        token_table = jnp.array(
+            [
+                [42, 43],  # pos 0
+                [44, 99],  # pos 1 (req 1 hits EOS)
+                [50, 50],  # pos 2
+                [60, 61],  # pos 3
+                [70, 71],  # pos 4
+            ],
+            dtype=jnp.int32,
+        )
+        batch_idx = jnp.arange(batch_size)
+        next_tokens = token_table[pos, batch_idx]
+        return next_tokens, None
+
+    rng = jax.random.PRNGKey(0)
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        current_rng,
+        all_expert_indices,
+        logprobs_tensors,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=rng,
+        mesh=None,
+        sampling_metadata=None,
+        continue_decode_eos_check_interval=-1,
+    )
+
+    # req 0 never hits EOS, so the window runs the full static depth.
+    assert int(final_state.step_counter) == 5
+
+    # Step 0: [42, 43]
+    # Step 1: [44, 99] (req 1 hits EOS)
+    # Step 2: [50, -1] (req 1 masked from here on)
+    # Step 3: [60, -1]
+    # Step 4: [70, -1]
+    expected_tokens = np.array(
+        [
+            [42, 43],
+            [44, 99],
+            [50, -1],
+            [60, -1],
+            [70, -1],
+        ],
+        dtype=np.int32,
+    )
+    assert np.array_equal(token_buffer, expected_tokens)
+    assert np.array_equal(final_state.active_mask, [True, False])
+    # req 0 advanced through all 5 steps; req 1 is frozen at the state it had
+    # when it finished (position 1, seq_len 2) and keeps re-feeding its last
+    # input token (43) instead of padding.
+    assert np.array_equal(final_state.current_tokens, [70, 43])
+    assert np.array_equal(final_state.attn_metadata.input_positions, [5, 1])
+    assert np.array_equal(final_state.attn_metadata.seq_lens, [6, 2])
 
 
 def test_continue_decode_exit_on_eos_interval():

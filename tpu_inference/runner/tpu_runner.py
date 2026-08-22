@@ -861,6 +861,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # every-step check.
         self.continue_decode_eos_check_interval = (
             envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL)
+        if (self.continue_decode_eos_check_interval <= 0
+                and self.scheduler_config.async_scheduling):
+            logger.warning(
+                "CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0 (continuous-batching "
+                "decode window) combined with async_scheduling has been "
+                "observed to degrade generation quality: sequences fail to "
+                "terminate and run to their token limit. Until that "
+                "interaction is resolved, run this mode with "
+                "async_scheduling disabled.")
         self.static_max_decode_steps = self.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
         self.eos_token_id = runner_utils.get_eos_token_id(self.model_config)
@@ -1846,10 +1855,23 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.rng_params_for_sampling = final_rng
             self.kv_caches = final_kv_caches
 
-            last_step_idx = jnp.clip(final_state.step_counter - 1, 0,
-                                     self.static_max_decode_steps - 1)
+            # Reseed each sequence from its own newest token. Reading the
+            # window's final row is only correct when the window stops right
+            # after an EOS; in a continuous-batching window
+            # (CONTINUE_DECODE_EOS_CHECK_INTERVAL <= 0) a sequence that
+            # finishes mid-window has padding in that row, and reseeding from
+            # padding makes the model continue from garbage and never
+            # terminate. Take the last non-padding row within the executed
+            # steps instead; whenever the window early-exits this reduces to
+            # the final row, so the default path is unchanged.
+            num_steps = jnp.clip(final_state.step_counter, 1,
+                                 self.static_max_decode_steps)
+            row_idx = jnp.arange(generated_tokens.shape[0])[:, None]
+            is_real_row = jnp.logical_and(
+                generated_tokens != self.pad_token_id, row_idx < num_steps)
+            last_real_row = jnp.max(jnp.where(is_real_row, row_idx, 0), axis=0)
             next_tokens_in_tpu = generated_tokens[
-                last_step_idx,
+                last_real_row,
                 jnp.arange(generated_tokens.shape[1])]
 
             generated_tokens_async = jax.copy_to_host_async(generated_tokens)
