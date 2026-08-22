@@ -776,6 +776,87 @@ class TPUWorker(WorkerBase):
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
 
+    def _extract_weight_state(self) -> Any:
+        """Builds the (possibly `nnx.State`) weight PyTree from the runner.
+
+        Shared by `get_weights_state` (returns the live PyTree -- callers in
+        this same process only, e.g. the CPU-side fallback in
+        `RLVllmSampler.get_weights_state`) and `bind_raiden_sync` (binds it to
+        Raiden in-process; never sends the PyTree itself across the
+        collective_rpc boundary, which cannot serialize `nnx.State`/live TPU
+        arrays -- see `raiden_worker_sync` module docstring).
+
+        `TPUModelRunner.state` is set unconditionally by `load_model()` (see
+        `raiden_worker_sync.extract_weight_state`), so the MaxText unwrap has
+        to apply there too, not just to the `nnx.state(runner.model, ...)`
+        fallback -- that fallback is dead code once `runner.state` is set,
+        which is always.
+        """
+        from tpu_inference.rl import raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        result = raiden_worker_sync.extract_weight_state(
+            getattr(self.model_runner, "state", None),
+            getattr(self.model_runner, "model", None),
+        )
+        if result is not None:
+            return result
+        return getattr(self.model_runner, "state_leaves", None)
+
+    def get_weights_state(self) -> Any:
+        """Returns model weights state / PyTree from the runner.
+
+        Only safe to call from this same process -- the result may be an
+        `nnx.State` full of live TPU arrays, which vLLM's collective_rpc
+        transport cannot serialize. Callers that cross the RPC boundary (e.g.
+        the rollout adapter) must use `bind_raiden_sync`/`get_raiden_metadata`
+        instead, which only ever return plain-data metadata.
+        """
+        return self._extract_weight_state()
+
+    def bind_raiden_sync(self, worker_index: int = 0, parallelism: int = 4) -> dict:
+        """Binds this worker's live weights to Raiden, in-process, and
+        returns wire-safe registration metadata (never the arrays).
+
+        Reuses (rebinds) `self._raiden_worker_sync` across sync rounds, the
+        same way the trainer side reuses `MaxTextTrainingEngine._raiden_sync`.
+        """
+        from tpu_inference.rl import raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        state = self._extract_weight_state()
+        if getattr(self, "_raiden_worker_sync", None) is None:
+            self._raiden_worker_sync = raiden_worker_sync.RaidenWorkerSync(
+                job_name="rollout",
+                worker_index=worker_index,
+                parallelism=parallelism,
+            )
+        self._raiden_worker_sync.bind(state)
+        return self._raiden_worker_sync.metadata_dict()
+
+    def get_raiden_metadata(self) -> dict:
+        """Re-fetches the current binding's wire-safe metadata without rebinding."""
+        sync = getattr(self, "_raiden_worker_sync", None)
+        if sync is None or not sync.bound:
+            return {}
+        return sync.metadata_dict()
+
+    def raiden_h2d(self) -> dict:
+        """Blocks until the transfer that just landed is visible on-device.
+
+        Returns tensor checksums when `VERIFY_WEIGHTS=true`, matching the
+        trainer side's `RaidenSynchronizer.checksums()` debug logging.
+        """
+        sync = getattr(self, "_raiden_worker_sync", None)
+        if sync is None:
+            raise RuntimeError("bind_raiden_sync must run before raiden_h2d.")
+        sync.h2d()
+        if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
+            return sync.checksums()
+        return {}
+
+    def raiden_metrics(self) -> dict:
+        sync = getattr(self, "_raiden_worker_sync", None)
+        return sync.metrics() if sync is not None else {}
+
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
