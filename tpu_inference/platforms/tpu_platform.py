@@ -168,6 +168,7 @@ class TpuPlatform(Platform):
         "ENABLE_RS_KERNEL",
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        "TPU_UNSAFE_HYBRID_PREFIX_CACHING",
     ]
 
     @classmethod
@@ -324,11 +325,14 @@ class TpuPlatform(Platform):
         # kernels handle cached prefixes.
         if (cache_config and cache_config.enable_prefix_caching
                 and vllm_config.model_config is not None
-                and getattr(vllm_config.model_config, "is_hybrid", False)):
+                and getattr(vllm_config.model_config, "is_hybrid", False)
+                and not envs.TPU_UNSAFE_HYBRID_PREFIX_CACHING):
             logger.warning(
                 "[tpu_platform] Disabling prefix caching: hybrid "
                 "(mamba/linear-attention) models do not support cached "
-                "prefixes on TPU yet (accuracy garbles on cache hits).")
+                "prefixes on TPU yet (accuracy garbles on cache hits). Set "
+                "TPU_UNSAFE_HYBRID_PREFIX_CACHING=1 to keep it on for "
+                "throughput measurements (output will be wrong).")
             cache_config.enable_prefix_caching = False
             # Reset the mamba cache fields derived from the enabled state to
             # their prefix-caching-off defaults; stale values trip vLLM's
@@ -341,6 +345,15 @@ class TpuPlatform(Platform):
                                     "user_specified_mamba_block_size", False)):
                 cache_config.mamba_block_size = (
                     vllm_config.model_config.max_model_len)
+        elif (cache_config and cache_config.enable_prefix_caching
+              and vllm_config.model_config is not None
+              and getattr(vllm_config.model_config, "is_hybrid", False)):
+            logger.warning(
+                "[tpu_platform] TPU_UNSAFE_HYBRID_PREFIX_CACHING is set: "
+                "keeping prefix caching on for a hybrid model. GENERATED "
+                "OUTPUT WILL BE WRONG on cache hits -- use this for "
+                "throughput measurements only, never for accuracy runs or "
+                "serving.")
 
         # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
         # CPU processor and instead normalizes inside the vLLM model's vision
