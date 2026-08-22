@@ -168,6 +168,7 @@ class TpuPlatform(Platform):
         "ENABLE_RS_KERNEL",
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        "MOE_RAGGED_GATHER_FP8",
     ]
 
     @classmethod
