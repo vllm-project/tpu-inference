@@ -42,18 +42,18 @@ def test_omni_model_single_frame_warmup():
     mock_config.model_config.hf_config.model_type = "qwen3_omni_moe"
     mock_config.model_config.dtype = "bfloat16"
     mock_config.scheduler_config.max_num_batched_tokens = 512
-    
+
     # Mock vision config
     vc = MagicMock()
     vc.in_channels = 3
     vc.temporal_patch_size = 2
     vc.patch_size = 14
     vc.spatial_merge_size = 2
-    
+
     with patch("tpu_inference.models.vllm.experimental.vision_tower_jit.has_jittable_vision", return_value=True), \
          patch("tpu_inference.models.vllm.experimental.vision_tower_jit.get_vision_config", return_value=vc), \
          patch("tpu_inference.models.vllm.experimental.vision_tower_jit.to_jax_dtype", return_value=None):
-        
+
         precompile_fn = maybe_precompile_vision_encoder_fn(
             params={},
             embed_multimodal_fn=MagicMock(),
@@ -83,17 +83,17 @@ def test_video_model_multi_frame_warmup():
     mock_config.model_config.hf_config.model_type = "qwen3_vl"
     mock_config.model_config.dtype = "bfloat16"
     mock_config.scheduler_config.max_num_batched_tokens = 4096
-    
+
     vc = MagicMock()
     vc.in_channels = 3
     vc.temporal_patch_size = 2
     vc.patch_size = 14
     vc.spatial_merge_size = 2
-    
+
     with patch("tpu_inference.models.vllm.experimental.vision_tower_jit.has_jittable_vision", return_value=True), \
          patch("tpu_inference.models.vllm.experimental.vision_tower_jit.get_vision_config", return_value=vc), \
          patch("tpu_inference.models.vllm.experimental.vision_tower_jit.to_jax_dtype", return_value=None):
-        
+
         precompile_fn = maybe_precompile_vision_encoder_fn(
             params={},
             embed_multimodal_fn=MagicMock(),
@@ -121,18 +121,18 @@ def test_env_var_overrides():
     mock_config.model_config.hf_config.model_type = "qwen3_vl"
     mock_config.model_config.dtype = "bfloat16"
     mock_config.scheduler_config.max_num_batched_tokens = 4096
-    
+
     vc = MagicMock()
     vc.in_channels = 3
     vc.temporal_patch_size = 2
     vc.patch_size = 14
     vc.spatial_merge_size = 2
-    
+
     with patch.dict(os.environ, {"VISION_PRECOMPILE_FRAMES": "2,8", "VISION_MIN_SHIFT": "5"}), \
          patch("tpu_inference.models.vllm.experimental.vision_tower_jit.has_jittable_vision", return_value=True), \
          patch("tpu_inference.models.vllm.experimental.vision_tower_jit.get_vision_config", return_value=vc), \
          patch("tpu_inference.models.vllm.experimental.vision_tower_jit.to_jax_dtype", return_value=None):
-        
+
         precompile_fn = maybe_precompile_vision_encoder_fn(
             params={},
             embed_multimodal_fn=MagicMock(),
