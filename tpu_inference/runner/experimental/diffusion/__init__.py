@@ -16,15 +16,27 @@
 This package is opt-in and has no API compatibility guarantee.
 """
 
-from tpu_inference.runner.experimental.diffusion.config import (
-    AttentionPolicy, CanvasPolicy, DiffusionAlgorithm, DiffusionConfig,
-    DiffusionModelSpec, DiffusionRuntimeConfig, GenerationStrategy,
-    GenerationStrategyConfig, LogitAlignment, PromptRemainderPolicy,
-    register_diffusion_model_adapter, resolve_generation_strategy)
+from .algorithm import CommitFn, get_commit_algorithm, low_confidence_commit
+from .config import (AttentionPolicy, CanvasPolicy, DiffusionAlgorithm,
+                     DiffusionConfig, DiffusionModelSpec,
+                     DiffusionRuntimeConfig, GenerationStrategy,
+                     GenerationStrategyConfig, LogitAlignment, NextBlockPolicy,
+                     PromptRemainderPolicy, register_diffusion_model_adapter,
+                     resolve_generation_strategy)
+from .program import BlockForwardFn, DenoiseBlockOutput, denoise_block
+
+from .batch import (  # isort: skip
+    PendingBlockOutput, PromptBlockPlan, complete_seeded_decode_block,
+    flush_partial_block_output, plan_seeded_prompt, required_cache_end,
+    start_partial_block_output,
+)
 
 __all__ = [
     "AttentionPolicy",
+    "BlockForwardFn",
     "CanvasPolicy",
+    "CommitFn",
+    "DenoiseBlockOutput",
     "DiffusionAlgorithm",
     "DiffusionConfig",
     "DiffusionModelSpec",
@@ -32,7 +44,18 @@ __all__ = [
     "GenerationStrategy",
     "GenerationStrategyConfig",
     "LogitAlignment",
+    "NextBlockPolicy",
+    "PendingBlockOutput",
+    "PromptBlockPlan",
     "PromptRemainderPolicy",
+    "complete_seeded_decode_block",
+    "denoise_block",
+    "flush_partial_block_output",
+    "get_commit_algorithm",
+    "low_confidence_commit",
+    "plan_seeded_prompt",
+    "required_cache_end",
     "register_diffusion_model_adapter",
     "resolve_generation_strategy",
+    "start_partial_block_output",
 ]
