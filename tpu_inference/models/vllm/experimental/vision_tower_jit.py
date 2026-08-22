@@ -87,7 +87,7 @@ class GridTHW(tuple):
     """Tensor-like wrapper for image/video grid_thw arguments.
 
     - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
-    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
+    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026).
     - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
     _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
 
@@ -199,7 +199,7 @@ def maybe_precompile_vision_encoder_fn(
 
 def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     """Convert certain kwargs to JIT-friendly formats, if needed.
-    
+
     Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
     GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
     """
