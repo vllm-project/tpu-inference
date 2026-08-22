@@ -583,11 +583,11 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
     def test_pcp_ring_matches_reference(self, dtype, P):
         """Ring launch: every rank passes [its page-interleaved cache shard |
         its OWN head+tail new KV] and its local Q; the kernel rotates the
-        streams around the pcp axis (no all-gather) and writes the pages it
-        owns of the new KV as they pass.
+        streams around the pcp axis (no all-gather), reads the cache only,
+        and returns every rank's new KV (new_kv_all) for the caller to write.
 
         Output must equal full-causal attention over the whole sequence and
-        the re-assembled cache must equal merge_kv of the current KV. The
+        new_kv_all must hold each source rank's own new KV verbatim. The
         cache length is not a multiple of P*PAGE (ranks' shards differ, one
         has a partial page), the last tail chunk is partially padding, and
         bkv is small enough that each stream spans several ring blocks.
@@ -689,15 +689,14 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                                     exp[chunk * C:chunk * C + real],
                                     atol=tol,
                                     rtol=tol)
-        # Cache write: every current token landed on the page owner.
-        flat = np.asarray(caches).reshape(P, -1, c["nkv2"] // c["kvp"],
-                                          c["kvp"], c["phd"])
+        # The kernel does not write the cache; it returns new_kv_all: on
+        # every rank, row src == source rank src's own new KV (rank order,
+        # padding rows included), collected as it rotated by.
+        nk = np.asarray(caches)  # [rank, src, 2C, ...]
         for r in range(P):
-            n_local = _cp_local_len(kv_total, P, r, self.PAGE)
-            for m in range(_cp_local_len(Lprev, P, r, self.PAGE), n_local):
-                gtok = _cp_global_token(m, P, r, self.PAGE)
-                slot = (m // self.PAGE) * self.PAGE + m % self.PAGE
-                self.assertArraysEqual(flat[r, slot], kv_merged[gtok - Lprev])
+            for src in range(P):
+                exp_src = np.asarray(merge_kv(k_l[src], v_l[src]))
+                self.assertArraysEqual(nk[r, src], exp_src)
 
 
 if __name__ == "__main__":
