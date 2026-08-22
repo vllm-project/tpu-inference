@@ -482,6 +482,102 @@ class BatchingORef(pltpu.BufferedRef):
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
+class BatchingLSERef(pltpu.BufferedRef):
+    """Handles writing LSE values to HBM, overlapped with compute via double buffering.
+
+    dst_ref tuple: (lse_hbm_ref, schedule_ref, cu_q_lens_ref).
+    VMEM block shape matches cfgs.lm_scratch_shape:
+      (batch_size, num_kv_heads, bq_sz * model.num_q_heads_per_kv_head, num_lanes).
+    """
+
+    cfgs: configs.RpaConfigs = dataclasses.field(default=None,
+                                                 metadata=dict(static=True))
+
+    @classmethod
+    def create(
+        cls,
+        spec: pl.BlockSpec,
+        dtype_or_type: jax.Array,
+        buffer_type,
+        buffer_count: int,
+        use_lookahead: bool,
+        cfgs: configs.RpaConfigs,
+    ):
+        standard_ref = pltpu.BufferedRef.create(
+            spec=spec,
+            dtype_or_type=dtype_or_type,
+            buffer_type=buffer_type,
+            buffer_count=buffer_count,
+            grid_rank=1,
+            use_lookahead=use_lookahead,
+        )
+        return cls(
+            cfgs=cfgs,
+            **{
+                f.name: getattr(standard_ref, f.name)
+                for f in dataclasses.fields(pltpu.BufferedRef)
+            },
+        )
+
+    def copy_out(
+        self,
+        dst_ref: tuple[jax.Ref, schedule.RpaSchedule, jax.Ref],
+        grid_indices: tuple[int | jax.Array, ...],
+    ):
+        lse_hbm, schedule_ref, cu_q_lens_ref = dst_ref
+        slot = self.current_copy_out_slot
+        sem = self.sem_sends.at[slot]
+        vmem_src = self.window_ref.at[slot]
+        block_idx = grid_indices[0]
+
+        dma_list = []
+        for b in range(self.cfgs.batch_size):
+            is_last_k = schedule_ref.is_last_k[block_idx, b] == 1
+            s_idx = schedule_ref.s_idx[block_idx, b]
+            q_idx = schedule_ref.q_idx[block_idx, b]
+            _, q_sz = schedule_ref.get_dma_q(block_idx, b)
+            q_src_flat = pl.multiple_of(
+                (cu_q_lens_ref[s_idx] + q_idx * self.cfgs.bq_sz) * self.cfgs.model.num_q_heads_per_kv_head, 8)
+            q_sz_flat = pl.multiple_of(q_sz * self.cfgs.model.num_q_heads_per_kv_head, 8)
+            q_sz_flat = jnp.where(is_last_k, q_sz_flat, 0)
+            dma_list.append((q_src_flat, q_sz_flat, b))
+
+        for i in range(len(dma_list)):
+            q_src_flat, q_sz_flat, b = dma_list[i]
+            pltpu.make_async_copy(
+                vmem_src.at[b, :, pl.ds(0, q_sz_flat), :],
+                lse_hbm.at[:, pl.ds(q_src_flat, q_sz_flat), :],
+                sem,
+            ).start()
+
+    def wait_out(
+        self,
+        dst_ref: tuple[jax.Ref, schedule.RpaSchedule, jax.Ref],
+        grid_indices: tuple[int | jax.Array, ...],
+    ):
+        lse_hbm, schedule_ref, _ = dst_ref
+        slot = self.current_wait_out_slot
+        sem = self.sem_sends.at[slot]
+        block_idx = grid_indices[0]
+
+        total_sz = 0
+        for b in range(self.cfgs.batch_size):
+            is_last_k = schedule_ref.is_last_k[block_idx, b] == 1
+            _, q_sz = schedule_ref.get_dma_q(block_idx, b)
+            q_sz_flat = pl.multiple_of(q_sz * self.cfgs.model.num_q_heads_per_kv_head, 8)
+            total_sz += jnp.where(is_last_k, q_sz_flat, 0)
+
+        flat_ref = lse_hbm.reshape((-1, lse_hbm.shape[-1]))
+        total_rows = pl.multiple_of(total_sz * lse_hbm.shape[0], 8)
+        pltpu.make_async_copy(
+            flat_ref.at[pl.ds(0, total_rows)],
+            flat_ref.at[pl.ds(0, total_rows)],
+            sem,
+        ).wait()
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
 class BatchingQRef(pltpu.BufferedRef):
     """Handles fetching Q blocks using precomputed metadata."""
 
