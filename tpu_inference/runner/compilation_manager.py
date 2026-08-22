@@ -241,7 +241,8 @@ class CompilationManager:
                     self.runner.lora_config), jax.set_mesh(self.runner.mesh):
                 self._precompile_backbone_text_only()
                 self._flush_compilations()
-                if self.runner.is_multimodal_model:
+                is_lm_only = bool(getattr(getattr(self.runner.model_config, "multimodal_config", None), "language_model_only", False))
+                if self.runner.is_multimodal_model and not is_lm_only:
                     if self.runner.precompile_vision_encoder_fn is not None:
                         self.runner.precompile_vision_encoder_fn(
                             self._run_compilation, )

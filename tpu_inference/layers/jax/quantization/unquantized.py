@@ -243,7 +243,7 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
             del layer.kernel_up_proj_EDF
 
             # Fuse the weights into w13: [Gate, Up]
-            w13_val = jnp.concatenate([w_gate, w_up], axis=1)
+            w13_val = jnp.concatenate([w_gate, w_up], axis=-1)
             del w_gate, w_up
 
             mesh = jax.sharding.get_mesh()

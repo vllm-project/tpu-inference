@@ -76,7 +76,7 @@ def all_gather_topk_indices_and_weights(
     # The optimization barrier here is to prevent the compiler from reordering the all-gather the operations above.
     blob = jax.lax.optimization_barrier(blob)
     gathered_blob = jax.lax.with_sharding_constraint(
-        blob, NamedSharding(mesh, P(None, ShardingAxisName.MLP_DATA)))
+        blob, NamedSharding(mesh, P(None, ShardingAxisName.ATTN_DATA)))
 
     topk_indices = gathered_blob[0]
     topk_weights = gathered_blob[1]
@@ -614,9 +614,16 @@ def fused_moe_func(
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
 
-    assert (num_tokens * topk) % 16 == 0, (
-        "The kernel requires num_tokens * topk to be a multiple of "
-        f"16 but got {num_tokens}*{topk}={num_tokens*topk}")
+    orig_num_tokens = num_tokens
+    if (num_tokens * topk) % 16 != 0:
+        pad_tokens = 0
+        while ((num_tokens + pad_tokens) * topk) % 16 != 0:
+            pad_tokens += 1
+        hidden_states = jnp.pad(hidden_states, ((0, pad_tokens), (0, 0)))
+        gating_output = jnp.pad(gating_output, ((0, pad_tokens), (0, 0)))
+        if num_valid_tokens is None:
+            num_valid_tokens = orig_num_tokens
+        num_tokens = hidden_states.shape[0]
 
     assert gating_output.shape == (num_tokens, global_num_experts)
 
@@ -648,10 +655,12 @@ def fused_moe_func(
         token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
         topk_indices = jnp.where(token_valid, topk_indices, 0)
         topk_weights = jnp.where(token_valid, topk_weights, 0.0)
-    # All gathering topk_indices and topk_weights if attention dp is used.
+    # All gathering topk_indices, topk_weights, and hidden_states if attention dp is used.
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
             topk_indices, topk_weights, dtype, mesh)
+        hidden_states = jax.lax.with_sharding_constraint(
+            hidden_states, NamedSharding(mesh, P(None, None)))
     topk_weights = topk_weights.astype(dtype)
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
@@ -785,4 +794,4 @@ def fused_moe_func(
             defer_all_reduce=defer_all_reduce,
         )
 
-    return x[:num_tokens, :hidden_size]
+    return x[:orig_num_tokens, :hidden_size]

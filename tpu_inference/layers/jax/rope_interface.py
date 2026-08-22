@@ -25,7 +25,8 @@ def normalize_rope_scaling(rope_scaling: Any) -> Optional[Dict[str, Any]]:
         if (rope_scaling.get("rope_type", "default") == "default"
                 and "factor" not in rope_scaling
                 and "scale_factor" not in rope_scaling
-                and "mrope_section" not in rope_scaling):
+                and "mrope_section" not in rope_scaling
+                and "partial_rotary_factor" not in rope_scaling):
             rope_scaling = None
         elif "factor" in rope_scaling and "scale_factor" not in rope_scaling:
             rope_scaling["scale_factor"] = rope_scaling.pop("factor")
@@ -69,6 +70,9 @@ def apply_rope(
     adjacent values are used as inputs for rotation.
     """
 
+    if rope_scaling and "partial_rotary_factor" in rope_scaling:
+        rope_proportion = float(rope_scaling["partial_rotary_factor"])
+
     # M-RoPE support for Qwen2.5-VL
     if positions.ndim == 2 and positions.shape[0] == 3:
         mrope_section = rope_scaling.get("mrope_section",
@@ -98,19 +102,30 @@ def apply_rope(
 
             # inv_freq shape: (mrope_section[i],)
             inv_freq = 1.0 / (rope_theta**(
-                current_indices.astype(jnp.float32) * 2.0 / head_dim))
+                (2 * current_indices) / head_dim)).astype(jnp.float32)
 
-            # positions[i]: (seq_len,)
-            # freqs shape: (seq_len, mrope_section[i])
-            freqs = jnp.outer(positions[i].astype(jnp.float32), inv_freq)
+            # positions[i] shape: (seq_len,)
+            # sinusoid_inp shape: (seq_len, mrope_section[i])
+            sinusoid_inp = jnp.einsum("i,j->ij",
+                                      positions[i].astype(jnp.float32),
+                                      inv_freq)
 
-            cos_list.append(jnp.cos(freqs))
-            sin_list.append(jnp.sin(freqs))
+            # Calculate cos and sin for this section
+            cos_list.append(jnp.cos(sinusoid_inp))
+            sin_list.append(jnp.sin(sinusoid_inp))
 
-        # Concatenate along the feature dimension
-        # cos, sin shape: (seq_len, head_dim//2)
-        cos = jnp.concatenate(cos_list, axis=1)
-        sin = jnp.concatenate(sin_list, axis=1)
+        # Concatenate along the feature dimension to form full (seq_len, head_dim // 2)
+        cos = jnp.concatenate(cos_list, axis=-1)
+        sin = jnp.concatenate(sin_list, axis=-1)
+
+        seq_len_input = inputs.shape[0]
+        seq_len_pos = cos.shape[0]
+
+        if seq_len_input != seq_len_pos:
+            # Calculate how many images/blocks are in the input
+            num_repeats = seq_len_input // seq_len_pos
+            cos = jnp.tile(cos, (num_repeats, 1))
+            sin = jnp.tile(sin, (num_repeats, 1))
 
         # Add num_heads dimension for broadcasting
         cos = cos[:, jnp.newaxis, :]  # Shape: (seq_len, 1, head_dim//2)
@@ -180,44 +195,37 @@ def apply_rope(
     # Standard RoPE or Partial RoPE
     else:
         # Calculate inverse frequencies (timescale)
-        rope_angles = int(rope_proportion * head_dim // 2)
-        nope_angles = head_dim // 2 - rope_angles
+        rotary_dim = int(rope_proportion * head_dim)
+        rope_angles = rotary_dim // 2
 
-        fraction = 2 * jnp.arange(0, rope_angles, dtype=jnp.float32) / head_dim
+        fraction = 2 * jnp.arange(0, rope_angles, dtype=jnp.float32) / rotary_dim
         timescale = 1.0 / (rope_theta**fraction)
 
         # Apply scaling if provided
         if rope_scaling and rope_scaling.get("rope_type") != "proportional":
             timescale = apply_rope_scaling(timescale, rope_scaling)
 
-        if nope_angles > 0:
-            timescale = jnp.pad(timescale, (0, nope_angles),
-                                mode="constant",
-                                constant_values=0.0)
-
         # Prepare for rotation by calculating sin and cos values
-        # `sinusoid_inp` gets shape (batch * seq_len, head_dim/2)
+        # `sinusoid_inp` gets shape (batch * seq_len, rotary_dim // 2)
         sinusoid_inp = positions[..., jnp.newaxis].astype(
             jnp.float32) * timescale[jnp.newaxis, :]
 
-        # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, head_dim)
+        # Broadcast over the 'heads' dimension, assuming shape (batch*seq, heads, rotary_dim // 2)
         sinusoid_inp = sinusoid_inp[:, jnp.newaxis, ...]
         sin = jnp.sin(sinusoid_inp)
         cos = jnp.cos(sinusoid_inp)
 
+        rotary_inputs = inputs[..., :rotary_dim]
+        pass_inputs = inputs[..., rotary_dim:head_dim]
+
         if rope_input_ordering == "interleaved":
-            # Reshape to group adjacent features for rotation, matching new_apply_rope
-            rotary_inputs = inputs[
-                ..., :head_dim]  # Take just the non-padded amount.
             reshaped_inputs = rotary_inputs.reshape(*rotary_inputs.shape[:-1],
                                                     -1, 2)
-
-            # Apply the rotation
             first_half = reshaped_inputs[..., 0]
             second_half = reshaped_inputs[..., 1]
         else:
-            first_half = inputs[..., :head_dim // 2]
-            second_half = inputs[..., head_dim // 2:head_dim]
+            first_half = rotary_inputs[..., :rope_angles]
+            second_half = rotary_inputs[..., rope_angles:rotary_dim]
 
         first_part = first_half * cos - second_half * sin
         second_part = second_half * cos + first_half * sin
@@ -225,9 +233,14 @@ def apply_rope(
         # Combine the rotated parts and reshape back
         if rope_input_ordering == "interleaved":
             out_stacked = jnp.stack([first_part, second_part], axis=-1)
-            out = out_stacked.reshape(rotary_inputs.shape)
+            rotated = out_stacked.reshape(rotary_inputs.shape)
         else:
-            out = jnp.concatenate([first_part, second_part], axis=-1)
+            rotated = jnp.concatenate([first_part, second_part], axis=-1)
+
+        if rotary_dim < head_dim:
+            out = jnp.concatenate([rotated, pass_inputs], axis=-1)
+        else:
+            out = rotated
 
     # If the original input was padded, pad the output with zeros to match.
     padded_head_dim = inputs.shape[-1]

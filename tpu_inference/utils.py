@@ -84,9 +84,8 @@ def t2j(t: torch.Tensor, use_dlpack=False):
     # TODO(gxd3): upstream this improvement to the torchax library.
     try:
         if t.dtype in _NUMPY_UNSUPPORTED_DTYPES:
-            # This bit cast require t to be continguous and more than 1 dimension.
-            if t.is_contiguous() and t.dim():
-                bytes = t.cpu().view(torch.uint8).detach().numpy()
+            if t.dim() > 0:
+                bytes = t.contiguous().cpu().view(torch.uint8).detach().numpy()
                 return jnp.array(bytes).view(
                     _NUMPY_UNSUPPORTED_DTYPES[t.dtype])
     except Exception as e:  # pylint: disable=broad-except

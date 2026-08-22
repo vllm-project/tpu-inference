@@ -15,6 +15,7 @@
 from typing import Optional
 
 import jax
+import jax.numpy as jnp
 from flax import nnx
 
 from tpu_inference.layers.jax import JaxModule
@@ -27,9 +28,11 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
 
     def __init__(self,
                  *args,
+                 zero_centered_gamma: bool = False,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "",
                  **kwargs):
+        self.zero_centered_gamma = zero_centered_gamma
         # nnx.RMSNorm uses `param_dtype` for parameter initialization dtype.
         # Accept `dtype` as an alias for backward compatibility, but forward it
         # as `param_dtype` so that weights are created with the correct dtype.
@@ -59,7 +62,14 @@ class JaxRmsNorm(nnx.RMSNorm, JaxModule):
                  x: jax.Array,
                  mask: Optional[jax.Array] = None) -> jax.Array:
         if self.quant_method is None:
-            return nnx.RMSNorm.__call__(self, x, mask=mask)
+            if self.zero_centered_gamma:
+                x_f32 = x.astype(jnp.float32)
+                var = jnp.mean(jnp.square(x_f32), axis=-1, keepdims=True)
+                norm_x = x_f32 * jax.lax.rsqrt(var + self.epsilon)
+                weight = self.weight.value if hasattr(self.weight, 'value') else self.weight
+                return (norm_x * (1.0 + weight.astype(jnp.float32))).astype(x.dtype)
+            out = nnx.RMSNorm.__call__(self, x, mask=mask)
+            return out.astype(x.dtype)
         return self.quant_method.apply_jax(self, x, mask=mask)
 
 
