@@ -1550,8 +1550,26 @@ def _ragged_paged_attention_kernel_loop(
                     # like a non-causal cache phase. Selected per block by a
                     # scalar: two copies of the tile loop, one executes.
                     block_has_new = (bkv_idx + 1) * bkv_sz > src_cache_len
+                    # A block of only new KV is skipped outright when it is
+                    # entirely masked for this Q block: its smallest new-token
+                    # position (head chunk first, then tail) is past the
+                    # block's largest q position, or past the real tokens.
+                    # (Without this the ring does the full 2C x 2C of every
+                    # stream on the current chunk, ~2x main's causal launch.)
+                    k0 = bkv_idx * bkv_sz
+                    t0 = jnp.maximum(k0 - src_cache_len, 0)
+                    min_pos = jnp.where(
+                        t0 < pcp_chunk, src_rank * pcp_chunk + t0,
+                        (2 * cp_group_size - 1 - src_rank) * pcp_chunk + t0 -
+                        pcp_chunk)
+                    q1 = jnp.minimum((bq_idx + 1) * actual_bq_sz, 2 * pcp_chunk)
+                    max_q_pos = jnp.where(q1 > pcp_chunk,
+                                          ring_q_tail_off + q1 - 1 - pcp_chunk,
+                                          get_q_pos_offset(seq_idx) + q1 - 1)
+                    tile_masked = (k0 >= src_cache_len) & (
+                        (min_pos > max_q_pos) | (min_pos >= kv_new_len_global))
 
-                    @pl.when(block_has_new)
+                    @pl.when(block_has_new & ~tile_masked)
                     def attention_causal():
                         run_attention(True)
 
