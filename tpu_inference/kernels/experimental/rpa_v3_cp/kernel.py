@@ -1475,73 +1475,106 @@ def _ragged_paged_attention_kernel_loop(
 
                 num_loops = cdiv(effective_bkv_sz, bkv_csz)
 
+                if ring_enabled:
+                    # Causal skipping on the current chunk: a bkv_csz sub-tile
+                    # of only new KV is skipped when its smallest new-token
+                    # position (head chunk first, then tail) is past this Q
+                    # block's largest position, or past the real tokens.
+                    # (Without it the ring does the full 2C x 2C of every
+                    # stream on the current chunk, ~2x main's causal launch.)
+                    q1 = jnp.minimum((bq_idx + 1) * actual_bq_sz,
+                                     2 * pcp_chunk)
+                    max_q_pos = jnp.where(q1 > pcp_chunk,
+                                          ring_q_tail_off + q1 - 1 - pcp_chunk,
+                                          get_q_pos_offset(seq_idx) + q1 - 1)
+
+                    def ring_tile_masked(ks):
+                        t0 = jnp.maximum(ks - src_cache_len, 0)
+                        min_pos = jnp.where(
+                            t0 < pcp_chunk, src_rank * pcp_chunk + t0,
+                            (2 * cp_group_size - 1 - src_rank) * pcp_chunk +
+                            t0 - pcp_chunk)
+                        return (ks >= src_cache_len) & (
+                            (min_pos > max_q_pos) |
+                            (min_pos >= kv_new_len_global))
+
                 def run_attention(ring_causal):
 
                     @pl.loop(0, num_loops, unroll=False)
                     def attention_loop(idx):
-                        prev_lm_slice = None
-                        prev_p = None
-                        prev_v = None
-                        prev_exp_m_diff = None
                         bkv_start = idx * bkv_csz
 
-                        for bq_start in range(0, actual_bq_sz, actual_bq_csz):
-                            for kv_head_idx in range(actual_num_kv_heads):
-                                bk_c, bv_c = load_bkv(
-                                    bkv_sem_idx,
-                                    kv_head_idx,
-                                    bkv_start,
-                                    bkv_csz,
-                                )
-                                bq_c = load_bq(bq_sem_idx, kv_head_idx,
-                                               bq_start, actual_bq_csz)
+                        def tiles():
+                            prev_lm_slice = None
+                            prev_p = None
+                            prev_v = None
+                            prev_exp_m_diff = None
 
-                                lm_slice_start = bq_start * num_q_heads_per_kv_head
-                                lm_slice_size = actual_bq_csz * num_q_heads_per_kv_head
-                                lm_slice = (kv_head_idx,
-                                            pl.ds(lm_slice_start,
-                                                  lm_slice_size))
-
-                                # FlashAttn is divided into `flash_attention_step1_qk_softmax`
-                                # and `flash_attention_step2_pv` to pipeline the computation.
-                                # `step2_pv` for the previous KV head, which depends on the
-                                # softmax output, is overlapped with `step1_qk_softmax` for the
-                                # current KV head, reducing overall wait times.
-                                cur_p, cur_v, cur_exp_m_diff = flash_attention_step1_qk_softmax(
-                                    bq_c,
-                                    bk_c,
-                                    bv_c,
-                                    l_ref.at[*lm_slice],
-                                    m_ref.at[*lm_slice],
-                                    processed_q_len=processed_q_len + bq_start,
-                                    processed_kv_len=processed_kv_len +
-                                    bkv_start,
-                                    effective_kv_len=effective_kv_len,
-                                    **({} if not ring_enabled else dict(
-                                        ring_src=src_rank,
-                                        ring_src_cache_len=src_cache_len,
-                                        ring_causal=ring_causal)),
-                                )
-                                if prev_lm_slice is not None:
-                                    flash_attention_step2_pv(
-                                        prev_p,
-                                        prev_v,
-                                        prev_exp_m_diff,
-                                        acc_ref.at[*prev_lm_slice],
+                            for bq_start in range(0, actual_bq_sz,
+                                                  actual_bq_csz):
+                                for kv_head_idx in range(actual_num_kv_heads):
+                                    bk_c, bv_c = load_bkv(
+                                        bkv_sem_idx,
+                                        kv_head_idx,
+                                        bkv_start,
+                                        bkv_csz,
                                     )
-                                prev_lm_slice = lm_slice
-                                prev_p = cur_p
-                                prev_v = cur_v
-                                prev_exp_m_diff = cur_exp_m_diff
+                                    bq_c = load_bq(bq_sem_idx, kv_head_idx,
+                                                   bq_start, actual_bq_csz)
 
-                        # Execute pv of last iteration.
-                        assert prev_lm_slice is not None
-                        flash_attention_step2_pv(
-                            prev_p,
-                            prev_v,
-                            prev_exp_m_diff,
-                            acc_ref.at[*prev_lm_slice],
-                        )
+                                    lm_slice_start = bq_start * num_q_heads_per_kv_head
+                                    lm_slice_size = actual_bq_csz * num_q_heads_per_kv_head
+                                    lm_slice = (kv_head_idx,
+                                                pl.ds(lm_slice_start,
+                                                      lm_slice_size))
+
+                                    # FlashAttn is divided into `flash_attention_step1_qk_softmax`
+                                    # and `flash_attention_step2_pv` to pipeline the computation.
+                                    # `step2_pv` for the previous KV head, which depends on the
+                                    # softmax output, is overlapped with `step1_qk_softmax` for the
+                                    # current KV head, reducing overall wait times.
+                                    cur_p, cur_v, cur_exp_m_diff = flash_attention_step1_qk_softmax(
+                                        bq_c,
+                                        bk_c,
+                                        bv_c,
+                                        l_ref.at[*lm_slice],
+                                        m_ref.at[*lm_slice],
+                                        processed_q_len=processed_q_len +
+                                        bq_start,
+                                        processed_kv_len=processed_kv_len +
+                                        bkv_start,
+                                        effective_kv_len=effective_kv_len,
+                                        **({} if not ring_enabled else dict(
+                                            ring_src=src_rank,
+                                            ring_src_cache_len=src_cache_len,
+                                            ring_causal=ring_causal)),
+                                    )
+                                    if prev_lm_slice is not None:
+                                        flash_attention_step2_pv(
+                                            prev_p,
+                                            prev_v,
+                                            prev_exp_m_diff,
+                                            acc_ref.at[*prev_lm_slice],
+                                        )
+                                    prev_lm_slice = lm_slice
+                                    prev_p = cur_p
+                                    prev_v = cur_v
+                                    prev_exp_m_diff = cur_exp_m_diff
+
+                            # Execute pv of last iteration.
+                            assert prev_lm_slice is not None
+                            flash_attention_step2_pv(
+                                prev_p,
+                                prev_v,
+                                prev_exp_m_diff,
+                                acc_ref.at[*prev_lm_slice],
+                            )
+
+                        if ring_enabled and ring_causal:
+                            pl.when(~ring_tile_masked(bkv_idx * bkv_sz +
+                                                      bkv_start))(tiles)
+                        else:
+                            tiles()
 
                 if ring_enabled:
                     # Only blocks that reach into the source's new KV need the
@@ -1550,26 +1583,8 @@ def _ragged_paged_attention_kernel_loop(
                     # like a non-causal cache phase. Selected per block by a
                     # scalar: two copies of the tile loop, one executes.
                     block_has_new = (bkv_idx + 1) * bkv_sz > src_cache_len
-                    # A block of only new KV is skipped outright when it is
-                    # entirely masked for this Q block: its smallest new-token
-                    # position (head chunk first, then tail) is past the
-                    # block's largest q position, or past the real tokens.
-                    # (Without this the ring does the full 2C x 2C of every
-                    # stream on the current chunk, ~2x main's causal launch.)
-                    k0 = bkv_idx * bkv_sz
-                    t0 = jnp.maximum(k0 - src_cache_len, 0)
-                    min_pos = jnp.where(
-                        t0 < pcp_chunk, src_rank * pcp_chunk + t0,
-                        (2 * cp_group_size - 1 - src_rank) * pcp_chunk + t0 -
-                        pcp_chunk)
-                    q1 = jnp.minimum((bq_idx + 1) * actual_bq_sz, 2 * pcp_chunk)
-                    max_q_pos = jnp.where(q1 > pcp_chunk,
-                                          ring_q_tail_off + q1 - 1 - pcp_chunk,
-                                          get_q_pos_offset(seq_idx) + q1 - 1)
-                    tile_masked = (k0 >= src_cache_len) & (
-                        (min_pos > max_q_pos) | (min_pos >= kv_new_len_global))
 
-                    @pl.when(block_has_new & ~tile_masked)
+                    @pl.when(block_has_new)
                     def attention_causal():
                         run_attention(True)
 
