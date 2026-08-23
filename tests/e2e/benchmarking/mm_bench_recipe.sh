@@ -98,8 +98,12 @@ checkThroughput() {
     # mid-benchmark, `vllm bench serve` still counts every request whose HTTP
     # response headers arrived before the death as "successful", so it reports a
     # short duration and a high req/s with no tokens produced at all. Require
-    # actual decoded output so a dead engine cannot score a pass.
-    generated_tokens=$(awk '/Total generated tokens:/ {print $NF}' "$BENCHMARK_LOG_FILE")
+    # actual decoded output, and no failed request, so that neither a dead engine
+    # nor one that died part-way through the run can score a pass.
+    # Both use the last occurrence in the log, so a re-run appended to the same
+    # file is judged on its own summary.
+    generated_tokens=$(awk '/Total generated tokens:/ {v=$NF} END {print v}' "$BENCHMARK_LOG_FILE")
+    failed_requests=$(awk '/Failed requests:/ {v=$NF} END {print v}' "$BENCHMARK_LOG_FILE")
 
     case "$generated_tokens" in
         '' )
@@ -119,19 +123,40 @@ checkThroughput() {
             tokens_pass=1
             ;;
     esac
+
+    case "$failed_requests" in
+        '' )
+            echo "Failed requests: NOT FOUND"
+            requests_pass=0
+            ;;
+        *[!0-9]* )
+            echo "Failed requests: '$failed_requests' (not a number)"
+            requests_pass=0
+            ;;
+        0 )
+            echo "Failed requests: 0"
+            requests_pass=1
+            ;;
+        * )
+            echo "Failed requests: $failed_requests"
+            requests_pass=0
+            ;;
+    esac
     echo
 
     echo "--- Summary ---"
     # Ensure pass flags are initialized if extraction fails
     : "${throughput_pass:=0}"
     : "${tokens_pass:=0}"
+    : "${requests_pass:=0}"
 
-    if [ "$throughput_pass" -eq 1 ] && [ "$tokens_pass" -eq 1 ]; then
+    if [ "$throughput_pass" -eq 1 ] && [ "$tokens_pass" -eq 1 ] && [ "$requests_pass" -eq 1 ]; then
         echo "Overall: PASSED"
     else
         echo "Overall: FAILED"
         [ "$throughput_pass" -eq 0 ] && echo "Reason: Throughput check failed or value not found."
         [ "$tokens_pass" -eq 0 ] && echo "Reason: Benchmark produced no decoded tokens -- the server likely died mid-run (grep the server log for EngineDeadError / RESOURCE_EXHAUSTED)."
+        [ "$requests_pass" -eq 0 ] && echo "Reason: Benchmark had failed requests -- the server did not serve the whole workload (grep the server log for EngineDeadError / RESOURCE_EXHAUSTED)."
         exit_code=1
     fi
 }
