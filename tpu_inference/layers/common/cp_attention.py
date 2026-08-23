@@ -16,6 +16,8 @@
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jax.experimental import pallas as pl
+from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -273,14 +275,15 @@ def _pcp_write_new_kv(kv_cache, new_kv_all, kv_len, cache_len, page_indices,
                       max_num_seqs, rank):
     """Write this rank's pages of the current chunk's KV into the
     page-interleaved cache (global page p lives on rank p % P at local page
-    p // P), in place: one gather + one scatter over the owned pages.
+    p // P), in place.
 
     new_kv_all: [P, 2C, ...] in kv-cache row layout, rank order (row r =
     rank r's [head chunk r | tail chunk 2P-1-r]); the real tokens are global
-    positions [cache_len, kv_len). The chunk touches a statically bounded
-    run of global pages; this rank owns every P-th of them. Each owned page
-    is read, patched where the rows are real, and scattered back (pages
-    past the real tokens get out-of-bounds indices and are dropped).
+    positions [cache_len, kv_len). A small non-communicating Pallas kernel
+    aliases the cache and DMAs the real rows of each owned page straight
+    from the token-ordered new KV (the ring kernel itself must not write the
+    cache: a communicating kernel that mutates it makes XLA copy the whole
+    cache per layer, and an XLA scatter is not in place either).
     """
     pcp, two_c = new_kv_all.shape[:2]
     C = two_c // 2
@@ -294,32 +297,62 @@ def _pcp_write_new_kv(kv_cache, new_kv_all, kv_len, cache_len, page_indices,
     ]
     tok = rows[jnp.array(order, jnp.int32)].reshape(2 * pcp * C,
                                                     *new_kv_all.shape[2:])
-    zpad = jnp.zeros((page, *tok.shape[1:]), tok.dtype)
-    tok_pad = jnp.concatenate([zpad, tok, zpad])
-    num_current = kv_len - cache_len
-    first_gp = cache_len // page
-    # Owned global pages gp = first_owned + P*j, first_owned = the first
-    # page >= first_gp with gp % P == rank; m bounds how many the chunk can
-    # touch.
+    # Owned global pages gp = first_owned + P*j (first_owned = the first page
+    # >= cache_len's page with gp % P == rank); m bounds how many the chunk
+    # can touch.
     m = cdiv(cdiv(2 * pcp * C, page) + 1, pcp) + 1
-    first_owned = first_gp + (rank - first_gp) % pcp
-    gps = first_owned + pcp * jnp.arange(m, dtype=jnp.int32)  # [m]
-    valid = gps * page < cache_len + num_current
-    lp = jnp.minimum(gps // pcp, pages_per_seq - 1)
-    # Invalid pages: unique out-of-bounds indices (dropped by the scatter,
-    # zero-filled by the gather).
-    phys = jnp.where(valid, page_indices[lp],
-                     kv_cache.shape[0] + jnp.arange(m, dtype=jnp.int32))
-    starts = jnp.clip(gps * page - cache_len + page, 0,
-                      tok_pad.shape[0] - page)
-    new_pages = tok_pad[starts[:, None] +
-                        jnp.arange(page)[None, :]]  # [m, page, ...]
-    cur = kv_cache.at[phys].get(mode="fill", fill_value=0)  # [m, page, ...]
-    pos = gps[:, None] * page + jnp.arange(page)[None, :]
-    keep = (pos >= cache_len) & (pos < cache_len + num_current)
-    val = jnp.where(keep.reshape((m, page) + (1, ) * (cur.ndim - 2)),
-                    new_pages, cur)
-    return kv_cache.at[phys].set(val, mode="drop", unique_indices=True)
+    lens = jnp.stack([kv_len, cache_len, rank]).astype(jnp.int32)
+
+    def kernel(lens_ref, pi_ref, tok_ref, cache_ref, out_ref, sem):
+        del cache_ref  # aliased to out_ref
+        kv_len = lens_ref[0]
+        cache_len = lens_ref[1]
+        rank = lens_ref[2]
+        first_gp = cache_len // page
+        first_owned = first_gp + lax.rem(
+            lax.rem(rank - first_gp, pcp) + pcp, pcp)
+
+        def page_dma(j, wait):
+            gp = first_owned + pcp * j
+            lo = jnp.maximum(gp * page, cache_len)
+            hi = jnp.minimum((gp + 1) * page, kv_len)
+            n = hi - lo
+
+            @pl.when(n > 0)
+            def _():
+                phys = pi_ref[jnp.minimum(gp // pcp, pages_per_seq - 1)]
+                cp = pltpu.make_async_copy(
+                    tok_ref.at[pl.ds(lo - cache_len, n)],
+                    out_ref.at[phys, pl.ds(lo - gp * page, n)], sem)
+                if wait:
+                    cp.wait()
+                else:
+                    cp.start()
+
+        @pl.loop(0, m)
+        def _start(j):
+            page_dma(j, False)
+
+        @pl.loop(0, m)
+        def _wait(j):
+            page_dma(j, True)
+
+    return pl.pallas_call(
+        kernel,
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=2,
+            grid=(1, ),
+            in_specs=[
+                pl.BlockSpec(memory_space=pl.ANY),
+                pl.BlockSpec(memory_space=pl.ANY),
+            ],
+            out_specs=pl.BlockSpec(memory_space=pl.ANY),
+            scratch_shapes=[pltpu.SemaphoreType.DMA],
+        ),
+        out_shape=jax.ShapeDtypeStruct(kv_cache.shape, kv_cache.dtype),
+        input_output_aliases={3: 0},  # kv_cache -> updated cache, in place
+        name="pcp_write_new_kv",
+    )(lens, page_indices, tok, kv_cache)
 
 
 def pcp_forward(
