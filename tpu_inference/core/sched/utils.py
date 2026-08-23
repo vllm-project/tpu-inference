@@ -71,6 +71,34 @@ def patch_vllm_scheduler_for_continue_decode():
         def patched_init(scheduler_self, vllm_config, *args, **kwargs):
             original_init(scheduler_self, vllm_config, *args, **kwargs)
 
+            # Under async scheduling, a continue-decode window runs up to N
+            # decode iterations on-device while the host overlaps output
+            # processing of the previous window. A request that samples EOS
+            # mid-window is still carried by the runner as a masked row for one
+            # or two more windows (retirement lag), and the device keeps writing
+            # that row's KV. If the scheduler frees and reallocates the
+            # request's blocks during the overlap, the in-flight window writes
+            # into another request's block and corrupts its generation, while
+            # every host-side invariant stays correct because the defect is in
+            # the KV bytes, not the bookkeeping.
+            #
+            # vLLM already guards this with deferred block freeing
+            # (Scheduler._free_request_blocks): a finished request's blocks are
+            # held until last_sched_seq <= processed_step_seq, i.e. until every
+            # in-flight step that referenced the request has been processed. It
+            # is auto-enabled only for KV-connector consumers; enable it here for
+            # continue-decode under async, the same overlapping-write hazard. The
+            # retirement-lag zombie is re-scheduled in the next window, which
+            # advances its last_sched_seq, so the fence holds its blocks until
+            # that window's output is processed.
+            try:
+                if getattr(vllm_config.scheduler_config,
+                           "async_scheduling", False) and hasattr(
+                               scheduler_self, "deferred_frees"):
+                    scheduler_self.defer_block_free = True
+            except Exception:  # pragma: no cover - best effort, never block init
+                pass
+
             additional_config = getattr(vllm_config, "additional_config", {})
             max_decode_steps = additional_config.get("max_decode_steps",
                                                      DEFAULT_MAX_DECODE_STEPS)
