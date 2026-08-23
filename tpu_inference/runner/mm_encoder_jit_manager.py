@@ -148,7 +148,12 @@ class _TorchaxEncoderModelAdapter:
         # the inherited _execute_local can stay in plain-torch context (its
         # replay-buffer prep indexes model Parameters, which must NOT run
         # under the torchax dispatch).
-        with torchax.default_env():
+        # ``enable_torch_wrap(False)`` is required for the same reason as in
+        # ``run_budget_forward``: with the torch custom-op layer on, vllm.ir
+        # ops (e.g. ``vllm_ir.rms_norm`` in the ViT block norms) reach torchax
+        # as opaque OpOverloads it has no lowering for, and dispatch dies with
+        # "torchax Tensors can only do math within the torchax environment".
+        with torchax.default_env(), enable_torch_wrap(False):
             torchax_kwargs = {
                 k: jax.tree.map(self._torchax_view_if_torch, v)
                 for k, v in mm_kwargs.items()
@@ -331,14 +336,23 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         replay_values: dict[str, torch.Tensor],
         budget: int,
     ) -> dict[str, torch.Tensor]:
-        """Zero-and-copy each replay tensor into a template-shaped buffer.
+        """Copy each replay tensor into a template-shaped buffer.
 
-        Mirrors the GPU manager's ``_copy_padded_buffer`` default (the
-        parent's ``_run_budget_graph`` does this per buffer_key). Here we pad
-        *every* template key because the jit call needs a fresh, fully
+        Mirrors the GPU manager's per-key copy in ``_run_budget_graph``: the
+        buffer starts zeroed and the model-supplied
+        ``EncoderCudaGraphConfig.padding_logics`` entry for the key decides how
+        the replay values land in it, falling back to the upstream
+        ``_copy_padded_buffer`` (zero tail) when the key has no entry. Here we
+        pad *every* template key because the jit call needs a fresh, fully
         materialised input dict each step (no persistent buffers).
-        cu_seqlens / scalars pass through because ``prepare_encoder_metadata``
-        already padded them.
+
+        Honouring ``padding_logics`` is required for correctness, not just
+        parity: Qwen2.5-VL registers ``_pad_cumulative_seqlens_buffer`` for
+        ``cu_seqlens`` / ``cu_window_seqlens`` and leaves ``cu_window_seqlens``
+        UNPADDED at replay time. A zero tail there makes
+        ``lens = cu[1:] - cu[:-1]`` go negative and the ViT attention build
+        garbage segment ids; the registered logic repeats the last cumulative
+        offset instead, which represents empty trailing sequences.
         """
         template = self.budget_templates[budget]
         padded: dict[str, torch.Tensor] = {}
@@ -356,13 +370,31 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
                 continue
             if src.shape == tmpl.shape:
                 # Already template-shaped (e.g. cu_seqlens padded by
-                # max_batch_size at metadata-prep time).
-                padded[key] = src
+                # max_batch_size at metadata-prep time). Still cast to the
+                # template dtype — a differing dtype would change the jit
+                # signature and force a recompile per request.
+                padded[key] = (src if src.dtype == tmpl.dtype else src.to(
+                    dtype=tmpl.dtype))
                 continue
-            # General case: zero buffer, then slice-copy src onto its head.
+            # Only the leading dim is padded; the trailing dims must match
+            # exactly or the slice-copy below writes the wrong layout.
+            if (src.shape[0] > tmpl.shape[0]
+                    or src.shape[1:] != tmpl.shape[1:]):
+                reason = ("leading-dim overflow" if src.shape[0]
+                          > tmpl.shape[0] else "trailing-dim mismatch")
+                raise ValueError(
+                    f"[mm_encoder_jit] replay buffer does not fit its budget "
+                    f"template ({reason}): key={key} "
+                    f"src_shape={tuple(src.shape)} "
+                    f"template_shape={tuple(tmpl.shape)} budget={budget} "
+                    f"max_batch_size={self.max_batch_size}; the batch was "
+                    f"packed into a token budget whose capture inputs do not "
+                    f"fit this key.")
+            # General case: zeroed buffer + the model's per-key padding logic.
             buf = torch.zeros_like(tmpl)
-            n = src.shape[0]
-            buf[:n] = src.to(dtype=tmpl.dtype, device=tmpl.device)
+            padding_logic = self.config.padding_logics.get(
+                key, EncoderCudaGraphManager._copy_padded_buffer)
+            padding_logic(buf, src.to(dtype=tmpl.dtype, device=tmpl.device))
             padded[key] = buf
         return padded
 
