@@ -13,9 +13,9 @@
 # limitations under the License.
 
 import math
+
 import jax
 import numpy as np
-import pytest
 import torch
 
 from tpu_inference.models.vllm.experimental.vision_tower_jit import GridTHW
@@ -28,7 +28,8 @@ def test_grid_thw_basic_and_slicing():
     assert grid.shape == (3, 3)
     assert grid.ndim == 2
     assert grid.tolist() == [[1, 28, 28], [2, 14, 14], [4, 7, 7]]
-    assert np.array_equal(grid.prod(), np.array([1 * 28 * 28, 2 * 14 * 14, 4 * 7 * 7]))
+    assert np.array_equal(grid.prod(),
+                          np.array([1 * 28 * 28, 2 * 14 * 14, 4 * 7 * 7]))
 
     # Test indexing
     assert grid[0] == (1, 28, 28)
@@ -54,10 +55,15 @@ def test_padding_factorization_math():
     # Simulate various TP sizes and merge sizes
     test_cases = [
         # (tp_size, spatial_merge_size, seq_len)
-        (8, 2, 100),   # merge_factor = 4, pad_factor = lcm(8, 4) = 8. 100 -> 104 (pad 4)
-        (4, 2, 104),   # merge_factor = 4, pad_factor = lcm(4, 4) = 4. 104 -> 104 (pad 0)
-        (8, 1, 15),    # merge_factor = 1, pad_factor = lcm(8, 1) = 8. 15 -> 16 (pad 1)
-        (16, 2, 252),  # merge_factor = 4, pad_factor = lcm(16, 4) = 16. 252 -> 256 (pad 4)
+        (8, 2, 100
+         ),  # merge_factor = 4, pad_factor = lcm(8, 4) = 8. 100 -> 104 (pad 4)
+        (4, 2, 104
+         ),  # merge_factor = 4, pad_factor = lcm(4, 4) = 4. 104 -> 104 (pad 0)
+        (8, 1,
+         15),  # merge_factor = 1, pad_factor = lcm(8, 1) = 8. 15 -> 16 (pad 1)
+        (
+            16, 2, 252
+        ),  # merge_factor = 4, pad_factor = lcm(16, 4) = 16. 252 -> 256 (pad 4)
     ]
 
     for tp_size, merge_size, seq_len in test_cases:
@@ -79,7 +85,8 @@ def test_padding_factorization_math():
             assert dummy_grid_thw[1] % merge_size == 0
             assert dummy_grid_thw[2] % merge_size == 0
             # Total patches in dummy grid equals pad_seq
-            assert dummy_grid_thw[0] * dummy_grid_thw[1] * dummy_grid_thw[2] == pad_seq
+            assert dummy_grid_thw[0] * dummy_grid_thw[1] * dummy_grid_thw[
+                2] == pad_seq
 
 
 def test_multimodal_unpadding_stripping():
@@ -102,15 +109,18 @@ def test_multimodal_unpadding_stripping():
     original_tokens_len = original_pixels_len // merge_factor
     stripped_output = simulated_output[:original_tokens_len, :]
 
-    assert stripped_output.shape == (original_pixels_len // merge_factor, hidden_dim)
+    assert stripped_output.shape == (original_pixels_len // merge_factor,
+                                     hidden_dim)
 
 
 def test_get_model_tp_size_helper():
     from unittest.mock import MagicMock
+
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
     wrapper = MagicMock(spec=VllmModelWrapper)
-    wrapper._get_model_tp_size = VllmModelWrapper._get_model_tp_size.__get__(wrapper)
+    wrapper._get_model_tp_size = VllmModelWrapper._get_model_tp_size.__get__(
+        wrapper)
 
     # Case 1: Mesh with "model" axis present
     mock_mesh = MagicMock()
@@ -131,12 +141,12 @@ def test_get_model_tp_size_helper():
 
 def test_get_activation_sharding_divisor():
     from unittest.mock import MagicMock
+
     from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
     wrapper = MagicMock(spec=VllmModelWrapper)
     wrapper._get_activation_sharding_divisor = (
-        VllmModelWrapper._get_activation_sharding_divisor.__get__(wrapper)
-    )
+        VllmModelWrapper._get_activation_sharding_divisor.__get__(wrapper))
 
     # Case 1: DP attention mesh ('attn_dp': 8, 'model': 1)
     mock_mesh = MagicMock()
@@ -146,7 +156,8 @@ def test_get_activation_sharding_divisor():
 
     # Case 2: Hybrid PCP + DP attention ('pcp': 2, 'attn_dp': 4)
     mock_mesh.shape = {"data": 1, "pcp": 2, "attn_dp": 4, "model": 1}
-    assert wrapper._get_activation_sharding_divisor() == 4  # lcm(1, 2, 4, 1) = 4
+    assert wrapper._get_activation_sharding_divisor(
+    ) == 4  # lcm(1, 2, 4, 1) = 4
 
     # Case 3: 2D mesh with string ShardingAxisName.ATTN_DATA ('data': 4, 'model': 2)
     mock_mesh.shape = {"data": 4, "model": 2}
@@ -175,7 +186,8 @@ def test_padding_metadata_synchronization():
     # Sequence padding
     seq_len = pixels.shape[0]
     pad_seq = pad_factor - (seq_len % pad_factor)  # 4
-    dummy_grid_thw = (max(1, pad_seq // merge_factor), spatial_merge_size, spatial_merge_size)  # (1, 2, 2)
+    dummy_grid_thw = (max(1, pad_seq // merge_factor), spatial_merge_size,
+                      spatial_merge_size)  # (1, 2, 2)
 
     pad_pixels_seq = torch.zeros((pad_seq, *pixels.shape[1:]))
     pixels = torch.cat([pixels, pad_pixels_seq], dim=0)
@@ -185,13 +197,16 @@ def test_padding_metadata_synchronization():
     grid = GridTHW(grid_list)
 
     # Tensor padding
-    pad_ts = torch.full((1,), second_per_grid_ts_tensor[-1].item())
-    second_per_grid_ts_tensor = torch.cat([second_per_grid_ts_tensor, pad_ts], dim=0)
+    pad_ts = torch.full((1, ), second_per_grid_ts_tensor[-1].item())
+    second_per_grid_ts_tensor = torch.cat([second_per_grid_ts_tensor, pad_ts],
+                                          dim=0)
     pad_ts_vals = timestamps_tensor[-1].unsqueeze(0)
     timestamps_tensor = torch.cat([timestamps_tensor, pad_ts_vals], dim=0)
 
     # List padding
-    second_per_grid_ts_list = second_per_grid_ts_list + [second_per_grid_ts_list[-1]]
+    second_per_grid_ts_list = second_per_grid_ts_list + [
+        second_per_grid_ts_list[-1]
+    ]
     timestamps_list = timestamps_list + [timestamps_list[-1]]
 
     # All arrays must match in length after sequence padding
