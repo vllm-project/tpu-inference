@@ -2378,9 +2378,14 @@ def ragged_paged_attention(
             pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache
         ]
 
+        # A launch that never writes the cache (update_kv_cache=False, e.g. the
+        # PCP ring cache phase) emits NO cache output and does not alias the
+        # cache: an aliased-but-unwritten output of a communicating custom
+        # call makes XLA copy the whole cache around the launch.
         out_specs = [
             pl.BlockSpec(memory_space=pltpu.HBM),  # o
-            pl.BlockSpec(memory_space=pltpu.HBM),  # updated_kv_cache
+            pl.BlockSpec(memory_space=pltpu.HBM)
+            if update_kv_cache else None,  # updated_kv_cache
         ]
 
         bkv_stride = num_kv_heads_x2_per_kv_packing
@@ -2461,26 +2466,31 @@ def ragged_paged_attention(
 
         out_shape = [
             pltpu.HBM(shape=q.shape, dtype=q.dtype),
-            pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
+            pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype)
+            if update_kv_cache else None,
             pltpu.HBM(shape=lse_hbm.shape, dtype=lse_hbm.dtype)
             if return_lse else None,
         ] if tpu_version >= 7 else [
             jax.ShapeDtypeStruct(shape=q.shape, dtype=q.dtype),
-            jax.ShapeDtypeStruct(shape=kv_cache.shape, dtype=kv_cache.dtype),
+            jax.ShapeDtypeStruct(shape=kv_cache.shape, dtype=kv_cache.dtype)
+            if update_kv_cache else None,
             jax.ShapeDtypeStruct(shape=lse_hbm.shape, dtype=lse_hbm.dtype)
             if return_lse else None,
         ]
 
-        input_output_aliases = {
-            num_active_scalers: 0,  # q -> o
-            num_active_scalers + 2: 1,  # kv_cache -> updated_kv_cache
-        }
+        input_output_aliases = {num_active_scalers: 0}  # q -> o
+        lse_out_idx = 1
+        if update_kv_cache:
+            # kv_cache -> updated_kv_cache
+            input_output_aliases[num_active_scalers + 2] = 1
+            lse_out_idx = 2
         in_specs.append(
             pl.BlockSpec(memory_space=pltpu.HBM) if return_lse else None)
         out_specs.append(
             pl.BlockSpec(memory_space=pltpu.HBM) if return_lse else None)
         if return_lse:
-            input_output_aliases[num_active_scalers + 3] = 2  # lse -> lse_out
+            input_output_aliases[num_active_scalers +
+                                 3] = lse_out_idx  # lse -> lse_out
 
         scope_name = f"RPA{case.symbol}-p_{page_size}-bq_{bq_sz}_{bq_csz}-bkv_{bkv_sz}_{bkv_csz}"
         if sliding_window is not None:
@@ -2554,11 +2564,11 @@ def ragged_paged_attention(
                 return kernel(*scalar_prefetches, *hbms)
 
         outputs = run(scalar_prefetches, hbm_buffers)
-        # (o, updated_kv_cache, lse)
-        if return_lse:
-            return outputs
-        else:
-            return outputs[0], outputs[1], None
+        # (o, updated_kv_cache, lse); the cache is untouched when not written.
+        o, updated_kv_cache, lse = outputs
+        if not update_kv_cache:
+            updated_kv_cache = kv_cache
+        return o, updated_kv_cache, (lse if return_lse else None)
 
     def _prepare_block_sizes(block_sizes, case):
         if block_sizes is None:
