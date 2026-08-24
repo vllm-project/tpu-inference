@@ -164,7 +164,8 @@ class VllmModelWrapper:
 
     def _get_model_tp_size(self) -> int:
         """Returns the size of the 'model' (TP) axis in mesh, falling back to tensor_parallel_size."""
-        if self.mesh is not None and hasattr(self.mesh, "shape") and "model" in self.mesh.shape:
+        if self.mesh is not None and hasattr(
+                self.mesh, "shape") and "model" in self.mesh.shape:
             return self.mesh.shape["model"]
         return self.vllm_config.parallel_config.tensor_parallel_size
 
@@ -628,9 +629,12 @@ class VllmModelWrapper:
 
                     # 1. Determine spatial merge size (default to 1 for non-merging vision models)
                     visual = getattr(self.model.vllm_model, "visual", None)
-                    if visual is None and hasattr(self.model.vllm_model, "model"):
-                        visual = getattr(self.model.vllm_model.model, "vision_tower", None)
-                    spatial_merge_size = getattr(visual, "spatial_merge_size", 1) if visual else 1
+                    if visual is None and hasattr(self.model.vllm_model,
+                                                  "model"):
+                        visual = getattr(self.model.vllm_model.model,
+                                         "vision_tower", None)
+                    spatial_merge_size = getattr(visual, "spatial_merge_size",
+                                                 1) if visual else 1
                     merge_factor = spatial_merge_size * spatial_merge_size
 
                     # 2. Determine total activation sharding divisor across all active mesh axes (model, attn_dp, pcp, data)
@@ -645,7 +649,9 @@ class VllmModelWrapper:
                         padded_anything = True
                         pad_seq = pad_factor - (seq_len % pad_factor)
 
-                        dummy_grid_thw = (max(1, pad_seq // merge_factor), spatial_merge_size, spatial_merge_size)
+                        dummy_grid_thw = (max(1, pad_seq // merge_factor),
+                                          spatial_merge_size,
+                                          spatial_merge_size)
 
                         pad_pixels_seq = torch.zeros(
                             (pad_seq, *pixels.shape[1:]),
@@ -660,43 +666,52 @@ class VllmModelWrapper:
                         grid = GridTHW(grid_list) if isinstance(
                             grid, GridTHW) else torch.tensor(
                                 grid_list,
-                                device=grid.device if isinstance(grid, torch.Tensor) else None)
+                                device=grid.device if isinstance(
+                                    grid, torch.Tensor) else None)
                         kwargs[grid_key] = grid
 
                         if "second_per_grid_ts" in kwargs:
                             ts = kwargs["second_per_grid_ts"]
                             if ts is not None:
                                 if isinstance(ts, torch.Tensor):
-                                    pad_ts = torch.full((1, ),
-                                                        ts[-1].item() if ts.numel() > 0 else 0.0,
-                                                        dtype=ts.dtype,
-                                                        device=ts.device)
-                                    kwargs["second_per_grid_ts"] = torch.cat([ts, pad_ts], dim=0)
+                                    pad_ts = torch.full(
+                                        (1, ),
+                                        ts[-1].item()
+                                        if ts.numel() > 0 else 0.0,
+                                        dtype=ts.dtype,
+                                        device=ts.device)
+                                    kwargs["second_per_grid_ts"] = torch.cat(
+                                        [ts, pad_ts], dim=0)
                                 elif isinstance(ts, (list, tuple)):
                                     last_val = ts[-1] if len(ts) > 0 else 0.0
-                                    kwargs["second_per_grid_ts"] = list(ts) + [last_val]
+                                    kwargs["second_per_grid_ts"] = list(ts) + [
+                                        last_val
+                                    ]
 
                         if "timestamps" in kwargs:
                             ts_vals = kwargs["timestamps"]
                             if ts_vals is not None:
                                 if isinstance(ts_vals, torch.Tensor):
                                     pad_ts_vals = ts_vals[-1].unsqueeze(
-                                        0) if ts_vals.numel() > 0 else torch.zeros(
+                                        0) if ts_vals.numel(
+                                        ) > 0 else torch.zeros(
                                             (1, *ts_vals.shape[1:]),
                                             dtype=ts_vals.dtype,
                                             device=ts_vals.device)
-                                    kwargs["timestamps"] = torch.cat([ts_vals, pad_ts_vals], dim=0)
+                                    kwargs["timestamps"] = torch.cat(
+                                        [ts_vals, pad_ts_vals], dim=0)
                                 elif isinstance(ts_vals, (list, tuple)):
-                                    last_val = ts_vals[-1] if len(ts_vals) > 0 else [0.0, 0.0]
-                                    kwargs["timestamps"] = list(ts_vals) + [last_val]
+                                    last_val = ts_vals[-1] if len(
+                                        ts_vals) > 0 else [0.0, 0.0]
+                                    kwargs["timestamps"] = list(ts_vals) + [
+                                        last_val
+                                    ]
 
                 def make_move(param_name: str):
 
                     def move(v: Any) -> Any:
-                        if isinstance(
-                                v,
-                            (int, float, str, bool, jax.Array, GridTHW
-                             )) or v is None:
+                        if isinstance(v, (int, float, str, bool, jax.Array,
+                                          GridTHW)) or v is None:
                             return v
                         if isinstance(v, (tuple, list)):
                             return type(v)(move(x) for x in v)
@@ -714,11 +729,13 @@ class VllmModelWrapper:
                             if param_name in ("pixel_values",
                                               "pixel_values_videos"):
                                 tp_size = self._get_model_tp_size()
-                                has_model_axis = (
-                                    "model" in self.mesh.shape if hasattr(
-                                        self.mesh, "shape") else "model" in
-                                    getattr(self.mesh, "axis_names", ()))
-                                if arr.shape[0] % tp_size == 0 and tp_size > 1 and has_model_axis:
+                                has_model_axis = ("model" in self.mesh.shape if
+                                                  hasattr(self.mesh, "shape")
+                                                  else "model" in getattr(
+                                                      self.mesh, "axis_names",
+                                                      ()))
+                                if arr.shape[
+                                        0] % tp_size == 0 and tp_size > 1 and has_model_axis:
                                     spec = PartitionSpec("model", None)
                                 else:
                                     spec = PartitionSpec()
@@ -735,11 +752,10 @@ class VllmModelWrapper:
                 # computation with weights can work properly.
                 call_kwargs = {
                     k:
-                    jax.tree.map(
-                        make_move(k),
-                        v,
-                        is_leaf=lambda x: isinstance(
-                            x, (GridTHW, torch.Tensor, jax.Array)))
+                    jax.tree.map(make_move(k),
+                                 v,
+                                 is_leaf=lambda x: isinstance(
+                                     x, (GridTHW, torch.Tensor, jax.Array)))
                     for k, v in kwargs.items()
                 }
 
