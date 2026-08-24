@@ -13,16 +13,12 @@
 # limitations under the License.
 
 from unittest.mock import MagicMock, patch
-import pytest
+
 import torch
 import torch.nn.functional as F
 
 from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
-    LARGE_ATTN_ELEMENT_THRESHOLD,
-    _flash_attn_sdpa,
-    _orig_sdpa,
-    apply_qwen3_vl_patches,
-)
+    LARGE_ATTN_ELEMENT_THRESHOLD, _flash_attn_sdpa, apply_qwen3_vl_patches)
 
 
 def test_large_attn_threshold_constant():
@@ -45,19 +41,33 @@ def test_flash_attn_sdpa_small_shape_fallback():
     assert out.shape == (batch_size, num_heads, seq_len, head_dim)
 
     # Test with *args, **kwargs (e.g. enable_gqa) forwarded without TypeError
-    out_kwargs = _flash_attn_sdpa(q, k, v, is_causal=False, scale=0.125, enable_gqa=False)
+    out_kwargs = _flash_attn_sdpa(q,
+                                  k,
+                                  v,
+                                  is_causal=False,
+                                  scale=0.125,
+                                  enable_gqa=False)
     assert out_kwargs.shape == (batch_size, num_heads, seq_len, head_dim)
 
 
 def test_flash_attn_sdpa_args_kwargs_forwarding():
     # Verify that arbitrary kwargs (e.g. future vLLM additions) are cleanly accepted and forwarded
     mock_orig = MagicMock(return_value=torch.zeros((1, 2, 4, 8)))
-    with patch("tpu_inference.models.vllm.experimental.qwen3_vl_patcher._orig_sdpa", mock_orig):
+    with patch(
+            "tpu_inference.models.vllm.experimental.qwen3_vl_patcher._orig_sdpa",
+            mock_orig):
         q = torch.randn(1, 2, 4, 8)
         k = torch.randn(1, 2, 4, 8)
         v = torch.randn(1, 2, 4, 8)
 
-        _flash_attn_sdpa(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=0.5, custom_kwarg=123)
+        _flash_attn_sdpa(q,
+                         k,
+                         v,
+                         attn_mask=None,
+                         dropout_p=0.0,
+                         is_causal=False,
+                         scale=0.5,
+                         custom_kwarg=123)
         mock_orig.assert_called_once()
         _, kwargs = mock_orig.call_args
         assert kwargs.get("custom_kwarg") == 123

@@ -44,10 +44,10 @@ making sure they go through standard function arguments:
 import jax
 import jax.numpy as jnp
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
+from torch import nn
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.multimodal import NestedTensors
@@ -120,8 +120,11 @@ def _flash_attn_sdpa(query: torch.Tensor,
                 v_flat = jnp.reshape(jnp.transpose(v_jax, (0, 2, 1, 3)),
                                      (b * s, h, d))
                 seq_lens = jnp.full((b, ), s, dtype=jnp.int32)
-                out_jax = encoder_only_flash_attention(
-                    q_flat, k_flat, v_flat, seq_lens=seq_lens, sm_scale=scale)
+                out_jax = encoder_only_flash_attention(q_flat,
+                                                       k_flat,
+                                                       v_flat,
+                                                       seq_lens=seq_lens,
+                                                       sm_scale=scale)
                 # Reshape back: [B*S, H, D] -> [B, S, H, D] -> [B, H, S, D]
                 out_jax = jnp.transpose(jnp.reshape(out_jax, (b, s, h, d)),
                                         (0, 2, 1, 3))
@@ -133,8 +136,11 @@ def _flash_attn_sdpa(query: torch.Tensor,
                 k_shd = jnp.transpose(k_jax, (1, 0, 2))
                 v_shd = jnp.transpose(v_jax, (1, 0, 2))
                 seq_lens = jnp.full((1, ), s, dtype=jnp.int32)
-                out_jax = encoder_only_flash_attention(
-                    q_shd, k_shd, v_shd, seq_lens=seq_lens, sm_scale=scale)
+                out_jax = encoder_only_flash_attention(q_shd,
+                                                       k_shd,
+                                                       v_shd,
+                                                       seq_lens=seq_lens,
+                                                       sm_scale=scale)
                 # Reshape back: [S, H, D] -> [H, S, D]
                 out_jax = jnp.transpose(out_jax, (1, 0, 2))
                 return torch_view(out_jax)
@@ -471,7 +477,7 @@ def apply_qwen3_vl_patches(vllm_model):
     # Patch SDPA specifically in ViT attention wrappers and Qwen vision modules
     # to redirect large sequence video attention to encoder_only_flash_attention.
     try:
-        import vllm.v1.attention.ops.vit_attn_wrappers as vit_attn_wrappers
+        from vllm.v1.attention.ops import vit_attn_wrappers
         vit_attn_wrappers.F.scaled_dot_product_attention = _flash_attn_sdpa
     except (ImportError, AttributeError):
         pass
@@ -533,7 +539,6 @@ def apply_qwen3_vl_patches(vllm_model):
         logger.info(
             "Disabled dynamo for Qwen3LLMModel; JAX JIT handles outer compilation"
         )
-
 
 
 def is_qwen3_vl(vllm_model) -> bool:
