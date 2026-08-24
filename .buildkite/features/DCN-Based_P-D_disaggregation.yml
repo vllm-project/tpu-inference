@@ -16,6 +16,12 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Correctness tests for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
     soft_fail: true
+    # exit 75 = EX_TEMPFAIL from run_disagg_multi_host.sh: transient TPU
+    # session init failure (infra); real failures exit 1 and are not retried.
+    retry:
+      automatic:
+        - exit_status: 75
+          limit: 1
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL: "Qwen/Qwen3-0.6B"
@@ -46,6 +52,12 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Performance tests for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
     soft_fail: true
+    # exit 75 = EX_TEMPFAIL from run_disagg_multi_host.sh: transient TPU
+    # session init failure (infra); real failures exit 1 and are not retried.
+    retry:
+      automatic:
+        - exit_status: 75
+          limit: 1
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL: "Qwen/Qwen3-0.6B"
