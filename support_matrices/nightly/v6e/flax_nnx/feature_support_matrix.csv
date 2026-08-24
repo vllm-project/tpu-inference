@@ -1,19 +1,37 @@
 Feature,CorrectnessTest,PerformanceTest
+"CP",❓ Untested,❓ Untested
 "Chunked Prefill",✅ Passing,✅ Passing
-"DCN-based P/D disaggregation",✅ Passing,✅ Passing
-"KV Cache Offload",✅ Passing,✅ Passing
-"LoRA_Torch",✅ Passing,✅ Passing
-"Multimodal Inputs",✅ Passing,✅ Passing
-"Out-of-tree model support",✅ Passing,✅ Passing
+"Collective Communication Matmul",❓ Untested,❓ Untested
+"DCN-based P/D disaggregation",❓ Untested,❓ Untested
+"DP",❓ Untested,❓ Untested
+"EP",❓ Untested,❓ Untested
+"FP4 W4A16",❓ Untested,❓ Untested
+"FP8 W8A8",❓ Untested,❓ Untested
+"FP8 W8A16",❓ Untested,❓ Untested
+"INT4 W4A16",❓ Untested,❓ Untested
+"INT8 W8A8",❓ Untested,❓ Untested
+"KV Cache Offload",❓ Untested,❓ Untested
+"LoRA_Torch",❓ Untested,❓ Untested
+"MLA",❓ Untested,❓ Untested
+"MoE",❓ Untested,❓ Untested
+"Multimodal Inputs",❓ Untested,❓ Untested
+"NVFP4 W4A16",❓ Untested,❓ Untested
+"Out-of-tree model support",❓ Untested,❓ Untested
+"PP",❓ Untested,❓ Untested
 "Prefix Caching",✅ Passing,✅ Passing
+"Quantized Attention",❓ Untested,❓ Untested
+"Quantized KV Cache",❓ Untested,❓ Untested
+"Quantized Matmul",❓ Untested,❓ Untested
+"SP",❓ Untested,❓ Untested
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Speculative Decoding: DFlash",✅ Passing,✅ Passing
-"Speculative Decoding: Eagle3",✅ Passing,✅ Passing
-"Speculative Decoding: Ngram",✅ Passing,✅ Passing
-"Step Pooling (Embedding)",✅ Passing,❓ Untested
-"async scheduler",✅ Passing,✅ Passing
-"hybrid kv cache",✅ Passing,❓ Untested
+"Speculative Decoding: DFlash",❓ Untested,❓ Untested
+"Speculative Decoding: Eagle3",❓ Untested,❓ Untested
+"Speculative Decoding: Ngram",❓ Untested,❓ Untested
+"Step Pooling (Embedding)",❓ Untested,❓ Untested
+"TP",❓ Untested,❓ Untested
+"async scheduler",❓ Untested,❓ Untested
+"hybrid kv cache",❓ Untested,❓ Untested
 "multi-host",❓ Untested,❓ Untested
-"runai_model_streamer_loader",✅ Passing,❓ Untested
-"sampling_params",✅ Passing,❓ Untested
-"structured_decoding",✅ Passing,❓ Untested
+"runai_model_streamer_loader",❓ Untested,❓ Untested
+"sampling_params",❓ Untested,❓ Untested
+"structured_decoding",❓ Untested,❓ Untested
