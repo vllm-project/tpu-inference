@@ -32,6 +32,18 @@ from tpu_inference.kernels.ragged_paged_attention.v3.util import (
 jax.config.parse_flags_with_absl()
 
 
+def _cp_local_len(n, P, r, page):
+    """Tokens of the first n that CP rank r owns under page interleave:
+    global page p -> rank p % P, local page p // P."""
+    sp = P * page
+    return (n // sp) * page + int(np.clip(n % sp - r * page, 0, page))
+
+
+def _cp_global_token(m, P, r, page):
+    """Global token held at local slot m of CP rank r."""
+    return (m // page * P + r) * page + m % page
+
+
 @jtu.with_config(jax_numpy_dtype_promotion="standard")
 class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
@@ -221,10 +233,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_strided_cache_write(self, P):
-        """Interleaved (strided) write of the current KV, non-causal.
+        """Page-interleaved write of the current KV, non-causal.
 
-        Each rank writes its 1/P round-robin share (global token g -> rank g%P,
-        local slot g//P); de-strided it must equal ``merge_kv`` of the current.
+        Each rank writes the pages it owns (global page p -> rank p % P, local
+        page p // P); re-assembled it must equal ``merge_kv`` of the current.
         """
         dtype = jnp.float32
         self.PAGE = 16
@@ -254,10 +266,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                                               skip_cache_attn=True,
                                               use_causal_mask=False)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P  # rank r's local slot m holds global token g
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
@@ -296,10 +308,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 skip_cache_attn=True,
                 use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
@@ -346,10 +358,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 skip_cache_attn=True,
                 use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
         self.assertTrue(
@@ -403,10 +415,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 skip_cache_attn=True,
                 use_causal_mask=True)
             flat = cache.reshape(-1, c["nkv2"] // c["kvp"], c["kvp"], c["phd"])
-            local_len = (S + P - 1 - r) // P
+            local_len = _cp_local_len(S, P, r, self.PAGE)
             pi = np.arange(pps)
             for m in range(local_len):
-                g = r + m * P
+                g = _cp_global_token(m, P, r, self.PAGE)
                 slot = pi[m // self.PAGE] * self.PAGE + m % self.PAGE
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
@@ -514,8 +526,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
 
     @parameterized.product(P=[2, 3, 4])
     def test_pcp_kv_cache_write_matches_merged(self, P):
-        """De-strided PCP cache write == merge_kv(current KV), across P devices
-        (whole-sequence view of test_pcp_strided_cache_write)."""
+        """Re-assembled PCP cache write == merge_kv(current KV), across P
+        devices (whole-sequence view of test_pcp_strided_cache_write)."""
         if jax.device_count() < P:
             self.skipTest(f"needs >= {P} devices")
         dtype = jnp.float32
@@ -558,116 +570,133 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         caches = np.asarray(jax.jit(fn)(k, v))  # [P, npages, page, h1, h2, hd]
         flat = caches.reshape(P, -1, caches.shape[3], caches.shape[4], hd)
         g = np.arange(S)
-        recon = flat[g % P,
-                     g // P]  # DCP-strided: token g -> rank g%P, slot g//P
+        # Page-interleaved: token g -> rank (g//page) % P, local slot
+        # (g//page//P)*page + g%page.
+        recon = flat[(g // page) % P, (g // page // P) * page + g % page]
         self.assertTrue(np.all(np.isfinite(recon)))
         self.assertGreater(float(np.abs(recon).max()), 0.0)
         self.assertLess(float((recon == 0).mean()), 0.5)
         self.assertArraysEqual(recon, ref)
 
-    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], P=[2, 4, 8])
-    def test_pcp_ring_cache_phase_matches_full_cache(self, dtype, P):
-        self._ring_vs_full_cache(dtype, P)
+    # ----------------------- multi-device PCP ring ---------------------------
+    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], P=[2, 4])
+    def test_pcp_ring_matches_reference(self, dtype, P):
+        """Ring launch: every rank passes [its page-interleaved cache shard |
+        its OWN head+tail new KV] and its local Q; the kernel rotates the
+        streams around the pcp axis (no all-gather), reads the cache only,
+        and returns every rank's new KV (new_kv_all) for the caller to write.
 
-    def _ring_vs_full_cache(self, dtype, P):
-        """In-kernel ring over the striped cache == the same local Q attending
-        the whole un-striped cache.
-
-        This is the property that makes the ring a drop-in cache phase: no Q
-        all-gather and no output collective, so each rank's result must already
-        be the full-cache answer for its own tokens.
+        Output must equal full-causal attention over the whole sequence and
+        new_kv_all must hold each source rank's own new KV verbatim. The
+        cache length is not a multiple of P*PAGE (ranks' shards differ, one
+        has a partial page), the last tail chunk is partially padding, and
+        bkv is small enough that each stream spans several ring blocks.
         """
         if jax.device_count() < P:
             self.skipTest(f"needs >= {P} devices")
-        self.PAGE = 64
-        # Lprev % P != 0 so the ranks' stripes have different lengths and a
-        # round that uses the wrong originating rank's length is visible.
-        Lprev, C, nq, nkv, hd = 1002, 256, 8, 2, 128
-        Scur = C * P
-        kv_total = Lprev + Scur
-        pps = cdiv(kv_total, self.PAGE)
-        sm = hd**-0.5
-        rng = np.random.default_rng(11)
+        self.PAGE = 16
+        Lprev, C, nq, nkv, hd = 1000, 64, 8, 2, 128
+        two_p = 2 * P
+        num_current = (two_p - 1) * C + 40  # last tail chunk: 40 real rows
+        S = two_p * C  # padded current length
+        kv_total = Lprev + num_current
+        c = self._cfg(dtype)
+        rng = np.random.default_rng(23)
         k_prev = self._rand(rng, (Lprev, nkv, hd), dtype)
         v_prev = self._rand(rng, (Lprev, nkv, hd), dtype)
-        q_all = self._rand(rng, (P, C, nq, hd), dtype)  # rank-major local Q
+        q = self._rand(rng, (num_current, nq, hd), dtype)
+        k = self._rand(rng, (num_current, nkv, hd), dtype)
+        v = self._rand(rng, (num_current, nkv, hd), dtype)
+        kv_merged = np.asarray(merge_kv(k, v))
 
-        kv_lens = self._pad1([kv_total])
-        kv_cache_lens = self._pad1([Lprev])
-        pi = self._pi(pps)
-        dist = jnp.array([0, 0, 1], jnp.int32)
-        cu = self._padcu([0, C])
-        # Small blocks so both the bq loop and the multi-block ring run.
-        blocks = (128, 128, 128, 128)
-        dummy_kv = jnp.zeros((C, nkv, hd), dtype)
+        # Reference: whole sequence, full causal.
+        ref_pps = cdiv(kv_total, self.PAGE)
+        exp, _ = ref_ragged_paged_attention(
+            q, k, v, self._cache_from_kv(k_prev, v_prev, Lprev, dtype),
+            self._pad1([kv_total]), self._pi(ref_pps),
+            self._padcu([0, num_current]), jnp.array([0, 0, 1], jnp.int32))
+        exp = np.asarray(exp[:num_current], np.float32)
 
-        # Reference: plain paged attention over the whole cache, per rank.
-        # kv_cache is donated, so each call needs its own (identical) copy.
-        ref = np.stack([
-            np.asarray(
-                ragged_paged_attention(q_all[r],
-                                       dummy_kv,
-                                       dummy_kv,
-                                       self._cache_from_kv(
-                                           k_prev, v_prev, Lprev, dtype),
-                                       kv_lens,
-                                       pi,
-                                       cu,
-                                       dist,
-                                       kv_cache_lens=kv_cache_lens,
-                                       cp_rank=jnp.array([0], jnp.int32),
-                                       cp_group_size=1,
-                                       skip_current_attn=True,
-                                       use_causal_mask=False,
-                                       update_kv_cache=False,
-                                       return_lse=True,
-                                       sm_scale=sm,
-                                       m_block_sizes=blocks)[0], np.float32)
+        def pad(x):
+            return jnp.zeros((S, *x.shape[1:]), dtype).at[:num_current].set(x)
+
+        # Rank r's local Q/K/V: head chunk r then tail chunk 2P-1-r.
+        def rank_order(x):
+            x = pad(x).reshape(two_p, C, *x.shape[1:])
+            return jnp.stack(
+                [jnp.concatenate([x[r], x[two_p - 1 - r]]) for r in range(P)])
+
+        q_l, k_l, v_l = rank_order(q), rank_order(k), rank_order(v)
+
+        # Rank r's page-interleaved cache shard: the tokens of global pages
+        # p with p % P == r, at local page p // P.
+        g = np.arange(Lprev)
+        pps = cdiv(cdiv(kv_total, self.PAGE), P)  # local pages per rank
+        cache_l = jnp.stack([
+            self._cache_from_kv(k_prev[g[(g // self.PAGE) % P == r]],
+                                v_prev[g[(g // self.PAGE) % P == r]],
+                                _cp_local_len(Lprev, P, r, self.PAGE), dtype)
             for r in range(P)
         ])
+        qpos_l = jnp.stack(
+            [self._pad1([r * C, (two_p - 1 - r) * C]) for r in range(P)])
+        kv_lens = self._pad1([kv_total])
+        kv_cache_lens = self._pad1([Lprev])
+        cu = self._padcu([0, 2 * C])  # one seq: [head | tail]
+        dist = jnp.array([0, 0, 1], jnp.int32)
+        pi = self._pi(pps)
+        blocks = (128, 128, 128, 128)  # small bkv -> several ring blocks
 
-        # Ring: rank r holds global cache tokens r, r+P, r+2P, ...
-        cache_sh = jnp.stack([
-            self._cache_from_kv(k_prev[r::P], v_prev[r::P],
-                                k_prev[r::P].shape[0], dtype) for r in range(P)
-        ])
         mesh = Mesh(np.array(jax.devices()[:P]), ("pcp", ))
-        qsp = PS("pcp", None, None, None)
-        csp = PS("pcp", None, None, None, None)
+        sh = PS("pcp")
 
         @partial(shard_map,
                  mesh=mesh,
-                 in_specs=(qsp, csp),
-                 out_specs=qsp,
+                 in_specs=(sh, sh, sh, sh, sh),
+                 out_specs=(sh, sh),
                  check_rep=False)
-        def ring(q_l, c_l):
+        def ring(q_l, k_l, v_l, c_l, qpos_l):
             r = jax.lax.axis_index("pcp")
-            o, _, _ = ragged_paged_attention(q_l[0],
-                                             dummy_kv,
-                                             dummy_kv,
-                                             c_l[0],
-                                             kv_lens,
-                                             pi,
-                                             cu,
-                                             dist,
-                                             kv_cache_lens=kv_cache_lens,
-                                             cp_rank=jax.lax.reshape(
-                                                 r, (1, )).astype(jnp.int32),
-                                             cp_group_size=P,
-                                             pcp_ring_axis_name="pcp",
-                                             skip_current_attn=True,
-                                             use_causal_mask=False,
-                                             update_kv_cache=False,
-                                             return_lse=True,
-                                             sm_scale=sm,
-                                             m_block_sizes=blocks)
-            return o[None]
+            o, nc, _ = ragged_paged_attention(q_l[0],
+                                              k_l[0],
+                                              v_l[0],
+                                              c_l[0],
+                                              kv_lens,
+                                              pi,
+                                              cu,
+                                              dist,
+                                              kv_cache_lens=kv_cache_lens,
+                                              cp_rank=jax.lax.reshape(
+                                                  r, (1, )).astype(jnp.int32),
+                                              cp_group_size=P,
+                                              q_pos_offsets=qpos_l[0],
+                                              pcp_ring_axis_name="pcp",
+                                              use_causal_mask=True,
+                                              update_kv_cache=True,
+                                              return_lse=True,
+                                              m_block_sizes=blocks)
+            return o[None], nc[None]
 
-        out = np.asarray(jax.jit(ring)(q_all, cache_sh), np.float32)
-        self.assertTrue(np.all(np.isfinite(out)))
-        self.assertGreater(float(np.abs(out).max()), 0.0)
-        tol = 2e-3 if dtype == jnp.float32 else 2e-2
-        self.assertAllClose(out, ref, atol=tol, rtol=tol)
+        out, caches = jax.jit(ring)(q_l, k_l, v_l, cache_l, qpos_l)
+        out = np.asarray(out, np.float32)
+        tol = self._tol(dtype)
+        for r in range(P):
+            for s, chunk in enumerate((r, two_p - 1 - r)):
+                real = int(np.clip(num_current - chunk * C, 0, C))
+                got = out[r, s * C:s * C + real]
+                self.assertTrue(np.all(np.isfinite(got)), (r, chunk))
+                self.assertAllClose(got,
+                                    exp[chunk * C:chunk * C + real],
+                                    atol=tol,
+                                    rtol=tol)
+        # The kernel does not write the cache; it returns new_kv_all: on
+        # every rank, row src == source rank src's own new KV (rank order,
+        # padding rows included), collected as it rotated by.
+        nk = np.asarray(caches)  # [rank, src, 2C, ...]
+        for r in range(P):
+            for src in range(P):
+                exp_src = np.asarray(merge_kv(k_l[src], v_l[src]))
+                self.assertArraysEqual(nk[r, src], exp_src)
 
 
 if __name__ == "__main__":

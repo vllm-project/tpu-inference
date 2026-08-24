@@ -683,14 +683,17 @@ class KVCacheManager:
 
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
-        # kv_cache_spec.block_size is the raw block size.
-        # The block table must use the physical size: one page covers block_size * dcp_size
-        # tokens globally.
-        # Read dcp_size and pcp_size from the mesh (KV_CONTEXT axis) to stay consistent with get_kv_cache_shape_with_mesh.
-        context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
-                                                   ShardingAxisName.KV_CONTEXT)
+        # kv_cache_spec.block_size is the raw block size. The block table must
+        # use the scheduler's block: vLLM scales it by dcp_size only (one
+        # scheduler block covers block_size * dcp_size tokens, split across
+        # the DCP ranks). Under PCP the cache is page-interleaved -- a
+        # scheduler block is one page, whole, on rank (block % pcp) -- so pcp
+        # does not scale it (an older vLLM also scaled by pcp; sizing the
+        # table by the KV_CONTEXT mesh product then overflowed it for prompts
+        # longer than max_model_len / pcp).
+        dcp_size = self.runner.vllm_config.sharding_config.decode_cp_size
         block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size * context_cnt
+            kv_cache_group.kv_cache_spec.block_size * dcp_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
         if block_sizes != [self.runner.cache_config.block_size]:
