@@ -318,18 +318,23 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
-        # Hybrid (mamba/linear-attention) models now reuse cached prefixes
-        # via `mamba_cache_mode="align"`, which addresses recurrent state by
-        # block id derived on TPU. Speculative decoding needs consecutive state
-        # slots for its verify window and cannot use prefix caching yet.
-        # Turning prefix caching off here keeps those configurations working
-        # instead of failing at runtime.
-        unsupported_reason = None
-        if (cache_config and cache_config.enable_prefix_caching
-                and vllm_config.model_config is not None
-                and getattr(vllm_config.model_config, "is_hybrid", False)):
+        # Hybrid (mamba/linear-attention) models cannot use prefix caching with
+        # speculative decoding because verify windows need consecutive state slots.
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "align"):
             if vllm_config.speculative_config is not None:
-                unsupported_reason = "speculative decoding"
+                logger.warning(
+                    "[tpu_platform] Disabling prefix caching: hybrid "
+                    "(mamba/linear-attention) models do not support cached "
+                    "prefixes with speculative decoding on TPU.")
+                cache_config.enable_prefix_caching = False
+                cache_config.mamba_cache_mode = "none"
+                if (getattr(cache_config, "mamba_block_size", None) is not None
+                        and
+                        not getattr(cache_config,
+                                    "user_specified_mamba_block_size", False)):
+                    cache_config.mamba_block_size = (
+                        vllm_config.model_config.max_model_len)
             elif (cache_config.prefix_match_unit is not None and
                   cache_config.prefix_match_unit < cache_config.block_size):
                 # Mamba prefix caching asks the worker to copy state between
@@ -343,23 +348,6 @@ class TpuPlatform(Platform):
                     "supported on TPU with mamba prefix caching because the "
                     "TPU runner does not implement KV cache block copies; "
                     "leave --prefix-match-unit unset.")
-        if unsupported_reason is not None:
-            logger.warning(
-                "[tpu_platform] Disabling prefix caching: hybrid "
-                "(mamba/linear-attention) models do not support cached "
-                "prefixes with %s on TPU.", unsupported_reason)
-            cache_config.enable_prefix_caching = False
-            # Reset the mamba cache fields derived from the enabled state to
-            # their prefix-caching-off defaults; stale values trip vLLM's
-            # "--mamba-block-size can only be set with
-            # --enable-prefix-caching" validator.
-            if getattr(cache_config, "mamba_cache_mode", "none") != "none":
-                cache_config.mamba_cache_mode = "none"
-            if (getattr(cache_config, "mamba_block_size", None) is not None
-                    and not getattr(cache_config,
-                                    "user_specified_mamba_block_size", False)):
-                cache_config.mamba_block_size = (
-                    vllm_config.model_config.max_model_len)
 
         # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
         # CPU processor and instead normalizes inside the vLLM model's vision

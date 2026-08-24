@@ -435,7 +435,8 @@ class CompilationManager:
         # and mamba align mode we pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
         if (self.runner.kv_cache_config.has_mamba_layers
-                and self.runner.mamba_align_group_id is None):
+                and getattr(self.runner.cache_config, "mamba_cache_mode",
+                            "none") != "align"):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -1961,7 +1962,8 @@ class CompilationManager:
                                                 sharding=dp_sharding)
 
             if (self.runner.kv_cache_config.has_mamba_layers
-                    and self.runner.mamba_align_group_id is None):
+                    and getattr(self.runner.cache_config, "mamba_cache_mode",
+                                "none") != "align"):
                 mamba_state_indices = device_array(
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),

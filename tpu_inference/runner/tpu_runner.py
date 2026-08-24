@@ -38,7 +38,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
                              LogprobsTensors, ModelRunnerOutput,
@@ -814,9 +814,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rank = rank
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
-        # Set in `_init_mamba_prefix_caching` once the kv cache config is known;
-        # None means mamba state is addressed by the per-request slot pool.
-        self.mamba_align_group_id: int | None = None
 
         self._init_random()
         self._init_mesh()
@@ -1294,8 +1291,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.input_batch.init_mamba_pools(
                 self.kv_cache_manager.actual_mamba_num_blocks)
 
-        self._init_mamba_prefix_caching(kv_cache_config)
-
         # This buffer grows dynamically to accommodate metadata and block tables.
         # We re-initialize with a precise capacity now that kv_cache_config is known.
         num_kv_groups = len(kv_cache_config.kv_cache_groups)
@@ -1315,30 +1310,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
-
-    def _init_mamba_prefix_caching(self,
-                                   kv_cache_config: KVCacheConfig) -> None:
-        """Set up mamba prefix caching (`mamba_cache_mode == "align"`).
-
-        In align mode, a request's recurrent state is addressed by prefix-cacheable
-        blocks from the mamba group's block table directly on TPU.
-        """
-        self.mamba_align_group_id = None
-
-        if (not kv_cache_config.has_mamba_layers or getattr(
-                self.cache_config, "mamba_cache_mode", "none") != "align"):
-            return
-
-        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, MambaSpec):
-                self.mamba_align_group_id = gid
-                break
-
-        if self.mamba_align_group_id is not None:
-            logger.info(
-                "Mamba prefix caching enabled: recurrent state is addressed by "
-                "the block table of kv-cache group %d.",
-                self.mamba_align_group_id)
 
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
@@ -3048,7 +3019,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # signature on those models is unchanged).
         # In align mode (prefix caching), mamba state indices are derived on-device
         # from the block tables, so mamba_state_indices is None.
-        if self.kv_cache_config.has_mamba_layers and self.mamba_align_group_id is None:
+        if (self.kv_cache_config.has_mamba_layers and getattr(
+                self.cache_config, "mamba_cache_mode", "none") != "align"):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.
