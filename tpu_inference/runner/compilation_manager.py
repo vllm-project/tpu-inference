@@ -1100,6 +1100,14 @@ class CompilationManager:
                         num_reqs=num_reqs,
                     )
 
+        if envs.SKIP_PROMPT_LOGPROBS_PRECOMPILE:
+            logger.info(
+                "Skipping compute_and_gather_prompt_logprobs precompilation "
+                "(SKIP_PROMPT_LOGPROBS_PRECOMPILE=1). The prompt-logprobs graph is "
+                "off the execution path unless prompt_logprobs is requested.")
+            self._gather_logprobs_precompiled = True
+            return
+
         logger.info(
             "Compiling compute_and_gather_prompt_logprobs with different input shapes."
         )
