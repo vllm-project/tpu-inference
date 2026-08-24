@@ -15,6 +15,7 @@
 # Utilities to support JIT compilation of VisionTower.
 
 import math
+import os
 from typing import Any, Callable, Optional
 
 import jax
@@ -128,10 +129,16 @@ class GridTHW(tuple):
 def is_video_supported_model(vllm_model, vllm_config: VllmConfig) -> bool:
     """Check if the model architecture supports video multimodal inputs."""
     hf_config = getattr(vllm_config.model_config, "hf_config", None)
-    model_type = getattr(hf_config, "model_type", "").lower() if hf_config else ""
-    return any(
-        v_arch in model_type
-        for v_arch in ("qwen2_vl", "qwen2_5_vl", "qwen3_vl", "qwen_vl"))
+    model_type = getattr(hf_config, "model_type",
+                         "").lower() if hf_config else ""
+    return any(v_arch in model_type for v_arch in (
+        "qwen2_vl",
+        "qwen2_5_vl",
+        "qwen3_vl",
+        "qwen3_5",
+        "qwen3_5_vl",
+        "qwen_vl",
+    ))
 
 
 def maybe_precompile_vision_encoder_fn(
@@ -161,7 +168,6 @@ def maybe_precompile_vision_encoder_fn(
     max_patches = (vllm_config.scheduler_config.max_num_batched_tokens //
                    spatial_merge_unit)
 
-    import os
     env_min_shift = os.environ.get("VISION_MIN_SHIFT", None)
     if env_min_shift:
         try:
@@ -241,7 +247,8 @@ def maybe_precompile_vision_encoder_fn(
                     call_kwargs={
                         "pixel_values_videos": dummy_pixel_values,
                         "video_grid_thw": dummy_video_grid_thw,
-                        "second_per_grid_ts": jnp.zeros((1, ), dtype=jnp.float32),
+                        "second_per_grid_ts": jnp.zeros((1, ),
+                                                        dtype=jnp.float32),
                         "timestamps": jnp.zeros((1, 2), dtype=jnp.float32),
                     },
                     num_patches=total_patches,
