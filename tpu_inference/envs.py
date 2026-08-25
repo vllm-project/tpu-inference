@@ -43,6 +43,10 @@ if TYPE_CHECKING:
     CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    BATCHED_RPA_DECODE_SLIDING_BKV_SIZE: int = 0
+    BATCHED_RPA_DECODE_BLOCK_SIZES: list[int] = []
+    BATCHED_RPA_PREFILL_BLOCK_SIZES: list[int] = []
+    BATCHED_RPA_MIXED_BLOCK_SIZES: list[int] = []
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
     # Empty (default) = use the built-in tuned/heuristic sizes.
@@ -352,6 +356,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Optional KV tile-size override for the experimental batched-RPA decode
+    # kernel. Zero keeps its built-in tuner decision.
+    "BATCHED_RPA_DECODE_SLIDING_BKV_SIZE":
+    lambda: int(os.getenv("BATCHED_RPA_DECODE_SLIDING_BKV_SIZE", "0")),
+    # Optional full block-size overrides for the experimental batched-RPA
+    # kernel, per request case. The five values match BlockSizes:
+    # bq_sz,bq_c_sz,bkv_sz,batch_size,n_buffer.
+    "BATCHED_RPA_DECODE_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_DECODE_BLOCK_SIZES"),
+    "BATCHED_RPA_PREFILL_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_PREFILL_BLOCK_SIZES"),
+    "BATCHED_RPA_MIXED_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_MIXED_BLOCK_SIZES"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
     # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
     # built-in tuned/heuristic sizes. Lets operators retune the decode

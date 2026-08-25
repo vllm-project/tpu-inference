@@ -12,17 +12,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import asdict, dataclass
+import math
+from dataclasses import asdict, dataclass, replace
 from typing import Literal
 
 import jax.experimental.pallas as pl
 import jax.numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference import envs
 from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
+_BATCHED_RPA_BLOCK_SIZE_ENVS = {
+    'decode': 'BATCHED_RPA_DECODE_BLOCK_SIZES',
+    'prefill': 'BATCHED_RPA_PREFILL_BLOCK_SIZES',
+    'mixed': 'BATCHED_RPA_MIXED_BLOCK_SIZES',
+}
+
+
+def get_block_sizes_override(
+    case: Literal['decode', 'prefill', 'mixed'],
+    page_size: int,
+) -> configs.BlockSizes | None:
+    """Return and validate an operator-supplied batched-RPA configuration."""
+    env_name = _BATCHED_RPA_BLOCK_SIZE_ENVS[case]
+    values = getattr(envs, env_name)
+    if not values:
+        return None
+    if len(values) != 5:
+        raise ValueError(
+            f"{env_name} must contain exactly five comma-separated integers "
+            "(bq_sz,bq_c_sz,bkv_sz,batch_size,n_buffer), got "
+            f"{values}.")
+    if any(value <= 0 for value in values):
+        raise ValueError(f"All values in {env_name} must be positive, got "
+                         f"{values}.")
+
+    block_sizes = configs.BlockSizes(*values)
+    if block_sizes.bq_sz % block_sizes.bq_c_sz:
+        raise ValueError(
+            f"{env_name} requires bq_c_sz to divide bq_sz exactly, got "
+            f"bq_sz={block_sizes.bq_sz} and bq_c_sz={block_sizes.bq_c_sz}.")
+    if block_sizes.bkv_sz % page_size:
+        raise ValueError(
+            f"{env_name} requires bkv_sz to be a multiple of page_size "
+            f"({page_size}), got {block_sizes.bkv_sz}.")
+    return block_sizes
 
 
 @dataclass(frozen=True)
@@ -297,6 +335,17 @@ def get_tuned_params(
         block_sizes = decode_block_sizes if case == 'decode' else prefill_block_sizes
     else:
         block_sizes = tuned_params_mapping[tuning_key].to_block_sizes()
+    if (case == 'decode' and model_config.sliding_window is not None
+            and envs.BATCHED_RPA_DECODE_SLIDING_BKV_SIZE):
+        override = envs.BATCHED_RPA_DECODE_SLIDING_BKV_SIZE
+        alignment = math.lcm(serve_config.page_size,
+                             pltpu.get_tpu_info().mxu_column_size)
+        if override < alignment or override % alignment:
+            raise ValueError(
+                "BATCHED_RPA_DECODE_SLIDING_BKV_SIZE must be a positive "
+                f"multiple of the page/MXU alignment ({alignment}), got "
+                f"{override}")
+        block_sizes = replace(block_sizes, bkv_sz=override)
     return block_sizes
 
 
