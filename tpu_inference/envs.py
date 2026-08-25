@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     SAMPLING_KEEP_SHARDED_LOGITS: bool = False
     USE_DISTRIBUTED_TOPK_SAMPLING: bool = False
     GEMMA4_EARLY_GLOBAL_KV_GATHER: bool = False
+    GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS: bool = False
 
 
 def env_with_choices(
@@ -518,6 +519,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # V normalization, instead of independently resharding both afterwards.
     "GEMMA4_EARLY_GLOBAL_KV_GATHER":
     env_bool("GEMMA4_EARLY_GLOBAL_KV_GATHER", default=False),
+    # Store one complete Gemma 4 global K/V head on every tensor-parallel
+    # shard, trading additional K projection work for zero KV communication.
+    "GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS":
+    env_bool("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", default=False),
 }
 
 

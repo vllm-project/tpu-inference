@@ -67,6 +67,7 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SAMPLING_KEEP_SHARDED_LOGITS", "0")
     monkeypatch.setenv("USE_DISTRIBUTED_TOPK_SAMPLING", "0")
     monkeypatch.setenv("GEMMA4_EARLY_GLOBAL_KV_GATHER", "0")
+    monkeypatch.setenv("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", "0")
     monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
@@ -129,6 +130,11 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("GEMMA4_EARLY_GLOBAL_KV_GATHER", "1")
     assert envs.GEMMA4_EARLY_GLOBAL_KV_GATHER is True
     monkeypatch.setenv("GEMMA4_EARLY_GLOBAL_KV_GATHER", "0")
+
+    assert envs.GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS is False
+    monkeypatch.setenv("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", "1")
+    assert envs.GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS is True
+    monkeypatch.setenv("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", "0")
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):

@@ -51,6 +51,55 @@ from tpu_inference.models.jax.utils.weight_utils import (
 logger = init_logger(__name__)
 
 
+def _load_replicated_global_kv_weight(
+    param: nnx.Param,
+    torch_weight,
+    _shard_id: int = -1,
+    *,
+    logical_num_kv_heads: int,
+    physical_num_kv_heads: int,
+    head_dim: int,
+    hidden_size: int,
+    param_name: str,
+):
+    """Expand logical checkpoint KV heads into TP-local physical heads."""
+    replicas_per_head = physical_num_kv_heads // logical_num_kv_heads
+    expanded = torch_weight.reshape(logical_num_kv_heads, head_dim,
+                                    hidden_size).repeat_interleave(
+                                        replicas_per_head, dim=0)
+    load_nnx_param_from_reshaped_torch(
+        param,
+        expanded,
+        reshape_dims=(physical_num_kv_heads, head_dim, hidden_size),
+        permute_dims=(2, 0, 1),
+        param_name=param_name,
+    )
+
+
+def _load_replicated_global_kv_bias(
+    param: nnx.Param,
+    torch_bias,
+    _shard_id: int = -1,
+    *,
+    logical_num_kv_heads: int,
+    physical_num_kv_heads: int,
+    head_dim: int,
+    param_name: str,
+):
+    """Expand a logical global K/V bias to match physical KV heads."""
+    replicas_per_head = physical_num_kv_heads // logical_num_kv_heads
+    expanded = torch_bias.reshape(logical_num_kv_heads,
+                                  head_dim).repeat_interleave(
+                                      replicas_per_head, dim=0)
+    load_nnx_param_from_reshaped_torch(
+        param,
+        expanded,
+        reshape_dims=(physical_num_kv_heads, head_dim),
+        permute_dims=(0, 1),
+        param_name=param_name,
+    )
+
+
 def _gather_and_select_global_kv_heads(
     k: jax.Array,
     mesh: Mesh,
@@ -348,19 +397,30 @@ class Gemma4Attention(JaxModule):
         _shard_kv_on_k = (_tp_size <= 1) or (self.num_kv_heads % _tp_size == 0)
         _attention_tp_size = utils.get_mesh_shape_product(
             mesh, ShardingAxisName.ATTN_HEAD)
-        self.early_global_kv_gather = (
-            envs.GEMMA4_EARLY_GLOBAL_KV_GATHER and use_k_eq_v
+        self.replicate_global_kv_weights = (
+            envs.GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS and use_k_eq_v
             and 1 < self.num_kv_heads < _tp_size
             and _tp_size % self.num_kv_heads == 0
             and _attention_tp_size == _tp_size)
-        if not _shard_kv_on_k:
+        self.early_global_kv_gather = (
+            not self.replicate_global_kv_weights
+            and envs.GEMMA4_EARLY_GLOBAL_KV_GATHER and use_k_eq_v
+            and 1 < self.num_kv_heads < _tp_size
+            and _tp_size % self.num_kv_heads == 0
+            and _attention_tp_size == _tp_size)
+        if not _shard_kv_on_k and not self.replicate_global_kv_weights:
             logger.warning_once(
                 f"num_kv_heads={self.num_kv_heads} is not divisible by TP size {_tp_size}, "
                 "sharding k/v projections on head_dim instead of kv-heads. This may cause "
                 "all-to-all communication overhead.")
-        _kv_kernel_spec = (None, "model",
-                           None) if _shard_kv_on_k else (None, None, "model")
-        _kv_bias_spec = ("model", None) if _shard_kv_on_k else (None, "model")
+        _kv_kernel_spec = ((None, "model", None)
+                           if (_shard_kv_on_k
+                               or self.replicate_global_kv_weights) else
+                           (None, None, "model"))
+        _kv_bias_spec = (("model", None)
+                         if (_shard_kv_on_k
+                             or self.replicate_global_kv_weights) else
+                         (None, "model"))
 
         self.q_proj = JaxEinsum(
             "TD,DNH->TNH",
@@ -375,10 +435,12 @@ class Gemma4Attention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".q_proj",
         )
+        physical_num_kv_heads = (_tp_size if self.replicate_global_kv_weights
+                                 else self.num_kv_heads)
         self.k_proj = JaxEinsum(
             "TD,DKH->TKH",
-            (self.hidden_size, self.num_kv_heads, self.head_dim),
-            bias_shape=(self.num_kv_heads,
+            (self.hidden_size, physical_num_kv_heads, self.head_dim),
+            bias_shape=(physical_num_kv_heads,
                         self.head_dim) if config.attention_bias else None,
             param_dtype=dtype,
             kernel_init=nnx.with_partitioning(init_fn, _kv_kernel_spec),
@@ -388,6 +450,27 @@ class Gemma4Attention(JaxModule):
             quant_config=quant_config,
             prefix=prefix + ".k_proj",
         )
+        if self.replicate_global_kv_weights:
+            self.k_proj.weight.set_metadata(
+                "weight_loader",
+                partial(
+                    _load_replicated_global_kv_weight,
+                    logical_num_kv_heads=self.num_kv_heads,
+                    physical_num_kv_heads=physical_num_kv_heads,
+                    head_dim=self.head_dim,
+                    hidden_size=self.hidden_size,
+                    param_name=prefix + ".k_proj.weight",
+                ))
+            if self.k_proj.bias is not None:
+                self.k_proj.bias.set_metadata(
+                    "weight_loader",
+                    partial(
+                        _load_replicated_global_kv_bias,
+                        logical_num_kv_heads=self.num_kv_heads,
+                        physical_num_kv_heads=physical_num_kv_heads,
+                        head_dim=self.head_dim,
+                        param_name=prefix + ".k_proj.bias",
+                    ))
         if use_k_eq_v:  # TODO: Add QKV fusion logic for k == v case.
             self.v_proj = None
         else:
