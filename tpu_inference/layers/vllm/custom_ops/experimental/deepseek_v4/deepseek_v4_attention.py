@@ -29,6 +29,7 @@ rebinds it on ``amd.model`` directly. It is invoked from
 ``_maybe_patch_for_deepseek_v4`` in ``vllm_model_wrapper`` while ``is_rocm`` is
 forced True and the package has been reloaded onto the AMD implementation.
 """
+import functools
 from unittest.mock import patch
 
 import jax
@@ -52,6 +53,8 @@ from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla_swa impor
     mla_sliding_window_ragged_paged_attention
 from tpu_inference.kernels.experimental.deepseek_v4.core_attention.sparse_mla import \
     sparse_ragged_paged_attention
+from tpu_inference.kernels.experimental.deepseek_v4.o_projection import \
+    fused_reverse_rope_wo_a_projection
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
     VllmDeepseekCompressor
@@ -106,8 +109,16 @@ class VllmDeepseekV4SWACache(DeepseekV4SWACache):
         dtype: torch.dtype,
         prefix: str,
         cache_config,
+        backend_cls=None,
     ):
-        super().__init__(head_dim, window_size, dtype, prefix, cache_config)
+        # vLLM #47808 added ``backend_cls`` to DeepseekV4SWACache and the base
+        # attention ctor always passes it; None keeps the default SWA backend.
+        super().__init__(head_dim,
+                         window_size,
+                         dtype,
+                         prefix,
+                         cache_config,
+                         backend_cls=backend_cls)
         compressed_kv_cache_bz = cache_config.block_size
         # We would like to overlay the SWA cache with CSA's main NOPE cache
         # on the same KV-Tensor, whose shape is [num_pages, page_size, 4, 128]
@@ -227,35 +238,36 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 positions: torch.Tensor) -> torch.Tensor:
         """Inverse-RoPE + wo_a (per-group bmm) + wo_b output projection.
         """
-        t = o.shape[0]
-        o_f = o.view(t, self.n_local_heads, self.head_dim)
         mesh = get_vllm_model_wrapper_context().mesh
-        o_ref = torch_view(
-            sharded_rope(
-                rope_kernel.rope,
-                mesh,
-                jax_view(o_f),
-                jax_view(positions),
-                jax_view(self.rotary_emb.cos_sin_cache),
+        # fused_reverse_rope_wo_a_projection assume data parallelism
+        # for the attention layer.
+        z = jax.shard_map(
+            functools.partial(
+                fused_reverse_rope_wo_a_projection,
+                head_dim=self.head_dim,
                 inverse=True,
-            ))
-
-        # --- wo_a: per-group batched matmul [t, g, d] x [d, g, r] -> [t, g, r].
-        o_ref = o_ref.view(t, self.n_local_groups, -1)  # [t, g, d]
-        hidden_dim = o_ref.shape[-1]
-        wo_a_weight = self.wo_a.weight.view(hidden_dim, self.n_local_groups,
-                                            self.o_lora_rank)
-        wo_a_scale = self.wo_a.weight_scale.view(self.n_local_groups,
-                                                 self.o_lora_rank)
-        z = jnp.einsum(
-            "tgd,dgr->tgr",
-            jax_view(o_ref),
-            jax_view(wo_a_weight),
-            preferred_element_type=jnp.float32) * jax_view(wo_a_scale).astype(
-                jnp.bfloat16)[None, ...]
+                quantize_activations=True,
+            ),
+            mesh=mesh,
+            in_specs=(
+                P(ShardingAxisName.ATTN_DATA),  # o
+                P(ShardingAxisName.ATTN_DATA),  # positions
+                P(),  # cos_sin_cache (replicated)
+                P(),  # wo_a
+                P(),  # wo_a_scale
+            ),
+            out_specs=P(ShardingAxisName.ATTN_DATA),
+            check_vma=False,
+        )(
+            jax_view(o),
+            jax_view(positions),
+            jax_view(self.rotary_emb.cos_sin_cache),
+            jax_view(self.wo_a.weight),
+            jax_view(self.wo_a.weight_scale),
+        )
 
         # --- wo_b: RowParallelLinear back to hidden_size (returns (out, bias)).
-        out = self.wo_b(torch_view(z.astype(jnp.bfloat16).reshape(t, -1)))
+        out = self.wo_b(torch_view(z))
         if isinstance(out, tuple):
             out = out[0]
         return out
@@ -463,7 +475,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                     # TODO: tune num_kv_pages_per_block & num_queries_per_block
                     num_kv_pages_per_block=(2, 2, 2),
                     num_queries_per_block=(1, 32, 32),
-                    q_compute_block_size=2,
+                    q_compute_block_size=4,
                     unnormalized_output=False if swa_only else True,
                 ))
 

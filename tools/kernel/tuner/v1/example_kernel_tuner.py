@@ -59,7 +59,7 @@ class ExampleKernelTuner(KernelTunerBase):
     # not based on any real computation, but rather is just a placeholder to
     # demonstrate the tuning pipeline.
 
-    def __init__(self, run_config: RunConfig):
+    def __init__(self, run_config: RunConfig, lightweight: bool = False):
         # Note: support_bayesian_optimization=True demonstrates BO support.
         # For small search spaces (e.g. 2-3 configurations per key in this mock example),
         # Bayesian optimization evaluates up to min(n_bayesian_trials, total_cases).
@@ -71,9 +71,9 @@ class ExampleKernelTuner(KernelTunerBase):
             kernel_tuner_name="example_kernel_tuner",
             support_bayesian_optimization=True)
         self.run_config = run_config
-        super().__init__(
-            tuner_config=self.tuner_config,
-            run_config=self.run_config)  # Use a small bucket size for testing
+        super().__init__(tuner_config=self.tuner_config,
+                         run_config=self.run_config,
+                         lightweight=lightweight)
 
     def get_search_space(self, tuning_key: TuningKey) -> dict[str, list]:
         param1_values = [7]

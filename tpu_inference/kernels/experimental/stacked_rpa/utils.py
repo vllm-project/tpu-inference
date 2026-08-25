@@ -19,6 +19,12 @@ import jax.experimental.pallas.tpu as pltpu
 import jax.numpy as jnp
 
 
+def cdiv(a, b):
+    """Return the ceiling of ``a / b``."""
+    assert b != 0
+    return (a + b - 1) // b
+
+
 def align_to(a, b):
     """Returns 'a' aligned to 'b'."""
     return pl.cdiv(a, b) * b
@@ -38,6 +44,7 @@ def window_anchor_tok(k_len, q_len, sliding_window, page_size_log2):
     return (lo >> page_size_log2) << page_size_log2
 
 
+@jax.named_scope("broadcast_minor")
 def broadcast_minor(src, shape):
     """Broadcasts 'src' to 'shape' in the minor dimension."""
     if src.shape == shape:
@@ -55,6 +62,7 @@ def get_dtype_packing(dtype):
     return 32 // jax.dtypes.itemsize_bits(dtype)
 
 
+@jax.named_scope("strided_load")
 def strided_load(ref, start_row, num_rows, step, *, dtype=None):
     """Loads data from HBM with strided access, handling 128-lane alignment."""
     _, row_width = ref.shape
@@ -77,6 +85,7 @@ def strided_load(ref, start_row, num_rows, step, *, dtype=None):
     return pltpu.bitcast(vec, dtype) if dtype is not None else vec
 
 
+@jax.named_scope("strided_store")
 def strided_store(ref, start, sz, step, val):
     """Stores data to HBM with strided access, handling 128-lane alignment."""
     assert get_dtype_packing(ref.dtype) == 1
@@ -97,6 +106,7 @@ def strided_store(ref, start, sz, step, val):
         ref[pl.ds(start + i, sz // step, step)] = val_slice
 
 
+@jax.named_scope("convert_to_target_bitwidth")
 def convert_to_target_bitwidth(val, target_bitwidth: int, kv_dtype: jnp.dtype):
     """Converts a value to a target bitwidth."""
     # If we want to convert 32-bits into 32//N number of N-bits value, naive

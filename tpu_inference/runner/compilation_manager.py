@@ -28,8 +28,8 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, PCPMetadata, SharedAttentionMetadata,
-    pcp_cache_page_buckets)
+    AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
+    SharedAttentionMetadata, pcp_cache_page_buckets)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -487,12 +487,16 @@ class CompilationManager:
             attention_metadata = build_attn(block_tables)
             shared_attention_metadata = build_shared_attn()
         else:
-            attention_metadata = {
-                name: build_attn(build_block_table(gid))
-                for gid, kv_cache_group in enumerate(
-                    self.runner.kv_cache_config.kv_cache_groups)
-                for name in kv_cache_group.layer_names
-            }
+            # Must mirror the runtime structure built in `_prepare_inputs`, or
+            # the precompiled executable does not match and we recompile.
+            attention_metadata = GroupedAttentionMetadata(
+                groups=tuple(
+                    build_attn(build_block_table(gid)) for gid in range(
+                        len(self.runner.kv_cache_config.kv_cache_groups))),
+                layer_names_per_group=tuple(
+                    tuple(group.layer_names)
+                    for group in self.runner.kv_cache_config.kv_cache_groups),
+            )
             shared_attention_metadata = build_shared_attn()
 
         def model_fn_warmup(_fn, _args, _call_kwargs):
@@ -1990,21 +1994,22 @@ class CompilationManager:
                     padded_num_reqs=num_reqs,
                 )
             else:
-                attn_metadata = {
-                    name:
-                    AttentionMetadata(
-                        input_positions=init_tokens,
-                        block_tables=build_block_table(gid),
-                        seq_lens=seq_lens,
-                        query_start_loc=query_start_loc,
-                        request_distribution=request_distribution,
-                        mamba_state_indices=mamba_state_indices,
-                        padded_num_reqs=num_reqs,
-                    )
-                    for gid, kv_cache_group in enumerate(
-                        self.runner.kv_cache_config.kv_cache_groups)
-                    for name in kv_cache_group.layer_names
-                }
+                attn_metadata = GroupedAttentionMetadata(
+                    groups=tuple(
+                        AttentionMetadata(
+                            input_positions=init_tokens,
+                            block_tables=build_block_table(gid),
+                            seq_lens=seq_lens,
+                            query_start_loc=query_start_loc,
+                            request_distribution=request_distribution,
+                            mamba_state_indices=mamba_state_indices,
+                            padded_num_reqs=num_reqs,
+                        ) for gid in range(
+                            len(self.runner.kv_cache_config.kv_cache_groups))),
+                    layer_names_per_group=tuple(
+                        tuple(group.layer_names) for group in
+                        self.runner.kv_cache_config.kv_cache_groups),
+                )
 
             init_state = TpuSamplingState(
                 current_tokens=init_tokens,
@@ -2079,8 +2084,7 @@ class CompilationManager:
                 f"worker{self.runner.rank} continue_decode_steps_{user_max_decode_steps}_reqs_{num_reqs}",
                 continue_decode_wrapper,
                 self.runner.state_leaves,
-                getattr(self.runner.model, "step_fn_no_options",
-                        self.runner.model_fn),
+                self.runner.model.step_fn_no_options,
                 self.runner.compute_logits_fn,
                 sample,
                 self.runner.mesh,

@@ -15,26 +15,51 @@
 import jax
 import jax.numpy as jnp
 from jax import lax
+from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.experimental.stacked_rpa import configs, utils
 
+_BRANCHLESS_MASK_MAX_ELEMENTS = 64 * 1024
 
+
+def _apply_attention_mask(qk, compute_mask, skip_mask, mask_value):
+    """Apply a statically selected eager or lazy attention-mask path."""
+    if skip_mask is None:
+        return jnp.where(compute_mask(), qk, mask_value)
+
+    # Small decode tiles can eagerly materialize the masked alternative. This
+    # removes Mosaic's control-flow barrier and lets mask work fuse into the QK
+    # and softmax pipeline. Large prefill tiles retain the lazy conditional:
+    # eagerly materializing their full masked QK alternative spills VREGs.
+    if qk.shape[-2] * qk.shape[-1] <= _BRANCHLESS_MASK_MAX_ELEMENTS:
+        masked_qk = jnp.where(compute_mask(), qk, mask_value)
+        return jnp.where(skip_mask != 0, qk, masked_qk)
+
+    return lax.cond(
+        skip_mask != 0,
+        lambda _: qk,
+        lambda _: jnp.where(compute_mask(), qk, mask_value),
+        operand=None,
+    )
+
+
+@jax.named_scope("flash_qk_softmax")
 def flash_attention_qk_softmax(
     q: jax.Array,  # [B, KV, TQ, H]
     k: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
-    m_prev: jax.Array,  # [B, KV, TQ, 128]
-    l_prev: jax.Array,  # [B, KV, TQ, 128]
+    m_prev: jax.Array | None,  # [B, KV, TQ, 128]
+    l_prev: jax.Array | None,  # [B, KV, TQ, 128]
     *,
     processed_q_len: list[jax.Array],  # [B]
     processed_kv_len: list[jax.Array],  # [B]
     effective_kv_len: list[jax.Array],  # [B]
-    visibility: list[jax.Array] | None = None,  # [B] x [bq_sz, 128]
     skip_mask: list[jax.Array] | None = None,  # [B]
-    cfgs: configs.RpaConfigs,
+    cfgs: configs.AttentionConfig,
     bq_start: int,
+    initialize: bool = False,
 ):
     """Flash attention kernel."""
-    b, k_heads, tq, h_size = q.shape
+    b, k_heads, tq, _ = q.shape
 
     if cfgs.serve.scale_q is not None:
         q = q / cfgs.serve.scale_q
@@ -47,8 +72,8 @@ def flash_attention_qk_softmax(
 
     s = k.shape[3]
     qk = lax.dot_general(
-        q.reshape(-1, tq, h_size),
-        k.reshape(-1, h_size, s),
+        q.reshape(b * k_heads, tq, q.shape[-1]),
+        k.reshape(b * k_heads, k.shape[2], s),
         dimension_numbers=(([2], [1]), ([0], [0])),
         preferred_element_type=jnp.float32,
     ).astype(configs.accum_dtype(cfgs.serve.dtype_out))
@@ -67,7 +92,10 @@ def flash_attention_qk_softmax(
     qk_masked = []
     mask_value = jnp.asarray(cfgs.model.mask_value, dtype=qk.dtype)
 
-    int_ty = cfgs.serve.int_ty
+    # Sliding-window addition can overflow int16 near the short-context limit,
+    # and wide int16 comparisons can acquire incompatible Mosaic layouts on a
+    # trimmed compute view. Keep metadata compact but use int32 mask coordinates.
+    int_ty = jnp.int32 if cfgs.model.sliding_window is not None else cfgs.serve.int_ty
 
     for b_idx in range(b):
         kv_idx_b = (lax.broadcasted_iota(int_ty, (k_heads, tq, s), 2) +
@@ -75,71 +103,46 @@ def flash_attention_qk_softmax(
         q_offset_b = (lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1) //
                       cfgs.aligned_num_q_heads_per_kv_head + bq_start)
 
-        def compute_mask(_):
-            if visibility is not None:
-                num_query_tokens = tq // cfgs.aligned_num_q_heads_per_kv_head
-                vis = visibility[b_idx][bq_start:bq_start +
-                                        num_query_tokens, :2]
-                bq_shape = (num_query_tokens, s)
-                k_span_bq = (lax.broadcasted_iota(jnp.int32, bq_shape, 1) +
-                             processed_kv_len[b_idx])
-                vis_start = lax.broadcast_in_dim(vis[:, 0], bq_shape, (0, ))
-                vis_end = lax.broadcast_in_dim(vis[:, 1], bq_shape, (0, ))
-                mask_bq = jnp.logical_and(k_span_bq >= vis_start, k_span_bq
-                                          <= vis_end)
-                mask_tq = jnp.repeat(mask_bq,
-                                     cfgs.aligned_num_q_heads_per_kv_head,
-                                     axis=0)
-                return jnp.stack([mask_tq for _ in range(k_heads)], axis=0)
-
+        def compute_mask():
             q_idx_b = q_offset_b.astype(int_ty) + processed_q_len[b_idx]
             eff_kv_len_b = effective_kv_len[b_idx]
             mask = q_idx_b < eff_kv_len_b
             mask = jnp.logical_and(mask, q_idx_b >= kv_idx_b)
 
             if (sliding_window := cfgs.model.sliding_window) is not None:
-                # Overflow guard: on v6e/v7x with int_ty=int16, `kv_idx_b +
-                # sliding_window` can exceed INT16_MAX (32767) even when
-                # max_model_len itself is <= 32767, because iota + processed_kv_len
-                # already lands near max_model_len at the tail. Wrapping there
-                # flips the predicate and silently drops valid keys.  Promote the
-                # sum to int32 for the compare -- the compare's result is a bool,
-                # so no downstream cost.
-                mask = jnp.logical_and(
-                    mask,
-                    q_idx_b.astype(jnp.int32)
-                    < kv_idx_b.astype(jnp.int32) + int(sliding_window))
+                mask = jnp.logical_and(mask, q_idx_b
+                                       < kv_idx_b + sliding_window)
             return mask
 
-        # Small qk tiles (decode, tq == 1) fit the branchless path without VREG
-        # spill; the always-materialised mask elides Mosaic's control-flow
-        # barrier and lets the mask compute fuse into the QK+softmax pipeline.
-        # For large tiles (prefill/mixed, tq >> 1) the always-materialised
-        # ``masked_qk`` is a (K, TQ, S) intermediate that spills VREGs
-        # catastrophically (>44 MB scratch on bq_sz=512 prefill measured on
-        # v7x-8), so keep the original ``lax.cond`` there. Threshold picked as
-        # tq == 1 -- exactly the single-token decode fast path.
-        _branchless_ok = (skip_mask is not None
-                          and qk.shape[2] * qk.shape[3] <= 64 * 1024)
-        if skip_mask is not None and _branchless_ok:
-            mask_pred = compute_mask(None)
-            masked_qk = jnp.where(mask_pred, qk[b_idx], mask_value)
-            qk_masked_b = jnp.where(skip_mask[b_idx] != 0, qk[b_idx],
-                                    masked_qk)
-        elif skip_mask is not None:
-            qk_masked_b = lax.cond(
-                skip_mask[b_idx] != 0,
-                lambda _: qk[b_idx],
-                lambda _: jnp.where(compute_mask(None), qk[b_idx], mask_value),
-                operand=None,
-            )
-        else:
-            qk_masked_b = jnp.where(compute_mask(None), qk[b_idx], mask_value)
+        skip_mask_b = None if skip_mask is None else skip_mask[b_idx]
+        qk_masked_b = _apply_attention_mask(
+            qk[b_idx],
+            compute_mask,
+            skip_mask_b,
+            mask_value,
+        )
 
         qk_masked.append(qk_masked_b)
     qk = jnp.stack(qk_masked, axis=0)
 
     m_curr = jnp.max(qk, axis=-1, keepdims=True)
+    if initialize:
+        p = jnp.exp(qk - m_curr)
+        l_next = jnp.sum(
+            p,
+            axis=-1,
+            keepdims=True,
+            dtype=configs.accum_dtype(cfgs.serve.dtype_out),
+        )
+        stats_shape = m_curr.shape[:-1] + (pltpu.get_tpu_info().num_lanes, )
+        return (
+            p,
+            None,
+            jnp.broadcast_to(m_curr, stats_shape),
+            jnp.broadcast_to(l_next, stats_shape),
+        )
+
+    assert m_prev is not None and l_prev is not None
     m_next = jnp.maximum(m_prev, m_curr)
     p = jnp.exp(qk - utils.broadcast_minor(m_next, qk.shape))
     p_rowsum = jnp.sum(p,
@@ -153,27 +156,32 @@ def flash_attention_qk_softmax(
     return p, alpha, m_next, l_next
 
 
+@jax.named_scope("flash_pv")
 def flash_attention_pv(
     p: jax.Array,  # [B, KV, TQ, S]
     v: jax.Array,  # [B, KV, S, H] or [B, KV, H, S]
-    alpha: jax.Array,  # [B, KV, TQ, 128]
-    o_prev: jax.Array,  # [B, KV, TQ, H]
-    cfgs: configs.RpaConfigs,
+    alpha: jax.Array | None,  # [B, KV, TQ, 128]
+    o_prev: jax.Array | None,  # [B, KV, TQ, H]
+    cfgs: configs.AttentionConfig,
+    initialize: bool = False,
 ):
     """Flash attention kernel."""
     b, k_heads, tq, s = p.shape
-    h_size = v.shape[2]
     pv = lax.dot_general(
-        p.reshape(-1, tq, s),
-        v.reshape(-1, h_size, s),
+        p.reshape(b * k_heads, tq, s),
+        v.reshape(b * k_heads, v.shape[2], v.shape[3]),
         dimension_numbers=(([2], [2]), ([0], [0])),
         preferred_element_type=jnp.float32,
     ).astype(configs.accum_dtype(cfgs.serve.dtype_out))
-    pv = pv.reshape(b, k_heads, tq, h_size)
+    pv = pv.reshape(b, k_heads, tq, v.shape[2])
 
     if cfgs.serve.scale_v is not None:
         pv *= cfgs.serve.scale_v
 
+    if initialize:
+        return pv
+
+    assert alpha is not None and o_prev is not None
     o_next = utils.broadcast_minor(alpha, o_prev.shape) * o_prev + pv
 
     return o_next

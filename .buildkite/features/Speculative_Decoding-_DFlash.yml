@@ -22,8 +22,16 @@ steps:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_dflash_correctness
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          echo "DFlash on the vllm (torchax) path is not integrated yet:" \
+               "DFlashTorchaxProposer is not wired into the runner and the" \
+               "generic torchax draft step does not match the vLLM DFlash" \
+               "model contract. Recording as unverified."
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_CorrectnessTest" "unverified"
+        else
+          .buildkite/scripts/run_in_docker.sh \
+            python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_dflash_correctness
+        fi
   - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Speculative Decoding: DFlash"
     key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_DFlash_CorrectnessTest"
     depends_on: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_CorrectnessTest"
@@ -48,8 +56,14 @@ steps:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh \
-          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_dflash_performance
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          echo "DFlash on the vllm (torchax) path is not integrated yet." \
+               "Recording as unverified."
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_PerformanceTest" "unverified"
+        else
+          .buildkite/scripts/run_in_docker.sh \
+            python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_dflash_performance
+        fi
   - label: "${TPU_VERSION:-tpu6e} Record performance test result for Speculative Decoding: DFlash"
     key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_DFlash_PerformanceTest"
     depends_on: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_PerformanceTest"

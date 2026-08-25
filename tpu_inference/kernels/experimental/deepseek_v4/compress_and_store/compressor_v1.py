@@ -303,4 +303,17 @@ def compressor_forward(
         rms_eps=rms_eps,
     )
 
-    return cache, rope_cache, (cache if shares_buffer else state_cache)
+    if shares_buffer:
+        return cache, rope_cache, cache
+
+    # `compress_norm_rope_store` READS `state_cache` (its read-only state
+    # operand) but emits no new version of it, so the value published here is
+    # the pre-read one straight off `proj_and_save_state`. The DSv4 KV-cache
+    # overlay hosts another layer's SWA cache on this same physical array, and
+    # that kernel takes whole-buffer ownership via `input_output_aliases`.
+    # Nothing orders the read against that write, so XLA's copy-insertion
+    # AddCopiesToResolveInterference cannot prove the read completes first and
+    # insert the cache copy. Publishing a version that is downstream of
+    # the read supplies the missing ordering edge.
+    state_cache, cache = jax.lax.optimization_barrier((state_cache, cache))
+    return cache, rope_cache, state_cache

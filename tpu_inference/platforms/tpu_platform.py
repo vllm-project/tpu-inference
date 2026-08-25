@@ -24,6 +24,39 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
                 raise e
 
     torch.accelerator.empty_cache = _patched_empty_cache
+
+# Monkeypatch torch.accelerator.get_memory_info to answer from the JAX device.
+# torchax registers "jax" as a PrivateUse1 device, and torch.accelerator's memory
+# APIs resolve the device via torch._C._accelerator_getDeviceIndex(), which
+# raises "PyTorch is not linked with support for jax devices". vLLM model code
+# on the torchax path calls get_memory_info() to size work by free HBM (e.g.
+# Gemma4ForConditionalGeneration._process_image_input chunks the vision
+# encoder by it), and an unhandled raise there kills the EngineCore mid-request.
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
+                                             "get_memory_info"):
+    _orig_get_memory_info = torch.accelerator.get_memory_info
+
+    def _jax_device_memory_info() -> Tuple[int, int]:
+        """(free_bytes, total_bytes) of the first local JAX device.
+
+        Falls back to (0, 0) when the backend exposes no memory stats; callers
+        that derive a budget from it then take their minimum-work path instead
+        of crashing.
+        """
+        stats = jax.local_devices()[0].memory_stats() or {}
+        total = int(stats.get("bytes_limit", 0))
+        in_use = int(stats.get("bytes_in_use", 0))
+        return max(total - in_use, 0), total
+
+    def _patched_get_memory_info(*args, **kwargs) -> Tuple[int, int]:
+        try:
+            return _orig_get_memory_info(*args, **kwargs)
+        except RuntimeError as e:
+            if "jax" not in str(e):
+                raise
+            return _jax_device_memory_info()
+
+    torch.accelerator.get_memory_info = _patched_get_memory_info
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -133,6 +166,7 @@ class TpuPlatform(Platform):
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
+        "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
     ]
 
@@ -284,6 +318,51 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
+        # The TPU hybrid (mamba/linear-attention) path does not support
+        # reusing cached prefixes yet — cache hits garble the output. Keep
+        # prefix caching disabled for hybrid models until the GDN/mamba
+        # kernels handle cached prefixes.
+        if (cache_config and cache_config.enable_prefix_caching
+                and vllm_config.model_config is not None
+                and getattr(vllm_config.model_config, "is_hybrid", False)):
+            logger.warning(
+                "[tpu_platform] Disabling prefix caching: hybrid "
+                "(mamba/linear-attention) models do not support cached "
+                "prefixes on TPU yet (accuracy garbles on cache hits).")
+            cache_config.enable_prefix_caching = False
+            # Reset the mamba cache fields derived from the enabled state to
+            # their prefix-caching-off defaults; stale values trip vLLM's
+            # "--mamba-block-size can only be set with
+            # --enable-prefix-caching" validator.
+            if getattr(cache_config, "mamba_cache_mode", "none") != "none":
+                cache_config.mamba_cache_mode = "none"
+            if (getattr(cache_config, "mamba_block_size", None) is not None
+                    and not getattr(cache_config,
+                                    "user_specified_mamba_block_size", False)):
+                cache_config.mamba_block_size = (
+                    vllm_config.model_config.max_model_len)
+
+        # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
+        # CPU processor and instead normalizes inside the vLLM model's vision
+        # tower (FusedInputNorm). JAX-native multimodal models consume the
+        # processor's pixel_values directly and have no device-side norm, so
+        # they would silently run the ViT on unnormalized pixels. Keep the
+        # normalization in the CPU processor for the JAX-native path.
+        mm_cfg = getattr(vllm_config.model_config, "multimodal_config", None) \
+            if vllm_config.model_config else None
+        if mm_cfg is not None and getattr(mm_cfg, "mm_device_do_normalize",
+                                          False):
+            from tpu_inference.models.common.model_loader import \
+                resolve_model_impl_type
+            impl = resolve_model_impl_type(vllm_config)
+            if impl != "vllm":
+                logger.warning(
+                    "[tpu_platform] Disabling mm_device_do_normalize: the "
+                    "JAX-native multimodal path normalizes images in the CPU "
+                    "processor; device-side FusedInputNorm only exists in the "
+                    "vLLM model implementation.")
+                mm_cfg.mm_device_do_normalize = False
+
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:

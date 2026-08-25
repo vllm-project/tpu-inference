@@ -44,6 +44,8 @@ class TestTpuPlatform:
         vllm_config.cache_config = cache_config
         vllm_config.model_config = MagicMock(dtype='bfloat16')
         vllm_config.model_config.use_mla = False
+        vllm_config.model_config.is_hybrid = False
+        vllm_config.model_config.multimodal_config = None
         vllm_config.scheduler_config = MagicMock(is_multimodal_model=False)
         vllm_config.parallel_config = MagicMock()
         vllm_config.parallel_config.data_parallel_size = 1
@@ -190,6 +192,84 @@ class TestTpuPlatform:
         with pytest.raises(AssertionError,
                            match="VLLM_ENABLE_V1_MULTIPROCESSING must be 0"):
             TpuPlatform.check_and_update_config(vllm_config)
+
+    @pytest.mark.parametrize("impl_type,resolved,expected_flag", [
+        ("auto", "flax_nnx", False),
+        ("flax_nnx", None, False),
+        ("vllm", None, True),
+    ])
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_mm_device_do_normalize(
+            self, mock_update, mock_sharding, vllm_config, impl_type, resolved,
+            expected_flag):
+        """mm_device_do_normalize must be forced off for JAX-native multimodal
+        models: they consume the processor's pixel_values directly and have no
+        device-side FusedInputNorm, so leaving it on feeds the ViT
+        unnormalized pixels (silently wrong outputs). The vllm (torchax) path
+        keeps the flag: FusedInputNorm lives in the vLLM model."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = True
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.max_model_len = 4096
+        mm_cfg = MagicMock()
+        mm_cfg.mm_device_do_normalize = True
+        vllm_config.model_config.multimodal_config = mm_cfg
+
+        with patch(
+                "tpu_inference.platforms.tpu_platform.envs.MODEL_IMPL_TYPE",
+                impl_type), \
+             patch("tpu_inference.models.common.model_loader."
+                   "resolve_model_architecture",
+                   return_value=resolved):
+            TpuPlatform.check_and_update_config(vllm_config)
+
+        assert mm_cfg.mm_device_do_normalize == expected_flag
+
+    @pytest.mark.parametrize("is_hybrid,expected_prefix_caching", [
+        (True, False),
+        (False, True),
+    ])
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_hybrid_prefix_caching(
+            self, mock_update, mock_sharding, vllm_config, is_hybrid,
+            expected_prefix_caching):
+        """Prefix caching is force-disabled for hybrid (mamba/linear-attention)
+        models on TPU — cached-prefix reuse garbles GDN outputs — and left
+        untouched for non-hybrid models."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = is_hybrid
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = True
+        # Simulate vLLM's hybrid config-verify having derived the mamba cache
+        # fields from the prefix-caching-enabled state (post-init assignment
+        # keeps user_specified_mamba_block_size False).
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 256
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
+        assert (vllm_config.cache_config.enable_prefix_caching ==
+                expected_prefix_caching)
+        if is_hybrid:
+            # Derived mamba fields must be reset to their prefix-caching-off
+            # defaults or vLLM's "--mamba-block-size can only be set with
+            # --enable-prefix-caching" validator rejects the config.
+            assert vllm_config.cache_config.mamba_cache_mode == "none"
+            assert vllm_config.cache_config.mamba_block_size == 4096
 
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "")
@@ -610,3 +690,59 @@ class TestTpuPlatform:
         with pytest.raises(ValueError, match=expected_error):
             TpuPlatform.check_and_update_config(vllm_config)
         mock_patch.assert_not_called()
+
+
+class TestTorchAcceleratorGetMemoryInfoShim:
+    """tpu_platform patches torch.accelerator.get_memory_info at import time so
+    the torchax path (PrivateUse1 "jax" device) answers from the JAX device
+    instead of raising "PyTorch is not linked with support for jax devices"."""
+
+    @staticmethod
+    def _jax_device(stats):
+        device = MagicMock()
+        device.memory_stats.return_value = stats
+        return device
+
+    def test_shim_is_installed(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        assert torch.accelerator.get_memory_info is (
+            tpu_platform._patched_get_memory_info)
+
+    def test_jax_device_error_falls_back_to_jax_memory_stats(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        stats = {"bytes_limit": 1000, "bytes_in_use": 250}
+        with patch.object(
+                tpu_platform,
+                "_orig_get_memory_info",
+                side_effect=RuntimeError(
+                    "PyTorch is not linked with support for jax devices")), \
+             patch.object(tpu_platform.jax, "local_devices",
+                          return_value=[self._jax_device(stats)]):
+            assert torch.accelerator.get_memory_info() == (750, 1000)
+
+    def test_missing_memory_stats_yields_zero_budget(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        with patch.object(
+                tpu_platform,
+                "_orig_get_memory_info",
+                side_effect=RuntimeError(
+                    "PyTorch is not linked with support for jax devices")), \
+             patch.object(tpu_platform.jax, "local_devices",
+                          return_value=[self._jax_device(None)]):
+            assert torch.accelerator.get_memory_info() == (0, 0)
+
+    def test_unrelated_runtime_error_is_reraised(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        with patch.object(tpu_platform,
+                          "_orig_get_memory_info",
+                          side_effect=RuntimeError("CUDA out of memory")), \
+             pytest.raises(RuntimeError, match="CUDA out of memory"):
+            torch.accelerator.get_memory_info()
+
+    def test_success_path_passes_through(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        with patch.object(tpu_platform,
+                          "_orig_get_memory_info",
+                          return_value=(1, 2)) as orig:
+            assert torch.accelerator.get_memory_info(0) == (1, 2)
+            orig.assert_called_once_with(0)

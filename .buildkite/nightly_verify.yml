@@ -96,7 +96,7 @@ steps:
 
    - label: "Record verified commit hashes"
      # GITHUB_PAT is main/tag-only - see commit_support_matrices above.
-     if: build.env("NIGHTLY") == "1" && build.branch == "main"
+     if: build.env("NIGHTLY") == "1" && build.branch == "main" && "${MODEL_IMPL_TYPE:-auto}" == "auto"
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results

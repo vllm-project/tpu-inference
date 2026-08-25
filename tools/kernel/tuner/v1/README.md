@@ -2,11 +2,100 @@
 
 A framework for measuring and tuning the latency of TPU kernels. Results are stored either locally (JSON files) or in Google Cloud Spanner. Supports both exhaustive grid searching (full sweep) and adaptive Bayesian Optimization via Optuna to find optimal tile sizes and parameters significantly faster.
 
+Uses a robust **3-process isolation model** ([Runner](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_runner.py) -> [Worker](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_worker.py) -> [Executor](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_executor.py)) to isolate TPU kernel runs and transparently recover from TPU device poisoning (e.g. OOMs or hardware hangs) without losing optimizer or search state.
+
 ---
 
-## 1. Implementing a Custom Kernel Tuner
+## 1. Architecture & Multi-Process Execution Model
 
-To add a new kernel to the tuning framework, create a new file (e.g. `my_kernel_tuner.py`) and subclass `KernelTunerBase`. You can add kernel-specific flags in this file. To avoid name conflicts, flags should be named in the format `{your_kernel_name}_{flag_name}` in your tuner module and append `KERNEL_TUNING_` as a prefix when invoked through the Buildkite UI. For example: flag `your_kernel_name_flag_name` in your tuner script corresponds to `KERNEL_TUNING_YOUR_KERNEL_NAME_FLAG_NAME` in Buildkite UI.
+To handle TPU execution instabilities (such as OOM errors or JAX runtime poisoning), the tuning framework architecture decouples job scheduling, optimization search, and TPU kernel execution across three distinct process layers.
+
+```
++-------------------------------------------------------------------------+
+|                              Runner Process                             |
+|                        (kernel_tuner_runner.py)                         |
+|  - Case Generation & Grouping (by TuningKey)                            |
+|  - Work Bucketing & Buildkite Pipeline Generation                       |
+|  - Bucket Lifecycle & Retry Management (BucketStatus)                   |
++-------------------------------------------------------------------------+
+                                     |
+                          Spawns per bucket (subprocess)
+                                     v
++-------------------------------------------------------------------------+
+|                              Worker Process                             |
+|                        (kernel_tuner_worker.py)                         |
+|  - Database Manager (StorageManager: Local / Cloud Spanner)             |
+|  - Search Optimizer (SweepOptimizer / BayesianOptimizer via Optuna)     |
+|  - Lightweight Tuner Config & Search Space                              |
++-------------------------------------------------------------------------+
+                                     |
+                     Manages lifecycle & IPC via stdin/stdout
+                                     v
++-------------------------------------------------------------------------+
+|                         ExecutorProcessManager                          |
+|                     (executor_process_manager.py)                       |
++-------------------------------------------------------------------------+
+                                     |
+                         Persistent Subprocess (JSON IPC)
+                                     v
++-------------------------------------------------------------------------+
+|                             Executor Process                            |
+|                       (kernel_tuner_executor.py)                        |
+|  - Full JAX & TPU Runtime Environment                                   |
+|  - In-Memory Input Tensor Cache (generate_inputs)                       |
+|  - Kernel Latency Measurement Execution (run)                           |
++-------------------------------------------------------------------------+
+```
+
+### Process Roles
+
+1. **Runner Process** ([kernel_tuner_runner.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_runner.py)):
+   - Serves as the top-level orchestrator.
+   - Generates and filters tuning cases, grouping cases by `TuningKey` prior to bucketing to maximize input caching reuse across consecutive kernel runs.
+   - Divides case sets into work buckets and generates dynamic Buildkite fan-out pipelines.
+   - Tracks bucket lifecycle states (`BucketStatus`) and manages bucket retries and job yields.
+
+2. **Worker Process** ([kernel_tuner_worker.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_worker.py)):
+   - Spawned as a separate process by the Runner for each work bucket.
+   - Houses the database connection ([storage_manager.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/storage_management/storage_manager.py)) and the search optimizer ([SweepOptimizer](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/optimizer/sweep_optimizer.py) or [BayesianOptimizer](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/optimizer/bayesian_optimizer.py)).
+   - Creates a lightweight tuner instance to access configuration and search space definitions without initializing full JAX/TPU device context in the worker process.
+
+3. **Executor Process** ([kernel_tuner_executor.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_executor.py)):
+   - Persistent subprocess spawned and managed by [executor_process_manager.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/executor_process_manager.py).
+   - Initializes the full JAX/TPU environment and retains the input tensor cache (`generate_inputs()`) across multiple tuning cases to minimize allocation overhead.
+   - Executes `KernelTunerBase.run()` measurements.
+   - Communicates with the Worker via line-buffered JSON requests over stdin/stdout (using `__JSON__` prefix filters to isolate logger output).
+
+### Fault Isolation & TPU Recovery
+
+TPU kernel execution can occasionally trigger OOMs, unrecoverable C++ exceptions, or hardware state poisoning that corrupts the JAX runtime:
+
+- **Isolated Execution**: Because `run()` executes inside the isolated Executor process, a TPU crash or process exit only kills the Executor.
+- **Transparent Worker Recovery**: When the Executor process dies or times out, `ExecutorProcessManager` intercepts the pipe error, logs the stack trace, cleans up process groups, and returns `TuningStatus.UNKNOWN_ERROR`.
+- **Automatic Process Restart**: On the next trial request, `ExecutorProcessManager` transparently spawns a fresh replacement Executor process. The Worker process, Optuna search state, and database connections remain intact.
+
+### Job Lifecycle Management (`BucketStatus`)
+
+Work buckets follow an explicit lifecycle tracked in database storage:
+
+- `NOT_STARTED`: Bucket created but not yet claimed by a worker.
+- `IN_PROGRESS`: Currently being executed by a worker process.
+- `COMPLETED`: All cases in the bucket evaluated successfully.
+- `FAILED`: Bucket execution failed after exhausting retry attempts.
+- `CANCELLED`: Bucket cancelled by runner or user intervention.
+- `YIELDED`: Bucket execution voluntarily yielded (e.g. during Buildkite job timeouts or worker preemptions) to be resumed by a subsequent job run.
+
+### Shared Flags & Centralized Factories
+
+- **Centralized Flags** ([kernel_tuner_flags.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_flags.py)): Defines common ABSL flags for GCP, Spanner, case set IDs, run IDs, TPU configurations, and optimization settings to eliminate flag duplicate definition errors across imported modules.
+- **Tuner & Storage Factories** ([kernel_tuner_factory.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/kernel_tuner_factory.py)): Provides centralized factory methods (`create_kernel_tuner`, `create_storage_manager`, `run_config_to_json`) for creating tuners and storage managers in lightweight or full execution modes.
+- **Subprocess Environment Helper** ([utils.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/utils.py)): Exposes `get_subprocess_env()` to propagate TPU/JAX flags and environment variables to worker and executor subprocesses.
+
+---
+
+## 2. Implementing a Custom Kernel Tuner
+
+To add a new kernel to the tuning framework, create a new file (e.g. `my_kernel_tuner.py`) and subclass `KernelTunerBase` ([common/kernel_tuner_base.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/common/kernel_tuner_base.py)). You can add kernel-specific flags in this file. To avoid name conflicts, flags should be named in the format `{your_kernel_name}_{flag_name}` in your tuner module and append `KERNEL_TUNING_` as a prefix when invoked through the Buildkite UI.
 
 ### Step 1 — Define `TuningKey` and `TunableParams`
 
@@ -59,6 +148,7 @@ class MyKernelTuner(KernelTunerBase):
             n_bayesian_trials=100,                 # max BO trials per tuning key bucket (default 100)
             bayesian_early_stopping_patience=10,   # stop trial if no improvement for 10 trials
             bayesian_early_stopping_min_delta_ratio=0.05, # min 5% relative improvement
+            min_cases_for_bayesian=200,            # fallback to full sweep if search space < 200
         )
         self.run_config = run_config
         super().__init__(
@@ -102,7 +192,7 @@ This method is called once to populate the initial case set; results are persist
 
 #### `generate_inputs(tuning_key: MyTuningKey) -> dict`
 
-Prepares the kernel inputs for a given `TuningKey`. The base class caches the result so inputs are only regenerated when the key changes.
+Prepares the kernel inputs for a given `TuningKey`. In the Executor process, the result is cached in memory so inputs are only regenerated when the tuning key changes.
 
 ```python
     def generate_inputs(self, tuning_key: MyTuningKey) -> dict:
@@ -135,23 +225,7 @@ Return `TuningStatus.FAILED_OOM` for OOM errors and `TuningStatus.UNKNOWN_ERROR`
             return TuningStatus.UNKNOWN_ERROR, 0.0, 0.0
 ```
 
-### Step 4 — Register the tuner
-
-Add your class to `KERNEL_TUNER_REGISTRY` in [kernel_tuner_runner.py](kernel_tuner_runner.py):
-
-```python
-from tools.kernel.tuner.v1.my_kernel_tuner import MyKernelTuner
-
-KERNEL_TUNER_REGISTRY = {
-    'example_kernel_tuner':     ExampleKernelTuner,
-    'rpa_v3_kernel_tuner':      RpaV3KernelTuner,
-    'mla_kernel_tuner':         MlaKernelTuner,
-    'batched_rpa_kernel_tuner': BatchedRpaKernelTuner,
-    'my_kernel_tuner':          MyKernelTuner,   # <-- add this
-}
-```
-
-### Step 5 — Run it
+### Step 4 — Run it
 
 Locally:
 
@@ -162,14 +236,62 @@ python -m tools.kernel.tuner.v1.kernel_tuner_runner \
   --case_set_id=my_first_run \
   --run_id=001 \
   --case_set_desc="My kernel first tuning run" \
-  --use_bayesian_optimization=True # Optional
+  --use_bayesian_optimization=True
 ```
 
 On Buildkite, set `KERNEL_TUNING_KERNEL_TUNER_NAME=my_kernel_tuner` and optionally `KERNEL_TUNING_USE_BAYESIAN_OPTIMIZATION=True` in the build environment variables.
 
 ---
 
-## 2. Running Locally
+## 3. Running Locally
+
+### Available built-in tuners
+
+The framework currently includes these built-in tuners:
+
+- `example_kernel_tuner` ([example_kernel_tuner.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/example_kernel_tuner.py))
+- `rpa_v3_kernel_tuner` ([rpa_v3_kernel_tuner.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/rpa_v3_kernel_tuner.py))
+- `mla_kernel_tuner` ([mla_kernel_tuner.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/mla_kernel_tuner.py))
+- `batched_rpa_kernel_tuner` ([batched_rpa_kernel_tuner.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/batched_rpa_kernel_tuner.py)) — supports both prefill and decode phase tuning
+- `gmm_v2_kernel_tuner` ([gmm_v2_kernel_tuner.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/gmm_v2_kernel_tuner.py))
+- `flash_attention_kernel_tuner` ([flash_attention_kernel_tuner.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/flash_attention_kernel_tuner.py))
+
+### GMM v2 tuner
+
+The `gmm_v2_kernel_tuner` targets the Megablox GMM v2 kernel. It uses a `TuningKey` that captures the fixed problem description from the GMM worker contract (`m`, `k`, `n`, `tg`, `cg`, `ldt`, `rdt`, `q_block`, `fuse_act`) and a `TunableParams` that captures the tile sizes (`tm`, `tk`, `tn`).
+
+```python
+@dataclasses.dataclass(frozen=True)
+class TuningKey:
+    m: int
+    k: int
+    n: int
+    tg: int
+    cg: int
+    ldt: str
+    rdt: str
+    q_block: int
+    fuse_act: str | None = None
+
+@dataclasses.dataclass(frozen=True)
+class TunableParams:
+    tm: int
+    tk: int
+    tn: int
+```
+
+Example local run:
+
+```bash
+python -m tools.kernel.tuner.v1.kernel_tuner_runner \
+  --run_locally \
+  --kernel_tuner_name=gmm_v2_kernel_tuner \
+  --case_set_id=gmm_v2_local_smoke \
+  --run_id=0 \
+  --case_set_desc='gmm_v2_local_smoke' \
+  --tpu_version=tpu7x \
+  --tpu_cores=2
+```
 
 Install dependencies first:
 
@@ -177,7 +299,7 @@ Install dependencies first:
 pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt 
 ```
 
-We recommend running the tuner with local storage first to verify that your custom kernel tuner is set up correctly.
+We recommend running the tuner with local storage first to verify that your custom kernel tuner is set up correctly:
 
 ```bash
 python -m tools.kernel.tuner.v1.kernel_tuner_runner \
@@ -189,13 +311,14 @@ python -m tools.kernel.tuner.v1.kernel_tuner_runner \
   --use_bayesian_optimization=True
 ```
 
-**Key flags:**
+### Key flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `--kernel_tuner_name` | `example_kernel_tuner` | Which tuner to run (must be in `KERNEL_TUNER_REGISTRY`). |
+| `--kernel_tuner_name` | `example_kernel_tuner` | Which tuner to run (must be registered in `KERNEL_TUNER_REGISTRY`). |
 | `--run_locally` | `False` | Use local JSON storage instead of Cloud Spanner. |
 | `--use_bayesian_optimization` | `False` | Enable Optuna Bayesian Optimization instead of full grid sweep. |
+| `--min_cases_for_bayesian` | `200` | Minimum cases in search space required to use Bayesian Optimization (fallbacks to sweep if smaller). |
 | `--case_set_id` | `""` | Identifier for this set of tuning cases (required). |
 | `--run_id` | `""` | Run ID within the case set (required). |
 | `--case_set_desc` | `""` | Human-readable description. |
@@ -206,7 +329,7 @@ Local results are written to JSON files in the directory `/tmp/kernel_tuner_runn
 
 ---
 
-## 3. Running on TPU VMs via Buildkite
+## 4. Running on TPU VMs via Buildkite
 
 The pipeline is defined in `.buildkite/pipeline_kernel_tuning.yml` and bootstrapped by `.buildkite/scripts/bootstrap_kernel_tuning.sh`.
 
@@ -214,8 +337,8 @@ The pipeline is defined in `.buildkite/pipeline_kernel_tuning.yml` and bootstrap
 
 1. **Bootstrap** (`bootstrap_kernel_tuning.sh`) — uploads the static `pipeline_kernel_tuning.yml`.
 2. **Build** — builds and pushes the `vllm-tpu` Docker image.
-3. **Generate cases + upload dynamic pipeline** — runs `kernel_tuner_runner` inside Docker with `--generate_buildkite_pipeline=True`. The generated YAML is written to `/tmp/kernel_tuning/generated_pipeline.yml` (shared with the host via a volume mount) and then uploaded to Buildkite with `buildkite-agent pipeline upload`.
-4. **Tuning jobs** — the dynamically-uploaded pipeline fans out individual tuning jobs across TPU workers.
+3. **Generate cases + upload dynamic pipeline** — runs `kernel_tuner_runner` inside Docker with `--generate_buildkite_pipeline=True`. Cases are grouped by `TuningKey` to maximize input caching in workers. The generated YAML is written to `/tmp/kernel_tuning/generated_pipeline.yml` (shared with the host via a volume mount) and uploaded to Buildkite with `buildkite-agent pipeline upload`.
+4. **Tuning jobs** — the dynamically-uploaded pipeline fans out individual worker tuning jobs across TPU workers using the multi-process execution framework.
 
 ### Triggering a build
 
@@ -247,7 +370,8 @@ curl -s -X POST \
       "KERNEL_TUNING_CASE_SET_DESC":               "My tuning run description",
       "KERNEL_TUNING_TPU_VERSION":                 "tpu7x",
       "KERNEL_TUNING_TPU_CORES":                   "2",
-      "KERNEL_TUNING_USE_BAYESIAN_OPTIMIZATION":   "True"
+      "KERNEL_TUNING_USE_BAYESIAN_OPTIMIZATION":   "True",
+      "KERNEL_TUNING_MIN_CASES_FOR_BAYESIAN":      "200"
     }
   }'
 ```
@@ -264,27 +388,43 @@ curl -s -X POST \
 | `KERNEL_TUNING_TPU_CORES` | `1`, `8`, `16` | Number of TPU cores for tuning jobs. |
 | `KERNEL_TUNING_USE_BAYESIAN_OPTIMIZATION` | `True` or `False` | Set to `True` to use Bayesian Optimization instead of full grid sweep. |
 | `KERNEL_TUNING_N_BAYESIAN_TRIALS` | `100` | Number of Bayesian trials to sample per tuning key bucket (overrides tuner default). |
+| `KERNEL_TUNING_MIN_CASES_FOR_BAYESIAN` | `200` | Minimum cases in search space required to use Bayesian Optimization (overrides tuner default). |
 
 ---
 
-## 4. Optimization Strategies & Bayesian Optimization
+## 5. Optimization Strategies & Bayesian Optimization
 
-The framework decouples tuning execution from search strategies via the `TuningOptimizer` abstraction (`tools/kernel/tuner/v1/optimizer/`):
+The framework decouples search strategies from kernel execution via the `TuningOptimizer` abstraction ([optimizer/base_optimizer.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/optimizer/base_optimizer.py)):
 
-1. **`SweepOptimizer`**: Exhaustively iterates through all tuning cases in the Cartesian product search space.
-2. **`BayesianOptimizer`**: Uses Optuna with Tree-structured Parzen Estimator (TPE) sampling and integer remapping to intelligently select tile and block configurations to evaluate.
+1. **`SweepOptimizer`** ([optimizer/sweep_optimizer.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/optimizer/sweep_optimizer.py)): Exhaustively iterates through all tuning cases in the search space.
+2. **`BayesianOptimizer`** ([optimizer/bayesian_optimizer.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/optimizer/bayesian_optimizer.py)): Uses Optuna with Tree-structured Parzen Estimator (TPE) sampling to intelligently sample tile configurations.
+
+### Multi-Process Execution Integration
+
+Optimizers run inside the **Worker Process** and communicate with the persistent **Executor Process** via `ExecutorProcessManager`:
+
+```python
+# Executed in Worker Process:
+status, avg_ns, total_ns = self.executor_mgr.execute_run(
+    tuning_key=case.tuning_key,
+    tunable_params=case.tunable_params,
+    iters=iters,
+)
+```
+
+If an evaluated configuration triggers a TPU OOM or hardware hang, the Executor crashes, `ExecutorProcessManager` recovers transparently by restarting the Executor process, and the Optimizer receives `TuningStatus.UNKNOWN_ERROR` to record the failure in Optuna without losing search state.
 
 ### Key Capabilities of Bayesian Optimization
 
 - **TPE Sampler with Integer Remapping**: Maps discrete parameter choices to continuous indices, allowing Optuna to learn parameter trends and converge rapidly.
 - **Relative Early Stopping**: Automatically stops trial sampling per tuning key if latency does not improve by at least `bayesian_early_stopping_min_delta_ratio` over `bayesian_early_stopping_patience` consecutive trials.
-- **Smart Fallback**: Automatically reverts to full sweep (`SweepOptimizer`) if `get_search_space()` returns an empty dictionary, if the total search space cases for a key is less than `min_cases_for_bayesian`, or if `support_bayesian_optimization` is disabled in `TunerConfig`.
+- **Smart Fallback**: Automatically reverts to full sweep (`SweepOptimizer`) if `get_search_space()` returns an empty dictionary, if total search space cases for a key is less than `min_cases_for_bayesian`, or if `support_bayesian_optimization` is disabled in `TunerConfig`.
 
 ---
 
-## 5. Inspecting Results
+## 6. Inspecting Results
 
-Use the interactive CLI:
+Use the interactive CLI ([inspect_result_cli.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/inspect_result_cli.py)):
 
 ```bash
 python tools/kernel/tuner/v1/inspect_result_cli.py
@@ -348,11 +488,13 @@ Total number of work buckets for a given run.
 list_bucket_status [--case_set_id ID] [--run_id ID]
 ```
 
-Shows how many buckets are `COMPLETED` vs pending — useful for monitoring progress.
+Shows how many buckets are in each `BucketStatus` state (`COMPLETED`, `IN_PROGRESS`, `FAILED`, `YIELDED`, `NOT_STARTED`) — useful for monitoring progress and worker yields.
 
 ```
 inspect|cs=testing_tuning_infra_11|run=001> list_bucket_status
   COMPLETED: 4
+  IN_PROGRESS: 0
+  YIELDED: 0
 ```
 
 #### Query run status
@@ -418,7 +560,7 @@ exit / quit  Exit the CLI
 
 ---
 
-## 6. End-to-End Autotuning Pipeline
+## 7. End-to-End Autotuning Pipeline
 
 The v1 tuner framework is integrated into a fully automated Buildkite pipeline that continuously optimizes kernel parameters based on real-world workload traces. The pipeline operates in 5 stages and automatically creates Pull Requests with improved configurations.
 
@@ -429,7 +571,7 @@ The E2E pipeline is defined in `.buildkite/pipeline_kernel_autotune_template.yml
 1. **Pre-Autotuning Benchmark (Cases Collection):**
    Runs a standard benchmark run on the `main` branch. During this run, the kernels intercept actual input shapes, serializing them into Spanner as `TuningCase` records. This guarantees tuning only targets shapes actually seen in production.
 2. **Kernel Tuning Execution:**
-   Triggers parallel tuning jobs on Cloud TPUs. Each job claims a bucket of generated tuning cases and measures latency for the tunable parameters (via full sweep or Bayesian optimization). Results are saved to Spanner.
+   Triggers parallel tuning jobs on Cloud TPUs using the multi-process worker architecture. Each job claims a bucket of generated tuning cases and measures latency for the tunable parameters (via full sweep or Bayesian optimization). Results are saved to Spanner.
 3. **Patch Kernel Tuning Result:**
    Fetches the lowest latency configuration for each shape from Spanner. It then updates the `tuned_params_mapping` dictionary in target Python files (e.g. `tpu_inference/kernels/mla/v2/tuned_params.py`), commits the change, and pushes it to an evaluation branch.
 4. **Post-Autotuning Benchmark (Evaluation):**
@@ -439,7 +581,7 @@ The E2E pipeline is defined in `.buildkite/pipeline_kernel_autotune_template.yml
 
 ### Configuration
 
-Register new kernels in `tools/kernel/tuner/v1/autotune/kernel_autotune_config.py`:
+Register new kernels in [autotune/kernel_autotune_config.py](https://github.com/vllm-project/tpu-inference/tree/main/tools/kernel/tuner/v1/autotune/kernel_autotune_config.py):
 
 ```python
 kernel_autotune_mapping = {
@@ -455,11 +597,11 @@ Target `tuned_params.py` files must contain:
 
 ---
 
-## 7. Future Work
+## 8. Future Work
 
 ### Asynchronous & Parallel Optimization Pipelining
 
-Currently, Optuna trial updates and parameter sampling occur sequentially in the worker process. Overhead can be further reduced by running Bayesian sampling updates asynchronously on CPU worker threads while keeping TPU execution pipelines fully saturated.
+Support running multiple workers in parallel on multi-core TPU VMs when a kernel does not require all TPU cores simultaneously.
 
 ### Warm-Starting from Previous Runs
 

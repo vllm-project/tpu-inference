@@ -34,20 +34,12 @@ from tpu_inference.utils import align_to, get_dtype_packing
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-flags.DEFINE_integer("mla_total_num_pages", 1506,
-                     "Total number of pages in the cache.")
-flags.DEFINE_integer("mla_page_size_per_kv_packing", 256,
-                     "Page size per KV packing.")
-flags.DEFINE_integer("mla_kv_packing", 4, "Packing factor for KV.")
-flags.DEFINE_integer("mla_max_num_seqs", 160,
-                     "Maximum number of sequences in the batch.")
-flags.DEFINE_integer("mla_pages_per_seq", 9, "Number of pages per sequence.")
-flags.DEFINE_integer("mla_actual_num_q_heads", 128,
-                     "Actual number of Q heads.")
-flags.DEFINE_integer("mla_actual_lkv_dim", 512, "Actual NOPE head dimension.")
-flags.DEFINE_integer("mla_actual_r_dim", 64, "Actual ROPE head dimension.")
-flags.DEFINE_string("mla_kv_dtype", "float8_e4m3fn", "KV cache data type.")
-flags.DEFINE_string("mla_q_dtype", "float8_e4m3fn", "Q activation dtype.")
+
+def _get_flag_value(name: str):
+    """Safely retrieves a flag's value if flags are parsed, otherwise its default."""
+    if flags.FLAGS.is_parsed():
+        return getattr(flags.FLAGS, name)
+    return flags.FLAGS[name].default
 
 
 def _generate_mla_inputs(
@@ -159,7 +151,7 @@ def _generate_mla_inputs(
 
 class MlaKernelTuner(KernelTunerBase):
 
-    def __init__(self, run_config: RunConfig):
+    def __init__(self, run_config: RunConfig, lightweight: bool = False):
         self.tuner_config = TunerConfig(
             tuning_key_class=TuningKey,
             tunable_params_class=TunableParams,
@@ -172,7 +164,9 @@ class MlaKernelTuner(KernelTunerBase):
             # letting optuna exploit the model after the initial warm-up.
             n_bayesian_trials=50,
         )
-        super().__init__(tuner_config=self.tuner_config, run_config=run_config)
+        super().__init__(tuner_config=self.tuner_config,
+                         run_config=run_config,
+                         lightweight=lightweight)
 
     def get_search_space(self, tuning_key: TuningKey) -> dict:
         """Return the tunable-parameter search space for a given TuningKey.
@@ -226,16 +220,16 @@ class MlaKernelTuner(KernelTunerBase):
         ]:
             tuning_key = TuningKey(
                 max_num_tokens=max_num_tokens,
-                actual_num_q_heads=flags.FLAGS.mla_actual_num_q_heads,
-                actual_lkv_dim=flags.FLAGS.mla_actual_lkv_dim,
-                actual_r_dim=flags.FLAGS.mla_actual_r_dim,
-                kv_dtype=flags.FLAGS.mla_kv_dtype,
-                q_dtype=flags.FLAGS.mla_q_dtype,
-                page_size_per_kv_packing=flags.FLAGS.
-                mla_page_size_per_kv_packing,
-                kv_packing=flags.FLAGS.mla_kv_packing,
-                max_num_seqs=flags.FLAGS.mla_max_num_seqs,
-                pages_per_seq=flags.FLAGS.mla_pages_per_seq,
+                actual_num_q_heads=_get_flag_value("mla_actual_num_q_heads"),
+                actual_lkv_dim=_get_flag_value("mla_actual_lkv_dim"),
+                actual_r_dim=_get_flag_value("mla_actual_r_dim"),
+                kv_dtype=_get_flag_value("mla_kv_dtype"),
+                q_dtype=_get_flag_value("mla_q_dtype"),
+                page_size_per_kv_packing=_get_flag_value(
+                    "mla_page_size_per_kv_packing"),
+                kv_packing=_get_flag_value("mla_kv_packing"),
+                max_num_seqs=_get_flag_value("mla_max_num_seqs"),
+                pages_per_seq=_get_flag_value("mla_pages_per_seq"),
                 s_dtype="bfloat16",
                 case="batched_decode",
                 soft_cap=None,
@@ -273,7 +267,7 @@ class MlaKernelTuner(KernelTunerBase):
             tuning_key.kv_packing,
             q_dtype=jnp.dtype(tuning_key.q_dtype),
             kv_dtype=jnp.dtype(tuning_key.kv_dtype),
-            num_pages=flags.FLAGS.mla_total_num_pages,
+            num_pages=_get_flag_value("mla_total_num_pages"),
             rng=rng,
         )
 
