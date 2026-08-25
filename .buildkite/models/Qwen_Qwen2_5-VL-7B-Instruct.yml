@@ -69,6 +69,13 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      # Without this the torchax (MODEL_IMPL_TYPE=vllm) vision tower has no
+      # compiled route: MMEncoderJITManager is never created, so all 32 ViT
+      # blocks run op-by-op through the torchax dispatch for every image.
+      # The flag is inert for the JAX-native model, which does not implement
+      # vLLM's SupportsEncoderCudaGraph protocol.
+      COMPILATION_CONFIG: '{"cudagraph_mm_encoder": true}'
     commands:
       - |
         if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then

@@ -77,6 +77,42 @@ class TestAttnDpBatchAxisFix:
         assert out.shape == (1, 128, 2, 64)
 
 
+class TestVitSdpaPadSegments:
+    """`vllm_vit_sdpa` must hand the kernel segment ids in which every padded
+    position (kernel 128-alignment padding AND mm-encoder budget padding) sits
+    in its own trailing segment."""
+
+    def _capture_seg_ids(self, q_seq_len, cu_seqlens):
+        q = k = v = jnp.ones((1, q_seq_len, 2, 64), dtype=jnp.float32)
+        with mock.patch.object(sdpa_ops,
+                               'sharded_flash_attention') as mock_sfa:
+            mock_sfa.return_value = mock.MagicMock(
+                return_value=jnp.ones((1, 2, q_seq_len,
+                                       64), dtype=jnp.float32))
+            vllm_vit_sdpa(q, k, v, cu_seqlens=cu_seqlens)
+        attn_fn = mock_sfa.return_value
+        seg_ids = attn_fn.call_args[0][3]
+        return np.asarray(seg_ids.q[0]), np.asarray(seg_ids.kv[0])
+
+    def test_budget_padding_gets_dedicated_segment(self):
+        """Full batch (no empty trailing cu_seqlens entry) with padded q/k/v:
+        the tail must NOT inherit the last image's segment id."""
+        # 2 images covering [0, 64) and [64, 192); 192..255 is budget padding.
+        q_seg, kv_seg = self._capture_seg_ids(256, [0, 64, 192])
+        expected = np.array([0] * 64 + [1] * 128 + [2] * 64)
+        np.testing.assert_array_equal(q_seg, expected)
+        np.testing.assert_array_equal(kv_seg, expected)
+
+    def test_kernel_alignment_padding_gets_dedicated_segment(self):
+        """The 128-alignment pad rows keep their dedicated trailing segment."""
+        # seq_len 100 -> q_pad 28; one image covering the whole real range.
+        q_seg, kv_seg = self._capture_seg_ids(100, [0, 100])
+        assert q_seg.shape == (128, )
+        np.testing.assert_array_equal(q_seg[:100], np.zeros(100))
+        np.testing.assert_array_equal(q_seg[100:], np.ones(28))
+        np.testing.assert_array_equal(kv_seg, q_seg)
+
+
 class TestVitVmemLimit:
     """The ViT flash attention must raise the scoped-vmem limit above the
     32MiB pallas default: large flattened image sequences exceed it

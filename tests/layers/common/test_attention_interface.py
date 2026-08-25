@@ -21,7 +21,8 @@ import pytest
 from jax.sharding import Mesh
 
 from tpu_inference.layers.common.attention_interface import (
-    attention, mla_attention, sharded_ragged_paged_attention)
+    attention, mla_attention, segment_ids_from_cu_seqlens,
+    sharded_ragged_paged_attention)
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -499,3 +500,54 @@ def test_mla_attention(monkeypatch, mesh):
     assert kernel_kwargs["num_queries_per_block"] == (1, 16, 16)
     assert kernel_kwargs["mixed_q_split"] == 1
     assert kernel_kwargs["sm_scale"] == 0.1
+
+
+class TestSegmentIdsFromCuSeqlens:
+    """`segment_ids_from_cu_seqlens` must give padding positions their own
+    segment id.
+
+    Wherever q/k/v are padded past `cu_seqlens[-1]` — e.g. the mm-encoder
+    budget path, where `pixel_values` is padded up to the token budget — a
+    `jnp.repeat(..., total_repeat_length=...)` construction would fill those
+    rows with the LAST real segment id, letting pad tokens attend together
+    with the last real sequence whenever `cu_seqlens` has no trailing empty
+    segment.
+    """
+
+    def test_trailing_positions_get_pad_segment(self):
+        """Positions >= cu_seqlens[-1] get id num_segs, not the last real id."""
+        cu = jnp.array([0, 4, 10], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 16)
+        expected = [0] * 4 + [1] * 6 + [2] * 6
+        np.testing.assert_array_equal(np.asarray(seg), np.array(expected))
+
+    def test_exact_fit_has_no_pad_segment(self):
+        """total_len == cu_seqlens[-1]: every position belongs to a real seg."""
+        cu = jnp.array([0, 4, 10], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 10)
+        np.testing.assert_array_equal(np.asarray(seg),
+                                      np.array([0] * 4 + [1] * 6))
+
+    def test_padded_cu_seqlens_with_empty_trailing_segments(self):
+        """cu_seqlens padded by repeating the last offset (empty sequences):
+        real positions keep their ids and pad positions still get num_segs."""
+        # 2 real sequences (0..3, 4..9) padded out to 4 sequence slots.
+        cu = jnp.array([0, 4, 10, 10, 10], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 14)
+        expected = [0] * 4 + [1] * 6 + [4] * 4
+        np.testing.assert_array_equal(np.asarray(seg), np.array(expected))
+
+    def test_leading_empty_segment(self):
+        """An empty leading segment must not swallow position 0."""
+        cu = jnp.array([0, 0, 6], dtype=jnp.int32)
+        seg = segment_ids_from_cu_seqlens(cu, 8)
+        np.testing.assert_array_equal(np.asarray(seg),
+                                      np.array([1] * 6 + [2] * 2))
+
+    def test_jit_traced_matches_eager(self):
+        """cu_seqlens is a traced array under jax.jit (torchax tensor -> jax
+        array); only total_len is static, so ids must match the eager result."""
+        cu = jnp.array([0, 4, 10, 10], dtype=jnp.int32)
+        eager = segment_ids_from_cu_seqlens(cu, 16)
+        jitted = jax.jit(segment_ids_from_cu_seqlens, static_argnums=1)(cu, 16)
+        np.testing.assert_array_equal(np.asarray(jitted), np.asarray(eager))
