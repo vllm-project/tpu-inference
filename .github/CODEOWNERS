@@ -88,7 +88,7 @@
 /tests/layers/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/lora/ @vanbasten23 @kyuyeunk
-/tests/models/ @kyuyeunk @lk-chen
+/tests/models/ @kyuyeunk @lk-chen @jrplatin
 /tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
 /tests/platforms/ @sixiang-google @mrjunwan-lang
