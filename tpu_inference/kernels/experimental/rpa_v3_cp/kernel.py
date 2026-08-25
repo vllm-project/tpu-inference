@@ -2378,10 +2378,6 @@ def ragged_paged_attention(
             pl.BlockSpec(memory_space=pltpu.HBM),  # kv_cache
         ]
 
-        # A launch that never writes the cache (update_kv_cache=False, e.g. the
-        # PCP ring cache phase) emits NO cache output and does not alias the
-        # cache: an aliased-but-unwritten output of a communicating custom
-        # call makes XLA copy the whole cache around the launch.
         out_specs = [
             pl.BlockSpec(memory_space=pltpu.HBM),  # o
             pl.BlockSpec(memory_space=pltpu.HBM)
