@@ -19,6 +19,7 @@ scale. Accumulation stays BF16 throughout; only the phase 2 transfer is FP8.
 """
 
 import functools
+import logging
 import math
 import os
 
@@ -33,19 +34,149 @@ from tpu_inference.kernels.collectives.hierrs_tc.config import (
     pick_num_micro_batches)
 from tpu_inference.kernels.collectives.hierrs_tc.kernel import (
     hier_rs_kernel, make_unified_scratch_shapes)
+# stdlib logging on purpose: every other import in this package stays inside
+# hierrs_tc, which is what lets the kernel be imported (and unit-tested)
+# without dragging in the vLLM graph. tpu_inference.logger imports vllm.
+logger = logging.getLogger(__name__)
 
 # RS_VMEM_PIN=0 disables VMEM operand pinning entirely and restores the old
 # behaviour (pl.ANY operands, 0.95 scoped claim). RS_VMEM_FRAC / RS_VMEM_INPUT
 # force a specific plan and exist for sweeps; unset, the plan is chosen by
 # _pick_vmem_plan below.
 _RS_VMEM_PIN = os.environ.get("RS_VMEM_PIN", "1") != "0"
-# EXP-021 probe: also request VMEM for the PRIMARY output (out_shape,
-# seq_chunk x hidden -- 2 MiB at 2048 rows). The other outputs stay pl.ANY:
-# running_sum / recv_buf / the fp8 payloads are ~16 MiB each and exist as
-# outputs only because Pallas cannot allocate HBM scratch, so they cannot move.
+# Also request VMEM for the PRIMARY output (out_shape, seq_chunk x hidden --
+# 2 MiB at local_seq_len 2048). Takes effect only when the operand is pinned
+# too (see `_out0_space` below). The working buffers are handled separately by
+# RS_VMEM_WORK.
 _RS_VMEM_OUT = os.environ.get("RS_VMEM_OUT", "0") == "1"
 _RS_VMEM_INPUT_OVERRIDE = os.environ.get("RS_VMEM_INPUT")
 _RS_VMEM_FRAC_OVERRIDE = os.environ.get("RS_VMEM_FRAC")
+
+# RS_VMEM_WORK: place the kernel's WORKING buffers (running_sum, recv_buf and
+# the wire's staging buffers) in VMEM scratch instead of HBM.
+#
+# Those buffers are pure scratch -- nothing downstream reads them. They are
+# declared as `pl.ANY` OUTPUTS only because Pallas cannot allocate HBM scratch,
+# so output-ness is the mechanism that forces them into HBM. Declaring them as
+# real VMEM scratch instead removes the HBM round trip that made the kernel's
+# reduce-scatter input and output spill where XLA's psum_scatter keeps both in
+# alternate memory.
+#
+# Note this is NOT the same as `BlockSpec(memory_space=VMEM)` on an output,
+# which was measured to colour nothing and merely add a copy-out.
+#
+# DEFAULT ON, but it is SHAPE-GATED and does not engage everywhere. The working
+# set is O(local_seq_len * hidden_dim) and VMEM is 64 MiB total, so
+# _plan_work_scratch falls back to the pl.ANY/HBM form once it stops fitting.
+#
+# The working set is `local_seq_len * hidden_dim * 6 bytes` on BOTH wires:
+# running_sum and recv_buf are bf16 (2 B/elem each) either way, and the fp8
+# wire replaces the bf16 phase-2 landing buffer with two 1-byte staging
+# buffers. FP8 halves what crosses the wire; it does not shrink this.
+#
+# Measured at hidden 4096 on 8 devices, against 0.92 * 64 = 58.9 MiB usable:
+#
+#   local_seq_len | operand | working set | scoped | total | VMEM scratch?
+#            128  |   1.0   |     3.1     |   1.3  |   5.4 | yes
+#            256  |   2.0   |     6.1     |   2.6  |  10.7 | yes
+#            512  |   4.0   |    12.1     |   5.2  |  21.3 | yes
+#           1024  |   8.0   |    24.1     |  10.4  |  42.5 | yes
+#           2048  |  16.0   |    48.1     |  10.4  |  74.5 | NO -- over 58.9
+#
+# Only 2048 is excluded, and it is excluded by arithmetic rather than by a
+# tuning constant. There the operand and primary output are still VMEM-pinned
+# by _pick_vmem_plan / _RS_VMEM_OUT; it is only the working set that stays in
+# HBM. `RS_VMEM_WORK=1 ignored` is logged whenever that happens, once per
+# shape, so the fallback is never silent.
+#
+# `local_seq_len` here is the PER-DEVICE, PRE-scatter row count, i.e. the
+# operand's first dim -- 8x the post-scatter row count that appears in the HLO.
+# A decode-heavy server sweeps this whole range in one run rather than running
+# a single shape, so both branches of the table are live in production and the
+# large shapes are NOT covered by this optimisation.
+#
+# RS_VMEM_WORK=0 restores the pl.ANY output form unconditionally.
+_RS_VMEM_WORK = os.environ.get("RS_VMEM_WORK", "1") not in ("0", "")
+# Optional hard ceiling on the scoped claim, as a fraction of total VMEM.
+# UNSET BY DEFAULT: _plan_work_scratch claims exactly what the shape needs and
+# refuses the shape outright when that does not leave room for the operand, so
+# a blanket fraction can only reject shapes that genuinely fit.
+# Set it to re-impose a ceiling if a future module hits
+# "Too many buffers are colored in the alternate memory ... size: 67108864" --
+# that failure is what the ceiling was originally guarding against.
+_RS_VMEM_WORK_FRAC = (float(os.environ["RS_VMEM_WORK_FRAC"])
+                      if "RS_VMEM_WORK_FRAC" in os.environ else None)
+
+
+def _work_set_bytes(local_seq_len, hidden_dim_size, itemsize, fp8_comm,
+                    num_devices, num_scale_slots):
+    """Total bytes of the buffers that move from pl.ANY outputs to VMEM scratch."""
+    big = local_seq_len * hidden_dim_size
+    total = 2 * big * itemsize  # running_sum + recv_buf
+    if fp8_comm:
+        total += 2 * big  # fp8_send + fp8_recv, 1 byte/elem
+        total += 2 * num_devices * num_scale_slots * SCALE_LANE * 4
+    else:
+        total += big * itemsize  # the bf16 wire's phase-2 landing buffer
+    return total
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_work_scratch_off(work_bytes: int, capacity: int) -> None:
+    """Log the RS_VMEM_WORK fallback once per distinct shape.
+
+  lru_cache keyed on the sizes, so a server that sweeps many shapes logs one
+  line per shape rather than one per call.
+  """
+    logger.info(
+        "hierrs_tc: RS_VMEM_WORK=1 ignored at this shape -- the working set "
+        "(%.2f MiB) plus the operand does not fit in %.0f MiB of VMEM. "
+        "Falling back to pl.ANY outputs (HBM).", work_bytes / 2**20,
+        capacity / 2**20)
+
+
+def _plan_work_scratch(local_seq_len, hidden_dim_size, itemsize, fp8_comm,
+                       num_devices, num_scale_slots, num_micro_batches,
+                       vmem_frac):
+    """Can the working set live in VMEM scratch, and at what scoped claim?
+
+  Moving these buffers out of `pl.ANY` outputs and into scratch makes them
+  genuinely VMEM-resident -- unlike a `BlockSpec(memory_space=VMEM)` on the
+  output, which colours nothing and merely adds a copy-out.
+  The cost is that they now come out of the SCOPED claim, so `vmem_frac` has to
+  grow to cover them or the kernel dies at compile time with
+  `CompileTimeScopedVmemOom`.
+
+  The operand still has to be colourable out of what the scoped claim leaves
+  behind, so this returns (False, unchanged_frac) whenever the two do not fit
+  together, which is what happens at the largest shapes.
+
+  Returns (enabled, vmem_frac).
+  """
+    if not _RS_VMEM_WORK:
+        return False, vmem_frac
+    capacity = pltpu.get_tpu_info().vmem_capacity_bytes
+    operand = local_seq_len * hidden_dim_size * itemsize
+    work = _work_set_bytes(local_seq_len, hidden_dim_size, itemsize, fp8_comm,
+                           num_devices, num_scale_slots)
+    # Existing BufferedRef/semaphore scratch, same model as _pick_vmem_plan.
+    scoped = int(operand / max(1, num_micro_batches) * _VMEM_SCOPED_SLACK)
+    need = scoped + work
+    # THE decision: the scoped claim and the operand must both fit, with
+    # _VMEM_TOTAL_SAFETY held back for everything else XLA colours. This is a
+    # property of the shape -- no tuning knob can make a shape fit that does
+    # not, and none should reject one that does.
+    if need + operand > capacity * _VMEM_TOTAL_SAFETY:
+        _warn_work_scratch_off(work, capacity)
+        return False, vmem_frac
+    # Claim exactly what this shape needs, not a fixed fraction. Claiming more
+    # steals alternate memory MSA needs to colour the operand; claiming less
+    # raises CompileTimeScopedVmemOom.
+    frac = need / capacity
+    if _RS_VMEM_WORK_FRAC is not None and frac > _RS_VMEM_WORK_FRAC:
+        _warn_work_scratch_off(work, capacity)
+        return False, vmem_frac
+    return True, frac
 
 
 @functools.lru_cache(maxsize=1)
@@ -97,6 +228,7 @@ def _pin_unsupported_once() -> None:
             "unpinned (correct, and the measured cost is ~0.3% on the fp8 wire "
             "and ~2.2% on bf16). Set RS_VMEM_INPUT=2 to force the old path.",
             flush=True)
+
 
 # Default scoped claim when we are NOT pinning. Deliberately generous: it is a
 # ceiling, not a reservation (EXP-016 measured 60.80 MiB claimed vs 8.00 MiB
@@ -263,10 +395,39 @@ def hierarchical_reduce_scatter_local(
     recv_buf_shape = jax.ShapeDtypeStruct((local_seq_len, hidden_dim_size),
                                           local_x.dtype)
 
-    out_shapes = [out_shape, running_sum_shape, recv_buf_shape]
+    work_scratch_on, vmem_frac = _plan_work_scratch(
+        local_seq_len, hidden_dim_size, local_x.dtype.itemsize, fp8_comm,
+        num_devices, num_scale_slots, num_micro_batches, vmem_frac)
+
+    # The working set -- running_sum, recv_buf, and the wire's staging buffers.
+    # These are pure scratch: nothing downstream reads them. They are declared
+    # as `pl.ANY` OUTPUTS only because Pallas cannot allocate HBM scratch, so
+    # output-ness is what forces them into HBM. Where they fit, RS_VMEM_WORK=1
+    # declares them as real VMEM scratch instead and the HBM buffers disappear.
+    # A `BlockSpec(memory_space=VMEM)` on the OUTPUT is not an alternative: it
+    # colours nothing and merely adds a copy-out.
+    #
+    # ORDER IS LOAD-BEARING. Pallas passes the kernel inputs, then outputs, then
+    # scratch. Emitting this group in the same relative order either as trailing
+    # outputs or as leading scratch leaves hier_rs_kernel's positional unpacking
+    # byte-identical, which is why that file needs no change. Never promote a
+    # subset -- that interleaves the two groups and silently permutes the args.
     _out0_space = pltpu.VMEM if (_RS_VMEM_OUT and vmem_pin) else pl.ANY
-    out_specs = [pl.BlockSpec(memory_space=_out0_space)
-                 ] + [pl.BlockSpec(memory_space=pl.ANY)] * 2
+    out_shapes = [out_shape]
+    out_specs = [pl.BlockSpec(memory_space=_out0_space)]
+    work_scratch = []
+
+    def _emit_work(shape_struct, memref):
+        if work_scratch_on:
+            work_scratch.append(memref)
+        else:
+            out_shapes.append(shape_struct)
+            out_specs.append(pl.BlockSpec(memory_space=pl.ANY))
+
+    _emit_work(running_sum_shape,
+               pltpu.VMEM((local_seq_len, hidden_dim_size), local_x.dtype))
+    _emit_work(recv_buf_shape,
+               pltpu.VMEM((local_seq_len, hidden_dim_size), local_x.dtype))
 
     # Separate phase-2 landing buffer for the bf16 wire. Without it an incoming
     # phase-2 chunk can overwrite phase-1 bytes the receiver has not drained
@@ -274,19 +435,28 @@ def hierarchical_reduce_scatter_local(
     # 512 rows / mb=4. Not optional.
     # The fp8 wire already lands phase 2 in fp8_recv_buf, so it needs nothing.
     if not fp8_comm:
-        out_shapes.append(
+        _emit_work(
             jax.ShapeDtypeStruct((local_seq_len, hidden_dim_size),
-                                 local_x.dtype))
-        out_specs.append(pl.BlockSpec(memory_space=pl.ANY))
+                                 local_x.dtype),
+            pltpu.VMEM((local_seq_len, hidden_dim_size), local_x.dtype))
 
     if fp8_comm:
         fp8_shape = jax.ShapeDtypeStruct((local_seq_len, hidden_dim_size),
                                          jnp.float8_e4m3fn)
-        SCALE_LANE = 128
         scale_shape = jax.ShapeDtypeStruct(
             (num_devices, num_scale_slots * SCALE_LANE), jnp.float32)
-        out_shapes += [fp8_shape, fp8_shape, scale_shape, scale_shape]
-        out_specs += [pl.BlockSpec(memory_space=pl.ANY)] * 4
+        # Order must match hier_rs_kernel's unpacking:
+        # fp8_send_ref, fp8_recv_ref, scale_send_ref, scale_recv_ref.
+        for _ in range(2):
+            _emit_work(
+                fp8_shape,
+                pltpu.VMEM((local_seq_len, hidden_dim_size),
+                           jnp.float8_e4m3fn))
+        for _ in range(2):
+            _emit_work(
+                scale_shape,
+                pltpu.VMEM((num_devices, num_scale_slots * SCALE_LANE),
+                           jnp.float32))
 
     config = Config(
         num_devices=num_devices,
@@ -306,7 +476,9 @@ def hierarchical_reduce_scatter_local(
         # by with_memory_space_constraint at the call site below instead.
         in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
         out_specs=tuple(out_specs),
-        scratch_shapes=tuple(
+        # work_scratch FIRST: it occupies exactly the positions these buffers
+        # held as trailing outputs, so the kernel's unpacking is unchanged.
+        scratch_shapes=tuple(work_scratch) + tuple(
             make_unified_scratch_shapes(
                 seq_chunk_size,
                 mb_size,
