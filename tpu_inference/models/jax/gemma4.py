@@ -24,7 +24,7 @@ from transformers import Gemma4TextConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import WeightsMapper
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -49,6 +49,52 @@ from tpu_inference.models.jax.utils.weight_utils import (
     load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
+
+
+def _gather_and_select_global_kv_heads(
+    k: jax.Array,
+    mesh: Mesh,
+    logical_num_kv_heads: int,
+) -> jax.Array:
+    """Converts head-dimension-sharded K/V to replicated physical KV heads.
+
+    Every model shard initially owns a slice of every logical KV head's head
+    dimension. One all-gather reconstructs the logical heads, after which each
+    shard keeps the head required by its local query heads. The shard-map output
+    represents those local selections as physical KV heads sharded over TP.
+    """
+    model_axis = ShardingAxisName.MODEL
+    tp_size = mesh.shape[model_axis]
+    if logical_num_kv_heads >= tp_size:
+        raise ValueError("Early KV gather requires fewer KV heads than TP")
+    if tp_size % logical_num_kv_heads != 0:
+        raise ValueError("KV head count must divide tensor parallelism")
+
+    replicas_per_head = tp_size // logical_num_kv_heads
+
+    def gather_and_select(local_k):
+        complete_heads = jax.lax.all_gather(
+            local_k,
+            model_axis,
+            axis=2,
+            tiled=True,
+        )
+        shard_index = jax.lax.axis_index(model_axis)
+        logical_head = shard_index // replicas_per_head
+        return jax.lax.dynamic_slice_in_dim(
+            complete_heads,
+            logical_head,
+            slice_size=1,
+            axis=1,
+        )
+
+    return jax.shard_map(
+        gather_and_select,
+        mesh=mesh,
+        in_specs=P(ShardingAxisName.ATTN_DATA, None, model_axis),
+        out_specs=P(ShardingAxisName.ATTN_DATA, model_axis, None),
+        check_vma=False,
+    )(k)
 
 init_fn = nnx.initializers.uniform()
 
@@ -300,6 +346,13 @@ class Gemma4Attention(JaxModule):
         # replicates kv-heads internally for that case.
         _tp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MODEL)
         _shard_kv_on_k = (_tp_size <= 1) or (self.num_kv_heads % _tp_size == 0)
+        _attention_tp_size = utils.get_mesh_shape_product(
+            mesh, ShardingAxisName.ATTN_HEAD)
+        self.early_global_kv_gather = (
+            envs.GEMMA4_EARLY_GLOBAL_KV_GATHER and use_k_eq_v
+            and 1 < self.num_kv_heads < _tp_size
+            and _tp_size % self.num_kv_heads == 0
+            and _attention_tp_size == _tp_size)
         if not _shard_kv_on_k:
             logger.warning_once(
                 f"num_kv_heads={self.num_kv_heads} is not divisible by TP size {_tp_size}, "
@@ -426,6 +479,12 @@ class Gemma4Attention(JaxModule):
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
         k = self.k_proj(x)
+        if self.early_global_kv_gather:
+            k = _gather_and_select_global_kv_heads(
+                k,
+                self.mesh,
+                self.num_kv_heads,
+            )
         v = self.v_proj(x) if self.v_proj is not None else k
         # q: (T, N, H)
         q = self.q_proj(x)

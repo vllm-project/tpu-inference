@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     SAMPLING_MICROBATCH_SIZE: int = 0
     SAMPLING_KEEP_SHARDED_LOGITS: bool = False
     USE_DISTRIBUTED_TOPK_SAMPLING: bool = False
+    GEMMA4_EARLY_GLOBAL_KV_GATHER: bool = False
 
 
 def env_with_choices(
@@ -513,6 +514,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # candidate sets.
     "USE_DISTRIBUTED_TOPK_SAMPLING":
     env_bool("USE_DISTRIBUTED_TOPK_SAMPLING", default=False),
+    # Reconstruct Gemma 4's shared raw global K/V projection once before K and
+    # V normalization, instead of independently resharding both afterwards.
+    "GEMMA4_EARLY_GLOBAL_KV_GATHER":
+    env_bool("GEMMA4_EARLY_GLOBAL_KV_GATHER", default=False),
 }
 
 
