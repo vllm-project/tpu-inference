@@ -285,8 +285,8 @@ def fused_conv1d_gdn(
     state_indices: jax.Array,  # [num_seqs]
     distribution: jax.Array,  # [3]
     seq_lens: jax.Array,  # [num_seqs]
+    read_state_indices: jax.Array,  # [num_seqs]
     read_offsets: jax.Array | None = None,  # [num_seqs]
-    read_state_indices: jax.Array | None = None,  # [num_seqs]
     *,
     n_kq: int,
     n_v: int,
@@ -329,18 +329,16 @@ def fused_conv1d_gdn(
             speculative verify windows of up to `num_spec_tokens + 1` tokens
             rather than 1-token decodes.
         seq_lens: Sequence lengths for each sequence of shape [num_seqs].
+        read_state_indices: Tensor of shape [num_seqs] mapping sequences to the
+            state slot to read initial state from. Equal to `state_indices` when
+            prefix caching is off. Mamba prefix caching ("align" mode) resumes
+            from the cached state block of the previous block boundary.
         read_offsets: Optional [num_seqs] int32 — per-sequence state read
             offset (num_accepted - 1 from the last verify step). Windowed
             sequences read their initial state from
-            `state_indices[s] + read_offsets[s]` and write one checkpoint
+            `read_state_indices[s] + read_offsets[s]` and write one checkpoint
             per window position to `state_indices[s] + t`. Required when
             `num_spec_tokens > 0`.
-        read_state_indices: Optional [num_seqs] int32 — slot each sequence
-            reads its initial state from, defaulting to `state_indices`.
-            Mamba prefix caching ("align" mode) resumes a sequence from the
-            cached state block of the last block boundary and checkpoints
-            into the block that covers the current position, so the read and
-            write slots differ. `read_offsets` still applies on top of it.
         n_kq: Number of key/query heads.
         n_v: Number of value heads.
         d_k: Key/query dimension.
@@ -386,8 +384,6 @@ def fused_conv1d_gdn(
         read_offsets = jnp.zeros((num_seqs, ), dtype=jnp.int32)
     assert read_offsets.shape == (num_seqs, )
     read_offsets = read_offsets.astype(jnp.int32)
-    if read_state_indices is None:
-        read_state_indices = state_indices
     assert read_state_indices.shape == (num_seqs, )
     read_state_indices = read_state_indices.astype(state_indices.dtype)
     act_in_dtype = qkv.dtype

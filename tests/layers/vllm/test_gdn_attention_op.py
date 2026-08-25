@@ -321,10 +321,15 @@ class TestVllmGatedDeltaNetAttention:
         a = torch.randn(num_tokens, n_v)
         core_attn_out = torch.zeros(num_tokens, n_v, d_v)
 
+        vllm_config = MagicMock()
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.block_size = mamba_block_size
+
         with set_vllm_model_wrapper_context(
                 kv_caches=[(conv_state, recurrent_state)],
                 mesh=mesh,
                 layer_name_to_kvcache_index={layer_name: 0},
+                vllm_config=vllm_config,
         ):
             gdn_attention_core_tpu(mixed_qkv, b, a, core_attn_out, layer_name,
                                    mesh)
@@ -424,10 +429,14 @@ class TestVllmGatedDeltaNetAttention:
         a = torch.randn(num_tokens, n_v)
         core_attn_out = torch.zeros(num_tokens, n_v, d_v)
 
+        vllm_config = MagicMock()
+        vllm_config.cache_config.mamba_cache_mode = "none"
+
         with set_vllm_model_wrapper_context(
                 kv_caches=[(conv_state, recurrent_state)],
                 mesh=mesh,
                 layer_name_to_kvcache_index={layer_name: 0},
+                vllm_config=vllm_config,
         ):
             gdn_attention_core_tpu(mixed_qkv, b, a, core_attn_out, layer_name,
                                    mesh)
@@ -436,9 +445,10 @@ class TestVllmGatedDeltaNetAttention:
         call_kwargs = mock_run_jax.call_args[1]
         call_args = mock_run_jax.call_args[0]
 
-        # state_indices should be [3, 7] and read_state_indices should be None
+        # state_indices and read_state_indices should both be [3, 7]
         actual_state_indices = call_args[9]  # 10th positional arg
         actual_read_state_indices = call_kwargs["read_state_indices"]
 
         np.testing.assert_array_equal(np.array(actual_state_indices), [3, 7])
-        assert actual_read_state_indices is None
+        np.testing.assert_array_equal(np.array(actual_read_state_indices),
+                                      [3, 7])

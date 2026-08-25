@@ -302,6 +302,7 @@ class TestTpuPlatform:
         vllm_config.compilation_config.backend = ""
         vllm_config.model_config.is_hybrid = True
         vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
         vllm_config.cache_config.block_size = 16
         vllm_config.cache_config.prefix_match_unit = 8
         vllm_config.speculative_config = None

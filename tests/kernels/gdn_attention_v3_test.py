@@ -45,6 +45,7 @@ def gdn_attention_ref(
     d_k: int,
     d_v: int,
     kernel_size: int,
+    read_state_indices: jnp.ndarray | None = None,
 ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs reference GDN attention sequence-by-sequence in eager mode.
 
@@ -55,13 +56,17 @@ def gdn_attention_ref(
     num_tokens = qkv.shape[0]
     num_valid_seqs = int(distribution[2])
 
+    if read_state_indices is None:
+        read_state_indices = state_indices
+
     out_mixed_qkv = jnp.zeros_like(qkv)
     new_conv_state = jnp.array(conv_state)
     new_recurrent_state = jnp.array(recurrent_state)
     output = jnp.zeros((num_tokens, n_v * d_v), dtype=qkv.dtype)
 
     for req_idx in range(num_valid_seqs):
-        s = int(state_indices[req_idx])
+        s_read = int(read_state_indices[req_idx])
+        s_write = int(state_indices[req_idx])
         start = int(query_start_loc[req_idx])
         end = int(query_start_loc[req_idx + 1])
         query_len = end - start
@@ -70,11 +75,9 @@ def gdn_attention_ref(
 
         has_init = bool((seq_lens[req_idx] - query_len) > 0)
         if has_init:
-            c_state = new_conv_state[s]
+            c_state = conv_state[s_read]
         else:
-            c_state = jnp.zeros_like(new_conv_state[s])
-            new_recurrent_state = new_recurrent_state.at[s].set(
-                jnp.zeros_like(new_recurrent_state[s]))
+            c_state = jnp.zeros_like(conv_state[s_read])
 
         # Part 1: Conv1D
         X = qkv[start:end]
@@ -86,20 +89,27 @@ def gdn_attention_ref(
         if conv_bias is not None:
             acc += conv_bias.astype(jnp.float32)[None, :]
         conv_out = acc.astype(qkv.dtype)
-        new_conv_state = new_conv_state.at[s].set(x_full[-(kernel_size - 1):])
+        new_conv_state = new_conv_state.at[s_write].set(
+            x_full[-(kernel_size - 1):])
         out_mixed_qkv = out_mixed_qkv.at[start:end].set(conv_out)
 
     out_mixed_qkv = jax.nn.silu(out_mixed_qkv)
 
     for req_idx in range(num_valid_seqs):
-        s = int(state_indices[req_idx])
+        s_read = int(read_state_indices[req_idx])
+        s_write = int(state_indices[req_idx])
         start = int(query_start_loc[req_idx])
         end = int(query_start_loc[req_idx + 1])
         query_len = end - start
         if query_len <= 0:
             continue
 
-        r_state = new_recurrent_state[s]
+        has_init = bool((seq_lens[req_idx] - query_len) > 0)
+        if has_init:
+            r_state = recurrent_state[s_read]
+        else:
+            r_state = jnp.zeros_like(recurrent_state[s_read])
+
         qkv_seq = out_mixed_qkv[start:end]
         key_dim = n_kq * d_k
         q_seq = qkv_seq[:, :key_dim].reshape(query_len, n_kq, d_k)
@@ -143,7 +153,8 @@ def gdn_attention_ref(
 
         final_r_state, out_seq = jax.lax.scan(
             step_fn, r_state, (q_seq, k_seq, v_seq, beta_seq, g_seq))
-        new_recurrent_state = new_recurrent_state.at[s].set(final_r_state)
+        new_recurrent_state = new_recurrent_state.at[s_write].set(
+            final_r_state)
         output = output.at[start:end].set(out_seq.reshape(
             query_len, n_v * d_v))
 
@@ -405,6 +416,7 @@ class GDNAttentionTest(parameterized.TestCase):
             state_indices=state_indices,
             distribution=distribution,
             seq_lens=seq_lens,
+            read_state_indices=state_indices,
             n_kq=n_kq,
             n_v=n_v,
             d_k=kq_head_dim,
@@ -533,6 +545,7 @@ class GDNAttentionTest(parameterized.TestCase):
             state_indices,
             distribution,
             seq_lens,
+            state_indices,
             read_offsets_arr,
             n_kq=n_kq,
             n_v=n_v,
@@ -698,6 +711,7 @@ class GDNAttentionTest(parameterized.TestCase):
             state_indices=state_indices,
             distribution=distribution,
             seq_lens=seq_lens_new,
+            read_state_indices=state_indices,
             n_kq=n_kq,
             n_v=n_v,
             d_k=kq_head_dim,
@@ -798,6 +812,7 @@ class GDNAttentionTest(parameterized.TestCase):
             a_log=A_log,
             dt_bias=dt_bias,
             state_indices=state_indices,
+            read_state_indices=state_indices,
             n_kq=n_kq,
             n_v=n_v,
             d_k=kq_head_dim,
@@ -926,6 +941,7 @@ class GDNAttentionTest(parameterized.TestCase):
             recurrent_state=recurrent_state_zero,
             query_start_loc=jnp.array([0, full]),
             state_indices=jnp.array([read_slot]),
+            read_state_indices=jnp.array([read_slot]),
             distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
             seq_lens=jnp.array([full], dtype=jnp.int32),
             **common_static,
@@ -940,6 +956,7 @@ class GDNAttentionTest(parameterized.TestCase):
             recurrent_state=recurrent_state_zero,
             query_start_loc=jnp.array([0, half]),
             state_indices=jnp.array([read_slot]),
+            read_state_indices=jnp.array([read_slot]),
             distribution=jnp.array([0, 1, 1], dtype=jnp.int32),
             seq_lens=jnp.array([half], dtype=jnp.int32),
             **common_static,

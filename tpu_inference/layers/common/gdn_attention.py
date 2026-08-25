@@ -15,6 +15,7 @@
 Bridge the torch gdn_attention_core op for gated deltanet attention TPU impl
 
 """
+import functools
 from typing import Optional, Tuple
 
 import jax
@@ -95,6 +96,9 @@ def run_jax_gdn_attention(
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
+    if read_state_indices is None:
+        read_state_indices = state_indices
+
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
@@ -113,9 +117,8 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # state_indices
         P(ShardingAxisName.ATTN_DATA),  # distribution
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
+        P(ShardingAxisName.ATTN_DATA),  # read_state_indices
     )
-    if read_state_indices is not None:
-        in_specs += (P(ShardingAxisName.ATTN_DATA), )  # read_state_indices
 
     out_specs = (
         (
@@ -129,26 +132,14 @@ def run_jax_gdn_attention(
 
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
-    # `read_state_indices` is the trailing shard_map argument, present only
-    # when the caller supplies one, so the non-prefix-caching graph keeps the
-    # exact argument list it had before.
-    def _fused_conv1d_gdn_local(*kernel_args):
-        read_indices = kernel_args[-1] if read_state_indices is not None \
-            else None
-        if read_state_indices is not None:
-            kernel_args = kernel_args[:-1]
-        (new_conv, new_rec), out = wrapper.fused_conv1d_gdn(
-            *kernel_args,
-            read_state_indices=read_indices,
-            n_kq=n_kq // tp_size,
-            n_v=n_v // tp_size,
-            d_k=d_k,
-            d_v=d_v,
-            kernel_size=kernel_size,
-        )
-        return (new_conv, new_rec), out
-
-    p_run_jax_gdn_attention_local = _fused_conv1d_gdn_local
+    p_run_jax_gdn_attention_local = functools.partial(
+        wrapper.fused_conv1d_gdn,
+        n_kq=n_kq // tp_size,
+        n_v=n_v // tp_size,
+        d_k=d_k,
+        d_v=d_v,
+        kernel_size=kernel_size,
+    )
 
     mapped_fn = jax.shard_map(
         p_run_jax_gdn_attention_local,
@@ -172,9 +163,8 @@ def run_jax_gdn_attention(
         state_indices,
         distribution,
         seq_lens,
+        read_state_indices,
     )
-    if read_state_indices is not None:
-        mapped_args += (read_state_indices, )
 
     (new_conv_state, new_recurrent_state), output = mapped_fn(*mapped_args)
 

@@ -26,7 +26,7 @@ def compute_batched_seq_metadata(
     state_indices: jax.Array,
     read_offsets: jax.Array,
     end_seq: jax.Array,
-    read_indices: jax.Array | None = None,
+    read_indices: jax.Array,
 ) -> memory_ref.MetadataRef:
     """Metadata for computing multiple sequences per tile.
 
@@ -34,14 +34,11 @@ def compute_batched_seq_metadata(
     a single decoded token, or a speculative verify window of up to
     `cfg.window_size` of them. The initial state is read from
     `read_indices[s] + read_offsets[s]` and one state checkpoint per window
-    position is written back to `state_indices[s] + t`. `read_indices`
-    defaults to `state_indices` (read and write the same slot).
+    position is written back to `state_indices[s] + t`.
     """
 
     max_seqs = seq_lens.size
     all_seqs = jnp.arange(max_seqs)
-    if read_indices is None:
-        read_indices = state_indices
 
     # NOTE: Only supports use case where query_lens[i] <= cfg.window_size where
     # i < end_seq. This must be guaranteed by the function caller.
@@ -73,7 +70,7 @@ def compute_per_seq_metadata(
     state_indices: jax.Array,
     start_seq: jax.Array,
     end_seq: jax.Array,
-    read_indices: jax.Array | None = None,
+    read_indices: jax.Array,
 ) -> memory_ref.MetadataRef:
     """Metadata for computing single sequence per tile."""
 
@@ -81,8 +78,6 @@ def compute_per_seq_metadata(
     max_tokens = cfg.batch_size
     all_seqs = jnp.arange(max_seqs)
     all_tokens = jnp.arange(max_tokens)
-    if read_indices is None:
-        read_indices = state_indices
 
     # Shift to ensure first element is for start_seq.
     query_start_loc = jnp.roll(query_start_loc, shift=-start_seq)
