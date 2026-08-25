@@ -246,6 +246,27 @@ CLIENT_BENCH_CMD=""
 DOCKER_ENV_ARGS=()
 DOCKER_ENV_STR=""
 
+# Optional extra container environment for BOTH the head and the worker nodes.
+# MULTIHOST_ENV_VARS is a newline-separated list of KEY=VALUE pairs. Values may
+# contain spaces. Env vars inlined into the serve command only reach the head
+# process; anything a Ray worker reads at import time has to be in its
+# container environment instead, which is what this provides.
+if [ -n "${MULTIHOST_ENV_VARS:-}" ]; then
+    while IFS= read -r env_item; do
+        [ -z "${env_item}" ] && continue
+        DOCKER_ENV_ARGS+=("-e" "${env_item}")
+    done <<< "${MULTIHOST_ENV_VARS}"
+fi
+
+# Optional extra raw `docker run` args for BOTH the head and the worker nodes,
+# space-separated. EXTRA_DOCKER_ARGS is head-only; this is the every-host
+# equivalent, for things like a bind mount that each host needs its own copy of
+# (e.g. a persistent JAX compilation cache directory).
+if [ -n "${MULTIHOST_DOCKER_ARGS:-}" ]; then
+    eval "declare -a _MH_DOCKER_ARGS=(${MULTIHOST_DOCKER_ARGS})"
+    DOCKER_ENV_ARGS+=("${_MH_DOCKER_ARGS[@]}")
+fi
+
 if [ "$#" -ge 1 ]; then
     if [[ "$1" == *.json ]]; then
         # JSON configuration mode (multihost benchmark)

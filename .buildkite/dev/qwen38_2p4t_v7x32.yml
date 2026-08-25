@@ -1,0 +1,73 @@
+# Bring up Qwen/Qwen3.8-2.4T-A95B-FP8 on a v7x-32 slice (4 hosts, 32 devices).
+#
+# Weights: 2469 GB of parameters (2371 GB of that is the 512 routed experts in
+# block-wise fp8) streamed from GCS with runai_streamer. At model=16/attn_dp=2
+# that is ~79.7 GB per device against the 96 GB each v7x JAX device sees, i.e.
+# ~83% of HBM before any KV cache.
+#
+# Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_v7x32.yml
+#
+# tpu_v7x_32_queue has exactly one agent, so this monopolises the org's only
+# 32-chip slice for the duration. No depends_on and no USE_PREBUILT_IMAGE:
+# run_multihost.sh builds and pushes its own image and would double the registry
+# prefix if setup_environment had already run.
+steps:
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, model=16 x attn_dp=2, EP=32)"
+    key: qwen38_2p4t_v7x32
+    agents:
+      queue: tpu_v7x_32_queue
+    timeout_in_minutes: 300
+    env:
+      TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
+      MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
+      NEW_MODEL_DESIGN: "1"       # required: sharding.validate() rejects attn_dp>1 without it
+    commands:
+      - |
+        set -euo pipefail
+        ART="$$PWD/dev_artifacts"; mkdir -p "$$ART"
+        export EXTRA_DOCKER_ARGS="-v $$ART:/workspace/artifacts"
+
+        # Persistent JAX compilation cache on each host's local disk.
+        # run_multihost.sh sets up no cache at all (unlike run_in_docker.sh,
+        # which rsyncs gs://ullm-ci-cache/jax_cache onto /mnt/disks/persist),
+        # so without this every build recompiles from scratch. /tmp is the same
+        # disk run_multihost.sh already puts HOST_HF_HOME on, so it is known to
+        # exist on all four hosts; /mnt/disks/persist is not assumed here.
+        # Bind-mounted rather than left inside the container because the `node`
+        # containers are torn down at the end of every build.
+        export MULTIHOST_DOCKER_ARGS="-v /tmp/jax_cache_tpu7x:/root/jax_cache"
+
+        # Container environment for the head *and* all three workers. Env vars
+        # inlined into the serve command would only reach the head process;
+        # USE_BATCHED_RPA_KERNEL in particular is read at import time by
+        # runner/kv_cache.py to pick the kernel module, so it has to be in the
+        # environment of every Ray worker container.
+        export MULTIHOST_ENV_VARS="$$(printf '%s\n' \
+          'MODEL_IMPL_TYPE=vllm' \
+          'NEW_MODEL_DESIGN=1' \
+          'USE_BATCHED_RPA_KERNEL=1' \
+          'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
+          'USE_MOE_EP_KERNEL=0' \
+          'VLLM_INCREMENTAL_FP8_LOADING=1' \
+          'VLLM_XLA_CHECK_RECOMPILATION=0' \
+          'SKIP_JAX_PRECOMPILE=1' \
+          'VLLM_XLA_CACHE_PATH=/root/jax_cache' \
+          'JAX_COMPILATION_CACHE_DIR=/root/jax_cache' \
+          'TENSOR_PARALLEL_SIZE=32' \
+          'ATTN_DP_SIZE=2' \
+          'MAX_MODEL_LEN=8192' \
+          'MAX_NUM_SEQS=32' \
+          'MAX_NUM_BATCHED_TOKENS=2048' \
+          'GPU_MEMORY_UTILIZATION=0.92' \
+          'BLOCK_SIZE=256' \
+          'KV_CACHE_DTYPE=fp8' \
+          'INPUT_LEN=1024' \
+          'OUTPUT_LEN=128' \
+          'NUM_PROMPTS=64' \
+          'MAX_CONCURRENCY=16')"
+
+        .buildkite/scripts/run_multihost.sh \
+          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_serve.sh" \
+          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh"
+      - sudo -n chown -R "$$(id -u):$$(id -g)" dev_artifacts 2>/dev/null || sudo -n chmod -R a+rX dev_artifacts || true
+      - buildkite-agent artifact upload "dev_artifacts/**/*"
