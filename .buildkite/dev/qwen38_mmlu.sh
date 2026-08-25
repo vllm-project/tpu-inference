@@ -55,21 +55,50 @@ finish() {
 trap finish EXIT
 
 # --- MMLU dataset ---
-# No dataset is staged in GCS; every in-repo caller wgets the Hendrycks tarball.
-# This mirrors .buildkite/benchmark/scripts/run_bm.sh:163-180 (the hardened of
-# the two call sites) including its path, retry flags and resume behaviour.
+# No dataset is staged in GCS; every in-repo caller wgets the Hendrycks tarball
+# from Berkeley (run_bm.sh:171, tests/e2e/benchmarking/mmlu.sh:136,
+# scripts/multihost/nightly_benchmarking.sh:199).
+#
+# That host is not dependable. It took down the first run of this experiment:
+# every request 302'd to an EECS incident page which then 404'd, ten seconds
+# into a job that had queued 89 minutes for a TPU. `wget --tries` is no defence
+# -- a 404 is a non-retryable error, so wget gives up on the first attempt.
+#
+# cais/mmlu on HuggingFace serves the identical tarball (same 166184960 bytes,
+# same `data/` layout), and HF is already a hard dependency of this run for the
+# weights, so it is tried first. Berkeley stays as the fallback in case the
+# mirror is ever withdrawn. The tar is validated before use so a saved error
+# page cannot masquerade as a download.
 DATASET_ROOT="$ROOT_DIR/mmlu"
+MMLU_URLS=(
+    https://huggingface.co/datasets/cais/mmlu/resolve/main/data.tar
+    https://people.eecs.berkeley.edu/~hendrycks/data.tar
+)
 if [ ! -d "$DATASET_ROOT/data/test" ]; then
     echo "--- downloading MMLU ---"
     mkdir -p "$DATASET_ROOT"
-    if [ ! -f "$DATASET_ROOT/data.tar" ]; then
-        wget --tries=3 --timeout=15 \
-            https://people.eecs.berkeley.edu/~hendrycks/data.tar \
-            -P "$DATASET_ROOT" || exit 1
+    for url in "${MMLU_URLS[@]}"; do
+        echo "trying $url"
+        if wget --tries=3 --timeout=30 --retry-connrefused \
+                -O "$DATASET_ROOT/data.tar" "$url" \
+           && tar -tf "$DATASET_ROOT/data.tar" >/dev/null 2>&1; then
+            echo "got MMLU from $url"
+            break
+        fi
+        echo "failed: $url"
+        rm -f "$DATASET_ROOT/data.tar"
+    done
+    if [ ! -s "$DATASET_ROOT/data.tar" ]; then
+        echo "ERROR: could not fetch MMLU from any mirror" >&2
+        exit 1
     fi
     tar -xf "$DATASET_ROOT/data.tar" -C "$DATASET_ROOT" || exit 1
 fi
 DATASET_PATH="$DATASET_ROOT/data/test"
+if [ ! -d "$DATASET_PATH" ]; then
+    echo "ERROR: $DATASET_PATH missing after extract" >&2
+    exit 1
+fi
 
 echo "--- run context ---"
 echo "tpu_inference: $(git -C "$ROOT_DIR/tpu_inference" rev-parse HEAD 2>/dev/null || echo n/a)"
