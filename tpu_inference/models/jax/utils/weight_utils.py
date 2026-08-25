@@ -882,8 +882,6 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         assert isinstance(model, JaxModule)
         self.pytorch_pooler = pytorch_pooler
         self.pooler_weights = {}
-        self.skip_prefixes = list(skip_prefixes) if skip_prefixes else []
-        self.skip_substrs = list(skip_substrs) if skip_substrs else []
 
         for name, param in model.named_parameters():
             if not hasattr(param, "weight_loader"):
@@ -938,6 +936,14 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 loader_kwargs[k] = v
 
         super().__init__(model, **loader_kwargs)
+        # Older vLLM AutoWeightsLoader versions still own skip_prefixes /
+        # skip_substrs and reset them in __init__ (newer versions removed the
+        # kwargs and never touch the attributes), so ours must be assigned
+        # after super().__init__ and merged with whatever it set.
+        self.skip_prefixes = getattr(self, "skip_prefixes", []) + (
+            list(skip_prefixes) if skip_prefixes else [])
+        self.skip_substrs = getattr(self, "skip_substrs", []) + (
+            list(skip_substrs) if skip_substrs else [])
         # Book mark those already done processing, skip if visited.
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
