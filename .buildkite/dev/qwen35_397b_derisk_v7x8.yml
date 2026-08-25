@@ -1,0 +1,85 @@
+# De-risk the Qwen3.8-2.4T-A95B-FP8 v7x-32 sharding scheme on a single v7x-8 host.
+#
+# Stand-in model: Qwen/Qwen3.5-397B-A17B-FP8. Same hybrid Gated DeltaNet + MoE
+# family as the 2.4T and, decisively, the same linear_num_key_heads=16 -- the
+# constraint that caps attention-head parallelism and is the entire reason the
+# 2.4T needs attn_dp. ~425 GB of weights, so it fits on 8 x 96 GB with room.
+#
+# CI covers this model at plain tp=8 (pipeline_jax.yml:515+). It does not cover
+# attn_dp > 1 on a GDN model, and it does not cover the batched RPA kernel here.
+# Those two are the untested part of the 2.4T plan.
+#
+#   attndp2 (always)          tp=8, attn_dp=2 -> model axis 4, EP product 8
+#   control (RUN_CONTROL=1)   tp=8, attn_dp=1 -> model axis 8, EP product 8
+#
+# Both arms keep USE_BATCHED_RPA_KERNEL / USE_BATCHED_RPA_SEQ_ON_LANE on, so the
+# only difference between them is attn_dp. The control is gated rather than
+# always-on because it is only informative if attndp2 fails: it separates "GDN
+# does not tolerate attn_dp" from "the batched RPA kernel does not work on this
+# model at all". Each arm pulls ~425 GB into the agent's HF cache, so running
+# both unconditionally would tie up two of the 18 v7x-8 agents for no reason.
+#
+# Trigger:
+#   DEV_PIPELINE_FILE=.buildkite/dev/qwen35_397b_derisk_v7x8.yml
+#   plus RUN_CONTROL=1 to add the control arm.
+steps:
+  - label: ":docker: Build base image (tpu7x)"
+    key: build_docker
+    agents:
+      queue: cpu_64_core
+    timeout_in_minutes: 25
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  - label: ":microscope: Qwen3.5-397B GDN de-risk: attn_dp=2 (v7x-8, model=4 x attn_dp=2)"
+    key: derisk_attndp2
+    depends_on: build_docker
+    agents:
+      queue: tpu_v7x_8_queue
+    timeout_in_minutes: 180
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForConditionalGeneration
+      NEW_MODEL_DESIGN: "1"       # sharding.validate() rejects attn_dp>1 without it
+      TENSOR_PARALLEL_SIZE: "8"
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "32"
+      MAX_NUM_BATCHED_TOKENS: "2048"
+      GPU_MEMORY_UTILIZATION: "0.88"
+      USE_BATCHED_RPA_KERNEL: "1"
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "128"
+      DERISK_ARM: "attndp2"
+      DERISK_ATTN_DP: "2"
+    commands:
+      - .buildkite/dev/qwen35_397b_derisk_step.sh
+      - buildkite-agent artifact upload "dev_artifacts/**/*"
+
+  - label: ":microscope: Qwen3.5-397B GDN de-risk: control attn_dp=1 (v7x-8)"
+    key: derisk_control
+    depends_on: build_docker
+    if: build.env("RUN_CONTROL") == "1"
+    agents:
+      queue: tpu_v7x_8_queue
+    timeout_in_minutes: 180
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+      MODEL_IMPL_TYPE: "vllm"
+      NEW_MODEL_DESIGN: "1"
+      TENSOR_PARALLEL_SIZE: "8"
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "32"
+      MAX_NUM_BATCHED_TOKENS: "2048"
+      GPU_MEMORY_UTILIZATION: "0.88"
+      USE_BATCHED_RPA_KERNEL: "1"
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "128"
+      DERISK_ARM: "control"
+      DERISK_ATTN_DP: "1"
+    commands:
+      - .buildkite/dev/qwen35_397b_derisk_step.sh
+      - buildkite-agent artifact upload "dev_artifacts/**/*"
