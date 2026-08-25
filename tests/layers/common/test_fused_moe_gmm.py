@@ -15,7 +15,23 @@
 import jax.numpy as jnp
 import numpy as np
 
-from tpu_inference.layers.common.fused_moe_gmm import _invert_permutation
+from tpu_inference.layers.common.fused_moe_gmm import (
+    _invert_permutation, _tokens_from_sorted_assignments)
+
+
+def test_sorted_assignments_map_to_source_tokens_without_gather():
+    rng = np.random.default_rng(1234)
+
+    for num_tokens, topk in ((1, 1), (16, 2), (32, 4), (256, 8)):
+        num_assignments = num_tokens * topk
+        sorted_assignments = jnp.asarray(
+            rng.permutation(num_assignments), dtype=jnp.int32)
+
+        token_indices = jnp.arange(num_tokens, dtype=jnp.int32).repeat(topk)
+        expected = token_indices[sorted_assignments]
+        actual = _tokens_from_sorted_assignments(sorted_assignments, topk)
+
+        np.testing.assert_array_equal(actual, expected)
 
 
 def test_invert_permutation_matches_argsort():
