@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     VERIFY_WEIGHTS: bool = False
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     RAIDEN_H2D_SETTLE: bool = True
+    GEMMA4_EARLY_GLOBAL_KV_GATHER: bool = False
 
 
 def env_with_choices(
@@ -539,6 +540,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":
     env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # Reconstruct Gemma 4's shared raw global K/V projection once before K and
+    # V normalization, instead of independently resharding both afterwards.
+    "GEMMA4_EARLY_GLOBAL_KV_GATHER":
+    env_bool("GEMMA4_EARLY_GLOBAL_KV_GATHER", default=False),
 }
 
 
