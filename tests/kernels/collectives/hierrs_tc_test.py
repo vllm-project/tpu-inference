@@ -14,6 +14,7 @@
 """Tests for hierarchical_reduce_scatter, including FP8 comm quality eval."""
 
 import os
+from unittest import mock
 
 import importlib.util as _importlib_util
 
@@ -477,6 +478,57 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
         print(f'[fp8_static_vs_dynamic] static-vs-dynamic SNR={snr:.1f} dB')
         self.assertGreater(snr, 10.0,
                            msg=f'static diverges from dynamic (SNR {snr:.1f} dB)')
+
+
+@jtu.with_config(jax_numpy_dtype_promotion='standard')
+class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
+  """Planning rules that decide HOW the kernel runs, tested without a TPU.
+
+  These cover the two decisions taken before any device work happens: how many
+  micro-batches to use, and whether the working set can live in VMEM scratch.
+  Both are pure arithmetic, so they run anywhere and in milliseconds -- which
+  matters because the on-device suite only ever exercises whatever the
+  heuristics happen to pick, and would stay green if these rules regressed.
+  """
+
+  # local_seq_len values a decode-heavy server actually reaches, per RS_PIPE_PROBE
+  # at MNBT 1024 / MoE chunk 256 on 8 devices. This is the PER-DEVICE, PRE-scatter
+  # row count -- 8x the post-scatter count that appears in the HLO.
+  PRODUCTION_ROWS = (32, 64, 128, 256, 512, 1024, 2048)
+  HIDDEN = 4096
+  BF16_ITEMSIZE = 2
+
+  def test_micro_batch_floor_is_bf16_only(self):
+    """mb=1 returns the PREVIOUS call's result on the BF16 wire.
+
+    [Step C] reads the accumulator on the line after the emit_pipeline that
+    writes it, with nothing ordering the two. Measured with a fresh input per
+    run against a psum+dynamic_slice reference: 26/30, 24/30 and 11/30 runs
+    below 40 dB SNR at 128, 256 and 512 local rows. mb>=2 is 0/30 everywhere.
+
+    The FP8 wire is exempt because quantize_chunks_to_fp8_staging already
+    separates the write from the wire read (0/200 at the production shape).
+    If that staging step is ever removed, this exemption must be re-validated
+    with fresh inputs BEFORE this test is relaxed.
+    """
+    self.assertEqual(hrs_config._MIN_SAFE_MICRO_BATCHES, 2,
+                     msg='the floor is disabled -- is RS_ALLOW_UNSAFE_MB1 set?')
+    for rows in self.PRODUCTION_ROWS:
+      bf16_mb = hrs_config.pick_num_micro_batches(rows, self.HIDDEN,
+                                                  self.BF16_ITEMSIZE, False)
+      self.assertGreaterEqual(
+          bf16_mb, 2,
+          msg=f'bf16 at local_seq_len={rows} picked mb={bf16_mb}; mb=1 is '
+              'measurably incorrect, see the docstring above')
+      self.assertLessEqual(bf16_mb, hrs_config._MAX_MICRO_BATCHES)
+
+    # The exemption is real, not vacuous: at small shapes the fitted rule wants
+    # mb=1 and the FP8 wire is allowed to take it while BF16 is not.
+    fp8_mb = hrs_config.pick_num_micro_batches(128, self.HIDDEN,
+                                               self.BF16_ITEMSIZE, True)
+    self.assertEqual(fp8_mb, 1,
+                     msg='FP8 no longer takes mb=1, so the BF16-only floor is '
+                         'not being exercised by this test')
 
 
 if __name__ == '__main__':
