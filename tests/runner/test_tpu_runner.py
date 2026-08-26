@@ -150,6 +150,7 @@ class TestTPUJaxRunner:
 
         # Mock input_batch
         self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 1
         self.runner.input_batch.num_reqs = 1
         self.runner.input_batch.req_ids = ['req1']
         self.runner.input_batch.req_id_to_index = {'req1': 0}
