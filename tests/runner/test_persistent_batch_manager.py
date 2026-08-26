@@ -331,6 +331,7 @@ class TestPersistentBatchManager(unittest.TestCase):
         requests = {req_id: req_state}
 
         input_batch = MagicMock()
+        input_batch.max_decode_tokens = 1
         input_batch.req_id_to_index = {req_id: 0}
         input_batch.num_prompt_tokens = np.array([2], dtype=np.int32)
         input_batch.token_ids_cpu = np.zeros((1, 10), dtype=np.int32)
