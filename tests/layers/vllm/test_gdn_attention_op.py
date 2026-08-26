@@ -324,6 +324,7 @@ class TestVllmGatedDeltaNetAttention:
         vllm_config = MagicMock()
         vllm_config.cache_config.mamba_cache_mode = "align"
         vllm_config.cache_config.block_size = mamba_block_size
+        vllm_config.cache_config.mamba_block_size = mamba_block_size
 
         with set_vllm_model_wrapper_context(
                 kv_caches=[(conv_state, recurrent_state)],

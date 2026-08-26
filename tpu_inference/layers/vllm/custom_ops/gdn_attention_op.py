@@ -143,11 +143,6 @@ def gdn_attention_core_tpu(
         batch_idx = jnp.arange(seq_lens_sliced.shape[0])
         read_state_indices_sliced = block_tables_sliced[batch_idx, read_col]
         state_indices_sliced = block_tables_sliced[batch_idx, write_col]
-
-        is_active = seq_lens_sliced > 0
-        read_state_indices_sliced = jnp.where(is_active,
-                                              read_state_indices_sliced, 0)
-        state_indices_sliced = jnp.where(is_active, state_indices_sliced, 0)
     else:
         # Index mamba state by the per-request slot id from
         # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
