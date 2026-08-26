@@ -73,6 +73,7 @@ class MockInputBatch:
     _reorder_batch: req_ids, request_distribution, and swap_states."""
 
     def __init__(self, req_ids: list[str]):
+        self.max_decode_tokens = 1
         self._req_ids = list(req_ids)
         self.req_id_to_index = {rid: i for i, rid in enumerate(req_ids)}
         self.request_distribution = [0, 0, 0]
