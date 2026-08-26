@@ -173,12 +173,10 @@ class VllmModelWrapper:
         """Returns the total divisor required for activation axis 0 across all active sharding axes."""
         divisor = 1
         if self.mesh is not None and hasattr(self.mesh, "shape"):
-            attn_data = (ShardingAxisName.ATTN_DATA if isinstance(
-                ShardingAxisName.ATTN_DATA, (tuple, list, set)) else
-                         (ShardingAxisName.ATTN_DATA, ))
-            axes = (*attn_data, ShardingAxisName.MODEL)
-            for ax in axes:
-                if ax and ax in self.mesh.shape:
+            candidate_axes = ("data", "attn_dp", "attn_dp_expert", "pcp",
+                              "dcp", "model")
+            for ax in candidate_axes:
+                if ax in self.mesh.shape:
                     divisor = math.lcm(divisor, self.mesh.shape[ax])
         else:
             divisor = self.vllm_config.parallel_config.tensor_parallel_size

@@ -15,7 +15,8 @@
 # Utilities to support JIT compilation of VisionTower.
 
 import math
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -24,8 +25,6 @@ import torch
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
     Qwen3OmniMoeConfig
 from vllm.config import VllmConfig
-from vllm.model_executor.models.qwen3_omni_moe_thinker import \
-    Qwen3OmniMoeThinkerForConditionalGeneration
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -33,14 +32,22 @@ from tpu_inference.utils import to_jax_dtype
 logger = init_logger(__name__)
 
 # Architectures whose embed_multimodal function is safe to wrap with jax.jit.
-JITTABLE_ARCHS = {
-    Qwen3OmniMoeThinkerForConditionalGeneration,
-}
+_SUPPORTED_JITTABLE_ARCHS = frozenset({
+    "Qwen3OmniMoeThinkerForConditionalGeneration",
+    "Qwen3VLForConditionalGeneration",
+    "Qwen3VLMoeForConditionalGeneration",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+})
 
 
 def is_jittable_architecture(vllm_model) -> bool:
     """Check if the given vLLM model is of an architecture that supports JIT compilation."""
-    is_jittable = any(isinstance(vllm_model, arch) for arch in JITTABLE_ARCHS)
+    architectures = (getattr(getattr(vllm_model, "config", None),
+                             "architectures", ()) or ())
+    is_jittable = (any(arch in _SUPPORTED_JITTABLE_ARCHS
+                       for arch in architectures) or
+                   vllm_model.__class__.__name__ in _SUPPORTED_JITTABLE_ARCHS)
     if is_jittable:
         logger.info_once(
             f"{type(vllm_model)}'s vision tower supports JIT compilation.")
@@ -140,8 +147,8 @@ class GridTHW(tuple):
 
 
 def maybe_precompile_vision_encoder_fn(
-        params: Any, embed_multimodal_fn: Optional[Callable], vllm_model,
-        vllm_config: VllmConfig) -> Optional[Callable]:
+        params: Any, embed_multimodal_fn: Callable | None, vllm_model,
+        vllm_config: VllmConfig) -> Callable | None:
     """Return a precompile function for jittable vision encoders, or None.
 
     The returned function accepts a single argument (run_compilation_fn) and
@@ -175,7 +182,7 @@ def maybe_precompile_vision_encoder_fn(
         for num_patches in num_patches_paddings:
             # Split num_patches into (h, w) by distributing bits evenly.
             # For any power-of-2 num_patches = 2^k: h=2^(k//2), w=2^(k-k//2).
-            k = int(round(math.log2(num_patches)))
+            k = round(math.log2(num_patches))
             h = 1 << (k // 2)
             w = 1 << (k - k // 2)
 
