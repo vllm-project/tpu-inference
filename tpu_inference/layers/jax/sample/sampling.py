@@ -23,6 +23,7 @@ from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference import envs
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
     from tpu_inference.runner.input_batch import CachedRequestState
 
 _SAMPLING_EPS = 1e-5
+
 
 
 @dataclass
@@ -102,6 +104,53 @@ def _apply_sampling_transforms(
     return logits
 
 
+def _apply_sampling_transforms_microbatched(
+    logits: jax.Array,
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+) -> jax.Array:
+    """Apply sampling transforms in sequential, scratchpad-sized chunks.
+
+    The top-k and top-p implementations repeatedly reduce over the complete
+    vocabulary. Processing large request batches at once can push their working
+    set out of fast TPU memory. Keep the existing path for small or non-divisible
+    batches, and split larger divisible batches into fixed-size chunks.
+    """
+    batch_size = logits.shape[0]
+    microbatch_size = envs.SAMPLING_MICROBATCH_SIZE
+    if (microbatch_size <= 0
+            or batch_size <= microbatch_size
+            or batch_size % microbatch_size != 0):
+        return _apply_sampling_transforms(logits, tpu_sampling_metadata)
+
+    num_microbatches = batch_size // microbatch_size
+    microbatch_logits = logits.reshape(
+        (num_microbatches, microbatch_size, logits.shape[-1]))
+    microbatch_temperature = tpu_sampling_metadata.temperature.reshape(
+        (num_microbatches, microbatch_size))
+    microbatch_top_k = tpu_sampling_metadata.top_k.reshape(
+        (num_microbatches, microbatch_size))
+    microbatch_top_p = tpu_sampling_metadata.top_p.reshape(
+        (num_microbatches, microbatch_size))
+
+    def transform_microbatch(inputs):
+        chunk_logits, temperature, top_k, top_p = inputs
+        chunk_metadata = TPUSupportedSamplingMetadata(
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            do_sampling=True,
+        )
+        return _apply_sampling_transforms(chunk_logits, chunk_metadata)
+
+    processed_logits = jax.lax.map(
+        transform_microbatch,
+        (microbatch_logits, microbatch_temperature, microbatch_top_k,
+         microbatch_top_p),
+    )
+    return processed_logits.reshape(logits.shape)
+
+
+
 @jax.jit(static_argnames=["mesh"])
 def sample(
     rng: jax.Array,
@@ -128,8 +177,8 @@ def sample(
         ret_tokens = greedy_tokens
         ret_logits = logits
     else:
-        processed_logits = _apply_sampling_transforms(logits,
-                                                      tpu_sampling_metadata)
+        processed_logits = _apply_sampling_transforms_microbatched(
+            logits, tpu_sampling_metadata)
         # (batch_size,)
         next_tokens = jax.random.categorical(rng, processed_logits)
         # Note: avoid using the sample result when temperature < _SAMPLING_EPS
