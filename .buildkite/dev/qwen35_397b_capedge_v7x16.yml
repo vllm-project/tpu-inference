@@ -1,0 +1,85 @@
+# Cap-edge de-risk for the Qwen3.8-2.4T-A95B-FP8 v7x-32 bringup.
+#
+# Runs Qwen3.5-397B-A17B-FP8 across a v7x-16 slice (2 hosts x 8 devices) at
+# tensor-parallel 16, attention DP off, so the ATTN_HEAD mesh product is exactly
+# 16 and each device gets exactly one Gated DeltaNet key head
+# (linear_num_key_heads=16, see qwen35_397b_capedge_serve.sh for the derivation).
+#
+# What is already cleared, and what is not:
+#   tp_size=4  -> 4 key heads/device   v7x-8 build #942, and locally on the 27B
+#   tp_size=8  -> 2 key heads/device   locally on the 27B
+#   tp_size=16 -> 1 key head/device    <-- this run; the v7x-32 plan needs it
+#   tp_size=32 -> 0                    malformed; why the 2.4T cannot use plain tp=32
+#
+# Secondary benefit: v7x-16 is two hosts, so this also exercises the Ray
+# multi-host path that the v7x-32 run depends on, at a fraction of the cost and
+# on a queue that actually has agents.
+#
+# 397B rather than the 27B because the 27B has 24 attention heads, which do not
+# divide by 16. The 397B divides cleanly: q 32/16=2, kv 2 (padded), linear key
+# 16/16=1, linear value 64/16=4.
+#
+# Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen35_397b_capedge_v7x16.yml
+steps:
+  - label: ":straight_ruler: Qwen3.5-397B cap edge (v7x-16, model=16, 1 GDN key head/device)"
+    key: qwen35_397b_capedge_v7x16
+    agents:
+      queue: tpu_v7x_16_queue
+    timeout_in_minutes: 240
+    env:
+      TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
+      MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForConditionalGeneration
+      # Append-only build output; the tty renderer redraws the whole table per
+      # update and buried a real serve failure under docker progress on #939.
+      BUILDKIT_PROGRESS: "plain"
+      # run_multihost.sh defaults HOST_HF_HOME to /tmp/hf_home, which is
+      # ephemeral -- that would re-pull 378 GiB onto each of the two hosts every
+      # build. /mnt/disks/persist/models is the same persistent cache
+      # run_in_docker.sh uses (run_in_docker.sh:112), and is why #942 loaded
+      # weights in 394 s. If it is empty on a host the first run populates it.
+      HOST_HF_HOME: "/mnt/disks/persist/models"
+    commands:
+      - |
+        set -euo pipefail
+        ART="$$PWD/dev_artifacts"; mkdir -p "$$ART"
+        export EXTRA_DOCKER_ARGS="-v $$ART:/workspace/artifacts"
+
+        # Per-host local-disk JAX compilation cache; run_multihost.sh provides none.
+        export MULTIHOST_DOCKER_ARGS="-v /tmp/jax_cache_tpu7x:/root/jax_cache"
+
+        # Container environment for the head *and* the worker. USE_BATCHED_RPA_KERNEL
+        # in particular is read at import time by runner/kv_cache.py to choose the
+        # kernel module, so it must be in every Ray worker's environment, not
+        # inlined into the serve command.
+        #
+        # No ATTN_DP_SIZE here on purpose: the serve script passes no
+        # --additional-config, leaving enable_dp_attention false so the mesh is
+        # a clean model=16.
+        export MULTIHOST_ENV_VARS="$$(printf '%s\n' \
+          'MODEL_IMPL_TYPE=vllm' \
+          'USE_BATCHED_RPA_KERNEL=1' \
+          'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
+          'USE_MOE_EP_KERNEL=0' \
+          'VLLM_INCREMENTAL_FP8_LOADING=1' \
+          'VLLM_XLA_CHECK_RECOMPILATION=0' \
+          'SKIP_JAX_PRECOMPILE=1' \
+          'VLLM_XLA_CACHE_PATH=/root/jax_cache' \
+          'JAX_COMPILATION_CACHE_DIR=/root/jax_cache' \
+          'SERVED_NAME=Qwen/Qwen3.5-397B-A17B-FP8' \
+          'TENSOR_PARALLEL_SIZE=16' \
+          'MAX_MODEL_LEN=4096' \
+          'MAX_NUM_SEQS=32' \
+          'MAX_NUM_BATCHED_TOKENS=2048' \
+          'GPU_MEMORY_UTILIZATION=0.88' \
+          'BLOCK_SIZE=128' \
+          'KV_CACHE_DTYPE=fp8' \
+          'INPUT_LEN=1024' \
+          'OUTPUT_LEN=128' \
+          'NUM_PROMPTS=64' \
+          'MAX_CONCURRENCY=16')"
+
+        .buildkite/scripts/run_multihost.sh \
+          "bash /workspace/tpu_inference/.buildkite/dev/qwen35_397b_capedge_serve.sh" \
+          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh"
+      - sudo -n chown -R "$$(id -u):$$(id -g)" dev_artifacts 2>/dev/null || sudo -n chmod -R a+rX dev_artifacts || true
+      - buildkite-agent artifact upload "dev_artifacts/**/*"
