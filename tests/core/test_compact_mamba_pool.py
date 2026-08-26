@@ -15,10 +15,179 @@
 from types import SimpleNamespace
 
 import pytest
-
 from tpu_inference.core.compact_mamba_pool import (
-    _CACHED_POSITIONS_ATTR, _patch_compact_mamba_pool_classes,
-    get_mamba_cached_positions, get_mamba_prefix_cache_num_blocks)
+    _ALIGNMENT_TOKENS_ATTR,
+    _AUTO_CACHE_POSITIONS_ATTR,
+    _CACHED_POSITIONS_ATTR,
+    _patch_compact_mamba_pool_classes,
+    auto_mm_cache_positions,
+    get_fixed_mamba_cached_positions,
+    get_mamba_prefix_cache_num_blocks,
+    mamba_cache_positions,
+)
+
+
+def _mm_feature(offset, length):
+    return SimpleNamespace(
+        mm_position=SimpleNamespace(offset=offset, length=length))
+
+
+class TestAutoMmCachePositions:
+
+    def test_no_media_returns_empty(self):
+        # [text] only: no media -> no multimodal boundary.
+        assert auto_mm_cache_positions([], 128) == frozenset()
+
+    def test_nonpositive_alignment_returns_empty(self):
+        # [text, media] but alignment unavailable (0): can't floor-align -> none.
+        assert auto_mm_cache_positions([_mm_feature(128, 384)],
+                                       0) == frozenset()
+
+    def test_media_without_leading_text_returns_empty(self):
+        # [media, text]: media starts at offset 0, no text0 to cache -> fallback.
+        assert auto_mm_cache_positions([_mm_feature(0, 512)],
+                                       128) == frozenset()
+
+    def test_aligned_pair_keeps_both_text0_and_pair(self):
+        # [text, media, text]: text0=[0,128), media0=[128,512). text0 boundary
+        # 128 (already aligned) and text0+media0 run_end 512 -> both boundaries.
+        assert auto_mm_cache_positions([_mm_feature(128, 384)],
+                                       128) == frozenset({128, 512})
+
+    def test_subblock_text0_is_dropped_pair_floors_into_media(self):
+        # [text, media, ...]: text0=100 floors to 0 (< one block -> dropped);
+        # run_end=600 floors to 512, landing mid-media -> kept (align mode).
+        assert auto_mm_cache_positions([_mm_feature(100, 500)],
+                                       128) == frozenset({512})
+
+    def test_no_full_block_covered_returns_empty(self):
+        # [text, media, ...]: text0=100->0 (dropped) and media only spans
+        # [100,110), so run_end=110->0 (<= media start) -> nothing cacheable.
+        assert auto_mm_cache_positions([_mm_feature(100, 10)],
+                                       128) == frozenset()
+
+    def test_contiguous_placeholders_extend_the_run(self):
+        # [text, media, media, text]: adjacent [128,256)+[256,384) merge into one
+        # media0 run ending at 384 -> boundary after the whole contiguous run.
+        features = [_mm_feature(128, 128), _mm_feature(256, 128)]
+        assert auto_mm_cache_positions(features, 128) == frozenset({128, 384})
+
+    def test_gap_after_first_media_stops_the_run(self):
+        # [text, media, text, media]: second media [300,428) is not adjacent
+        # (text gap after 256) -> run ends at media0 only, boundary at 256.
+        features = [_mm_feature(128, 128), _mm_feature(300, 128)]
+        assert auto_mm_cache_positions(features, 128) == frozenset({128, 256})
+
+
+class TestMambaCachePositions:
+
+    def test_auto_off_returns_static_attr(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: False,
+                _CACHED_POSITIONS_ATTR: frozenset({256}),
+            })
+        # Auto off: pass the pinned TPU_MAMBA_CACHED_POSITIONS set through
+        # unchanged (no media here to trigger the placeholder guard).
+        request = SimpleNamespace(mm_features=[])
+        assert mamba_cache_positions(obj, request) == frozenset({256})
+
+    def test_auto_off_drops_fixed_inside_media(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: False,
+                _CACHED_POSITIONS_ATTR: frozenset({256, 512}),
+            })
+        # media spans [128, 512): 256 is strictly inside media -> dropped; 512 kept.
+        request = SimpleNamespace(mm_features=[_mm_feature(128, 384)])
+        assert mamba_cache_positions(obj, request) == frozenset({512})
+
+    def test_both_layers_inactive_returns_native_none(self):
+        obj = SimpleNamespace(**{
+            _AUTO_CACHE_POSITIONS_ATTR: False,
+            _CACHED_POSITIONS_ATTR: None,
+        })
+        # Feature fully idle: auto detector off and no manual pins. Nothing
+        # selects a subset, so return None -> vLLM caches at every aligned block
+        # boundary (its native behavior), exactly as if the feature were absent.
+        request = SimpleNamespace(mm_features=[_mm_feature(128, 384)])
+        assert mamba_cache_positions(obj, request) is None
+
+    def test_auto_on_infers_boundaries_from_request_media(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: True,
+                _CACHED_POSITIONS_ATTR: None,
+                _ALIGNMENT_TOKENS_ATTR: 128,
+            })
+        # Auto on, the detector reads this request's media layout
+        # ([text, media, text], media0 = [128, 512)) and infers both boundaries
+        # itself -- 128 = end of text0, 512 = end of text0+media0. A different
+        # request with different media would yield a different set.
+        request = SimpleNamespace(mm_features=[_mm_feature(128, 384)])
+        assert mamba_cache_positions(obj, request) == frozenset({128, 512})
+
+    def test_auto_on_ignores_pin_within_auto_owned_prefix(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: True,
+                _CACHED_POSITIONS_ATTR: frozenset({256}),
+                _ALIGNMENT_TOKENS_ATTR: 128,
+            })
+        # Auto infers 128 (end of text0) and 512 (text0+media0) from the media.
+        # The manual position 256 is not considered if auto detector can handle more prefixes.
+        request = SimpleNamespace(mm_features=[_mm_feature(128, 384)])
+        assert mamba_cache_positions(obj, request) == frozenset({128, 512})
+
+    def test_auto_on_keeps_fixed_beyond_auto_region(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: True,
+                _CACHED_POSITIONS_ATTR: frozenset({256, 768}),
+                _ALIGNMENT_TOKENS_ATTR: 128,
+            })
+        request = SimpleNamespace(mm_features=[_mm_feature(128, 384)])
+        # 768 is manually configured and kept as it's beyond auto detectable text0+media0 (512).
+        assert mamba_cache_positions(obj,
+                                     request) == frozenset({128, 512, 768})
+
+    def test_auto_on_drops_fixed_beyond_auto_but_inside_later_media(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: True,
+                _CACHED_POSITIONS_ATTR: frozenset({768}),
+                _ALIGNMENT_TOKENS_ATTR: 128,
+            })
+        # media0 [128, 512) -> auto {128, 512}; a later media1 [640, 896).
+        # Pinned 768 is beyond the auto region but lands inside media1, so the
+        # split can never stop there -> it must not be cached either.
+        request = SimpleNamespace(
+            mm_features=[_mm_feature(128, 384),
+                         _mm_feature(640, 256)])
+        assert mamba_cache_positions(obj, request) == frozenset({128, 512})
+
+    def test_auto_boundary_inside_media_is_not_guarded(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: True,
+                _CACHED_POSITIONS_ATTR: None,
+                _ALIGNMENT_TOKENS_ATTR: 128,
+            })
+        # media [128, 528): the text0+media0 floor 512 lands mid-placeholder but
+        # is materializable under align mode, so auto positions are exempt.
+        request = SimpleNamespace(mm_features=[_mm_feature(128, 400)])
+        assert mamba_cache_positions(obj, request) == frozenset({128, 512})
+
+    def test_auto_on_without_media_falls_back_to_fixed(self):
+        obj = SimpleNamespace(
+            **{
+                _AUTO_CACHE_POSITIONS_ATTR: True,
+                _CACHED_POSITIONS_ATTR: None,
+                _ALIGNMENT_TOKENS_ATTR: 128,
+            })
+        request = SimpleNamespace(mm_features=[])
+        # No auto boundary -> defer entirely to the fixed layer (None = native).
+        assert mamba_cache_positions(obj, request) is None
 
 
 def _fake_vllm_classes():
@@ -249,19 +418,19 @@ class TestCompactMambaPool:
             self, monkeypatch):
         monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
 
-        assert get_mamba_cached_positions() is None
+        assert get_fixed_mamba_cached_positions() is None
 
     def test_cached_positions_are_deduplicated(self, monkeypatch):
         monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "4096,8192,4096")
 
-        assert get_mamba_cached_positions() == frozenset({4096, 8192})
+        assert get_fixed_mamba_cached_positions() == frozenset({4096, 8192})
 
     @pytest.mark.parametrize("positions", ["0", "-128", "128,-256"])
     def test_cached_positions_must_be_positive(self, monkeypatch, positions):
         monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", positions)
 
         with pytest.raises(ValueError, match="positive token positions"):
-            get_mamba_cached_positions()
+            get_fixed_mamba_cached_positions()
 
     def test_block_count_uses_configured_multiplier(self, monkeypatch):
         monkeypatch.setenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "4")
@@ -280,15 +449,22 @@ class TestCompactMambaPool:
     @pytest.mark.parametrize(
         ("config", "message"),
         [
-            (SimpleNamespace(
-                cache_config=SimpleNamespace(mamba_cache_mode="align"),
-                kv_transfer_config=object(),
-                speculative_config=None,
-            ), "KV transfer"),
-            (SimpleNamespace(
-                cache_config=SimpleNamespace(mamba_cache_mode="align"),
-                kv_transfer_config=None,
-                speculative_config=object()), "speculative decoding"),
+            (
+                SimpleNamespace(
+                    cache_config=SimpleNamespace(mamba_cache_mode="align"),
+                    kv_transfer_config=object(),
+                    speculative_config=None,
+                ),
+                "KV transfer",
+            ),
+            (
+                SimpleNamespace(
+                    cache_config=SimpleNamespace(mamba_cache_mode="align"),
+                    kv_transfer_config=None,
+                    speculative_config=object(),
+                ),
+                "speculative decoding",
+            ),
         ],
     )
     def test_rejects_unsupported_config_before_installing_pool(
@@ -378,6 +554,209 @@ class TestCompactMambaPool:
             ("hash-0", 0),
             ("hash-2", 0),
         }
+
+    def test_auto_mode_caches_only_first_media_boundaries(self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        scheduler = classes.Scheduler(coordinator, max_num_seqs=4)
+        # Auto mode never restricts lookup; boundaries are per-request.
+        assert getattr(scheduler, _CACHED_POSITIONS_ATTR) is None
+        assert getattr(mamba, _AUTO_CACHE_POSITIONS_ATTR) is True
+
+        # text0=128, media0=384 -> run_end=512 -> boundaries {128, 512}.
+        blocks = [classes.Block(i + 1) for i in range(4)]
+        mamba.req_to_blocks["request-0"] = blocks
+        request = SimpleNamespace(
+            request_id="request-0",
+            block_hashes=["hash-0", "hash-1", "hash-2", "hash-3"],
+            mm_features=[_mm_feature(128, 384)],
+        )
+
+        mamba.cache_blocks(request, 4 * mamba.block_size, alignment_tokens=128)
+
+        # Positions 128 (index 0) and 512 (index 3) are cached; 256/384 nulled.
+        assert blocks[0].block_hash == ("hash-0", 0)
+        assert blocks[1].block_hash is None
+        assert blocks[2].block_hash is None
+        assert blocks[3].block_hash == ("hash-3", 0)
+        assert mamba.cached_blocks_this_step == {("hash-0", 0), ("hash-3", 0)}
+
+    def test_auto_mode_insert_then_reuse_shared_prefix(self, monkeypatch):
+        # request A caches its text0/text0+media0 boundaries, then a
+        # request B sharing the whole prefix reuses the deepest boundary.
+        monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        pool = main_pool._tpu_compact_mamba_pools[0]
+        spec = SimpleNamespace(block_size=mamba.block_size)
+
+        # A: text0=[0,128), media0=[128,384), media1=[384,600). The contiguous
+        # media merge to run_end=600, which floors to 512, so the text0+media0+media1
+        # lands mid media and is acceptable. Auto boundaries: {128 (text0), 512 (mid-media1)}.
+        blocks_a = [classes.Block(i + 1) for i in range(4)]
+        mamba.req_to_blocks["req-a"] = blocks_a
+        request_a = SimpleNamespace(
+            request_id="req-a",
+            block_hashes=["h0", "h1", "h2", "h3"],
+            mm_features=[_mm_feature(128, 256),
+                         _mm_feature(384, 216)],
+        )
+        mamba.cache_blocks(request_a,
+                           4 * mamba.block_size,
+                           alignment_tokens=128)
+
+        # Only the two selected boundary states landed in the private pool.
+        assert set(pool.cached) == {("h0", 0), ("h3", 0)}
+
+        # B shares A's entire prefix -> identical block hashes. Lookup returns
+        # the deepest cached boundary (position 512, index 3, mid-media1), with
+        # nulls for the shallower blocks it skipped over.
+        hit = classes.MambaManager.find_longest_cache_hit(
+            ["h0", "h1", "h2", "h3"],
+            4 * spec.block_size,
+            [0],
+            main_pool,
+            spec,
+            False,
+            128,
+        )
+        assert hit == ([
+            pool.null_block, pool.null_block, pool.null_block, blocks_a[3]
+        ], )
+
+    def test_different_media_falls_back_to_text0_cache(self, monkeypatch):
+        # A request with the same leading text but a different media0 shares only
+        # the text0 block hash, so lookup reuses the text0 boundary and NOT the
+        # (now diverged) text0+media0 boundary.
+        monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        pool = main_pool._tpu_compact_mamba_pools[0]
+        spec = SimpleNamespace(block_size=mamba.block_size)
+
+        # A caches text0 (h0 @128) and text0+media0 (hA3 @512).
+        blocks_a = [classes.Block(i + 1) for i in range(4)]
+        mamba.req_to_blocks["req-a"] = blocks_a
+        request_a = SimpleNamespace(
+            request_id="req-a",
+            block_hashes=["h0", "hA1", "hA2", "hA3"],
+            mm_features=[_mm_feature(128, 384)],
+        )
+        mamba.cache_blocks(request_a,
+                           4 * mamba.block_size,
+                           alignment_tokens=128)
+        assert set(pool.cached) == {("h0", 0), ("hA3", 0)}
+
+        # B keeps A's text0 (same first block hash h0) but swaps the media, so
+        # B's text0+media0 (hB3) misses; and we can only reuse text0 boundary (h0 @ index 0).
+        hit = classes.MambaManager.find_longest_cache_hit(
+            ["h0", "hB1", "hB2", "hB3"],
+            4 * spec.block_size,
+            [0],
+            main_pool,
+            spec,
+            False,
+            128,
+        )
+        assert hit == ([blocks_a[0]], )
+
+    def test_auto_mm_with_fallback_to_fixed_boundary(self, monkeypatch):
+        # Exercise automatic mamba mm cache detection that falls back to fixed cache position
+        # with a request formatted like text0 + media0 + media1 + text2.
+        # Auto detects text0 boundary, and text0 + contiguous media0+media1 boundary;
+        # and the rest of request uses fixed position boundary.
+        monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "768")
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        pool = main_pool._tpu_compact_mamba_pools[0]
+        spec = SimpleNamespace(block_size=mamba.block_size)
+
+        # media0=[128,384), media1=[384,640) are adjacent -> one run ending at 640.
+        request = SimpleNamespace(
+            request_id="req-a",
+            block_hashes=["h0", "h1", "h2", "h3", "h4", "h5"],
+            mm_features=[_mm_feature(128, 256),
+                         _mm_feature(384, 256)],
+        )
+        # Composition: auto {128, 640} owns the prefix; fixed 768 kept beyond it.
+        assert mamba_cache_positions(mamba,
+                                     request) == frozenset({128, 640, 768})
+
+        # Insert: only text0 (idx0 @128), text0+media0+media1 (idx4 @640) and
+        # text2 (idx5 @768) land in the private pool; the media interior is null.
+        blocks = [classes.Block(i + 1) for i in range(6)]
+        mamba.req_to_blocks["req-a"] = blocks
+        mamba.cache_blocks(request, 6 * mamba.block_size, alignment_tokens=128)
+        assert set(pool.cached) == {("h0", 0), ("h4", 0), ("h5", 0)}
+
+        # Reuse: a request sharing the whole prefix hits the deepest boundary
+        # (text2 @768, index 5).
+        hit = classes.MambaManager.find_longest_cache_hit(
+            ["h0", "h1", "h2", "h3", "h4", "h5"],
+            6 * spec.block_size,
+            [0],
+            main_pool,
+            spec,
+            False,
+            128,
+        )
+        assert hit == ([pool.null_block] * 5 + [blocks[5]], )
+
+    def test_auto_mode_disabled_when_not_align(self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        mamba.mamba_cache_mode = "cont"  # not "align"
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        scheduler = classes.Scheduler(coordinator, max_num_seqs=4)
+
+        # No align group -> whole compact feature (incl. auto) never installs.
+        assert not getattr(scheduler, _AUTO_CACHE_POSITIONS_ATTR, False)
+        assert not hasattr(main_pool, "_tpu_compact_mamba_pools")
+        assert mamba.block_pool is main_pool
+
+    def test_auto_mode_drops_static_positions_inside_auto_region(
+            self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "256")
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        scheduler = classes.Scheduler(coordinator, max_num_seqs=4)
+
+        # Fixed layer is retained on the manager (composed at cache time), but
+        # lookup on the main pool stays unrestricted in auto mode.
+        assert getattr(scheduler, _CACHED_POSITIONS_ATTR) == frozenset({256})
+        assert getattr(main_pool, _CACHED_POSITIONS_ATTR) is None
+        assert getattr(mamba, _AUTO_CACHE_POSITIONS_ATTR) is True
+        assert getattr(mamba, _ALIGNMENT_TOKENS_ATTR) == 128
+        # Auto owns [0, 512]; pinned 256 falls inside it -> dropped, not unioned.
+        request = SimpleNamespace(mm_features=[_mm_feature(128, 384)])
+        assert mamba_cache_positions(mamba, request) == frozenset({128, 512})
 
     def test_cache_insertion_uses_native_path_when_positions_unset(
             self, monkeypatch):

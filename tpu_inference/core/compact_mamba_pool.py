@@ -38,6 +38,7 @@ positions at either placeholder edge remain eligible.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from collections.abc import Mapping, Sequence
 from functools import wraps
@@ -50,6 +51,21 @@ logger = init_logger(__name__)
 
 _PRIVATE_POOLS_ATTR = "_tpu_compact_mamba_pools"
 _CACHED_POSITIONS_ATTR = "_tpu_mamba_cached_positions"
+_AUTO_CACHE_POSITIONS_ATTR = "_tpu_mamba_auto_cache_positions"
+_ALIGNMENT_TOKENS_ATTR = "_tpu_mamba_alignment_tokens"
+# Per-request guard so the content-safe decision trace logs once, not once per
+# scheduling step. Set on the request object the first time it is composed.
+_LOGGED_ATTR = "_tpu_mamba_decision_logged"
+
+
+def _media_digest(feature: Any) -> str:
+    """Content-safe fingerprint of a media span's identity, hashed so the log
+    never carries the raw identifier.
+    """
+    identifier = getattr(feature, "identifier", None)
+    if identifier is None:
+        return "none"
+    return hashlib.sha256(str(identifier).encode()).hexdigest()[:20]
 
 
 def get_mamba_prefix_cache_block_multiplier() -> int:
@@ -69,7 +85,7 @@ def get_mamba_prefix_cache_num_blocks(max_num_seqs: int) -> int:
     return 1 + get_mamba_prefix_cache_block_multiplier() * max_num_seqs
 
 
-def get_mamba_cached_positions() -> frozenset[int] | None:
+def get_fixed_mamba_cached_positions() -> frozenset[int] | None:
     """Return selected Mamba prefix lengths, or ``None`` for every boundary."""
     positions = envs.TPU_MAMBA_CACHED_POSITIONS
     if not positions:
@@ -79,6 +95,210 @@ def get_mamba_cached_positions() -> frozenset[int] | None:
             "TPU_MAMBA_CACHED_POSITIONS must contain positive token positions, "
             f"got {positions}")
     return frozenset(positions)
+
+
+def auto_mm_cache_positions(mm_features: Sequence[Any],
+                            alignment_tokens: int) -> frozenset[int]:
+    """Auto-detect block-aligned Mamba cache boundaries for a multimodal request.
+
+    Yields up to two reusable boundaries so a later request can hit whichever
+    prefix it shares:
+
+    * ``text0``: ``offset // alignment_tokens * alignment_tokens``.
+      ``offset`` is the media chunk's start index, which equals the text0 token
+      count — i.e. the exclusive end of the leading text. Flooring keeps the
+      boundary within the text region.
+    * ``text0 + media0``: floor of the first contiguous media run's end to
+      ``alignment_tokens``. This floor may land *inside* the media run; align
+      mode supports stopping there (chunked MM input is required, so the Mamba
+      state is materializable mid-placeholder), so partial-media caching is
+      accepted in exchange for a reusable boundary.
+
+    Returns an empty set when there is no media or no leading text (offset 0).
+    The ``text0`` boundary is dropped when it floors to 0 (text shorter than one
+    block); the ``text0 + media0`` boundary is dropped when it floors
+    at/before the media's start (nothing of the media would be cached).
+
+    TODO: only the first ``text0``/``text0 + media0`` pair is auto-detected
+    today. Extend to chain later segments —
+    ``text0 + media0 + text1 + media1 + ...`` — so more text/media prefix
+    boundary becomes a reusable cache position. Until then, use
+     ``TPU_MAMBA_CACHED_POSITIONS`` for further caching boundaries.
+    """
+    if not mm_features or alignment_tokens <= 0:
+        return frozenset()
+    # mm_features are ordered ascending by mm_position.offset (prompt order); no
+    # consumer sorts them and multimodal_manager relies on it.
+    first_offset = mm_features[0].mm_position.offset
+    if first_offset <= 0:
+        return frozenset()
+
+    positions: set[int] = set()
+    text0_boundary = first_offset // alignment_tokens * alignment_tokens
+    if text0_boundary > 0:
+        positions.add(text0_boundary)
+
+    run_end = first_offset + mm_features[0].mm_position.length
+    # Adjacent placeholders form one logical media run; extend across them so the
+    # boundary is measured from the end of that run.
+    for feature in mm_features[1:]:
+        if feature.mm_position.offset != run_end:
+            break
+        run_end = feature.mm_position.offset + feature.mm_position.length
+    pair_boundary = run_end // alignment_tokens * alignment_tokens
+    if pair_boundary > first_offset:
+        positions.add(pair_boundary)
+
+    return frozenset(positions)
+
+
+def mamba_auto_positions(obj: Any, request: Any) -> frozenset[int]:
+    """Obtain auto-detected cache positions from the request.
+
+    If ``TPU_MAMBA_AUTO_MM_CACHE_POSITIONS`` is set,
+    return automatically detected cache positions from this request's media.
+    If ``TPU_MAMBA_AUTO_MM_CACHE_POSITIONS`` is not set, return empty set.
+    """
+    if not getattr(obj, _AUTO_CACHE_POSITIONS_ATTR, False):
+        return frozenset()
+    alignment_tokens = getattr(obj, _ALIGNMENT_TOKENS_ATTR, 0)
+    mm_features = getattr(request, "mm_features", None) or ()
+    return auto_mm_cache_positions(mm_features, alignment_tokens)
+
+
+def mamba_fixed_positions(obj: Any) -> frozenset[int] | None:
+    """Obtain statically pinned cache positions.
+
+    If ``TPU_MAMBA_CACHED_POSITIONS`` is set,
+    return the positions configured through this env var.
+    If not set, return ``None``.
+    """
+    return getattr(obj, _CACHED_POSITIONS_ATTR, None)
+
+
+def _drop_mid_media_positions(positions: frozenset[int] | None,
+                              request: Any) -> frozenset[int] | None:
+    """Drop positions landing strictly inside an atomic media placeholder.
+
+    A Mamba state cannot be materialized mid-placeholder, so such positions are
+    not valid boundaries for this request; positions exactly at either edge are
+    kept. ``None`` (native "every boundary") passes through untouched.
+    """
+    if positions is None:
+        return None
+    mm_features = getattr(request, "mm_features", None) or ()
+    if not mm_features:
+        return positions
+
+    def is_inside_mm_placeholder(position: int) -> bool:
+        return any(
+            mm_feature.mm_position.offset < position <
+            mm_feature.mm_position.offset + mm_feature.mm_position.length
+            for mm_feature in mm_features)
+
+    return frozenset(position for position in positions
+                     if not is_inside_mm_placeholder(position))
+
+
+def mamba_cache_positions(obj: Any, request: Any) -> frozenset[int] | None:
+    """Obtain Mamba prefix cache positions for a request and log mamba cache position decisions if enabled."""
+    composed = _mamba_cache_positions_helper(obj, request)
+    _log_cache_decision(obj, request, composed)
+    return composed
+
+
+def _mamba_cache_positions_helper(obj: Any,
+                                  request: Any) -> frozenset[int] | None:
+    """Helper function containing `mamba_cache_position` decision logic.
+
+    * First try to detect automatically cache boundaries from request's text and media,
+      block align and truncate mid-media if necessary.
+    * then for rest of tokens to compute, fall back to use fixed cache positions,
+      note fixed position does not support mid-media --  will skip such cache positions.
+    """
+    fixed = mamba_fixed_positions(obj)
+    if not getattr(obj, _AUTO_CACHE_POSITIONS_ATTR, False):
+        return _drop_mid_media_positions(fixed, request)
+    auto = mamba_auto_positions(obj, request)
+    if not auto:
+        return _drop_mid_media_positions(fixed, request)
+    if not fixed:
+        return auto
+    cutoff = max(auto)
+    beyond = frozenset(position for position in fixed if position > cutoff)
+    return auto | _drop_mid_media_positions(beyond, request)
+
+
+def _describe_auto_detection(mm_features: Sequence[Any], alignment_tokens: int,
+                             auto_on: bool) -> str:
+    """Human-readable narration of the automatic cache position detection decision."""
+    if not auto_on:
+        return "auto off"
+    if not mm_features:
+        return "auto skip: no media spans"
+    if alignment_tokens <= 0:
+        return f"auto skip: non-positive alignment ({alignment_tokens})"
+    first_offset = mm_features[0].mm_position.offset
+    if first_offset <= 0:
+        return f"auto skip: no prefix text, media first (first offset={first_offset})"
+
+    parts = []
+    text0 = first_offset // alignment_tokens * alignment_tokens
+    parts.append(f"text0 offset {first_offset}->{text0}" if text0 >
+                 0 else f"text0 dropped (offset {first_offset} floors to 0)")
+    run_end = first_offset + mm_features[0].mm_position.length
+    merged = 1
+    for feature in mm_features[1:]:
+        if feature.mm_position.offset != run_end:
+            break
+        run_end = feature.mm_position.offset + feature.mm_position.length
+        merged += 1
+    parts.append(f"media0 {merged} span(s) run_end={run_end}")
+    pair = run_end // alignment_tokens * alignment_tokens
+    if pair > first_offset:
+        parts.append(f"text0+media0 {run_end}->{pair}" +
+                     (" (inside media)" if pair < run_end else ""))
+    else:
+        parts.append(
+            f"text0+media0 dropped ({pair}<=media start {first_offset})")
+    return "auto: " + ", ".join(parts)
+
+
+def _log_cache_decision(obj: Any, request: Any,
+                        composed: frozenset[int] | None) -> None:
+    """Config-gated, content-safe trace of a request's caching decision.
+
+    Off unless ``TPU_MAMBA_LOG_AUTO_MM_CACHE_DECISIONS`` is set; logs once per request.
+    Emits only metadata (offsets, lengths, positions, block size) and hashed
+    media identities -- never raw prompt text, generated text, or media.
+    """
+    if not envs.TPU_MAMBA_LOG_AUTO_MM_CACHE_DECISIONS:
+        return
+    if getattr(request, _LOGGED_ATTR, False):
+        return
+    try:
+        setattr(request, _LOGGED_ATTR, True)
+    except (AttributeError, TypeError):
+        pass
+
+    auto_on = bool(getattr(obj, _AUTO_CACHE_POSITIONS_ATTR, False))
+    alignment_tokens = getattr(obj, _ALIGNMENT_TOKENS_ATTR, 0)
+    mm_features = getattr(request, "mm_features", None) or ()
+    spans = (", ".join(
+        "#%d off=%d len=%d id=%s" %
+        (i, f.mm_position.offset, f.mm_position.length, _media_digest(f))
+        for i, f in enumerate(mm_features)) or "none")
+    fixed = mamba_fixed_positions(obj)
+
+    logger.info(
+        "mamba-cache: block=%d spans=[%s] | %s | auto=%s fixed=%s => cached=%s",
+        alignment_tokens,
+        spans,
+        _describe_auto_detection(mm_features, alignment_tokens, auto_on),
+        sorted(mamba_auto_positions(obj, request)),
+        "native(None)" if fixed is None else sorted(fixed),
+        "native(None)" if composed is None else sorted(composed),
+    )
 
 
 def is_mamba_prefix_cache_enabled(vllm_config: Any) -> bool:
@@ -107,7 +327,7 @@ def validate_mamba_prefix_cache_config(vllm_config: Any) -> None:
             "Compact Mamba prefix-cache pools do not support speculative "
             "decoding.")
     get_mamba_prefix_cache_block_multiplier()
-    get_mamba_cached_positions()
+    get_fixed_mamba_cached_positions()
 
 
 def _new_block_pool(block_pool_cls: type, main_pool: Any,
@@ -169,19 +389,30 @@ def _attach_private_mamba_pools(
         and getattr(manager, "mamba_cache_mode", None) == "align"
     ]
     if not mamba_managers:
+        # The compact pool (and its auto boundary detection) is align-mode only.
+        # Never enable the feature outside align mode; surface the misconfig.
+        if envs.TPU_MAMBA_AUTO_MM_CACHE_POSITIONS:
+            logger.warning(
+                "TPU_MAMBA_AUTO_MM_CACHE_POSITIONS is set but no align-mode "
+                "Mamba cache group is present; the feature is disabled.")
         return
 
-    cached_positions = get_mamba_cached_positions()
+    fixed_cached_positions = get_fixed_mamba_cached_positions()
     alignment_tokens = coordinator.lcm_block_size
-    if cached_positions is not None:
-        misaligned_positions = sorted(position for position in cached_positions
+    if fixed_cached_positions is not None:
+        misaligned_positions = sorted(position
+                                      for position in fixed_cached_positions
                                       if position % alignment_tokens != 0)
         if misaligned_positions:
             raise ValueError(
                 "TPU_MAMBA_CACHED_POSITIONS values must be multiples of the "
                 f"hybrid cache alignment ({alignment_tokens} tokens), got "
                 f"{misaligned_positions}")
-    setattr(scheduler, _CACHED_POSITIONS_ATTR, cached_positions)
+    auto_mm_cache_positions = envs.TPU_MAMBA_AUTO_MM_CACHE_POSITIONS
+
+    setattr(scheduler, _CACHED_POSITIONS_ATTR, fixed_cached_positions)
+    setattr(scheduler, _AUTO_CACHE_POSITIONS_ATTR, auto_mm_cache_positions)
+    setattr(scheduler, _ALIGNMENT_TOKENS_ATTR, alignment_tokens)
 
     vllm_config = getattr(scheduler, "vllm_config", None)
     if vllm_config is not None:
@@ -203,7 +434,9 @@ def _attach_private_mamba_pools(
         manager.block_pool = pool
         # SingleTypeKVCacheManager caches the null block at construction.
         manager._null_block = pool.null_block
-        setattr(manager, _CACHED_POSITIONS_ATTR, cached_positions)
+        setattr(manager, _CACHED_POSITIONS_ATTR, fixed_cached_positions)
+        setattr(manager, _AUTO_CACHE_POSITIONS_ATTR, auto_mm_cache_positions)
+        setattr(manager, _ALIGNMENT_TOKENS_ATTR, alignment_tokens)
 
     if not private_pools:
         return
@@ -213,7 +446,12 @@ def _attach_private_mamba_pools(
     # the Mamba classmethod. Tag it so that method can route each group lookup
     # to the corresponding private pool.
     setattr(main_pool, _PRIVATE_POOLS_ATTR, private_pools)
-    setattr(main_pool, _CACHED_POSITIONS_ATTR, cached_positions)
+    # Only fixed TPU_MAMBA_AUTO_MM_CACHE_POSITIONS restricts lookup to a pinned set of cache positions.
+    setattr(
+        main_pool,
+        _CACHED_POSITIONS_ATTR,
+        None if auto_mm_cache_positions else fixed_cached_positions,
+    )
     setattr(kv_cache_manager, _PRIVATE_POOLS_ATTR, private_pools)
     logger.info(
         "Installed compact scheduler pools for Mamba groups %s: "
@@ -225,9 +463,19 @@ def _attach_private_mamba_pools(
             for group_id, pool in private_pools.items()
         },
     )
-    if cached_positions is not None:
-        logger.info("Mamba prefix caching restricted to token positions %s",
-                    sorted(cached_positions))
+    if auto_mm_cache_positions:
+        logger.info(
+            "Mamba prefix caching auto-targets the first text0/text0+media0 "
+            "boundaries per request (alignment=%d tokens)%s",
+            alignment_tokens,
+            ("" if fixed_cached_positions is None else
+             f"; also pinning {sorted(fixed_cached_positions)}"),
+        )
+    elif fixed_cached_positions is not None:
+        logger.info(
+            "Mamba prefix caching restricted to token positions %s",
+            sorted(fixed_cached_positions),
+        )
 
 
 def _all_block_pools(kv_cache_manager: Any) -> tuple[Any, ...]:
@@ -267,10 +515,9 @@ def _find_private_mamba_cache_hit(
     max_num_blocks = max_length // block_size
     for index in range(max_num_blocks - 1, -1, -1):
         position = (index + 1) * block_size
-        if (cached_positions is not None and position not in cached_positions):
+        if cached_positions is not None and position not in cached_positions:
             continue
-        if (block_size != alignment_tokens
-                and position % alignment_tokens != 0):
+        if block_size != alignment_tokens and position % alignment_tokens != 0:
             continue
 
         hits: list[Any] = []
@@ -431,15 +678,14 @@ def _patch_compact_mamba_pool_classes(
 
     if not hasattr(mamba_manager_cls, "_tpu_orig_compact_mamba_cache_blocks"):
         original_cache_blocks = mamba_manager_cls.cache_blocks
-        mamba_manager_cls._tpu_orig_compact_mamba_cache_blocks = (
-            original_cache_blocks)
+        mamba_manager_cls._tpu_orig_compact_mamba_cache_blocks = original_cache_blocks
         supports_alignment_tokens = (
             "alignment_tokens"
             in inspect.signature(original_cache_blocks).parameters)
 
         @wraps(original_cache_blocks)
         def cache_blocks(self, request, num_tokens, alignment_tokens=None):
-            cached_positions = getattr(self, _CACHED_POSITIONS_ATTR, None)
+            cached_positions = mamba_cache_positions(self, request)
             if cached_positions is None:
                 if supports_alignment_tokens:
                     return original_cache_blocks(
@@ -535,8 +781,10 @@ def _patch_compact_mamba_pool_classes(
 def install_compact_mamba_pool() -> None:
     """Install compact, scheduler-addressable Mamba pools into vLLM."""
     from vllm.v1.core.block_pool import BlockPool
-    from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
-                                                   KVCacheCoordinator)
+    from vllm.v1.core.kv_cache_coordinator import (
+        HybridKVCacheCoordinator,
+        KVCacheCoordinator,
+    )
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.sched.scheduler import Scheduler
     from vllm.v1.core.single_type_kv_cache_manager import MambaManager

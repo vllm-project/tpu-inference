@@ -15,11 +15,12 @@
 
 from typing import Any
 
+from tpu_inference.core.compact_mamba_pool import (
+    install_compact_mamba_pool,
+    mamba_cache_positions,
+)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-
-from tpu_inference.core.compact_mamba_pool import (_CACHED_POSITIONS_ATTR,
-                                                   install_compact_mamba_pool)
 
 
 def _split_at_next_mamba_cached_position(
@@ -31,7 +32,13 @@ def _split_at_next_mamba_cached_position(
     *,
     num_computed_tokens: int | None = None,
 ) -> int:
-    """Stop a prefill at the next selected Mamba prefix boundary."""
+    """Cap a prefill step at the next selected Mamba prefix boundary.
+
+    ``cached_positions`` is the fully-composed eligible set from
+    :func:`mamba_cache_positions` (auto over fixed, mid-placeholder positions
+    already dropped), so this only finds the nearest boundary ahead of the
+    computed prefix. ``None`` -> native chunking (no forced boundary).
+    """
     if cached_positions is None or num_new_tokens <= 0:
         return num_new_tokens
 
@@ -40,21 +47,9 @@ def _split_at_next_mamba_cached_position(
                                num_new_local_computed_tokens +
                                num_external_computed_tokens)
 
-    # A Mamba state cannot be materialized in the middle of an atomic
-    # multimodal placeholder. Ignore such positions for this request. Positions
-    # exactly at either edge of the placeholder remain valid boundaries.
-    mm_features = getattr(request, "mm_features", None) or ()
-
-    def is_inside_mm_placeholder(position: int) -> bool:
-        return any(
-            mm_feature.mm_position.offset < position <
-            mm_feature.mm_position.offset + mm_feature.mm_position.length
-            for mm_feature in mm_features)
-
     next_position = min(
         (position
-         for position in cached_positions if position > num_computed_tokens
-         and not is_inside_mm_placeholder(position)),
+         for position in cached_positions if position > num_computed_tokens),
         default=None,
     )
     if (next_position is not None
@@ -80,8 +75,8 @@ class _SelectedMambaPositionSchedulerMixin:
         num_new_tokens = _split_at_next_mamba_cached_position(
             request,
             num_new_tokens,
-            cached_positions=getattr(self, _CACHED_POSITIONS_ATTR, None),
             num_computed_tokens=num_computed_tokens,
+            cached_positions=mamba_cache_positions(self, request),
         )
         return super()._try_schedule_encoder_inputs(
             request,
@@ -109,7 +104,7 @@ class _SelectedMambaPositionSchedulerMixin:
             num_new_tokens,
             num_new_local_computed_tokens,
             num_external_computed_tokens,
-            getattr(self, _CACHED_POSITIONS_ATTR, None),
+            cached_positions=mamba_cache_positions(self, request),
         )
 
 

@@ -15,9 +15,10 @@
 from types import SimpleNamespace
 
 import pytest
-
 from tpu_inference.core.sched.compact_mamba_scheduler import (
-    _SelectedMambaPositionSchedulerMixin, _split_at_next_mamba_cached_position)
+    _SelectedMambaPositionSchedulerMixin,
+    _split_at_next_mamba_cached_position,
+)
 
 
 class TestSplitAtNextMambaCachedPosition:
@@ -30,74 +31,49 @@ class TestSplitAtNextMambaCachedPosition:
         assert _split_at_next_mamba_cached_position(req, 8192) == 8192
 
     def test_prefill_stops_at_first_crossed_position(self, req):
-        assert _split_at_next_mamba_cached_position(
+        assert (_split_at_next_mamba_cached_position(
             req,
             8192,
             cached_positions=frozenset({4096, 6144}),
-        ) == 4096
+        ) == 4096)
 
     def test_prefill_ending_at_position_is_unchanged(self, req):
-        assert _split_at_next_mamba_cached_position(
+        assert (_split_at_next_mamba_cached_position(
             req,
             4096,
             cached_positions=frozenset({4096}),
-        ) == 4096
+        ) == 4096)
 
     def test_prefill_before_next_position_is_unchanged(self, req):
-        assert _split_at_next_mamba_cached_position(
+        assert (_split_at_next_mamba_cached_position(
             req,
             2048,
             cached_positions=frozenset({4096}),
-        ) == 2048
+        ) == 2048)
 
     def test_prefill_uses_next_position_after_current_state(self, req):
         req.num_computed_tokens = 4096
 
-        assert _split_at_next_mamba_cached_position(
+        assert (_split_at_next_mamba_cached_position(
             req,
             4096,
             cached_positions=frozenset({4096, 6144}),
-        ) == 2048
+        ) == 2048)
 
     def test_new_prefix_hits_are_included_in_current_position(self, req):
-        assert _split_at_next_mamba_cached_position(
+        assert (_split_at_next_mamba_cached_position(
             req,
             8192,
             num_new_local_computed_tokens=4096,
             cached_positions=frozenset({4096, 8192}),
-        ) == 4096
+        ) == 4096)
 
     def test_nonpositive_native_chunk_is_unchanged(self, req):
-        assert _split_at_next_mamba_cached_position(
+        assert (_split_at_next_mamba_cached_position(
             req,
             0,
             cached_positions=frozenset({4096}),
-        ) == 0
-
-    def test_position_inside_mm_placeholder_is_skipped(self, req):
-        req.mm_features = [
-            SimpleNamespace(
-                mm_position=SimpleNamespace(offset=2048, length=4096))
-        ]
-
-        assert _split_at_next_mamba_cached_position(
-            req,
-            12288,
-            cached_positions=frozenset({4096, 8192}),
-        ) == 8192
-
-    @pytest.mark.parametrize("position", [4096, 8192])
-    def test_position_at_mm_placeholder_edge_is_retained(self, req, position):
-        req.mm_features = [
-            SimpleNamespace(
-                mm_position=SimpleNamespace(offset=4096, length=4096))
-        ]
-
-        assert _split_at_next_mamba_cached_position(
-            req,
-            12288,
-            cached_positions=frozenset({position}),
-        ) == position
+        ) == 0)
 
 
 class TestSelectedMambaPositionSchedulerMixin:

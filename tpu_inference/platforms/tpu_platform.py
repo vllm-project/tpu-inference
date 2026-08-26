@@ -112,6 +112,7 @@ class TpuPlatform(Platform):
         "ENABLE_RS_KERNEL",
         "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER",
         "TPU_MAMBA_CACHED_POSITIONS",
+        "TPU_MAMBA_AUTO_MM_CACHE_POSITIONS",
     ]
 
     @classmethod

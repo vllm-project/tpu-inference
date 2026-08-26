@@ -55,6 +55,8 @@ if TYPE_CHECKING:
     TPU_OFFLOAD_USE_UNPINNED_HOST: bool = False
     TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER: int = 2
     TPU_MAMBA_CACHED_POSITIONS: list[int] = []
+    TPU_MAMBA_AUTO_MM_CACHE_POSITIONS: bool = False
+    TPU_MAMBA_LOG_AUTO_MM_CACHE_DECISIONS: bool = False
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
@@ -355,6 +357,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # states are inserted and looked up only at these exact token positions.
     "TPU_MAMBA_CACHED_POSITIONS":
     env_int_list("TPU_MAMBA_CACHED_POSITIONS"),
+    # When set, auto-detect the first text0 and text0+media0 boundaries per
+    # multimodal request and cache the Mamba state there (floor-aligned to the
+    # hybrid cache unit; the pair boundary may land mid-media). Composed on top
+    # of (unioned with) TPU_MAMBA_CACHED_POSITIONS. Align mode only.
+    "TPU_MAMBA_AUTO_MM_CACHE_POSITIONS":
+    env_bool("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS"),
+    # Debug-only: log a content-safe, per-request trace of the Mamba prefix
+    # caching decision (media layout digests, aligned boundaries, skip reasons,
+    # fixed-position composition). Off by default; never logs raw prompt/media.
+    "TPU_MAMBA_LOG_AUTO_MM_CACHE_DECISIONS":
+    env_bool("TPU_MAMBA_LOG_AUTO_MM_CACHE_DECISIONS"),
     "AGGREGATED_STATS_DIR":
     lambda: os.getenv("AGGREGATED_STATS_DIR", ""),
     # MoE: whether to use approximate top-k for expert selection.
