@@ -10,6 +10,7 @@ without importing or depending on Tunix.
 """
 
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -27,12 +28,21 @@ logger = logging.getLogger(__name__)
 
 
 def _get_val(obj: Any, key: str, default: Any = None) -> Any:
-    """Helper to extract an attribute or dict key seamlessly from any duck-typed request."""
+    """Helper to extract an attribute or dict key seamlessly from any duck-typed request.
+
+    Falls back to `default` both when `key` is absent and when it's present
+    but explicitly `None` -- request dataclasses across callers (e.g. tunix's
+    rollout requests) commonly default optional sampling fields to `None`
+    rather than omitting them, and vLLM's `SamplingParams` rejects `None` for
+    fields like `top_k` that it compares numerically.
+    """
     if obj is None:
         return default
     if isinstance(obj, dict):
-        return obj.get(key, default)
-    return getattr(obj, key, default)
+        val = obj.get(key, default)
+    else:
+        val = getattr(obj, key, default)
+    return default if val is None else val
 
 
 class RLVllmSampler:
@@ -57,6 +67,7 @@ class RLVllmSampler:
         self._mesh: Any | None = None
         self._transfer_statuses: dict[str, str] = {}
         self._policy_version = 0
+        self._kv_cache_freed = False
 
     def _get_tpu_workers(self) -> list[Any]:
         """Retrieves active TPUWorker instances from underlying model executor."""
@@ -84,17 +95,6 @@ class RLVllmSampler:
 
         self._engine = AsyncLLMEngine.from_engine_args(self.engine_args)
         self._is_running = True
-
-        init_info = {
-            "model_path": self.engine_args.model,
-            "tp_size": self.engine_args.tensor_parallel_size,
-        }
-        if self._engine:
-            try:
-                await self._engine.init_weight_transfer_engine(init_info)
-            except Exception as e:
-                logger.warning(
-                    "Failed to initialize weight transfer engine: %s", e)
 
         logger.info("RLVllmSampler started successfully.")
 
@@ -340,17 +340,92 @@ class RLVllmSampler:
             "tpu_worker_ips": worker_ips,
         }
 
+    async def _call_worker_method(self, method_name: str, *args: Any, **kwargs: Any) -> list[Any]:
+        """Dispatches a method call across TPU workers via collective_rpc or direct execution."""
+        if self._engine is None:
+            return []
+        engine_obj = getattr(self._engine, "engine", self._engine)
+        last_error: Exception | None = None
+        # AsyncLLMEngine.collective_rpc is a coroutine function; other engine
+        # objects may expose a plain sync collective_rpc. Handle both.
+        if hasattr(engine_obj, "collective_rpc"):
+            try:
+                result = engine_obj.collective_rpc(method_name, args=args, kwargs=kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+            except Exception as e:
+                logger.warning("engine.collective_rpc(%s) failed: %s", method_name, e)
+                last_error = e
+        model_executor = getattr(engine_obj, "model_executor", None)
+        if model_executor and hasattr(model_executor, "collective_rpc"):
+            try:
+                result = model_executor.collective_rpc(method_name, args=args, kwargs=kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+            except Exception as e:
+                logger.warning("model_executor.collective_rpc(%s) failed: %s", method_name, e)
+                last_error = e
+
+        workers = self._get_tpu_workers()
+        results = []
+        for w in workers:
+            if hasattr(w, method_name):
+                fn = getattr(w, method_name)
+                r = fn(*args, **kwargs)
+                if inspect.isawaitable(r):
+                    r = await r
+                results.append(r)
+        if not results and workers and last_error is not None:
+            raise RuntimeError(
+                f"_call_worker_method({method_name}) failed on all dispatch "
+                f"paths: {last_error}") from last_error
+        return results
+
+    async def get_weights_state(self) -> list[Any]:
+        """Returns the PyTree of weights or state from active TPU workers."""
+        return await self._call_worker_method("get_weights_state")
+
+    async def bind_raiden_sync(self, worker_index: int = 0, parallelism: int = 4) -> None:
+        """Binds Raiden to each TPU worker's live weights, in-process.
+
+        `get_weights_state()` cannot back a rollout-side weight sync: the
+        live `nnx.State` it returns has to be dispatched back across
+        `collective_rpc` into this (parent) process to be useful, but vLLM's
+        RPC transport can't serialize `nnx.State`/live TPU arrays, and even a
+        pickle-based fallback would bind Raiden to a disconnected host copy
+        rather than the device buffers actually being served. Binding must
+        happen in the worker subprocess instead -- see
+        `tpu_worker.TPUWorker.bind_raiden_sync`.
+        """
+        await self._call_worker_method("bind_raiden_sync", worker_index, parallelism)
+
+    async def get_raiden_metadata(self) -> list[dict]:
+        """Wire-safe registration metadata for each worker's current Raiden binding."""
+        return await self._call_worker_method("get_raiden_metadata")
+
+    async def raiden_h2d(self) -> list[dict]:
+        """Blocks each worker until its just-landed transfer is visible on-device.
+
+        Returns each worker's checksums dict (empty unless VERIFY_WEIGHTS=true).
+        """
+        return await self._call_worker_method("raiden_h2d")
+
+    async def raiden_metrics(self) -> list[dict]:
+        return await self._call_worker_method("raiden_metrics")
+
     async def pre_weight_sync(
         self,
         sync_request: Any = None,
         free_kv_cache: bool = True,
         **kwargs: Any,
     ) -> None:
-        """Phase 1: Pauses intake, clears prefix cache, and calls start_weight_update()."""
+        """Phase 1: Pauses intake, clears prefix cache, and drops KV cache via delete_kv_cache()."""
         self._policy_version = _get_val(sync_request, "policy_version",
                                         self._policy_version)
-        logger.info("Executing pre_weight_sync (policy_version=%d)",
-                    self._policy_version)
+        logger.info("Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s)",
+                    self._policy_version, free_kv_cache)
 
         if sync_request is not None:
             rid = _get_val(sync_request, "req_id")
@@ -360,19 +435,19 @@ class RLVllmSampler:
         await self.pause()
         await self._clear_prefix_cache()
 
-        if self._engine and hasattr(self._engine, "start_weight_update"):
-            self._engine.start_weight_update(free_kv_cache=free_kv_cache)
+        if free_kv_cache:
+            await self._call_worker_method("delete_kv_cache")
+            self._kv_cache_freed = True
 
     async def weight_sync(
         self,
         sync_request: Any = None,
         **kwargs: Any,
     ) -> None:
-        """Phase 2: Calls TPUWorker.update_weights(update_info)."""
+        """Phase 2: Coordinates weight synchronization barrier across TPU workers."""
         logger.info("Executing weight_sync update on TPU workers...")
         u_info = _get_val(sync_request, "extra_config") or {}
-        if self._engine:
-            self._engine.update_weights(u_info)
+        await self._call_worker_method("update_weights", u_info)
         await asyncio.sleep(0.01)
 
     async def post_weight_sync(
@@ -380,14 +455,17 @@ class RLVllmSampler:
         sync_request: Any = None,
         **kwargs: Any,
     ) -> None:
-        """Phase 3: Calls TPUWorker.finish_weight_update()."""
+        """Phase 3: Restores KV cache via reinitialize_kv_cache() and resumes serving."""
         rid = None
         if sync_request is not None:
             rid = _get_val(sync_request, "req_id")
         logger.info("Executing post_weight_sync (req_id=%s)...", rid)
 
-        if self._engine:
-            self._engine.finish_weight_update()
+        if getattr(self, "_kv_cache_freed", False):
+            await self._call_worker_method("reinitialize_kv_cache")
+            self._kv_cache_freed = False
+        else:
+            await self._call_worker_method("finish_weight_update")
 
         self._cache_valid = True
         if rid:

@@ -726,14 +726,6 @@ class TPUWorker(WorkerBase):
         port = get_kv_transfer_port()
         return (int(self.topology_order_id), ip, int(port))
 
-    def init_weight_transfer_engine(self, init_info: Dict[str, Any]) -> None:
-        """Prepare the transport.
-
-        No setup is needed today; Raiden will build its `WeightSynchronizer`
-        here.
-        """
-        logger.info("init_weight_transfer_engine: %s", sorted(init_info or {}))
-
     def start_weight_update(self, free_kv_cache: bool = True) -> None:
         """Open a weight update session.
 
@@ -775,6 +767,67 @@ class TPUWorker(WorkerBase):
 
     def reinitialize_kv_cache(self) -> None:
         self.model_runner.reinitialize_kv_cache()
+
+    def _extract_weight_state(self) -> Any:
+        """Builds the weight PyTree (possibly `nnx.State`) from the runner.
+
+        Used by `get_weights_state` (same-process callers only -- the
+        result can hold live TPU arrays, unserializable over collective_rpc)
+        and `bind_raiden_sync` (binds it to Raiden in-process instead).
+        """
+        from tpu_inference.rl import raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        return raiden_worker_sync.extract_weight_state(
+            getattr(self.model_runner, "state", None),
+            getattr(self.model_runner, "model", None),
+        )
+
+    def get_weights_state(self) -> Any:
+        """Returns model weights state / PyTree from the runner.
+
+        Same-process callers only; use `bind_raiden_sync`/`get_raiden_metadata`
+        to cross the collective_rpc boundary.
+        """
+        return self._extract_weight_state()
+
+    def _require_raiden_sync(self, op: str) -> Any:
+        sync = getattr(self, "_raiden_worker_sync", None)
+        if sync is None:
+            raise RuntimeError(f"bind_raiden_sync must run before {op}.")
+        return sync
+
+    def bind_raiden_sync(self, worker_index: int = 0, parallelism: int = 4) -> dict:
+        """Binds this worker's live weights to Raiden and returns wire-safe
+        registration metadata (never the arrays)."""
+        from tpu_inference.rl import raiden_worker_sync  # pylint: disable=g-import-not-at-top
+
+        state = self._extract_weight_state()
+        if getattr(self, "_raiden_worker_sync", None) is None:
+            self._raiden_worker_sync = raiden_worker_sync.RaidenWorkerSync(
+                job_name="rollout",
+                worker_index=worker_index,
+                parallelism=parallelism,
+            )
+        self._raiden_worker_sync.bind(state)
+        return self._raiden_worker_sync.metadata_dict()
+
+    def get_raiden_metadata(self) -> dict:
+        """Re-fetches the current binding's wire-safe metadata without rebinding."""
+        return self._require_raiden_sync("get_raiden_metadata").metadata_dict()
+
+    def raiden_h2d(self) -> dict:
+        """Blocks until the transfer that just landed is visible on-device.
+
+        Returns tensor checksums when `VERIFY_WEIGHTS=true`.
+        """
+        sync = self._require_raiden_sync("raiden_h2d")
+        sync.h2d()
+        if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
+            return sync.checksums()
+        return {}
+
+    def raiden_metrics(self) -> dict:
+        return self._require_raiden_sync("raiden_metrics").metrics()
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()

@@ -159,12 +159,10 @@ class TestRLVllmSamplerInference(unittest.TestCase):
 class TestRLVllmSamplerWeightSync(unittest.TestCase):
     """Tests RLVllmSampler weight synchronization with duck-typed requests."""
 
-    @patch("tpu_inference.rl.vllm_sampler.RLVllmSampler._get_tpu_workers")
-    def test_weight_sync_calls_tpu_worker_apis(self, mock_get_workers):
+    @patch("tpu_inference.rl.vllm_sampler.RLVllmSampler._call_worker_method")
+    def test_weight_sync_calls_tpu_worker_apis(self, mock_call_worker_method):
 
-        mock_worker_0 = MagicMock()
-        mock_worker_1 = MagicMock()
-        mock_get_workers.return_value = [mock_worker_0, mock_worker_1]
+        mock_call_worker_method.return_value = []
 
         args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B",
                                tensor_parallel_size=2)
@@ -174,10 +172,6 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
         mock_engine.pause_background_loop = AsyncMock()
         mock_engine.resume_background_loop = AsyncMock()
         mock_engine.reset_prefix_cache = AsyncMock()
-        mock_engine.init_weight_transfer_engine = MagicMock()
-        mock_engine.start_weight_update = MagicMock()
-        mock_engine.update_weights = MagicMock()
-        mock_engine.finish_weight_update = MagicMock()
         sampler._engine = mock_engine
         sampler._is_running = True
 
@@ -193,21 +187,21 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
             await sampler.pre_weight_sync(req_pre)
             mock_engine.pause_background_loop.assert_called_once()
-            mock_engine.start_weight_update.assert_called_once_with(
-                free_kv_cache=True)
+            mock_call_worker_method.assert_called_once_with("delete_kv_cache")
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "IN_PROGRESS")
 
+            mock_call_worker_method.reset_mock()
             req_sync = {"extra_config": {"dma_channel": 1}}
             await sampler.weight_sync(req_sync)
-            mock_engine.update_weights.assert_called_once()
-            call_arg = mock_engine.update_weights.call_args[0][0]
-            update_dict = getattr(call_arg, "update_info", call_arg)
-            self.assertEqual(update_dict, {"dma_channel": 1})
+            mock_call_worker_method.assert_called_once_with(
+                "update_weights", {"dma_channel": 1})
 
+            mock_call_worker_method.reset_mock()
             req_post = SimpleNamespace(req_id="transfer_99")
             await sampler.post_weight_sync(req_post)
-            mock_engine.finish_weight_update.assert_called_once()
+            mock_call_worker_method.assert_called_once_with(
+                "reinitialize_kv_cache")
             mock_engine.reset_prefix_cache.assert_called_once()
             mock_engine.resume_background_loop.assert_called_once()
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
