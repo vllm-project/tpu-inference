@@ -13,12 +13,15 @@
 # limitations under the License.
 
 import math
+from types import SimpleNamespace
 
 import jax
 import numpy as np
 import torch
 
-from tpu_inference.models.vllm.experimental.vision_tower_jit import GridTHW
+from tpu_inference.models.vllm.experimental.vision_tower_jit import (
+    _SUPPORTED_JITTABLE_ARCHS, GridTHW, is_jittable_architecture)
+from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
 
 
 def test_grid_thw_basic_and_slicing():
@@ -114,58 +117,54 @@ def test_multimodal_unpadding_stripping():
 
 
 def test_get_model_tp_size_helper():
-    from unittest.mock import MagicMock
-
-    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
-
-    wrapper = MagicMock(spec=VllmModelWrapper)
+    wrapper = SimpleNamespace()
     wrapper._get_model_tp_size = VllmModelWrapper._get_model_tp_size.__get__(
         wrapper)
 
     # Case 1: Mesh with "model" axis present
-    mock_mesh = MagicMock()
-    mock_mesh.shape = {"data": 1, "model": 4}
-    wrapper.mesh = mock_mesh
+    wrapper.mesh = SimpleNamespace(shape={"data": 1, "model": 4})
     assert wrapper._get_model_tp_size() == 4
 
     # Case 2: Mesh without "model" axis, fallback to parallel_config
-    mock_mesh.shape = {"data": 2}
-    wrapper.vllm_config.parallel_config.tensor_parallel_size = 2
+    wrapper.mesh = SimpleNamespace(shape={"data": 2})
+    wrapper.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(
+        tensor_parallel_size=2))
     assert wrapper._get_model_tp_size() == 2
 
     # Case 3: Mesh is None, fallback to parallel_config
     wrapper.mesh = None
-    wrapper.vllm_config.parallel_config.tensor_parallel_size = 8
+    wrapper.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(
+        tensor_parallel_size=8))
     assert wrapper._get_model_tp_size() == 8
 
 
 def test_get_activation_sharding_divisor():
-    from unittest.mock import MagicMock
-
-    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
-
-    wrapper = MagicMock(spec=VllmModelWrapper)
+    wrapper = SimpleNamespace()
     wrapper._get_activation_sharding_divisor = (
         VllmModelWrapper._get_activation_sharding_divisor.__get__(wrapper))
 
     # Case 1: DP attention mesh ('attn_dp': 8, 'model': 1)
-    mock_mesh = MagicMock()
-    mock_mesh.shape = {"data": 1, "attn_dp": 8, "model": 1}
-    wrapper.mesh = mock_mesh
+    wrapper.mesh = SimpleNamespace(shape={"data": 1, "attn_dp": 8, "model": 1})
     assert wrapper._get_activation_sharding_divisor() == 8
 
     # Case 2: Hybrid PCP + DP attention ('pcp': 2, 'attn_dp': 4)
-    mock_mesh.shape = {"data": 1, "pcp": 2, "attn_dp": 4, "model": 1}
+    wrapper.mesh = SimpleNamespace(shape={
+        "data": 1,
+        "pcp": 2,
+        "attn_dp": 4,
+        "model": 1
+    })
     assert wrapper._get_activation_sharding_divisor(
     ) == 4  # lcm(1, 2, 4, 1) = 4
 
     # Case 3: 2D mesh with string ShardingAxisName.ATTN_DATA ('data': 4, 'model': 2)
-    mock_mesh.shape = {"data": 4, "model": 2}
+    wrapper.mesh = SimpleNamespace(shape={"data": 4, "model": 2})
     assert wrapper._get_activation_sharding_divisor() == 4  # lcm(4, 2) = 4
 
     # Case 4: Fallback when mesh is None
     wrapper.mesh = None
-    wrapper.vllm_config.parallel_config.tensor_parallel_size = 8
+    wrapper.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(
+        tensor_parallel_size=8))
     assert wrapper._get_activation_sharding_divisor() == 8
 
 
@@ -216,3 +215,21 @@ def test_padding_metadata_synchronization():
     assert len(second_per_grid_ts_list) == 2
     assert len(timestamps_list) == 2
     assert pixels.shape[0] % tp_size == 0
+
+
+def test_jittable_architectures_detection():
+
+    class NonJittableModel:
+        pass
+
+    non_jittable_model = NonJittableModel()
+    assert not is_jittable_architecture(non_jittable_model)
+
+    for arch in _SUPPORTED_JITTABLE_ARCHS:
+        # Test via config.architectures using lightweight SimpleNamespace
+        model = SimpleNamespace(config=SimpleNamespace(architectures=[arch]))
+        assert is_jittable_architecture(model)
+
+        # Test via __class__.__name__
+        NamedModel = type(arch, (), {})
+        assert is_jittable_architecture(NamedModel())
