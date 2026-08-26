@@ -187,7 +187,8 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
             await sampler.pre_weight_sync(req_pre)
             mock_engine.pause_background_loop.assert_called_once()
-            mock_call_worker_method.assert_called_once_with("delete_kv_cache")
+            mock_call_worker_method.assert_called_once_with(
+                "start_weight_update", free_kv_cache=True)
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
                              "IN_PROGRESS")
 
@@ -201,7 +202,7 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
             req_post = SimpleNamespace(req_id="transfer_99")
             await sampler.post_weight_sync(req_post)
             mock_call_worker_method.assert_called_once_with(
-                "reinitialize_kv_cache")
+                "finish_weight_update")
             mock_engine.reset_prefix_cache.assert_called_once()
             mock_engine.resume_background_loop.assert_called_once()
             self.assertEqual(await sampler.get_transfer_status("transfer_99"),
