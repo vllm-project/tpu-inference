@@ -56,6 +56,33 @@ echo "=== cap edge: tp=${TP} attn_dp=1 -> ATTN_HEAD product ${TP}, 16/${TP} = $(
 echo "--- effective tpu-inference env ---"
 env | grep -E '^(VLLM_|MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_|ATTN_|SKIP_JAX|MOE_|ONEHOT_|TPU_)' | sort || true
 
+# Tokenizer preflight. Qwen3_5MoeForConditionalGeneration builds a tokenizer in
+# its own __init__ (qwen3_5.py:712), so a cache holding weights but no usable
+# tokenizer.json takes down every rank ~19 s into model construction with a
+# "Couldn't instantiate the backend tokenizer" ValueError whose text blames
+# missing sentencepiece/tiktoken -- both of which are installed, and neither of
+# which is the problem. That cost build #944 ten minutes to reach and a full log
+# download to read. Resolve it here instead, in seconds, with the cache listing
+# attached.
+echo "--- tokenizer preflight (HF_HOME=${HF_HOME:-<unset>}) ---"
+python3 - "${MODEL}" <<'PY' || { echo "!!! tokenizer preflight failed; not starting the server"; exit 1; }
+import sys, os
+model = sys.argv[1]
+import transformers, tokenizers
+print(f"transformers={transformers.__version__} tokenizers={tokenizers.__version__}")
+from huggingface_hub import snapshot_download
+# Small files only (~23 MB of index + 13 MB of tokenizer): repairs a snapshot
+# that is missing them without touching the 378 GiB of weights.
+path = snapshot_download(model, allow_patterns=["*.json", "*.txt", "*.model", "tokenizer*"])
+print("snapshot:", path)
+for name in sorted(os.listdir(path)):
+    full = os.path.join(path, name)
+    print(f"   {name:40s} {os.path.getsize(full) if os.path.isfile(full) else '<dir>'}")
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained(model)
+print(f"tokenizer OK: {type(tok).__name__} vocab={tok.vocab_size}")
+PY
+
 exec vllm serve "${MODEL}" \
   --served-model-name "${SERVED_NAME}" \
   --port "${PORT}" \

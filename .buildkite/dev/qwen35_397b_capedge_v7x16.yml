@@ -32,12 +32,16 @@ steps:
       # Append-only build output; the tty renderer redraws the whole table per
       # update and buried a real serve failure under docker progress on #939.
       BUILDKIT_PROGRESS: "plain"
-      # run_multihost.sh defaults HOST_HF_HOME to /tmp/hf_home, which is
-      # ephemeral -- that would re-pull 378 GiB onto each of the two hosts every
-      # build. /mnt/disks/persist/models is the same persistent cache
-      # run_in_docker.sh uses (run_in_docker.sh:112), and is why #942 loaded
-      # weights in 394 s. If it is empty on a host the first run populates it.
-      HOST_HF_HOME: "/mnt/disks/persist/models"
+      # HOST_HF_HOME is deliberately left at run_multihost.sh's /tmp/hf_home
+      # default. Pointing it at the persistent /mnt/disks/persist/models cache
+      # to avoid re-pulling 378 GiB is what broke #944: the snapshot cached
+      # there has no usable tokenizer.json, so every rank died in
+      # qwen3_5.py:712 cached_tokenizer_from_config after ~19 s. That cache is
+      # only known-good on the v7x-8 queue, where #942 used it; the v7x-16
+      # hosts are different machines with independently-seeded disks. Neither
+      # transformers 5.16.1 nor the repo itself is at fault -- both were
+      # reproduced clean locally. A cold download costs one-off wall clock and
+      # is the only variant that is correct on any host.
     commands:
       - |
         set -euo pipefail
