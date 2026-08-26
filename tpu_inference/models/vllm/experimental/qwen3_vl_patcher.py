@@ -49,7 +49,6 @@ import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
 from torch import nn
 from torchax.interop import jax_view, torch_view
-from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 
@@ -60,6 +59,31 @@ from tpu_inference.kernels.flash_attention.kernel import \
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
+
+# Architectures considered part of the Qwen3-VL / Qwen3.5 family
+QWEN3_VL_ARCHS = set()
+
+try:
+    from vllm.model_executor.models.qwen3_vl import \
+        Qwen3VLForConditionalGeneration
+    QWEN3_VL_ARCHS.add(Qwen3VLForConditionalGeneration)
+except ImportError:
+    pass
+
+try:
+    from vllm.model_executor.models.qwen3_vl_moe import \
+        Qwen3VLMoeForConditionalGeneration
+    QWEN3_VL_ARCHS.add(Qwen3VLMoeForConditionalGeneration)
+except ImportError:
+    pass
+
+try:
+    from vllm.model_executor.models.qwen3_5 import (
+        Qwen3_5ForConditionalGeneration, Qwen3_5MoeForConditionalGeneration)
+    QWEN3_VL_ARCHS.add(Qwen3_5ForConditionalGeneration)
+    QWEN3_VL_ARCHS.add(Qwen3_5MoeForConditionalGeneration)
+except ImportError:
+    pass
 
 LARGE_ATTN_ELEMENT_THRESHOLD = 40 * 1024 * 1024  # 40M elements (~160MB in float32)
 
@@ -542,8 +566,8 @@ def apply_qwen3_vl_patches(vllm_model):
 
 
 def is_qwen3_vl(vllm_model) -> bool:
-    """Check if the given vLLM model is of architecture Qwen3VLForConditionalGeneration."""
-    return isinstance(vllm_model, Qwen3VLForConditionalGeneration)
+    """Check if the given vLLM model is of architecture Qwen3VL or Qwen3.5."""
+    return any(isinstance(vllm_model, arch) for arch in QWEN3_VL_ARCHS)
 
 
 def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:

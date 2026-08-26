@@ -84,3 +84,24 @@ def test_scoped_vit_patching():
 
     # Global F.scaled_dot_product_attention should remain untouched
     assert F.scaled_dot_product_attention != _flash_attn_sdpa
+
+
+def test_is_qwen3_vl_architectures():
+    from tpu_inference.models.vllm.experimental.qwen3_vl_patcher import (
+        QWEN3_VL_ARCHS, is_qwen3_vl)
+
+    class MockUnrelatedModel:
+        pass
+
+    unrelated_model = MockUnrelatedModel()
+    assert not is_qwen3_vl(unrelated_model)
+
+    for arch in QWEN3_VL_ARCHS:
+
+        class MockModel(arch):
+
+            def __init__(self):
+                pass
+
+        model_instance = MockModel()
+        assert is_qwen3_vl(model_instance)
