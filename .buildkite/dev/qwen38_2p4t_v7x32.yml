@@ -21,6 +21,10 @@ steps:
       TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
       MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
       NEW_MODEL_DESIGN: "1"       # required: sharding.validate() rejects attn_dp>1 without it
+      # Append-only build output. The default tty progress renderer redraws the
+      # whole step table on every update, which produced 4.9 MB of log in under
+      # five minutes on the first attempt and would bury a real serve failure.
+      BUILDKIT_PROGRESS: "plain"
     commands:
       - |
         set -euo pipefail
