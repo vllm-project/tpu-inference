@@ -178,8 +178,10 @@ def get_attn_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     return reqs
 
 
-def get_token_paddings(min_token_size: int, max_token_size: int,
-                       padding_gap: int) -> list[int]:
+def get_token_paddings(min_token_size: int,
+                       max_token_size: int,
+                       padding_gap: int,
+                       include_max_token_size: bool = False) -> list[int]:
     """Generate a list of padding size, starting from min_token_size,
     ending with a number that can cover max_token_size
 
@@ -188,6 +190,12 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
     else:
         first increase the size to twice,
         then increase the padding size by padding_gap.
+
+    If include_max_token_size is set, `max_token_size` (rounded up to a
+    multiple of min_token_size) is added as a bucket of its own. Without it a
+    step that schedules exactly max_token_size tokens (a full chunked-prefill
+    budget) is padded to the next exponential bucket, i.e. up to ~2x the
+    scheduler's own limit (e.g. 16640 -> 32768 tokens per rank).
     """
     # assert min_token_size is power of 2
     assert (min_token_size & (min_token_size - 1) == 0) and min_token_size > 0
@@ -208,6 +216,10 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
         while num < max_token_size:
             num += padding_gap
             paddings.append(num)
+    if include_max_token_size:
+        exact = -(-max_token_size // min_token_size) * min_token_size
+        if exact not in paddings:
+            paddings = sorted(paddings + [exact])
     logger.info(f"Prepared token paddings: {paddings}")
     return paddings
 

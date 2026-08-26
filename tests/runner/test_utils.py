@@ -99,6 +99,26 @@ def test_get_paddings():
                                          padding_gap)
     assert actual_paddings == expected_paddings
 
+    # include_max_token_size: the exact budget becomes a bucket so a full
+    # chunked-prefill step is never padded to the next exponential size.
+    expected_paddings = [16, 32, 64, 128, 256, 320, 512]
+    actual_paddings = get_token_paddings(min_token_size,
+                                         max_token_size,
+                                         padding_gap,
+                                         include_max_token_size=True)
+    assert actual_paddings == expected_paddings
+    # Already a bucket: no duplicate.
+    assert get_token_paddings(16, 512, 0, include_max_token_size=True) == [
+        16, 32, 64, 128, 256, 512
+    ]
+    # Production shape: 16640 tokens x dp 16 -> 266240 is inserted between
+    # 262144 and 524288 (per rank: 16640 instead of 32768).
+    paddings = get_token_paddings(32,
+                                  16640 * 16,
+                                  0,
+                                  include_max_token_size=True)
+    assert 266240 in paddings and paddings[-1] == 524288
+
 
 def test_get_padded_token_len():
     min_token_size, max_token_size, padding_gap = 16, 512, 64
