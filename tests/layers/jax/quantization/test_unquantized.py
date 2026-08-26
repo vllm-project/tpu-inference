@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -27,9 +29,11 @@ from tpu_inference.layers.common.process_weights.moe_weights import \
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
                                              JaxMergedColumnParallelLinear)
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.unquantized import (
-    UnquantizedConfig, UnquantizedMergedLinearMethod)
+    UnquantizedConfig, UnquantizedFusedMoEMethod,
+    UnquantizedMergedLinearMethod)
 
 
 @pytest.fixture
@@ -204,6 +208,79 @@ class TestJaxMergedColumnParallelLinear:
 
 
 class TestUnquantizedJaxMoe:
+
+    @pytest.mark.parametrize(
+        "axis_names,shape,use_ep,expected",
+        [
+            (("data", "model"), {
+                "data": 1,
+                "model": 8
+            }, True, (("model", None, None), ("model", None, None))),
+            (("expert", "model"), {
+                "expert": 4,
+                "model": 2
+            }, True, ((('expert', 'model'), None, None),
+                      (('expert', 'model'), None, None))),
+            (("expert", "model"), {
+                "expert": 1,
+                "model": 8
+            }, False, ((None, None, "model"), (None, "model", None))),
+        ],
+    )
+    def test_routed_expert_weight_shardings(self, axis_names, shape, use_ep,
+                                            expected):
+        mesh = SimpleNamespace(axis_names=axis_names, shape=shape)
+        assert JaxRoutedExperts._get_weight_shardings(mesh,
+                                                      use_ep) == expected
+
+    @pytest.mark.parametrize("backend,transpose", [
+        (MoEBackend.FUSED_MOE, True),
+        (MoEBackend.GMM_EP, False),
+        (MoEBackend.GMM_TP, False),
+    ])
+    def test_routed_expert_loader_uses_backend_layout(self, backend,
+                                                      transpose):
+        """Fused and GMM kernels consume different expert-weight layouts."""
+        layer = JaxRoutedExperts.__new__(JaxRoutedExperts)
+        layer.prefix = "experts"
+        layer.moe_backend = backend
+        for name, shape in (
+            ("kernel_gating_EDF", (2, 3, 4)),
+            ("kernel_up_proj_EDF", (2, 3, 4)),
+            ("kernel_down_proj_EFD", (2, 4, 3)),
+        ):
+            param = nnx.Param(jnp.zeros(shape))
+            param.set_metadata(_weights_to_load=[None, None])
+            setattr(layer, name, param)
+
+        checkpoint_weight = torch.arange(12).reshape(4, 3)
+        loaded = layer._load_weights(
+            [("experts.0.gate_proj.weight", checkpoint_weight)])
+
+        assert loaded == set()
+        staged = layer.kernel_gating_EDF._weights_to_load[0]
+        expected = (checkpoint_weight.numpy().T
+                    if transpose else checkpoint_weight.numpy())
+        np.testing.assert_array_equal(staged[0], expected)
+
+    def test_fused_postprocessing_waits_for_all_expert_weights(self):
+        """Streaming load must not fuse and delete partially loaded params."""
+        complete = nnx.Param(jnp.zeros((1, 2, 3)))
+        complete.set_metadata(_weights_to_load=[jnp.zeros((1, 2, 3))])
+        incomplete = nnx.Param(jnp.zeros((1, 2, 3)))
+        incomplete.set_metadata(_weights_to_load=[None])
+        layer = SimpleNamespace(
+            moe_backend=MoEBackend.FUSED_MOE,
+            kernel_gating_EDF=complete,
+            kernel_up_proj_EDF=incomplete,
+            kernel_down_proj_EFD=complete,
+        )
+        method = UnquantizedFusedMoEMethod.__new__(
+            UnquantizedFusedMoEMethod)
+
+        assert method.process_weights_after_loading(layer) is False
+        assert hasattr(layer, "kernel_gating_EDF")
+        assert hasattr(layer, "kernel_up_proj_EDF")
 
     @pytest.fixture
     def mesh(self):
