@@ -166,6 +166,7 @@ def moe_apply(
                     scoring_fn=layer.scoring_func,
                     all_gather_fp8=all_gather_fp8,
                     enable_rs_kernel=envs.ENABLE_RS_KERNEL,
+                    use_gmm_fused_rs_kernel=envs.USE_GMM_FUSED_RS_KERNEL,
                     onehot_moe_permute_threshold=envs.
                     ONEHOT_MOE_PERMUTE_THRESHOLD,
                     scatter_results=scatter_results,

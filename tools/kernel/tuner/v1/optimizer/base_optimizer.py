@@ -17,13 +17,28 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tools.kernel.tuner.v1.common.kernel_tuner_base import KernelTunerBase
+    from tools.kernel.tuner.v1.executor_process_manager import \
+        ExecutorProcessManager
 
 
 class TuningOptimizer(ABC):
-    """Abstract base class for kernel tuning optimization strategies."""
+    """Abstract base class for kernel tuning optimization strategies.
 
-    def __init__(self, tuner: "KernelTunerBase"):
+    Args:
+        tuner: KernelTunerBase instance (for tuner_config, search_space, etc.).
+        storage_manager: Storage manager for persisting results. Optional when
+            only ``generate_tuning_jobs`` is needed (e.g. in the runner process).
+        executor_mgr: ExecutorProcessManager for subprocess-isolated run()
+            calls. Optional when only ``generate_tuning_jobs`` is needed.
+    """
+
+    def __init__(self,
+                 tuner: "KernelTunerBase",
+                 storage_manager=None,
+                 executor_mgr: "ExecutorProcessManager | None" = None):
         self.tuner = tuner
+        self.storage_manager = storage_manager
+        self.executor_mgr = executor_mgr
 
     @abstractmethod
     def generate_tuning_jobs(self, cases: list) -> list[tuple[int, int]]:
@@ -38,11 +53,18 @@ class TuningOptimizer(ABC):
         pass
 
     @abstractmethod
-    def measure_latency(self, begin_case_id: int, end_case_id: int) -> None:
+    def measure_latency(self,
+                        begin_case_id: int,
+                        end_case_id: int,
+                        bucket_id: int | None = None) -> int:
         """Measures latency of cases within the given bucket range.
 
         Args:
             begin_case_id: Start case ID (inclusive).
             end_case_id: End case ID (exclusive).
+            bucket_id: Optional bucket identifier. If None, derived from begin_case_id.
+
+        Returns:
+            The next case ID to process (for partial completion / retry).
         """
         pass

@@ -565,6 +565,110 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         self.assertLess(float((recon == 0).mean()), 0.5)
         self.assertArraysEqual(recon, ref)
 
+    @parameterized.product(dtype=[jnp.float32, jnp.bfloat16], P=[2, 4, 8])
+    def test_pcp_ring_cache_phase_matches_full_cache(self, dtype, P):
+        self._ring_vs_full_cache(dtype, P)
+
+    def _ring_vs_full_cache(self, dtype, P):
+        """In-kernel ring over the striped cache == the same local Q attending
+        the whole un-striped cache.
+
+        This is the property that makes the ring a drop-in cache phase: no Q
+        all-gather and no output collective, so each rank's result must already
+        be the full-cache answer for its own tokens.
+        """
+        if jax.device_count() < P:
+            self.skipTest(f"needs >= {P} devices")
+        self.PAGE = 64
+        # Lprev % P != 0 so the ranks' stripes have different lengths and a
+        # round that uses the wrong originating rank's length is visible.
+        Lprev, C, nq, nkv, hd = 1002, 256, 8, 2, 128
+        Scur = C * P
+        kv_total = Lprev + Scur
+        pps = cdiv(kv_total, self.PAGE)
+        sm = hd**-0.5
+        rng = np.random.default_rng(11)
+        k_prev = self._rand(rng, (Lprev, nkv, hd), dtype)
+        v_prev = self._rand(rng, (Lprev, nkv, hd), dtype)
+        q_all = self._rand(rng, (P, C, nq, hd), dtype)  # rank-major local Q
+
+        kv_lens = self._pad1([kv_total])
+        kv_cache_lens = self._pad1([Lprev])
+        pi = self._pi(pps)
+        dist = jnp.array([0, 0, 1], jnp.int32)
+        cu = self._padcu([0, C])
+        # Small blocks so both the bq loop and the multi-block ring run.
+        blocks = (128, 128, 128, 128)
+        dummy_kv = jnp.zeros((C, nkv, hd), dtype)
+
+        # Reference: plain paged attention over the whole cache, per rank.
+        # kv_cache is donated, so each call needs its own (identical) copy.
+        ref = np.stack([
+            np.asarray(
+                ragged_paged_attention(q_all[r],
+                                       dummy_kv,
+                                       dummy_kv,
+                                       self._cache_from_kv(
+                                           k_prev, v_prev, Lprev, dtype),
+                                       kv_lens,
+                                       pi,
+                                       cu,
+                                       dist,
+                                       kv_cache_lens=kv_cache_lens,
+                                       cp_rank=jnp.array([0], jnp.int32),
+                                       cp_group_size=1,
+                                       skip_current_attn=True,
+                                       use_causal_mask=False,
+                                       update_kv_cache=False,
+                                       return_lse=True,
+                                       sm_scale=sm,
+                                       m_block_sizes=blocks)[0], np.float32)
+            for r in range(P)
+        ])
+
+        # Ring: rank r holds global cache tokens r, r+P, r+2P, ...
+        cache_sh = jnp.stack([
+            self._cache_from_kv(k_prev[r::P], v_prev[r::P],
+                                k_prev[r::P].shape[0], dtype) for r in range(P)
+        ])
+        mesh = Mesh(np.array(jax.devices()[:P]), ("pcp", ))
+        qsp = PS("pcp", None, None, None)
+        csp = PS("pcp", None, None, None, None)
+
+        @partial(shard_map,
+                 mesh=mesh,
+                 in_specs=(qsp, csp),
+                 out_specs=qsp,
+                 check_rep=False)
+        def ring(q_l, c_l):
+            r = jax.lax.axis_index("pcp")
+            o, _, _ = ragged_paged_attention(q_l[0],
+                                             dummy_kv,
+                                             dummy_kv,
+                                             c_l[0],
+                                             kv_lens,
+                                             pi,
+                                             cu,
+                                             dist,
+                                             kv_cache_lens=kv_cache_lens,
+                                             cp_rank=jax.lax.reshape(
+                                                 r, (1, )).astype(jnp.int32),
+                                             cp_group_size=P,
+                                             pcp_ring_axis_name="pcp",
+                                             skip_current_attn=True,
+                                             use_causal_mask=False,
+                                             update_kv_cache=False,
+                                             return_lse=True,
+                                             sm_scale=sm,
+                                             m_block_sizes=blocks)
+            return o[None]
+
+        out = np.asarray(jax.jit(ring)(q_all, cache_sh), np.float32)
+        self.assertTrue(np.all(np.isfinite(out)))
+        self.assertGreater(float(np.abs(out).max()), 0.0)
+        tol = 2e-3 if dtype == jnp.float32 else 2e-2
+        self.assertAllClose(out, ref, atol=tol, rtol=tol)
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())

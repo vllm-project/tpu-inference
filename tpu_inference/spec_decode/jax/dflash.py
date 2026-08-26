@@ -102,9 +102,8 @@ class DFlashProposer:
 
     def load_model(self, target_model: Any) -> None:
         """Load the DFlash draft model and share embeddings from target."""
-        from tpu_inference import envs
         from tpu_inference.models.common.model_loader import \
-            resolve_model_architecture
+            resolve_model_impl_type
 
         draft_mi = get_model(self.vllm_config,
                              self.rng_key,
@@ -115,14 +114,10 @@ class DFlashProposer:
         self.combine_hidden_states_fn = draft_mi.combine_hidden_states_fn
         self.state = draft_mi.state
 
-        draft_model_impl = envs.DRAFT_MODEL_IMPL_TYPE
-        target_model_impl = envs.MODEL_IMPL_TYPE
-        if draft_model_impl == 'auto':
-            draft_model_impl = resolve_model_architecture(
-                self.vllm_config, True)
-        if target_model_impl == 'auto':
-            target_model_impl = resolve_model_architecture(
-                self.vllm_config, False)
+        draft_model_impl = resolve_model_impl_type(self.vllm_config,
+                                                   is_draft_model=True)
+        target_model_impl = resolve_model_impl_type(self.vllm_config,
+                                                    is_draft_model=False)
         if draft_model_impl != target_model_impl:
             raise ValueError(
                 "Draft model implementation must match target model.")

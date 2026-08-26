@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
+    USE_GMM_FUSED_RS_KERNEL: bool = False
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
@@ -75,6 +76,8 @@ if TYPE_CHECKING:
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     SLICE_ROPE_CACHE: bool = False
+    ROPE_CACHE_ROW_MAJOR: bool = False
+    HASH_TABLE_ROW_MAJOR: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -410,6 +413,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
+    # Enable fused GMM reduce-scatter kernel for MoE
+    "USE_GMM_FUSED_RS_KERNEL":
+    env_bool("USE_GMM_FUSED_RS_KERNEL", default=False),
     # Number of worker threads for parallel XLA precompilation.
     "NUM_PRECOMPILE_WORKERS":
     lambda: int(os.getenv("NUM_PRECOMPILE_WORKERS") or "1"),
@@ -447,6 +453,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # positions can exceed max_model_len.
     "SLICE_ROPE_CACHE":
     env_bool("SLICE_ROPE_CACHE", default=False),
+    # Set the rotary cos_sin_cache in the row-major TPU layout at
+    # load time. XLA picks the transposed layout {0,1} for narrow tables (the
+    # 64-wide DeepSeek rope cache) to avoid lane padding, and then has to copy
+    # the whole table back to {1,0} inside the step function on every forward
+    # pass. Trades 2x HBM for that buffer for the per-step copy.
+    "ROPE_CACHE_ROW_MAJOR":
+    env_bool("ROPE_CACHE_ROW_MAJOR", default=False),
+    # similar to ROPE_CACHE_ROW_MAJOR, but for the hash-MoE routing table
+    # (`*.routed_experts.hash_indices_table`, [vocab_size, num_experts_per_tok]).
+    "HASH_TABLE_ROW_MAJOR":
+    env_bool("HASH_TABLE_ROW_MAJOR", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
     # Minimum max num of batched tokens.

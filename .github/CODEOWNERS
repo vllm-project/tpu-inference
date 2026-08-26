@@ -85,10 +85,10 @@
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
 /tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
 /tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
-/tests/layers/ @kyuyeunk @lk-chen
+/tests/layers/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/lora/ @vanbasten23 @kyuyeunk
-/tests/models/ @kyuyeunk @lk-chen
+/tests/models/ @kyuyeunk @lk-chen @jrplatin
 /tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
 /tests/platforms/ @sixiang-google @mrjunwan-lang

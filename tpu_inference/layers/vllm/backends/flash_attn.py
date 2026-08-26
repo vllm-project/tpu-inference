@@ -261,6 +261,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
                 sinks = jax_view(self.sinks)
 
+                # KV-shared layers (kv_sharing_target_layer_name set, e.g.
+                # gemma-4 E2B/E4B cross-decoder) read the target layer's
+                # cache and must NOT write to it: layer_name_to_kvcache_index
+                # maps them to the target's cache index, so an unconditional
+                # write would overwrite the target's entries with this
+                # layer's discarded K/V and corrupt every subsequent step.
+                update_kv_cache = self.kv_sharing_target_layer_name is None
+
                 new_kv_cache, outputs = _jax_attn_func(
                     kv_cache,
                     q_jax,
@@ -278,7 +286,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     k_scale,
                     v_scale,
                     self.sliding_window,
+                    update_kv_cache=update_kv_cache,
                 )
+                # With update_kv_cache=False the kernel returns the cache
+                # unchanged; still store the returned array (kv_cache is a
+                # donated argument, so the old reference must not be reused).
                 vllm_model_wrapper_context.kv_caches[
                     kv_cache_index] = new_kv_cache
             case _:
@@ -334,6 +346,7 @@ def _format_attention_output(
         "v_scale",
         "sliding_window",
         "soft_cap",
+        "update_kv_cache",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -355,6 +368,7 @@ def _jax_attn_func(
     v_scale: float | None = None,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
+    update_kv_cache: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
     q_len = q.shape[0]
     q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
@@ -373,6 +387,7 @@ def _jax_attn_func(
         sinks=sinks,
         attention_chunk_size=sliding_window,
         attn_logits_soft_cap=soft_cap,
+        update_kv_cache=update_kv_cache,
         shared_attention_metadata=shared_attention_metadata,
     )
 

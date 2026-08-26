@@ -113,6 +113,8 @@ class TestDPScheduler:
 
                 # Verify processes and connections were created
                 assert scheduler.dp_size == 2
+                assert scheduler.connector is None
+                assert scheduler.ec_connector is None
                 assert len(scheduler.processes) == 2
                 # One input conn and one output conn per rank
                 assert len(scheduler.input_conns) == 2
@@ -581,19 +583,28 @@ class TestDPScheduler:
                                            mock_structured_output_manager)
 
         scheduler._send_command = MagicMock()
-        scheduler._get_result = MagicMock(return_value=None)
+        # Rank workers answer FINISH_REQUESTS with the (request_id,
+        # client_index) pairs they actually finished; EngineCoreProc needs
+        # them to send abort outputs.
+        scheduler._get_result = MagicMock(
+            side_effect=lambda rank, _cmd: [(f"req{rank + 1}", rank)])
 
         scheduler.assigned_dp_rank = {"req1": 0, "req2": 1, "req3": 0}
 
         # Test with list of requests
-        scheduler.finish_requests(["req1", "req2"],
-                                  finished_status="completed")
+        finished = scheduler.finish_requests(["req1", "req2"],
+                                             finished_status="completed")
 
         # Verify FINISH_REQUESTS commands were sent to correct ranks
         scheduler._send_command.assert_any_call(
             0, SchedulerCommand.FINISH_REQUESTS, (["req1"], "completed"))
         scheduler._send_command.assert_any_call(
             1, SchedulerCommand.FINISH_REQUESTS, (["req2"], "completed"))
+
+        # And that what the ranks reported is passed back to the caller.
+        assert sorted(
+            (r.request_id, r.client_index) for r in finished) == [("req1", 0),
+                                                                  ("req2", 1)]
 
     def test_get_num_unfinished_requests(self, mock_vllm_config,
                                          mock_kv_cache_config,

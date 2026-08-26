@@ -26,7 +26,9 @@ Typical usage:
 
 import atexit
 
-from tools.kernel.tuner.v1.common.tuner_datatypes import CaseResult
+from tools.kernel.tuner.v1.common.tuner_datatypes import (BucketStatus,
+                                                          CaseResult,
+                                                          ProcessedCaseStatus)
 
 
 class StorageManager:
@@ -169,7 +171,7 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement create_buckets_for_run")
 
-    def mark_bucket_in_progress(self, cs_id, r_id, b_id):
+    def update_bucket_status(self, cs_id, r_id, b_id, status: BucketStatus):
         """Marks a work bucket as IN_PROGRESS, claiming it for the current worker.
 
         Used by tuner agents to coordinate work distribution and avoid duplicate
@@ -178,21 +180,11 @@ class StorageManager:
         Args:
             cs_id: Case set ID the bucket belongs to.
             r_id: Run ID the bucket belongs to.
-            b_id: Bucket ID to claim.
+            b_id: Bucket ID to update.
+            status: Status to update the bucket to.
         """
         raise NotImplementedError(
-            "Subclasses must implement mark_bucket_in_progress")
-
-    def mark_bucket_completed(self, cs_id, r_id, b_id):
-        """Marks a work bucket as COMPLETED.
-
-        Args:
-            cs_id: Case set ID the bucket belongs to.
-            r_id: Run ID the bucket belongs to.
-            b_id: Bucket ID to mark as completed.
-        """
-        raise NotImplementedError(
-            "Subclasses must implement mark_bucket_completed")
+            "Subclasses must implement update_bucket_status")
 
     def add_bucket_processed_time_us(self, cs_id, r_id, b_id,
                                      processed_time_us):
@@ -209,7 +201,8 @@ class StorageManager:
         raise NotImplementedError(
             "Subclasses must implement add_bucket_processed_time_us")
 
-    def get_already_processed_ids(self, cs_id, r_id, start, end):
+    def get_already_processed_ids(self, cs_id: str, r_id: str, start: int,
+                                  end: int) -> list[ProcessedCaseStatus]:
         """Returns case IDs that have already been processed within a range.
 
         Used by tuner agents to resume interrupted runs without reprocessing
@@ -222,7 +215,9 @@ class StorageManager:
             end: End of the case ID range (inclusive).
 
         Returns:
-            A set of integer case IDs that have already been processed.
+            A list of ProcessedCaseStatus namedtuples, each containing:
+                'case_id': the case ID (int)
+                'status': the processing status (str) of the case
         """
         raise NotImplementedError(
             "Subclasses must implement get_already_processed_ids")

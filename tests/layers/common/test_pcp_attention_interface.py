@@ -270,6 +270,20 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     # ------------------------------ tests ------------------------------------
     @parameterized.product(pcp=[2, 4])
+    def test_ring_cache_phase_matches_reference(self, pcp):
+        """The ring cache phase must reproduce the full-causal reference.
+
+        The ring streams each rank's KV shard around the pcp axis instead of
+        materializing the cache, so any divergence is a synchronization or
+        masking bug in the rotation, not a modelling choice.
+        """
+        if jax.device_count() < pcp:
+            self.skipTest(f"needs >= {pcp} devices")
+        L, S = 512, 128
+        out, _, exp, C = self._run(pcp, L, S, S)
+        self._assert_matches(out, exp, pcp, C, S)
+
+    @parameterized.product(pcp=[2, 4])
     def test_chunked_prefill(self, pcp):
         """Wrapper output == full-causal reference, for a chunked prefill: L
         previously-computed tokens in the strided cache + a full current chunk."""
