@@ -16,11 +16,17 @@ steps:
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
-    timeout_in_minutes: 300
+    timeout_in_minutes: 480
     env:
       TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
       MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
       NEW_MODEL_DESIGN: "1"       # required: sharding.validate() rejects attn_dp>1 without it
+      # Health-wait budget. Build #943 was killed by the 7200s default with the
+      # runai streamer at 63% (180271/287119 tensors) after 1:58:40 and still
+      # advancing, i.e. ~3h to finish loading 2469 GB from GCS. 5h leaves room
+      # for the load plus KV-cache init and compile; timeout_in_minutes above
+      # has to exceed it or Buildkite kills the job first.
+      VLLM_ENGINE_READY_TIMEOUT_S: "18000"
       # Append-only build output. The default tty progress renderer redraws the
       # whole step table on every update, which produced 4.9 MB of log in under
       # five minutes on the first attempt and would bury a real serve failure.

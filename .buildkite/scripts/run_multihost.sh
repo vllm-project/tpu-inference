@@ -471,7 +471,12 @@ docker exec \
   node bash -c "${VLLM_SERVE_CMD} > /root/vllm_serve.log 2>&1"
 
 # 4. Wait for the server to be healthy
-SERVER_TIMEOUT=""
+# Seed from the ambient environment so string-command mode can raise the health
+# budget too; JSON-config mode still overrides it below. Models whose weights
+# stream from GCS can need well over the 7200s default just to load -- a 2.4T
+# fp8 checkpoint reaches only ~60% in two hours -- and the default silently
+# kills a run that was making steady progress.
+SERVER_TIMEOUT="${VLLM_ENGINE_READY_TIMEOUT_S:-}"
 if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
     for env_item in "${SERVER_CMD_ENVS[@]}"; do
         if [[ "$env_item" == VLLM_ENGINE_READY_TIMEOUT_S=* ]]; then
