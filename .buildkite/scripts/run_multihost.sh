@@ -166,9 +166,27 @@ wait_for_server() {
 
   echo "   -> Found PID: $pid"
 
+  # Periodic progress tail. Until now the server log was only ever shown on
+  # failure, so a long bring-up (a 2.4T checkpoint streaming from GCS takes
+  # hours) looked identical in Buildkite to a hang: thousands of `sleep 5`
+  # lines and nothing else. Emitting the tail every LOG_EVERY_S makes the
+  # loader's progress bar visible while it is still actionable -- and the rate
+  # it prints is the only way to tell "slow but converging" from "stuck"
+  # without waiting out the whole timeout. `tr` because tqdm separates updates
+  # with CR, so a plain tail returns one enormous line.
+  local log_every=${VLLM_SERVER_WAIT_LOG_EVERY_S:-60}
+  local log_every_iters=$(( log_every / 5 ))
+  [[ $log_every_iters -lt 1 ]] && log_every_iters=1
+  local start_time=$SECONDS
+
   local end_time=$((SECONDS + timeout))
   local loop_count=0
   while [[ $SECONDS -lt $end_time ]]; do
+    if [[ $((loop_count % log_every_iters)) -eq 0 ]]; then
+      echo "--- [$service_name +$((SECONDS - start_time))s / ${timeout}s] $log_path"
+      docker exec "$container_name" tail -c 8192 "$log_path" 2>/dev/null \
+        | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -5 | sed 's/^/    /' || true
+    fi
     # 2. Check health
     # max-time 10 is crucial to prevent curl from hanging indefinitely if the server 
     # accepts the TCP connection but is deadlocked or blocked from sending an HTTP response.
@@ -484,7 +502,14 @@ if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
         fi
     done
 fi
-wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "$SERVER_TIMEOUT"
+# xtrace off for the poll loop only: it emits three lines per 5s tick, which on
+# a multi-hour bring-up is thousands of `+ sleep 5` that bury the progress tail
+# the loop now prints. Restored immediately after.
+set +x
+_WAIT_RC=0
+wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "$SERVER_TIMEOUT" || _WAIT_RC=$?
+set -x
+[[ $_WAIT_RC -eq 0 ]] || exit "$_WAIT_RC"
 
 # 5. Run Benchmarks / Validation
 if [[ "${CASE_FILE:-}" == *.json ]]; then

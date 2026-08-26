@@ -25,8 +25,16 @@ steps:
       # runai streamer at 63% (180271/287119 tensors) after 1:58:40 and still
       # advancing, i.e. ~3h to finish loading 2469 GB from GCS. 5h leaves room
       # for the load plus KV-cache init and compile; timeout_in_minutes above
-      # has to exceed it or Buildkite kills the job first.
+      # has to exceed it or Buildkite kills the job first. Kept at 5h even with
+      # the streamer retuned below, so that a regression shows up as a slow
+      # load in the progress tail rather than as a killed job.
       VLLM_ENGINE_READY_TIMEOUT_S: "18000"
+      # Tail /root/vllm_serve.log into the Buildkite log every 60s while waiting
+      # for /health. Read by wait_for_server in run_multihost.sh (on the host,
+      # not inside the container, so it belongs here and not in
+      # MULTIHOST_ENV_VARS). Without it a multi-hour weight load is
+      # indistinguishable from a hang until the job ends.
+      VLLM_SERVER_WAIT_LOG_EVERY_S: "60"
       # Append-only build output. The default tty progress renderer redraws the
       # whole step table on every update, which produced 4.9 MB of log in under
       # five minutes on the first attempt and would bury a real serve failure.
@@ -45,7 +53,13 @@ steps:
         # exist on all four hosts; /mnt/disks/persist is not assumed here.
         # Bind-mounted rather than left inside the container because the `node`
         # containers are torn down at the end of every build.
-        export MULTIHOST_DOCKER_ARGS="-v /tmp/jax_cache_tpu7x:/root/jax_cache"
+        # --ulimit: libstreamer wants ~64 file descriptors per reader thread and
+        # aborts with "Increase process fd limit or decrease the concurrency
+        # level" if it cannot get them. At RUNAI_STREAMER_CONCURRENCY=64 that is
+        # ~4096; 65536 leaves headroom. The serve script raises its own soft
+        # limit too, but that only covers the head -- the three Ray workers load
+        # weights as well and only get what `docker run` gives them.
+        export MULTIHOST_DOCKER_ARGS="-v /tmp/jax_cache_tpu7x:/root/jax_cache --ulimit nofile=65536:65536"
 
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -63,6 +77,10 @@ steps:
           'SKIP_JAX_PRECOMPILE=1' \
           'VLLM_XLA_CACHE_PATH=/root/jax_cache' \
           'JAX_COMPILATION_CACHE_DIR=/root/jax_cache' \
+          'RUNAI_STREAMER_CONCURRENCY=64' \
+          'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
+          'RUNAI_STREAMER_LOG_LEVEL=INFO' \
+          'RUNAI_STREAMER_LOG_TO_STDERR=1' \
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=2' \
           'MAX_MODEL_LEN=8192' \
