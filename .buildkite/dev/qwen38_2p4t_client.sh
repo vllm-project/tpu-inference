@@ -12,8 +12,10 @@ PORT="${VLLM_PORT:-8000}"
 ART="${ART_DIR:-/workspace/artifacts}"
 mkdir -p "${ART}"
 
+# --fail-with-body, not plain -sS: curl exits 0 on an HTTP 500, which on build
+# #940 let a dead engine report the job as passed.
 echo "--- smoke test (triggers first-request compilation) ---"
-time curl -sS --max-time 5400 "http://localhost:${PORT}/v1/completions" \
+time curl -sS --fail-with-body --max-time 5400 "http://localhost:${PORT}/v1/completions" \
   -X POST -H 'Content-Type: application/json' \
   -d "{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 32, \"temperature\": 0}" \
   | tee "${ART}/smoke.json"
@@ -33,6 +35,19 @@ vllm bench serve \
   --percentile-metrics ttft,tpot,itl,e2el \
   --save-result --result-dir "${ART}" --result-filename bench.json \
   2>&1 | tee "${ART}/bench.log"
+
+# `vllm bench serve` exits 0 even when every request failed, so check the result.
+python3 - "${ART}/bench.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+done, failed = d.get("completed", 0), d.get("failed", 0)
+print(f"[bench] completed={done} failed={failed} "
+      f"out_tok/s={d.get('output_throughput', 0):.1f} "
+      f"median_ttft_ms={d.get('median_ttft_ms', 0):.0f} "
+      f"median_tpot_ms={d.get('median_tpot_ms', 0):.1f}")
+if done == 0:
+    sys.exit("[bench] FAILED: no request completed")
+PY
 
 # Did the local-disk compilation cache actually get written? This is the head
 # host's copy only; each of the other three hosts has its own under the same

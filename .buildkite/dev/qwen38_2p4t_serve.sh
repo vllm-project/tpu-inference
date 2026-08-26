@@ -25,7 +25,10 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 GPU_MEM_UTIL="${GPU_MEMORY_UTILIZATION:-0.92}"
-BLOCK_SIZE="${BLOCK_SIZE:-256}"
+# 128, not 256: USE_BATCHED_RPA_SEQ_ON_LANE selects KVLayout.SEQ_ALONG_LANE,
+# whose tile alignment hard-requires page_size==128
+# (batched_rpa/configs.py:360-363). Confirmed the hard way on build #940.
+BLOCK_SIZE="${BLOCK_SIZE:-128}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 
 # ---------------------------------------------------------------------------

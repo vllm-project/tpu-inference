@@ -63,7 +63,7 @@ steps:
           'MAX_NUM_SEQS=32' \
           'MAX_NUM_BATCHED_TOKENS=2048' \
           'GPU_MEMORY_UTILIZATION=0.92' \
-          'BLOCK_SIZE=256' \
+          'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=1024' \
           'OUTPUT_LEN=128' \
