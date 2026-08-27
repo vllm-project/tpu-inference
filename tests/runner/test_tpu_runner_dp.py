@@ -28,6 +28,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
     def setup_method(self):
         self.runner = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 1
 
         # Basic DP configuration
         self.runner.dp_size = 2
@@ -41,6 +42,8 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Mock input batch - adjust num_reqs to match test data
         self.runner.input_batch = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 1
+        self.runner.input_batch.max_decode_tokens = 1
         self.runner.input_batch.num_reqs = 2
         self.runner.input_batch.req_ids = ["req1", "req2", "req3", "req4"]
         self.runner.input_batch.req_id_to_index = {
@@ -1248,6 +1251,7 @@ class TestTPUJaxRunnerPadding:
 
     def setup_method(self):
         self.runner = MagicMock()
+        self.runner.input_batch.max_decode_tokens = 1
         self.runner.dp_size = 2
         self.runner.num_tokens_paddings = [16, 32, 64]
         self.runner.num_tokens_paddings_per_dp = [8, 16, 32]
@@ -1336,6 +1340,7 @@ class TestSamplingMetadataPassthrough:
         mock_set_mesh.return_value.__enter__ = MagicMock(return_value=None)
         mock_set_mesh.return_value.__exit__ = MagicMock(return_value=False)
         runner = MagicMock()
+        runner.input_batch.max_decode_tokens = 1
         mock_sampling_metadata = MagicMock()
         # Set the specific field we want to trace; other fields are auto-mocked.
         runner.execute_model_state.sampling_metadata = mock_sampling_metadata
@@ -1365,6 +1370,7 @@ class TestSamplingMetadataPassthrough:
         from tpu_inference.layers.common.sharding import ShardingAxisName
 
         runner = MagicMock()
+        runner.input_batch.max_decode_tokens = 1
         runner.dp_size = 2
         runner.vllm_config.sharding_config.prefill_cp_size = 1
         runner.max_num_reqs = 8
@@ -1439,6 +1445,7 @@ class TestSamplingMetadataPassthrough:
             mock_sampling_metadata):
         """_sample_from_logits() should use its tpu_sampling_metadata argument, not create one internally."""
         runner = MagicMock()
+        runner.input_batch.max_decode_tokens = 1
         runner.input_batch.num_reqs = 0  # empty batch keeps the loop trivial
         runner.speculative_config = None
         runner.scheduler_config.async_scheduling = False
