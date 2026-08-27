@@ -80,8 +80,12 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
     def test_raises_without_a_sharded_array(self):
         sync = rws.RaidenWorkerSync("rollout")
         sync.names = ["w"]
-        sync.arrays = [SimpleNamespace(shape=(2,), dtype=SimpleNamespace(itemsize=4),
-                                       sharding=None, ndim=1)]
+        sync.arrays = [
+            SimpleNamespace(shape=(2, ),
+                            dtype=SimpleNamespace(itemsize=4),
+                            sharding=None,
+                            ndim=1)
+        ]
         with self.assertRaises(RuntimeError):
             sync.metadata_dict()
 

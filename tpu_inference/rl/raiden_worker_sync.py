@@ -23,7 +23,8 @@ import jax.numpy as jnp
 _ws_lib: Any = None
 _RAIDEN_IMPORT_ERROR: Optional[Exception] = None
 try:
-    from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
+    from tpu_sync.api.jax import \
+        weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
 except ImportError as exc:
     _RAIDEN_IMPORT_ERROR = exc
 
@@ -105,9 +106,8 @@ def _bindable(arr: Any) -> bool:
         return False
 
 
-def _filter_bindable(
-    names: List[str], arrays: List[Any]
-) -> Tuple[List[str], List[Any]]:
+def _filter_bindable(names: List[str],
+                     arrays: List[Any]) -> Tuple[List[str], List[Any]]:
     """Drops leaves the native layer cannot bind (e.g. RNG-key arrays)."""
     keep_names: List[str] = []
     keep_arrays: List[Any] = []
@@ -131,12 +131,12 @@ def _axis_name(axis: Any) -> str:
 def _tensor_metadata_dict(name: str, arr: Any, layer_idx: int) -> dict:
     sharding: Any = getattr(arr, "sharding", None)
     spec = tuple(getattr(sharding, "spec", ()) or ())
-    spec = (spec + (None,) * arr.ndim)[: arr.ndim]
+    spec = (spec + (None, ) * arr.ndim)[:arr.ndim]
     try:
         local = sharding.shard_shape(tuple(arr.shape))
-        mesh_shape = tuple(g // l for g, l in zip(arr.shape, local))
+        mesh_shape = tuple(g // s for g, s in zip(arr.shape, local))
     except Exception:  # pylint: disable=broad-exception-caught
-        mesh_shape = (1,) * arr.ndim
+        mesh_shape = (1, ) * arr.ndim
     return {
         "name": name,
         "shape": list(arr.shape),
@@ -209,7 +209,7 @@ class RaidenWorkerSync:
         if self._sync is None:
             return {}
         getter = getattr(self._sync, "get_metrics",
-                        getattr(self._sync, "metrics", None))
+                         getattr(self._sync, "metrics", None))
         return getter() if getter is not None else {}
 
     def checksums(self, sample: int = 3) -> dict:
@@ -219,7 +219,8 @@ class RaidenWorkerSync:
             return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
 
         return {
-            name: total(arr) for name, arr in list(zip(self.names, self.arrays))[:sample]
+            name: total(arr)
+            for name, arr in list(zip(self.names, self.arrays))[:sample]
         }
 
     def metadata_dict(self) -> dict:
@@ -244,16 +245,15 @@ class RaidenWorkerSync:
                 "cannot determine mesh_shape/mesh_axes for registration "
                 "metadata.")
         data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
-        control_addr = (
-            f"{self.ip}:{self._sync.listener_port}"
-            if self._sync and self._sync.listener_port
-            else ""
-        )
+        control_addr = (f"{self.ip}:{self._sync.listener_port}"
+                        if self._sync and self._sync.listener_port else "")
         num_shards = self._sync.num_shards if self._sync else 1
         return {
             "unit": {
-                "job_name": self.job_name,
-                "job_replica_id": str(self.worker_index) if self.worker_index else "",
+                "job_name":
+                self.job_name,
+                "job_replica_id":
+                str(self.worker_index) if self.worker_index else "",
             },
             "shards": [data_addr] * num_shards if data_addr else [],
             "control_plane_rpc_address": control_addr,
