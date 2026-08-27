@@ -426,28 +426,30 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
 
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
 
-        # stage_on_host: process_quantized_moe_weights below starts by putting
-        # each of these four at exactly `ep_sharding`, so building them there
-        # directly is the same array without a full-size stop on one device.
+        # process_quantized_moe_weights below opens by putting each of these
+        # four at exactly `ep_sharding`, so building them there in the first
+        # place gives the same array without a full-size stop on one device.
+        on_host = envs.MOE_STAGE_WEIGHTS_ON_HOST
+
         w13_weight = _load_weight_for_layer(layer,
                                             "w13_weight",
                                             ep_sharding,
-                                            stage_on_host=True)
+                                            stage_on_host=on_host)
         w2_weight = _load_weight_for_layer(layer,
                                            "w2_weight",
                                            ep_sharding,
-                                           stage_on_host=True)
+                                           stage_on_host=on_host)
 
         scale_w13_name = f"w13_{self.weight_scale_name}"
         scale_w2_name = f"w2_{self.weight_scale_name}"
         w13_weight_scale = _load_weight_for_layer(layer,
                                                   scale_w13_name,
                                                   ep_sharding,
-                                                  stage_on_host=True)
+                                                  stage_on_host=on_host)
         w2_weight_scale = _load_weight_for_layer(layer,
                                                  scale_w2_name,
                                                  ep_sharding,
-                                                 stage_on_host=True)
+                                                 stage_on_host=on_host)
 
         p_w13_scale = getattr(layer, scale_w13_name)
         p_w2_scale = getattr(layer, scale_w2_name)
