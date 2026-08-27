@@ -791,7 +791,8 @@ class TPUWorker(WorkerBase):
         Cross the collective_rpc boundary via `bind_raiden_sync` /
         `get_raiden_metadata` instead.
         """
-        from tpu_inference.rl import raiden_worker_sync  # pylint: disable=g-import-not-at-top
+        from tpu_inference.rl import \
+            raiden_worker_sync  # pylint: disable=g-import-not-at-top
 
         return raiden_worker_sync.extract_weight_state(
             getattr(self.model_runner, "state", None),
@@ -804,10 +805,13 @@ class TPUWorker(WorkerBase):
             raise RuntimeError(f"bind_raiden_sync must run before {op}.")
         return sync
 
-    def bind_raiden_sync(self, worker_index: int = 0, parallelism: int = 4) -> dict:
+    def bind_raiden_sync(self,
+                         worker_index: int = 0,
+                         parallelism: int = 4) -> dict:
         """Binds this worker's live weights to Raiden and returns wire-safe
         registration metadata (never the arrays)."""
-        from tpu_inference.rl import raiden_worker_sync  # pylint: disable=g-import-not-at-top
+        from tpu_inference.rl import \
+            raiden_worker_sync  # pylint: disable=g-import-not-at-top
 
         state = self.get_weights_state()
         if self._raiden_rl_weight_sync is None:

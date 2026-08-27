@@ -338,7 +338,8 @@ class RLVllmSampler:
             "tpu_worker_ips": worker_ips,
         }
 
-    async def _call_worker_method(self, method_name: str, *args: Any, **kwargs: Any) -> list[Any]:
+    async def _call_worker_method(self, method_name: str, *args: Any,
+                                  **kwargs: Any) -> list[Any]:
         """Dispatches a method call across TPU workers via collective_rpc.
 
         `AsyncLLMEngine` (an alias of `vllm.v1.engine.async_llm.AsyncLLM`)
@@ -346,13 +347,17 @@ class RLVllmSampler:
         """
         if self._engine is None:
             return []
-        return await self._engine.collective_rpc(method_name, args=args, kwargs=kwargs)
+        return await self._engine.collective_rpc(method_name,
+                                                 args=args,
+                                                 kwargs=kwargs)
 
     async def get_weights_state(self) -> list[Any]:
         """Returns the PyTree of weights or state from active TPU workers."""
         return await self._call_worker_method("get_weights_state")
 
-    async def bind_raiden_sync(self, worker_index: int = 0, parallelism: int = 4) -> None:
+    async def bind_raiden_sync(self,
+                               worker_index: int = 0,
+                               parallelism: int = 4) -> None:
         """Binds Raiden to each TPU worker's live weights, in-process.
 
         `get_weights_state()` cannot back a rollout-side weight sync: the
@@ -364,7 +369,8 @@ class RLVllmSampler:
         happen in the worker subprocess instead -- see
         `tpu_worker.TPUWorker.bind_raiden_sync`.
         """
-        await self._call_worker_method("bind_raiden_sync", worker_index, parallelism)
+        await self._call_worker_method("bind_raiden_sync", worker_index,
+                                       parallelism)
 
     async def get_raiden_metadata(self) -> list[dict]:
         """Wire-safe registration metadata for each worker's current Raiden binding."""
@@ -389,8 +395,9 @@ class RLVllmSampler:
         """Phase 1: Pauses intake, clears prefix cache, and drops KV cache via delete_kv_cache()."""
         self._policy_version = _get_val(sync_request, "policy_version",
                                         self._policy_version)
-        logger.info("Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s)",
-                    self._policy_version, free_kv_cache)
+        logger.info(
+            "Executing pre_weight_sync (policy_version=%d, free_kv_cache=%s)",
+            self._policy_version, free_kv_cache)
 
         if sync_request is not None:
             rid = _get_val(sync_request, "req_id")
