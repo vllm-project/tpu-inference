@@ -279,16 +279,19 @@ def _scores_kernel(
             fp8_val = flat_bkv[:, :head_dim]
             fp8_val = pltpu.bitcast(fp8_val, jnp.float8_e4m3fn)
             if scale_storage == "e8m0":
-                scale_val = pltpu.bitcast(flat_bkv[:, head_dim:head_dim + 1].T,
-                                          jnp.float8_e8m0fnu).astype(
-                                              jnp.bfloat16)
+                # E8M0 stores the unbiased power-of-two scale in the same
+                # exponent byte used by IEEE/BF16. Rebuild BF16 bits directly:
+                # Mosaic on TPU v4 cannot lower an E8M0-to-float conversion.
+                scale_bits = flat_bkv[:, head_dim:head_dim + 1].T.astype(
+                    jnp.uint16) * jnp.uint16(128)
+                scale_val = pltpu.bitcast(scale_bits, jnp.bfloat16)
             else:
                 scale_val = pltpu.bitcast(flat_bkv[:, head_dim:head_dim + 4].T,
                                           jnp.float32)
-                # TPU v4 cannot consume FP8 as an MXU RHS. FP8 E4M3 values
-                # are exactly representable in BF16, so widening in VMEM
-                # preserves the quantized math without expanding the cache.
-                fp8_val = fp8_val.astype(jnp.bfloat16)
+            # TPU v4 cannot consume FP8 as an MXU RHS. FP8 E4M3 values are
+            # exactly representable in BF16, so widening in VMEM preserves the
+            # quantized math without expanding either cache format.
+            fp8_val = fp8_val.astype(jnp.bfloat16)
 
             # NOTE: Do NOT multiply the scales here. Return them separately.
             bkvs.append(fp8_val.reshape(bkv_sz, head_dim))
