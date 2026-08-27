@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any, Optional
 import jax
 import jax.numpy as jnp
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (KVConnectorRole,
-                                                               SupportsHMA)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1, KVConnectorRole, SupportsHMA)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import RequestStatus
 
@@ -52,7 +52,9 @@ class TPUConnectorHMA(TPUConnector, SupportsHMA):
                  vllm_config: VllmConfig,
                  role: KVConnectorRole,
                  kv_cache_config: "KVCacheConfig | None" = None):
-        self._connector_metadata = None
+        # TPUConnector.__init__ creates the non-HMA scheduler/worker, so call
+        # the shared base directly before creating the HMA implementation.
+        KVConnectorBase_V1.__init__(self, vllm_config, role, kv_cache_config)
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = TPUConnectorHMAScheduler(vllm_config)
