@@ -27,6 +27,14 @@ parallelism layouts, each cell relative to the all-device TP baseline.
                          KV cache page-striped over pcp. In-kernel ring for the
                          cache phase.
 
+Attention alone understates the difference between the layouts: under TP a
+layer also all-reduces the o_proj and down_proj outputs of the whole chunk
+over all N devices, while under pcp{P}xtp{N/P} those all-reduces cover 1/P of
+the tokens over N/P devices. By default every step therefore also performs the
+two [tokens_per_device, hidden] bf16 all-reduces over the model axis (data
+dependent on the attention output); ``--no-layer-all-reduce`` times attention
+only. Matmuls are not modelled (they cost the same per device in both).
+
 TP attention has no in-op collective, so it is measured on a shard_map over
 the tp devices and blocked on all of them: it pays the same cross-device
 dispatch/sync the PCP columns do. Meshes over different device subsets cannot
@@ -53,6 +61,7 @@ class ModelParams:
     num_kv_heads: int
     head_dim: int
     num_devices: list[int]
+    hidden_size: int  # width of the all-reduced o_proj / down_proj outputs
 
 
 MODEL_CONFIGS = {
@@ -63,6 +72,7 @@ MODEL_CONFIGS = {
         num_kv_heads=8,
         head_dim=128,
         num_devices=[2],
+        hidden_size=5120,
     ),
     # google3/third_party/py/tpu_kernel_testbench/qwen35_config_defaults.json
     'Qwen3.5':
@@ -71,6 +81,7 @@ MODEL_CONFIGS = {
         num_kv_heads=2,
         head_dim=256,
         num_devices=[8],
+        hidden_size=4096,
     ),
     # https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct/blob/main/config.json
     'Qwen3-Coder-480B':
@@ -79,6 +90,7 @@ MODEL_CONFIGS = {
         num_kv_heads=8,
         head_dim=128,
         num_devices=[8],
+        hidden_size=6144,
     ),
     # https://huggingface.co/google/gemma-4-31b-it/raw/main/config.json
     'Gemma4-31B':
@@ -87,6 +99,7 @@ MODEL_CONFIGS = {
         num_kv_heads=16,
         head_dim=256,
         num_devices=[8],
+        hidden_size=5376,
     ),
 }
 
@@ -114,7 +127,7 @@ def _ladder(max_ctx):
 # Worker: one variant, one process (jax is imported here only).
 # --------------------------------------------------------------------------
 def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
-                 warmup, iters):
+                 warmup, iters, layer_all_reduce):
     # tpu_inference must be imported before jax (its __init__ loads the
     # engine first).
     import jax
@@ -149,6 +162,22 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
 
     def rand(shape):
         return jnp.asarray(rng.random(shape, np.float32)).astype(dtype)
+
+    def layer_all_reduces(o, axis):
+        """The two per-layer all-reduces that follow attention (o_proj and
+        down_proj outputs, [tokens, hidden] bf16) over the model axis `axis`,
+        made data dependent on the attention output `o` so they are timed
+        after it. Returns `o` unchanged when disabled."""
+        if not layer_all_reduce:
+            return o
+        tokens = o.shape[0]
+        act = jnp.broadcast_to(
+            o.reshape(tokens, -1)[:, :1].astype(dtype),
+            (tokens, mp.hidden_size))
+        act = jax.lax.psum(act, axis)
+        act = jax.lax.psum(act * act, axis)
+        return o + act[:, :1].astype(o.dtype).reshape((tokens, ) + (1, ) *
+                                                      (o.ndim - 1))
 
     def bench_cache(fn, cache, *args):
         # fn(cache, *args) -> (out, cache), cache donated and threaded so the
@@ -202,7 +231,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                                 sm_scale=sm_scale,
                                                 use_causal_mask=True,
                                                 update_kv_cache=True)
-            return out[None], cache
+            return layer_all_reduces(out, "x")[None], cache
 
         @functools.partial(jax.jit, donate_argnums=(0, ))
         def fn(cache, q, k, v, ctx):
@@ -240,9 +269,9 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         def put(x, s):
             return jax.device_put(x, NamedSharding(mesh, s))
 
-        q = put(
-            rand((chunk, NQ, HD)),
-            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None))
+        q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
+                   None)
+        q = put(rand((chunk, NQ, HD)), q_spec)
         kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
         k = put(rand((chunk, NKV, HD)).astype(kv_dtype), kv_spec)
         v = put(rand((chunk, NKV, HD)).astype(kv_dtype), kv_spec)
@@ -293,6 +322,13 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                              sm_scale=sm_scale,
                                              update_kv_cache=True,
                                              use_causal_mask=True)
+                    # Heads are sharded over the model axis; all-reduce there.
+                    out = jax.shard_map(functools.partial(
+                        layer_all_reduces, axis=ShardingAxisName.ATTN_HEAD),
+                                        mesh=mesh,
+                                        in_specs=q_spec,
+                                        out_specs=q_spec,
+                                        check_vma=False)(out)
                     return out, cache
 
                 fns[cache_pages] = fn
@@ -405,6 +441,10 @@ def main():
                     type=int,
                     default=1,
                     help="KV cache pages allocated = slack x request pages")
+    ap.add_argument("--no-layer-all-reduce",
+                    action="store_true",
+                    help="time attention only (skip the two per-layer "
+                    "all-reduces of [tokens, hidden] over the model axis)")
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--iters", type=int, default=10)
     ap.add_argument("--worker",
@@ -418,7 +458,8 @@ def main():
         model, n, variant = args.worker
         res = _run_variant(MODEL_CONFIGS[model], variant, args.chunk_size,
                            args.max_context, args.kv_dtype, args.page_size,
-                           args.cache_slack, args.warmup, args.iters)
+                           args.cache_slack, args.warmup, args.iters,
+                           not args.no_layer_all_reduce)
         with open(args.json, "w") as f:
             json.dump(res, f)
         return
@@ -441,7 +482,8 @@ def main():
                         str(args.cache_slack), "--warmup",
                         str(args.warmup), "--iters",
                         str(args.iters)
-                    ]
+                    ] + (["--no-layer-all-reduce"]
+                         if args.no_layer_all_reduce else [])
                     t0 = time.time()
                     rc = subprocess.call(cmd)
                     # The worker writes its results before exiting; trust
@@ -468,11 +510,14 @@ def main():
                 f"{v} ({n // 2} dev)" if v == f"tp{n // 2}" else v
                 for v in variants[1:]
             ]
-            title = (
-                f"{model}: NQ={mp.num_q_heads} NKV={mp.num_kv_heads} "
-                f"HD={mp.head_dim}, {n} devices, CH={_human(args.chunk_size)}, "
-                f"KV {args.kv_dtype} -- cumulative TTFT (ms), baseline "
-                f"{variants[0]}")
+            what = ("attention only" if args.no_layer_all_reduce else
+                    f"attention + 2 layer all-reduces "
+                    f"(hidden={mp.hidden_size})")
+            title = (f"{model}: NQ={mp.num_q_heads} NKV={mp.num_kv_heads} "
+                     f"HD={mp.head_dim}, {n} devices, "
+                     f"CH={_human(args.chunk_size)}, KV {args.kv_dtype}, "
+                     f"{what} -- cumulative TTFT (ms), baseline "
+                     f"{variants[0]}")
             tables.append(title + "\n\n" + _box_table(header, rows))
             print("\n" + tables[-1] + "\n", flush=True)
 
