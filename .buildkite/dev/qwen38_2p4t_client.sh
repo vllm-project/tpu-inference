@@ -2,9 +2,10 @@
 # Client leg for the Qwen3.8-2.4T-A95B-FP8 v7x-32 bringup.
 #
 # Runs inside the head node's Ray container after run_multihost.sh has seen
-# /health come up. The first request is the expensive one: the pipeline runs
-# with SKIP_JAX_PRECOMPILE=1, so the whole 92-layer graph is compiled lazily on
-# the first prefill. Do the smoke test before the benchmark and give it room.
+# /health come up. The smoke test still goes first and still gets a long
+# deadline: precompilation is on now, so the first prefill should no longer pay
+# for the whole 92-layer graph, but it is the cheapest place to find out if a
+# shape slipped through the buckets.
 set -euo pipefail
 
 MODEL="${SERVED_NAME:-Qwen/Qwen3.8-2.4T-A95B-FP8}"
@@ -21,7 +22,15 @@ time curl -sS --fail-with-body --max-time 5400 "http://localhost:${PORT}/v1/comp
   | tee "${ART}/smoke.json"
 echo
 
-echo "--- benchmark ---"
+# --num-warmups: build #947 ran with 0 and the means were unusable -- mean TTFT
+# 44.5s against a 1.35s median, because the first few requests absorbed
+# just-in-time compilation and the percentile machinery counts them like any
+# other. serve.py fires the warmups concurrently under the same
+# --max-concurrency semaphore before timing starts, so a count at or above
+# MAX_CONCURRENCY also drives the scheduler to steady-state batch shapes rather
+# than only the single-request path.
+NUM_WARMUPS="${NUM_WARMUPS:-32}"
+echo "--- benchmark (num_warmups=${NUM_WARMUPS}) ---"
 vllm bench serve \
   --backend vllm \
   --model "${MODEL}" \
@@ -31,6 +40,7 @@ vllm bench serve \
   --random-output-len "${OUTPUT_LEN:-128}" \
   --num-prompts "${NUM_PROMPTS:-64}" \
   --max-concurrency "${MAX_CONCURRENCY:-16}" \
+  --num-warmups "${NUM_WARMUPS}" \
   --request-rate inf --seed 42 --ignore-eos \
   --percentile-metrics ttft,tpot,itl,e2el \
   --save-result --result-dir "${ART}" --result-filename bench.json \
@@ -45,6 +55,13 @@ print(f"[bench] completed={done} failed={failed} "
       f"out_tok/s={d.get('output_throughput', 0):.1f} "
       f"median_ttft_ms={d.get('median_ttft_ms', 0):.0f} "
       f"median_tpot_ms={d.get('median_tpot_ms', 0):.1f}")
+# With warmups the means should have converged on the medians. A mean TTFT
+# still an order of magnitude above the median means compilation leaked into
+# the timed run, i.e. the warmups missed a shape the benchmark hits.
+mt, md = d.get("mean_ttft_ms", 0), d.get("median_ttft_ms", 0)
+print(f"[bench] mean_ttft_ms={mt:.0f} median_ttft_ms={md:.0f} "
+      f"ratio={mt / md if md else float('nan'):.1f}x "
+      f"mean_tpot_ms={d.get('mean_tpot_ms', 0):.1f}")
 if done == 0:
     sys.exit("[bench] FAILED: no request completed")
 PY
@@ -57,3 +74,7 @@ JAX_CACHE_DIR="${VLLM_XLA_CACHE_PATH:-/root/jax_cache}"
 echo "--- jax compilation cache (head host) ---"
 echo "dir=${JAX_CACHE_DIR} entries=$(find "${JAX_CACHE_DIR}" -type f 2>/dev/null | wc -l)"
 du -sh "${JAX_CACHE_DIR}" 2>/dev/null || true
+# Post-run disk state. With precompilation on, this is the number that says
+# whether the 20GB cap and the 25GB floor are set anywhere near right.
+echo "--- disk after run (head host) ---"
+df -h "${JAX_CACHE_DIR}" / 2>/dev/null || true

@@ -1,9 +1,15 @@
 # Bring up Qwen/Qwen3.8-2.4T-A95B-FP8 on a v7x-32 slice (4 hosts, 32 devices).
 #
 # Weights: 2469 GB of parameters (2371 GB of that is the 512 routed experts in
-# block-wise fp8) streamed from GCS with runai_streamer. At model=16/attn_dp=2
-# that is ~79.7 GB per device against the 96 GB each v7x JAX device sees, i.e.
-# ~83% of HBM before any KV cache.
+# block-wise fp8) loaded with runai_streamer. At model=16/attn_dp=2 that is
+# ~79.7 GB per device against the 96 GB each v7x JAX device sees, i.e. ~83% of
+# HBM before any KV cache.
+#
+# The source is chosen at runtime: qwen38_2p4t_preflight.sh looks for a copy of
+# the checkpoint mounted on every host of the slice and, finding one, bind
+# mounts it read-only and points MODEL_PATH at it; otherwise the run streams
+# from object storage as before. Build #947 took ~210 min to load over GCS on
+# the slowest rank, which was the bulk of a 3.7 h build.
 #
 # Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_v7x32.yml
 #
@@ -23,10 +29,12 @@ steps:
       NEW_MODEL_DESIGN: "1"       # required: sharding.validate() rejects attn_dp>1 without it
       # Health-wait budget. Build #943 was killed by the 7200s default with the
       # runai streamer at 63% (180271/287119 tensors) after 1:58:40 and still
-      # advancing, i.e. ~3h to finish loading 2469 GB from GCS. 5h leaves room
-      # for the load plus KV-cache init and compile; timeout_in_minutes above
-      # has to exceed it or Buildkite kills the job first. Kept at 5h even with
-      # the streamer retuned below, so that a regression shows up as a slow
+      # advancing; #947 finished the load in ~210 min. 5h leaves room for the
+      # load plus KV-cache init, and now also for AOT precompilation, which
+      # SKIP_JAX_PRECOMPILE=0 moves ahead of /health -- worst case that is
+      # ~210 min of GCS streaming plus ~45 min of cold compiles, still inside
+      # the budget. timeout_in_minutes above has to exceed it or Buildkite
+      # kills the job first. Kept at 5h so that a regression shows up as a slow
       # load in the progress tail rather than as a killed job.
       VLLM_ENGINE_READY_TIMEOUT_S: "18000"
       # Tail /root/vllm_serve.log into the Buildkite log every 60s while waiting
@@ -59,7 +67,55 @@ steps:
         # ~4096; 65536 leaves headroom. The serve script raises its own soft
         # limit too, but that only covers the head -- the three Ray workers load
         # weights as well and only get what `docker run` gives them.
-        export MULTIHOST_DOCKER_ARGS="-v /tmp/jax_cache_tpu7x:/root/jax_cache --ulimit nofile=65536:65536"
+        MULTIHOST_DOCKER_ARGS="-v /tmp/jax_cache_tpu7x:/root/jax_cache --ulimit nofile=65536:65536"
+
+        # Ask every host in the slice two questions before committing to a
+        # three-hour load: is there a locally-mounted copy of the checkpoint,
+        # and is there room for the compilation cache. Both answers are
+        # all-or-nothing across the slice -- see the script for why. It only
+        # ever prints these three assignments, and defaults here cover the case
+        # where it cannot run at all.
+        CKPT_MOUNT=""; CACHE_MIN_FREE_MB=0; CACHE_WRITABLE=0
+        eval "$$(bash .buildkite/dev/qwen38_2p4t_preflight.sh || true)"
+
+        # A local copy of the weights is bind-mounted read-only at the same path
+        # it has on the host, so every rank resolves the same MODEL_PATH. The
+        # path is discovered, not written down: this file is public and the disk
+        # is attached wherever the operator likes.
+        CKPT_ENV=""
+        if [ -n "$$CKPT_MOUNT" ]; then
+          MULTIHOST_DOCKER_ARGS="$$MULTIHOST_DOCKER_ARGS -v $$CKPT_MOUNT:$$CKPT_MOUNT:ro"
+          CKPT_ENV="MODEL_PATH=$$CKPT_MOUNT"
+          echo "--- weights: local mount on all hosts ($$CKPT_MOUNT)"
+        else
+          echo "--- weights: no usable local mount, streaming from object storage"
+        fi
+
+        # Compilation-cache disk guard. SKIP_JAX_PRECOMPILE is off from this
+        # build on, so the cache now takes an entry per shape bucket instead of
+        # the handful the lazy path produced (#947: 8 entries, 90 MB). The
+        # checkpoint disks are read-only, so the cache has nowhere to live but
+        # the host root filesystem, which had 54 GB free on #947.
+        #
+        # MAX_GB makes JAX evict LRU entries itself -- its default is -1,
+        # unlimited. MIN_FREE_GB is the point at which caching is abandoned
+        # rather than risked: a cold recompile costs minutes, an ENOSPC three
+        # hours into a load costs the build. The serve script re-checks both
+        # from inside the container and runs a watchdog during the run.
+        JAX_CACHE_MAX_GB=20
+        JAX_CACHE_MIN_FREE_GB=25
+        CACHE_ENV="$$(printf '%s\n' \
+          'VLLM_XLA_CACHE_PATH=/root/jax_cache' \
+          'JAX_COMPILATION_CACHE_DIR=/root/jax_cache' \
+          "JAX_COMPILATION_CACHE_MAX_SIZE=$$((JAX_CACHE_MAX_GB * 1024 * 1024 * 1024))")"
+        if [ "$$CACHE_WRITABLE" != "1" ] || [ "$$CACHE_MIN_FREE_MB" -lt "$$((JAX_CACHE_MIN_FREE_GB * 1024))" ]; then
+          echo "--- :warning: persistent JAX cache DISABLED cluster-wide (writable=$$CACHE_WRITABLE min_free=$${CACHE_MIN_FREE_MB}MB floor=$$((JAX_CACHE_MIN_FREE_GB * 1024))MB)"
+          CACHE_ENV="VLLM_DISABLE_COMPILE_CACHE=1"
+        else
+          echo "--- jax cache: enabled, cap $${JAX_CACHE_MAX_GB}GB, min free across slice $${CACHE_MIN_FREE_MB}MB"
+        fi
+
+        export MULTIHOST_DOCKER_ARGS
 
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -74,9 +130,7 @@ steps:
           'USE_MOE_EP_KERNEL=0' \
           'VLLM_INCREMENTAL_FP8_LOADING=1' \
           'VLLM_XLA_CHECK_RECOMPILATION=0' \
-          'SKIP_JAX_PRECOMPILE=1' \
-          'VLLM_XLA_CACHE_PATH=/root/jax_cache' \
-          'JAX_COMPILATION_CACHE_DIR=/root/jax_cache' \
+          'SKIP_JAX_PRECOMPILE=0' \
           'RUNAI_STREAMER_CONCURRENCY=64' \
           'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
           'RUNAI_STREAMER_LOG_LEVEL=INFO' \
@@ -92,7 +146,14 @@ steps:
           'INPUT_LEN=1024' \
           'OUTPUT_LEN=128' \
           'NUM_PROMPTS=64' \
-          'MAX_CONCURRENCY=16')"
+          'MAX_CONCURRENCY=16' \
+          'NUM_WARMUPS=32' \
+          "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
+          "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
+          $$CACHE_ENV \
+          $$CKPT_ENV)"
+        echo "--- effective MULTIHOST_ENV_VARS"; printf '%s\n' "$$MULTIHOST_ENV_VARS"
+        echo "--- effective MULTIHOST_DOCKER_ARGS: $$MULTIHOST_DOCKER_ARGS"
 
         .buildkite/scripts/run_multihost.sh \
           "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_serve.sh" \
