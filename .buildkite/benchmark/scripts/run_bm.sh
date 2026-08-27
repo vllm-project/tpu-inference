@@ -410,6 +410,26 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
   fi
 fi
 
+# sonnet ships inside the vLLM checkout rather than the GCS bucket, so it is
+# built here instead of being synced above. `vllm bench serve` samples each
+# prompt from a distinct slice of the file, and one copy of sonnet.txt is too
+# short to fill 1800-token inputs at 1000 prompts -- concatenating it four times
+# is what bm-infra did, and the recorded throughput history these cases continue
+# was measured against that same 4x file.
+if [[ "$DATASET" == "sonnet" ]]; then
+  SONNET_SRC="/workspace/vllm/benchmarks/sonnet.txt"
+  SONNET_4X="$DATASET_DIR/sonnet_4x.txt"
+  if [[ ! -f "$SONNET_SRC" ]]; then
+    echo "[ERROR] $SONNET_SRC not found; cannot build the sonnet dataset."
+    report_and_exit 1
+  fi
+  echo "Building $SONNET_4X from $SONNET_SRC"
+  : > "$SONNET_4X"
+  for _ in 1 2 3 4; do
+    cat "$SONNET_SRC" >> "$SONNET_4X"
+  done
+fi
+
 # Prep specialized configurations (DeepSeek)
 if [[ "$MODEL" == "deepseek-ai/DeepSeek-R1" && "${IS_MULTI_HOST_BENCH:-false}" == "false" ]]; then
   if [[ -n "${GCS_GEN_CONFIG:-}" ]]; then
@@ -435,16 +455,6 @@ if [ "$COMMAND_TYPE" = "lm_eval" ]; then
   } >> "$BM_LOG"
   echo "Finished running $DATASET benchmark."
   report_and_exit 0
-fi
-
-# For Sonnet
-if [ "$DATASET" = "sonnet" ]; then
-  echo "Create sonnet_4x.txt"
-  echo "" > benchmarks/sonnet_4x.txt
-  for _ in {1..4}
-    do
-     cat benchmarks/sonnet.txt >> benchmarks/sonnet_4x.txt
-  done
 fi
 
 #
