@@ -88,6 +88,7 @@ def _scores_kernel(
     sems,  # [4, 2]
     *,
     compression_ratio: int,
+    scale_storage: str,
     static_q_len: int,
     bkv_p: int,
     bq_sz: int,
@@ -107,7 +108,7 @@ def _scores_kernel(
 
     # Validate against the KV dtype.
     kv_dtype = cache_kv_hbm_ref.dtype
-    assert get_dtype_packing(kv_dtype) == kv_packing
+    assert kv_dtype == jnp.uint8
     assert head_dim % 128 == 0
 
     bkv_sz_per_kv_packing = bkv_p * page_size_per_kv_packing
@@ -269,12 +270,25 @@ def _scores_kernel(
             bkv = bkv_x2_ref.at[bkv_sem_idx,
                                 batch_idx, :bkv_sz_per_kv_packing][...]
 
-            # Unpack quantized values and scales from the DSv4 FP8 cache format.
+            # Unpack quantized values and scales from the FP8 cache record.
+            # DeepSeek-v4's original TPU compressor stores one E8M0 byte;
+            # current vLLM V3.2/GLM stores the (power-of-two) scale as four
+            # raw FP32 bytes.  Both layouts pad each token record to the same
+            # cache width, so only this decode differs.
             flat_bkv = bkv.reshape(-1, bkv.shape[-1])
             fp8_val = flat_bkv[:, :head_dim]
             fp8_val = pltpu.bitcast(fp8_val, jnp.float8_e4m3fn)
-            scale_val = pltpu.bitcast(flat_bkv[:, head_dim:head_dim + 1].T,
-                                      jnp.float8_e8m0fnu).astype(jnp.bfloat16)
+            if scale_storage == "e8m0":
+                scale_val = pltpu.bitcast(flat_bkv[:, head_dim:head_dim + 1].T,
+                                          jnp.float8_e8m0fnu).astype(
+                                              jnp.bfloat16)
+            else:
+                scale_val = pltpu.bitcast(flat_bkv[:, head_dim:head_dim + 4].T,
+                                          jnp.float32)
+                # TPU v4 cannot consume FP8 as an MXU RHS. FP8 E4M3 values
+                # are exactly representable in BF16, so widening in VMEM
+                # preserves the quantized math without expanding the cache.
+                fp8_val = fp8_val.astype(jnp.bfloat16)
 
             # NOTE: Do NOT multiply the scales here. Return them separately.
             bkvs.append(fp8_val.reshape(bkv_sz, head_dim))
@@ -330,6 +344,8 @@ def _scores_kernel(
             for batch_idx in range(seq_batch_size):
                 bq = bq_vec[batch_idx].reshape(-1, head_dim)
                 bkv = bkv_vec[batch_idx]
+                if scale_storage == "float32":
+                    bq = bq.astype(jnp.bfloat16)
                 scale_val = scale_val_vec[batch_idx]
                 bq_weights = bq_weights_vec[batch_idx]
                 bq_pos_compressed = bq_pos_compressed_vec[batch_idx]
@@ -485,6 +501,8 @@ def prepare_outputs(out):
     static_argnames=(
         "k",
         "compression_ratio",
+        "scale_storage",
+        "exact_topk",
         "num_kv_pages_per_block",
         "num_queries_per_block",
         "vmem_limit_bytes",
@@ -503,6 +521,8 @@ def streamindex_topk(
     *,
     k: int,
     compression_ratio: int,
+    scale_storage: str = "e8m0",
+    exact_topk: bool = False,
     num_kv_pages_per_block: tuple[int, int, int] | int | None = None,
     num_queries_per_block: tuple[int, int, int] | int | None = None,
     vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
@@ -523,6 +543,11 @@ def streamindex_topk(
       k is also the total number of sequences.
     k: Number of top-K elements to retrieve.
     compression_ratio: KV cache compression ratio.
+    scale_storage: Encoding of the per-token scale bytes in ``cache_kv``:
+      ``"e8m0"`` for the original one-byte DeepSeek-v4 TPU record or
+      ``"float32"`` for current vLLM V3.2/GLM's four-byte record.
+    exact_topk: Use ``lax.top_k`` instead of approximate top-k. Required for
+      model contracts that preserve exact selected-set and tie ordering.
     num_kv_pages_per_block: number of kv pages to be processed in one block in
       the pallas kernel. This is a tuple of (decode, prefill, mixed) cases.
     num_queries_per_block: number of queries to be processed in one block in the
@@ -534,6 +559,10 @@ def streamindex_topk(
   """
     # Scale factors for the FP8 index cache format are packed directly inside
     # `cache_kv` along the width dimension, keeping HBM transactions fused.
+    if scale_storage not in ("e8m0", "float32"):
+        raise ValueError(
+            f"scale_storage must be 'e8m0' or 'float32', got {scale_storage!r}"
+        )
 
     if num_kv_pages_per_block is None or num_queries_per_block is None:
         raise ValueError(
@@ -558,6 +587,14 @@ def streamindex_topk(
                                                      original_dtype)
     q = prepare_q_inputs(q)
     lkv_dim = cache_kv.shape[-1]
+    if cache_kv.dtype != jnp.uint8:
+        raise ValueError(
+            f"cache_kv must use raw uint8 records, got {cache_kv.dtype}")
+    scale_bytes = 1 if scale_storage == "e8m0" else 4
+    if lkv_dim < q.shape[-1] + scale_bytes:
+        raise ValueError(
+            f"cache record width {lkv_dim} cannot hold {q.shape[-1]} FP8 "
+            f"values and {scale_bytes} scale bytes")
     _, page_size_per_kv_packing, kv_packing, _ = cache_kv.shape
     page_size = page_size_per_kv_packing * kv_packing
     pages_per_seq = page_indices.shape[0] // max_num_seqs
@@ -672,6 +709,7 @@ def streamindex_topk(
             functools.partial(
                 _scores_kernel,
                 compression_ratio=compression_ratio,
+                scale_storage=scale_storage,
                 static_q_len=static_q_len,
                 bq_sz=bq_sz,
                 bkv_p=bkv_p,
@@ -782,11 +820,14 @@ def streamindex_topk(
     # Currently, jax.lax.approx_max_k wins due to the HBM read/write tax, but
     # direct VMEM streaming will allow SC to beat TensorCore performance.
 
-    # jax.lax.approx_max_k(recall_target=1.0) is equivalent to jax.lax.top_k
-    # but faster.
-    top_vals, top_idxs = jax.lax.approx_max_k(scores,
-                                              k,
-                                              reduction_dimension=-1,
-                                              recall_target=1.0)
+    if exact_topk:
+        top_vals, top_idxs = jax.lax.top_k(scores, k)
+    else:
+        top_vals, top_idxs = jax.lax.approx_max_k(
+            scores,
+            k,
+            reduction_dimension=-1,
+            recall_target=1.0,
+        )
     topk_idxs = jnp.where(top_vals == -jnp.inf, -1, top_idxs)
     return topk_idxs[:q.shape[0], :k]
