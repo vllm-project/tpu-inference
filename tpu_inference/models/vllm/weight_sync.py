@@ -15,8 +15,9 @@ This module defines the trainer-facing contract as vLLM's *canonical*
 parameter layout -- what ``model.named_parameters()`` holds on a single GPU
 at TP=1 (``[out, in]`` linears, ``qkv_proj`` = ``[q | k | v]`` with
 unreplicated KV heads, ``w13_weight`` = ``[E, 2F, D]`` gate-first,
-``w2_weight`` = ``[E, D, F]``) -- and re-runs tpu-inference's own weight
-processing to turn canonical arrays into the internal layout:
+``w2_weight`` = ``[E, D, F]``) -- and turns canonical arrays into the internal
+layout by calling each layer's own ``quant_method.process_weights``, the same
+function the checkpoint loader runs, so the two paths cannot drift:
 
     specs = wrapper.canonical_weight_specs()      # name -> ShapeDtypeStruct
     wrapper.load_canonical_weights(new_weights, state)
@@ -39,11 +40,6 @@ from vllm.model_executor.layers.linear import LinearBase, QKVParallelLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import \
     VocabParallelEmbedding
 
-from tpu_inference.layers.common.process_weights.linear_weights import (
-    LinearWeights, process_linear_weights, shard_linear_weights)
-from tpu_inference.layers.common.process_weights.moe_weights import (
-    process_unquantized_moe_weights, shard_moe_weights)
-from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedEmbeddingMethod, VllmUnquantizedFusedMoEMethod,
@@ -156,80 +152,73 @@ def canonical_weight_specs(
         mod_path, _, pname = name.rpartition(".")
         layer = modules.get(mod_path)
         arr = jax_view(state[key])
-        shape = tuple(arr.shape)
-        qm = getattr(layer, "quant_method", None)
-        if isinstance(layer, LinearBase) and isinstance(
-                qm, VllmUnquantizedLinearMethod):
-            out = _linear_canonical_out(layer)
-            if pname == "weight":
-                shape = (out, layer.input_size)
-            elif pname == "bias":
-                shape = (out, )
-            else:
-                continue
-        elif isinstance(layer, RoutedExperts) and isinstance(
-                qm, VllmUnquantizedFusedMoEMethod):
-            e = layer.global_num_experts
-            d = layer.hidden_size
-            f = layer.moe_config.intermediate_size
-            if pname == "w13_weight":
-                shape = (e, 2 * f, d)
-            elif pname == "w2_weight":
-                shape = (e, d, f)
-            elif pname == "w13_bias":
-                shape = (e, 2 * f)
-            elif pname == "w2_bias":
-                shape = (e, d)
-            else:
-                continue
-        # Embeddings, replicated linears (vLLM's default method), norms,
-        # conv1d, A_log, ...: the internal layout is the canonical one.
+        # The quant methods record the vLLM Parameter shape at load time
+        # (`_record_canonical_shape`); everything else keeps its layout.
+        shape = tuple(
+            getattr(layer, "_canonical_shapes", {}).get(pname, arr.shape))
+        if isinstance(layer, QKVParallelLinear) and pname in ("weight",
+                                                             "bias"):
+            # The vLLM Parameter carries the tp-replicated KV heads; the sync
+            # contract carries each KV head once.
+            shape = (_linear_canonical_out(layer), ) + shape[1:]
         specs[name] = jax.ShapeDtypeStruct(shape, arr.dtype)
     return specs
 
 
 def _process_linear(layer: LinearBase, qm: VllmUnquantizedLinearMethod,
-                    weight: jax.Array | None,
-                    bias: jax.Array | None) -> LinearWeights:
-    cfg = qm.linear_config
-    if not cfg.fuse_matmuls:
+                    weight: jax.Array | None, bias: jax.Array | None):
+    """Runs the quant method's own `process_weights` (the same code the
+    loading path uses) on canonical `[out, in]` arrays."""
+    if not qm.linear_config.fuse_matmuls:
         raise NotImplementedError(
             f"{layer}: weight sync into unfused (split) linear weights is not "
             "supported yet; the layer keeps one processed tensor per "
             "projection.")
     if isinstance(layer, QKVParallelLinear):
+        # The sync contract carries each KV head once; vLLM's Parameter (and
+        # therefore `process_weights`) expects them replicated per TP rank.
         if weight is not None:
             weight = _replicate_kv_heads(layer, weight)
         if bias is not None:
             bias = _replicate_kv_heads(layer, bias)
-    if weight is not None:
-        weight = jnp.transpose(weight)  # [out, in] -> [in, out]
-    weights = process_linear_weights(
-        LinearWeights(weight=weight,
-                      weight_scale=None,
-                      zero_point=None,
-                      bias=bias),
-        fused=True,
-        output_sizes=cfg.output_sizes,
-        reorder_size=cfg.n_shards,
-    )
-    return shard_linear_weights(weights,
-                                mesh=cfg.mesh,
-                                weight_p_spec=cfg.weight_sharding,
-                                bias_p_spec=cfg.bias_sharding)
+    if weight is None:
+        # Bias-only update: process_weights needs the weight too, so reuse the
+        # current processed one untouched is not possible; require both.
+        raise NotImplementedError(
+            f"{layer}: bias-only updates are not supported; update weight "
+            "and bias together.")
+    return qm.process_weights(layer, weight, bias)
 
 
 def _process_moe(layer: RoutedExperts, qm: VllmUnquantizedFusedMoEMethod,
                  w13: jax.Array, w2: jax.Array, w13_bias: jax.Array | None,
                  w2_bias: jax.Array | None):
-    weights = process_unquantized_moe_weights(mesh=qm.mesh,
-                                              moe_backend=qm.moe_backend,
-                                              activation=layer.activation,
-                                              w13_weight=w13,
-                                              w13_bias=w13_bias,
-                                              w2_weight=w2,
-                                              w2_bias=w2_bias)
-    return shard_moe_weights(weights, qm.moe_backend, qm.mesh)
+    return qm.process_weights(layer, w13, w2, w13_bias, w2_bias)
+
+
+def _flush_linear(vllm_model: torch.nn.Module,
+                  modules: dict[str, torch.nn.Module], state: dict[str, Any],
+                  mod_path: str, layer: LinearBase,
+                  qm: VllmUnquantizedLinearMethod,
+                  parts: dict[str, jax.Array]) -> list[str]:
+    """Re-expresses, processes and installs one linear layer's weight/bias."""
+    ready = {}
+    for pname, arr in parts.items():
+        name = f"{mod_path}.{pname}"
+        old = jax_view(state[STATE_PREFIX + name])
+        ready[pname] = _on_runner_devices(jnp.asarray(arr), old.sharding,
+                                          name).astype(old.dtype)
+    processed = _process_linear(layer, qm, ready["weight"],
+                                ready.get("bias"))
+    del ready
+    updated = []
+    for pname in ("weight", "bias"):
+        if pname in parts:
+            name = f"{mod_path}.{pname}"
+            _install(vllm_model, modules, state, name,
+                     getattr(processed, pname))
+            updated.append(STATE_PREFIX + name)
+    return updated
 
 
 def _flush_moe(vllm_model: torch.nn.Module,
@@ -309,6 +298,7 @@ def load_canonical_weights(vllm_model: torch.nn.Module,
     """
     modules = dict(vllm_model.named_modules())
     pending_moe: dict[str, dict[str, jax.Array]] = {}
+    pending_linear: dict[str, dict[str, jax.Array]] = {}
     updated: list[str] = []
 
     def _hbm_gib() -> str:
@@ -353,24 +343,29 @@ def load_canonical_weights(vllm_model: torch.nn.Module,
                                qm, pending_moe.pop(mod_path)))
             continue
 
-        arr = _on_runner_devices(jnp.asarray(arr), old.sharding, name)
-        arr = arr.astype(old.dtype)
-
         if isinstance(layer, LinearBase) and isinstance(
                 qm, VllmUnquantizedLinearMethod) and pname in ("weight",
                                                                "bias"):
-            processed = _process_linear(layer, qm,
-                                        arr if pname == "weight" else None,
-                                        arr if pname == "bias" else None)
-            new = processed.weight if pname == "weight" else processed.bias
-            _install(vllm_model, modules, state, name, new)
-            updated.append(key)
-        elif isinstance(layer, VocabParallelEmbedding) and isinstance(
-                qm, VllmUnquantizedEmbeddingMethod):
-            sharding = NamedSharding(qm.mesh, P(ShardingAxisName.MLP_TENSOR,
-                                                None))
+            # weight and bias are processed together (one process_weights
+            # call, as at load time); wait until both parts of the layer are in.
+            parts = pending_linear.setdefault(mod_path, {})
+            parts[pname] = arr
+            needed = {"weight"}
+            if STATE_PREFIX + mod_path + ".bias" in state:
+                needed.add("bias")
+            if needed <= set(parts):
+                updated.extend(
+                    _flush_linear(vllm_model, modules, state, mod_path, layer,
+                                  qm, pending_linear.pop(mod_path)))
+            continue
+
+        arr = _on_runner_devices(jnp.asarray(arr), old.sharding, name)
+        arr = arr.astype(old.dtype)
+
+        if isinstance(layer, VocabParallelEmbedding) and isinstance(
+                qm, VllmUnquantizedEmbeddingMethod) and pname == "weight":
             _install(vllm_model, modules, state, name,
-                     general_device_put(arr, sharding))
+                     qm.process_weights(layer, arr).weight)
             updated.append(key)
         else:
             # Layout-preserving parameters: keep the state's own placement.
@@ -379,11 +374,15 @@ def load_canonical_weights(vllm_model: torch.nn.Module,
                      general_device_put(arr, old.sharding))
             updated.append(key)
 
-    if pending_moe:
-        incomplete = {k: sorted(v) for k, v in pending_moe.items()}
+    if pending_moe or pending_linear:
+        incomplete = {
+            k: sorted(v)
+            for k, v in {**pending_moe, **pending_linear}.items()
+        }
         raise ValueError(
-            "fused MoE layers need w13_weight and w2_weight (and the biases "
-            f"when present) in the same update; incomplete: {incomplete}")
+            "layers must receive all of their parameters in the same update "
+            "(weight and bias; w13_weight and w2_weight and the biases when "
+            f"present); incomplete: {incomplete}")
 
     updated_set = set(updated)
     missing = [

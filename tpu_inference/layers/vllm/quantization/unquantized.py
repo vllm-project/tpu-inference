@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 from typing import Any, Callable, Optional
 
 import jax
@@ -161,40 +162,95 @@ class VllmUnquantizedConfig(QuantizationConfig, VllmQuantConfig):
                 return None
 
 
+@functools.partial(jax.jit,
+                   static_argnames=("fused", "output_sizes", "reorder_size"))
+def _process_unquantized_linear_weights(
+    weight: jax.Array,
+    bias: jax.Array | None,
+    *,
+    fused: bool,
+    output_sizes: tuple[int, ...],
+    reorder_size: int,
+) -> LinearWeights:
+    """Module-level jit so the trace is shared by every layer with the same
+    shapes/config (both at load time and during in-place weight updates)."""
+    return process_linear_weights(
+        LinearWeights(weight=weight,
+                      weight_scale=None,
+                      zero_point=None,
+                      bias=bias),
+        fused=fused,
+        output_sizes=list(output_sizes),
+        reorder_size=reorder_size,
+    )
+
+
+def _record_canonical_shape(layer: torch.nn.Module, param_name: str) -> None:
+    """Remembers the vLLM Parameter (canonical) shape before it is replaced by
+    the processed on-device weight, for `weight_sync.canonical_weight_specs`."""
+    shapes = layer.__dict__.setdefault("_canonical_shapes", {})
+    shapes[param_name] = tuple(getattr(layer, param_name).shape)
+
+
 class VllmUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
 
     def __init__(self, mesh):
         self.mesh = mesh
 
+    def process_weights(self,
+                        layer: torch.nn.Module,
+                        weight: jax.Array,
+                        bias: jax.Array | None = None) -> LinearWeights:
+        """Canonical `[vocab, hidden]` arrays -> sharded on-device weights."""
+        del layer
+        weight_sharding = NamedSharding(self.mesh,
+                                        P(ShardingAxisName.MLP_TENSOR, None))
+        weight = general_device_put(weight, weight_sharding)
+        if bias is not None:
+            bias_sharding = NamedSharding(self.mesh,
+                                          P(ShardingAxisName.MLP_TENSOR))
+            bias = general_device_put(bias, bias_sharding)
+        return LinearWeights(weight=weight,
+                             weight_scale=None,
+                             zero_point=None,
+                             bias=bias)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight_sharding = NamedSharding(self.mesh,
                                         P(ShardingAxisName.MLP_TENSOR, None))
         weight = _load_weight_for_layer(layer, "weight", weight_sharding)
+        _record_canonical_shape(layer, "weight")
         delattr(layer, 'weight')
-        weight = general_device_put(weight, weight_sharding)
+        bias = None
+        if isinstance(layer, ParallelLMHead) and layer.bias is not None:
+            bias_sharding = NamedSharding(self.mesh,
+                                          P(ShardingAxisName.MLP_TENSOR))
+            bias = _load_weight_for_layer(layer, "bias", bias_sharding)
+            _record_canonical_shape(layer, "bias")
+            delattr(layer, 'bias')
+
+        weights = self.process_weights(layer, weight, bias)
         is_pooling = get_current_vllm_config(
         ).model_config.runner_type == "pooling"
 
         if is_pooling:
             layer.__dict__.pop("weight", None)
-            layer._parameters["weight"] = Parameter(torch_view(weight),
+            layer._parameters["weight"] = Parameter(torch_view(
+                weights.weight),
                                                     requires_grad=False)
         else:
-            layer.weight = Parameter(torch_view(weight), requires_grad=False)
+            layer.weight = Parameter(torch_view(weights.weight),
+                                     requires_grad=False)
 
-        if isinstance(layer, ParallelLMHead) and layer.bias is not None:
-            bias_sharding = NamedSharding(self.mesh,
-                                          P(ShardingAxisName.MLP_TENSOR))
-            bias = _load_weight_for_layer(layer, "bias", bias_sharding)
-            delattr(layer, 'bias')
-            bias = general_device_put(bias, bias_sharding)
-
+        if weights.bias is not None:
             if is_pooling:
                 layer.__dict__.pop("bias", None)
-                layer._parameters["bias"] = Parameter(torch_view(bias),
+                layer._parameters["bias"] = Parameter(torch_view(
+                    weights.bias),
                                                       requires_grad=False)
             else:
-                layer.bias = Parameter(torch_view(bias), requires_grad=False)
+                layer.bias = Parameter(torch_view(weights.bias),
+                                       requires_grad=False)
 
 
 class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
@@ -215,6 +271,28 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         self.maybe_process_linear_weights(layer, param_name, args, kwargs,
                                           self.linear_config.num_proj)
 
+    def process_weights(self,
+                        layer: torch.nn.Module,
+                        weight: jax.Array,
+                        bias: jax.Array | None = None) -> LinearWeights:
+        """Canonical `[out, in]` arrays (vLLM Parameter layout, KV heads
+        already replicated for QKV) -> processed, sharded on-device weights."""
+        del layer
+        weight = jnp.transpose(weight)
+        weights = _process_unquantized_linear_weights(
+            weight,
+            bias,
+            fused=self.linear_config.fuse_matmuls,
+            output_sizes=tuple(self.linear_config.output_sizes),
+            reorder_size=self.linear_config.n_shards,
+        )
+        return shard_linear_weights(
+            weights,
+            mesh=self.linear_config.mesh,
+            weight_p_spec=self.linear_config.weight_sharding,
+            bias_p_spec=self.linear_config.bias_sharding,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.weight):
             # Already processed and sharded.
@@ -225,7 +303,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             self.linear_config.mesh,
             PartitionSpec(*self.linear_config.weight_sharding[::-1]))
         weight = _load_weight_for_layer(layer, "weight", loading_sharding)
-        weight = jnp.transpose(weight)
+        _record_canonical_shape(layer, "weight")
 
         # Free CPU memory immediately
         layer.weight.untyped_storage().resize_(0)
@@ -236,36 +314,13 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             bias_sharding = NamedSharding(self.linear_config.mesh,
                                           self.linear_config.bias_sharding)
             bias = _load_weight_for_layer(layer, "bias", bias_sharding)
+            _record_canonical_shape(layer, "bias")
             layer.bias.untyped_storage().resize_(0)
             delattr(layer, 'bias')
         else:
             bias = None
 
-        @jax.jit
-        def process_unquantized_linear_weights(
-            weight: jax.Array,
-            bias: jax.Array | None,
-        ) -> LinearWeights:
-            return process_linear_weights(
-                LinearWeights(
-                    weight=weight,
-                    weight_scale=None,
-                    zero_point=None,
-                    bias=bias,
-                ),
-                fused=self.linear_config.fuse_matmuls,
-                output_sizes=self.linear_config.output_sizes,
-                reorder_size=self.linear_config.n_shards,
-            )
-
-        weights = process_unquantized_linear_weights(weight, bias)
-        weights = torch_view(
-            shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            ))
+        weights = torch_view(self.process_weights(layer, weight, bias))
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
             if bias is not None:
@@ -347,6 +402,23 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
             self.process_weights_after_loading(layer)
             logger.debug(f"Complete sharding weights for layer {type(layer)}")
 
+    def process_weights(self,
+                        layer: torch.nn.Module,
+                        w13_weight: jax.Array,
+                        w2_weight: jax.Array,
+                        w13_bias: jax.Array | None = None,
+                        w2_bias: jax.Array | None = None) -> FusedMoEWeights:
+        """Canonical `w13 = [E, 2F, D]` (gate first) / `w2 = [E, D, F]` arrays
+        -> processed (backend layout), sharded on-device weights."""
+        weights = process_unquantized_moe_weights(mesh=self.mesh,
+                                                  moe_backend=self.moe_backend,
+                                                  activation=layer.activation,
+                                                  w13_weight=w13_weight,
+                                                  w13_bias=w13_bias,
+                                                  w2_weight=w2_weight,
+                                                  w2_bias=w2_bias)
+        return shard_moe_weights(weights, self.moe_backend, self.mesh)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.w13_weight):
             # Already processed and sharded.
@@ -358,6 +430,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
         w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
         w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
+        _record_canonical_shape(layer, "w13_weight")
+        _record_canonical_shape(layer, "w2_weight")
         # Free CPU memory immediately
         layer.w13_weight.untyped_storage().resize_(0)
         layer.w2_weight.untyped_storage().resize_(0)
@@ -367,6 +441,8 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         if self.moe.has_bias:
             w13_bias = _load_weight_for_layer(layer, "w13_bias", ep_sharding)
             w2_bias = _load_weight_for_layer(layer, "w2_bias", ep_sharding)
+            _record_canonical_shape(layer, "w13_bias")
+            _record_canonical_shape(layer, "w2_bias")
             layer.w13_bias.untyped_storage().resize_(0)
             layer.w2_bias.untyped_storage().resize_(0)
             delattr(layer, 'w13_bias')
@@ -374,18 +450,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        weights = process_unquantized_moe_weights(mesh=self.mesh,
-                                                  moe_backend=self.moe_backend,
-                                                  activation=layer.activation,
-                                                  w13_weight=w13_weight,
-                                                  w13_bias=w13_bias,
-                                                  w2_weight=w2_weight,
-                                                  w2_bias=w2_bias)
-
+        weights = self.process_weights(layer, w13_weight, w2_weight, w13_bias,
+                                       w2_bias)
         del w13_weight, w2_weight, w13_bias, w2_bias
 
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+        weights = torch_view(weights)
         layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
 
