@@ -184,7 +184,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         nkv2 = align_to(2 * nkv, kvp)
         npages = max(cdiv(max_ctx, page), 1) * slack
         mesh = Mesh(np.array(jax.devices()[:tp]).reshape(tp), ("x", ))
-        put = lambda x: jax.device_put(x, NamedSharding(mesh, P("x")))
+
+        def put(x):
+            return jax.device_put(x, NamedSharding(mesh, P("x")))
+
         q = put(jnp.broadcast_to(rand((chunk, nq, HD)), (tp, chunk, nq, HD)))
         k = put(
             jnp.broadcast_to(
@@ -236,7 +239,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         nkv2 = tp * align_to(2 * max(1, NKV // tp), kvp)
         cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                        ShardingAxisName.KV_HEAD, None, None)
-        put = lambda x, s: jax.device_put(x, NamedSharding(mesh, s))
+
+        def put(x, s):
+            return jax.device_put(x, NamedSharding(mesh, s))
+
         q = put(
             rand((chunk, NQ, HD)),
             P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None))
@@ -363,8 +369,8 @@ def _cell(v, base):
 def _box_table(header, rows):
     widths = [max(len(str(x)) for x in col) + 2 for col in zip(header, *rows)]
 
-    def line(l, m, r):
-        return l + m.join("─" * w for w in widths) + r
+    def line(left, mid, right):
+        return left + mid.join("─" * w for w in widths) + right
 
     def fmt(cells, center=False):
         parts = []
@@ -441,13 +447,17 @@ def main():
                     ]
                     t0 = time.time()
                     rc = subprocess.call(cmd)
+                    # The worker writes its results before exiting; trust
+                    # them even if the runtime's teardown returns non-zero.
+                    try:
+                        results[variant] = json.load(open(tf.name))
+                    except (OSError, ValueError):
+                        results[variant] = {}
+                    status = "ok" if results[variant] else f"FAILED rc={rc}"
                     print(
-                        f"  {model} {n} dev {variant}: "
-                        f"{'ok' if rc == 0 else f'FAILED rc={rc}'} "
+                        f"  {model} {n} dev {variant}: {status} "
                         f"({time.time() - t0:.0f}s)",
                         flush=True)
-                    results[variant] = json.load(open(
-                        tf.name)) if rc == 0 else {}
             base = results[variants[0]]
             rows = []
             for ctx in _ladder(args.max_context):
