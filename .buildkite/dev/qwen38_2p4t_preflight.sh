@@ -57,11 +57,19 @@ for cand in "$root"/*/"$dirname_want"; do
 done
 [ -n "$found" ] && break
 done
+# Writability here means "root inside the container can write through the bind
+# mount", not "this ssh user can write". A previous build's container created
+# this directory as root, so `touch` as the agent user fails on a directory
+# that is in fact perfectly usable -- which is how build #948 talked itself out
+# of a cache with 54 GB free. The two things that genuinely stop the container
+# writing are the directory not existing and not being creatable, or the
+# filesystem being mounted read-only.
 mkdir -p "$cache_dir" 2>/dev/null
 writable=0
-if touch "$cache_dir/.preflight_wtest" 2>/dev/null; then
-  rm -f "$cache_dir/.preflight_wtest"
+if [ -d "$cache_dir" ]; then
   writable=1
+  opts=$(findmnt -no OPTIONS --target "$cache_dir" 2>/dev/null)
+  case ",$opts," in *,ro,*) writable=0; echo "  $cache_dir is on a read-only mount" >&2 ;; esac
 fi
 free_mb=$(df -Pm "$cache_dir" 2>/dev/null | awk 'NR==2{print $4}')
 [ -n "${free_mb:-}" ] || free_mb=0
