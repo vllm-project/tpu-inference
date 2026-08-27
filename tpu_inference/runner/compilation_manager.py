@@ -1886,6 +1886,10 @@ class CompilationManager:
                 )
 
     def _precompile_structured_decoding(self) -> None:
+        if envs.SKIP_STRUCTURED_DECODING_PRECOMPILE:
+            logger.info(
+                "Structured decoding precompilation skipped by configuration.")
+            return
         logger.info(
             "Compiling structured_decoding with different input shapes.")
         if self.runner.vllm_config.sharding_config.total_dp_size > 1:
