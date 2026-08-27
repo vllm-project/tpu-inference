@@ -282,6 +282,14 @@ def test_mamba_cached_positions(monkeypatch: pytest.MonkeyPatch):
     assert envs.TPU_MAMBA_CACHED_POSITIONS == [4096, 8192]
 
 
+def test_mamba_disable_chunk_cache(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", raising=False)
+    assert not envs.TPU_MAMBA_DISABLE_CHUNK_CACHE
+
+    monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
+    assert envs.TPU_MAMBA_DISABLE_CHUNK_CACHE
+
+
 def test_invalid_attribute_raises_error():
     with pytest.raises(AttributeError,
                        match="has no attribute 'NONEXISTENT_VAR'"):
@@ -299,6 +307,7 @@ def test_dir_returns_all_env_vars():
     assert "MODEL_IMPL_TYPE" in env_vars
     assert "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER" in env_vars
     assert "TPU_MAMBA_CACHED_POSITIONS" in env_vars
+    assert "TPU_MAMBA_DISABLE_CHUNK_CACHE" in env_vars
 
 
 def test_tpu_multihost_env_vars(monkeypatch: pytest.MonkeyPatch):

@@ -15,10 +15,12 @@
 from types import SimpleNamespace
 
 import pytest
+
 from tpu_inference.core.compact_mamba_pool import (
     _ALIGNMENT_TOKENS_ATTR,
     _AUTO_CACHE_POSITIONS_ATTR,
     _CACHED_POSITIONS_ATTR,
+    _DISABLE_CHUNK_CACHE_ATTR,
     _patch_compact_mamba_pool_classes,
     auto_mm_cache_positions,
     get_fixed_mamba_cached_positions,
@@ -523,8 +525,10 @@ class TestCompactMambaPool:
 
         assert mamba.block_pool is main_pool
 
-    def test_cache_insertion_keeps_only_selected_positions(self, monkeypatch):
+    def test_disable_chunk_cache_keeps_only_selected_positions(
+            self, monkeypatch):
         monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "128,384")
+        monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
         classes = _fake_vllm_classes()
         _install(classes)
         main_pool = classes.BlockPool(1000)
@@ -555,8 +559,10 @@ class TestCompactMambaPool:
             ("hash-2", 0),
         }
 
-    def test_auto_mode_caches_only_first_media_boundaries(self, monkeypatch):
+    def test_disable_chunk_cache_with_auto_keeps_only_media_boundaries(
+            self, monkeypatch):
         monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
         monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
         classes = _fake_vllm_classes()
         _install(classes)
@@ -590,6 +596,7 @@ class TestCompactMambaPool:
         # request A caches its text0/text0+media0 boundaries, then a
         # request B sharing the whole prefix reuses the deepest boundary.
         monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
         monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
         classes = _fake_vllm_classes()
         _install(classes)
@@ -639,6 +646,7 @@ class TestCompactMambaPool:
         # the text0 block hash, so lookup reuses the text0 boundary and NOT the
         # (now diverged) text0+media0 boundary.
         monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
+        monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
         monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
         classes = _fake_vllm_classes()
         _install(classes)
@@ -682,6 +690,7 @@ class TestCompactMambaPool:
         # and the rest of request uses fixed position boundary.
         monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", "1")
         monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "768")
+        monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
         classes = _fake_vllm_classes()
         _install(classes)
         main_pool = classes.BlockPool(1000)
@@ -773,6 +782,39 @@ class TestCompactMambaPool:
 
         assert mamba.original_cache_calls == [(request, 128, 128)]
 
+    @pytest.mark.parametrize(
+        ("auto", "fixed", "mm_features"),
+        [
+            (False, "128,384", []),
+            (True, "", [_mm_feature(128, 384)]),
+            (True, "768", [_mm_feature(128, 384)]),
+        ],
+    )
+    def test_selected_positions_keep_native_chunk_cache_by_default(
+            self, monkeypatch, auto, fixed, mm_features):
+        monkeypatch.setenv("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS", str(int(auto)))
+        if fixed:
+            monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", fixed)
+        else:
+            monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
+        monkeypatch.delenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", raising=False)
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        request = SimpleNamespace(
+            request_id="request-0",
+            mm_features=mm_features,
+        )
+
+        mamba.cache_blocks(request, 384, alignment_tokens=128)
+
+        assert mamba.original_cache_calls == [(request, 384, 128)]
+        assert getattr(main_pool, _CACHED_POSITIONS_ATTR) is None
+        assert not getattr(mamba, _DISABLE_CHUNK_CACHE_ATTR)
+
     def test_native_cache_path_supports_legacy_vllm_signature(
             self, monkeypatch):
         monkeypatch.delenv("TPU_MAMBA_CACHED_POSITIONS", raising=False)
@@ -796,6 +838,7 @@ class TestCompactMambaPool:
     def test_selected_cache_path_supports_legacy_block_pool_signature(
             self, monkeypatch):
         monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "128")
+        monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
         classes = _fake_vllm_classes()
         cache_full_blocks = classes.BlockPool.cache_full_blocks
 
@@ -915,6 +958,7 @@ class TestCompactMambaPool:
 
     def test_cache_lookup_keeps_only_selected_positions(self, monkeypatch):
         monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "2048,6144")
+        monkeypatch.setenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", "1")
         classes = _fake_vllm_classes()
         _install(classes)
         main_pool = classes.BlockPool(1000)
@@ -939,6 +983,34 @@ class TestCompactMambaPool:
         )
 
         assert hit == ([pool.null_block, pool.null_block, selected], )
+
+    def test_fixed_positions_keep_native_lookup_by_default(self, monkeypatch):
+        monkeypatch.setenv("TPU_MAMBA_CACHED_POSITIONS", "2048,6144")
+        monkeypatch.delenv("TPU_MAMBA_DISABLE_CHUNK_CACHE", raising=False)
+        classes = _fake_vllm_classes()
+        _install(classes)
+        main_pool = classes.BlockPool(1000)
+        mamba = classes.MambaManager(main_pool)
+        coordinator = classes.HybridCoordinator(main_pool, [mamba])
+        classes.Scheduler(coordinator, max_num_seqs=4)
+        pool = main_pool._tpu_compact_mamba_pools[0]
+        selected = classes.Block(3)
+        native_chunk = classes.Block(5)
+        pool.cached[("hash-2", 0)] = selected
+        pool.cached[("hash-3", 0)] = native_chunk
+        spec = SimpleNamespace(block_size=2048)
+
+        hit = classes.MambaManager.find_longest_cache_hit(
+            ["hash-0", "hash-1", "hash-2", "hash-3"],
+            4 * spec.block_size,
+            [0],
+            main_pool,
+            spec,
+            False,
+            128,
+        )
+
+        assert hit == ([pool.null_block] * 3 + [native_chunk], )
 
     def test_global_lifecycle_operations_keep_pool_local_ids_separate(self):
         classes = _fake_vllm_classes()

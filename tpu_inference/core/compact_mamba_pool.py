@@ -29,11 +29,13 @@ two reserve additional LRU retention capacity. Cached states whose reference
 count reaches zero remain in the private pool's normal free/LRU queue, so
 prefix hits and eviction retain vLLM's native semantics.
 
-By default every alignment-compatible Mamba boundary is eligible for caching.
-``TPU_MAMBA_CACHED_POSITIONS`` can restrict insertion and lookup to a
-comma-separated set of exact, hybrid-aligned prefix lengths, in tokens. A
-position inside an atomic multimodal placeholder is skipped for that request;
-positions at either placeholder edge remain eligible.
+By default native chunk-based Mamba caching remains enabled.
+``TPU_MAMBA_CACHED_POSITIONS`` and ``TPU_MAMBA_AUTO_MM_CACHE_POSITIONS`` add
+forced, hybrid-aligned scheduler boundaries so important states are
+materialized alongside ordinary chunk endpoints. Set
+``TPU_MAMBA_DISABLE_CHUNK_CACHE`` to retain only those selected positions. A
+manual position inside an atomic multimodal placeholder is skipped for that
+request; positions at either placeholder edge remain eligible.
 """
 
 from __future__ import annotations
@@ -52,6 +54,7 @@ logger = init_logger(__name__)
 _PRIVATE_POOLS_ATTR = "_tpu_compact_mamba_pools"
 _CACHED_POSITIONS_ATTR = "_tpu_mamba_cached_positions"
 _AUTO_CACHE_POSITIONS_ATTR = "_tpu_mamba_auto_cache_positions"
+_DISABLE_CHUNK_CACHE_ATTR = "_tpu_mamba_disable_chunk_cache"
 _ALIGNMENT_TOKENS_ATTR = "_tpu_mamba_alignment_tokens"
 # Per-request guard so the content-safe decision trace logs once, not once per
 # scheduling step. Set on the request object the first time it is composed.
@@ -86,7 +89,7 @@ def get_mamba_prefix_cache_num_blocks(max_num_seqs: int) -> int:
 
 
 def get_fixed_mamba_cached_positions() -> frozenset[int] | None:
-    """Return selected Mamba prefix lengths, or ``None`` for every boundary."""
+    """Return configured Mamba boundary lengths, or ``None`` when unset."""
     positions = envs.TPU_MAMBA_CACHED_POSITIONS
     if not positions:
         return None
@@ -201,7 +204,11 @@ def _drop_mid_media_positions(positions: frozenset[int] | None,
 
 
 def mamba_cache_positions(obj: Any, request: Any) -> frozenset[int] | None:
-    """Obtain Mamba prefix cache positions for a request and log mamba cache position decisions if enabled."""
+    """Obtain selected Mamba boundaries and optionally log the decision.
+
+    These positions always force scheduler splits. They restrict cache
+    insertion only when ``TPU_MAMBA_DISABLE_CHUNK_CACHE`` is enabled.
+    """
     composed = _mamba_cache_positions_helper(obj, request)
     _log_cache_decision(obj, request, composed)
     return composed
@@ -290,14 +297,17 @@ def _log_cache_decision(obj: Any, request: Any,
         for i, f in enumerate(mm_features)) or "none")
     fixed = mamba_fixed_positions(obj)
 
+    selected_only = bool(getattr(obj, _DISABLE_CHUNK_CACHE_ATTR, False))
     logger.info(
-        "mamba-cache: block=%d spans=[%s] | %s | auto=%s fixed=%s => cached=%s",
+        "mamba-cache: block=%d spans=[%s] | %s | auto=%s fixed=%s "
+        "=> selected=%s chunk_cache=%s",
         alignment_tokens,
         spans,
         _describe_auto_detection(mm_features, alignment_tokens, auto_on),
         sorted(mamba_auto_positions(obj, request)),
         "native(None)" if fixed is None else sorted(fixed),
         "native(None)" if composed is None else sorted(composed),
+        "disabled" if selected_only else "enabled",
     )
 
 
@@ -409,9 +419,11 @@ def _attach_private_mamba_pools(
                 f"hybrid cache alignment ({alignment_tokens} tokens), got "
                 f"{misaligned_positions}")
     auto_mm_cache_positions = envs.TPU_MAMBA_AUTO_MM_CACHE_POSITIONS
+    disable_chunk_cache = envs.TPU_MAMBA_DISABLE_CHUNK_CACHE
 
     setattr(scheduler, _CACHED_POSITIONS_ATTR, fixed_cached_positions)
     setattr(scheduler, _AUTO_CACHE_POSITIONS_ATTR, auto_mm_cache_positions)
+    setattr(scheduler, _DISABLE_CHUNK_CACHE_ATTR, disable_chunk_cache)
     setattr(scheduler, _ALIGNMENT_TOKENS_ATTR, alignment_tokens)
 
     vllm_config = getattr(scheduler, "vllm_config", None)
@@ -436,6 +448,7 @@ def _attach_private_mamba_pools(
         manager._null_block = pool.null_block
         setattr(manager, _CACHED_POSITIONS_ATTR, fixed_cached_positions)
         setattr(manager, _AUTO_CACHE_POSITIONS_ATTR, auto_mm_cache_positions)
+        setattr(manager, _DISABLE_CHUNK_CACHE_ATTR, disable_chunk_cache)
         setattr(manager, _ALIGNMENT_TOKENS_ATTR, alignment_tokens)
 
     if not private_pools:
@@ -446,11 +459,14 @@ def _attach_private_mamba_pools(
     # the Mamba classmethod. Tag it so that method can route each group lookup
     # to the corresponding private pool.
     setattr(main_pool, _PRIVATE_POOLS_ATTR, private_pools)
-    # Only fixed TPU_MAMBA_AUTO_MM_CACHE_POSITIONS restricts lookup to a pinned set of cache positions.
+    # Native chunk caching uses unrestricted lookup. Selected-only mode can
+    # restrict fixed-only lookup, while auto mode remains unrestricted because
+    # its eligible positions vary per request.
     setattr(
         main_pool,
         _CACHED_POSITIONS_ATTR,
-        None if auto_mm_cache_positions else fixed_cached_positions,
+        (fixed_cached_positions
+         if disable_chunk_cache and not auto_mm_cache_positions else None),
     )
     setattr(kv_cache_manager, _PRIVATE_POOLS_ATTR, private_pools)
     logger.info(
@@ -466,15 +482,19 @@ def _attach_private_mamba_pools(
     if auto_mm_cache_positions:
         logger.info(
             "Mamba prefix caching auto-targets the first text0/text0+media0 "
-            "boundaries per request (alignment=%d tokens)%s",
+            "boundaries per request (alignment=%d tokens)%s; native chunk "
+            "caching is %s",
             alignment_tokens,
             ("" if fixed_cached_positions is None else
              f"; also pinning {sorted(fixed_cached_positions)}"),
+            "disabled" if disable_chunk_cache else "enabled",
         )
     elif fixed_cached_positions is not None:
         logger.info(
-            "Mamba prefix caching restricted to token positions %s",
+            "Mamba prefix caching adds token positions %s; native chunk "
+            "caching is %s",
             sorted(fixed_cached_positions),
+            "disabled" if disable_chunk_cache else "enabled",
         )
 
 
@@ -686,7 +706,9 @@ def _patch_compact_mamba_pool_classes(
         @wraps(original_cache_blocks)
         def cache_blocks(self, request, num_tokens, alignment_tokens=None):
             cached_positions = mamba_cache_positions(self, request)
-            if cached_positions is None:
+            selected_only = bool(
+                getattr(self, _DISABLE_CHUNK_CACHE_ATTR, False))
+            if not selected_only or cached_positions is None:
                 if supports_alignment_tokens:
                     return original_cache_blocks(
                         self,

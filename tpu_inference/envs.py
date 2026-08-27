@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER: int = 2
     TPU_MAMBA_CACHED_POSITIONS: list[int] = []
     TPU_MAMBA_AUTO_MM_CACHE_POSITIONS: bool = False
+    TPU_MAMBA_DISABLE_CHUNK_CACHE: bool = False
     TPU_MAMBA_LOG_AUTO_MM_CACHE_DECISIONS: bool = False
     MOE_APPROX_TOPK: bool = False
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
@@ -353,8 +354,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # retain more unreferenced prefix states in the private pool.
     "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER":
     lambda: int(os.getenv("TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER", "2")),
-    # Optional comma-separated prefix lengths. When configured, Mamba prefix
-    # states are inserted and looked up only at these exact token positions.
+    # Optional comma-separated prefix lengths. These positions force scheduler
+    # boundaries in addition to the native chunk-based Mamba cache positions.
+    # Set TPU_MAMBA_DISABLE_CHUNK_CACHE to retain only selected positions.
     "TPU_MAMBA_CACHED_POSITIONS":
     env_int_list("TPU_MAMBA_CACHED_POSITIONS"),
     # When set, auto-detect the first text0 and text0+media0 boundaries per
@@ -363,6 +365,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # of (unioned with) TPU_MAMBA_CACHED_POSITIONS. Align mode only.
     "TPU_MAMBA_AUTO_MM_CACHE_POSITIONS":
     env_bool("TPU_MAMBA_AUTO_MM_CACHE_POSITIONS"),
+    # Disable native chunk-based Mamba cache insertion when an auto/manual
+    # position set is available, retaining only those selected positions.
+    # Native caching remains the default and is required to retain generated
+    # text at aligned decode boundaries for subsequent turns.
+    "TPU_MAMBA_DISABLE_CHUNK_CACHE":
+    env_bool("TPU_MAMBA_DISABLE_CHUNK_CACHE"),
     # Debug-only: log a content-safe, per-request trace of the Mamba prefix
     # caching decision (media layout digests, aligned boundaries, skip reasons,
     # fixed-position composition). Off by default; never logs raw prompt/media.

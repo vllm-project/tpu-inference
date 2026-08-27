@@ -113,6 +113,7 @@ class TpuPlatform(Platform):
         "TPU_MAMBA_PREFIX_CACHE_BLOCK_MULTIPLIER",
         "TPU_MAMBA_CACHED_POSITIONS",
         "TPU_MAMBA_AUTO_MM_CACHE_POSITIONS",
+        "TPU_MAMBA_DISABLE_CHUNK_CACHE",
     ]
 
     @classmethod
