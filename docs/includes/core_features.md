@@ -77,17 +77,17 @@
     <tr>
       <td>Speculative Decoding: DFlash</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>hybrid kv cache</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td>multi-host</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>multi-host</td>
+      <td>hybrid kv cache</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>

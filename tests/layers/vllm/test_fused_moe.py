@@ -158,15 +158,11 @@ class TestMaybeReduceSharedExpertOutput:
              patch.object(fm, "_all_reduce_over_tp",
                           return_value=reduced) as reduce:
             out = runner._maybe_reduce_shared_expert_output(shared)
-        reduce.assert_called_once_with(shared, mesh)
+        reduce.assert_called_once_with(shared, mesh,
+                                       fm.ShardingAxisName.MLP_TENSOR)
         assert out is reduced
 
     def test_reduces_shared_output_under_attention_dp(self):
-        # Under attention DP the fused kernel reduces its own output, so the
-        # shared-expert output is reduced separately on the early path. Unlike
-        # the test above this drives the real ``_fused_output_is_reduced``
-        # property (via ``is_attn_dp``) instead of mocking it, exercising the
-        # attn-DP -> early-reduce routing end to end.
         runner = _make_runner(shared_experts=object())
         shared = torch.ones(2, 3)
         reduced = torch.full((2, 3), 7.0)
@@ -175,8 +171,10 @@ class TestMaybeReduceSharedExpertOutput:
              patch.object(fm, "is_attn_dp", return_value=True), \
              patch.object(fm, "_all_reduce_over_tp",
                           return_value=reduced) as reduce:
-            runner._maybe_reduce_shared_expert_output(shared)
-        reduce.assert_not_called()
+            out = runner._maybe_reduce_shared_expert_output(shared)
+        reduce.assert_called_once_with(shared, mesh,
+                                       fm.ShardingAxisName.ATTN_HEAD)
+        assert out is reduced
 
 
 # ---------------------------------------------------------------------------

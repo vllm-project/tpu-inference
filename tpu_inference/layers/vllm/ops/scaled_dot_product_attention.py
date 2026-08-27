@@ -18,8 +18,8 @@ import jax.numpy as jnp
 import torch
 from torchax.ops.jtorch import register_function
 
-from tpu_inference.layers.common.attention_interface import \
-    sharded_flash_attention
+from tpu_inference.layers.common.attention_interface import (
+    segment_ids_from_cu_seqlens, sharded_flash_attention)
 
 # ViT flash-attention on large flattened image sequences needs more scoped
 # vmem than the 32MiB pallas default (~37MiB at bf16[1,16,25344,80]); 64MiB
@@ -143,29 +143,15 @@ def vllm_vit_sdpa(
         value = jnp.pad(value, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
 
     if cu_seqlens is not None:
-        # Compute individual sequence lengths from cumulative sequence lengths.
-        cu_seqlens_arr = jnp.array(cu_seqlens)
-        lens = cu_seqlens_arr[1:] - cu_seqlens_arr[:-1]
-        num_segs = lens.shape[0]
-
-        # Create segment IDs for each token by repeating the sequence index by its length.
-        q_real_seg = jnp.repeat(jnp.arange(num_segs),
-                                lens,
-                                total_repeat_length=q_seq_len)
-        kv_real_seg = q_real_seg
-
-        # Pad segment IDs if sequence lengths are not multiples of 128.
-        if q_pad > 0:
-            q_pad_seg = jnp.full((q_pad, ), num_segs)
-            q_seg = jnp.concatenate([q_real_seg, q_pad_seg])
-        else:
-            q_seg = q_real_seg
-
-        if kv_pad > 0:
-            kv_pad_seg = jnp.full((kv_pad, ), num_segs)
-            kv_seg = jnp.concatenate([kv_real_seg, kv_pad_seg])
-        else:
-            kv_seg = kv_real_seg
+        # Build the segment ids straight over the PADDED length. Every position
+        # >= cu_seqlens[-1] -- both the kernel's 128-alignment padding and the
+        # mm-encoder budget padding baked into pixel_values -- lands in the
+        # dedicated trailing segment `num_segs`, so pad tokens never attend
+        # together with the last real image.
+        cu_seqlens_arr = jnp.asarray(cu_seqlens)
+        q_seg = segment_ids_from_cu_seqlens(cu_seqlens_arr, q_seq_len + q_pad)
+        kv_seg = segment_ids_from_cu_seqlens(cu_seqlens_arr,
+                                             kv_seq_len + kv_pad)
 
         # Broadcast from 1D (seq_len,) to 2D (batch, seq_len) to match kernel expectations.
         q_seg = jnp.broadcast_to(q_seg, (batch, q_seg.shape[0]))

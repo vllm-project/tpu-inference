@@ -95,6 +95,35 @@ class MetadataRef:
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
+class GatherMetadata:
+    """Per-tile metadata container for GMM gather DMA."""
+
+    m_start: jax.Array
+    m_end: jax.Array
+    num_rows: jax.Array
+    is_valid: jax.Array
+    src_rows: list[jax.Array]
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class ScatterMetadata:
+    """Per-tile metadata container for GMM direct-write (scatter) DMA."""
+
+    m_start: jax.Array
+    m_end: jax.Array
+    num_rows: jax.Array
+    is_valid: jax.Array
+    dest_chips: list[jax.Array]
+    write_positions: list[jax.Array]
+    should_sends: list[jax.Array]
+    should_locals: list[jax.Array]
+    total_send_sz: jax.Array
+    total_local_sz: jax.Array
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
 class WeightsRef:
     weight: Any
     scale: Any | None
@@ -867,53 +896,149 @@ def zero_out_end_3d(
     ).wait()
 
 
+@jax.named_scope("prepare_gather_tile_metadata")
+def prepare_gather_tile_metadata(
+    gm_id,
+    metadata_ref: MetadataRef,
+    tile_m: int,
+    size_m: int,
+    lhs_indices_ref: jax.Array,
+    *,
+    pack_indices: bool = True,
+    gather_divisor: int = 1,
+) -> GatherMetadata:
+    """Prepares gather metadata for a single tile (gm_id)."""
+    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    num_rows = m_end - m_start
+    tile_arange = jnp.arange(tile_m)
+    is_valid = (tile_arange < num_rows).astype(jnp.int32)
+
+    src_rows = [None] * tile_m
+    for i in range(tile_m):
+        m_idx = jnp.minimum(m_start + i, size_m - 1)
+        if pack_indices:
+            combined = lhs_indices_ref[m_idx]
+            src_rows[i] = combined // gather_divisor
+        else:
+            oi = lhs_indices_ref[m_idx]
+            src_rows[i] = (oi // gather_divisor if gather_divisor != 1 else oi)
+
+    return GatherMetadata(
+        m_start=m_start,
+        m_end=m_end,
+        num_rows=num_rows,
+        is_valid=is_valid,
+        src_rows=src_rows,
+    )
+
+
+@jax.named_scope("prepare_scatter_tile_metadata")
+def prepare_scatter_tile_metadata(
+    gm_id,
+    metadata_ref: MetadataRef,
+    tile_m: int,
+    size_m: int,
+    lhs_indices_ref: jax.Array,
+    topk_indices_ref: jax.Array | None = None,
+    *,
+    my_id: int | jax.Array,
+    chunk_size: int,
+    top_k: int,
+    pack_indices: bool = True,
+) -> ScatterMetadata:
+    """Prepares direct-write (scatter) routing metadata for a single tile (gm_id)."""
+    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    num_rows = m_end - m_start
+    tile_arange = jnp.arange(tile_m)
+    is_valid = (tile_arange < num_rows).astype(jnp.int32)
+
+    dest_chips = [None] * tile_m
+    write_positions = [None] * tile_m
+    should_sends = [None] * tile_m
+    should_locals = [None] * tile_m
+
+    cs_tk = chunk_size * top_k
+    for i in range(tile_m):
+        m_idx = jnp.minimum(m_start + i, size_m - 1)
+        v = is_valid[i]
+        if pack_indices:
+            combined = lhs_indices_ref[m_idx]
+            write_positions[i] = combined % cs_tk
+            dest_chips[i] = combined // cs_tk
+        else:
+            oi = lhs_indices_ref[m_idx]
+            topk_idx = (topk_indices_ref[m_idx]
+                        if topk_indices_ref is not None else jnp.int32(0))
+            dest_chips[i] = oi // chunk_size
+            local_row = oi % chunk_size
+            write_positions[i] = local_row * top_k + topk_idx
+
+        is_local = dest_chips[i] == my_id
+        should_sends[i] = jnp.where(is_local, 0, v)
+        should_locals[i] = jnp.where(is_local, v, 0)
+
+    should_sends_arr = jnp.stack(should_sends)
+    should_locals_arr = jnp.stack(should_locals)
+    total_send_sz = jnp.sum(should_sends_arr)
+    total_local_sz = jnp.sum(should_locals_arr)
+
+    return ScatterMetadata(
+        m_start=m_start,
+        m_end=m_end,
+        num_rows=num_rows,
+        is_valid=is_valid,
+        dest_chips=dest_chips,
+        write_positions=write_positions,
+        should_sends=should_sends,
+        should_locals=should_locals,
+        total_send_sz=total_send_sz,
+        total_local_sz=total_local_sz,
+    )
+
+
 @jax.named_scope("dma_gather_gm_start")
-def dma_gather_gm_start(src_ref,
-                        dst_ref,
-                        indices_ref,
-                        sem_ref,
-                        gm_id,
-                        metadata_ref,
-                        divisor: int = 1):
+def dma_gather_gm_start(
+    src_ref,
+    dst_ref,
+    sem_ref,
+    gather_metadata: GatherMetadata,
+):
     """Start gathering rows for a specific gm tile via DMA.
 
     src_ref and dst_ref must be 3D: (rows, k // num_lanes, num_lanes).
     No reshape — reshape on refs breaks dynamic pl.ds offsets.
-
-    `divisor`: optional integer divisor applied to indices_ref values before
-    use. Set > 1 when indices_ref contains packed values (e.g.,
-    `combined = lhs_idx * divisor + extra_field`) and we need to recover the
-    actual src_row via integer division. Default 1 = no unpacking.
     """
-    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    m_start = gather_metadata.m_start
     sls = pltpu.get_tpu_info().get_sublane_tiling(src_ref.dtype)
     m_start_local = m_start % sls
+    tile_m = dst_ref.shape[0]
 
-    def _gather_body(i, _):
-        row = m_start + i
-        src_row = indices_ref[row]
-        if divisor != 1:
-            src_row = src_row // divisor
-        pltpu.make_async_copy(
-            src_ref=src_ref.at[pl.ds(src_row, 1), :, :],
-            dst_ref=dst_ref.at[pl.ds(m_start_local + i, 1), :, :],
-            sem=sem_ref,
-        ).start()
-        return _
-
-    lax.fori_loop(0, m_end - m_start, _gather_body, 0)
+    with jax.named_scope("dma_gather_gm_start_dma"):
+        for i in range(tile_m):
+            src_row = gather_metadata.src_rows[i]
+            should_gather = gather_metadata.is_valid[i]
+            pltpu.make_async_copy(
+                src_ref=src_ref.at[pl.ds(src_row, should_gather), :, :],
+                dst_ref=dst_ref.at[pl.ds(m_start_local +
+                                         i, should_gather), :, :],
+                sem=sem_ref,
+            ).start()
 
 
 @jax.named_scope("dma_gather_gm_wait")
-def dma_gather_gm_wait(dst_ref, sem_ref, gm_id, metadata_ref):
+def dma_gather_gm_wait(
+    dst_ref,
+    sem_ref,
+    metadata: GatherMetadata | ScatterMetadata,
+):
     """Wait for all gather DMAs for a specific gm tile to complete.
 
     dst_ref must be 3D: (rows, k // num_lanes, num_lanes).
     """
-    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
-    num_rows = m_end - m_start
+    m_start = metadata.m_start
+    num_rows = metadata.num_rows
     sls = pltpu.get_tpu_info().get_sublane_tiling(dst_ref.dtype)
     m_start_local = m_start % sls
     pltpu.make_async_copy(
@@ -989,6 +1114,8 @@ def calculate_tiling(
     lhs_mod = min(pl.cdiv(16, lhs_bits), 2)
     rhs_mod = min(pl.cdiv(16, rhs_bits), 2)
     tile_m = bf16_bf16_tile_m * lhs_mod // rhs_mod
+    if dims.size_m > 128:
+        tile_m = max(tile_m, 128)
     tile_m = min(tile_m, dims.size_m)
 
     # Subtract non-rhs VMEM overhead before computing per-buffer budget.

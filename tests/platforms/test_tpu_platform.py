@@ -690,3 +690,59 @@ class TestTpuPlatform:
         with pytest.raises(ValueError, match=expected_error):
             TpuPlatform.check_and_update_config(vllm_config)
         mock_patch.assert_not_called()
+
+
+class TestTorchAcceleratorGetMemoryInfoShim:
+    """tpu_platform patches torch.accelerator.get_memory_info at import time so
+    the torchax path (PrivateUse1 "jax" device) answers from the JAX device
+    instead of raising "PyTorch is not linked with support for jax devices"."""
+
+    @staticmethod
+    def _jax_device(stats):
+        device = MagicMock()
+        device.memory_stats.return_value = stats
+        return device
+
+    def test_shim_is_installed(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        assert torch.accelerator.get_memory_info is (
+            tpu_platform._patched_get_memory_info)
+
+    def test_jax_device_error_falls_back_to_jax_memory_stats(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        stats = {"bytes_limit": 1000, "bytes_in_use": 250}
+        with patch.object(
+                tpu_platform,
+                "_orig_get_memory_info",
+                side_effect=RuntimeError(
+                    "PyTorch is not linked with support for jax devices")), \
+             patch.object(tpu_platform.jax, "local_devices",
+                          return_value=[self._jax_device(stats)]):
+            assert torch.accelerator.get_memory_info() == (750, 1000)
+
+    def test_missing_memory_stats_yields_zero_budget(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        with patch.object(
+                tpu_platform,
+                "_orig_get_memory_info",
+                side_effect=RuntimeError(
+                    "PyTorch is not linked with support for jax devices")), \
+             patch.object(tpu_platform.jax, "local_devices",
+                          return_value=[self._jax_device(None)]):
+            assert torch.accelerator.get_memory_info() == (0, 0)
+
+    def test_unrelated_runtime_error_is_reraised(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        with patch.object(tpu_platform,
+                          "_orig_get_memory_info",
+                          side_effect=RuntimeError("CUDA out of memory")), \
+             pytest.raises(RuntimeError, match="CUDA out of memory"):
+            torch.accelerator.get_memory_info()
+
+    def test_success_path_passes_through(self):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        with patch.object(tpu_platform,
+                          "_orig_get_memory_info",
+                          return_value=(1, 2)) as orig:
+            assert torch.accelerator.get_memory_info(0) == (1, 2)
+            orig.assert_called_once_with(0)

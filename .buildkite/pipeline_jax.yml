@@ -428,6 +428,12 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} E2E test for Multihost DCN-based P/D disaggregation"
         key: ${TPU_VERSION:-tpu6e}_test_25
         soft_fail: true
+        # exit 75 = EX_TEMPFAIL from run_disagg_multi_host.sh: transient TPU
+        # session init failure (infra); real failures exit 1 and are not retried.
+        retry:
+          automatic:
+            - exit_status: 75
+              limit: 1
         env:
           USE_PREBUILT_IMAGE: "1"
           TPU_VERSION: "${TPU_VERSION:-tpu6e}"

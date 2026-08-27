@@ -31,8 +31,8 @@ from vllm.transformers_utils.config import set_default_rope_theta
 
 from tpu_inference import utils as utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
-from tpu_inference.layers.common.attention_interface import \
-    sharded_flash_attention
+from tpu_inference.layers.common.attention_interface import (
+    segment_ids_from_cu_seqlens, sharded_flash_attention)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.jax.layers import FlaxUtils
 from tpu_inference.layers.jax.linear import JaxLmHead
@@ -198,8 +198,9 @@ def generate_window_segment_ids(cu_seqlens: jax.Array, seq_len: int,
     Returns:
         A SegmentIds object for flash_attention.
     """
-    indices = jnp.arange(seq_len, dtype=jnp.int32)
-    segment_ids = jnp.searchsorted(cu_seqlens[1:], indices, side='right') + 1
+    # Shared 0-based ids (positions >= cu_seqlens[-1] get num_segs), shifted to
+    # 1-based here so this kernel can keep 0 for the trailing padding below.
+    segment_ids = segment_ids_from_cu_seqlens(cu_seqlens, seq_len) + 1
     padding_segment_ids = jnp.zeros(padded_seq_len - seq_len, dtype=jnp.int32)
     segment_ids = jnp.concatenate([segment_ids, padding_segment_ids])
     segment_ids = segment_ids.reshape(1, -1)
