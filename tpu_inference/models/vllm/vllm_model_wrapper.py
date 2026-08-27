@@ -153,6 +153,15 @@ class VllmModelWrapper:
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
 
+    def _is_multimodal_enabled(self) -> bool:
+        """Return whether multimodal model paths should be active."""
+        model_config = self.vllm_config.model_config
+        if not model_config.is_multimodal_model:
+            return False
+        multimodal_config = model_config.multimodal_config
+        return not (multimodal_config is not None and getattr(
+            multimodal_config, "language_model_only", False))
+
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
         import sys
@@ -314,7 +323,7 @@ class VllmModelWrapper:
 
         self._pooler: Pooler | None = self.model.pooler
 
-        if self.vllm_config.model_config.is_multimodal_model:
+        if self._is_multimodal_enabled():
             # NOTE: It patch mm models to be JITtable within some submodule.
             # Caution: the submodule params_and_buffers would be put into
             # the wrapper directly. params_and_buffers should be sharded to tpu
@@ -527,7 +536,7 @@ class VllmModelWrapper:
         Registers budget-capture tasks against the existing manager so
         compile_manager can AOT-prime the XLA cache at startup.
         """
-        if not self.vllm_config.model_config.is_multimodal_model:
+        if not self._is_multimodal_enabled():
             return None
         if self._mm_encoder_jit_manager is not None:
             return self._mm_encoder_jit_manager.precompile_vision_encoder
@@ -538,7 +547,7 @@ class VllmModelWrapper:
                                                   self.vllm_config)
 
     def wrap_embed_multimodal_func(self):
-        if not self.vllm_config.model_config.is_multimodal_model:
+        if not self._is_multimodal_enabled():
             return None
 
         def embed_multimodal_func_jax(
@@ -601,7 +610,7 @@ class VllmModelWrapper:
         return embed_multimodal_func_torch
 
     def wrap_embed_input_ids_func(self):
-        if not self.vllm_config.model_config.is_multimodal_model:
+        if not self._is_multimodal_enabled():
             return None
 
         # The function cannot be JITted directly due to its dynamic implementation
