@@ -11,7 +11,16 @@ set -euo pipefail
 MODEL="${SERVED_NAME:-Qwen/Qwen3.8-2.4T-A95B-FP8}"
 PORT="${VLLM_PORT:-8000}"
 ART="${ART_DIR:-/workspace/artifacts}"
+DEV_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "${ART}"
+
+# RandomDataset defaults range_ratio to 0.0, so every request is exactly
+# INPUT_LEN in and, with --ignore-eos, exactly OUTPUT_LEN out. The shape is
+# therefore identical across runs and the only variance left is the server's.
+INPUT_LEN="${INPUT_LEN:-8192}"
+OUTPUT_LEN="${OUTPUT_LEN:-1024}"
+NUM_PROMPTS="${NUM_PROMPTS:-128}"
+MAX_CONCURRENCY="${MAX_CONCURRENCY:-8}"
 
 # --fail-with-body, not plain -sS: curl exits 0 on an HTTP 500, which on build
 # #940 let a dead engine report the job as passed.
@@ -30,16 +39,27 @@ echo
 # MAX_CONCURRENCY also drives the scheduler to steady-state batch shapes rather
 # than only the single-request path.
 NUM_WARMUPS="${NUM_WARMUPS:-32}"
-echo "--- benchmark (num_warmups=${NUM_WARMUPS}) ---"
+
+# Will the requested shape fit the KV cache, or will the scheduler preempt to
+# make it fit? At 8192+1024 a single request holds 72 of the pool's 660 blocks,
+# so this is a live constraint rather than a formality, and an oversubscribed
+# run still reports numbers -- they just measure re-prefill. Fail before the
+# benchmark rather than publish those.
+python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
+  --tokens-per-request $((INPUT_LEN + OUTPUT_LEN)) \
+  --concurrency "${MAX_CONCURRENCY}" \
+  --block-size "${BLOCK_SIZE:-128}"
+
+echo "--- benchmark (in=${INPUT_LEN} out=${OUTPUT_LEN} n=${NUM_PROMPTS} conc=${MAX_CONCURRENCY} num_warmups=${NUM_WARMUPS}) ---"
 vllm bench serve \
   --backend vllm \
   --model "${MODEL}" \
   --host 127.0.0.1 --port "${PORT}" \
   --dataset-name random \
-  --random-input-len "${INPUT_LEN:-1024}" \
-  --random-output-len "${OUTPUT_LEN:-128}" \
-  --num-prompts "${NUM_PROMPTS:-64}" \
-  --max-concurrency "${MAX_CONCURRENCY:-16}" \
+  --random-input-len "${INPUT_LEN}" \
+  --random-output-len "${OUTPUT_LEN}" \
+  --num-prompts "${NUM_PROMPTS}" \
+  --max-concurrency "${MAX_CONCURRENCY}" \
   --num-warmups "${NUM_WARMUPS}" \
   --request-rate inf --seed 42 --ignore-eos \
   --percentile-metrics ttft,tpot,itl,e2el \

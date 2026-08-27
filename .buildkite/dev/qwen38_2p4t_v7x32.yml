@@ -8,8 +8,12 @@
 # The source is chosen at runtime: qwen38_2p4t_preflight.sh looks for a copy of
 # the checkpoint mounted on every host of the slice and, finding one, bind
 # mounts it read-only and points MODEL_PATH at it; otherwise the run streams
-# from object storage as before. Build #947 took ~210 min to load over GCS on
-# the slowest rank, which was the bulk of a 3.7 h build.
+# from object storage as before.
+#
+# One server, three legs: a smoke test and a perf benchmark
+# (qwen38_2p4t_client.sh), then GPQA/GSM8K/MMLU (qwen38_2p4t_eval.sh). Loading
+# and precompiling costs ~55 min, so everything that needs this model runs
+# against the one instance.
 #
 # Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_v7x32.yml
 #
@@ -29,13 +33,13 @@ steps:
       NEW_MODEL_DESIGN: "1"       # required: sharding.validate() rejects attn_dp>1 without it
       # Health-wait budget. Build #943 was killed by the 7200s default with the
       # runai streamer at 63% (180271/287119 tensors) after 1:58:40 and still
-      # advancing; #947 finished the load in ~210 min. 5h leaves room for the
-      # load plus KV-cache init, and now also for AOT precompilation, which
-      # SKIP_JAX_PRECOMPILE=0 moves ahead of /health -- worst case that is
-      # ~210 min of GCS streaming plus ~45 min of cold compiles, still inside
-      # the budget. timeout_in_minutes above has to exceed it or Buildkite
-      # kills the job first. Kept at 5h so that a regression shows up as a slow
-      # load in the progress tail rather than as a killed job.
+      # advancing. MOE_STAGE_WEIGHTS_ON_HOST since cut the load from 3h34m to
+      # 33m (#951), and AOT precompilation adds ~20 min ahead of /health now
+      # that SKIP_JAX_PRECOMPILE is off, so ~55 min is the expectation.
+      # Deliberately left at 5h rather than trimmed to fit: the budget exists to
+      # bound a pathological run, and a load regression is far more useful as a
+      # slow progress tail than as a killed job. timeout_in_minutes above has to
+      # exceed it or Buildkite kills the job first.
       VLLM_ENGINE_READY_TIMEOUT_S: "18000"
       # Tail /root/vllm_serve.log into the Buildkite log every 60s while waiting
       # for /health. Read by wait_for_server in run_multihost.sh (on the host,
@@ -117,6 +121,32 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # Benchmark shape: 8192 in / 1024 out, up from 1024/128. Three knobs
+        # move together with it and none of them is optional.
+        #
+        # MAX_MODEL_LEN has to clear 8192+1024=9216 or every request is
+        # rejected; 12288 leaves room for the accuracy leg's 2048-token
+        # reasoning budget too.
+        #
+        # NUM_PROMPTS 64 -> 128 is the variance ask. Every request is exactly
+        # 8192/1024 (RandomDataset range_ratio defaults to 0) and --ignore-eos
+        # pins the output, so the sample is 16 full waves of identical work
+        # rather than 4.
+        #
+        # MAX_CONCURRENCY 16 -> 8 is forced by HBM. Build #951 sized the full-
+        # attention pool at 660 blocks x 128 tokens; one 9216-token request
+        # holds 72 of them, so 9 requests fill it and 16 would preempt. With
+        # prefix caching off a preempted request is re-prefilled from scratch,
+        # which inflates the numbers and adds exactly the run-to-run variance
+        # this change is meant to remove. 8 x 72 = 576 blocks, 87% of the pool.
+        # qwen38_2p4t_kv_fit.py re-checks this against the live server and
+        # fails the leg rather than publishing a preempting run.
+        #
+        # MAX_NUM_BATCHED_TOKENS stays at 2048, so an 8192-token prompt is four
+        # chunked-prefill passes. Raising it would grow the profiling peak that
+        # vLLM subtracts from the KV budget, shrinking the pool that is already
+        # the binding constraint. TTFT here is therefore a chunked number.
+        #
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
         # USE_BATCHED_RPA_KERNEL in particular is read at import time by
@@ -139,16 +169,16 @@ steps:
           'TPU_WEIGHT_LOAD_PROFILE_EVERY=10000' \
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=2' \
-          'MAX_MODEL_LEN=8192' \
+          'MAX_MODEL_LEN=12288' \
           'MAX_NUM_SEQS=32' \
           'MAX_NUM_BATCHED_TOKENS=2048' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
-          'INPUT_LEN=1024' \
-          'OUTPUT_LEN=128' \
-          'NUM_PROMPTS=64' \
-          'MAX_CONCURRENCY=16' \
+          'INPUT_LEN=8192' \
+          'OUTPUT_LEN=1024' \
+          'NUM_PROMPTS=128' \
+          'MAX_CONCURRENCY=8' \
           'NUM_WARMUPS=32' \
           "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
           "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
@@ -157,8 +187,21 @@ steps:
         echo "--- effective MULTIHOST_ENV_VARS"; printf '%s\n' "$$MULTIHOST_ENV_VARS"
         echo "--- effective MULTIHOST_DOCKER_ARGS: $$MULTIHOST_DOCKER_ARGS"
 
+        # Two client legs against one server: perf first, then accuracy. `&&`,
+        # not `;` -- if the perf leg cannot get a completion out of the server
+        # there is nothing for the evals to score, and the eval leg records its
+        # own per-dataset failures internally rather than aborting on the first.
+        #
+        # The run's exit status is stashed instead of propagated so the artifact
+        # upload below still happens; without that, a failure here means no
+        # serve log, no bench.json and no eval output to diagnose it with. The
+        # last command in this step re-raises it.
+        set +e
         .buildkite/scripts/run_multihost.sh \
           "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_serve.sh" \
-          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh"
+          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval.sh"
+        echo $$? > "$$PWD/dev_artifacts/.run_rc"
+        set -e
       - sudo -n chown -R "$$(id -u):$$(id -g)" dev_artifacts 2>/dev/null || sudo -n chmod -R a+rX dev_artifacts || true
       - buildkite-agent artifact upload "dev_artifacts/**/*"
+      - exit "$$(cat dev_artifacts/.run_rc 2>/dev/null || echo 1)"
