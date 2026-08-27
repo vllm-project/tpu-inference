@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -58,40 +58,32 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
-from tpu_inference.utils import to_jax_dtype
+from tpu_inference.utils import _NUMPY_UNSUPPORTED_DTYPES, to_jax_dtype
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
 
-# Kill switch for the `stage_on_host` argument of `_load_weight_for_layer`.
-# Set TPU_STAGE_WEIGHTS_ON_DEVICE=1 to force every caller back onto t2j.
-_STAGE_ON_HOST = os.environ.get("TPU_STAGE_WEIGHTS_ON_DEVICE", "0") != "1"
 
+def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
+    """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
 
-def _host_numpy_view(tensor: torch.Tensor):
-    """Zero-copy numpy view of a torch tensor, or None if that is not possible.
-
-    numpy has no bf16 or fp8 scalar types, so those go out as uint8 and are
-    reinterpreted with the ml_dtypes scalar type JAX itself uses for them. The
-    uint8 detour changes the trailing dimension when the element is wider than a
-    byte, and the numpy view undoes that exactly.
+    numpy has no scalar type for bf16 or the fp8 formats, so those travel as
+    uint8 and are reinterpreted with the ml_dtypes type JAX already uses for
+    them -- the same bit cast `tpu_inference.utils.t2j` does. Reinterpreting
+    scales the trailing dimension by the element width on the way out and the
+    numpy view undoes it exactly, but torch can only do it on contiguous data.
     """
     t = tensor.detach()
-    if t.device != torch.device("cpu"):
+    if t.device.type != "cpu":
         return None
-    try:
+
+    jax_dtype = _NUMPY_UNSUPPORTED_DTYPES.get(t.dtype)
+    if jax_dtype is None:
         return t.numpy()
-    except Exception:
-        pass
     if not t.dim() or not t.is_contiguous():
         return None
-    try:
-        return t.view(torch.uint8).numpy().view(to_jax_dtype(t.dtype))
-    except Exception as e:
-        logger.warning_once(f"Host staging unavailable for dtype {t.dtype}: "
-                            f"{e}")
-        return None
+    return t.view(torch.uint8).numpy().view(jax_dtype)
 
 
 def _load_weight_on_host(tensor: torch.Tensor,
@@ -109,19 +101,21 @@ def _load_weight_on_host(tensor: torch.Tensor,
     Staging on the host instead lets every shard go straight to the device that
     owns it. Measured on one host against a 17.2 GB expert weight: 5.08s ->
     0.99s (3.4 -> 17.3 GB/s), with more to gain multi-host.
+
+    Returns None if the weight cannot be staged this way -- most often a shape
+    the requested sharding does not divide, since block scales are not always
+    divisible along the axes their weight is. Callers reshard afterwards
+    regardless, so falling back to unsharded staging is correct, just slower.
     """
-    np_view = _host_numpy_view(tensor)
-    if np_view is None:
-        return None
     try:
+        np_view = _host_numpy_view(tensor)
+        if np_view is None:
+            return None
         array = general_device_put(np_view, sharding)
     except Exception as e:
-        # Usually a shape the requested sharding cannot divide -- block scales
-        # in particular are not always divisible along the axes their weight is.
-        # Callers reshard afterwards regardless, so falling back to unsharded
-        # staging is always correct, just slower.
-        logger.warning_once(f"Host staging unavailable for shape "
-                            f"{tuple(np_view.shape)} with {sharding}: {e}")
+        logger.warning_once(
+            f"Host staging unavailable for {tuple(tensor.shape)}"
+            f" {tensor.dtype} at {sharding}: {e}")
         return None
     # np_view aliases the torch storage and callers free that storage as soon as
     # this returns, so the asynchronous copy has to be forced here rather than
@@ -172,7 +166,7 @@ def _load_weight_for_layer(
             tensor = new_param
 
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
-        if stage_on_host and _STAGE_ON_HOST and sharding is not None:
+        if stage_on_host and sharding is not None:
             array = _load_weight_on_host(tensor, sharding)
             if array is not None:
                 return array
