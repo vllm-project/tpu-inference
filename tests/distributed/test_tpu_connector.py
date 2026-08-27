@@ -509,6 +509,50 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.assertEqual(done_recving, set())
         self.assertNotIn('req1', worker.reqs_wait_pull)
 
+    def test_maybe_start_p2p_server_ipv6(self):
+        """Tests that _maybe_start_p2p_server formats IPv6 addresses with brackets."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.host_ip = "2001:db8::1"
+        worker.kv_transfer_port = 9100
+
+        worker._maybe_start_p2p_server()
+
+        self.all_mocks["start_transfer_server"].assert_called_once()
+        call_args, _ = self.all_mocks["start_transfer_server"].call_args
+        server_addr = call_args[1]
+        transport_addrs = call_args[2]
+
+        self.assertEqual(server_addr, "[2001:db8::1]:9100")
+        for addr in transport_addrs:
+            self.assertEqual(addr, "[2001:db8::1]:0")
+
+    def test_maybe_build_kv_connection_ipv6(self):
+        """Tests that _maybe_build_kv_connection formats IPv6 addresses with brackets."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        mock_server = MagicMock()
+        worker.kv_transfer_server = mock_server
+
+        # Single string host/port
+        load_meta_single = tpu_connector.LoadMeta(uuid=1,
+                                                  local_block_ids=[1],
+                                                  remote_block_ids=[10],
+                                                  remote_host="2001:db8::1",
+                                                  remote_port=9100)
+        worker._maybe_build_kv_connection(load_meta_single)
+        mock_server.connect.assert_called_with("[2001:db8::1]:9100")
+
+        # List host/port
+        load_meta_list = tpu_connector.LoadMeta(
+            uuid=2,
+            local_block_ids=[1],
+            remote_block_ids=[10],
+            remote_host=["2001:db8::2", "2001:db8::3"],
+            remote_port=[9101, 9102])
+        worker._maybe_build_kv_connection(load_meta_list)
+        mock_server.connect.assert_called_with("[2001:db8::2]:9101")
+
 
 class TestTPUConnectorUtils(unittest.TestCase):
 
