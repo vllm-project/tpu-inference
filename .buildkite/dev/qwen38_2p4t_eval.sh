@@ -47,15 +47,30 @@ mkdir -p "${ART}" "${DATA}"
 # Sized in ../dev notes at ~500 aggregate output tok/s with reasoning_effort=low.
 # The caps are ~3x the estimate: they exist to stop a pathological run eating
 # the 480 min build, not to trim a slow one.
+# Output budgets are sized against measured behaviour, not guessed. On the first
+# run GPQA generated 1392 tokens per question on average against a 2048 cap, and
+# 31 of 198 completions (15.7%) never closed their reasoning block -- the only
+# way that happens with EOS honoured is hitting the cap mid-<think>, and
+# strip_reasoning scores an unterminated block as unparsed, i.e. wrong. Grading
+# a model on answers it was cut off before giving measures the cap, not the
+# model. 6144 is ~4.4x the observed mean; unparsed_rate stays in the summary so
+# the next run can say whether that was enough.
+#
+# Concurrency is per-eval because the KV pool, not the request count, is the
+# binding constraint: 660 blocks x 128 = 84480 tokens total, so a longer output
+# budget has to buy itself a smaller batch. See the kv-fit call in
+# run_serving_eval, which checks the arithmetic against the live pool.
 GPQA_N="${GPQA_NUM_PROMPTS:-198}"        # the whole of GPQA-Diamond
-GPQA_OUT="${GPQA_OUTPUT_LEN:-2048}"
-GPQA_TIMEOUT="${GPQA_TIMEOUT_S:-2400}"
+GPQA_OUT="${GPQA_OUTPUT_LEN:-6144}"
+GPQA_CONC="${GPQA_CONCURRENCY:-10}"      # 10 x 56 blocks = 560 of 660 (85%)
+GPQA_TIMEOUT="${GPQA_TIMEOUT_S:-3600}"
 MMLU_N="${MMLU_NUM_PROMPTS:-1000}"       # of 14042; the full set is ~8h of decode
-MMLU_OUT="${MMLU_OUTPUT_LEN:-1024}"
+MMLU_OUT="${MMLU_OUTPUT_LEN:-4096}"
+MMLU_CONC="${MMLU_CONCURRENCY:-14}"      # 14 x 40 blocks = 560 of 660 (85%)
 MMLU_TIMEOUT="${MMLU_TIMEOUT_S:-4800}"
 GSM8K_LIMIT="${GSM8K_LIMIT:-0}"          # 0 = all 1319
 GSM8K_TIMEOUT="${GSM8K_TIMEOUT_S:-3600}"
-# Below MAX_NUM_SEQS on purpose: see the kv-fit note further down.
+# GSM8K only: short completions over the raw endpoint, so it fits a wider batch.
 EVAL_CONCURRENCY="${EVAL_CONCURRENCY:-24}"
 REASONING_EFFORT="${EVAL_REASONING_EFFORT:-low}"
 SYS_PROMPT="${EVAL_SYSTEM_PROMPT:-Answer with only the letter in parentheses, e.g. (A).}"
@@ -132,15 +147,13 @@ evaluate.load("accuracy")
 print("[eval] evaluate+nltk ready")
 PY
 
-# The KV pool is small in block terms -- 2.4 TB of weights leaves little HBM --
-# and it is only knowable once the server has sized it. GPQA's shape is the
-# longest of the three, so checking that one covers all of them. Advisory here:
-# unlike the perf leg, an accuracy number is still correct if the scheduler
-# preempted to produce it, just slower.
-python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
-  --tokens-per-request $((512 + GPQA_OUT)) \
-  --concurrency "${EVAL_CONCURRENCY}" \
-  --block-size "${BLOCK_SIZE:-128}" --warn-only || true
+# Build #952 died here: lm_eval put 576 requests on a server sized for 64, the
+# KV pool hit 99.8%, and the resulting preemption storm tripped a mamba
+# slot-pool underflow in the runner that killed the engine outright -- taking
+# the eval that was running and the one after it with it. So the shape check is
+# no longer advisory-and-forget: every eval states its own shape before it runs,
+# and a dead server is reported as such instead of being hammered.
+server_up() { curl -sf -m 10 "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; }
 
 # ---------------------------------------------------------------------------
 # GPQA-Diamond and MMLU, over the OpenAI completions endpoint.
@@ -148,10 +161,20 @@ python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
 # No --ignore-eos, unlike the perf leg: the answer ends when the model stops,
 # and forcing generation to the cap would bury it in continuation text.
 # ---------------------------------------------------------------------------
-run_serving_eval() {  # name dataset-path num-prompts timeout extra-args...
-  local name="$1" path="$2" n="$3" timeout_s="$4"; shift 4
+run_serving_eval() {  # name path num-prompts timeout concurrency out-len extra...
+  local name="$1" path="$2" n="$3" timeout_s="$4" conc="$5" out="$6"; shift 6
   local t0 rc secs
-  echo "--- ${name} (n=${n}, concurrency=${EVAL_CONCURRENCY}, reasoning_effort=${REASONING_EFFORT})"
+  if ! server_up; then
+    record "${name}" "skipped" 0 "server not healthy"
+    return
+  fi
+  echo "--- ${name} (n=${n}, concurrency=${conc}, out=${out}, reasoning_effort=${REASONING_EFFORT})"
+  # 1024, not the ~291-token GPQA mean: the check is worth nothing if it is
+  # optimistic about the prompt. Advisory -- an accuracy number is still correct
+  # if the scheduler preempted to produce it, just slower.
+  python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
+    --tokens-per-request $((1024 + out)) --concurrency "${conc}" \
+    --block-size "${BLOCK_SIZE:-128}" --warn-only || true
   t0=$SECONDS
   # This fork of benchmark_serving.py has no --save-result; the accuracy dict
   # only ever reaches stdout, so the tee is the result file.
@@ -161,7 +184,7 @@ run_serving_eval() {  # name dataset-path num-prompts timeout extra-args...
     --host 127.0.0.1 --port "${PORT}" \
     --dataset-name "${name}" --dataset-path "${path}" \
     --num-prompts "${n}" \
-    --max-concurrency "${EVAL_CONCURRENCY}" \
+    --max-concurrency "${conc}" \
     --request-rate inf --seed 42 \
     --chat-template-system-prompt "${SYS_PROMPT}" \
     --chat-template-kwargs "{\"reasoning_effort\": \"${REASONING_EFFORT}\"}" \
@@ -199,6 +222,7 @@ PY
 cd "${BENCH_DIR}" || exit 1
 
 run_serving_eval gpqa "${GPQA_PATH}" "${GPQA_N}" "${GPQA_TIMEOUT}" \
+  "${GPQA_CONC}" "${GPQA_OUT}" \
   --gpqa-use-chat-template --gpqa-output-len "${GPQA_OUT}"
 
 # ---------------------------------------------------------------------------
@@ -268,12 +292,28 @@ GSM8K_ARGS=(
   --model_args "${GSM8K_MODEL_ARGS}"
   --tasks "${GSM8K_TASK}"
   --num_fewshot 8
-  --batch_size "${EVAL_CONCURRENCY}"
+  # batch_size 1, NOT EVAL_CONCURRENCY. lm_eval's local-completions puts
+  # batch_size prompts in one request body and runs num_concurrent of those
+  # bodies at once, so the two multiply: build #952 asked for 24 and 24 and got
+  # 24 x 24 = 576 requests in flight (observed: 62 running, 514 waiting, KV at
+  # 99.8%), which oversubscribed the pool badly enough to kill the engine. With
+  # batch_size 1, num_concurrent is the real in-flight cap.
+  --batch_size 1
   --output_path "${ART}/eval_gsm8k"
   "${GSM8K_INCLUDE[@]}"
 )
 [ "${GSM8K_LIMIT}" != "0" ] && GSM8K_ARGS+=(--limit "${GSM8K_LIMIT}")
 
+if ! server_up; then
+  record gsm8k "skipped" 0 "server not healthy"
+  rc=0 secs=0
+else
+# The 8-shot CoT prompt is ~1000 tokens and max_gen_toks is 512, so this is the
+# cheapest shape of the three -- but it is the one that broke #952, so it states
+# its budget like the others.
+python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
+  --tokens-per-request $((1536 + 512)) --concurrency "${EVAL_CONCURRENCY}" \
+  --block-size "${BLOCK_SIZE:-128}" --warn-only || true
 t0=$SECONDS
 timeout "${GSM8K_TIMEOUT}" lm_eval "${GSM8K_ARGS[@]}" 2>&1 | tee "${ART}/eval_gsm8k.log"
 rc=${PIPESTATUS[0]}
@@ -288,10 +328,12 @@ else
   strict=$(grep "strict-match" "${ART}/eval_gsm8k.log" | awk -F'|' '{print $8}' | xargs)
   record gsm8k "ok" "${secs}" "flexible-extract=${flex:-?} strict-match=${strict:-?}"
 fi
+fi
 
 # MMLU last: the longest of the three, and the one whose partial loss costs
 # least because the other two have already landed.
 run_serving_eval mmlu "${MMLU_PATH}" "${MMLU_N}" "${MMLU_TIMEOUT}" \
+  "${MMLU_CONC}" "${MMLU_OUT}" \
   --mmlu-use-chat-template --mmlu-output-len "${MMLU_OUT}" --mmlu-num-shots 0
 
 echo "--- eval summary"
