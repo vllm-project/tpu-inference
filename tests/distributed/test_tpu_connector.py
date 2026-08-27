@@ -22,7 +22,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
-from tpu_inference.distributed import tpu_connector
+from tpu_inference.distributed import tpu_connector, tpu_connector_hma
 from tpu_inference.distributed.tpu_connector_stats import (
     TpuKVConnectorPromMetrics, TpuKVConnectorStats)
 
@@ -123,6 +123,44 @@ class TestTPUConnector(unittest.TestCase):
 
         connector.get_finished(set())
         mock_worker_instance.get_finished.assert_called_once_with()
+
+
+@patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAWorker")
+@patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAScheduler")
+class TestTPUConnectorHMA(unittest.TestCase):
+
+    def setUp(self):
+        self.vllm_config = MockVllmConfig()
+
+    def test_init_scheduler_role(self, mock_scheduler_cls, mock_worker_cls):
+        connector = tpu_connector_hma.TPUConnectorHMA(
+            self.vllm_config, KVConnectorRole.SCHEDULER,
+            _make_test_kv_cache_config())
+
+        mock_scheduler_cls.assert_called_once_with(self.vllm_config)
+        mock_worker_cls.assert_not_called()
+        self.assertIs(connector._vllm_config, self.vllm_config)
+        self.assertIs(connector._kv_transfer_config,
+                      self.vllm_config.kv_transfer_config)
+        self.assertEqual(connector.role, KVConnectorRole.SCHEDULER)
+        self.assertTrue(connector.requires_kv_delivery)
+        self.assertIsNotNone(connector.connector_scheduler)
+        self.assertIsNone(connector.connector_worker)
+
+    def test_init_worker_role(self, mock_scheduler_cls, mock_worker_cls):
+        connector = tpu_connector_hma.TPUConnectorHMA(
+            self.vllm_config, KVConnectorRole.WORKER,
+            _make_test_kv_cache_config())
+
+        mock_worker_cls.assert_called_once_with(self.vllm_config)
+        mock_scheduler_cls.assert_not_called()
+        self.assertIs(connector._vllm_config, self.vllm_config)
+        self.assertIs(connector._kv_transfer_config,
+                      self.vllm_config.kv_transfer_config)
+        self.assertEqual(connector.role, KVConnectorRole.WORKER)
+        self.assertTrue(connector.requires_kv_delivery)
+        self.assertIsNone(connector.connector_scheduler)
+        self.assertIsNotNone(connector.connector_worker)
 
 
 class TestTPUConnectorScheduler(unittest.TestCase):
