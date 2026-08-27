@@ -445,6 +445,11 @@ def main():
                     action="store_true",
                     help="time attention only (skip the two per-layer "
                     "all-reduces of [tokens, hidden] over the model axis)")
+    ap.add_argument("--retries",
+                    type=int,
+                    default=3,
+                    help="re-run a layout whose worker failed (e.g. the TPU "
+                    "was held by another process), 60s apart")
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--iters", type=int, default=10)
     ap.add_argument("--worker",
@@ -485,17 +490,23 @@ def main():
                     ] + (["--no-layer-all-reduce"]
                          if args.no_layer_all_reduce else [])
                     t0 = time.time()
-                    rc = subprocess.call(cmd)
-                    # The worker writes its results before exiting; trust
-                    # them even if the runtime's teardown returns non-zero.
-                    try:
-                        results[variant] = json.load(open(tf.name))
-                    except (OSError, ValueError):
-                        results[variant] = {}
+                    for attempt in range(args.retries + 1):
+                        if attempt:
+                            time.sleep(60)
+                        rc = subprocess.call(cmd)
+                        # The worker writes its results before exiting; trust
+                        # them even if the runtime's teardown returns non-zero.
+                        try:
+                            results[variant] = json.load(open(tf.name))
+                        except (OSError, ValueError):
+                            results[variant] = {}
+                        if results[variant]:
+                            break
                     status = "ok" if results[variant] else f"FAILED rc={rc}"
                     print(
                         f"  {model} {n} dev {variant}: {status} "
-                        f"({time.time() - t0:.0f}s)",
+                        f"({time.time() - t0:.0f}s, {attempt + 1} attempt"
+                        f"{'s' if attempt else ''})",
                         flush=True)
             base = results[variants[0]]
             rows = []
