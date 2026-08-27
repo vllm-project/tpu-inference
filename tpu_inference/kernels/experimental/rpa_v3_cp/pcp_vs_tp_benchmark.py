@@ -150,22 +150,11 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     def rand(shape):
         return jnp.asarray(rng.random(shape, np.float32)).astype(dtype)
 
-    def bench(fn, *args):
-        # Queue every iteration and block once: per-step time reflects device
-        # work, not `iters` host<->device round trips.
-        jax.block_until_ready(fn(*args))
-        for _ in range(warmup):
-            jax.block_until_ready(fn(*args))
-        t0 = time.perf_counter()
-        out = None
-        for _ in range(iters):
-            out = fn(*args)
-        jax.block_until_ready(out)
-        return (time.perf_counter() - t0) / iters * 1e3
-
     def bench_cache(fn, cache, *args):
         # fn(cache, *args) -> (out, cache), cache donated and threaded so the
-        # in-place cache write is timed too.
+        # in-place cache write is timed and nothing is re-materialized per
+        # step. Every iteration is queued and the host blocks once, so the
+        # per-step time reflects device work, not `iters` host round trips.
         out, cache = fn(cache, *args)
         jax.block_until_ready(out)
         for _ in range(warmup):
@@ -184,9 +173,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         nkv2 = align_to(2 * nkv, kvp)
         npages = max(cdiv(max_ctx, page), 1) * slack
         mesh = Mesh(np.array(jax.devices()[:tp]).reshape(tp), ("x", ))
+        sharding = NamedSharding(mesh, P("x"))
 
         def put(x):
-            return jax.device_put(x, NamedSharding(mesh, P("x")))
+            return jax.device_put(x, sharding)
 
         q = put(jnp.broadcast_to(rand((chunk, nq, HD)), (tp, chunk, nq, HD)))
         k = put(
@@ -195,34 +185,41 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         v = put(
             jnp.broadcast_to(
                 rand((chunk, nkv, HD)).astype(kv_dtype), (tp, chunk, nkv, HD)))
+        cache_shape = (tp * npages, page, nkv2 // kvp, kvp, HD)
         pi = jnp.arange(npages, dtype=jnp.int32)
         cu = jnp.array([0, chunk], jnp.int32)
         dist = jnp.array([0, 0, 1], jnp.int32)
 
-        def per_device(q1, k1, v1, ctx1):
-            cache = jnp.zeros((npages, page, nkv2 // kvp, kvp, HD), kv_dtype)
-            out, _ = ragged_paged_attention(q1[0],
-                                            k1[0],
-                                            v1[0],
-                                            cache,
-                                            ctx1.reshape(1),
-                                            pi,
-                                            cu,
-                                            dist,
-                                            sm_scale=sm_scale,
-                                            use_causal_mask=True,
-                                            update_kv_cache=True)
-            return out[None]
+        def per_device(cache, q1, k1, v1, ctx1):
+            out, cache = ragged_paged_attention(q1[0],
+                                                k1[0],
+                                                v1[0],
+                                                cache,
+                                                ctx1.reshape(1),
+                                                pi,
+                                                cu,
+                                                dist,
+                                                sm_scale=sm_scale,
+                                                use_causal_mask=True,
+                                                update_kv_cache=True)
+            return out[None], cache
 
-        @jax.jit
-        def fn(q, k, v, ctx):
+        @functools.partial(jax.jit, donate_argnums=(0, ))
+        def fn(cache, q, k, v, ctx):
             return jax.shard_map(per_device,
                                  mesh=mesh,
-                                 in_specs=(P("x"), P("x"), P("x"), P()),
-                                 out_specs=P("x"),
-                                 check_vma=False)(q, k, v, ctx)
+                                 in_specs=(P("x"), P("x"), P("x"), P("x"),
+                                           P()),
+                                 out_specs=(P("x"), P("x")),
+                                 check_vma=False)(cache, q, k, v, ctx)
 
-        return lambda ctx: bench(fn, q, k, v, jnp.array(ctx, jnp.int32))
+        def measure(ctx):
+            # Donated and threaded, like the PCP path, so the cache write is
+            # timed and no per-step cache materialization is.
+            cache = jax.device_put(jnp.zeros(cache_shape, kv_dtype), sharding)
+            return bench_cache(fn, cache, q, k, v, jnp.array(ctx, jnp.int32))
+
+        return measure
 
     def make_pcp(pcp, tp):
         """rpa_v3_cp through cp_attention.pcp_forward on a (pcp, model) mesh."""
