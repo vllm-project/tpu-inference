@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import threading
 import unittest
 from functools import partial
 from unittest.mock import MagicMock, patch
@@ -552,6 +553,58 @@ class TestTPUConnectorWorker(unittest.TestCase):
             remote_port=[9101, 9102])
         worker._maybe_build_kv_connection(load_meta_list)
         mock_server.connect.assert_called_with("[2001:db8::2]:9101")
+
+    def test_pull_notify_listener_ipv6(self):
+        """Tests that _pull_notify_listener binds to :: when host_ip is IPv6."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.host_ip = "2001:db8::1"
+        worker.side_channel_port = 9600
+
+        mock_sock = MagicMock()
+        mock_sock.recv_multipart.side_effect = KeyboardInterrupt
+        self.all_mocks["make_zmq_socket"].return_value = mock_sock
+
+        ready_event = threading.Event()
+        try:
+            worker._pull_notify_listener(ready_event)
+        except KeyboardInterrupt:
+            pass
+
+        self.assertTrue(ready_event.is_set())
+        self.all_mocks["make_zmq_path"].assert_called_with("tcp", "::", 9600)
+        self.all_mocks["make_zmq_socket"].assert_called_with(
+            ctx=worker.zmq_cxt,
+            path=self.all_mocks["make_zmq_path"].return_value,
+            socket_type=self.all_mocks["zmq"].ROUTER,
+            bind=True,
+        )
+
+    def test_pull_notify_listener_ipv4(self):
+        """Tests that _pull_notify_listener binds to * when host_ip is IPv4."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.host_ip = "127.0.0.1"
+        worker.side_channel_port = 9600
+
+        mock_sock = MagicMock()
+        mock_sock.recv_multipart.side_effect = KeyboardInterrupt
+        self.all_mocks["make_zmq_socket"].return_value = mock_sock
+
+        ready_event = threading.Event()
+        try:
+            worker._pull_notify_listener(ready_event)
+        except KeyboardInterrupt:
+            pass
+
+        self.assertTrue(ready_event.is_set())
+        self.all_mocks["make_zmq_path"].assert_called_with("tcp", "*", 9600)
+        self.all_mocks["make_zmq_socket"].assert_called_with(
+            ctx=worker.zmq_cxt,
+            path=self.all_mocks["make_zmq_path"].return_value,
+            socket_type=self.all_mocks["zmq"].ROUTER,
+            bind=True,
+        )
 
 
 class TestTPUConnectorUtils(unittest.TestCase):

@@ -78,7 +78,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics, KVConnectorStats, PromMetric, PromMetricT)
 from vllm.utils.math_utils import round_down
-from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
+from vllm.utils.network_utils import (is_valid_ipv6_address, make_zmq_path,
+                                      make_zmq_socket)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
@@ -586,7 +587,8 @@ class TPUConnectorWorker:
         )
 
     def _pull_notify_listener(self, ready_event: threading.Event):
-        sock_path = make_zmq_path("tcp", "*", self.side_channel_port)
+        bind_host = "::" if is_valid_ipv6_address(self.host_ip) else "*"
+        sock_path = make_zmq_path("tcp", bind_host, self.side_channel_port)
         sock = make_zmq_socket(ctx=self.zmq_cxt,
                                path=sock_path,
                                socket_type=zmq.ROUTER,
