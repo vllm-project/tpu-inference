@@ -17,9 +17,9 @@ The default shape is one live decode row at 256K context with DSA top-k 2048.
 Each sample is individually synchronized, so the reported distribution is
 steady host wall latency rather than queued dispatch time.
 
-Run on a TPU host:
+Run from the repository root on a TPU host:
 
-    python scripts/benchmarking/kernels/benchmark_glm_dsa.py --mode all
+    PYTHONPATH=. python scripts/benchmarking/kernels/benchmark_glm_dsa.py --mode all
 """
 
 from __future__ import annotations
