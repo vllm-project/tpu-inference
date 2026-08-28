@@ -833,9 +833,37 @@ class TPUWorker(WorkerBase):
         Returns tensor checksums when `VERIFY_WEIGHTS=true`.
         """
         sync = self._require_raiden_sync("raiden_h2d")
+        before = sync.checksums() if envs.VERIFY_WEIGHTS else {}
         sync.h2d()
         if envs.VERIFY_WEIGHTS:
-            return sync.checksums()
+            after = sync.checksums()
+            # TEMPORARY diagnostic. Two distinct failures look identical from
+            # the destination checksum alone: h2d not landing in the bound
+            # buffers at all, versus landing in buffers the runner no longer
+            # serves from. `before`/`after` separates the first; `live`
+            # re-extracts the runner's current weights to catch the second.
+            from tpu_inference.rl import \
+                raiden_worker_sync  # pylint: disable=g-import-not-at-top
+            import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+            live = {}
+            try:
+                fresh = raiden_worker_sync.extract_weight_state(
+                    getattr(self.model_runner, "state", None),
+                    getattr(self.model_runner, "model", None))
+                # Same filter bind() uses: flatten_weights also yields
+                # RNG-key leaves, which jnp.abs rejects outright.
+                names, arrays = raiden_worker_sync._filter_bindable(  # pylint: disable=protected-access
+                    *raiden_worker_sync.flatten_weights(fresh))
+                live = {
+                    n: float(jnp.sum(jnp.abs(a).astype(jnp.float32)))
+                    for n, a in list(zip(names, arrays))[:3]
+                }
+            except Exception as exc:  # pylint: disable=broad-except
+                live = {"error": str(exc)}
+            logger.info(
+                "raiden_h2d verify | before=%s | after=%s | live=%s", before,
+                after, live)
+            return after
         return {}
 
     def raiden_metrics(self) -> dict:
