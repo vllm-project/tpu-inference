@@ -28,10 +28,10 @@ parallelism layouts, each cell relative to the all-device TP baseline.
                          cache phase.
 
 Attention alone understates the difference between the layouts: under TP a
-layer also all-reduces the o_proj and down_proj outputs of the whole chunk
-over all N devices, while under pcp{P}xtp{N/P} those all-reduces cover 1/P of
-the tokens over N/P devices. By default every step therefore also performs the
-two [tokens_per_device, hidden] bf16 all-reduces over the model axis (data
+layer also all-reduces the o_proj output of the whole chunk over all N
+devices, while under pcp{P}xtp{N/P} that all-reduce covers 1/P of the tokens
+over N/P devices. By default every step therefore also performs the
+[tokens_per_device, hidden] bf16 all-reduce over the model axis (data
 dependent on the attention output); ``--no-layer-all-reduce`` times attention
 only. Matmuls are not modelled (they cost the same per device in both).
 
@@ -69,7 +69,7 @@ class ModelParams:
     num_kv_heads: int
     head_dim: int
     num_devices: list[int]
-    hidden_size: int  # width of the all-reduced o_proj / down_proj outputs
+    hidden_size: int  # width of the all-reduced o_proj output
 
 
 MODEL_CONFIGS = {
@@ -163,11 +163,11 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     def rand(shape):
         return jnp.asarray(rng.random(shape, np.float32)).astype(dtype)
 
-    def layer_all_reduces(o, axis):
-        """The two per-layer all-reduces that follow attention (o_proj and
-        down_proj outputs, [tokens, hidden] bf16) over the model axis `axis`,
-        made data dependent on the attention output `o` so they are timed
-        after it. Returns `o` unchanged when disabled."""
+    def layer_all_reduce_fn(o, axis):
+        """The per-layer all-reduce that follows attention (o_proj output,
+        [tokens, hidden] bf16) over the model axis `axis`, made data
+        dependent on the attention output `o` so it is timed after it.
+        Returns `o` unchanged when disabled."""
         if not layer_all_reduce:
             return o
         tokens = o.shape[0]
@@ -175,7 +175,6 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
             o.reshape(tokens, -1)[:, :1].astype(dtype),
             (tokens, mp.hidden_size))
         act = jax.lax.psum(act, axis)
-        act = jax.lax.psum(act * act, axis)
         return o + act[:, :1].astype(o.dtype).reshape((tokens, ) + (1, ) *
                                                       (o.ndim - 1))
 
@@ -231,7 +230,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                                 sm_scale=sm_scale,
                                                 use_causal_mask=True,
                                                 update_kv_cache=True)
-            return layer_all_reduces(out, "x")[None], cache
+            return layer_all_reduce_fn(out, "x")[None], cache
 
         @functools.partial(jax.jit, donate_argnums=(0, ))
         def fn(cache, q, k, v, ctx):
@@ -324,7 +323,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                              use_causal_mask=True)
                     # Heads are sharded over the model axis; all-reduce there.
                     out = jax.shard_map(functools.partial(
-                        layer_all_reduces, axis=ShardingAxisName.ATTN_HEAD),
+                        layer_all_reduce_fn, axis=ShardingAxisName.ATTN_HEAD),
                                         mesh=mesh,
                                         in_specs=q_spec,
                                         out_specs=q_spec,
@@ -478,8 +477,8 @@ def main():
                     help="KV cache pages allocated = slack x request pages")
     ap.add_argument("--no-layer-all-reduce",
                     action="store_true",
-                    help="time attention only (skip the two per-layer "
-                    "all-reduces of [tokens, hidden] over the model axis)")
+                    help="time attention only (skip the per-layer "
+                    "all-reduce of [tokens, hidden] over the model axis)")
     ap.add_argument("--profile-dir",
                     default=None,
                     help="also record xprof traces per layout here (local "
@@ -577,7 +576,7 @@ def main():
                 for v in variants[1:]
             ]
             what = ("attention only" if args.no_layer_all_reduce else
-                    f"attention + 2 layer all-reduces "
+                    f"attention + layer all-reduce "
                     f"(hidden={mp.hidden_size})")
             title = (f"{model}: NQ={mp.num_q_heads} NKV={mp.num_kv_heads} "
                      f"HD={mp.head_dim}, {n} devices, "
