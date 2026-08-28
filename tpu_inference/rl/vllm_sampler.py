@@ -173,6 +173,14 @@ class RLVllmSampler:
                 text = output_choice.text
                 token_ids_arr = np.array(output_choice.token_ids,
                                          dtype=np.int32)
+                # Lives on the RequestOutput, not the CompletionOutput. Tunix's
+                # SamplingResponse carries prompt_token_ids and its collector
+                # feeds them straight into np.asarray(..., dtype=np.int32), so
+                # omitting the field here surfaces downstream as "int()
+                # argument must be ... not 'NoneType'".
+                prompt_token_ids_arr = np.array(
+                    getattr(final_output, "prompt_token_ids", None) or [],
+                    dtype=np.int32)
                 cum_logprob = float(
                     getattr(output_choice, "cumulative_logprob", 0.0) or 0.0)
 
@@ -194,6 +202,7 @@ class RLVllmSampler:
                     request_id=req_id,
                     text=text,
                     token_ids=token_ids_arr,
+                    prompt_token_ids=prompt_token_ids_arr,
                     logprobs=logprobs_arr,
                     cumulative_logprob=cum_logprob,
                     routed_experts=routed_experts,
@@ -211,6 +220,7 @@ class RLVllmSampler:
                 request_id=req_id,
                 text="",
                 token_ids=np.zeros(0, dtype=np.int32),
+                prompt_token_ids=np.zeros(0, dtype=np.int32),
                 logprobs=None,
                 cumulative_logprob=0.0,
                 routed_experts=None,
@@ -229,6 +239,7 @@ class RLVllmSampler:
                 request_id=req_id,
                 text="",
                 token_ids=np.zeros(0, dtype=np.int32),
+                prompt_token_ids=np.zeros(0, dtype=np.int32),
                 logprobs=None,
                 cumulative_logprob=0.0,
                 routed_experts=None,
