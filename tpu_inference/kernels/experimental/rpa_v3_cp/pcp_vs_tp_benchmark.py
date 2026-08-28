@@ -35,10 +35,17 @@ covers 1/P of the tokens over N/P devices -- but PCP then all-gathers the
 token-sharded activation over the pcp axis into the MLP's replicated layout
 (``activation_ffw_td``). The MLP itself is tensor-sharded over every axis
 (``MLP_TENSOR``), so its all-reduce is identical in both layouts and left out.
-By default every step therefore also performs that o_proj all-reduce (and, for
-PCP, the pcp all-gather), data dependent on the attention output;
-``--no-layer-all-reduce`` times attention only. Matmuls are not modelled (they
-cost the same per device in both).
+``--no-collectives`` selects which of the two things a step measures:
+
+  * default: attention + the layer collectives around it (the o_proj
+    all-reduce over the model axis and, for PCP, the all-gather over the pcp
+    axis between the token-sharded attention layout and the replicated MLP
+    layout), data dependent on the attention output;
+  * ``--no-collectives``: pure attention, no collective outside the kernel
+    (the PCP kernel's own ring DMAs and current-KV all-gather stay, they are
+    the attention).
+
+Matmuls are not modelled (they cost the same per device in every layout).
 
 TP attention has no in-op collective, so it is measured on a shard_map over
 the tp devices and blocked on all of them: it pays the same cross-device
@@ -49,6 +56,7 @@ Usage:
   python pcp_vs_tp_benchmark.py                       # all models, all layouts
   python pcp_vs_tp_benchmark.py --models Qwen3.5 --max-context 262144
   python pcp_vs_tp_benchmark.py --kv-dtype float8_e4m3fn --pcp-sizes 8
+  python pcp_vs_tp_benchmark.py --no-collectives                # pure attention
   python pcp_vs_tp_benchmark.py --profile-dir gs://bucket/path   # + xprof traces
 
 With ``--profile-dir`` every layout also records an xprof trace of the step at
@@ -131,8 +139,7 @@ def _ladder(max_ctx):
 # Worker: one variant, one process (jax is imported here only).
 # --------------------------------------------------------------------------
 def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
-                 warmup, iters, layer_all_reduce, profile_dir,
-                 profile_contexts, n):
+                 warmup, iters, collectives, profile_dir, profile_contexts, n):
     # tpu_inference must be imported before jax (its __init__ loads the
     # engine first).
     import jax
@@ -168,14 +175,14 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     def rand(shape):
         return jnp.asarray(rng.random(shape, np.float32)).astype(dtype)
 
-    def layer_all_reduce_fn(o, axis, gather_axis=None):
-        """The per-layer collectives that follow attention: the o_proj
-        output ([tokens, hidden] bf16) all-reduced over the model axis `axis`
-        and, when `gather_axis` is given (PCP), all-gathered over it into the
-        MLP's token-replicated layout. Made data dependent on the attention
-        output `o` so they are timed after it. Returns `o` unchanged when
-        disabled."""
-        if not layer_all_reduce:
+    def layer_collectives(o, axis, gather_axis=None):
+        """The layer collectives around attention: the o_proj output
+        ([tokens, hidden] bf16) all-reduced over the model axis `axis` and,
+        when `gather_axis` is given (PCP), all-gathered over it between the
+        token-sharded attention layout and the replicated MLP layout. Made
+        data dependent on the attention output `o` so they are timed after
+        it. Returns `o` unchanged with --no-collectives."""
+        if not collectives:
             return o
         tokens = o.shape[0]
         act = jnp.broadcast_to(
@@ -240,7 +247,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                                 sm_scale=sm_scale,
                                                 use_causal_mask=True,
                                                 update_kv_cache=True)
-            return layer_all_reduce_fn(out, "x")[None], cache
+            return layer_collectives(out, "x")[None], cache
 
         @functools.partial(jax.jit, donate_argnums=(0, ))
         def fn(cache, q, k, v, ctx):
@@ -333,7 +340,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                              use_causal_mask=True)
                     # Heads are sharded over the model axis; all-reduce there.
                     out = jax.shard_map(functools.partial(
-                        layer_all_reduce_fn,
+                        layer_collectives,
                         axis=ShardingAxisName.ATTN_HEAD,
                         gather_axis=ShardingAxisName.PREFILL_CONTEXT),
                                         mesh=mesh,
@@ -487,11 +494,11 @@ def main():
                     type=int,
                     default=1,
                     help="KV cache pages allocated = slack x request pages")
-    ap.add_argument("--no-layer-all-reduce",
+    ap.add_argument("--no-collectives",
                     action="store_true",
-                    help="time attention only (skip the o_proj all-reduce "
-                    "over the model axis and, for PCP, the pcp all-gather "
-                    "into the MLP layout)")
+                    help="pure attention: skip the layer collectives (o_proj "
+                    "all-reduce over the model axis and, for PCP, the "
+                    "all-gather over the pcp axis into the MLP layout)")
     ap.add_argument("--profile-dir",
                     default=None,
                     help="also record xprof traces per layout here (local "
@@ -520,7 +527,7 @@ def main():
                 MODEL_CONFIGS[model], variant, args.chunk_size,
                 args.max_context, args.kv_dtype, args.page_size,
                 args.cache_slack, args.warmup, args.iters,
-                not args.no_layer_all_reduce, args.profile_dir,
+                not args.no_collectives, args.profile_dir,
                 [int(c) for c in args.profile_contexts.split(",")], int(n))
         except Exception as e:  # noqa: BLE001
             if "vmem" not in str(e):
@@ -550,8 +557,8 @@ def main():
                         str(args.cache_slack), "--warmup",
                         str(args.warmup), "--iters",
                         str(args.iters)
-                    ] + (["--no-layer-all-reduce"]
-                         if args.no_layer_all_reduce else []) + ([
+                    ] + (["--no-collectives"]
+                         if args.no_collectives else []) + ([
                              "--profile-dir", args.profile_dir,
                              "--profile-contexts", args.profile_contexts
                          ] if args.profile_dir else [])
@@ -588,9 +595,9 @@ def main():
                 f"{v} ({n // 2} dev)" if v == f"tp{n // 2}" else v
                 for v in variants[1:]
             ]
-            what = ("attention only" if args.no_layer_all_reduce else
-                    f"attention + o_proj all-reduce (+ pcp all-gather) "
-                    f"(hidden={mp.hidden_size})")
+            what = ("pure attention" if args.no_collectives else
+                    f"attention + collectives: o_proj all-reduce, pcp "
+                    f"all-gather (hidden={mp.hidden_size})")
             title = (f"{model}: NQ={mp.num_q_heads} NKV={mp.num_kv_heads} "
                      f"HD={mp.head_dim}, {n} devices, "
                      f"CH={_human(args.chunk_size)}, KV {args.kv_dtype}, "
