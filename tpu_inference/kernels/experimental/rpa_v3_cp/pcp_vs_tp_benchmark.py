@@ -55,7 +55,7 @@ coexist in one TPU process, so every variant runs in its own subprocess.
 Usage:
   python pcp_vs_tp_benchmark.py                       # all models, all layouts
   python pcp_vs_tp_benchmark.py --models Qwen3.5 --max-context 262144
-  python pcp_vs_tp_benchmark.py --kv-dtype float8_e4m3fn --pcp-sizes 8
+  python pcp_vs_tp_benchmark.py --kv-dtype bfloat16 --pcp-sizes 8
   python pcp_vs_tp_benchmark.py --no-collectives                # pure attention
   python pcp_vs_tp_benchmark.py --profile-dir gs://bucket/path   # + xprof traces
 
@@ -149,8 +149,11 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     from jax.sharding import PartitionSpec as P
 
     import tpu_inference  # noqa: F401
-    from tpu_inference.kernels.ragged_paged_attention.v3.util import (
-        align_to, cdiv, get_dtype_packing)
+    from tpu_inference.kernels.experimental.rpa_v3_cp import \
+        kernel as rpa_v3_cp
+    from tpu_inference.kernels.ragged_paged_attention.v3 import \
+        kernel as rpa_v3
+    from tpu_inference.kernels.ragged_paged_attention.v3.util import cdiv
     from tpu_inference.layers.common import sharding as sharding_mod
     from tpu_inference.layers.common.attention_interface import \
         ragged_paged_attention
@@ -169,7 +172,6 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     dtype = jnp.bfloat16
     kv_dtype = getattr(jnp, kv_dtype_name)
     sm_scale = HD**-0.5
-    kvp = get_dtype_packing(kv_dtype)
     rng = np.random.default_rng(0)
 
     def rand(shape):
@@ -215,7 +217,6 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         """rpa_v3 with heads sharded over `tp` devices (KV heads replicated
         when tp > num_kv_heads, as the model does)."""
         nq, nkv = NQ // tp, max(1, NKV // tp)
-        nkv2 = align_to(2 * nkv, kvp)
         npages = max(cdiv(max_ctx, page), 1) * slack
         mesh = Mesh(np.array(jax.devices()[:tp]).reshape(tp), ("x", ))
         sharding = NamedSharding(mesh, P("x"))
@@ -230,7 +231,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         v = put(
             jnp.broadcast_to(
                 rand((chunk, nkv, HD)).astype(kv_dtype), (tp, chunk, nkv, HD)))
-        cache_shape = (tp * npages, page, nkv2 // kvp, kvp, HD)
+        # Per-device layout (packing of K/V heads per 32-bit word for the KV
+        # dtype) is the kernel's own; the leading page dim is stacked over tp.
+        per_dev = rpa_v3.get_kv_cache_shape(npages, page, nkv, HD, kv_dtype)
+        cache_shape = (tp * per_dev[0], ) + tuple(per_dev[1:])
         pi = jnp.arange(npages, dtype=jnp.int32)
         cu = jnp.array([0, chunk], jnp.int32)
         dist = jnp.array([0, 0, 1], jnp.int32)
@@ -277,8 +281,12 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         gpage = page * pcp
         pages_per_seq = max(cdiv(max_ctx, gpage), 1)
         npages = pages_per_seq * slack
-        # Packed KV planes are laid out per TP shard.
-        nkv2 = tp * align_to(2 * max(1, NKV // tp), kvp)
+        # Each rank holds `page` tokens of every global page (KV_CONTEXT shards
+        # the page dim over pcp) and its own KV heads (KV_HEAD shards the
+        # packed planes over tp); the per-rank layout is the CP kernel's own.
+        per_rank = rpa_v3_cp.get_kv_cache_shape(npages, page, NKV // tp, HD,
+                                                kv_dtype)
+        cache_shape = (npages, gpage, per_rank[2] * tp) + tuple(per_rank[3:])
         cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                        ShardingAxisName.KV_HEAD, None, None)
 
@@ -364,9 +372,8 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
             kvl = jnp.zeros((MAX_SEQ, ), jnp.int32).at[:2].set(ctx)
             kvcl = jnp.zeros((MAX_SEQ, ),
                              jnp.int32).at[:2].set(max(ctx - chunk, 0))
-            cache = jax.device_put(
-                jnp.zeros((npages, gpage, nkv2 // kvp, kvp, HD), kv_dtype),
-                NamedSharding(mesh, cache_spec))
+            cache = jax.device_put(jnp.zeros(cache_shape, kv_dtype),
+                                   NamedSharding(mesh, cache_spec))
             return bench_cache(fn_for(cache_pages_for(ctx)), cache, q, k, v,
                                kvl, kvcl)
 
@@ -482,8 +489,9 @@ def main():
     ap.add_argument("--chunk-size", type=int, default=4096)
     ap.add_argument("--max-context", type=int, default=1024 * 1024)
     ap.add_argument("--kv-dtype",
-                    default="bfloat16",
-                    choices=["bfloat16", "float8_e4m3fn"])
+                    default="float8_e4m3fn",
+                    choices=["bfloat16", "float8_e4m3fn"],
+                    help="KV cache dtype (Q/K/V activations stay bf16)")
     ap.add_argument("--pcp-sizes",
                     nargs="*",
                     type=int,
