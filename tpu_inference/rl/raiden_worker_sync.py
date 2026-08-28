@@ -190,6 +190,17 @@ class RaidenWorkerSync:
                 unsafe_skip_buffer_lock=True,
                 listener_port=0,
                 bind_ip=None,
+                # Destination side: ingest each slice as it lands rather than
+                # waiting for an explicit h2d() at a coordinator-chosen moment.
+                # Left at the default (False), h2d() unpacks whatever happens
+                # to be staged when it is called, so tensors still in flight
+                # are installed torn -- observable as per-tensor checksums that
+                # match the source for some tensors and are partway between
+                # the initial and synced values for others, varying run to run
+                # with `parallelism` streams racing. tunix's in-process
+                # destination (RaidenWeightSyncDelegate) already binds this
+                # way; this makes the vLLM worker path match.
+                auto_h2d=True,
             )
         else:
             self._sync.bind_weights(self.arrays)
@@ -213,15 +224,28 @@ class RaidenWorkerSync:
         return getter() if getter is not None else {}
 
     def checksums(self, sample: int = 3) -> dict:
-        """Per-tensor float32 abs-sums for cross-process verification."""
+        """Per-tensor float32 abs-sums for cross-process verification.
+
+        `__grand_total__` covers every bound tensor, not just the sampled
+        ones -- a three-tensor sample says nothing about how much of the
+        model actually arrived intact, and the source side logs the same
+        key so the two are directly comparable.
+        """
 
         def total(arr):
             return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
 
-        return {
+        out = {
             name: total(arr)
             for name, arr in list(zip(self.names, self.arrays))[:sample]
         }
+        out["__grand_total__"] = sum(total(arr) for arr in self.arrays)
+        # The grand totals are only comparable to the source's if both sides
+        # bound the same tensors; count and element total make that checkable
+        # rather than assumed.
+        out["__tensor_count__"] = len(self.arrays)
+        out["__element_count__"] = int(sum(a.size for a in self.arrays))
+        return out
 
     def metadata_dict(self) -> dict:
         """Wire-safe registration metadata, shaped for tunix's
