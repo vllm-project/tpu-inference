@@ -380,8 +380,10 @@ def _variants(mp, n, pcp_sizes):
         if p <= 1 or n % p:
             continue
         tp = n // p
-        if p % 2 or mp.num_q_heads % tp:
-            continue  # PCP needs an even pcp size and whole Q heads per shard
+        if p % 2 or mp.num_q_heads % tp or mp.num_kv_heads % tp:
+            # PCP needs an even pcp size and shards Q and KV heads over tp
+            # (TP replicates KV heads when tp > num_kv_heads, PCP does not).
+            continue
         out.append(f"pcp{p}xtp{tp}")
     return out
 
@@ -389,6 +391,8 @@ def _variants(mp, n, pcp_sizes):
 def _cell(v, base):
     if v is None:
         return "n/a"
+    if isinstance(v, str):
+        return v
     r = v / base
     if abs(r - 1) < 0.005:
         return f"{v:.2f} (=)"
@@ -461,10 +465,17 @@ def main():
 
     if args.worker:
         model, n, variant = args.worker
-        res = _run_variant(MODEL_CONFIGS[model], variant, args.chunk_size,
-                           args.max_context, args.kv_dtype, args.page_size,
-                           args.cache_slack, args.warmup, args.iters,
-                           not args.no_layer_all_reduce)
+        try:
+            res = _run_variant(MODEL_CONFIGS[model], variant, args.chunk_size,
+                               args.max_context, args.kv_dtype, args.page_size,
+                               args.cache_slack, args.warmup, args.iters,
+                               not args.no_layer_all_reduce)
+        except Exception as e:  # noqa: BLE001
+            if "vmem" not in str(e):
+                raise
+            # The kernel's default tiles do not fit VMEM for this head
+            # config on one device; report it instead of failing the sweep.
+            res = {"error": "vmem OOM"}
         with open(args.json, "w") as f:
             json.dump(res, f)
         return
@@ -515,7 +526,8 @@ def main():
                 if key not in base:
                     continue
                 rows.append([_human(ctx), f"{base[key]:.2f}"] + [
-                    _cell(results[v].get(key), base[key]) for v in variants[1:]
+                    _cell(results[v].get("error") or results[v].get(key),
+                          base[key]) for v in variants[1:]
                 ])
             header = ["Context", f"{variants[0]} ({n} dev)"] + [
                 f"{v} ({n // 2} dev)" if v == f"tp{n // 2}" else v
