@@ -54,7 +54,7 @@
 /tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork @Lumosis
 
 # RL Rollout / Weight Sync
-/tpu_inference/rl/ @wenxindongwork
+/tpu_inference/rl/ @wenxindongwork @pv97
 
 # Speculative Decoding
 /tpu_inference/spec_decode/ @Lumosis @gxd3
@@ -98,7 +98,7 @@
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang @gxd3 @a1yssan13
 /tests/spec_decode/ @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
-/tests/rl/ @wenxindongwork
+/tests/rl/ @wenxindongwork @pv97
 /tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
 /tests/offload/ @juncgu-google @richardsliu
 /tests/scripts/ @jrplatin @QiliangCui
