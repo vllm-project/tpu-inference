@@ -218,6 +218,12 @@ docker system prune -a --volumes -f || true
 # Source the environment setup script
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/setup_docker_env.sh"
+# The prune above runs before this file is sourced, so report_disk is not
+# available to bracket it. Reporting once here still answers the question that
+# matters at this point: how much room the head has left before it builds and
+# pulls the image.
+report_disk "head node, after prune"
+
 # setup_environment traces a long tail of docker tag/build/push plumbing and
 # one line per variable it sources from /etc/environment. It echoes its own
 # progress, so the trace adds nothing; xtrace is on for this whole script, so
@@ -386,7 +392,12 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
 
     # Prune Worker Node BEFORE it tries to pull the new giant image
     echo "   -> Pruning Docker on worker to free disk space..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f" || true
+    # Report the reclaimed total and the space left, so a worker that is still
+    # short says so here rather than only surfacing as a pull failure further
+    # down. Workers are boot-disk only -- no /mnt/disks/persist to check.
+    # shellcheck disable=SC2029
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
+      "docker system prune -a --volumes -f | tail -1; df -h /var/lib/docker" || true
     
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "mkdir -p ~/tpu-inference/scripts/multihost" || true
     # shellcheck disable=SC2002

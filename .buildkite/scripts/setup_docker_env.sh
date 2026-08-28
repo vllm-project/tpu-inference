@@ -17,7 +17,39 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
+# Report free space either side of the cleanup. A job that dies with "No space
+# left on device" names a path inside the container, not the host filesystem
+# that actually filled, so without this there is nothing in the log to tell the
+# candidate disks apart. The docker root is wherever the daemon is configured to
+# live, not necessarily /var/lib/docker, and /mnt/disks/persist only exists on
+# agents that have a data disk attached.
+#
+# The model cache gets a per-entry breakdown rather than a single total. It is
+# shared with every other pipeline scheduled on this agent pool and nothing
+# evicts from it, so it holds the union of every model ever run here -- the
+# useful question is which snapshots are still worth their space, and that
+# needs the list, not the sum.
+report_disk() {
+  local when="$1" docker_root
+  echo "=== Disk usage (${when}) ==="
+  docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+  df -h "${docker_root:-/var/lib/docker}" 2>/dev/null || true
+
+  if [[ -d /mnt/disks/persist ]]; then
+    df -h /mnt/disks/persist 2>/dev/null || true
+    # du only stats, it does not read file contents, and model repos are a
+    # handful of large shards rather than many small files -- so this is cheap
+    # despite the size of the tree. Bounded anyway: a cold or unusually
+    # fragmented cache should slow the report down, not the build.
+    echo "--- Largest entries in /mnt/disks/persist/models ---"
+    timeout 120 du -sh /mnt/disks/persist/models/* 2>/dev/null | sort -rh | head -15 || true
+    timeout 60 du -sh /mnt/disks/persist/models 2>/dev/null || true
+  fi
+}
+
 cleanup_docker_resource() {
+  report_disk "before cleanup"
+
   # Define defaults and get the parameter
   DEFAULT_IMAGES=("vllm-tpu")
   IMAGE_NAME="${1:-}"
@@ -74,6 +106,8 @@ cleanup_docker_resource() {
 
   echo "Pruning old Docker build cache..."
   docker builder prune -f
+
+  report_disk "after cleanup"
 
   echo "Cleanup complete."
 }
