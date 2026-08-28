@@ -44,11 +44,19 @@ Usage:
   python pcp_vs_tp_benchmark.py                       # all models, all layouts
   python pcp_vs_tp_benchmark.py --models Qwen3.5 --max-context 262144
   python pcp_vs_tp_benchmark.py --kv-dtype float8_e4m3fn --pcp-sizes 8
+  python pcp_vs_tp_benchmark.py --profile-dir gs://bucket/path   # + xprof traces
+
+With ``--profile-dir`` every layout also records an xprof trace of the step at
+each ``--profile-contexts`` length (warm-up and timed iterations included)
+under ``<profile-dir>/<model>_<N>dev_<layout>/ctx<len>/``; a ``gs://`` path
+is uploaded with gsutil.
 """
 import argparse
 import dataclasses
 import functools
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -118,7 +126,8 @@ def _ladder(max_ctx):
 # Worker: one variant, one process (jax is imported here only).
 # --------------------------------------------------------------------------
 def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
-                 warmup, iters, layer_all_reduce):
+                 warmup, iters, layer_all_reduce, profile_dir,
+                 profile_contexts, n):
     # tpu_inference must be imported before jax (its __init__ loads the
     # engine first).
     import jax
@@ -352,12 +361,43 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         measure = make_tp(int(variant[2:]))
 
     ladder = _ladder(max_ctx)
-    needed = sorted({b for n in ladder for b in _boundaries(n, chunk)})
+    needed = sorted({b for m in ladder for b in _boundaries(m, chunk)})
     step = {c: measure(c) for c in needed}
+    if profile_dir:
+        _profile(measure, profile_dir, f"{mp_name(mp)}_{n}dev_{variant}",
+                 [c for c in profile_contexts if c <= max_ctx])
     return {
-        str(n): sum(step[b] for b in _boundaries(n, chunk))
-        for n in ladder
+        str(m): sum(step[b] for b in _boundaries(m, chunk))
+        for m in ladder
     }
+
+
+def mp_name(mp):
+    return next(k for k, v in MODEL_CONFIGS.items() if v is mp)
+
+
+def _profile(measure, profile_dir, name, contexts):
+    """Record an xprof trace of `measure(ctx)` for each context under
+    <profile_dir>/<name>/ctx<len>/ (uploaded with gsutil for gs:// paths)."""
+    import jax
+    local = tempfile.mkdtemp(prefix="pcp_vs_tp_prof_")
+    for ctx in contexts:
+        d = os.path.join(local, name, f"ctx{_human(ctx)}")
+        os.makedirs(d, exist_ok=True)
+        with jax.profiler.trace(d):
+            measure(ctx)
+    if profile_dir.startswith("gs://"):
+        subprocess.check_call([
+            "gsutil", "-q", "-m", "cp", "-r",
+            os.path.join(local, name),
+            profile_dir.rstrip("/") + "/"
+        ])
+        shutil.rmtree(local, ignore_errors=True)
+    else:
+        os.makedirs(profile_dir, exist_ok=True)
+        dst = os.path.join(profile_dir, name)
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.move(os.path.join(local, name), dst)
 
 
 # --------------------------------------------------------------------------
@@ -440,6 +480,13 @@ def main():
                     action="store_true",
                     help="time attention only (skip the two per-layer "
                     "all-reduces of [tokens, hidden] over the model axis)")
+    ap.add_argument("--profile-dir",
+                    default=None,
+                    help="also record xprof traces per layout here (local "
+                    "dir or gs:// path)")
+    ap.add_argument("--profile-contexts",
+                    default="8192,65536,1048576",
+                    help="comma-separated context lengths to profile")
     ap.add_argument("--retries",
                     type=int,
                     default=3,
@@ -457,10 +504,12 @@ def main():
     if args.worker:
         model, n, variant = args.worker
         try:
-            res = _run_variant(MODEL_CONFIGS[model], variant, args.chunk_size,
-                               args.max_context, args.kv_dtype, args.page_size,
-                               args.cache_slack, args.warmup, args.iters,
-                               not args.no_layer_all_reduce)
+            res = _run_variant(
+                MODEL_CONFIGS[model], variant, args.chunk_size,
+                args.max_context, args.kv_dtype, args.page_size,
+                args.cache_slack, args.warmup, args.iters,
+                not args.no_layer_all_reduce, args.profile_dir,
+                [int(c) for c in args.profile_contexts.split(",")], int(n))
         except Exception as e:  # noqa: BLE001
             if "vmem" not in str(e):
                 raise
@@ -490,7 +539,10 @@ def main():
                         str(args.warmup), "--iters",
                         str(args.iters)
                     ] + (["--no-layer-all-reduce"]
-                         if args.no_layer_all_reduce else [])
+                         if args.no_layer_all_reduce else []) + ([
+                             "--profile-dir", args.profile_dir,
+                             "--profile-contexts", args.profile_contexts
+                         ] if args.profile_dir else [])
                     t0 = time.time()
                     for attempt in range(args.retries + 1):
                         if attempt:
