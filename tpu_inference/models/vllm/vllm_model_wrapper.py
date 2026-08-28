@@ -314,7 +314,7 @@ class VllmModelWrapper:
 
         self._pooler: Pooler | None = self.model.pooler
 
-        if self.vllm_config.model_config.is_multimodal_model:
+        if self.vllm_config.model_config.is_multimodal_model and not getattr(self.vllm_config.model_config, "language_model_only", False):
             # NOTE: It patch mm models to be JITtable within some submodule.
             # Caution: the submodule params_and_buffers would be put into
             # the wrapper directly. params_and_buffers should be sharded to tpu
@@ -339,7 +339,7 @@ class VllmModelWrapper:
         )
         # Returning to the jax land, so we need to wrap it into a JaxValue.
         params = jax_view(params_and_buffers)
-        self._mm_encoder_jit_manager = maybe_create_mm_encoder_jit_manager(
+        self._mm_encoder_jit_manager = None if getattr(self.vllm_config.model_config, "language_model_only", False) else maybe_create_mm_encoder_jit_manager(
             vllm_config=self.vllm_config,
             vllm_model=self.model.vllm_model,
             vllm_runner=self.model,
@@ -527,7 +527,7 @@ class VllmModelWrapper:
         Registers budget-capture tasks against the existing manager so
         compile_manager can AOT-prime the XLA cache at startup.
         """
-        if not self.vllm_config.model_config.is_multimodal_model:
+        if not self.vllm_config.model_config.is_multimodal_model or getattr(self.vllm_config.model_config, "language_model_only", False):
             return None
         if self._mm_encoder_jit_manager is not None:
             return self._mm_encoder_jit_manager.precompile_vision_encoder
@@ -538,7 +538,7 @@ class VllmModelWrapper:
                                                   self.vllm_config)
 
     def wrap_embed_multimodal_func(self):
-        if not self.vllm_config.model_config.is_multimodal_model:
+        if not self.vllm_config.model_config.is_multimodal_model or getattr(self.vllm_config.model_config, "language_model_only", False):
             return None
 
         def embed_multimodal_func_jax(
@@ -601,7 +601,7 @@ class VllmModelWrapper:
         return embed_multimodal_func_torch
 
     def wrap_embed_input_ids_func(self):
-        if not self.vllm_config.model_config.is_multimodal_model:
+        if not self.vllm_config.model_config.is_multimodal_model or getattr(self.vllm_config.model_config, "language_model_only", False):
             return None
 
         # The function cannot be JITted directly due to its dynamic implementation

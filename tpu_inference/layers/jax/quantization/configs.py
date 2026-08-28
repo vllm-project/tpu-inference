@@ -67,12 +67,17 @@ class QuantizationConfig(ABC):
         under them, needing `skip_with_substr=True` for a prefix-style match.
         """
 
+        def _normalize(s: str) -> str:
+            return s.replace("language_model.", "")
+
         def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
-            return prefix in ignored_layers
+            p_norm = _normalize(prefix)
+            return any(p_norm == _normalize(layer) for layer in ignored_layers)
 
         # For case like: ignored_layers = ["model.vision_tower"]
         def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
-            return any(layer in prefix for layer in ignored_layers)
+            p_norm = _normalize(prefix)
+            return any(_normalize(layer) in p_norm or p_norm in _normalize(layer) for layer in ignored_layers)
 
         match_func = substr_match if skip_with_substr else prefix_full_match
 

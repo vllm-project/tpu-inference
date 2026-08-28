@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -79,15 +79,18 @@ class Qwen3Attention(JaxModule):
 
         self.mesh = mesh
 
+        self.attn_output_gate = getattr(config, "attn_output_gate", False)
+        num_q_heads = self.num_heads * (2 if self.attn_output_gate else 1)
+
         # NOTE: LAYOUT_Q_PROJ_AS_NDH is by default False
         if envs.LAYOUT_Q_PROJ_AS_NDH:
             rhs_str = "NDH"
             q_proj_sharding = ("model", None, None)
-            kernel_shape = (self.num_heads, self.hidden_size, self.head_dim)
+            kernel_shape = (num_q_heads, self.hidden_size, self.head_dim)
         else:
             rhs_str = "DNH"
             q_proj_sharding = (None, "model", None)
-            kernel_shape = (self.hidden_size, self.num_heads, self.head_dim)
+            kernel_shape = (self.hidden_size, num_q_heads, self.head_dim)
 
         logger.info_once(
             f"Running with attention Q-Projection laid out as {rhs_str}")
@@ -168,8 +171,15 @@ class Qwen3Attention(JaxModule):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
-        # q: (T, N, H)
-        q = self.q_proj(x)
+        if self.attn_output_gate:
+            q_gate = self.q_proj(x)
+            q_gate = q_gate.reshape(q_gate.shape[0], self.num_heads, 2, self.head_dim)
+            q = q_gate[:, :, 0, :]
+            gate = q_gate[:, :, 1, :]
+        else:
+            q = self.q_proj(x)
+            gate = None
+
         q = self.q_norm(q)
         q = apply_rope(q, md.input_positions, self.head_dim_original,
                        self.rope_theta, self.rope_scaling)
@@ -191,6 +201,10 @@ class Qwen3Attention(JaxModule):
             v_scale = self._v_scale
             k, v = quantize_kv(self.kv_cache_quantized_dtype, k, v, k_scale,
                                v_scale)
+        else:
+            q = q.astype(x.dtype)
+            k = k.astype(x.dtype)
+            v = v.astype(x.dtype)
 
         new_kv_cache, outputs = attention(
             kv_cache,
@@ -204,6 +218,8 @@ class Qwen3Attention(JaxModule):
             k_scale=k_scale,
             v_scale=v_scale,
         )
+        if gate is not None:
+            outputs = outputs * jax.nn.sigmoid(gate)
         # (T, D)
         o = self.o_proj(outputs)
         return new_kv_cache, o
@@ -257,6 +273,27 @@ class Qwen3DecoderLayer(Qwen2DecoderLayer):
             prefix=prefix + ".mlp",
         )
 
+    def __call__(
+        self,
+        kv_cache: Optional[jax.Array],
+        x: jax.Array,
+        attention_metadata: AttentionMetadata,
+    ) -> Tuple[jax.Array, jax.Array]:
+        hidden_states = self.input_layernorm(x)
+        kv_cache, attn_output = self.self_attn(
+            kv_cache,
+            hidden_states,
+            attention_metadata,
+        )
+        attn_output += x
+
+        residual = attn_output
+        attn_output = self.post_attention_layernorm(attn_output)
+        mlp_output = self.mlp(attn_output)
+        outputs = residual + mlp_output
+
+        return kv_cache, outputs
+
 
 class Qwen3Model(Qwen2Model):
 
@@ -264,39 +301,37 @@ class Qwen3Model(Qwen2Model):
                  vllm_config: VllmConfig,
                  rng: nnx.Rngs,
                  mesh: Mesh,
-                 prefix: str = "model") -> None:
+                 prefix: str = ""):
+        JaxModule.__init__(self)
         model_config = vllm_config.model_config
-        hf_config = model_config.hf_config
-        vocab_size = model_config.get_vocab_size()
+        config = getattr(model_config.hf_config, "text_config", model_config.hf_config)
+        self.config = config
         dtype = model_config.dtype
-        rms_norm_eps = hf_config.rms_norm_eps
-        hidden_size = hf_config.hidden_size
-
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
         self.is_first_rank = get_pp_group().is_first_rank
         self.is_last_rank = get_pp_group().is_last_rank
 
-        tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config.parallel_config is not None else 1
-        padded_vocab_size = utils.align_to(vocab_size, tp_size)
+        rms_norm_eps = config.rms_norm_eps
+        hidden_size = config.hidden_size
 
-        if self.is_first_rank or (hf_config.tie_word_embeddings
-                                  and self.is_last_rank):
+        if self.is_first_rank:
             self.embed_tokens = JaxEmbed(
-                num_embeddings=padded_vocab_size,
-                features=hidden_size,
+                self.vocab_size,
+                hidden_size,
                 dtype=dtype,
                 param_dtype=dtype,
                 embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
-                quant_config=vllm_config.quant_config,
                 prefix=prefix + ".embed_tokens",
             )
         else:
             self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
-            hf_config.num_hidden_layers,
+            config.num_hidden_layers,
             lambda layer_index: Qwen3DecoderLayer(
-                config=hf_config,
+                config=config,
                 dtype=dtype,
                 rng=rng,
                 mesh=mesh,
@@ -440,3 +475,25 @@ class Qwen3ForCausalLM(JaxModule, LoadableWithIterator):
 
         assert isinstance(self.model.embed_tokens, JaxEmbed)
         return self.model.embed_tokens.decode(hidden_states)
+
+    def embed_input_ids(
+        self,
+        input_ids: jax.Array,
+        multimodal_embeddings: jax.Array | None = None,
+        *,
+        is_multimodal: jax.Array | None = None,
+    ) -> jax.Array:
+        del multimodal_embeddings, is_multimodal
+        return self.model.embed_tokens(input_ids)
+
+    @staticmethod
+    def get_mrope_input_positions(
+        input_tokens: list[int],
+        mm_features: list[Any] | None = None,
+    ) -> tuple[jax.Array, int]:
+        del mm_features
+        n = len(input_tokens)
+        positions = jnp.broadcast_to(
+            jnp.arange(n, dtype=jnp.int32).reshape(1, -1), (3, n)
+        )
+        return positions, 0
