@@ -65,15 +65,6 @@ class ModelParams:
 
 
 MODEL_CONFIGS = {
-    # https://huggingface.co/Qwen/Qwen3-32B/raw/main/config.json
-    'Qwen3-32B':
-    ModelParams(
-        num_q_heads=64,
-        num_kv_heads=8,
-        head_dim=128,
-        num_devices=[2],
-        hidden_size=5120,
-    ),
     # google3/third_party/py/tpu_kernel_testbench/qwen35_config_defaults.json
     'Qwen3.5':
     ModelParams(
