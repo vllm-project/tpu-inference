@@ -27,13 +27,18 @@ parallelism layouts, each cell relative to the all-device TP baseline.
                          KV cache page-striped over pcp. In-kernel ring for the
                          cache phase.
 
-Attention alone understates the difference between the layouts: under TP a
-layer also all-reduces the o_proj output of the whole chunk over all N
-devices, while under pcp{P}xtp{N/P} that all-reduce covers 1/P of the tokens
-over N/P devices. By default every step therefore also performs the
-[tokens_per_device, hidden] bf16 all-reduce over the model axis (data
-dependent on the attention output); ``--no-layer-all-reduce`` times attention
-only. Matmuls are not modelled (they cost the same per device in both).
+Attention alone understates the difference between the layouts. Per the
+sharding rules (``ShardingAxisName``): o_proj is row-parallel over the model
+axis, so under TP a layer all-reduces the whole chunk's [tokens, hidden]
+o_proj output over all N devices, while under pcp{P}xtp{N/P} that all-reduce
+covers 1/P of the tokens over N/P devices -- but PCP then all-gathers the
+token-sharded activation over the pcp axis into the MLP's replicated layout
+(``activation_ffw_td``). The MLP itself is tensor-sharded over every axis
+(``MLP_TENSOR``), so its all-reduce is identical in both layouts and left out.
+By default every step therefore also performs that o_proj all-reduce (and, for
+PCP, the pcp all-gather), data dependent on the attention output;
+``--no-layer-all-reduce`` times attention only. Matmuls are not modelled (they
+cost the same per device in both).
 
 TP attention has no in-op collective, so it is measured on a shard_map over
 the tp devices and blocked on all of them: it pays the same cross-device
@@ -163,11 +168,13 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     def rand(shape):
         return jnp.asarray(rng.random(shape, np.float32)).astype(dtype)
 
-    def layer_all_reduce_fn(o, axis):
-        """The per-layer all-reduce that follows attention (o_proj output,
-        [tokens, hidden] bf16) over the model axis `axis`, made data
-        dependent on the attention output `o` so it is timed after it.
-        Returns `o` unchanged when disabled."""
+    def layer_all_reduce_fn(o, axis, gather_axis=None):
+        """The per-layer collectives that follow attention: the o_proj
+        output ([tokens, hidden] bf16) all-reduced over the model axis `axis`
+        and, when `gather_axis` is given (PCP), all-gathered over it into the
+        MLP's token-replicated layout. Made data dependent on the attention
+        output `o` so they are timed after it. Returns `o` unchanged when
+        disabled."""
         if not layer_all_reduce:
             return o
         tokens = o.shape[0]
@@ -175,8 +182,11 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
             o.reshape(tokens, -1)[:, :1].astype(dtype),
             (tokens, mp.hidden_size))
         act = jax.lax.psum(act, axis)
-        return o + act[:, :1].astype(o.dtype).reshape((tokens, ) + (1, ) *
-                                                      (o.ndim - 1))
+        if gather_axis is not None:
+            act = jax.lax.all_gather(act, gather_axis, axis=0, tiled=True)
+        return o + act[:tokens, :1].astype(o.dtype).reshape((tokens, ) +
+                                                            (1, ) *
+                                                            (o.ndim - 1))
 
     def bench_cache(fn, cache, *args):
         # fn(cache, *args) -> (out, cache), cache donated and threaded so the
@@ -323,7 +333,9 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                              use_causal_mask=True)
                     # Heads are sharded over the model axis; all-reduce there.
                     out = jax.shard_map(functools.partial(
-                        layer_all_reduce_fn, axis=ShardingAxisName.ATTN_HEAD),
+                        layer_all_reduce_fn,
+                        axis=ShardingAxisName.ATTN_HEAD,
+                        gather_axis=ShardingAxisName.PREFILL_CONTEXT),
                                         mesh=mesh,
                                         in_specs=q_spec,
                                         out_specs=q_spec,
@@ -477,8 +489,9 @@ def main():
                     help="KV cache pages allocated = slack x request pages")
     ap.add_argument("--no-layer-all-reduce",
                     action="store_true",
-                    help="time attention only (skip the per-layer "
-                    "all-reduce of [tokens, hidden] over the model axis)")
+                    help="time attention only (skip the o_proj all-reduce "
+                    "over the model axis and, for PCP, the pcp all-gather "
+                    "into the MLP layout)")
     ap.add_argument("--profile-dir",
                     default=None,
                     help="also record xprof traces per layout here (local "
@@ -576,7 +589,7 @@ def main():
                 for v in variants[1:]
             ]
             what = ("attention only" if args.no_layer_all_reduce else
-                    f"attention + layer all-reduce "
+                    f"attention + o_proj all-reduce (+ pcp all-gather) "
                     f"(hidden={mp.hidden_size})")
             title = (f"{model}: NQ={mp.num_q_heads} NKV={mp.num_kv_heads} "
                      f"HD={mp.head_dim}, {n} devices, "
