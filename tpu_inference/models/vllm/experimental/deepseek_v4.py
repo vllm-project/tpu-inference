@@ -738,7 +738,6 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
             "embed.": "model.embed.",
             "norm.": "model.norm.",
             "hc_head": "model.hc_head",
-            "mtp.": "model.mtp.",
         },
         orig_to_new_regex=scale_regex,
         orig_to_new_suffix={
@@ -748,6 +747,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         },
         orig_to_new_substr={
             ".shared_experts.w2": ".shared_experts.down_proj",
+            "mtp.": None,
         },
     )
 
@@ -812,7 +812,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
+        loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights,
                                             mapper=self.hf_to_vllm_mapper)
 
