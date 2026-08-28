@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -124,3 +125,14 @@ def test_inserted_cache_composes_with_exact_streamindex_topk():
     )
     np.testing.assert_array_equal(np.asarray(topk),
                                   np.arange(127, 119, -1)[None, :])
+
+
+def test_insert_indexer_k_cache_stablehlo_contract():
+    cache = jax.ShapeDtypeStruct((2048, 4, 32, 256), jnp.uint8)
+    key = jax.ShapeDtypeStruct((1, 128), jnp.bfloat16)
+    slot = jax.ShapeDtypeStruct((1, ), jnp.int32)
+    lowered = jax.jit(insert_indexer_k_cache).lower(cache, key, slot)
+    stablehlo = str(lowered.compiler_ir(dialect="stablehlo"))
+
+    assert "stablehlo.scatter" in stablehlo
+    assert "stablehlo.while" not in stablehlo
