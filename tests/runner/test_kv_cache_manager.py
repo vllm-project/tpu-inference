@@ -596,6 +596,78 @@ class TestKVCacheManager:
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + 10}'] == i
 
+    def test_initialize_kv_cache_aliased_groups(self):
+        # In the new vLLM layout, multi-group models produce one KVCacheTensor
+        # per group, where all groups alias the backing memory from offset 0.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        sliding_window = 100
+        num_blocks = 100
+        kv_packing = 2  # bf16
+        sliding_window_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            sliding_window=sliding_window,
+        )
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        num_layers_per_group = 10
+        group_0_layers = [f'layer.{i}' for i in range(num_layers_per_group)]
+        group_1_layers = [
+            f'layer.{i + num_layers_per_group}'
+            for i in range(num_layers_per_group)
+        ]
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=group_0_layers,
+                             kv_cache_spec=full_attn_spec),
+            KVCacheGroupSpec(layer_names=group_1_layers,
+                             kv_cache_spec=sliding_window_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        tensor_size = num_layers_per_group * num_blocks * page_size_bytes
+        layer_stride = num_blocks * page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=tensor_size,
+                layers=group_0_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+            KVCacheTensor(
+                size=tensor_size,
+                layers=group_1_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # Groups alias from offset 0, so only 10 KV caches should be allocated.
+        assert len(self.runner.kv_caches) == num_layers_per_group
+        for i in range(num_layers_per_group):
+            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
+                                                      num_kv_heads * 2 //
+                                                      kv_packing, kv_packing,
+                                                      head_size)
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+            assert self.runner.layer_name_to_kvcache_index[
+                f'layer.{i + num_layers_per_group}'] == i
+
     def test_initialize_kv_cache_capped_by_override(self):
         # create a kv cache config with 1 layer full attention.
         block_size = self.runner.vllm_config.cache_config.block_size

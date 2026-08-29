@@ -793,6 +793,7 @@ class KVCacheManager:
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.layers)}"
                     break
 
+        tensors_by_layout: dict[tuple, KVCacheTensor] = {}
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
                 total_group_page_size = 0
@@ -847,6 +848,33 @@ class KVCacheManager:
                 num_blocks = min(
                     num_blocks,
                     self.runner.cache_config.num_gpu_blocks_override)
+
+            first_spec = layer_name_to_spec[kv_cache_tensor.layers[0]]
+            layout_key = (
+                getattr(kv_cache_tensor, 'offset', 0),
+                getattr(kv_cache_tensor, 'layer_stride', 0),
+                getattr(kv_cache_tensor, 'block_stride', 0),
+                getattr(first_spec, 'num_kv_heads', None),
+                getattr(first_spec, 'head_size', None),
+                getattr(first_spec, 'dtype', None),
+            )
+            if (not duplicate_shared_layers and alloc_per_layer
+                    and layout_key in tensors_by_layout):
+                alias_tensor = tensors_by_layout[layout_key]
+                alias_len = len(alias_tensor.layers)
+                for j, layer_name in enumerate(kv_cache_tensor.layers):
+                    if j < alias_len:
+                        target_layer_name = alias_tensor.layers[j]
+                        self.runner.layer_name_to_kvcache_index[layer_name] = (
+                            self.runner.
+                            layer_name_to_kvcache_index[target_layer_name])
+                    else:
+                        logger.warning(
+                            "Layer %s exceeds aliased tensor layer count %d",
+                            layer_name, alias_len)
+                continue
+
+            tensors_by_layout[layout_key] = kv_cache_tensor
 
             # When compact-mamba sizing succeeded (set by
             # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
