@@ -157,8 +157,6 @@ function updateProvisionGenerator() {
     const containerEl = document.querySelector('#prov-generator .cg-output-container');
     
     if (cmdEl && instEl && data) {
-        containerEl.style.display = 'block';
-
         // Grey out invalid chip counts for this hardware
         if (data.valid_chips) {
             document.querySelectorAll('#prov-generator .cg-btn[data-group="prov_chips"]').forEach(btn => {
@@ -204,6 +202,8 @@ function updateProvisionGenerator() {
                 }
             }
         }
+
+        containerEl.style.display = 'block';
 
         if (hw === 'v6e' || hw === 'v5p') {
             const machineType = hw === 'v6e' ? `ct6e-standard-${chips}t` : `ct5p-hightpu-${chips}t`;
