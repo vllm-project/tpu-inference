@@ -83,18 +83,23 @@ def awq_u32_unpack_u4(awq_u32_packed: jax.Array) -> jax.Array:
     return jnp.reshape(u4, u4.shape[:-2] + (-1, ))
 
 
-def u32_unpack_i4(u32_packed_i4: jax.Array) -> jax.Array:
-    """Unpack i4 tensor that was packed into u32.
+def u32_unpack_i4(u32_packed_i4: jax.Array, axis: int = -1) -> jax.Array:
+    """Unpack i4 tensor that was packed into u32 along `axis`.
 
     Assumes values are stored as unsigned 4-bit integers (0-15) and
     shifts them by -8 to center them into signed int4 (-8 to 7).
     """
+    if axis != -1:
+        u32_packed_i4 = jnp.moveaxis(u32_packed_i4, axis, -1)
     shifts = jnp.arange(8, dtype=jnp.int32) * 4
     unpacked = jnp.bitwise_and(
         jnp.bitwise_right_shift(u32_packed_i4[..., None], shifts), 0xF)
     # Shift by 8 to get centered int4 values
     unpacked = (unpacked - 8).astype(jnp.int4)
-    return jnp.reshape(unpacked, u32_packed_i4.shape[:-1] + (-1, ))
+    unpacked = jnp.reshape(unpacked, u32_packed_i4.shape[:-1] + (-1, ))
+    if axis != -1:
+        unpacked = jnp.moveaxis(unpacked, -1, axis)
+    return unpacked
 
 
 def dequantize_tensor(
@@ -259,6 +264,10 @@ def quantize_tensor(
     scale_inv = jnp.nan_to_num(1 / scale, jnp.inf)
 
     tensor_q = jnp.clip(tensor * scale_inv, dtype_min, dtype_max)
+    if jnp.issubdtype(dtype, jnp.integer):
+        # Round to nearest before the int cast; astype truncates toward zero,
+        # which would bias magnitudes low by up to a full quantization step.
+        tensor_q = jnp.rint(tensor_q)
     tensor_q = tensor_q.reshape(orig_shape)
     tensor_q = tensor_q.astype(dtype)
 
