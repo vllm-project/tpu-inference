@@ -195,6 +195,9 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
 
     # Abstract platform hooks required to instantiate the DeepseekV4Attention
     # ABC; unused on the TPU pass-through path.
+    from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+    backend_cls = DeepseekV4SparseMLABackend
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
@@ -218,7 +221,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 num_kv_heads=1,
                 head_size=align_to(448 + 64 * 2 + 7, 128),
                 dtype=torch.uint8,
-                compress_ratio=self.compress_ratio,
+                tokens_per_state=self.compress_ratio,
                 alignment=None,
             )
         else:
@@ -230,7 +233,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 num_kv_heads=1,
                 head_size=512 * 2,
                 dtype=torch.uint8,
-                compress_ratio=self.compress_ratio,
+                tokens_per_state=self.compress_ratio,
                 alignment=None,
             )
 
