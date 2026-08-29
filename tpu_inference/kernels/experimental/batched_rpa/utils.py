@@ -24,17 +24,18 @@ def align_to(a, b):
     return pl.cdiv(a, b) * b
 
 
-def cp_local_cache_len(global_cache_len, cp_group_size, cp_rank, page_size):
+def cp_local_cache_len(global_kv_cache_len, cp_group_size, cp_rank, page_size):
     """Number of cache tokens owned by this CP rank.
 
-  Currently only support cp_kv_cache_interleave_size = page_size
-  """
+    Currently only support cp_kv_cache_interleave_size = page_size
+    """
     super_page = cp_group_size * page_size
-    full_tokens = (global_cache_len // super_page) * page_size
+    full_tokens = (global_kv_cache_len // super_page) * page_size
     rem_tokens = jnp.maximum(
         0,
-        jnp.minimum(page_size,
-                    (global_cache_len % super_page) - cp_rank * page_size),
+        jnp.minimum(
+            page_size, (global_kv_cache_len % super_page) - cp_rank * page_size
+        ),
     )
     return full_tokens + rem_tokens
 
@@ -48,8 +49,8 @@ def broadcast_minor(src, shape):
     assert src.shape[-1] % num_lanes == 0
     target_minor = align_to(shape[-1], src.shape[-1])
     # no-op concatenation.
-    broadcasted = jnp.tile(src, (target_minor // src.shape[-1], ))
-    return broadcasted[..., :shape[-1]]
+    broadcasted = jnp.tile(src, (target_minor // src.shape[-1],))
+    return broadcasted[..., : shape[-1]]
 
 
 def get_dtype_packing(dtype):
@@ -94,7 +95,7 @@ def strided_store(ref, start, sz, step, val):
     step *= folds
     assert sz % step == 0
     for i in range(folds):
-        val_slice = val[:, i * num_lanes:(i + 1) * num_lanes]
+        val_slice = val[:, i * num_lanes : (i + 1) * num_lanes]
         ref[pl.ds(start + i, sz // step, step)] = val_slice
 
 
@@ -131,12 +132,12 @@ def convert_to_target_bitwidth(val, target_bitwidth: int, kv_dtype: jnp.dtype):
         v = pltpu.bitcast(right, kv_dtype)
         return [(k, v)]
     else:
-        left_out = convert_to_target_bitwidth(left,
-                                              target_bitwidth=target_bitwidth,
-                                              kv_dtype=kv_dtype)
-        right_out = convert_to_target_bitwidth(right,
-                                               target_bitwidth=target_bitwidth,
-                                               kv_dtype=kv_dtype)
+        left_out = convert_to_target_bitwidth(
+            left, target_bitwidth=target_bitwidth, kv_dtype=kv_dtype
+        )
+        right_out = convert_to_target_bitwidth(
+            right, target_bitwidth=target_bitwidth, kv_dtype=kv_dtype
+        )
         return left_out + right_out
 
 
