@@ -47,6 +47,7 @@ def run_jax_gdn_attention(
     d_v: int,
     kernel_size: int,
     mesh: jax.sharding.Mesh,
+    read_state_indices: Optional[jnp.ndarray] = None,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -81,6 +82,12 @@ def run_jax_gdn_attention(
         kernel_size: Convolution kernel size.
         mesh: The device mesh for distributed computation.
         config: Configuration for implementation selection.
+        read_state_indices: Optional tensor of shape `(max_reqs,)` mapping
+          request index to the state index its initial state is read from.
+          Defaults to `state_indices` (read and write the same slot). Mamba
+          prefix caching passes a different slot here, since a request
+          resumes from the cached state block of the last block boundary and
+          checkpoints into the block covering its current position.
 
     Returns:
         A tuple containing:
@@ -89,6 +96,9 @@ def run_jax_gdn_attention(
           - new_recurrent_state: `(num_blocks, n_v, d_k, d_v)`
         - The output tensor of shape `(num_tokens, n_v * d_v)`.
     """
+    if read_state_indices is None:
+        read_state_indices = state_indices
+
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
           ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
@@ -107,6 +117,7 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # state_indices
         P(ShardingAxisName.ATTN_DATA),  # distribution
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
+        P(ShardingAxisName.ATTN_DATA),  # read_state_indices
     )
 
     out_specs = (
@@ -138,7 +149,7 @@ def run_jax_gdn_attention(
         check_vma=False,
     )
 
-    (new_conv_state, new_recurrent_state), output = mapped_fn(
+    mapped_args = (
         j_mixed_qkv,
         j_b,
         j_a,
@@ -152,6 +163,9 @@ def run_jax_gdn_attention(
         state_indices,
         distribution,
         seq_lens,
+        read_state_indices,
     )
+
+    (new_conv_state, new_recurrent_state), output = mapped_fn(*mapped_args)
 
     return (new_conv_state, new_recurrent_state), output

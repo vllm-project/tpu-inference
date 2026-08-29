@@ -318,29 +318,36 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
-        # The TPU hybrid (mamba/linear-attention) path does not support
-        # reusing cached prefixes yet — cache hits garble the output. Keep
-        # prefix caching disabled for hybrid models until the GDN/mamba
-        # kernels handle cached prefixes.
-        if (cache_config and cache_config.enable_prefix_caching
-                and vllm_config.model_config is not None
-                and getattr(vllm_config.model_config, "is_hybrid", False)):
-            logger.warning(
-                "[tpu_platform] Disabling prefix caching: hybrid "
-                "(mamba/linear-attention) models do not support cached "
-                "prefixes on TPU yet (accuracy garbles on cache hits).")
-            cache_config.enable_prefix_caching = False
-            # Reset the mamba cache fields derived from the enabled state to
-            # their prefix-caching-off defaults; stale values trip vLLM's
-            # "--mamba-block-size can only be set with
-            # --enable-prefix-caching" validator.
-            if getattr(cache_config, "mamba_cache_mode", "none") != "none":
+        # Hybrid (mamba/linear-attention) models cannot use prefix caching with
+        # speculative decoding because verify windows need consecutive state slots.
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "align"):
+            if vllm_config.speculative_config is not None:
+                logger.warning(
+                    "[tpu_platform] Disabling prefix caching: hybrid "
+                    "(mamba/linear-attention) models do not support cached "
+                    "prefixes with speculative decoding on TPU.")
+                cache_config.enable_prefix_caching = False
                 cache_config.mamba_cache_mode = "none"
-            if (getattr(cache_config, "mamba_block_size", None) is not None
-                    and not getattr(cache_config,
+                if (getattr(cache_config, "mamba_block_size", None) is not None
+                        and
+                        not getattr(cache_config,
                                     "user_specified_mamba_block_size", False)):
-                cache_config.mamba_block_size = (
-                    vllm_config.model_config.max_model_len)
+                    cache_config.mamba_block_size = (
+                        vllm_config.model_config.max_model_len)
+            elif (cache_config.prefix_match_unit is not None and
+                  cache_config.prefix_match_unit < cache_config.block_size):
+                # Mamba prefix caching asks the worker to copy state between
+                # blocks when a request partially hits a cached block, which
+                # only arises when block hashes are finer than the block size
+                # (DCP, or an explicit --prefix-match-unit). Nothing on the TPU
+                # side performs those copies, and skipping them would resume a
+                # request from an unwritten block.
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
 
         # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
         # CPU processor and instead normalizes inside the vLLM model's vision
@@ -469,12 +476,35 @@ class TpuPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
+        cache_config = vllm_config.cache_config
         logger.info(f"Using cache_config.block_size: "
-                    f"{vllm_config.cache_config.block_size} "
+                    f"{cache_config.block_size} "
                     f"instead of overriding with _align_hybrid_block_size() "
                     f"since we set mamba_page_size_padded in "
                     f"kv_cache_manager.py")
-        pass
+
+        # `_align_hybrid_block_size` is where upstream ties the mamba block
+        # size to the (now final) attention block size in align mode. Skipping
+        # that function leaves `mamba_block_size` at whatever it was when
+        # `MambaModelConfig` ran, which is the pre-TPU default rather than the
+        # block size we settled on. The two must agree: a mamba group whose
+        # block size divides the attention one drives `hash_block_size` below
+        # the block size, which turns on partial prefix-cache hits and their
+        # copy-on-write state copies (unimplemented on TPU).
+        if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+            if cache_config.mamba_block_size != cache_config.block_size:
+                logger.info(
+                    "Setting mamba_block_size to %d to match the attention "
+                    "block size (was %d) for mamba prefix caching.",
+                    cache_config.block_size, cache_config.mamba_block_size)
+                cache_config.mamba_block_size = cache_config.block_size
+            if (cache_config.prefix_match_unit is not None and
+                    cache_config.prefix_match_unit < cache_config.block_size):
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
 
     @classmethod
     def is_pin_memory_available(cls):

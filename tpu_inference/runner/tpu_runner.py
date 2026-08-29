@@ -3026,7 +3026,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # pure-attention models, leaving the field None keeps AttentionMetadata
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
-        if self.kv_cache_config.has_mamba_layers:
+        # In align mode (prefix caching), mamba state indices are derived on-device
+        # from the block tables, so mamba_state_indices is None.
+        if (self.kv_cache_config.has_mamba_layers and getattr(
+                self.cache_config, "mamba_cache_mode", "none") != "align"):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.
