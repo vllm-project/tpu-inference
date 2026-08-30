@@ -27,7 +27,6 @@ from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.attention import (DeepseekV4Indexer,
                                                DeepseekV4IndexerCache)
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 # =====================================================================
 # IMPORT TPU CUSTOM OPS TO TRIGGER vLLM @register_oot DECORATORS
@@ -41,6 +40,7 @@ from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_c
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+from tpu_inference.vllm_compat import make_mla_attention_spec
 
 logger = init_logger(__name__)
 
@@ -91,7 +91,7 @@ class VllmDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         # 128 fp8, 1 e8m0 scale packed as uint8
         # TODO: consider put the scale as a separate Array / Tensor
         # to reduce large space waste due to padding.
-        return MLAAttentionSpec(
+        return make_mla_attention_spec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=align_to(128 + 1, 128),

@@ -43,8 +43,7 @@ from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.kv_cache_interface import (KVCacheSpec, MLAAttentionSpec,
-                                        SlidingWindowMLASpec)
+from vllm.v1.kv_cache_interface import KVCacheSpec, SlidingWindowMLASpec
 
 from tpu_inference.kernels.experimental.deepseek_v4 import rope as rope_kernel
 from tpu_inference.kernels.experimental.deepseek_v4.core_attention.mla import \
@@ -63,6 +62,7 @@ from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_i
 from tpu_inference.logger import init_logger
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     get_vllm_model_wrapper_context
+from tpu_inference.vllm_compat import make_mla_attention_spec
 
 logger = init_logger(__name__)
 
@@ -213,7 +213,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             # In DSV4 FP8 format
             # 448 fp8, 64 bf16, 7 fp8 scales, 7 e8m0 scale for 448 fp8 (block size 64)
             # packed as uint8
-            return MLAAttentionSpec(
+            return make_mla_attention_spec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=align_to(448 + 64 * 2 + 7, 128),
@@ -225,7 +225,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             # For HCA, we store raw bf16 values in the KV cache to avoid
             # expernsive DSV4 FP8 quantization and dequantization. The
             # size of HCA cache only take very small memory overall, so it's ok.
-            return MLAAttentionSpec(
+            return make_mla_attention_spec(
                 block_size=vllm_config.cache_config.block_size,
                 num_kv_heads=1,
                 head_size=512 * 2,

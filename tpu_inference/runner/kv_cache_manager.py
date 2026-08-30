@@ -30,8 +30,21 @@ from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
-                                              set_kv_cache_layout)
+
+try:
+    # Older vLLM (up to and including the LKG pin) keeps the KV cache layout
+    # as process-global state in attention.backends.utils.
+    from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
+                                                  set_kv_cache_layout)
+    record_kv_cache_layout = None
+except ImportError:
+    # vLLM commit 8bdc70ec7b ("Standardize KV cache layout") removed the
+    # global getter/setter; the resolved layout now lives on
+    # cache_config.kv_cache_layout as a KVCacheLayout enum name, with the
+    # legacy "NHD"/"HND" names kept as aliases for "LBNHC"/"LBHNC".
+    from vllm.v1.attention.backends.utils import record_kv_cache_layout
+    get_kv_cache_layout = None
+    set_kv_cache_layout = None
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
@@ -39,6 +52,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
+from tpu_inference import vllm_compat
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -61,6 +75,10 @@ logger = init_logger(__name__)
 # default layout (order) used by kv cache manager
 # N=num_blocks, H=num_heads and D=head_size
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
+
+# Newer vLLM stores the layout under its KVCacheLayout enum name; map back to
+# the legacy names the rest of tpu-inference compares against.
+_LEGACY_KV_CACHE_LAYOUT_NAMES = {"LBNHC": "NHD", "LBHNC": "HND"}
 
 
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
@@ -693,7 +711,10 @@ class KVCacheManager:
 
     def get_kv_cache_layout(self):
         # return the layout (mostly "NHD" or "HND") of kv cache
-        return get_kv_cache_layout()
+        if get_kv_cache_layout is not None:
+            return get_kv_cache_layout()
+        layout = self.runner.vllm_config.cache_config.kv_cache_layout
+        return _LEGACY_KV_CACHE_LAYOUT_NAMES.get(layout, layout)
 
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
@@ -746,9 +767,19 @@ class KVCacheManager:
                 for layer_name in group.layer_names:
                     layer_name_to_spec[layer_name] = group.kv_cache_spec
 
+        # Newer vLLM describes the tensors as strided spans over a group's
+        # layers; regroup them into the per-aliasing-set (`shared_by`) shape
+        # the code below is written against.
+        kv_cache_tensors = vllm_compat.legacy_kv_cache_tensors(
+            kv_cache_config, layer_name_to_spec)
+
         # set the kv cache layout which is needed by kv connectors
         # NOTE(jcgu): please update the default value when the order changes
-        set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
+        if set_kv_cache_layout is not None:
+            set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
+        else:
+            record_kv_cache_layout(self.runner.vllm_config.cache_config,
+                                   DEFAULT_KV_CACHE_LAYOUT)
         # verify kv cache layout is matched between the cache manager and
         # the kv connector (if configured)
         _required_kv_layout = get_kv_connector_cache_layout()
@@ -770,7 +801,7 @@ class KVCacheManager:
         if is_ds_v4(self.runner.vllm_config):
             # DSv4's packed KV cache layout needs its own array/index plan;
             # see `_initialize_ds_v4_kv_cache` for the invariants.
-            self._initialize_ds_v4_kv_cache(kv_cache_config,
+            self._initialize_ds_v4_kv_cache(kv_cache_config, kv_cache_tensors,
                                             layer_name_to_spec, kv_caches,
                                             num_blocks_list, metadata)
             self._log_kv_cache_init(kv_cache_config,
@@ -785,7 +816,7 @@ class KVCacheManager:
         # shared layers
         duplicate_shared_layers = False
         if not duplicate_shared_layers:
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            for kv_cache_tensor in kv_cache_tensors:
                 if any(
                         isinstance(layer_name_to_spec[layer_name], MambaSpec)
                         for layer_name in kv_cache_tensor.shared_by):
@@ -797,7 +828,7 @@ class KVCacheManager:
                     )
                     duplicate_shared_layers = True
                     non_mtp_tensors = [
-                        t for t in kv_cache_config.kv_cache_tensors
+                        t for t in kv_cache_tensors
                         if not any("mtp" in name for name in t.shared_by)
                     ]
                     if non_mtp_tensors:
@@ -810,7 +841,7 @@ class KVCacheManager:
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
                     break
 
-        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+        for i, kv_cache_tensor in enumerate(kv_cache_tensors):
             if duplicate_shared_layers:
                 total_group_page_size = 0
                 for name in kv_cache_tensor.shared_by:
@@ -924,7 +955,8 @@ class KVCacheManager:
                     # is True, we should init a new kv cache for each layer in shared_by
                     if j == 0 or duplicate_shared_layers:
                         # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                        block_size = layer_spec.storage_block_size
+                        block_size = vllm_compat.get_storage_block_size(
+                            layer_spec)
 
                         kv_cache = create_kv_caches(
                             num_blocks=num_blocks,
@@ -1025,7 +1057,7 @@ class KVCacheManager:
         return base
 
     def _initialize_ds_v4_kv_cache(
-            self, kv_cache_config: KVCacheConfig,
+            self, kv_cache_config: KVCacheConfig, kv_cache_tensors: List,
             layer_name_to_spec: dict[str, KVCacheSpec],
             kv_caches: List[jax.Array], num_blocks_list: List[int],
             metadata: dict[str, KVCacheMetadata]) -> None:
@@ -1075,7 +1107,7 @@ class KVCacheManager:
         # All packed tensors describe the same slab, so they must agree on
         # the block count.
         num_blocks_candidates = set()
-        for tensor in kv_cache_config.kv_cache_tensors:
+        for tensor in kv_cache_tensors:
             if tensor.block_stride:
                 if tensor.size % tensor.block_stride:
                     raise ValueError(
@@ -1096,7 +1128,7 @@ class KVCacheManager:
                 "[kv-cache] DSv4 KVCacheTensors disagree on num_blocks: "
                 f"{sorted(num_blocks_candidates)}; expected one shared block "
                 "count across the packed slab. tensors="
-                f"{kv_cache_config.kv_cache_tensors}")
+                f"{kv_cache_tensors}")
         num_blocks = num_blocks_candidates.pop()
 
         # Default KV cache is sharded over (BATCH=(dp, attn_dp)); num_blocks
@@ -1164,8 +1196,9 @@ class KVCacheManager:
         hca_layer_names: set[str] = set()
         for layer_name in mla_layer_names:
             spec = layer_name_to_spec[layer_name]
-            page_size = spec.storage_block_size * common_utils.get_mesh_shape_product(
-                self.runner.mesh, ShardingAxisName.KV_CONTEXT)
+            page_size = vllm_compat.get_storage_block_size(
+                spec) * common_utils.get_mesh_shape_product(
+                    self.runner.mesh, ShardingAxisName.KV_CONTEXT)
             if layer_name.endswith(self._DS_V4_INDEXER_CACHE_SUFFIX):
                 # Lightning indexer: 128 fp8 values + 1 e8m0 scale per token,
                 # padded to a 256B record; 4 tokens per row.
@@ -1173,7 +1206,8 @@ class KVCacheManager:
                          self._DS_V4_KV_PACKING, 256)
                 _create_cache(shape, layer_name)
                 layer_to_index[layer_name] = len(kv_caches) - 1
-            elif spec.compress_ratio == self._DS_V4_CSA_COMPRESS_RATIO:
+            elif vllm_compat.get_compress_ratio(
+                    spec) == self._DS_V4_CSA_COMPRESS_RATIO:
                 # CSA is split across two arrays, for nope and rope respectively.
                 shape = (num_blocks, page_size, self._DS_V4_KV_PACKING, 128)
                 _create_cache(shape, layer_name)

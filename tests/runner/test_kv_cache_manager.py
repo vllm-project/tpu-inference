@@ -26,9 +26,8 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheTensor,
-                                        MambaSpec, MLAAttentionSpec,
-                                        SlidingWindowMLASpec,
+                                        KVCacheGroupSpec, MambaSpec,
+                                        MLAAttentionSpec, SlidingWindowMLASpec,
                                         SlidingWindowSpec,
                                         UniformTypeKVCacheSpecs)
 from vllm.v1.request import Request
@@ -38,6 +37,8 @@ from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
                                            get_attention_page_size_bytes)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.vllm_compat import (make_kv_cache_tensor,
+                                       make_mla_attention_spec)
 
 
 class TestKVCacheManager:
@@ -102,7 +103,7 @@ class TestKVCacheManager:
                              kv_cache_spec=mamba_spec),
         ]
         kv_cache_tensors = [
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=num_blocks * page_size_bytes,
                 shared_by=layer_names,
             )
@@ -566,7 +567,7 @@ class TestKVCacheManager:
         page_size_bytes = full_attn_spec.page_size_bytes
         for i in range(10):
             kv_cache_tensors.append(
-                KVCacheTensor(
+                make_kv_cache_tensor(
                     size=num_blocks * page_size_bytes,
                     shared_by=[f'layer.{i}', f'layer.{i+10}'],
                 ))
@@ -611,7 +612,7 @@ class TestKVCacheManager:
         ]
         page_size_bytes = full_attn_spec.page_size_bytes
         kv_cache_tensors = [
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=num_blocks * page_size_bytes,
                 shared_by=['layer.0'],
             )
@@ -773,7 +774,7 @@ class TestKVCacheManager:
         ]
         page_size_bytes = full_attn_spec.page_size_bytes
         kv_cache_tensors = [
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=num_blocks * page_size_bytes,
                 shared_by=[f'layer.{i}'],
             ) for i in range(10)
@@ -839,7 +840,7 @@ class TestKVCacheManager:
         ]
         page_size_bytes = full_attn_spec.page_size_bytes
         kv_cache_tensors = [
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=num_blocks * page_size_bytes,
                 shared_by=[f'layer.{i}'],
             ) for i in range(10)
@@ -982,7 +983,7 @@ class TestKVCacheManager:
 
         page_size_bytes = full_attn_spec.page_size_bytes
         kv_cache_tensors = [
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=num_blocks * page_size_bytes,
                 shared_by=layer_names,
             )
@@ -1341,7 +1342,7 @@ class TestKVCacheManager:
             KVCacheGroupSpec(layer_names=['layer.1'], kv_cache_spec=attn_spec),
         ]
         kv_cache_tensors = [
-            KVCacheTensor(
+            make_kv_cache_tensor(
                 size=tensor_size,
                 shared_by=layer_names,
             )
@@ -1448,7 +1449,7 @@ class TestKVCacheManager:
                              kv_cache_spec=mamba_spec),
         ]
         kv_cache_tensors = [
-            KVCacheTensor(size=tensor_size, shared_by=list(names))
+            make_kv_cache_tensor(size=tensor_size, shared_by=list(names))
             for names in layer_names_per_tensor
         ]
         kv_cache_config = KVCacheConfig(
@@ -1489,21 +1490,21 @@ class TestKVCacheManager:
         layers (3+); every layer has a swa_cache. Specs mirror what the TPU
         DSv4 classes register (block_size 1024, byte-addressed uint8
         latents, f32 compressor state)."""
-        main_spec = MLAAttentionSpec(block_size=1024,
-                                     num_kv_heads=1,
-                                     head_size=640,
-                                     dtype=torch.uint8,
-                                     compress_ratio=4)
-        idx_spec = MLAAttentionSpec(block_size=1024,
-                                    num_kv_heads=1,
-                                    head_size=256,
-                                    dtype=torch.uint8,
-                                    compress_ratio=4)
-        hca_spec = MLAAttentionSpec(block_size=1024,
-                                    num_kv_heads=1,
-                                    head_size=1024,
-                                    dtype=torch.uint8,
-                                    compress_ratio=128)
+        main_spec = make_mla_attention_spec(block_size=1024,
+                                            num_kv_heads=1,
+                                            head_size=640,
+                                            dtype=torch.uint8,
+                                            compress_ratio=4)
+        idx_spec = make_mla_attention_spec(block_size=1024,
+                                           num_kv_heads=1,
+                                           head_size=256,
+                                           dtype=torch.uint8,
+                                           compress_ratio=4)
+        hca_spec = make_mla_attention_spec(block_size=1024,
+                                           num_kv_heads=1,
+                                           head_size=1024,
+                                           dtype=torch.uint8,
+                                           compress_ratio=128)
         swa_spec = SlidingWindowMLASpec(block_size=128,
                                         num_kv_heads=1,
                                         head_size=1024,
@@ -1581,10 +1582,10 @@ class TestKVCacheManager:
                 offset += page_bytes[name]
             block_stride = max(block_stride, offset)
         return [
-            KVCacheTensor(size=block_stride * num_blocks,
-                          shared_by=layers_by_offset[offset],
-                          offset=offset,
-                          block_stride=block_stride)
+            make_kv_cache_tensor(size=block_stride * num_blocks,
+                                 shared_by=layers_by_offset[offset],
+                                 offset=offset,
+                                 block_stride=block_stride)
             for offset in sorted(layers_by_offset)
         ]
 
@@ -1713,9 +1714,9 @@ class TestKVCacheManager:
         block_stride = sum(page_size * len(slots)
                            for page_size, slots in buckets.items())
         tensors = [
-            KVCacheTensor(size=block_stride * num_blocks,
-                          shared_by=slot,
-                          block_stride=block_stride)
+            make_kv_cache_tensor(size=block_stride * num_blocks,
+                                 shared_by=slot,
+                                 block_stride=block_stride)
             for slots in buckets.values() for slot in slots
         ]
 

@@ -207,7 +207,17 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             "VllmUnquantizedLinearMethod")
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
-        super().__init__(linear_config)
+        if "__init__" in vllm_linear.UnquantizedLinearMethod.__dict__:
+            # Newer vLLM gives UnquantizedLinearMethod its own no-argument
+            # __init__ that does not chain along the MRO, so run it and the
+            # shared TPU init separately.
+            vllm_linear.UnquantizedLinearMethod.__init__(self)
+            common_unquantized.UnquantizedLinearMethod.__init__(
+                self, linear_config)
+        else:
+            # Older vLLM defines no __init__ there, so super() lands directly
+            # on the shared TPU class.
+            super().__init__(linear_config)
 
     def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
                               args, kwargs):
