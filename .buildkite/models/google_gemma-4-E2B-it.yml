@@ -16,6 +16,17 @@
 # gemma-4-it is BOS-sensitive — raw prompts produce token-repetition
 # garbage on both GPU vllm-pytorch and JAX (model property, not a
 # correctness bug in our path).
+#
+# MODEL_IMPL_TYPE is pinned to flax_nnx on every TPU step: only the JAX
+# implementation is enabled for the gemma-4 E-series. The vllm/torchax
+# path is not supported — vLLM's Gemma4ForConditionalGeneration caches
+# per-layer embeddings in a plain-attribute tensor via in-place copy_()
+# (gemma4_mm.py embed_input_ids), which torchax cannot dispatch during
+# the JAX precompile (AttributeError: 'Tensor' object has no attribute
+# '_elem'), and the torchax attention backend does not plumb
+# update_kv_cache=False for the E-series KV-shared layers. Without the
+# pin, the nightly MODEL_IMPL_TYPE=vllm variant inherits the build-level
+# env and fails.
 
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
@@ -23,6 +34,8 @@ steps:
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
+    env:
+      MODEL_IMPL_TYPE: "flax_nnx"
     # Default RPA v3 is the production attention path for E2B (fully
     # deterministic gsm8k across runs). To exercise the experimental batched
     # RPA kernel locally or on a dev pipeline, set:
@@ -56,6 +69,7 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
     env:
+      MODEL_IMPL_TYPE: "flax_nnx"
       TEST_MODEL: google/gemma-4-E2B-it
       TENSOR_PARALLEL_SIZE: 1
       # USE_CHAT_TEMPLATE=1 routes lm_eval through apply_chat_template +
@@ -90,6 +104,7 @@ steps:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
     soft_fail: true
     env:
+      MODEL_IMPL_TYPE: "flax_nnx"
       TEST_MODEL: google/gemma-4-E2B-it
       TENSOR_PARALLEL_SIZE: 1
       # BENCH_DATASET unset -> mm_bench_recipe.sh defaults to the random-mm
