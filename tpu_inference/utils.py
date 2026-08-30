@@ -144,10 +144,16 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                     "Failed to get memory stats for device %s: %s. ", device,
                     e)
     else:
+        import jax as _jax
+        _pid = _jax.process_index()
         for device in devices:
+            if getattr(device, "process_index", _pid) != _pid:
+                continue
             hbm_used = device.memory_stats()["bytes_in_use"]
             hbm_limit = device.memory_stats()["bytes_limit"]
             usage.append((hbm_used, hbm_limit))
+        if usage and len(usage) < len(devices):
+            usage = [usage[0]] * len(devices)
 
     return usage
 
