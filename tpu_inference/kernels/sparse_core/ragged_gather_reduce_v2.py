@@ -23,6 +23,7 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
 from tpu_inference.kernels.sparse_core import core_map_helper
+from tpu_inference.layers.common.sort import can_pack_int32, packed_argsort
 
 
 @dataclasses.dataclass(frozen=True)
@@ -223,10 +224,20 @@ def _preprocess(
 
     # Stable sort of a boolean key is a stable partition: valid rows keep their
     # relative order and move ahead of the invalid ones.
-    sorted_by_validity = jnp.argsort(~valid_rows_mask_2d,
-                                     descending=False,
-                                     stable=True,
-                                     axis=-1)
+    if can_pack_int32(n=valid_rows_mask_2d.shape[-1], max_key=1):
+        # Sort by the packed [key | index] rather than argsorting, when the
+        # two widths together fit in an int32. Keys need to be an integer
+        # rather than the bool to be packed into a single int32 value.
+        invalid_rows_mask_2d = (~valid_rows_mask_2d).astype(jnp.int32)
+        sorted_by_validity = packed_argsort(
+            invalid_rows_mask_2d,
+            max_key=1,  # boolean 0 or 1
+            axis=-1)
+    else:
+        sorted_by_validity = jnp.argsort(~valid_rows_mask_2d,
+                                         descending=False,
+                                         stable=True,
+                                         axis=-1)
     sorted_by_validity += (jnp.arange(num_row_partitions)[:, None] *
                            row_partition_size)
 
