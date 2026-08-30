@@ -668,6 +668,72 @@ class TestKVCacheManager:
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + num_layers_per_group}'] == i
 
+    def test_initialize_kv_cache_aliased_groups_unequal_layers(self):
+        # When groups have unequal number of layers (e.g. Gemma 3 with 9 sliding
+        # window layers and 10 full attention layers), the shared layout slots
+        # must accommodate the maximum number of layers without dropping excess layers.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        sliding_window = 100
+        num_blocks = 100
+        kv_packing = 2  # bf16
+        sliding_window_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            sliding_window=sliding_window,
+        )
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        group_0_layers = [f'layer.{i}' for i in range(9)]
+        group_1_layers = [f'layer.{i}' for i in range(9, 19)]  # 10 layers
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=group_0_layers,
+                             kv_cache_spec=sliding_window_spec),
+            KVCacheGroupSpec(layer_names=group_1_layers,
+                             kv_cache_spec=full_attn_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        layer_stride = num_blocks * page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=10 * num_blocks * page_size_bytes,
+                layers=group_0_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+            KVCacheTensor(
+                size=10 * num_blocks * page_size_bytes,
+                layers=group_1_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # 10 total caches should be allocated (9 from group 0 + 1 extra for the 10th layer of group 1)
+        assert len(self.runner.kv_caches) == 10
+        for i in range(9):
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+            assert self.runner.layer_name_to_kvcache_index[
+                f'layer.{i + 9}'] == i
+        # The 10th layer of group 1 must have its own cache allocated at index 9
+        assert self.runner.layer_name_to_kvcache_index['layer.18'] == 9
+
     def test_initialize_kv_cache_capped_by_override(self):
         # create a kv cache config with 1 layer full attention.
         block_size = self.runner.vllm_config.cache_config.block_size

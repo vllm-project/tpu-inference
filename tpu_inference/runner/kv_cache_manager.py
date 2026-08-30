@@ -793,7 +793,7 @@ class KVCacheManager:
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.layers)}"
                     break
 
-        tensors_by_layout: dict[tuple, KVCacheTensor] = {}
+        layout_cache_indices: dict[tuple, list[int]] = {}
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
                 total_group_page_size = 0
@@ -860,23 +860,6 @@ class KVCacheManager:
                 getattr(first_spec, 'head_size', None),
                 getattr(first_spec, 'dtype', None),
             )
-            if (not duplicate_shared_layers and alloc_per_layer
-                    and layout_key in tensors_by_layout):
-                alias_tensor = tensors_by_layout[layout_key]
-                alias_len = len(alias_tensor.layers)
-                for j, layer_name in enumerate(kv_cache_tensor.layers):
-                    if j < alias_len:
-                        target_layer_name = alias_tensor.layers[j]
-                        self.runner.layer_name_to_kvcache_index[layer_name] = (
-                            self.runner.
-                            layer_name_to_kvcache_index[target_layer_name])
-                    else:
-                        logger.warning(
-                            "Layer %s exceeds aliased tensor layer count %d",
-                            layer_name, alias_len)
-                continue
-
-            tensors_by_layout[layout_key] = kv_cache_tensor
 
             # When compact-mamba sizing succeeded (set by
             # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
@@ -931,8 +914,23 @@ class KVCacheManager:
                             s.sharding for s in mamba_states)
 
                     kv_caches.append(tuple(mamba_states))
-                else:
                     if j == 0 or alloc_per_layer:
+                        num_blocks_list.append(mamba_num_blocks)
+                        self.runner.layer_name_to_kvcache_index[
+                            layer_name] = len(kv_caches) - 1
+                    else:
+                        first_layer_name = kv_cache_tensor.layers[0]
+                        self.runner.layer_name_to_kvcache_index[
+                            layer_name] = self.runner.layer_name_to_kvcache_index[
+                                first_layer_name]
+                else:
+                    if (not duplicate_shared_layers and alloc_per_layer
+                            and layout_key in layout_cache_indices
+                            and j < len(layout_cache_indices[layout_key])):
+                        cache_idx = layout_cache_indices[layout_key][j]
+                        self.runner.layer_name_to_kvcache_index[
+                            layer_name] = cache_idx
+                    elif j == 0 or alloc_per_layer:
                         block_size = layer_spec.num_states
 
                         kv_cache = create_kv_caches(
@@ -955,16 +953,18 @@ class KVCacheManager:
                             metadata[
                                 "regular_attn"].sharding = kv_cache.sharding
 
-                if j == 0 or alloc_per_layer:
-                    num_blocks_list.append(mamba_num_blocks if isinstance(
-                        layer_spec, MambaSpec) else num_blocks)
-                    self.runner.layer_name_to_kvcache_index[layer_name] = len(
-                        kv_caches) - 1
-                else:
-                    first_layer_name = kv_cache_tensor.layers[0]
-                    self.runner.layer_name_to_kvcache_index[
-                        layer_name] = self.runner.layer_name_to_kvcache_index[
-                            first_layer_name]
+                        num_blocks_list.append(num_blocks)
+                        cache_idx = len(kv_caches) - 1
+                        if not duplicate_shared_layers and alloc_per_layer:
+                            layout_cache_indices.setdefault(
+                                layout_key, []).append(cache_idx)
+                        self.runner.layer_name_to_kvcache_index[
+                            layer_name] = cache_idx
+                    else:
+                        first_layer_name = kv_cache_tensor.layers[0]
+                        self.runner.layer_name_to_kvcache_index[
+                            layer_name] = self.runner.layer_name_to_kvcache_index[
+                                first_layer_name]
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
             ):
