@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
+    GANG_SYMMETRIC_DISPATCH: bool = False
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
@@ -329,6 +330,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # separated by comma. The max_reqs will alwasy be added to the buckets
     "ATTN_CUSTOM_NUM_REQS_BUCKETS":
     env_int_list("ATTN_CUSTOM_NUM_REQS_BUCKETS"),
+    # Gang-symmetric dispatch (for bare-SPMD gangs where one logical batch is
+    # split across many independent runner processes that share a single libtpu
+    # coordinator domain, e.g. per-process-local rollout engines in an RL loop).
+    # When true, every runner emits a data-INDEPENDENT device-Execute sequence:
+    # the token/req padding buckets collapse to a single max bucket and the
+    # per-step decode count is pinned to static_max_decode_steps. This keeps the
+    # HLO identical across processes at every dispatch ordinal so the gang never
+    # desyncs into an ICI-collective hang. Costs compilation flexibility (one
+    # shape) and forgoes the block-boundary decode clamp, so the caller must
+    # guarantee max_model_len >= max_prompt + static_max_decode_steps. Default
+    # false = stock per-process data-dependent dispatch.
+    "GANG_SYMMETRIC_DISPATCH":
+    env_bool("GANG_SYMMETRIC_DISPATCH"),
     # dictates whether to layout q-proj as NDH (q-heads, model dim, head dim)
     # or DNH (model dim, q-heads, head dim), which is the default (False)
     "LAYOUT_Q_PROJ_AS_NDH":
