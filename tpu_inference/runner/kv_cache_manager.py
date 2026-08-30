@@ -829,12 +829,14 @@ class KVCacheManager:
                 if (num_layers > 1 and kv_cache_config.num_blocks > 0
                         and kv_cache_tensor.size >= num_layers *
                         page_size_bytes * kv_cache_config.num_blocks):
-                    num_blocks = kv_cache_tensor.size // (num_layers *
-                                                          page_size_bytes)
+                    num_blocks = kv_cache_config.num_blocks
                     alloc_per_layer = True
                 else:
-                    assert kv_cache_tensor.size % page_size_bytes == 0
-                    num_blocks = kv_cache_tensor.size // page_size_bytes
+                    if kv_cache_config.num_blocks > 0:
+                        num_blocks = kv_cache_config.num_blocks
+                    else:
+                        assert kv_cache_tensor.size % page_size_bytes == 0
+                        num_blocks = kv_cache_tensor.size // page_size_bytes
                     alloc_per_layer = False
 
             # Default KV cache is sharded over (BATCH=(dp, attn_dp))
