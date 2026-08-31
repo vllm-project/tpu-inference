@@ -255,9 +255,10 @@ class StepMetadataComputer:
 
     def fetch_step_metadata(self, step, schedule_ref, kv_in_vref,
                             extra_scratches, chunk_start, *, cu_q_lens_ref,
-                            q_offsets_ref, kv_cache_lens_ref,
-                            kv_new_lens_ref) -> StepMetadata:
+                            q_offsets_ref, kv_cache_lens_ref, kv_new_lens_ref,
+                            kv_window_ref, chunk_num_steps) -> StepMetadata:
         del kv_in_vref, extra_scratches, chunk_start
+        del kv_window_ref, chunk_num_steps
         return fetch_step_metadata(
             step,
             schedule_ref,
@@ -267,6 +268,13 @@ class StepMetadataComputer:
             kv_new_lens_ref,
             cfgs=self.cfgs,
         )
+
+    def finalize(self):
+        """Runs at the end of rpa_body, after compute and output writeback.
+
+        The ring waits its in-flight sends here, while they are covered by
+        the step's compute time and before the next iteration's copy_in
+        phase can issue a local fetch into their source buffers."""
 
 
 def generate_mask(
@@ -342,11 +350,13 @@ def rpa_body(
     cfgs: configs.RpaConfigs,
     step_metadata_computer: StepMetadataComputer,
     chunk_start: jax.Array | int = 0,
+    kv_window_ref: jax.Ref | None = None,
+    chunk_num_steps: jax.Array | int | None = None,
 ):
     step = pl.program_id(0)
 
     # Step 1: Fetch metadata (a computer like the ring's may also rewrite the
-    # lane state in kv_in_vref; see StepMetadataComputer).
+    # lane state in the KV window; see StepMetadataComputer).
     step_meta = step_metadata_computer.fetch_step_metadata(
         step,
         schedule_ref,
@@ -357,6 +367,8 @@ def rpa_body(
         q_offsets_ref=q_offsets_ref,
         kv_cache_lens_ref=kv_cache_lens_ref,
         kv_new_lens_ref=kv_new_lens_ref,
+        kv_window_ref=kv_window_ref,
+        chunk_num_steps=chunk_num_steps,
     )
 
     # Step 2: Fetch inputs.
@@ -549,6 +561,9 @@ def rpa_body(
         lse_o_vref,
         cfgs=cfgs,
     )
+
+    # Step 5: End-of-step bookkeeping (the ring waits its sends here).
+    step_metadata_computer.finalize()
 
 
 # Define main kernel.
@@ -833,6 +848,8 @@ def rpa_kernel(
                         kv_new_lens_ref=kv_new_lens_ref,
                         step_metadata_computer=step_metadata_computer,
                         chunk_start=aligned_start_step,
+                        kv_window_ref=kv_alloc.window_ref,
+                        chunk_num_steps=num_steps + prefix_steps,
                     ),
                     grid=(num_steps + prefix_steps, ),
                     in_specs=(q_alloc.spec, kv_cache_alloc.spec),

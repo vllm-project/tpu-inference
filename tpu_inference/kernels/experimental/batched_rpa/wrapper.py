@@ -350,7 +350,11 @@ def calculate_block_sizes(
 
     def ring_vmem_usage(batch_size: int, n_buffer: int, bq_sz: int,
                         bkv_sz: int) -> int:
-        """calculate_vmem_usage plus the ring's two lane-sized slots."""
+        """calculate_vmem_usage plus two lane-sized slots of headroom.
+
+        The ring rotates blocks directly between the pipeline's window
+        buffers and no longer allocates private slots; the term is kept as
+        headroom until the model is refit for the direct protocol."""
         kv_buf = bkv_sz * aligned_num_kv_heads_x2 * aligned_head_dim * kv_bytes
         ring_slots = 2 * kv_buf
         return calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz) + int(
