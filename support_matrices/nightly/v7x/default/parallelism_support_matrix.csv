@@ -3,5 +3,5 @@ Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host Corre
 "DP",❌ Failing,❓ Untested,❓ Untested,❓ Untested
 "EP",❌ Failing,❓ Untested,❓ Untested,❓ Untested
 "PP",❌ Failing,❓ Untested,❌ Failing,❓ Untested
-"SP",❌ Failing,❓ Untested,❓ Untested,❓ Untested
+"SP",❓ Untested,❓ Untested,❓ Untested,❓ Untested
 "TP",❌ Failing,❓ Untested,❓ Untested,❓ Untested

@@ -1,4 +1,5 @@
 Feature,CorrectnessTest,PerformanceTest
+"Collective Communication Matmul",❌ Failing,❓ Untested
 "MLA",❓ Untested,❓ Untested
 "MoE",❓ Untested,❓ Untested
 "Quantized Attention",❓ Untested,❓ Untested
