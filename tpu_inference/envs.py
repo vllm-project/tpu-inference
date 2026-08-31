@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     FUSED_EP_MOE_V2_SHARDED_PLAN: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
+    VLLM_INCREMENTAL_MXFP4_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
     TPU_MESH_ATTN_DP_RING: bool = False
     VERIFY_WEIGHTS: bool = False
@@ -681,6 +682,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("TPU_MOE_LOWTOK", default=False),
     "TPU_MOE_LOWTOK_MAX_TOKENS":
     lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
+    # Controls whether MXFP4 MoE layers perform incremental weight
+    # loading, sharding, and immediate host RAM cleanup on TPU v6e.
+    "VLLM_INCREMENTAL_MXFP4_LOADING":
+    env_bool("VLLM_INCREMENTAL_MXFP4_LOADING", default=False),
 }
 
 
