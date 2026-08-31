@@ -225,6 +225,20 @@ def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "False")
     assert envs.USE_MOE_EP_KERNEL is False
 
+    # Test VLLM_INCREMENTAL_FP8_LOADING (default False)
+    assert envs.VLLM_INCREMENTAL_FP8_LOADING is False
+    monkeypatch.setenv("VLLM_INCREMENTAL_FP8_LOADING", "1")
+    assert envs.VLLM_INCREMENTAL_FP8_LOADING is True
+    monkeypatch.setenv("VLLM_INCREMENTAL_FP8_LOADING", "0")
+    assert envs.VLLM_INCREMENTAL_FP8_LOADING is False
+
+    # Test VLLM_INCREMENTAL_MXFP4_LOADING (default False)
+    assert envs.VLLM_INCREMENTAL_MXFP4_LOADING is False
+    monkeypatch.setenv("VLLM_INCREMENTAL_MXFP4_LOADING", "1")
+    assert envs.VLLM_INCREMENTAL_MXFP4_LOADING is True
+    monkeypatch.setenv("VLLM_INCREMENTAL_MXFP4_LOADING", "0")
+    assert envs.VLLM_INCREMENTAL_MXFP4_LOADING is False
+
 
 def test_boolean_env_vars_invalid_values(monkeypatch: pytest.MonkeyPatch):
     """Test that boolean env vars raise errors for invalid values"""
