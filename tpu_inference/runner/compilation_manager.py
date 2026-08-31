@@ -718,22 +718,41 @@ class CompilationManager:
                 if is_first_rank:
                     intermediate_tensors = None
                 else:
-                    sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-                    hidden_states = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    residual = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    intermediate_tensors = JaxIntermediateTensors(
-                        tensors={
-                            "hidden_states": hidden_states,
-                            "residual": residual
-                        })
+                    hf_conf = self.runner.vllm_config.model_config.hf_config
+                    hc_mult = getattr(hf_conf, "hc_mult", None)
+                    if hc_mult:
+                        # DeepSeek-V4 on TPU v6e uses Multi-Head Compression (mHC) where the hidden states
+                        # expand into hc_mult parallel streams: shape (num_tokens, hc_mult, hidden_size).
+                        # The residual mixing is self-contained across these streams, so no separate
+                        # external 'residual' tensor is passed across pipeline stages on the v6e mesh.
+                        hs_shape = (num_tokens, hc_mult, hidden_size)
+                        hs_sharding = NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                                          None))
+                        hidden_states = self._create_dummy_tensor(
+                            hs_shape, jnp.bfloat16, sharding=hs_sharding)
+                        intermediate_tensors = JaxIntermediateTensors(
+                            tensors={
+                                "hidden_states": hidden_states,
+                            })
+                    else:
+                        sharding = NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                        hidden_states = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        residual = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        intermediate_tensors = JaxIntermediateTensors(
+                            tensors={
+                                "hidden_states": hidden_states,
+                                "residual": residual
+                            })
                 _pcp = self.runner.vllm_config.sharding_config.prefill_cp_size
                 # has_cached_kv is a static field; non-PCP runs never read it.
                 _cache_rungs = (False, True) if _pcp > 1 else (False, )
@@ -799,19 +818,34 @@ class CompilationManager:
                 is_first_rank = self.runner.is_first_rank
                 is_last_rank = self.runner.is_last_rank
                 if not is_first_rank:
-                    hidden_states = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    residual = self._create_dummy_tensor(
-                        (num_tokens, hidden_size),
-                        jnp.bfloat16,
-                        sharding=sharding)
-                    intermediate_tensors = JaxIntermediateTensors(
-                        tensors={
-                            "hidden_states": hidden_states,
-                            "residual": residual
-                        })
+                    hf_conf = self.runner.vllm_config.model_config.hf_config
+                    hc_mult = getattr(hf_conf, "hc_mult", None)
+                    if hc_mult:
+                        hs_shape = (num_tokens, hc_mult, hidden_size)
+                        hs_sharding = NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                                          None))
+                        hidden_states = self._create_dummy_tensor(
+                            hs_shape, jnp.bfloat16, sharding=hs_sharding)
+                        intermediate_tensors = JaxIntermediateTensors(
+                            tensors={
+                                "hidden_states": hidden_states,
+                            })
+                    else:
+                        hidden_states = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        residual = self._create_dummy_tensor(
+                            (num_tokens, hidden_size),
+                            jnp.bfloat16,
+                            sharding=sharding)
+                        intermediate_tensors = JaxIntermediateTensors(
+                            tensors={
+                                "hidden_states": hidden_states,
+                                "residual": residual
+                            })
                 else:
                     intermediate_tensors = None
                 self._precompile_backbone_helper(
