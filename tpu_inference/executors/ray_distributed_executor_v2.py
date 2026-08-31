@@ -104,18 +104,9 @@ class RayDistributedExecutorV2(RayExecutorV2):
             f"RayDistributedExecutorV2 | nodes_with_device={len(nodes_with_device)} "
             f"(filtered from {len(ray_nodes)} total nodes)")
 
-        if pp_size == 1:
-            placement_group_specs = [{
-                device_str: node['Resources'][device_str]
-            } for node in nodes_with_device]
-        else:
-            assert pp_size == len(nodes_with_device), (
-                f"Cannot use PP across hosts, please set --pipeline-parallel-size "
-                f"to 1 or {len(nodes_with_device)}")
-            num_devices_per_pp_rank = self.vllm_config.sharding_config.total_devices
-            placement_group_specs = [{
-                device_str: num_devices_per_pp_rank
-            } for _ in range(pp_size)]
+        placement_group_specs = [{
+            device_str: node['Resources'][device_str]
+        } for node in nodes_with_device]
 
         # Bind the first bundle to the current node (vLLM engine node)
         current_ip = get_ip()
@@ -176,9 +167,13 @@ class RayDistributedExecutorV2(RayExecutorV2):
         # Set up JAX pipeline parallel transfer connection across PP stages.
         # Only needed if actual pipeline parallel size is > 1.
         if self.parallel_config.pipeline_parallel_size > 1:
-            for rank in range(1, self.world_size):
-                self.collective_rpc("initialize_pp_transfer_connect",
-                                    unique_reply_rank=rank)
+            worker_ips = self.collective_rpc("get_node_ip")
+            logger.info(
+                "RayDistributedExecutorV2 | gathered PP worker IPs: %s",
+                worker_ips)
+            self.collective_rpc(
+                "initialize_pp_transfer_connect",
+                kwargs={"worker_ips": worker_ips})
 
     def _get_output_rank(self) -> int:
         # The last PP stage produces the final token outputs.
