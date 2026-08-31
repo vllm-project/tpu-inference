@@ -202,8 +202,15 @@ class TPUWorker(WorkerBase):
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
-        self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
-                                  self.parallel_config.pipeline_parallel_size)
+        w_ip = os.environ.get("TPU_PP_WORKER_IP", ip)
+        p_ip = os.environ.get("TPU_PP_PREV_WORKER_IP", prev_worker_ip)
+        self.pp_config = PPConfig(
+            vllm_config,
+            rank,
+            w_ip,
+            p_ip,
+            self.parallel_config.pipeline_parallel_size,
+        )
 
         # If model_weights is set, and we are in a distributed environment on Ray,
         # the driver might have overwritten `model` to its local cache path.
@@ -465,6 +472,9 @@ class TPUWorker(WorkerBase):
                 self.topology_order_id = get_device_topology_order_id(
                     jax.local_devices(), jax.devices())
 
+        self.is_first_rank = is_first_rank
+        self.is_last_rank = is_last_rank
+
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
                                            self.rank, is_first_rank,
                                            is_last_rank)
@@ -505,8 +515,10 @@ class TPUWorker(WorkerBase):
     def initialize_pp_transfer_connect(self):
         if self.rank == 0:
             return
-        jax_parallel_state.connect(self.pp_config.prev_worker_ip,
-                                   self.rank - 1)
+        prev_ip = self.pp_config.prev_worker_ip
+        if prev_ip == "localhost" and "TPU_PP_PREV_WORKER_IP" in os.environ:
+            prev_ip = os.environ["TPU_PP_PREV_WORKER_IP"]
+        jax_parallel_state.connect(prev_ip, self.rank - 1)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
@@ -582,21 +594,30 @@ class TPUWorker(WorkerBase):
             # receive intermediate tensors
             uuid = self.model_runner.get_uuid_for_jax_transfer(
                 scheduler_output, self.rank - 1, self.step_counter)
-            # TODO: this method might only works for vllm model, not sure about jax models.
             tensor_spec = self.model_runner.get_intermediate_tensor_spec(
                 scheduler_output)
+            logger.info(f"[PP Debug] Rank {self.rank} receiving intermediate tensors with uuid={uuid} spec={tensor_spec}")
             intermediate_tensors_dict = get_pp_group().recv_tensor_dict(
                 uuid, tensor_spec)
+            logger.info(f"[PP Debug] Rank {self.rank} successfully received intermediate tensors")
             intermediate_tensors = JaxIntermediateTensors(
                 intermediate_tensors_dict)
 
+        logger.info(f"[PP Debug] Rank {self.rank} executing model runner")
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
+        logger.info(f"[PP Debug] Rank {self.rank} model runner execution finished, output type: {type(output)}")
 
         if isinstance(output, JaxIntermediateTensors):
             assert self.parallel_config.pipeline_parallel_size > 1
             assert not get_pp_group().is_last_rank
             # send intermediate tensors
+            try:
+                for k, v in output.tensors.items():
+                    v.block_until_ready()
+                logger.info(f"[PP Debug] Rank {self.rank} forward intermediate tensors block_until_ready() SUCCEEDED!")
+            except Exception as e:
+                logger.error(f"[PP Debug] Rank {self.rank} forward intermediate tensors block_until_ready() FAILED: {e}")
             uuid = self.model_runner.get_uuid_for_jax_transfer(
                 scheduler_output, self.rank, self.step_counter)
             get_pp_group().send_tensor_dict(uuid, output.tensors)
@@ -608,7 +629,7 @@ class TPUWorker(WorkerBase):
             # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
             if has_kv_transfer_group():
                 return output
-            return output if self.is_driver_worker else None
+            return output if (self.is_driver_worker or self.is_last_rank) else None
 
     def sample_tokens(self,
                       grammar_output: GrammarOutput) -> ModelRunnerOutput:
