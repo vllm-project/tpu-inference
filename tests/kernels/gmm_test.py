@@ -66,6 +66,24 @@ def quantize_tensor(x: jax.Array,
     return x_q, scale
 
 
+def pack_lhs_scale(lhs_q: jax.Array, lhs_scale: jax.Array) -> jax.Array:
+    """Appends a per-token bf16 scale to lhs as fp8-typed transport bytes.
+
+    Mirrors what the fp8 MoE path builds before its SparseCore permute: the
+    scale's two bytes land at columns ``size_k`` and ``size_k + 1``, and the
+    row is padded up to a multiple of the lane width.
+    """
+    scale_f8 = jax.lax.bitcast_convert_type(lhs_scale.astype(jnp.bfloat16),
+                                            jnp.float8_e4m3fn)
+    scale_f8 = scale_f8.reshape(lhs_scale.shape[0], -1)
+    combined = jnp.concatenate([lhs_q, scale_f8], axis=1)
+    width = combined.shape[-1]
+    aligned_width = ((width + 127) // 128) * 128
+    if aligned_width != width:
+        combined = jnp.pad(combined, ((0, 0), (0, aligned_width - width)))
+    return combined
+
+
 def reference_gmm(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -745,6 +763,103 @@ class GmmTest(jtu.JaxTestCase):
             atol, rtol = 5e-2, 5e-2  # Unquantized Path (bfloat16 precision diffs)
 
         self.assertArraysAllClose(actual, expected, atol=atol, rtol=rtol)
+
+    @parameterized.product(
+        # batch_size >= 512 grows tile_m past bucket_base, so the kernel runs
+        # several row buckets per tile and the scale slice has to track them.
+        batch_size=[128, 256, 512, 1024],
+        in_size=[512, 1024],
+        out_size=[512, 1024],
+        num_groups=[8, 16],
+        group_offset=[0, 2],
+        out_dtype=[jnp.float32, jnp.bfloat16],
+    )
+    def test_gmm_lhs_scale_packed(self, batch_size, in_size, out_size,
+                                  num_groups, group_offset, out_dtype):
+        """An fp8 lhs carrying its per-token scale in its trailing columns.
+
+        The kernel contracts the first size_k columns, reads the scale out of
+        the trailing lane tile, and applies it to the accumulator -- so the
+        result must match a matmul on the dequantized activations.
+        """
+        num_local_groups = num_groups - group_offset
+        key = jax.random.key(0)
+
+        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
+                                 1)
+        rhs = jax.random.uniform(key, (num_local_groups, in_size, out_size),
+                                 jnp.bfloat16, -1, 1)
+        group_sizes = get_group_sizes(batch_size, num_groups)
+        group_offset = jnp.array([group_offset], dtype=jnp.int32)
+
+        # Quantize per token, the way the fp8 MoE path does.
+        lhs_q, lhs_scale = quantize_tensor(lhs,
+                                           jnp.float8_e4m3fn,
+                                           axis=1,
+                                           block_size=in_size)
+        lhs_scale = lhs_scale.astype(jnp.bfloat16)
+
+        # The kernel dequantizes after the matmul; the scale is constant across
+        # k, so scaling the codes before it is equivalent.
+        lhs_dq = lhs_q.astype(jnp.float32) * lhs_scale.astype(jnp.float32)
+        expected = reference_gmm(lhs_dq,
+                                 rhs,
+                                 group_sizes,
+                                 group_offset=group_offset)
+
+        actual = gmm_v2(
+            pack_lhs_scale(lhs_q, lhs_scale),
+            rhs,
+            group_sizes,
+            group_offset=group_offset,
+            preferred_element_type=out_dtype,
+            lhs_scale_packed=True,
+        )
+
+        self.assertEqual(actual.shape, (batch_size, out_size))
+        self.assertEqual(actual.dtype, out_dtype)
+        # fp8 activation codes plus a bf16 accumulator; scaled to the output
+        # magnitude rather than absolute.
+        tol = 0.05 * float(jnp.abs(expected).max())
+        self.assertArraysAllClose(actual.astype(jnp.float32),
+                                  expected.astype(jnp.float32),
+                                  atol=tol,
+                                  rtol=5e-2)
+
+    @parameterized.product(
+        batch_size=[128],
+        in_size=[512],
+        out_size=[512],
+        num_groups=[16],
+        extra_cols=[128, 256],
+    )
+    def test_gmm_ignores_lhs_columns_past_size_k(self, batch_size, in_size,
+                                                 out_size, num_groups,
+                                                 extra_cols):
+        """An lhs wider than size_k contracts only its first size_k columns.
+
+        This is what lets the MoE path hand the kernel one buffer carrying both
+        the activations and the packed scale, with no slice on the host.
+        """
+        key = jax.random.key(0)
+
+        lhs = jax.random.uniform(key, (batch_size, in_size), jnp.bfloat16, -1,
+                                 1)
+        rhs = jax.random.uniform(key, (num_groups, in_size, out_size),
+                                 jnp.bfloat16, -1, 1)
+        group_sizes = get_group_sizes(batch_size, num_groups)
+
+        narrow = gmm_v2(lhs, rhs, group_sizes, maybe_quantize_lhs=False)
+        # Garbage in the trailing columns must not reach the output.
+        padding = jax.random.uniform(jax.random.key(1),
+                                     (batch_size, extra_cols), jnp.bfloat16,
+                                     -1, 1)
+        wide = gmm_v2(jnp.concatenate([lhs, padding], axis=1),
+                      rhs,
+                      group_sizes,
+                      maybe_quantize_lhs=False)
+
+        self.assertArraysEqual(wide, narrow)
 
 
 if __name__ == "__main__":
