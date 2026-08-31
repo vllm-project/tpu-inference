@@ -530,38 +530,43 @@ class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
                      msg='FP8 no longer takes mb=1, so the BF16-only floor is '
                          'not being exercised by this test')
 
-  def test_work_set_is_six_bytes_per_element_on_both_wires(self):
-    """FP8 halves what crosses the wire but does NOT shrink the working set.
+  def test_work_set_is_three_bytes_per_element_on_both_wires(self):
+    """Packed working buffers cost 3 B/elem of input on EITHER wire.
 
-    running_sum and recv_buf are BF16 on both wires (2 B/elem each); the FP8
-    wire swaps the BF16 phase-2 landing buffer for two 1-byte staging buffers.
-    Both land on 6 B/elem. A comment that assumed otherwise under-counted these
-    buffers by 8x and claimed they fit in VMEM at every shape.
+    Working buffers only ever touch this device's chunk parity
+    (ChunkLocator.pack), so they are allocated at half the input's rows.
+    Unpacked the cost was 6 B/elem on both wires -- running_sum + recv_buf at
+    2 B each, plus either the bf16 landing buffer (2 B) or the two fp8
+    staging buffers (1 B + 1 B). Packing halves both wires equally; fp8
+    still halves only the wire, never the working set.
     """
     for rows in self.PRODUCTION_ROWS:
       elems = rows * self.HIDDEN
       bf16 = hrs._work_set_bytes(rows, self.HIDDEN, self.BF16_ITEMSIZE,
                                 False, 8, 8)
-      self.assertEqual(bf16, 6 * elems)
+      self.assertEqual(bf16, 3 * elems)
 
       # num_scale_slots only adds the two f32 scale buffers, which are tiny.
       fp8 = hrs._work_set_bytes(rows, self.HIDDEN, self.BF16_ITEMSIZE,
                                True, 8, 8)
       scale_bytes = 2 * 8 * 8 * hrs_config.SCALE_LANE * 4
-      self.assertEqual(fp8, 6 * elems + scale_bytes)
+      self.assertEqual(fp8, 3 * elems + scale_bytes)
 
   def test_work_scratch_falls_back_when_it_cannot_fit(self):
     """The VMEM claim is sized from the shape, and refuses shapes that do not fit.
 
-    At 2048 local rows the working set (48.1 MiB) plus scoped scratch plus the
-    operand is 74.5 MiB against 58.9 MiB usable -- no setting makes that fit, so
-    the kernel must fall back to the pl.ANY/HBM form rather than fail to
-    compile. At 1024 the same total is 42.5 MiB and must be accepted.
+    With packed working buffers the production shape now fits: at 2048 local
+    rows the working set is ~24.3 MiB, and with scoped scratch plus the
+    operand the total is ~50.7 MiB against 58.9 MiB usable. Before packing
+    the same shape totalled 74.5 MiB and had to fall back -- that flip is the
+    point of packing. 4096 is still over budget and must fall back to the
+    pl.ANY/HBM form rather than fail to compile.
     """
     fake_info = mock.Mock(vmem_capacity_bytes=64 * 2**20)
     with mock.patch.object(hrs.pltpu, 'get_tpu_info', return_value=fake_info):
       for rows, mb, expected in ((256, 1, True), (512, 1, True),
-                                 (1024, 1, True), (2048, 2, False)):
+                                 (1024, 1, True), (2048, 2, True),
+                                 (4096, 4, False)):
         enabled, frac = hrs._plan_work_scratch(rows, self.HIDDEN,
                                                self.BF16_ITEMSIZE, True, 8,
                                                8 * mb, mb, 0.95)
