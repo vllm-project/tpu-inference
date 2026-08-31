@@ -905,9 +905,12 @@ def host_extract_sampled_tokens(
         sampled_output: jnp.ndarray, logits_indices_selector: np.ndarray,
         discard_sampled_tokens_req_indices: list, num_reqs: int):
     """host retrieve the sampled tokens for the current step."""
+    if hasattr(sampled_output, "_cached_valid_tokens"):
+        return getattr(sampled_output, "_cached_valid_tokens")
     next_tokens = sampled_output
     if spec_decode_metadata is None:
-        next_tokens = np.asarray(jax.device_get(next_tokens))
+        if not isinstance(next_tokens, np.ndarray):
+            next_tokens = np.asarray(next_tokens)
         # Map tokens back to the pre-dp shuffling order
         if logits_indices_selector is not None:
             next_tokens = next_tokens[logits_indices_selector]
@@ -922,6 +925,11 @@ def host_extract_sampled_tokens(
     # Mask out the sampled tokens that should not be sampled.
     for i in discard_sampled_tokens_req_indices:
         valid_sampled_token_ids[i].clear()
+
+    try:
+        setattr(sampled_output, "_cached_valid_tokens", valid_sampled_token_ids)
+    except Exception:
+        pass
 
     return valid_sampled_token_ids
 

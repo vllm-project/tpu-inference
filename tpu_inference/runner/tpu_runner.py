@@ -376,7 +376,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                  scheduler_output: Optional["VllmSchedulerOutput"] = None,
                  req_ids_dp: Optional[Dict] = None,
                  padded_num_scheduled_tokens_per_dp_rank: int = 0,
-                 runner=None):
+                 runner=None,
+                 valid_sampled_token_ids: Optional[List] = None):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
         self._num_reqs = num_reqs
@@ -391,6 +392,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._req_ids_dp = req_ids_dp
         self._padded_num_scheduled_tokens_per_dp_rank = padded_num_scheduled_tokens_per_dp_rank
         self._runner = runner
+        self._valid_sampled_token_ids = valid_sampled_token_ids
         self._is_continue_decode = False
         self._actual_steps_future = None
 
@@ -443,12 +445,19 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         if getattr(self, "_is_continue_decode", False):
             return self._get_continue_decode_output()
 
-        valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
-            self._runner, self._spec_decode_metadata, self._next_tokens,
-            self.logits_indices_selector,
-            self._discard_sampled_tokens_req_indices, self._num_reqs)
+        if getattr(self, "_valid_sampled_token_ids", None) is not None:
+            valid_sampled_token_ids = self._valid_sampled_token_ids
+        elif self._runner and getattr(self._runner, "_pre_async_results", None) is not None and getattr(self._runner._pre_async_results, "valid_sampled_token_ids", None) is not None:
+            valid_sampled_token_ids = self._runner._pre_async_results.valid_sampled_token_ids
+        else:
+            valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+                self._runner, self._spec_decode_metadata, self._next_tokens,
+                self.logits_indices_selector,
+                self._discard_sampled_tokens_req_indices, self._num_reqs)
 
         self._model_runner_output.sampled_token_ids = valid_sampled_token_ids
+        if self._runner and getattr(self._runner, "_pre_async_results", None) is not None:
+            self._runner._pre_async_results.valid_sampled_token_ids = valid_sampled_token_ids
 
         if self._logprobs_tensors is not None:
             # Use materialize to ensure logprobs are ready on host when we return async results
@@ -500,6 +509,7 @@ class AsyncPreResults:
     spec_decode_num_rejected_tokens: Optional[
         jax.Array] = None  # [max_num_reqs]
     spec_decode_metadata: Optional[SpecDecodeMetadata] = None
+    valid_sampled_token_ids: Optional[list] = None
 
     # For continue decode async scheduling
     is_continue_decode: bool = False
@@ -533,7 +543,7 @@ class ExecuteModelState:
     padded_num_scheduled_tokens_per_dp_rank: int = 0
 
 
-@jax.jit(donate_argnums=(0, 1, 2))
+@jax.jit
 def _substitute_placeholder_token(
         input_ids: jax.Array, token_in_tpu_cur_input_indices: jax.Array,
         token_in_tpu_pre_next_tokens_indices: jax.Array,
@@ -1453,10 +1463,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         req_id] = actual_len
             return
 
-        valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
-            self, pre_spec_decode_metadata, pre_next_tokens,
-            pre_logits_indices_selector,
-            pre_discard_sampled_tokens_req_indices, pre_num_reqs)
+        if getattr(self._pre_async_results, "valid_sampled_token_ids", None) is not None:
+            valid_sampled_token_ids = self._pre_async_results.valid_sampled_token_ids
+        else:
+            valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+                self, pre_spec_decode_metadata, pre_next_tokens,
+                pre_logits_indices_selector,
+                pre_discard_sampled_tokens_req_indices, pre_num_reqs)
 
         # Append sampled tokens
         for pre_req_idx, req_state, _ in pre_request_seq_lens:
@@ -1556,7 +1569,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if not scheduler_output.total_num_scheduled_tokens:
-            if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+            if self.scheduler_config.async_scheduling and self._pre_async_results is not None and self.parallel_config.pipeline_parallel_size == 1:
                 self._modify_prev_results()
                 self._pre_async_results = None
 
@@ -1726,6 +1739,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 lora_metadata,
             )
 
+        if self.is_last_rank and logits is not None:
+            try:
+                logits.block_until_ready()
+            except Exception:
+                pass
+
         self.execute_model_state = ExecuteModelState(
             scheduler_output=scheduler_output,
             attn_metadata=attn_metadata,
@@ -1760,7 +1779,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self,
         scheduler_output: "VllmSchedulerOutput",
     ) -> ModelRunnerOutput | None:
-        if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+        if self.scheduler_config.async_scheduling and self._pre_async_results is not None and self.parallel_config.pipeline_parallel_size == 1:
             self._modify_prev_results()
 
         (
@@ -2173,7 +2192,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     spec_decode_metadata)
 
             # Save the previous results
-            next_tokens = jax.copy_to_host_async(next_tokens)
+            valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
+                self, spec_decode_metadata, next_tokens,
+                logits_indices_selector,
+                discard_sampled_tokens_req_indices, num_reqs)
             self._pre_async_results = AsyncPreResults(
                 req_ids=req_ids,
                 next_tokens=next_tokens,
@@ -2186,13 +2208,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 spec_decode_next_tokens=spec_decode_next_tokens,
                 spec_decode_num_rejected_tokens=spec_decode_num_rejected_tokens,
                 spec_decode_metadata=spec_decode_metadata,
+                valid_sampled_token_ids=valid_sampled_token_ids,
             )
 
             # Return Model output to executor
             model_runner_output = ModelRunnerOutput(
                 req_ids=req_ids,
                 req_id_to_index=self.input_batch.req_id_to_index.copy(),
-                sampled_token_ids=[],  # Fill in async get
+                sampled_token_ids=valid_sampled_token_ids,
                 logprobs=None,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 pooler_output=[],
@@ -2215,7 +2238,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
-                runner=self)
+                runner=self,
+                valid_sampled_token_ids=valid_sampled_token_ids)
             return async_model_runner_output
 
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
@@ -2687,7 +2711,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             num_draft_tokens[req_idx] = len(draft_token_ids)
         token_in_tpu_cur_input_indices_dp = {}
         token_in_tpu_pre_next_tokens_indices_dp = {}
-        if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+        if self.scheduler_config.async_scheduling and self._pre_async_results is not None and self.parallel_config.pipeline_parallel_size == 1:
             # If async previous results exists, we will prepare for the token substitution here
             # The actual substitution will be performed in tpu during later parts of this function.
             (
@@ -3119,7 +3143,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             shared_attention_metadata = build_shared_attn()
 
         # Async scheduling: substitute placeholder tokens for DP
-        if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
+        if self.scheduler_config.async_scheduling and self._pre_async_results is not None and self.parallel_config.pipeline_parallel_size == 1:
             # Collect all token indices that need substitution across all DP ranks
             all_token_indices_to_substitute = []
             all_pre_next_tokens_indices = []

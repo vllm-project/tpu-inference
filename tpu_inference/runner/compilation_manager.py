@@ -304,6 +304,17 @@ class CompilationManager:
             except (RuntimeError, ValueError):
                 pass
             self._prev_stack_size = None
+        try:
+            from flax import nnx
+            from tpu_inference.utils import device_array
+            rng_key = nnx.Rngs(jax.random.key(self.runner.model_config.seed)).params()
+            self.runner.rng_params_for_sampling = device_array(
+                self.runner.mesh,
+                rng_key,
+                sharding=NamedSharding(self.runner.mesh, PartitionSpec()))
+            logger.info("Successfully re-initialized rng_params_for_sampling after compilation.")
+        except Exception as e:
+            logger.warning(f"Failed to reset rng_params_for_sampling: {e}")
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
@@ -574,7 +585,7 @@ class CompilationManager:
                 padded_token_in_tpu_pre_next_tokens_indices,
                 next_tokens,
                 placeholder_num,
-                compile_only=False,
+                compile_only=True,
                 num_tokens=input_padding,
                 next_tokens_size=next_tokens_size,
             )
@@ -699,9 +710,13 @@ class CompilationManager:
                 if is_first_rank:
                     intermediate_tensors = None
                 else:
-                    sharding = NamedSharding(
-                        self.runner.mesh,
-                        PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                    if self.dp_size > 1:
+                        sharding = NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                    else:
+                        sharding = NamedSharding(self.runner.mesh,
+                                                 PartitionSpec())
                     hidden_states = self._create_dummy_tensor(
                         (num_tokens, hidden_size),
                         jnp.bfloat16,
@@ -713,7 +728,7 @@ class CompilationManager:
                     intermediate_tensors = JaxIntermediateTensors(
                         tensors={
                             "hidden_states": hidden_states,
-                            "residual": residual
+                            "residual": residual,
                         })
                 for _cache_pages in self._pcp_cache_page_buckets():
                     self._precompile_backbone_helper(
@@ -775,6 +790,13 @@ class CompilationManager:
                 is_first_rank = self.runner.is_first_rank
                 is_last_rank = self.runner.is_last_rank
                 if not is_first_rank:
+                    if self.dp_size > 1:
+                        sharding = NamedSharding(
+                            self.runner.mesh,
+                            PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+                    else:
+                        sharding = NamedSharding(self.runner.mesh,
+                                                 PartitionSpec())
                     hidden_states = self._create_dummy_tensor(
                         (num_tokens, hidden_size),
                         jnp.bfloat16,
@@ -786,7 +808,7 @@ class CompilationManager:
                     intermediate_tensors = JaxIntermediateTensors(
                         tensors={
                             "hidden_states": hidden_states,
-                            "residual": residual
+                            "residual": residual,
                         })
                 else:
                     intermediate_tensors = None
@@ -968,8 +990,9 @@ class CompilationManager:
             # function.
             sampling_metadata_sharding = NamedSharding(
                 self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
+            from tpu_inference.utils import to_jax_dtype
             logits = self._create_dummy_tensor((num_reqs, hsize),
-                                               jnp.float32,
+                                               to_jax_dtype(self.runner.dtype),
                                                sharding=logits_sharding)
             for do_sampling in (True, False):
                 for logprobs in (True, False):
@@ -1011,7 +1034,7 @@ class CompilationManager:
                         self.runner.mesh,
                         logits,
                         sampling_metadata,
-                        compile_only=False,
+                        compile_only=True,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
                         logprobs=logprobs,
