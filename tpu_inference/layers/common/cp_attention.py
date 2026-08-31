@@ -19,6 +19,8 @@ from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+import tpu_inference.kernels.experimental.batched_rpa.configs as batched_rpa_configs
+import tpu_inference.kernels.experimental.batched_rpa.wrapper as batched_rpa
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -339,7 +341,7 @@ def pcp_forward(
                 -1, pps)[0::2].reshape(-1)
             distribution_cache = jnp.zeros_like(
                 distribution_local).at[2].set(distribution_local[2] // 2)
-            context_out, _, context_lse = _rpa_cp_call(
+            context_out, _, context_lse = batched_rpa.ragged_paged_attention(
                 q_local,
                 k_local,
                 v_local,
@@ -350,12 +352,11 @@ def pcp_forward(
                 distribution_cache,
                 cp_rank=cp_rank,
                 cp_group_size=pcp_size,
-                kv_cache_lens=kv_cache_lens_cache,
+                global_kv_cache_lens=kv_cache_lens_cache,
+                attention_scope=batched_rpa_configs.AttentionScope.CACHE_ONLY,
                 pcp_ring_axis_name=pcp_axis,
                 pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
-                skip_current_attn=True,
-                use_causal_mask=False,
-                update_kv_cache=False,
+                return_lse=True,
                 **common)
 
         # ---- Current phase ------------------------------------------------
@@ -367,7 +368,7 @@ def pcp_forward(
         max_seqs = kv_lens_local.shape[0]
         kv_write_seq_mask = jnp.zeros(max_seqs,
                                       jnp.int32).at[1:2 * num_reqs:2].set(1)
-        curr_out, kv_cache_updated, curr_lse = _rpa_cp_call(
+        curr_out, kv_cache_updated, curr_lse = batched_rpa.ragged_paged_attention(
             q_local,
             k_curr,
             v_curr,
@@ -378,12 +379,14 @@ def pcp_forward(
             distribution_local,
             cp_rank=cp_rank,
             cp_group_size=pcp_size,
-            kv_cache_lens=kv_cache_lens_local,
+            global_kv_cache_lens=kv_cache_lens_local,
+            global_new_kv_lens=kv_lens_local - kv_cache_lens_local,
             q_pos_offsets=pcp_q_pos_offsets_local[0],
             kv_new_starts=kv_new_starts_local,
             kv_write_seq_mask=kv_write_seq_mask,
             kv_page_order=kv_page_order_local,
-            skip_cache_attn=True,
+            attention_scope=batched_rpa_configs.AttentionScope.NEW_TOKENS_ONLY,
+            return_lse=True,
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
             **common)
