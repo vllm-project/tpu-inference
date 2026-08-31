@@ -430,6 +430,41 @@ class TpuPlatform(Platform):
         parallel_config.worker_cls = \
                         "tpu_inference.worker.tpu_worker.TPUWorker"
 
+        # Pipeline Parallelism on TPU v6e (Trillium) V1 Model Runner:
+        # 1. Synchronous single-batch execution: On TPU v6e slices, the TPU V1 model runner executes
+        #    synchronously stage-by-stage across ranks. Each decode step requires
+        #    the previous step's sampled token IDs from the final rank (delivered via
+        #    the CPU scheduler). Async scheduling must be disabled (async_scheduling = False)
+        #    so the CPU scheduler waits for sampled tokens before scheduling the next step.
+        # 2. Single persistent batch slot: Upstream VllmConfig.max_concurrent_batches defaults
+        #    to pp_size (e.g. 32) assuming GPU 1F1B multi-slot pipelined execution.
+        #    Because the TPU v6e runner maintains a single persistent batch buffer per worker,
+        #    it requires max_concurrent_batches = 1 to prevent pipeline desynchronization.
+        # 3. Dynamic monkeypatch: VllmConfig.max_concurrent_batches is an upstream property.
+        #    We dynamically wrap it here inside check_and_update_config() rather than at the
+        #    module top-level to prevent circular import errors between vllm.platforms and
+        #    vllm.config during platform plugin discovery.
+        if (parallel_config.pipeline_parallel_size > 1
+                and not getattr(vllm_config, "use_v2_model_runner", False)):
+            scheduler_config.async_scheduling = False
+            config_cls = vllm_config.__class__
+            if hasattr(config_cls, "max_concurrent_batches"):
+                _orig = getattr(config_cls, "_orig_max_concurrent_batches",
+                                None)
+                if _orig is None:
+                    _orig = config_cls.max_concurrent_batches.fget
+                    config_cls._orig_max_concurrent_batches = _orig
+
+                    def _tpu_max_concurrent_batches(self) -> int:
+                        pp_size = self.parallel_config.pipeline_parallel_size
+                        if pp_size > 1 and not getattr(
+                                self, "use_v2_model_runner", False):
+                            return 1
+                        return _orig(self)
+
+                    config_cls.max_concurrent_batches = property(
+                        _tpu_max_concurrent_batches)
+
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if not multihost_backend:  # Single host
             if parallel_config.pipeline_parallel_size == 1:

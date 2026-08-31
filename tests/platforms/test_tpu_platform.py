@@ -444,6 +444,36 @@ class TestTpuPlatform:
             TpuPlatform.check_and_update_config(vllm_config)
             assert vllm_config.parallel_config.distributed_executor_backend == RayDistributedExecutorV2
 
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_check_and_update_config_pipeline_parallelism(
+            self, mock_update, mock_sharding, vllm_config):
+        vllm_config.cache_config = None
+        vllm_config.parallel_config.pipeline_parallel_size = 4
+        vllm_config.scheduler_config.async_scheduling = True
+        vllm_config.use_v2_model_runner = False
+
+        config_cls = vllm_config.__class__
+        orig_prop = getattr(config_cls, "max_concurrent_batches", None)
+        try:
+            config_cls.max_concurrent_batches = property(
+                lambda self: self.parallel_config.pipeline_parallel_size)
+            TpuPlatform.check_and_update_config(vllm_config)
+
+            # async_scheduling must be disabled for TPU V1 PP runner
+            assert vllm_config.scheduler_config.async_scheduling is False
+            # max_concurrent_batches must evaluate to 1
+            assert vllm_config.max_concurrent_batches == 1
+        finally:
+            if orig_prop is not None:
+                config_cls.max_concurrent_batches = orig_prop
+            elif hasattr(config_cls, "max_concurrent_batches"):
+                delattr(config_cls, "max_concurrent_batches")
+            if hasattr(config_cls, "_orig_max_concurrent_batches"):
+                delattr(config_cls, "_orig_max_concurrent_batches")
+
     @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
            "unknown_backend")
     @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
