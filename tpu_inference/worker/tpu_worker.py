@@ -203,8 +203,15 @@ class TPUWorker(WorkerBase):
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
-        self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
-                                  self.parallel_config.pipeline_parallel_size)
+        w_ip = os.environ.get("TPU_PP_WORKER_IP", ip)
+        p_ip = os.environ.get("TPU_PP_PREV_WORKER_IP", prev_worker_ip)
+        self.pp_config = PPConfig(
+            vllm_config,
+            rank,
+            w_ip,
+            p_ip,
+            self.parallel_config.pipeline_parallel_size,
+        )
 
         # If model_weights is set, and we are in a distributed environment on Ray,
         # the driver might have overwritten `model` to its local cache path.
@@ -509,8 +516,10 @@ class TPUWorker(WorkerBase):
     def initialize_pp_transfer_connect(self):
         if self.rank == 0:
             return
-        jax_parallel_state.connect(self.pp_config.prev_worker_ip,
-                                   self.rank - 1)
+        prev_ip = self.pp_config.prev_worker_ip
+        if prev_ip == "localhost" and "TPU_PP_PREV_WORKER_IP" in os.environ:
+            prev_ip = os.environ["TPU_PP_PREV_WORKER_IP"]
+        jax_parallel_state.connect(prev_ip, self.rank - 1)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization

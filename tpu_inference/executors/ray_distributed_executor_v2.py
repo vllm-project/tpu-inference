@@ -104,18 +104,9 @@ class RayDistributedExecutorV2(RayExecutorV2):
             f"RayDistributedExecutorV2 | nodes_with_device={len(nodes_with_device)} "
             f"(filtered from {len(ray_nodes)} total nodes)")
 
-        if pp_size == 1:
-            placement_group_specs = [{
-                device_str: node['Resources'][device_str]
-            } for node in nodes_with_device]
-        else:
-            assert pp_size == len(nodes_with_device), (
-                f"Cannot use PP across hosts, please set --pipeline-parallel-size "
-                f"to 1 or {len(nodes_with_device)}")
-            num_devices_per_pp_rank = self.vllm_config.sharding_config.total_devices
-            placement_group_specs = [{
-                device_str: num_devices_per_pp_rank
-            } for _ in range(pp_size)]
+        placement_group_specs = [{
+            device_str: node['Resources'][device_str]
+        } for node in nodes_with_device]
 
         # Bind the first bundle to the current node (vLLM engine node)
         current_ip = get_ip()
