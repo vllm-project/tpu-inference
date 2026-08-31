@@ -126,6 +126,17 @@ def hier_rs_kernel(
     all_phase1_ops = []
     all_phase2_ops = []
 
+    def _collect_phase2_ops(ops):
+        """Queue a start_phase2_c2c_copies batch for the final wait_send drain.
+
+    Slot 0 is the payload DMA and is always present; slot 1 is the fp8 scale
+    DMA, which is None on the bf16 wire and under fp8 static scaling. Filtering
+    on None rather than branching on the wire is what lets both wires share one
+    call site.
+    """
+        all_phase2_ops.extend([o[0] for o in ops])
+        all_phase2_ops.extend([o[1] for o in ops if o[1] is not None])
+
     # =========================================================================================================
     #                                  HIERARCHICAL REDUCE-SCATTER TIMELINE (D2D + C2C Step 0)
     # =========================================================================================================
@@ -172,15 +183,12 @@ def hier_rs_kernel(
         dma.quantize_chunks_to_fp8_staging(running_sum_ref,
                                            mb_idx=0,
                                            step_idx=0)
-        mb_ops_0 = dma.start_phase2_c2c_copies_fp8(mb_idx=0, step_idx=0)
-        all_phase2_ops.extend([item[0] for item in mb_ops_0])
-        all_phase2_ops.extend([i[1] for i in mb_ops_0 if i[1] is not None])
-    else:
-        mb_ops_0 = dma.start_phase2_c2c_copies(src=running_sum_ref,
-                                               dst=p2_buf,
-                                               mb_idx=0,
-                                               step_idx=0)
-        all_phase2_ops.extend([item[0] for item in mb_ops_0])
+    mb_ops_0 = dma.start_phase2_c2c_copies(mb_idx=0,
+                                           step_idx=0,
+                                           src=running_sum_ref,
+                                           dst=p2_buf,
+                                           fp8=fp8_comm)
+    _collect_phase2_ops(mb_ops_0)
 
     def _start_phase2_step0(mb):
         """[Step F] body: start the phase-2 step-0 C2C copies for micro-batch mb."""
@@ -188,15 +196,12 @@ def hier_rs_kernel(
             dma.quantize_chunks_to_fp8_staging(running_sum_ref,
                                                mb,
                                                step_idx=0)
-            ops = dma.start_phase2_c2c_copies_fp8(mb, step_idx=0)
-            all_phase2_ops.extend([item[0] for item in ops])
-            all_phase2_ops.extend([i[1] for i in ops if i[1] is not None])
-        else:
-            ops = dma.start_phase2_c2c_copies(src=running_sum_ref,
-                                              dst=p2_buf,
-                                              mb_idx=mb,
-                                              step_idx=0)
-            all_phase2_ops.extend([item[0] for item in ops])
+        ops = dma.start_phase2_c2c_copies(mb_idx=mb,
+                                          step_idx=0,
+                                          src=running_sum_ref,
+                                          dst=p2_buf,
+                                          fp8=fp8_comm)
+        _collect_phase2_ops(ops)
 
     for m in range(config.num_micro_batches):
 
@@ -283,15 +288,12 @@ def hier_rs_kernel(
     # timing when other micro-batches gave the write time to land.
     if fp8_comm:
         dma.quantize_chunks_to_fp8_staging(running_sum_ref, 0, step_idx=1)
-        mb_ops = dma.start_phase2_c2c_copies_fp8(0, step_idx=1)
-        all_phase2_ops.extend([item[0] for item in mb_ops])
-        all_phase2_ops.extend([i[1] for i in mb_ops if i[1] is not None])
-    else:
-        mb_ops = dma.start_phase2_c2c_copies(src=running_sum_ref,
-                                             dst=p2_buf,
-                                             mb_idx=0,
-                                             step_idx=1)
-        all_phase2_ops.extend([item[0] for item in mb_ops])
+    mb_ops = dma.start_phase2_c2c_copies(mb_idx=0,
+                                         step_idx=1,
+                                         src=running_sum_ref,
+                                         dst=p2_buf,
+                                         fp8=fp8_comm)
+    _collect_phase2_ops(mb_ops)
 
     # ================= STEP 1 LOOP =================
     for m in range(config.num_micro_batches):
@@ -301,18 +303,12 @@ def hier_rs_kernel(
                 dma.quantize_chunks_to_fp8_staging(running_sum_ref,
                                                    m + 1,
                                                    step_idx=1)
-                mb_ops = dma.start_phase2_c2c_copies_fp8(m + 1,
-                                                         step_idx=1)
-                all_phase2_ops.extend([item[0] for item in mb_ops])
-                all_phase2_ops.extend(
-                    [i[1] for i in mb_ops if i[1] is not None])
-            else:
-                mb_ops = dma.start_phase2_c2c_copies(
-                    src=running_sum_ref,
-                    dst=p2_buf,
-                    mb_idx=m + 1,
-                    step_idx=1)
-                all_phase2_ops.extend([item[0] for item in mb_ops])
+            mb_ops = dma.start_phase2_c2c_copies(mb_idx=m + 1,
+                                                 step_idx=1,
+                                                 src=running_sum_ref,
+                                                 dst=p2_buf,
+                                                 fp8=fp8_comm)
+            _collect_phase2_ops(mb_ops)
 
         # Accumulate Step 1
         if config.num_hcube_dims > 1:

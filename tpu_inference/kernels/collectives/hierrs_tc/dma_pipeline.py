@@ -249,7 +249,58 @@ class DmaManager:
             ops.append(op)
         return ops
 
-    def start_phase2_c2c_copies(self, src, dst, mb_idx, step_idx):
+    def start_phase2_c2c_copies(self,
+                                mb_idx,
+                                step_idx,
+                                src=None,
+                                dst=None,
+                                fp8=False):
+        """Start Phase-2 inter-chip (C2C) copies for one micro-batch and step.
+
+    Serves BOTH wires. The hypercube walk -- which neighbour, which chunk,
+    which hidden-dim slice -- is identical for bf16 and fp8; only three things
+    differ, and all three are parameters rather than structure:
+
+      * buffers    bf16 takes `src`/`dst` explicitly (running_sum -> the
+                   separate phase-2 landing buffer); fp8 always moves
+                   fp8_send_buf -> fp8_recv_buf, which the caller has already
+                   filled via quantize_chunks_to_fp8_staging.
+      * semaphores each wire owns its own send/recv DMA semaphore arrays, so
+                   an in-flight bf16 and fp8 transfer could never alias.
+      * scale DMA  fp8 dynamic scaling sends a second, tiny (512 B) buffer
+                   alongside the payload. Negligible in bytes, NOT negligible
+                   in cost: it is another DMA issue plus two more semaphore
+                   arrays per chunk, which is what doubles fp8's fixed cost
+                   against bf16. Static scaling skips it entirely
+                   (`skip_scale_dma`), and that is the shipped configuration.
+
+    Returns a list of tuples whose first two slots are always
+    `(data_op, scale_op)`, with `scale_op` None on every path that sends no
+    scale -- bf16 always, fp8 under static scaling. Callers rely on that fixed
+    shape to drain both wires with one code path.
+    """
+        if fp8:
+            assert self.fp8_send_buf is not None
+            assert self.fp8_recv_buf is not None
+            assert self.fp8_p2_send_sems is not None
+            assert self.fp8_p2_recv_sems is not None
+            src = self.fp8_send_buf
+            dst = self.fp8_recv_buf
+            send_sems = self.fp8_p2_send_sems
+            recv_sems = self.fp8_p2_recv_sems
+            send_scale = not self.skip_scale_dma
+            if send_scale:
+                assert self.scale_send_buf is not None
+                assert self.scale_recv_buf is not None
+                assert self.scale_p2_send_sems is not None
+                assert self.scale_p2_recv_sems is not None
+        else:
+            assert src is not None and dst is not None, (
+                "the bf16 wire must be given explicit src/dst refs")
+            send_sems = self.phase2_send_sems
+            recv_sems = self.phase2_recv_sems
+            send_scale = False
+
         mb_ops = []
         exponent = self.config.num_hcube_dims - 1 - step_idx
         num_ops_in_step = 1 << exponent if exponent >= 0 else 0
@@ -263,6 +314,8 @@ class DmaManager:
                 chunk_start, k_size = get_capped_bounds(
                     chunk_start, self.config.hc_chunk_size,
                     self.config.hidden_dim_size)
+                if k_size <= 0:
+                    continue
 
                 neigh_device_id = self.topo.get_neighbor_device_id(dim)
                 my_chunk_idx = self.locator.get_phase2_chunk_idx(
@@ -270,32 +323,53 @@ class DmaManager:
                 neighbor_chunk_idx = self.locator.get_phase2_chunk_idx(
                     neigh_device_id, step_idx, op_idx, hcube_dim_idx)
 
-                if k_size > 0:
-                    mb_slice = self.locator.get_slice(neighbor_chunk_idx,
-                                                      chunk_start, k_size)
-                    op = pltpu.make_async_remote_copy(
-                        src_ref=src.at[mb_slice],
-                        dst_ref=dst.at[mb_slice],
-                        send_sem=self.phase2_send_sems.at[step_idx, mb_idx,
-                                                          hcube_dim_idx,
-                                                          op_idx],
-                        recv_sem=self.phase2_recv_sems.at[step_idx, mb_idx,
-                                                          hcube_dim_idx,
-                                                          op_idx],
+                mb_slice = self.locator.get_slice(neighbor_chunk_idx,
+                                                  chunk_start, k_size)
+                data_op = pltpu.make_async_remote_copy(
+                    src_ref=src.at[mb_slice],
+                    dst_ref=dst.at[mb_slice],
+                    send_sem=send_sems.at[step_idx, mb_idx, hcube_dim_idx,
+                                          op_idx],
+                    recv_sem=recv_sems.at[step_idx, mb_idx, hcube_dim_idx,
+                                          op_idx],
+                    device_id=neigh_device_id,
+                    device_id_type=pl.DeviceIdType.LOGICAL,
+                )
+                data_op.start()
+
+                scale_op = None
+                if send_scale:
+                    slot = self._scale_slot(step_idx, mb_idx, hcube_dim_idx,
+                                            op_idx)
+                    scale_slice = (
+                        pl.ds(neighbor_chunk_idx, 1),
+                        pl.ds(slot * SCALE_LANE, SCALE_LANE),
+                    )
+                    scale_op = pltpu.make_async_remote_copy(
+                        src_ref=self.scale_send_buf.at[scale_slice],
+                        dst_ref=self.scale_recv_buf.at[scale_slice],
+                        send_sem=self.scale_p2_send_sems.at[step_idx, mb_idx,
+                                                            hcube_dim_idx,
+                                                            op_idx],
+                        recv_sem=self.scale_p2_recv_sems.at[step_idx, mb_idx,
+                                                            hcube_dim_idx,
+                                                            op_idx],
                         device_id=neigh_device_id,
                         device_id_type=pl.DeviceIdType.LOGICAL,
                     )
-                    op.start()
-                    mb_ops.append((
-                        op,
-                        step_idx,
-                        mb_idx,
-                        hcube_dim_idx,
-                        op_idx,
-                        my_chunk_idx,
-                        chunk_start,
-                        k_size,
-                    ))
+                    scale_op.start()
+
+                mb_ops.append((
+                    data_op,
+                    scale_op,
+                    step_idx,
+                    mb_idx,
+                    hcube_dim_idx,
+                    op_idx,
+                    my_chunk_idx,
+                    chunk_start,
+                    k_size,
+                ))
         return mb_ops
 
     @scoped("p1_accum")
@@ -423,7 +497,7 @@ class DmaManager:
 
     Reads BF16 from src_hbm (running_sum_ref); writes FP8 to fp8_send_buf and
     the per-chunk scale to scale_send_buf.  Must complete before
-    start_phase2_c2c_copies_fp8 is called.
+    start_phase2_c2c_copies(..., fp8=True) is called.
     """
         assert self.run_bref is not None
         assert self.fp8_send_bref is not None
@@ -491,7 +565,7 @@ class DmaManager:
 
         # Data + scale land at neigh_chunk_idx (the chunk destined for the
         # neighbor) — same index the serial path wrote, and the same index
-        # start_phase2_c2c_copies_fp8 reads back.
+        # start_phase2_c2c_copies(..., fp8=True) reads back.
         def send_data_index_fn(op_idx, hcube_dim_idx):
             dim = (hcube_dim_idx + step_idx) % self.config.num_hcube_dims
             neigh_device_id = self.topo.get_neighbor_device_id(dim)
@@ -549,99 +623,6 @@ class DmaManager:
                 self.scale_send_buf,
                 allocations=[src_bref, fp8_out_bref, scale_out_bref],
             )
-
-    def start_phase2_c2c_copies_fp8(self, mb_idx, step_idx):
-        """Start Phase-2 inter-chip copies using FP8 buffers (8-bit wire transfer).
-
-    Assumes quantize_chunks_to_fp8_staging has already been called for this
-    (mb_idx, step_idx).  Returns list of op tuples for later accounting.
-    """
-        assert self.fp8_send_buf is not None
-        assert self.fp8_recv_buf is not None
-        assert self.fp8_p2_send_sems is not None
-        assert self.fp8_p2_recv_sems is not None
-        assert self.scale_send_buf is not None
-        assert self.scale_recv_buf is not None
-        assert self.scale_p2_send_sems is not None
-        assert self.scale_p2_recv_sems is not None
-
-        mb_ops = []
-        exponent = self.config.num_hcube_dims - 1 - step_idx
-        num_ops_in_step = 1 << exponent if exponent >= 0 else 0
-
-        for op_idx in range(num_ops_in_step):
-            for hcube_dim_idx in range(self.config.num_hcube_dims):
-                dim = (hcube_dim_idx + step_idx) % self.config.num_hcube_dims
-
-                mb_start = mb_idx * self.locator.mb_stride
-                chunk_start = mb_start + hcube_dim_idx * self.config.hc_chunk_size
-                chunk_start, k_size = get_capped_bounds(
-                    chunk_start, self.config.hc_chunk_size,
-                    self.config.hidden_dim_size)
-                if k_size <= 0:
-                    continue
-
-                neigh_device_id = self.topo.get_neighbor_device_id(dim)
-                my_chunk_idx = self.locator.get_phase2_chunk_idx(
-                    self.topo.cur_id, step_idx, op_idx, hcube_dim_idx)
-                neigh_chunk_idx = self.locator.get_phase2_chunk_idx(
-                    neigh_device_id, step_idx, op_idx, hcube_dim_idx)
-                slot = self._scale_slot(step_idx, mb_idx, hcube_dim_idx,
-                                        op_idx)
-
-                data_slice = self.locator.get_slice(neigh_chunk_idx,
-                                                    chunk_start, k_size)
-                scale_slice = (
-                    pl.ds(neigh_chunk_idx, 1),
-                    pl.ds(slot * SCALE_LANE, SCALE_LANE),
-                )
-
-                # ── 8-bit FP8 data transfer ───────────────────────────────────
-                data_op = pltpu.make_async_remote_copy(
-                    src_ref=self.fp8_send_buf.at[data_slice],
-                    dst_ref=self.fp8_recv_buf.at[data_slice],
-                    send_sem=self.fp8_p2_send_sems.at[step_idx, mb_idx,
-                                                      hcube_dim_idx, op_idx],
-                    recv_sem=self.fp8_p2_recv_sems.at[step_idx, mb_idx,
-                                                      hcube_dim_idx, op_idx],
-                    device_id=neigh_device_id,
-                    device_id_type=pl.DeviceIdType.LOGICAL,
-                )
-                data_op.start()
-
-                # ── scale transfer ───────────────────────────────────────────
-                # Negligible in BYTES (512 B) but not in cost: it is a second DMA issue
-                # plus two more semaphore arrays per chunk, which is what doubles fp8's
-                # fixed cost against bf16. Static mode does not need it at all.
-                if self.skip_scale_dma:
-                    scale_op = None
-                else:
-                    scale_op = pltpu.make_async_remote_copy(
-                        src_ref=self.scale_send_buf.at[scale_slice],
-                        dst_ref=self.scale_recv_buf.at[scale_slice],
-                        send_sem=self.scale_p2_send_sems.at[step_idx, mb_idx,
-                                                            hcube_dim_idx,
-                                                            op_idx],
-                        recv_sem=self.scale_p2_recv_sems.at[step_idx, mb_idx,
-                                                            hcube_dim_idx,
-                                                            op_idx],
-                        device_id=neigh_device_id,
-                        device_id_type=pl.DeviceIdType.LOGICAL,
-                    )
-                    scale_op.start()
-
-                mb_ops.append((
-                    data_op,
-                    scale_op,
-                    step_idx,
-                    mb_idx,
-                    hcube_dim_idx,
-                    op_idx,
-                    my_chunk_idx,
-                    chunk_start,
-                    k_size,
-                ))
-        return mb_ops
 
     @scoped("p2_dequant_accum")
     def run_phase2_dequant_accumulate_pipeline(self, running_sum_ref, dst_ref,
