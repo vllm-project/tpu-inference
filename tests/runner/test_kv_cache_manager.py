@@ -677,7 +677,6 @@ class TestKVCacheManager:
         head_size = 128
         sliding_window = 100
         num_blocks = 100
-        kv_packing = 2  # bf16
         sliding_window_spec = SlidingWindowSpec(
             block_size=block_size,
             num_kv_heads=num_kv_heads,
