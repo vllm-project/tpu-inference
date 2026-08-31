@@ -51,7 +51,8 @@ from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     _tensor_is_in_cpu
-from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+from tpu_inference.layers.vllm.quantization.base import (
+    VllmQuantizationMethod, _release_host_memory)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.logger import init_logger
@@ -259,21 +260,30 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             )
 
         weights = process_unquantized_linear_weights(weight, bias)
-        weights = torch_view(
-            shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            ))
+        del weight, bias
+
+        sharded = shard_linear_weights(
+            weights,
+            mesh=self.linear_config.mesh,
+            weight_p_spec=self.linear_config.weight_sharding,
+            bias_p_spec=self.linear_config.bias_sharding,
+        )
+        del weights
+
+        tv_weights = torch_view(sharded)
+        del sharded
+
         if self.linear_config.fuse_matmuls:
-            layer.weight = Parameter(weights.weight, requires_grad=False)
-            if bias is not None:
-                layer.bias = Parameter(weights.bias, requires_grad=False)
+            layer.weight = Parameter(tv_weights.weight, requires_grad=False)
+            if tv_weights.bias is not None:
+                layer.bias = Parameter(tv_weights.bias, requires_grad=False)
         else:
-            layer.weight = to_parameter_list(weights.weight)
-            if bias is not None:
-                layer.bias = to_parameter_list(weights.bias)
+            layer.weight = to_parameter_list(tv_weights.weight)
+            if tv_weights.bias is not None:
+                layer.bias = to_parameter_list(tv_weights.bias)
+        del tv_weights
+
+        _release_host_memory()
 
     def apply(self,
               layer: torch.nn.Module,
@@ -384,19 +394,24 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
 
         del w13_weight, w2_weight, w13_bias, w2_bias
 
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
-        layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
+        sharded = shard_moe_weights(weights, self.moe_backend, self.mesh)
+        del weights
+
+        tv_weights = torch_view(sharded)
+        del sharded
+
+        layer.w13_weight = Parameter(tv_weights.w13_weight, requires_grad=False)
+        layer.w2_weight = Parameter(tv_weights.w2_weight, requires_grad=False)
 
         if self.moe.has_bias:
-            layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
-            layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+            layer.w13_bias = Parameter(tv_weights.w13_bias, requires_grad=False)
+            layer.w2_bias = Parameter(tv_weights.w2_bias, requires_grad=False)
+        del tv_weights
 
         # Force JAX to release intermediate buffers before processing the next
         # layer.  Without this barrier, async dispatch can keep old weight
         # buffers alive across layers, accumulating until OOM.
-        jax.effects_barrier()
+        _release_host_memory()
 
     def apply_monolithic(
         self,

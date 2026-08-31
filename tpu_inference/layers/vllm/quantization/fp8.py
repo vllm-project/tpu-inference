@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import ctypes
-import ctypes.util
-import gc
 from typing import Optional, Union
 
 import jax
@@ -51,7 +48,8 @@ from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     _tensor_is_in_cpu
-from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+from tpu_inference.layers.vllm.quantization.base import (
+    VllmQuantizationMethod, _free_torch_storage, _release_host_memory)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import (
@@ -62,38 +60,6 @@ from tpu_inference.logger import init_logger
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-
-# TODO: Use custom op with overriding weight loading class so we will have a better
-# and cleaner interface.
-def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
-    """Safely frees the underlying CPU memory storage of a PyTorch tensor.
-
-    Tries `untyped_storage().resize_(0)` first, with fallback to `set_(torch.storage.UntypedStorage())`
-    for 0-dim scalars or float8 dtypes that cannot be resized in-place.
-    """
-    if tensor is None:
-        return
-    try:
-        tensor.untyped_storage().resize_(0)
-    except Exception:
-        tensor.set_(torch.storage.UntypedStorage())
-
-
-def _release_host_memory() -> None:
-    """Frees CPU host memory and trims malloc arena if incremental FP8 loading is enabled."""
-    if not envs.VLLM_INCREMENTAL_FP8_LOADING:
-        return
-    gc.collect()
-    jax.effects_barrier()
-    try:
-        # Dynamically locate the system standard C library (e.g. libc.so.6 on Linux)
-        # to invoke glibc's malloc_trim(0) and return freed CPU pages to the kernel.
-        libc_name = ctypes.util.find_library("c")
-        if libc_name:
-            ctypes.CDLL(libc_name).malloc_trim(0)
-    except Exception as e:
-        logger.debug(f"[fp8-incremental] malloc_trim failed: {e}")
 
 
 @register_quantization_config(FP8)
@@ -473,11 +439,14 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
 
         del w13_weight, w2_weight, w13_weight_scale, w2_weight_scale, input_weights
 
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+        sharded = shard_moe_weights(weights, self.moe_backend, self.mesh)
+        del weights
 
-        layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
+        tv_weights = torch_view(sharded)
+        del sharded
+
+        layer.w13_weight = Parameter(tv_weights.w13_weight, requires_grad=False)
+        layer.w2_weight = Parameter(tv_weights.w2_weight, requires_grad=False)
 
         # Use setattr to dynamically assign the correct scale parameter name
         # based on the quantization type. vLLM uses 'weight_scale_inv' for
@@ -485,13 +454,15 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         setattr(
             layer,
             scale_w13_name,
-            Parameter(weights.w13_weight_scale, requires_grad=False),
+            Parameter(tv_weights.w13_weight_scale, requires_grad=False),
         )
         setattr(
             layer,
             scale_w2_name,
-            Parameter(weights.w2_weight_scale, requires_grad=False),
+            Parameter(tv_weights.w2_weight_scale, requires_grad=False),
         )
+        del tv_weights
+
         _release_host_memory()
 
     def apply_monolithic(
