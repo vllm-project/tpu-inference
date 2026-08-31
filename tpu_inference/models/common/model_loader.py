@@ -353,10 +353,45 @@ def get_flax_model(
                                pooler=pooler,
                                is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
-    kv_cache_sharding = NamedSharding(
+
+    attn_kv_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD))
+
+    gdn_conv_sharding = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, None, ShardingAxisName.ATTN_HEAD))
+    gdn_ssm_sharding = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None, None))
+    gdn_kv_sharding = (gdn_conv_sharding, gdn_ssm_sharding)
+
+    hf_cfg = vllm_config.model_config.hf_config
+    if isinstance(hf_cfg, dict):
+        text_cfg = hf_cfg.get("text_config", hf_cfg)
+        layer_types = text_cfg.get("layer_types", None)
+    else:
+        text_cfg = getattr(hf_cfg, "text_config", hf_cfg)
+        layer_types = getattr(text_cfg, "layer_types", None)
+        if layer_types is None and hasattr(hf_cfg, "to_dict"):
+            layer_types = hf_cfg.to_dict().get("text_config", {}).get("layer_types", None)
+    if layer_types:
+        kv_cache_sharding = [
+            gdn_kv_sharding if lt == "linear_attention" else attn_kv_sharding
+            for lt in layer_types
+        ]
+        logger.info(f"Successfully configured heterogeneous KV cache sharding for {len(layer_types)} layers "
+                    f"({layer_types.count('linear_attention')} GDN layers, {layer_types.count('full_attention')} Full Attn layers).")
+    else:
+        interval = getattr(text_cfg, "full_attention_interval", 4) if not isinstance(text_cfg, dict) else text_cfg.get("full_attention_interval", 4)
+        num_layers = getattr(text_cfg, "num_hidden_layers", 40) if not isinstance(text_cfg, dict) else text_cfg.get("num_hidden_layers", 40)
+        kv_cache_sharding = [
+            attn_kv_sharding if (i + 1) % interval == 0 else gdn_kv_sharding
+            for i in range(num_layers)
+        ]
+        logger.info(f"Fallback configured KV cache sharding with interval={interval}, total_layers={num_layers}.")
+
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,

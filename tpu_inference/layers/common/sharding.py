@@ -218,18 +218,24 @@ class ShardingConfigManager:
                                                     False)
         if envs.TPU_MULTIPROCESS_DP:
             data_parallelism = 1
-        expert_parallelism = sharding_strategy.get("expert_parallelism", 1)
         sequence_parallelism = sharding_strategy.get("sequence_parallelism", 1)
         device_indexes = sharding_strategy.get("device_indexes", None)
 
         decode_context_parallelism = parallel_config.decode_context_parallel_size
         prefill_context_parallelism = parallel_config.prefill_context_parallel_size
 
-        if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
-            # The user has explicitly set the tensor parallelism in the sharding config.
-            tensor_parallelism = ss_tensor_parallelsim
+        if expert_parallelism is None:
+            if parallel_config.enable_expert_parallel:
+                expert_parallelism = pc_tensor_parallelism
+                tensor_parallelism = 1
+            else:
+                expert_parallelism = 1
+                tensor_parallelism = pc_tensor_parallelism
         else:
-            tensor_parallelism = pc_tensor_parallelism
+            if pc_tensor_parallelism != ss_tensor_parallelsim and ss_tensor_parallelsim:
+                tensor_parallelism = ss_tensor_parallelsim
+            else:
+                tensor_parallelism = pc_tensor_parallelism
 
         if tensor_parallelism % decode_context_parallelism != 0:
             raise ValueError(
