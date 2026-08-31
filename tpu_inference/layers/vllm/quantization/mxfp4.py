@@ -13,12 +13,12 @@
 # limitations under the License.
 
 import functools
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh, PartitionSpec
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
@@ -51,9 +51,14 @@ from tpu_inference.layers.common.quantization import (
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
+    _tensor_is_in_cpu
+from tpu_inference.layers.vllm.quantization.base import (
+    VllmQuantizationMethod, _free_torch_storage, _log_memory_stats,
+    _release_host_memory)
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
-from tpu_inference.layers.vllm.quantization.unquantized import \
-    VllmUnquantizedLinearMethod
+from tpu_inference.layers.vllm.quantization.unquantized import (
+    VllmUnquantizedLinearMethod, _load_weight_for_layer)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product, t2j, to_jax_dtype
 
@@ -143,7 +148,7 @@ def _process_mxfp4_moe_weights(
     )
 
 
-class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
+class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase, VllmQuantizationMethod):
 
     def __init__(
         self,
@@ -181,17 +186,60 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
     def is_monolithic(self) -> bool:
         return True
 
+    def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
+                              args, kwargs):
+        """Check if all weights are loaded for the MoE layer.
+
+        If so, process and shard the weights.
+        """
+        if not (getattr(envs, "VLLM_INCREMENTAL_FP8_LOADING", False) or getattr(envs, "VLLM_INCREMENTAL_MXFP4_LOADING", False)):
+            return
+
+        logger.info_once(
+            "[mxfp4-incremental] VLLM_INCREMENTAL_MXFP4_LOADING is enabled")
+
+        expert_id = kwargs.get("expert_id")
+        shard_id = kwargs.get("shard_id")
+        assert expert_id is not None, "Expecting expert_id argument"
+        assert shard_id is not None, "Expecting shard_id argument"
+
+        layer._loaded_weights.add((param_name, expert_id, shard_id))
+
+        num_experts = getattr(layer, "global_num_experts", getattr(layer, "num_experts", None))
+        assert num_experts is not None, "Layer must have global_num_experts or num_experts"
+        expected_shards = 6 * num_experts
+
+        if len(layer._loaded_weights) >= expected_shards:
+            logger.debug(
+                f"[mxfp4-incremental] Start sharding weights for MoE layer {type(layer)}"
+            )
+            self.process_weights_after_loading(layer)
+            logger.debug(
+                f"[mxfp4-incremental] Complete sharding weights for MoE layer {type(layer)}"
+            )
+
     def process_weights_after_loading(self, layer: torch.nn.Module):
+        if not hasattr(layer, "w13_weight") or not _tensor_is_in_cpu(layer.w13_weight):
+            return
         assert isinstance(layer, RoutedExperts)
         has_bias = layer.moe_config.has_bias
 
-        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
-        w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
-        w13_bias = t2j(layer.w13_bias, use_dlpack=False) if has_bias else None
+        ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
 
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
-        w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
-        w2_bias = t2j(layer.w2_bias, use_dlpack=False) if has_bias else None
+        p_w13_weight = layer.w13_weight
+        p_w13_scale = layer.w13_weight_scale
+        p_w2_weight = layer.w2_weight
+        p_w2_scale = layer.w2_weight_scale
+
+        w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
+        w13_weight_scale = _load_weight_for_layer(layer, "w13_weight_scale", ep_sharding)
+        w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
+        w2_weight_scale = _load_weight_for_layer(layer, "w2_weight_scale", ep_sharding)
+
+        p_w13_bias = getattr(layer, "w13_bias", None) if has_bias else None
+        p_w2_bias = getattr(layer, "w2_bias", None) if has_bias else None
+        w13_bias = _load_weight_for_layer(layer, "w13_bias", ep_sharding) if has_bias else None
+        w2_bias = _load_weight_for_layer(layer, "w2_bias", ep_sharding) if has_bias else None
 
         w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
         w13_reorder_size = get_mesh_shape_product(
@@ -213,20 +261,46 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
             desired_quant_dtype=desired_quant_dtype,
             requant_block_size=requant_block_size,
         )
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
 
-        layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
+        # Free CPU memory now that weights have been safely transferred to TPU
+        _free_torch_storage(p_w13_weight)
+        _free_torch_storage(p_w13_scale)
+        _free_torch_storage(p_w2_weight)
+        _free_torch_storage(p_w2_scale)
+        delattr(layer, "w13_weight")
+        delattr(layer, "w13_weight_scale")
+        delattr(layer, "w2_weight")
+        delattr(layer, "w2_weight_scale")
+        if has_bias:
+            _free_torch_storage(p_w13_bias)
+            _free_torch_storage(p_w2_bias)
+            delattr(layer, "w13_bias")
+            delattr(layer, "w2_bias")
 
-        layer.w13_weight_scale = Parameter(weights.w13_weight_scale,
+        del w13_weight, w13_weight_scale, w2_weight, w2_weight_scale, w13_bias, w2_bias
+
+        sharded_weights = shard_moe_weights(weights, self.moe_backend, self.mesh)
+        del weights
+
+        tv_weights = torch_view(sharded_weights)
+        del sharded_weights
+
+        layer.w13_weight = Parameter(tv_weights.w13_weight, requires_grad=False)
+        layer.w2_weight = Parameter(tv_weights.w2_weight, requires_grad=False)
+
+        layer.w13_weight_scale = Parameter(tv_weights.w13_weight_scale,
                                            requires_grad=False)
-        layer.w2_weight_scale = Parameter(weights.w2_weight_scale,
+        layer.w2_weight_scale = Parameter(tv_weights.w2_weight_scale,
                                           requires_grad=False)
 
         if has_bias:
-            layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
-            layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+            layer.w13_bias = Parameter(tv_weights.w13_bias, requires_grad=False)
+            layer.w2_bias = Parameter(tv_weights.w2_bias, requires_grad=False)
+
+        del tv_weights
+
+        _release_host_memory()
+        _log_memory_stats(layer_name=getattr(layer, "_module_name", getattr(layer, "prefix", str(type(layer)))))
 
     def apply_monolithic(
         self,

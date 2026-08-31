@@ -51,7 +51,8 @@ from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     _tensor_is_in_cpu
-from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+from tpu_inference.layers.vllm.quantization.base import (
+    VllmQuantizationMethod, _log_memory_stats)
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import (
@@ -324,6 +325,7 @@ class VllmFp8LinearMethod(
                 layer.bias = to_parameter_list(weights.bias)
 
         _release_host_memory()
+        _log_memory_stats(layer_name=getattr(layer, "_module_name", getattr(layer, "prefix", str(type(layer)))))
 
     def apply(self,
               layer: torch.nn.Module,
@@ -473,11 +475,14 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
 
         del w13_weight, w2_weight, w13_weight_scale, w2_weight_scale, input_weights
 
-        weights = torch_view(
-            shard_moe_weights(weights, self.moe_backend, self.mesh))
+        sharded = shard_moe_weights(weights, self.moe_backend, self.mesh)
+        del weights
 
-        layer.w13_weight = Parameter(weights.w13_weight, requires_grad=False)
-        layer.w2_weight = Parameter(weights.w2_weight, requires_grad=False)
+        tv_weights = torch_view(sharded)
+        del sharded
+
+        layer.w13_weight = Parameter(tv_weights.w13_weight, requires_grad=False)
+        layer.w2_weight = Parameter(tv_weights.w2_weight, requires_grad=False)
 
         # Use setattr to dynamically assign the correct scale parameter name
         # based on the quantization type. vLLM uses 'weight_scale_inv' for
@@ -485,14 +490,17 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         setattr(
             layer,
             scale_w13_name,
-            Parameter(weights.w13_weight_scale, requires_grad=False),
+            Parameter(tv_weights.w13_weight_scale, requires_grad=False),
         )
         setattr(
             layer,
             scale_w2_name,
-            Parameter(weights.w2_weight_scale, requires_grad=False),
+            Parameter(tv_weights.w2_weight_scale, requires_grad=False),
         )
+        del tv_weights
+
         _release_host_memory()
+        _log_memory_stats(layer_name=getattr(layer, "_module_name", getattr(layer, "prefix", str(type(layer)))))
 
     def apply_monolithic(
         self,

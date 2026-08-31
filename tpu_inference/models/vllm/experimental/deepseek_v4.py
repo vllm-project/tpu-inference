@@ -8,7 +8,8 @@ import regex as re
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
+from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import (SiluAndMul,
                                                    SiluAndMulWithClamp)

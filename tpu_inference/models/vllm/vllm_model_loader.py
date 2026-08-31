@@ -26,7 +26,9 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading)
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+from tpu_inference import envs
+from tpu_inference.layers.vllm.quantization.base import (
+    VllmQuantizationMethod, _free_torch_storage, _release_host_memory)
 
 
 def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
@@ -34,12 +36,24 @@ def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
     Traverses the model and overrides the weight_loader of each parameter to support incremental loading.
     This allows processing and sharding of weights after all weights for a module have been loaded.
     """
+    is_incremental_enabled = (
+        getattr(envs, "VLLM_INCREMENTAL_FP8_LOADING", False) or
+        getattr(envs, "VLLM_INCREMENTAL_MXFP4_LOADING", False)
+    )
 
     def create_weight_loader(layer, original_loader, layer_name, param_name):
 
         def weight_loader_wrapper(param: torch.nn.Parameter,
                                   loaded_weight: torch.Tensor, *args,
                                   **kwargs):
+            # If parameter storage was lazily freed upfront, reallocate zero-initialized buffer on first shard.
+            if hasattr(param, "_full_shape") and param.untyped_storage().size() == 0:
+                param.data = torch.zeros(
+                    param._full_shape,
+                    dtype=param._full_dtype,
+                    device=param._full_device,
+                )
+
             # Loading the weight
             res = original_loader(param, loaded_weight, *args, **kwargs)
 
@@ -59,6 +73,10 @@ def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
         # Weight loader will be invoked multiple times for module. In order to determine when all the weights are loaded,
         # we need to keep track of the loaded weights for each module.
         module._loaded_weights = set()
+        module._module_name = name
+        quant_method = getattr(module, "quant_method", None)
+        is_incremental_layer = isinstance(quant_method, VllmQuantizationMethod)
+
         for param_name, param in module.named_parameters(recurse=False):
             # Omit parameters that do not have a weight_loader
             original_loader = getattr(param, "weight_loader", None)
@@ -68,6 +86,15 @@ def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
                 param, "weight_loader",
                 create_weight_loader(module, original_loader, name,
                                      param_name))
+
+            if is_incremental_enabled and is_incremental_layer:
+                param._full_shape = tuple(param.shape)
+                param._full_dtype = param.dtype
+                param._full_device = param.device
+                _free_torch_storage(param)
+
+    if is_incremental_enabled:
+        _release_host_memory()
 
 
 @register_model_loader("tpu_streaming_loader")

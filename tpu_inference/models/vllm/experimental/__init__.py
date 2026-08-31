@@ -28,7 +28,10 @@ def register_models():
     Called from the ``vllm.general_plugins`` entrypoint so it runs at vLLM
     startup, before any model is resolved from its architecture name.
     """
-    from vllm import ModelRegistry
+    try:
+        from vllm import ModelRegistry
+    except ImportError:
+        from vllm.model_executor.models import ModelRegistry
 
     for arch, model_cls in _TPU_VLLM_MODELS.items():
         ModelRegistry.register_model(arch, model_cls)
