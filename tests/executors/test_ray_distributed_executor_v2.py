@@ -149,3 +149,22 @@ class TestTpuRayDistributedExecutorV2(unittest.TestCase):
 
         mock_ray.util.placement_group.assert_not_called()
         self.assertEqual(executor.parallel_config.placement_group, existing_pg)
+
+    def test_post_init_executor_multihost_pp(self, mock_wait_until_pg_ready,
+                                             mock_get_ip, mock_platform,
+                                             mock_ray):
+        self.vllm_config.parallel_config.pipeline_parallel_size = 2
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.parallel_config = self.vllm_config.parallel_config
+        executor.collective_rpc = MagicMock()
+        executor.collective_rpc.side_effect = lambda method, **kwargs: (
+            ["10.0.0.1", "10.0.0.2"] if method == "get_node_ip" else None)
+
+        executor._post_init_executor()
+
+        # Should query get_node_ip across workers via collective_rpc
+        executor.collective_rpc.assert_any_call("get_node_ip")
+        # Should initialize JAX PP transfer connect with gathered IPs
+        executor.collective_rpc.assert_any_call(
+            "initialize_pp_transfer_connect",
+            kwargs={"worker_ips": ["10.0.0.1", "10.0.0.2"]})
