@@ -69,31 +69,37 @@ _RS_VMEM_FRAC_OVERRIDE = os.environ.get("RS_VMEM_FRAC")
 # set is O(local_seq_len * hidden_dim) and VMEM is 64 MiB total, so
 # _plan_work_scratch falls back to the pl.ANY/HBM form once it stops fitting.
 #
-# The working set is `local_seq_len * hidden_dim * 6 bytes` on BOTH wires:
-# running_sum and recv_buf are bf16 (2 B/elem each) either way, and the fp8
-# wire replaces the bf16 phase-2 landing buffer with two 1-byte staging
-# buffers. FP8 halves what crosses the wire; it does not shrink this.
+# The working set is `local_seq_len * hidden_dim * 3 bytes` on BOTH wires.
+# The working buffers are PACKED to half the input's rows -- every chunk index
+# that touches them carries this device's chiplet parity (ChunkLocator.pack),
+# so the full-size allocation they used to get was half dead rows. Unpacked
+# the cost was 6 B/elem: running_sum and recv_buf are bf16 (2 B/elem each)
+# either way, and the fp8 wire replaces the bf16 phase-2 landing buffer with
+# two 1-byte staging buffers. FP8 halves what crosses the wire; it never
+# shrank the working set, and packing shrinks both wires equally.
 #
-# Measured at hidden 4096 on 8 devices, against 0.92 * 64 = 58.9 MiB usable:
+# At hidden 4096 on 8 devices, against 0.92 * 64 = 58.9 MiB usable:
 #
 #   local_seq_len | operand | working set | scoped | total | VMEM scratch?
-#            128  |   1.0   |     3.1     |   1.3  |   5.4 | yes
-#            256  |   2.0   |     6.1     |   2.6  |  10.7 | yes
-#            512  |   4.0   |    12.1     |   5.2  |  21.3 | yes
-#           1024  |   8.0   |    24.1     |  10.4  |  42.5 | yes
-#           2048  |  16.0   |    48.1     |  10.4  |  74.5 | NO -- over 58.9
+#            128  |   1.0   |     1.6     |   1.3  |   3.9 | yes
+#            256  |   2.0   |     3.1     |   2.6  |   7.7 | yes
+#            512  |   4.0   |     6.1     |   5.2  |  15.3 | yes
+#           1024  |   8.0   |    12.1     |  10.4  |  30.5 | yes
+#           2048  |  16.0   |    24.3     |  10.4  |  50.7 | yes (was NO unpacked)
+#           4096  |  32.0   |    48.5     |  10.4  |  90.9 | NO -- over 58.9
 #
-# Only 2048 is excluded, and it is excluded by arithmetic rather than by a
-# tuning constant. There the operand and primary output are still VMEM-pinned
-# by _pick_vmem_plan / _RS_VMEM_OUT; it is only the working set that stays in
-# HBM. `RS_VMEM_WORK=1 ignored` is logged whenever that happens, once per
-# shape, so the fallback is never silent.
+# Packing is what brought the production-dominant 2048 shape inside the
+# budget. 4096+ is still excluded by arithmetic rather than by a tuning
+# constant; there the operand and primary output are still VMEM-pinned by
+# _pick_vmem_plan / _RS_VMEM_OUT and only the working set stays in HBM.
+# `RS_VMEM_WORK=1 ignored` is logged whenever that happens, once per shape,
+# so the fallback is never silent.
 #
 # `local_seq_len` here is the PER-DEVICE, PRE-scatter row count, i.e. the
 # operand's first dim -- 8x the post-scatter row count that appears in the HLO.
 # A decode-heavy server sweeps this whole range in one run rather than running
-# a single shape, so both branches of the table are live in production and the
-# large shapes are NOT covered by this optimisation.
+# a single shape, so both branches of the table are live in production; with
+# packing, every shape up to and including 2048 is covered.
 #
 # RS_VMEM_WORK=0 restores the pl.ANY output form unconditionally.
 _RS_VMEM_WORK = os.environ.get("RS_VMEM_WORK", "1") not in ("0", "")
@@ -110,14 +116,22 @@ _RS_VMEM_WORK_FRAC = (float(os.environ["RS_VMEM_WORK_FRAC"])
 
 def _work_set_bytes(local_seq_len, hidden_dim_size, itemsize, fp8_comm,
                     num_devices, num_scale_slots):
-    """Total bytes of the buffers that move from pl.ANY outputs to VMEM scratch."""
-    big = local_seq_len * hidden_dim_size
-    total = 2 * big * itemsize  # running_sum + recv_buf
+    """Total bytes of the buffers that move from pl.ANY outputs to VMEM scratch.
+
+  The working buffers are PACKED to half the input's rows (see
+  ChunkLocator.pack: only this device's chunk parity is ever touched), so the
+  per-element cost against local_seq_len * hidden is 3 bytes on either wire:
+  bf16 = (2 + 2 + 2)/2, fp8 = (2 + 2 + 1 + 1)/2. FP8 halves what crosses the
+  wire; it never shrank the working set, and packing shrinks both wires
+  equally.
+  """
+    packed = (local_seq_len // 2) * hidden_dim_size
+    total = 2 * packed * itemsize  # running_sum + recv_buf
     if fp8_comm:
-        total += 2 * big  # fp8_send + fp8_recv, 1 byte/elem
+        total += 2 * packed  # fp8_send + fp8_recv, 1 byte/elem
         total += 2 * num_devices * num_scale_slots * SCALE_LANE * 4
     else:
-        total += big * itemsize  # the bf16 wire's phase-2 landing buffer
+        total += packed * itemsize  # the bf16 wire's phase-2 landing buffer
     return total
 
 
@@ -390,9 +404,14 @@ def hierarchical_reduce_scatter_local(
 
     out_shape = jax.ShapeDtypeStruct((seq_chunk_size, hidden_dim_size),
                                      local_x.dtype)
-    running_sum_shape = jax.ShapeDtypeStruct((local_seq_len, hidden_dim_size),
+    # Working buffers are PACKED: every chunk index that touches them carries
+    # this device's chiplet parity (see ChunkLocator.pack), so a full
+    # (local_seq_len, hidden) allocation is half dead rows. num_chips chunks
+    # of seq_chunk_size rows each == local_seq_len // 2.
+    packed_seq_len = local_seq_len // 2
+    running_sum_shape = jax.ShapeDtypeStruct((packed_seq_len, hidden_dim_size),
                                              local_x.dtype)
-    recv_buf_shape = jax.ShapeDtypeStruct((local_seq_len, hidden_dim_size),
+    recv_buf_shape = jax.ShapeDtypeStruct((packed_seq_len, hidden_dim_size),
                                           local_x.dtype)
 
     work_scratch_on, vmem_frac = _plan_work_scratch(
@@ -425,9 +444,9 @@ def hierarchical_reduce_scatter_local(
             out_specs.append(pl.BlockSpec(memory_space=pl.ANY))
 
     _emit_work(running_sum_shape,
-               pltpu.VMEM((local_seq_len, hidden_dim_size), local_x.dtype))
+               pltpu.VMEM((packed_seq_len, hidden_dim_size), local_x.dtype))
     _emit_work(recv_buf_shape,
-               pltpu.VMEM((local_seq_len, hidden_dim_size), local_x.dtype))
+               pltpu.VMEM((packed_seq_len, hidden_dim_size), local_x.dtype))
 
     # Separate phase-2 landing buffer for the bf16 wire. Without it an incoming
     # phase-2 chunk can overwrite phase-1 bytes the receiver has not drained
@@ -436,12 +455,12 @@ def hierarchical_reduce_scatter_local(
     # The fp8 wire already lands phase 2 in fp8_recv_buf, so it needs nothing.
     if not fp8_comm:
         _emit_work(
-            jax.ShapeDtypeStruct((local_seq_len, hidden_dim_size),
+            jax.ShapeDtypeStruct((packed_seq_len, hidden_dim_size),
                                  local_x.dtype),
-            pltpu.VMEM((local_seq_len, hidden_dim_size), local_x.dtype))
+            pltpu.VMEM((packed_seq_len, hidden_dim_size), local_x.dtype))
 
     if fp8_comm:
-        fp8_shape = jax.ShapeDtypeStruct((local_seq_len, hidden_dim_size),
+        fp8_shape = jax.ShapeDtypeStruct((packed_seq_len, hidden_dim_size),
                                          jnp.float8_e4m3fn)
         scale_shape = jax.ShapeDtypeStruct(
             (num_devices, num_scale_slots * SCALE_LANE), jnp.float32)
@@ -450,7 +469,7 @@ def hierarchical_reduce_scatter_local(
         for _ in range(2):
             _emit_work(
                 fp8_shape,
-                pltpu.VMEM((local_seq_len, hidden_dim_size),
+                pltpu.VMEM((packed_seq_len, hidden_dim_size),
                            jnp.float8_e4m3fn))
         for _ in range(2):
             _emit_work(

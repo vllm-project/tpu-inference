@@ -170,8 +170,10 @@ def hier_rs_kernel(
         src1=recv_buf_ref,
         src2=input_ref,
         dst=running_sum_ref,
-        in_index_fn=locator.make_phase1_index_fn(mb_idx=0),
-        out_index_fn=locator.make_phase1_index_fn(mb_idx=0),
+        # recv_buf and running_sum are packed; the input operand is full-size.
+        in1_index_fn=locator.make_phase1_packed_index_fn(mb_idx=0),
+        in2_index_fn=locator.make_phase1_index_fn(mb_idx=0),
+        out_index_fn=locator.make_phase1_packed_index_fn(mb_idx=0),
         hbm_index_fn=locator.make_phase1_in_index_fn_with_recv_sem(
             mb_idx=0),
         block_size=config.mb_size,
@@ -217,8 +219,9 @@ def hier_rs_kernel(
                 src1=recv_buf_ref,
                 src2=input_ref,
                 dst=running_sum_ref,
-                in_index_fn=locator.make_phase1_index_fn(m + 1),
-                out_index_fn=locator.make_phase1_index_fn(m + 1),
+                in1_index_fn=locator.make_phase1_packed_index_fn(m + 1),
+                in2_index_fn=locator.make_phase1_index_fn(m + 1),
+                out_index_fn=locator.make_phase1_packed_index_fn(m + 1),
                 hbm_index_fn=locator.
                 make_phase1_in_index_fn_with_recv_sem(m + 1),
                 block_size=config.mb_size,

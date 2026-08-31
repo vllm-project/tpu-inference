@@ -74,19 +74,29 @@ class ChunkLocator:
             pl.ds(start, size),
         )
 
-    def get_phase1_slice(self, chunk_idx, mb_idx):
-        """Returns the 2D HBM slice for Phase 1 (D2D) at `chunk_idx`, `mb_idx`."""
-        return self.get_slice(chunk_idx, mb_idx * self.config.mb_size,
-                              self.config.mb_size)
+    def pack(self, chunk_idx):
+        """Global chunk index -> row-chunk index in a PACKED working buffer.
 
-    def get_phase2_slice(self, chunk_idx, mb_idx, hcube_dim_idx):
-        """Returns the 2D HBM slice for Phase 2 (C2C) at `chunk_idx`, `mb_idx`, `hcube_dim_idx`."""
-        return self.get_slice(
-            chunk_idx,
-            mb_idx * self.mb_stride +
-            hcube_dim_idx * self.config.hc_chunk_size,
-            self.config.hc_chunk_size,
-        )
+    Every chunk index that ever touches a working buffer (recv_buf,
+    running_sum, the bf16 phase-2 landing buffer, fp8_send, fp8_recv) is of
+    the form `k * 2 + chiplet_bit`: phase 1 lands at this device's parity
+    (`get_phase1_chunk_idx`), and phase 2 both reads and receives at it too,
+    because hypercube neighbours share the chiplet position
+    (`get_neighbor_device_id`). The odd/even half of a full-size buffer is
+    therefore dead rows. Packed buffers drop that half -- allocated at
+    (local_seq_len // 2, hidden) -- and this remap, `chunk_idx // 2`, is exact
+    for both parities and agrees between DMA sender and receiver because both
+    compute the same chunk index and share parity.
+
+    The INPUT operand is the one buffer this must never be applied to: its
+    other-parity rows are real data, read by the phase-1 send that pushes
+    them to the partner chiplet.
+    """
+        return chunk_idx // 2
+
+    def get_packed_slice(self, chunk_idx, start, size):
+        """`get_slice` into a PACKED working buffer (see `pack`)."""
+        return self.get_slice(self.pack(chunk_idx), start, size)
 
     def get_phase1_chunk_idx(self, device_id, chip_idx):
         """Calculates the chunk index processed by `device_id` for `chip_idx`.
@@ -154,7 +164,11 @@ class ChunkLocator:
         return base
 
     def make_phase1_index_fn(self, mb_idx):
-        """Grid index fn for the Phase 1 emit_pipeline (chip_idx -> ref index)."""
+        """Grid index fn for the Phase 1 emit_pipeline (chip_idx -> ref index).
+
+    FULL-buffer indexing -- valid only for the input operand. The working
+    buffers are packed; use `make_phase1_packed_index_fn` for those.
+    """
 
         def phase1_index_fn(chip_idx):
             c_me = self.get_phase1_chunk_idx(self.topo.cur_id, chip_idx)
@@ -162,13 +176,26 @@ class ChunkLocator:
 
         return phase1_index_fn
 
+    def make_phase1_packed_index_fn(self, mb_idx):
+        """Phase-1 grid index fn into PACKED working buffers.
+
+    pack(chip_idx * 2 + chiplet_bit) == chip_idx, so the packed row-chunk
+    index is the grid index itself.
+    """
+
+        def phase1_packed_index_fn(chip_idx):
+            return (chip_idx, mb_idx)
+
+        return phase1_packed_index_fn
+
     def make_phase1_in_index_fn_with_recv_sem(self, mb_idx):
         """Phase 1 input index fn that also reports the slice width for the recv semaphore."""
 
         def phase1_in_index_fn_with_recv_sem(grid_indices, ref):
             (chip_idx, ) = grid_indices
-            c_me = self.get_phase1_chunk_idx(self.topo.cur_id, chip_idx)
-            return self.get_phase1_slice(c_me, mb_idx), self.config.mb_size
+            # recv_buf is packed: pack(c_me) == chip_idx.
+            return (self.get_slice(chip_idx, mb_idx * self.config.mb_size,
+                                   self.config.mb_size), self.config.mb_size)
 
         return phase1_in_index_fn_with_recv_sem
 
@@ -180,8 +207,12 @@ class ChunkLocator:
             my_chunk_idx = self.get_phase2_chunk_idx(self.topo.cur_id,
                                                      step_idx, chunk_group_idx,
                                                      hcube_dim_idx)
-            chunk_slice = self.get_phase2_slice(my_chunk_idx, mb_idx,
-                                                hcube_dim_idx)
+            # The landing buffer is packed.
+            chunk_slice = self.get_packed_slice(
+                my_chunk_idx,
+                mb_idx * self.mb_stride +
+                hcube_dim_idx * self.config.hc_chunk_size,
+                self.config.hc_chunk_size)
             return chunk_slice, self.config.hc_chunk_size
 
         return phase2_in_index_fn_with_recv_sem
@@ -190,11 +221,13 @@ class ChunkLocator:
         """Grid index fn for the Phase 2 emit_pipeline."""
 
         def phase2_index_fn(chunk_group_idx, hcube_dim_idx):
+            # All phase-2 refs (fp8_recv, running_sum, the bf16 landing
+            # buffer) are packed working buffers.
             my_chunk_idx = self.get_phase2_chunk_idx(self.topo.cur_id,
                                                      step_idx, chunk_group_idx,
                                                      hcube_dim_idx)
             mb_start_idx = mb_idx * self.config.num_hcube_dims + hcube_dim_idx
-            return (my_chunk_idx, mb_start_idx)
+            return (self.pack(my_chunk_idx), mb_start_idx)
 
         return phase2_index_fn
 

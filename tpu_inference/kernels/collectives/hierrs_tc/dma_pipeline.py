@@ -227,6 +227,14 @@ class DmaManager:
         self.skip_scale_dma = fp8_static_scale is not None
 
     def start_phase1_d2d_copies(self, src, dst, mb_idx):
+        """Push this device's partner-parity chunks into the partner's recv_buf.
+
+    src is the FULL input operand; dst is the partner's PACKED recv_buf, so
+    the two slices differ in their row offset. pack(c_neigh) == chip_idx for
+    either parity, and c_neigh carries the PARTNER's chiplet bit -- which is
+    exactly the receiver's parity -- so the packed destination row agrees with
+    where the receiver's accumulate pipeline reads (chip_idx as well).
+    """
         ops = []
         mb_start = mb_idx * self.config.mb_size
         mb_start, mb_slice_size = get_capped_bounds(
@@ -234,12 +242,15 @@ class DmaManager:
         partner_chunks = self.locator.get_phase1_chunk_idxes(
             self.topo.partner_id)
         for chip_idx, c_neigh in enumerate(partner_chunks):
-            mb_slice = self.locator.get_slice(chunk_idx=c_neigh,
-                                              start=mb_start,
-                                              size=mb_slice_size)
+            src_slice = self.locator.get_slice(chunk_idx=c_neigh,
+                                               start=mb_start,
+                                               size=mb_slice_size)
+            dst_slice = self.locator.get_packed_slice(chunk_idx=c_neigh,
+                                                      start=mb_start,
+                                                      size=mb_slice_size)
             op = pltpu.make_async_remote_copy(
-                src_ref=src.at[mb_slice],
-                dst_ref=dst.at[mb_slice],
+                src_ref=src.at[src_slice],
+                dst_ref=dst.at[dst_slice],
                 send_sem=self.phase1_send_sems.at[chip_idx, mb_idx],
                 recv_sem=self.phase1_recv_sems.at[chip_idx, mb_idx],
                 device_id=self.topo.partner_id,
@@ -323,8 +334,12 @@ class DmaManager:
                 neighbor_chunk_idx = self.locator.get_phase2_chunk_idx(
                     neigh_device_id, step_idx, op_idx, hcube_dim_idx)
 
-                mb_slice = self.locator.get_slice(neighbor_chunk_idx,
-                                                  chunk_start, k_size)
+                # src and dst are both PACKED working buffers (bf16:
+                # running_sum -> landing buffer; fp8: fp8_send -> fp8_recv),
+                # and sender and receiver share chunk parity, so one packed
+                # slice serves both ends.
+                mb_slice = self.locator.get_packed_slice(
+                    neighbor_chunk_idx, chunk_start, k_size)
                 data_op = pltpu.make_async_remote_copy(
                     src_ref=src.at[mb_slice],
                     dst_ref=dst.at[mb_slice],
@@ -378,13 +393,19 @@ class DmaManager:
         src1,
         src2,
         dst,
-        in_index_fn,
+        in1_index_fn,
+        in2_index_fn,
         out_index_fn,
         hbm_index_fn,
         block_size,
         mb_idx,
     ):
-        """Orchestrates a D2D accumulation pipeline on a 1D chip grid."""
+        """Orchestrates a D2D accumulation pipeline on a 1D chip grid.
+
+    src1 (recv_buf) and dst (running_sum) are PACKED working buffers; src2 is
+    the FULL input operand. That is why the two inputs take separate index
+    fns -- the only pipeline where packed and full indexing meet.
+    """
 
         def accum_body(s1_ref, s2_ref, d_ref):
             d_ref[...] = s1_ref[...] + s2_ref[...]
@@ -397,9 +418,13 @@ class DmaManager:
             sem = self.phase1_recv_sems.at[chip_idx, mb_idx]
             return hbm_index, sem, size
 
-        in_spec = pl.BlockSpec(
+        in1_spec = pl.BlockSpec(
             block_shape=(self.config.seq_chunk_size, block_size),
-            index_map=in_index_fn,
+            index_map=in1_index_fn,
+        )
+        in2_spec = pl.BlockSpec(
+            block_shape=(self.config.seq_chunk_size, block_size),
+            index_map=in2_index_fn,
         )
         out_spec = pl.BlockSpec(
             block_shape=(self.config.seq_chunk_size, block_size),
@@ -407,18 +432,18 @@ class DmaManager:
         )
 
         s1_bref = RemoteWaitBufferedRef.from_ref(
-            self.recv_bref.with_spec(in_spec),
+            self.recv_bref.with_spec(in1_spec),
             index_fn_with_recv_sem=in_index_fn_with_recv_sem,
         )
         s2_bref = RemoteWaitBufferedRef.from_ref(
-            self.run_bref.with_spec(in_spec))
+            self.run_bref.with_spec(in2_spec))
         d_bref = RemoteWaitBufferedRef.from_ref(
             self.out_bref.with_spec(out_spec))
 
         pltpu.emit_pipeline(
             accum_body,
             grid=grid,
-            in_specs=[in_spec, in_spec],
+            in_specs=[in1_spec, in2_spec],
             out_specs=[out_spec],
         )(src1, src2, dst, allocations=[s1_bref, s2_bref, d_bref])
 
@@ -572,7 +597,8 @@ class DmaManager:
             neigh_chunk_idx = self.locator.get_phase2_chunk_idx(
                 neigh_device_id, step_idx, op_idx, hcube_dim_idx)
             mb_col_idx = mb_idx * self.config.num_hcube_dims + hcube_dim_idx
-            return (neigh_chunk_idx, mb_col_idx)
+            # running_sum (source) and fp8_send (dest) are both packed.
+            return (self.locator.pack(neigh_chunk_idx), mb_col_idx)
 
         def send_scale_index_fn(op_idx, hcube_dim_idx):
             dim = (hcube_dim_idx + step_idx) % self.config.num_hcube_dims
@@ -699,8 +725,9 @@ class DmaManager:
                 self.topo.cur_id, step_idx, op_idx, hcube_dim_idx)
             mb_start = mb_idx * self.locator.mb_stride
             mb_start_idx = mb_start + hcube_dim_idx * self.config.hc_chunk_size
-            chunk_slice = self.locator.get_slice(my_chunk_idx, mb_start_idx,
-                                                 self.config.hc_chunk_size)
+            # fp8_recv is packed.
+            chunk_slice = self.locator.get_packed_slice(
+                my_chunk_idx, mb_start_idx, self.config.hc_chunk_size)
             sem = self.fp8_p2_recv_sems.at[step_idx, mb_idx, hcube_dim_idx,
                                            op_idx]
             return chunk_slice, sem, self.config.hc_chunk_size
