@@ -12,9 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.util
+import sys
 import tempfile
 from unittest import mock
 from unittest.mock import MagicMock, patch
+
+if sys.modules.get("tokamax") is None and importlib.util.find_spec(
+        "tokamax") is None:
+    sys.modules["tokamax"] = MagicMock()
+    sys.modules["tokamax._src"] = MagicMock()
+    sys.modules["tokamax._src.ops"] = MagicMock()
+    sys.modules["tokamax._src.ops.experimental"] = MagicMock()
+    sys.modules["tokamax._src.ops.experimental.gmm_v2"] = MagicMock()
+    sys.modules["tokamax._src.ops.experimental.gmm_v2.gmm_v2"] = MagicMock()
 
 import jax
 import jax.numpy as jnp
@@ -31,9 +42,12 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 
 from tests.layers.common import utils as test_utils
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import MoEBackend
-from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
+from tpu_inference.layers.vllm.interface.moe import (FusedMoEFactory,
+                                                     RoutedExperts)
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
+from tpu_inference.layers.vllm.quantization.base import _free_torch_storage
 from tpu_inference.layers.vllm.quantization.mxfp4 import (VllmMxfp4Config,
                                                           VllmMxfp4MoEMethod)
 
@@ -41,8 +55,10 @@ P = PartitionSpec
 MODELS = ["openai/gpt-oss-20b"]
 MXFP4_BLOCK_SIZE = 32
 
-if not jtu.is_device_tpu_at_least(version=7):
-    pytest.skip(allow_module_level=True, reason="Expected TPUv7+")
+
+def _require_tpu7():
+    if not jtu.is_device_tpu_at_least(version=7):
+        pytest.skip("Expected TPUv7+")
 
 
 def quantize_to_mxfp4(weight: torch.tensor):
@@ -84,7 +100,12 @@ def mock_get_pp_group():
 
 
 @pytest.fixture(autouse=True)
-def setup_environment():
+def setup_environment(request):
+    if not (request.node.name.startswith("test_quant_override")
+            or request.node.name.startswith("test_mxfp4_fused_moe")):
+        yield
+        return
+
     # This is a fake config used for init dist env.
     # RowParallelLinear needs dist env to be initialized.
     engine_args = EngineArgs(
@@ -114,6 +135,7 @@ def setup_environment():
     test_utils.get_spmd_mesh(jax.local_device_count())
 ])
 def test_quant_override(model, mesh):
+    _require_tpu7()
 
     engine_args = EngineArgs(
         model=model,
@@ -142,6 +164,7 @@ def test_quant_override(model, mesh):
 def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
                          hidden_size, num_experts, topk, use_ep,
                          enable_attn_dp):
+    _require_tpu7()
     # Skip if enable_attn_dp is True but we don't have enough devices
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
@@ -234,6 +257,7 @@ def test_mxfp4_fused_moe(num_devices, num_tokens, intermediate_size,
 def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
                                     hidden_size, num_experts, topk,
                                     enable_attn_dp):
+    _require_tpu7()
     # Skip if enable_attn_dp is True but we don't have enough devices
     if enable_attn_dp and num_devices < 2:
         pytest.skip("enable_attn_dp requires at least 2 devices")
@@ -329,3 +353,229 @@ def test_mxfp4_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
                                    check_device=False,
                                    atol=2e-1,
                                    rtol=2e-1)
+
+
+def test_mxfp4_moe_incremental_loading_trigger_no_bias():
+    """Test that VllmMxfp4MoEMethod triggers sharding on exact last shard (6E shards) when has_bias=False."""
+    mesh = test_utils.get_spmd_mesh(1)
+    mock_moe_config = MagicMock()
+    mock_moe_config.num_experts = 4
+    mock_moe_config.moe_backend = "auto"
+    mock_moe_config.has_bias = False
+
+    layer = MagicMock()
+    layer.moe_config = mock_moe_config
+    layer.global_num_experts = 4
+    layer._loaded_weights = set()
+
+    with patch(
+            "tpu_inference.layers.vllm.quantization.mxfp4.select_moe_backend_from_fused_moe_config"
+    ):
+        method = VllmMxfp4MoEMethod(mock_moe_config, mesh)
+
+    with patch.object(method, "process_weights_after_loading") as mock_process:
+        with patch.object(envs, "VLLM_INCREMENTAL_MXFP4_LOADING", True):
+            # Load 23 shards (1 short of expected 6 * 4 = 24)
+            for expert_id in range(4):
+                for shard_id in range(5):
+                    method.maybe_process_weights(layer, "w13_weight", (), {
+                        "expert_id": expert_id,
+                        "shard_id": shard_id
+                    })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 0,
+                "shard_id": 5
+            })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 1,
+                "shard_id": 5
+            })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 2,
+                "shard_id": 5
+            })
+
+            assert mock_process.call_count == 0
+
+            # 24th shard triggers process_weights_after_loading
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 3,
+                "shard_id": 5
+            })
+            assert mock_process.call_count == 1
+
+
+def test_mxfp4_moe_incremental_loading_trigger_with_bias():
+    """Test that VllmMxfp4MoEMethod triggers sharding on exact last shard (9E shards) when has_bias=True."""
+    mesh = test_utils.get_spmd_mesh(1)
+    mock_moe_config = MagicMock()
+    mock_moe_config.num_experts = 4
+    mock_moe_config.moe_backend = "auto"
+    mock_moe_config.has_bias = True
+
+    layer = MagicMock()
+    layer.moe_config = mock_moe_config
+    layer.global_num_experts = 4
+    layer._loaded_weights = set()
+
+    with patch(
+            "tpu_inference.layers.vllm.quantization.mxfp4.select_moe_backend_from_fused_moe_config"
+    ):
+        method = VllmMxfp4MoEMethod(mock_moe_config, mesh)
+
+    with patch.object(method, "process_weights_after_loading") as mock_process:
+        with patch.object(envs, "VLLM_INCREMENTAL_MXFP4_LOADING", True):
+            # Load 35 shards (1 short of expected (6 + 3) * 4 = 36)
+            for expert_id in range(4):
+                for shard_id in range(8):
+                    method.maybe_process_weights(layer, "w13_weight", (), {
+                        "expert_id": expert_id,
+                        "shard_id": shard_id
+                    })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 0,
+                "shard_id": 8
+            })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 1,
+                "shard_id": 8
+            })
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 2,
+                "shard_id": 8
+            })
+
+            assert mock_process.call_count == 0
+
+            # 36th shard triggers process_weights_after_loading
+            method.maybe_process_weights(layer, "w2_weight", (), {
+                "expert_id": 3,
+                "shard_id": 8
+            })
+            assert mock_process.call_count == 1
+
+
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_mxfp4_moe_incremental_loading_monolithic_fallback_gpt_oss(has_bias):
+    """Test that a loader call with expert_id=None (e.g. GPT-OSS) falls back without crashing and triggers after all parameters arrive."""
+    mesh = test_utils.get_spmd_mesh(1)
+    mock_moe_config = MagicMock()
+    mock_moe_config.num_experts = 4
+    mock_moe_config.moe_backend = "auto"
+    mock_moe_config.has_bias = has_bias
+
+    layer = MagicMock()
+    layer.moe_config = mock_moe_config
+    layer.global_num_experts = 4
+    layer._loaded_weights = set()
+
+    with patch(
+            "tpu_inference.layers.vllm.quantization.mxfp4.select_moe_backend_from_fused_moe_config"
+    ):
+        method = VllmMxfp4MoEMethod(mock_moe_config, mesh)
+
+    params = ["w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale"]
+    if has_bias:
+        params.extend(["w13_bias", "w2_bias"])
+
+    layer.named_parameters.return_value = [(p, MagicMock()) for p in params]
+
+    with patch.object(method, "process_weights_after_loading") as mock_process:
+        with patch.object(envs, "VLLM_INCREMENTAL_MXFP4_LOADING", True):
+            # Load all but the last parameter with expert_id=None, shard_id=None
+            for param_name in params[:-1]:
+                method.maybe_process_weights(layer, param_name, (), {
+                    "expert_id": None,
+                    "shard_id": None
+                })
+                assert mock_process.call_count == 0
+                assert param_name in layer._loaded_weights
+
+            # Last parameter triggers processing
+            method.maybe_process_weights(layer, params[-1], (), {
+                "expert_id": None,
+                "shard_id": None
+            })
+            assert mock_process.call_count == 1
+
+
+def test_mxfp4_free_torch_storage_frees_memory():
+    """Test that _free_torch_storage frees host storage (untyped_storage().size() == 0)."""
+    t = torch.randn(16, 32, dtype=torch.float32)
+    assert t.untyped_storage().size() > 0
+    _free_torch_storage(t)
+    assert t.untyped_storage().size() == 0
+
+
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_mxfp4_moe_process_weights_frees_host_storage(has_bias):
+    """Test that process_weights_after_loading frees the original CPU storage for all layer parameters."""
+    mesh = test_utils.get_spmd_mesh(1)
+    mock_moe_config = MagicMock()
+    mock_moe_config.num_experts = 4
+    mock_moe_config.moe_backend = "auto"
+    mock_moe_config.has_bias = has_bias
+
+    with patch(
+            "tpu_inference.layers.vllm.quantization.mxfp4.select_moe_backend_from_fused_moe_config"
+    ):
+        method = VllmMxfp4MoEMethod(mock_moe_config, mesh)
+
+    layer = MagicMock(spec=RoutedExperts)
+    layer.moe_config = mock_moe_config
+    layer.activation = MagicMock(value="silu")
+
+    # Real CPU tensors
+    p_w13_weight = torch.zeros((4, 32, 16), dtype=torch.uint8)
+    p_w13_scale = torch.zeros((4, 32, 2), dtype=torch.uint8)
+    p_w2_weight = torch.zeros((4, 16, 16), dtype=torch.uint8)
+    p_w2_scale = torch.zeros((4, 16, 2), dtype=torch.uint8)
+
+    layer.w13_weight = p_w13_weight
+    layer.w13_weight_scale = p_w13_scale
+    layer.w2_weight = p_w2_weight
+    layer.w2_weight_scale = p_w2_scale
+
+    if has_bias:
+        p_w13_bias = torch.zeros((4, 32), dtype=torch.bfloat16)
+        p_w2_bias = torch.zeros((4, 16), dtype=torch.bfloat16)
+        layer.w13_bias = p_w13_bias
+        layer.w2_bias = p_w2_bias
+
+    # Verify initial storage is allocated
+    assert p_w13_weight.untyped_storage().size() > 0
+    assert p_w13_scale.untyped_storage().size() > 0
+    assert p_w2_weight.untyped_storage().size() > 0
+    assert p_w2_scale.untyped_storage().size() > 0
+    if has_bias:
+        assert p_w13_bias.untyped_storage().size() > 0
+        assert p_w2_bias.untyped_storage().size() > 0
+
+    dummy_fused = MagicMock()
+    dummy_sharded = MagicMock()
+    dummy_tv = MagicMock()
+    dummy_tv.w13_weight = torch.empty((1, ))
+    dummy_tv.w13_weight_scale = torch.empty((1, ))
+    dummy_tv.w2_weight = torch.empty((1, ))
+    dummy_tv.w2_weight_scale = torch.empty((1, ))
+    if has_bias:
+        dummy_tv.w13_bias = torch.empty((1, ))
+        dummy_tv.w2_bias = torch.empty((1, ))
+
+    with patch("tpu_inference.layers.vllm.quantization.mxfp4._load_weight_for_layer", return_value=MagicMock()), \
+         patch("tpu_inference.layers.vllm.quantization.mxfp4.shard_moe_weights", return_value=dummy_sharded), \
+         patch("tpu_inference.layers.vllm.quantization.mxfp4.torch_view", return_value=dummy_tv), \
+         patch("tpu_inference.layers.vllm.quantization.mxfp4._release_host_memory"), \
+         patch.object(method, "moe_backend", MagicMock()):
+        with patch("jax.jit",
+                   side_effect=lambda fn: lambda *args, **kwargs: dummy_fused):
+            method.process_weights_after_loading(layer)
+
+    # Verify that CPU storages are completely freed
+    assert p_w13_weight.untyped_storage().size() == 0
+    assert p_w13_scale.untyped_storage().size() == 0
+    assert p_w2_weight.untyped_storage().size() == 0
+    assert p_w2_scale.untyped_storage().size() == 0
+    if has_bias:
+        assert p_w13_bias.untyped_storage().size() == 0
+        assert p_w2_bias.untyped_storage().size() == 0

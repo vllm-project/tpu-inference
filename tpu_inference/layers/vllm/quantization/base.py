@@ -12,13 +12,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
+import ctypes.util
+import gc
 from abc import ABC, abstractmethod
+from typing import Optional
 
+import jax
 import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers import linear as vllm_linear
 
+from tpu_inference import envs
+
 logger = init_logger(__name__)
+
+
+def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
+    """Safely frees the underlying CPU memory storage of a PyTorch tensor.
+
+    Tries `untyped_storage().resize_(0)` first, with fallback to `set_(torch.storage.UntypedStorage())`
+    for 0-dim scalars or float8 dtypes that cannot be resized in-place.
+    """
+    if tensor is None:
+        return
+    try:
+        tensor.untyped_storage().resize_(0)
+    except Exception:
+        try:
+            tensor.set_(torch.storage.UntypedStorage())
+        except Exception:
+            pass
+
+
+def _release_host_memory() -> None:
+    """Frees CPU host memory and trims malloc arena during incremental loading on TPU v6e."""
+    if not (getattr(envs, "VLLM_INCREMENTAL_FP8_LOADING", False)
+            or getattr(envs, "VLLM_INCREMENTAL_MXFP4_LOADING", False)):
+        return
+    gc.collect()
+    jax.effects_barrier()
+    try:
+        libc_name = ctypes.util.find_library("c")
+        if libc_name:
+            ctypes.CDLL(libc_name).malloc_trim(0)
+    except Exception as e:
+        logger.debug(f"malloc_trim failed: {e}")
 
 
 class VllmQuantizationMethod(ABC):
