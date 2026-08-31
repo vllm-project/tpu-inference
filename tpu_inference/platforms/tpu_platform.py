@@ -57,7 +57,22 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
             return _jax_device_memory_info()
 
     torch.accelerator.get_memory_info = _patched_get_memory_info
+from vllm.config import VllmConfig
 from vllm.platforms.interface import Platform, PlatformEnum
+
+# Patch VllmConfig.max_concurrent_batches for TPU PP:
+# TPU V1 model runner executes synchronously with 1 batch in flight so each
+# decode step receives the previous step's sampled token.
+if hasattr(VllmConfig, "max_concurrent_batches"):
+    _orig_max_concurrent_batches = VllmConfig.max_concurrent_batches.fget
+
+    def _tpu_max_concurrent_batches(self: VllmConfig) -> int:
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if pp_size > 1 and not getattr(self, "use_v2_model_runner", False):
+            return 1
+        return _orig_max_concurrent_batches(self)
+
+    VllmConfig.max_concurrent_batches = property(_tpu_max_concurrent_batches)
 
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingConfigManager
@@ -397,6 +412,11 @@ class TpuPlatform(Platform):
         scheduler_config = vllm_config.scheduler_config
         parallel_config.worker_cls = \
                         "tpu_inference.worker.tpu_worker.TPUWorker"
+
+        # TPU V1 model runner executes synchronously with 1 batch in flight when PP is used
+        if (parallel_config.pipeline_parallel_size > 1
+                and not getattr(vllm_config, "use_v2_model_runner", False)):
+            scheduler_config.async_scheduling = False
 
         multihost_backend = envs.TPU_MULTIHOST_BACKEND
         if not multihost_backend:  # Single host
