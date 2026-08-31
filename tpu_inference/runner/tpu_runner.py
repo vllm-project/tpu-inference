@@ -3256,16 +3256,40 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         jax_dtype = to_jax_dtype(self.dtype)
         num_padded_tokens = self._get_padded_total_tokens(scheduler_output)
 
-        if self.dp_size > 1:
-            sharding = NamedSharding(
-                self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
-        else:
-            sharding = NamedSharding(self.mesh, PartitionSpec())
+        hf_conf = getattr(self.model_config, "hf_config", None)
+        hc_mult = getattr(hf_conf, "hc_mult", None) if hf_conf is not None else None
         hidden_size = self.model_config.get_hidden_size()
-        spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
-                                    dtype=jax_dtype,
-                                    sharding=sharding)
-        tensor_spec = {"hidden_states": spec, "residual": spec}
+
+        if hc_mult:
+            hs_shape = (num_padded_tokens, hc_mult, hidden_size)
+            if self.dp_size > 1:
+                hs_sharding = NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None, None))
+            else:
+                hs_sharding = NamedSharding(self.mesh, PartitionSpec())
+        else:
+            hs_shape = (num_padded_tokens, hidden_size)
+            if self.dp_size > 1:
+                hs_sharding = NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+            else:
+                hs_sharding = NamedSharding(self.mesh, PartitionSpec())
+
+        hs_spec = jax.ShapeDtypeStruct(shape=hs_shape,
+                                       dtype=jax_dtype,
+                                       sharding=hs_sharding)
+        if hc_mult:
+            tensor_spec = {"hidden_states": hs_spec}
+        else:
+            if self.dp_size > 1:
+                res_sharding = NamedSharding(
+                    self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, None))
+            else:
+                res_sharding = NamedSharding(self.mesh, PartitionSpec())
+            res_spec = jax.ShapeDtypeStruct(shape=(num_padded_tokens, hidden_size),
+                                            dtype=jax_dtype,
+                                            sharding=res_sharding)
+            tensor_spec = {"hidden_states": hs_spec, "residual": res_spec}
         return tensor_spec
 
     def get_uuid_for_jax_transfer(self,
