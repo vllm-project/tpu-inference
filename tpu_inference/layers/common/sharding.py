@@ -224,6 +224,7 @@ class ShardingConfigManager:
         decode_context_parallelism = parallel_config.decode_context_parallel_size
         prefill_context_parallelism = parallel_config.prefill_context_parallel_size
 
+        expert_parallelism = sharding_strategy.get("expert_parallelism", None)
         if expert_parallelism is None:
             if parallel_config.enable_expert_parallel:
                 expert_parallelism = pc_tensor_parallelism
