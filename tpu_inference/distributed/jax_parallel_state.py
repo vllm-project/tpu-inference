@@ -64,9 +64,18 @@ def init_pp_distributed_environment(ip: str, rank: int, world_size: int,
 
     if need_pp:
         port_number = BASE_JAX_PORT + rank
-        server_address = f"{ip}:{port_number}"
+        server_address = f"0.0.0.0:{port_number}"
+        adv_ip = ip
+        if ip == "localhost":
+            try:
+                import ray
+
+                if ray.is_initialized():
+                    adv_ip = ray.util.get_node_ip_address()
+            except Exception:
+                pass
         transfer_server = transfer.start_transfer_server(
-            device.client, server_address, [f"{ip}:0", f"{ip}:0"])
+            device.client, server_address, [f"{adv_ip}:0", f"{adv_ip}:0"])
         _PP.transfer_server = transfer_server
 
 
