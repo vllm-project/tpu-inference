@@ -258,11 +258,9 @@ class IsCompatibleTest(parameterized.TestCase):
 
     # (num_lanes, dtype, reduce_group_size, expected_is_compatible)
     @parameterized.named_parameters(
-        # v6e SparseCore (num_lanes=8). bf16 packing=2: 8//8//2 = 0 -> the
-        # Qwen3-30B-A3B crash -> must fall back.
-        ("v6e_bf16_topk8_degenerate", 8, jnp.bfloat16, 8, False),
-        # Same v6e lanes but f32 (packing=1): 8//8//1 = 1 -> kernel is valid,
-        # must NOT be blocked just because it is v6e.
+        # v6e SparseCore (num_lanes=8), bf16, topk=8: enabled via FP32 output buffer (packing=1)
+        ("v6e_bf16_topk8_fp32_buffer", 8, jnp.bfloat16, 8, True),
+        # Same v6e lanes but f32 (packing=1): 8//8//1 = 1 -> kernel is valid.
         ("v6e_f32_topk8_ok", 8, jnp.float32, 8, True),
         # v6e lanes, bf16, smaller group: 8//4//2 = 1 -> valid.
         ("v6e_bf16_topk4_ok", 8, jnp.bfloat16, 4, True),

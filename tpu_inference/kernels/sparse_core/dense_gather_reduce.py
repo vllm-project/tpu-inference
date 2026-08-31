@@ -48,9 +48,15 @@ def is_compatible(
     if sc_info.num_lanes % reduce_group_size != 0:
         return False
 
-    # The output block has (num_lanes // reduce_group_size) // packing rows;
-    # fall back to JAX when that is 0 (the kernel can't emit a zero-row block).
-    packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
+    # The output block has (num_lanes // reduce_group_size) // packing rows.
+    # When num_lanes // reduce_group_size == 1 on bf16 (e.g. 8 lanes on v6e with topk=8),
+    # packing=2 would yield a 0-sized output block. We enable the kernel by storing the
+    # intermediate output in FP32 (packing=1) and converting back to bf16.
+    can_use_fp32_output_buffer = (
+        op.dtype == jnp.bfloat16
+        and (sc_info.num_lanes // reduce_group_size) == 1)
+    packing = 1 if can_use_fp32_output_buffer else (
+        32 // jax.dtypes.itemsize_bits(op.dtype))
     if (sc_info.num_lanes // reduce_group_size) // packing < 1:
         return False
 
@@ -296,32 +302,28 @@ def dense_gather_reduce(
       multiplication, resulting in zero output.
   """
     if is_compatible(x, indices, reduce_group_size):
+        sc_info = pltpu.get_tpu_info().sparse_core
         K = x.shape[-1]
-        # The kernel slices the operand along the hidden (column) dimension,
-        # which carries a 128-wide lane tile in the HBM layout
-        # (#tpu.tiled<(4, 128)>). A column chunk that is not a multiple of 128
-        # produces a tpu.memref_slice whose size along the tiled dimension is
-        # not tile-aligned, which Mosaic rejects at compile time with
-        # "Slice sizes along tiled dimensions must be aligned to tiles" (e.g.
-        # hidden_size=2880 -> chunk 1440, and 1440 % 128 = 32). Require the
-        # chunk to be a multiple of the 128 lane tile; when 128 does not divide
-        # hidden_size (as for gpt-oss's 2880) no valid chunk exists and we fall
-        # back to the JAX implementation below.
         col_chunk_size = (min(2048, K) // 128) * 128
         while col_chunk_size > 0:
             if K % col_chunk_size == 0:
                 break
             col_chunk_size -= 128
         if col_chunk_size > 0:
+            can_use_fp32_output_buffer = (
+                x.dtype == jnp.bfloat16
+                and (sc_info.num_lanes // reduce_group_size) == 1)
+            kernel_x = x.astype(jnp.float32) if can_use_fp32_output_buffer else x
             # Pallas kernel expects 1D weights
-            return _sc_gather_reduce(
-                x,
+            res = _sc_gather_reduce(
+                kernel_x,
                 indices,
                 topk_weights.reshape(-1),
                 reduce_group_size=reduce_group_size,
                 col_chunk_size=col_chunk_size,
                 topk_wgt_zero_nan=topk_wgt_zero_nan,
             )
+            return res.astype(x.dtype)
     # Fallback to JAX baseline
     return _jax_fallback(x, indices, topk_weights, reduce_group_size,
                          topk_wgt_zero_nan)
