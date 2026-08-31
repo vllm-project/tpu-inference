@@ -8,7 +8,7 @@ import regex as re
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import (SiluAndMul,
                                                    SiluAndMulWithClamp)
@@ -33,6 +33,7 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader,
 from vllm.model_executor.offloader import NoopOffloader, set_offloader
 from vllm.sequence import IntermediateTensors
 
+from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_attention import \
     VllmDeepseekV4MLAAttention
 from tpu_inference.layers.vllm.custom_ops.experimental.deepseek_v4.deepseek_v4_compressor import \
