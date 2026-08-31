@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 from typing import Optional
 
 import jax
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import \
     FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.moe_weights import (
@@ -53,7 +55,7 @@ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j
+from tpu_inference.utils import get_mesh_shape_product, t2j, to_jax_dtype
 
 P = PartitionSpec
 
@@ -89,6 +91,56 @@ class VllmMxfp4Config(Mxfp4Config, VllmQuantConfig):
             logger.warning_once("MXFP4 attention layer is not implemented. "
                                 "Skipping quantization for this layer.")
         return None
+
+
+@functools.partial(
+    jax.jit,
+    static_argnames=(
+        "moe_backend",
+        "w13_reorder_size",
+        "w13_interleave",
+        "desired_quant_dtype",
+        "requant_block_size",
+    ),
+)
+def _process_mxfp4_moe_weights(
+    w13_weight: jax.Array,
+    w13_weight_scale: jax.Array,
+    w13_bias: jax.Array | None,
+    w2_weight: jax.Array,
+    w2_weight_scale: jax.Array,
+    w2_bias: jax.Array | None,
+    moe_backend: Any,
+    w13_reorder_size: int,
+    w13_interleave: bool,
+    desired_quant_dtype: Any,
+    requant_block_size: int,
+) -> FusedMoEWeights:
+    # Dequantize fp4 weights into fp32.
+    w13_weight = dequantize_tensor_from_mxfp4_packed(
+        w13_weight, w13_weight_scale, 2, jnp.float32)
+    w2_weight = dequantize_tensor_from_mxfp4_packed(
+        w2_weight, w2_weight_scale, 2, jnp.float32)
+
+    weights = quantize_moe_weights(
+        FusedMoEWeights(
+            w13_weight=w13_weight,
+            w13_weight_scale=None,
+            w13_bias=w13_bias,
+            w2_weight=w2_weight,
+            w2_weight_scale=None,
+            w2_bias=w2_bias,
+        ),
+        desired_quant_dtype,
+        requant_block_size,
+        w13_interleave=w13_interleave,
+    )
+    return process_moe_weights(
+        weights,
+        moe_backend=moe_backend,
+        w13_reorder_size=w13_reorder_size,
+        w13_interleave=w13_interleave,
+    )
 
 
 class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
@@ -141,51 +193,25 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
         w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
         w2_bias = t2j(layer.w2_bias, use_dlpack=False) if has_bias else None
 
-        @jax.jit
-        def process_mxfp4_moe_weights(
-            w13_weight: jax.Array,
-            w13_weight_scale: jax.Array,
-            w13_bias: jax.Array | None,
-            w2_weight: jax.Array,
-            w2_weight_scale: jax.Array,
-            w2_bias: jax.Array | None,
-        ) -> FusedMoEWeights:
-            # Dequantize fp4 weights into fp32.
-            w13_weight = dequantize_tensor_from_mxfp4_packed(
-                w13_weight, w13_weight_scale, 2, jnp.float32)
-            w2_weight = dequantize_tensor_from_mxfp4_packed(
-                w2_weight, w2_weight_scale, 2, jnp.float32)
-            w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
-            w13_reorder_size = get_mesh_shape_product(
-                self.mesh, ShardingAxisName.MLP_TENSOR)
+        w13_interleave = layer.activation == MoEActivation.SWIGLUOAI
+        w13_reorder_size = get_mesh_shape_product(
+            self.mesh, ShardingAxisName.MLP_TENSOR)
 
-            weights = quantize_moe_weights(
-                FusedMoEWeights(
-                    w13_weight=w13_weight,
-                    w13_weight_scale=None,
-                    w13_bias=w13_bias,
-                    w2_weight=w2_weight,
-                    w2_weight_scale=None,
-                    w2_bias=w2_bias,
-                ),
-                jnp.float4_e2m1fn,
-                MXFP4_REQUANTIZED_BLOCK_SIZE,
-                w13_interleave=w13_interleave,
-            )
-            return process_moe_weights(
-                weights,
-                moe_backend=self.moe_backend,
-                w13_reorder_size=w13_reorder_size,
-                w13_interleave=w13_interleave,
-            )
+        desired_quant_dtype = to_jax_dtype(envs.MOE_REQUANTIZE_WEIGHT_DTYPE) if envs.MOE_REQUANTIZE_WEIGHT_DTYPE else jnp.float4_e2m1fn
+        requant_block_size = int(envs.MOE_REQUANTIZE_BLOCK_SIZE) if envs.MOE_REQUANTIZE_BLOCK_SIZE else MXFP4_REQUANTIZED_BLOCK_SIZE
 
-        weights = process_mxfp4_moe_weights(
+        weights = _process_mxfp4_moe_weights(
             w13_weight,
             w13_weight_scale,
             w13_bias,
             w2_weight,
             w2_weight_scale,
             w2_bias,
+            moe_backend=self.moe_backend,
+            w13_reorder_size=w13_reorder_size,
+            w13_interleave=w13_interleave,
+            desired_quant_dtype=desired_quant_dtype,
+            requant_block_size=requant_block_size,
         )
         weights = torch_view(
             shard_moe_weights(weights, self.moe_backend, self.mesh))

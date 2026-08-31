@@ -83,6 +83,8 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
+    MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
+    MOE_REQUANTIZE_BLOCK_SIZE: str = ""
 
 
 def env_with_choices(
@@ -494,6 +496,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when initializing large FP8 models on smaller RAM TPUs such as TPU8i.
     "VLLM_INCREMENTAL_FP8_LOADING":
     env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
+    # Controls the target quantization dtype for MoE requantization (e.g. 'fp8', 'int4').
+    "MOE_REQUANTIZE_WEIGHT_DTYPE":
+    lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", ""),
+    # Controls the block size for MoE requantization (e.g. '32', '64').
+    "MOE_REQUANTIZE_BLOCK_SIZE":
+    lambda: os.getenv("MOE_REQUANTIZE_BLOCK_SIZE", ""),
 }
 
 
