@@ -64,6 +64,40 @@ ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
 get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
 
 
+def segment_ids_from_cu_seqlens(cu_seqlens: jax.Array,
+                                total_len: int) -> jax.Array:
+    """Build a per-position segment id vector from cumulative sequence lengths.
+
+    Position ``p`` belongs to segment ``i`` when
+    ``cu_seqlens[i] <= p < cu_seqlens[i + 1]``; every position at or beyond
+    ``cu_seqlens[-1]`` is padding and gets the dedicated id ``num_segs``
+    (``= len(cu_seqlens) - 1``), which no real sequence uses. That keeps
+    padding tokens out of the last real sequence's attention block.
+
+    The alternative ``jnp.repeat(arange(num_segs), lens,
+    total_repeat_length=total_len)`` fills the trailing positions with the LAST
+    segment id instead, which silently merges padding into the last real
+    sequence unless ``cu_seqlens`` happens to end with an empty (padded)
+    segment. That matters wherever q/k/v are padded past ``cu_seqlens[-1]`` --
+    e.g. the mm-encoder budget path, where ``pixel_values`` is padded up to the
+    token budget.
+
+    Args:
+      cu_seqlens: 1-D cumulative offsets, ``[0, l0, l0+l1, ...]``. May be a
+        traced array (repeated trailing offsets = empty segments are fine).
+      total_len: Static length of the id vector to produce.
+
+    Returns:
+      int32 array of shape ``(total_len,)``. The shape depends only on the
+      static ``total_len`` / ``len(cu_seqlens)``, so this is jit-safe.
+    """
+    cu = jnp.asarray(cu_seqlens)
+    positions = jnp.arange(total_len, dtype=cu.dtype)
+    # searchsorted(side="right") over the segment *end* offsets gives exactly
+    # sum(p >= cu_seqlens[1:]): the count of segments that end at or before p.
+    return jnp.searchsorted(cu[1:], positions, side="right").astype(jnp.int32)
+
+
 def sharded_flash_attention(
     mesh: Mesh,
     causal: bool = True,

@@ -285,6 +285,7 @@ def fused_conv1d_gdn(
     state_indices: jax.Array,  # [num_seqs]
     distribution: jax.Array,  # [3]
     seq_lens: jax.Array,  # [num_seqs]
+    read_state_indices: jax.Array,  # [num_seqs]
     read_offsets: jax.Array | None = None,  # [num_seqs]
     *,
     n_kq: int,
@@ -328,10 +329,14 @@ def fused_conv1d_gdn(
             speculative verify windows of up to `num_spec_tokens + 1` tokens
             rather than 1-token decodes.
         seq_lens: Sequence lengths for each sequence of shape [num_seqs].
+        read_state_indices: Tensor of shape [num_seqs] mapping sequences to the
+            state slot to read initial state from. Equal to `state_indices` when
+            prefix caching is off. Mamba prefix caching ("align" mode) resumes
+            from the cached state block of the previous block boundary.
         read_offsets: Optional [num_seqs] int32 — per-sequence state read
             offset (num_accepted - 1 from the last verify step). Windowed
             sequences read their initial state from
-            `state_indices[s] + read_offsets[s]` and write one checkpoint
+            `read_state_indices[s] + read_offsets[s]` and write one checkpoint
             per window position to `state_indices[s] + t`. Required when
             `num_spec_tokens > 0`.
         n_kq: Number of key/query heads.
@@ -379,6 +384,8 @@ def fused_conv1d_gdn(
         read_offsets = jnp.zeros((num_seqs, ), dtype=jnp.int32)
     assert read_offsets.shape == (num_seqs, )
     read_offsets = read_offsets.astype(jnp.int32)
+    assert read_state_indices.shape == (num_seqs, )
+    read_state_indices = read_state_indices.astype(state_indices.dtype)
     act_in_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
@@ -486,6 +493,7 @@ def fused_conv1d_gdn(
                 state_indices=state_indices,
                 read_offsets=read_offsets,
                 end_seq=distribution[0],
+                read_indices=read_state_indices,
             )
         else:
             metadata_obj = metadata.compute_per_seq_metadata(
@@ -495,6 +503,7 @@ def fused_conv1d_gdn(
                 state_indices=state_indices,
                 start_seq=distribution[0],
                 end_seq=distribution[-1],
+                read_indices=read_state_indices,
             )
 
         metadata_spec = jax.tree.map(lambda _: smem_spec, metadata_obj)

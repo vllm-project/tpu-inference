@@ -947,6 +947,13 @@ class DPScheduler(SchedulerInterface):
                     combined_kv_connector_metadata.reqs_to_load.update(
                         meta.reqs_to_load)
 
+        has_structured_output_requests = any(
+            getattr(o, "has_structured_output_requests", False)
+            for o in rank_outputs)
+        pending_structured_output_tokens = any(
+            getattr(o, "pending_structured_output_tokens", False)
+            for o in rank_outputs)
+
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
             scheduled_cached_reqs=combined_cached_data,
@@ -961,6 +968,8 @@ class DPScheduler(SchedulerInterface):
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
             kv_connector_metadata=combined_kv_connector_metadata,
+            has_structured_output_requests=has_structured_output_requests,
+            pending_structured_output_tokens=pending_structured_output_tokens,
         )
 
     def _combine_cached_request_data(

@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
+    USE_GMM_FUSED_RS_KERNEL: bool = False
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
@@ -82,6 +83,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
+    VERIFY_WEIGHTS: bool = False
 
 
 def env_with_choices(
@@ -412,6 +414,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
+    # Enable fused GMM reduce-scatter kernel for MoE
+    "USE_GMM_FUSED_RS_KERNEL":
+    env_bool("USE_GMM_FUSED_RS_KERNEL", default=False),
     # Number of worker threads for parallel XLA precompilation.
     "NUM_PRECOMPILE_WORKERS":
     lambda: int(os.getenv("NUM_PRECOMPILE_WORKERS") or "1"),
@@ -490,6 +495,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when initializing large FP8 models on smaller RAM TPUs such as TPU8i.
     "VLLM_INCREMENTAL_FP8_LOADING":
     env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
+    # RL weight sync: verify tensor checksums after each Raiden H2D transfer.
+    "VERIFY_WEIGHTS":
+    env_bool("VERIFY_WEIGHTS", default=False),
 }
 
 

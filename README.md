@@ -49,7 +49,7 @@ vLLM TPU is now powered by `tpu-inference`, an expressive and powerful new hardw
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 
-For this reason, we’ve provided a **[Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/)** page detailing the models and features that are validated through unit, integration, and performance testing.
+For this reason, we’ve provided **[Recommended Models](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/)** and **[Recommended Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_features/)** pages detailing the models and features that are validated through unit, integration, and performance testing.
 
 <br>
 
@@ -76,7 +76,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-07-31 04:23 AM UTC*
+*Last Updated: 2026-08-20 08:51 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -136,8 +136,8 @@ Below is the live status of our supported models, features, and kernels. Click o
 | [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [moonshotai/Kimi-K2.6](https://huggingface.co/moonshotai/Kimi-K2.6) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
-| [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
-| [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
+| [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> | <span title="❌ Failing">❌</span> |
+| [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> | <span title="❌ Failing">❌</span> |
 | [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
@@ -244,17 +244,17 @@ Below is the live status of our supported models, features, and kernels. Click o
     <tr>
       <td>Speculative Decoding: DFlash</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>hybrid kv cache</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
+      <td>multi-host</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
-      <td>multi-host</td>
+      <td>hybrid kv cache</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -331,9 +331,9 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>TP</td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>

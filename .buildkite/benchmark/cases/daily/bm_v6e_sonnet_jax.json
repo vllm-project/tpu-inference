@@ -1,0 +1,318 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs"
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "Llama-3.1-8B-v6e-1-dataset_sonnet-inlen_1800-outlen_128-jax",
+      "ci_queue": [
+        "tpu_v6e_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "BK_TIMEOUT_IN_MINUTES": 90
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "meta-llama/Llama-3.1-8B-Instruct",
+          "seed": 42,
+          "max-num-seqs": 256,
+          "max-num-batched-tokens": 1024,
+          "tensor-parallel-size": 1,
+          "max-model-len": 2048,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "meta-llama/Llama-3.1-8B-Instruct",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1800,
+          "sonnet-output-len": 128,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-4B-v6e-1-dataset_sonnet-inlen_1800-outlen_128-jax",
+      "ci_queue": [
+        "tpu_v6e_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "BK_TIMEOUT_IN_MINUTES": 90
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-4B",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 1024,
+          "tensor-parallel-size": 1,
+          "max-model-len": 2048,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-4B",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1800,
+          "sonnet-output-len": 128,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-8B-v6e-1-dataset_sonnet-inlen_1800-outlen_128-jax",
+      "ci_queue": [
+        "tpu_v6e_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "BK_TIMEOUT_IN_MINUTES": 90
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-8B",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 512,
+          "tensor-parallel-size": 1,
+          "max-model-len": 2048,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-8B",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1800,
+          "sonnet-output-len": 128,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen2.5-1.5B-v6e-1-dataset_sonnet-inlen_1800-outlen_128-jax",
+      "ci_queue": [
+        "tpu_v6e_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "BK_TIMEOUT_IN_MINUTES": 90
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "Qwen/Qwen2.5-1.5B-Instruct",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 4096,
+          "tensor-parallel-size": 1,
+          "max-model-len": 2048,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen2.5-1.5B-Instruct",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1800,
+          "sonnet-output-len": 128,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-32B-v6e-8-dataset_sonnet-inlen_1800-outlen_128-jax",
+      "ci_queue": [
+        "tpu_v6e_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "BK_TIMEOUT_IN_MINUTES": 180
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-32B",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 1024,
+          "tensor-parallel-size": 8,
+          "max-model-len": 2048,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-32B",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1800,
+          "sonnet-output-len": 128,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Llama-3.1-70B-v6e-8-dataset_sonnet-inlen_1800-outlen_128-jax",
+      "ci_queue": [
+        "tpu_v6e_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "BK_TIMEOUT_IN_MINUTES": 180
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "meta-llama/Llama-3.1-70B-Instruct",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 1024,
+          "tensor-parallel-size": 8,
+          "max-model-len": 2048,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "meta-llama/Llama-3.1-70B-Instruct",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1800,
+          "sonnet-output-len": 128,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Llama-3.3-70B-v6e-8-dataset_sonnet-inlen_1800-outlen_128-jax",
+      "ci_queue": [
+        "tpu_v6e_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1800,
+        "OUTPUT_LEN": 128,
+        "BK_TIMEOUT_IN_MINUTES": 180
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax"
+        },
+        "args": {
+          "model": "meta-llama/Llama-3.3-70B-Instruct",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 1024,
+          "tensor-parallel-size": 8,
+          "max-model-len": 2048,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "meta-llama/Llama-3.3-70B-Instruct",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1800,
+          "sonnet-output-len": 128,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    }
+  ]
+}

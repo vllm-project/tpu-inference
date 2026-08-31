@@ -53,6 +53,9 @@
 # Worker Management
 /tpu_inference/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork @Lumosis
 
+# RL Rollout / Weight Sync
+/tpu_inference/rl/ @wenxindongwork @pv97
+
 # Speculative Decoding
 /tpu_inference/spec_decode/ @Lumosis @gxd3
 /tpu_inference/layers/jax/sample/rejection_sampler.py @Lumosis @gxd3
@@ -85,16 +88,17 @@
 /tests/kernels/ @kyuyeunk @bythew3i @a1yssan13
 /tests/kernels/deepseek_v4 @gxd3 @a1yssan13 @inucool12
 /tests/kernels/rpa_v3_cp/ @kyuyeunk @wenxindongwork @weiyu0824 
-/tests/layers/ @kyuyeunk @lk-chen
+/tests/layers/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/lora/ @vanbasten23 @kyuyeunk
-/tests/models/ @kyuyeunk @lk-chen
+/tests/models/ @kyuyeunk @lk-chen @jrplatin
 /tests/models/jax/ @kyuyeunk @lk-chen @jrplatin
 /tests/layers/jax/sample/test_rejection_sampler.py @Lumosis @gxd3
 /tests/platforms/ @sixiang-google @mrjunwan-lang
 /tests/runner/ @kyuyeunk @jrplatin @wenxindongwork @sixiang-google @mrjunwan-lang @gxd3 @a1yssan13
 /tests/spec_decode/ @Lumosis @gxd3
 /tests/worker/ @sixiang-google @mrjunwan-lang @jrplatin @vanbasten23 @wenxindongwork
+/tests/rl/ @wenxindongwork @pv97
 /tests/e2e/ @pv97 @wenxindongwork @jrplatin @Lumosis @gxd3
 /tests/offload/ @juncgu-google @richardsliu
 /tests/scripts/ @jrplatin @QiliangCui
