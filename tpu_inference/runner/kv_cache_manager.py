@@ -1181,10 +1181,10 @@ class KVCacheManager:
 
         # Overlay swa_caches onto the CSA NoPE arrays.
         if not csa_nope_indices:
-            raise ValueError(
-                "[kv-cache] DSv4 model has no CSA layer to host the swa_caches"
-                f" (compress_ratio={self._DS_V4_CSA_COMPRESS_RATIO}). MLA "
-                f"layers={mla_layer_names}")
+            csa_page_size = (self.runner.cache_config.block_size // self._DS_V4_CSA_COMPRESS_RATIO) * common_utils.get_mesh_shape_product(self.runner.mesh, ShardingAxisName.KV_CONTEXT)
+            shape = (num_blocks, csa_page_size, self._DS_V4_KV_PACKING, 128)
+            _create_cache(shape, "csa_virtual_host.0")
+            csa_nope_indices.append(len(kv_caches) - 1)
         swa_host_indices = list(csa_nope_indices)
         for group_swa_layers in swa_layer_groups:
             for position, layer_name in enumerate(group_swa_layers):
