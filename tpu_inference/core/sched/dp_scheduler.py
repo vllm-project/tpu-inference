@@ -228,6 +228,9 @@ def _scheduler_worker_process(
                     model_runner_output = data
                     scheduler_output = _cached_scheduler_outputs.popleft()
 
+                    # Tokens removed by the rewrite below, per request.
+                    shortfalls: Dict[str, int] = {}
+
                     if model_runner_output.sampled_token_ids:
                         # Synchronize the locally cached `num_scheduled_tokens` with the actual
                         # count of generated tokens from the continue-decode multi-step execution.
@@ -243,11 +246,39 @@ def _scheduler_worker_process(
                                 num_sampled = len(model_runner_output.
                                                   sampled_token_ids[req_idx])
                                 if num_sampled > 0:
+                                    original = (scheduler_output.
+                                                num_scheduled_tokens[req_id])
+                                    if original != num_sampled:
+                                        shortfalls[req_id] = (original -
+                                                              num_sampled)
                                     scheduler_output.num_scheduled_tokens[
                                         req_id] = num_sampled
 
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
+
+                    # Track in-flight and stale output tokens on the
+                    # SCHEDULED count, not the SAMPLED count.
+                    # _update_after_schedule (vllm scheduler.py) adds the
+                    # scheduled count to num_in_flight_tokens, but
+                    # update_from_output subtracts the sampled count the
+                    # overwrite above left there, and the difference stays
+                    # attached to the request.
+                    #
+                    # Preemption copies that difference into
+                    # num_stale_output_tokens, and schedule()
+                    # then parks the request forever, waiting on output
+                    # tokens that never arrive.
+                    for req_id, shortfall in shortfalls.items():
+                        request = scheduler.requests.get(req_id)
+                        if request is None:
+                            continue  # finished and dropped during the update
+                        request.num_in_flight_tokens = max(
+                            0, request.num_in_flight_tokens - shortfall)
+                        if request.num_stale_output_tokens > 0:
+                            request.num_stale_output_tokens = max(
+                                0, request.num_stale_output_tokens - shortfall)
+
                     _send_result(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
