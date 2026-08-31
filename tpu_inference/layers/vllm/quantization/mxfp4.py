@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import \
     is_layer_skipped
 
+from tpu_inference import envs
 from tpu_inference.layers.common.moe import \
     FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.moe_weights import (
@@ -53,7 +54,7 @@ from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedLinearMethod
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import get_mesh_shape_product, t2j
+from tpu_inference.utils import get_mesh_shape_product, t2j, to_jax_dtype
 
 P = PartitionSpec
 
@@ -159,6 +160,9 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
             w13_reorder_size = get_mesh_shape_product(
                 self.mesh, ShardingAxisName.MLP_TENSOR)
 
+            desired_quant_dtype = to_jax_dtype(envs.MOE_REQUANTIZE_WEIGHT_DTYPE) if envs.MOE_REQUANTIZE_WEIGHT_DTYPE else jnp.float4_e2m1fn
+            requant_block_size = int(envs.MOE_REQUANTIZE_BLOCK_SIZE) if envs.MOE_REQUANTIZE_BLOCK_SIZE else MXFP4_REQUANTIZED_BLOCK_SIZE
+
             weights = quantize_moe_weights(
                 FusedMoEWeights(
                     w13_weight=w13_weight,
@@ -168,8 +172,8 @@ class VllmMxfp4MoEMethod(Mxfp4MoEMethod, FusedMoEMethodBase):
                     w2_weight_scale=None,
                     w2_bias=w2_bias,
                 ),
-                jnp.float4_e2m1fn,
-                MXFP4_REQUANTIZED_BLOCK_SIZE,
+                desired_quant_dtype,
+                requant_block_size,
                 w13_interleave=w13_interleave,
             )
             return process_moe_weights(
