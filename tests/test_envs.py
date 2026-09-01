@@ -114,18 +114,18 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
-    """MOE_STAGE_WEIGHTS_ON_HOST is on unless it is explicitly turned off."""
+    """MOE_STAGE_WEIGHTS_ON_HOST is opt-in: off unless it is asked for."""
     monkeypatch.delenv("MOE_STAGE_WEIGHTS_ON_HOST", raising=False)
-    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
-
-    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
-    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
-
-    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "false")
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
 
     monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "1")
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "true")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):

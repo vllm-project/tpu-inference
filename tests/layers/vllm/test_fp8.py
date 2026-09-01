@@ -774,3 +774,22 @@ def test_fp8_moe_weight_loads_follow_moe_stage_weights_on_host(stage_on_host):
         # Host staging is only sound because the weight is built at the very
         # sharding process_quantized_moe_weights would have put it at.
         assert call.args[2] == NamedSharding(mesh, P(ShardingAxisName.EXPERT))
+
+
+def test_fp8_moe_weight_loads_do_not_stage_on_host_by_default(
+        monkeypatch: pytest.MonkeyPatch):
+    """Host staging is opt-in, so an untouched environment loads as before."""
+    monkeypatch.delenv("MOE_STAGE_WEIGHTS_ON_HOST", raising=False)
+    mesh = test_utils.get_spmd_mesh(4)
+    method, layer = _make_fp8_moe_method_and_layer(mesh)
+
+    with patch("tpu_inference.layers.vllm.quantization.fp8._load_weight_for_layer"
+               ) as mock_load, \
+         patch("tpu_inference.layers.vllm.quantization.fp8.process_quantized_moe_weights",
+               side_effect=_StopAfterLoads):
+        with pytest.raises(_StopAfterLoads):
+            method.process_weights_after_loading(layer)
+
+    assert mock_load.call_args_list
+    for call in mock_load.call_args_list:
+        assert call.kwargs["stage_on_host"] is False
