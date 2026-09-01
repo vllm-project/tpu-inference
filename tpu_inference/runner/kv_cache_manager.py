@@ -731,7 +731,6 @@ class KVCacheManager:
 
         # set the kv cache layout which is needed by kv connectors
         # NOTE(jcgu): please update the default value when the order changes
-        # set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
         # verify kv cache layout is matched between the cache manager and
         # the kv connector (if configured)
         _required_kv_layout = get_kv_connector_cache_layout()
