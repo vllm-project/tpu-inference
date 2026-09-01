@@ -392,23 +392,28 @@ def rpa_body(
     v_b = []
 
     if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
-        stitch_results = []
-        for b_idx in range(cfgs.batch_size):
-            res = stitch_utils.stitch_new_kv_lane(
-                kv_in_vref,
-                b_idx,
-                step_meta.bkv_sz_frm_cache[b_idx],
-                step_meta.new_kv_len_start[b_idx],
-                cfgs=cfgs,
-            )
-            stitch_results.append(res)
-        for b_idx in range(cfgs.batch_size):
-            stitch_utils.store_new_kv_lane(
-                kv_in_vref,
-                b_idx,
-                stitch_results[b_idx],
-                cfgs=cfgs,
-            )
+        # CACHE_ONLY has no new kv, so there is nothing to stitch; skipping
+        # also keeps the lane buffer untouched by vector stores, which the
+        # PCP ring requires (an in-place stitch would race the send that is
+        # still reading the buffer).
+        if cfgs.serve.attention_scope != configs.AttentionScope.CACHE_ONLY:
+            stitch_results = []
+            for b_idx in range(cfgs.batch_size):
+                res = stitch_utils.stitch_new_kv_lane(
+                    kv_in_vref,
+                    b_idx,
+                    step_meta.bkv_sz_frm_cache[b_idx],
+                    step_meta.new_kv_len_start[b_idx],
+                    cfgs=cfgs,
+                )
+                stitch_results.append(res)
+            for b_idx in range(cfgs.batch_size):
+                stitch_utils.store_new_kv_lane(
+                    kv_in_vref,
+                    b_idx,
+                    stitch_results[b_idx],
+                    cfgs=cfgs,
+                )
         for b_idx in range(cfgs.batch_size):
             ks = []
             vs = []
