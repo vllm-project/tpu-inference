@@ -339,9 +339,6 @@ def pcp_forward(
             # -inf result discarded by merge_attn_states.  Skip it outright.
             context_out = context_lse = None
         else:
-            # In-kernel ring (CACHE_ONLY scope, cache page-interleaved over
-            # the pcp ranks like the current phase below). The output (and so
-            # the LSE) is in q's dtype: the kernel aliases its output to q.
             cu_ring = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(
                 q_local.shape[0])
             context_out, _, context_lse = batched_rpa.ragged_paged_attention(
@@ -362,11 +359,6 @@ def pcp_forward(
                 return_lse=True,
                 **common)
 
-        # Current phase, NEW_TOKENS_ONLY: the two local sequences (head, tail
-        # chunk; pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]) attend
-        # the whole chunk's kv in token order, positioned by q_pos_offsets;
-        # the tail sequence writes the pages this rank owns (page interleave)
-        # exactly once.
         k_curr = to_token_order(k_local)
         v_curr = to_token_order(v_local)
         curr_out, kv_cache_updated, curr_lse = batched_rpa.ragged_paged_attention(
