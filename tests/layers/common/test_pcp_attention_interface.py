@@ -25,12 +25,11 @@ from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
 from tpu_inference.layers.common import sharding as sharding_mod
 from tpu_inference.layers.common.attention_metadata import (AttentionMetadata,
-                                                            PCPMetadata,
-                                                            pcp_seq_arrays,
-                                                            pcp_token_layout)
+                                                            PCPMetadata)
 from tpu_inference.layers.common.cp_attention import pcp_forward
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
+from tpu_inference.runner.pcp_utils import pcp_seq_arrays, pcp_token_layout
 
 PAGE = 16  # per-rank block_size; the GLOBAL page_size dim is PAGE * pcp
 MAX_SEQ = 8
