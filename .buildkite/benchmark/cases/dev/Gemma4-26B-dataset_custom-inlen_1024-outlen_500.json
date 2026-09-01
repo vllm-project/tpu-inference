@@ -24,6 +24,7 @@
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "flax_nnx",
           "USE_BATCHED_RPA_KERNEL": "1",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "float8_e4m3fn",
           "VLLM_ENGINE_READY_TIMEOUT_S": "1800"
         },
         "args": {
@@ -42,6 +43,7 @@
           "max-model-len": 2048,
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": null, \"act_qtype\": null}]}}}",
           "async-scheduling": true
         }
       },
@@ -78,6 +80,7 @@
           "VLLM_USE_V1": "1",
           "MODEL_IMPL_TYPE": "flax_nnx",
           "USE_BATCHED_RPA_KERNEL": "1",
+          "MOE_REQUANTIZE_WEIGHT_DTYPE": "float8_e4m3fn",
           "VLLM_ENGINE_READY_TIMEOUT_S": "1800"
         },
         "args": {
@@ -97,6 +100,7 @@
           "kv-cache-dtype": "fp8",
           "gpu-memory-utilization": 0.9,
           "async-scheduling": true,
+          "additional-config": "{\"quantization\": { \"qwix\": { \"rules\": [{ \"module_path\": \".*\", \"weight_qtype\": null, \"act_qtype\": null}]}}}",
           "compilation-config": "{\"cudagraph_mm_encoder\": true}",
           "disable-chunked-mm-input": true
         }
