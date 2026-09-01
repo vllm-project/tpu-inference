@@ -431,10 +431,12 @@ class CompilationManager:
                 cache_pages=pcp_cache_pages,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
-        # populate for hybrid attn+mamba models — for pure-attention models we
-        # pass None at runtime (see `_prepare_inputs`), and the precompile
+        # populate for hybrid attn+mamba models without align mode — for pure-attention models
+        # and mamba align mode we pass None at runtime (see `_prepare_inputs`), and the precompile
         # primer must match that shape so the cached HLO is reused.
-        if self.runner.kv_cache_config.has_mamba_layers:
+        if (self.runner.kv_cache_config.has_mamba_layers
+                and getattr(self.runner.cache_config, "mamba_cache_mode",
+                            "none") != "align"):
             mamba_state_indices = device_array(self.runner.mesh,
                                                np.zeros(
                                                    self.runner.max_num_reqs,
@@ -1959,7 +1961,9 @@ class CompilationManager:
                                                 request_distribution,
                                                 sharding=dp_sharding)
 
-            if self.runner.kv_cache_config.has_mamba_layers:
+            if (self.runner.kv_cache_config.has_mamba_layers
+                    and getattr(self.runner.cache_config, "mamba_cache_mode",
+                                "none") != "align"):
                 mamba_state_indices = device_array(
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),

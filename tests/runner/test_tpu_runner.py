@@ -1070,3 +1070,44 @@ class TestTPUJaxRunnerDisableMM:
             runner.load_model()
 
             assert runner.is_multimodal_model == still_mm_after_loading_model
+
+    @patch('tpu_inference.runner.tpu_runner.set_forward_context')
+    def test_execute_model_continue_decode_structured_output_guard(
+            self, mock_set_forward_context):
+        """_execute_model() should bypass continue decode if structured output is requested."""
+        runner = MagicMock()
+        runner.enable_continue_decode = True
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.request_distribution = [2, 0, 2]  # decode only
+        runner._prepare_inputs.return_value = (MagicMock(), MagicMock(),
+                                               MagicMock(), MagicMock(),
+                                               MagicMock(), None, None, 2, {},
+                                               2, None, MagicMock())
+        runner._get_input_ids_embeds.return_value = (MagicMock(), None)
+        runner.is_multimodal_model = False
+        runner.compute_logits_fn = MagicMock()
+        runner.state_leaves = MagicMock()
+        runner.mesh = MagicMock()
+        runner.lora_utils.extract_lora_metadata.return_value = None
+        runner.input_batch.num_prompt_logprobs = 0
+        runner.model_fn.return_value = (MagicMock(), MagicMock(), None, None)
+        runner._select_from_array_fn = MagicMock()
+        runner.is_pooling_model = False
+        runner.is_last_rank = True
+        runner.speculative_config = None
+        runner.execute_model_state = None
+
+        # 1. Batch has structured output requests -> continue decode MUST be bypassed
+        scheduler_output_structured = MagicMock()
+        scheduler_output_structured.has_structured_output_requests = True
+        scheduler_output_structured.finished_req_ids = []
+        TPUModelRunner._execute_model(runner, scheduler_output_structured)
+        runner._execute_continue_decode.assert_not_called()
+
+        # 2. Batch does NOT have structured output requests -> continue decode called
+        scheduler_output_normal = MagicMock()
+        scheduler_output_normal.has_structured_output_requests = False
+        scheduler_output_normal.finished_req_ids = []
+        TPUModelRunner._execute_model(runner, scheduler_output_normal)
+        runner._execute_continue_decode.assert_called_once_with(
+            scheduler_output_normal)

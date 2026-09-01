@@ -1,4 +1,5 @@
-# Recommended Model and Feature Matrices
+
+# Recommended Models
 
 Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 For this reason, until we land more capabilities, we recommend starting from this list of stress tested models and features below.
@@ -41,57 +42,3 @@ These tables show the models currently tested for accuracy and performance.
 === "v6e"
 
     {{ read_csv('support_matrices/release/v6e/default/model_support_matrix.csv') }}
-
-## Recommended Features
-
-This table shows the features currently tested for accuracy and performance.
-
-=== "Release"
-
-    --8<-- "docs/includes/core_features.md"
-
-=== "Nightly"
-
-    --8<-- "docs/includes/nightly_core_features.md"
-
-## Kernel Support
-
-This table tracks high-level correctness and performance validation for distributed compute kernels.
-
---8<-- "docs/includes/kernel_support.md"
-
-## Microbenchmark Kernel Support
-
-This section outlines the detailed hardware and precision validation for our core microbenchmark kernels.
-
-=== "Release"
-
-    --8<-- "docs/includes/microbenchmarks.md"
-
-=== "Nightly"
-
-    --8<-- "docs/includes/nightly_microbenchmarks.md"
-
-## Parallelism Support
-
-This table shows the current parallelism support status.
-
-=== "Release"
-
-    --8<-- "docs/includes/parallelism.md"
-
-=== "Nightly"
-
-    --8<-- "docs/includes/nightly_parallelism.md"
-
-## Quantization Support
-
-This table shows the current quantization support status.
-
-=== "Release"
-
-    --8<-- "docs/includes/quantization.md"
-
-=== "Nightly"
-
-    --8<-- "docs/includes/nightly_quantization.md"

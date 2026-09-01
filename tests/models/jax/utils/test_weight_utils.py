@@ -116,6 +116,21 @@ class TestJaxAutoWeightsLoader:
                                    rtol=1e-3,
                                    atol=1e-2)
 
+    def test_skip_lists_survive_init(self):
+        """skip_prefixes/skip_substrs must survive construction regardless of
+        whether the vLLM AutoWeightsLoader base class still owns (and resets)
+        those attributes in its own __init__."""
+        from tpu_inference.models.jax.utils.weight_utils import \
+            JaxAutoWeightsLoader
+
+        jax_model = JaxMLP(rngs=nnx.Rngs(0))
+        loader = JaxAutoWeightsLoader(jax_model,
+                                      skip_prefixes=["lm_head"],
+                                      skip_substrs=["vision", "audio"])
+        assert "lm_head" in loader.skip_prefixes
+        assert "vision" in loader.skip_substrs
+        assert "audio" in loader.skip_substrs
+
     def test_weight_prefix_mapping(self):
         """Test that 'model.' is prepended correctly based on module structure."""
         from unittest.mock import MagicMock, patch

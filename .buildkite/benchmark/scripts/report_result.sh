@@ -352,6 +352,22 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
     --instance="$GCP_INSTANCE_ID" \
     --sql="$SQL"
   echo "--- Reporting finished (DB written)"
+
+  # Dual write the same result to BigQuery, sharing the Spanner RecordId so
+  # the two rows can be joined. Dashboards are migrating off Spanner and both
+  # sinks have to stay truthful until they have. Non-fatal: a BigQuery outage
+  # or a missing grant must not fail an otherwise good benchmark run, and
+  # Spanner remains the source of record.
+  if [[ "${BQ_UPLOAD_ENABLED:-true}" == "true" ]]; then
+    echo "--- Reporting to BigQuery"
+    python3 "$(dirname "${BASH_SOURCE[0]}")/report_bigquery.py" \
+      --record-id="$RECORD_ID" \
+      --result-file="$RESULT_FILE" \
+      --status="$FINAL_STATUS" \
+      || echo "Warning: BigQuery dual write failed for $RECORD_ID."
+  else
+    echo "--- Reporting to BigQuery (skipped)"
+  fi
 else
   echo "--- Reporting finished (Local test scenario: GCP variables not set, skipping DB reporting)"
   if [ -f "$RESULT_FILE" ]; then

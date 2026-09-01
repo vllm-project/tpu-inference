@@ -59,15 +59,17 @@ def gdn_attention_core_tpu(
        in the cache.
     """
     fc = get_forward_context()
-    # attn_metadata = fc.attn_metadata[layer_name]
-    key = list(fc.attn_metadata.keys())[0]
-    first_attn_metadata = fc.attn_metadata[key]
+    if isinstance(fc.attn_metadata, dict):
+        attn_metadata = fc.attn_metadata.get(
+            layer_name, next(iter(fc.attn_metadata.values())))
+    else:
+        attn_metadata = fc.attn_metadata
 
-    padded_num_reqs = first_attn_metadata.padded_num_reqs
-    request_distribution = first_attn_metadata.request_distribution
-    query_start_loc = first_attn_metadata.query_start_loc
-    seq_lens = first_attn_metadata.seq_lens
-    state_indices = first_attn_metadata.mamba_state_indices
+    padded_num_reqs = attn_metadata.padded_num_reqs
+    request_distribution = attn_metadata.request_distribution
+    query_start_loc = attn_metadata.query_start_loc
+    seq_lens = attn_metadata.seq_lens
+    block_tables = attn_metadata.block_tables
 
     layer_module = fc.no_compile_layers[layer_name]
     vllm_context = get_vllm_model_wrapper_context()
@@ -109,31 +111,57 @@ def gdn_attention_core_tpu(
     else:
         conv_state_in = conv_state
 
-    # Index mamba state by the per-request slot id from
-    # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
-    # (vLLM's GPU convention). Two reasons:
-    #
-    #  1. `_maybe_set_compact_mamba_num_blocks_override` caps the mamba
-    #     pool at `max_num_seqs + 1` while the attention pool is much
-    #     larger; using `block_tables[:, 0]` (a value in the attention
-    #     range) would walk off the end of the mamba arrays.
-    #  2. When vLLM's input batch runs `condense` to compact the persistent
-    #     batch (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662 — moves
-    #     requests into lower-index slots after earlier ones finish), the
-    #     slot id moves with the request so the kernel still reads/writes
-    #     the slot that holds this request's real state.
-    state_indices = state_indices.astype(jnp.int32)
     padded_num_reqs_per_dp = padded_num_reqs // dp_size
 
-    # Slice the state indices to the padded_num_reqs, which is the actual number
-    # of requests padded to the bucket.
-    state_indices_sliced = truncate_sharded_tensor(state_indices,
-                                                   padded_num_reqs_per_dp,
-                                                   dp_size)
     query_start_loc_sliced = truncate_sharded_tensor(
         query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
     seq_lens_sliced = truncate_sharded_tensor(seq_lens, padded_num_reqs_per_dp,
                                               dp_size)
+
+    cache_config = vllm_context.vllm_config.cache_config
+    if cache_config.mamba_cache_mode == "align":
+        # Mamba prefix caching ("align" mode): derive read/write state slots
+        # from the mamba block table directly on TPU.
+        block_tables = block_tables.reshape(seq_lens.shape[0], -1)
+        max_num_reqs_per_dp = seq_lens.shape[0] // dp_size
+        block_tables_reshaped = block_tables.reshape(dp_size,
+                                                     max_num_reqs_per_dp, -1)
+        block_tables_sliced = block_tables_reshaped[:, :
+                                                    padded_num_reqs_per_dp, :].reshape(
+                                                        -1,
+                                                        block_tables.shape[-1])
+        mamba_block_size = cache_config.mamba_block_size
+        query_start_loc_reshaped = query_start_loc_sliced.reshape(
+            dp_size, padded_num_reqs_per_dp + 1)
+        query_lens = (query_start_loc_reshaped[:, 1:] -
+                      query_start_loc_reshaped[:, :-1]).reshape(-1)
+        num_computed = seq_lens_sliced - query_lens
+
+        read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
+        write_col = jnp.maximum(seq_lens_sliced - 1, 0) // mamba_block_size
+
+        batch_idx = jnp.arange(seq_lens_sliced.shape[0])
+        read_state_indices_sliced = block_tables_sliced[batch_idx, read_col]
+        state_indices_sliced = block_tables_sliced[batch_idx, write_col]
+    else:
+        # Index mamba state by the per-request slot id from
+        # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
+        # (vLLM's GPU convention). Two reasons:
+        #
+        #  1. `_maybe_set_compact_mamba_num_blocks_override` caps the mamba
+        #     pool at `max_num_seqs + 1` while the attention pool is much
+        #     larger; using `block_tables[:, 0]` (a value in the attention
+        #     range) would walk off the end of the mamba arrays.
+        #  2. When vLLM's input batch runs `condense` to compact the persistent
+        #     batch (https://github.com/vllm-project/vllm/blob/de3da0b/vllm/v1/worker/gpu_input_batch.py#L662 — moves
+        #     requests into lower-index slots after earlier ones finish), the
+        #     slot id moves with the request so the kernel still reads/writes
+        #     the slot that holds this request's real state.
+        state_indices = attn_metadata.mamba_state_indices.astype(jnp.int32)
+        state_indices_sliced = truncate_sharded_tensor(state_indices,
+                                                       padded_num_reqs_per_dp,
+                                                       dp_size)
+        read_state_indices_sliced = state_indices_sliced
 
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
@@ -156,6 +184,7 @@ def gdn_attention_core_tpu(
          d_v,
          kernel_size,
          mesh=mesh,
+         read_state_indices=read_state_indices_sliced,
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]

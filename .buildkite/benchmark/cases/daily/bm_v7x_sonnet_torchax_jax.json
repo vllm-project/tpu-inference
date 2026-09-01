@@ -1,0 +1,153 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs"
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "Qwen3-Coder-30B-A3B-tpu7x-2-dataset_sonnet-inlen_1024-outlen_1024-torchax",
+      "ci_queue": [
+        "tpu_v7x_2_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 1024,
+        "BK_TIMEOUT_IN_MINUTES": 120
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 10275,
+          "tensor-parallel-size": {
+            "v7x-2": 1
+          },
+          "max-model-len": 10275,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1024,
+          "sonnet-output-len": 1024,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-0.6B-tpu7x-2-dataset_sonnet-inlen_1024-outlen_1024-torchax",
+      "ci_queue": [
+        "tpu_v7x_2_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 1024,
+        "BK_TIMEOUT_IN_MINUTES": 120
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-0.6B",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 10275,
+          "tensor-parallel-size": {
+            "v7x-2": 1
+          },
+          "max-model-len": 10275,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-0.6B",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1024,
+          "sonnet-output-len": 1024,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "gpt-oss-20b-tpu7x-2-dataset_sonnet-inlen_1024-outlen_1024-torchax",
+      "ci_queue": [
+        "tpu_v7x_2_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 3600000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 1024,
+        "BK_TIMEOUT_IN_MINUTES": 120
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm"
+        },
+        "args": {
+          "model": "openai/gpt-oss-20b",
+          "seed": 42,
+          "max-num-seqs": 128,
+          "max-num-batched-tokens": 10275,
+          "tensor-parallel-size": {
+            "v7x-2": 1
+          },
+          "max-model-len": 10275,
+          "no-enable-prefix-caching": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "openai/gpt-oss-20b",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "sonnet",
+          "dataset-path": "/workspace/tpu_inference/artifacts/dataset/sonnet_4x.txt",
+          "sonnet-input-len": 1024,
+          "sonnet-output-len": 1024,
+          "num-prompts": 1000,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    }
+  ]
+}
