@@ -1,2 +1,4 @@
 Feature,CorrectnessTest,PerformanceTest
-"Group sampling prefix cache",❌ Failing,❓ Untested
+"async_logprobs",❌ Failing,❓ Untested
+"processed_logprobs",❌ Failing,❓ Untested
+"rl_integration",❌ Failing,❓ Untested
