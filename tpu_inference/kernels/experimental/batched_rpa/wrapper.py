@@ -540,8 +540,8 @@ def ragged_paged_attention(
     return_lse: bool = False,
     pcp_ring_axis_name: str | None = None,
     pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
-    kv_cache_lens: jax.Array | None = None,
-    new_kv_lens: jax.Array | None = None,
+    global_kv_cache_lens: jax.Array | None = None,
+    global_new_kv_lens: jax.Array | None = None,
     q_pos_offsets: jax.Array | None = None,
     write_last_seq_only: bool = False,
 ) -> tuple[jax.Array, jax.Array] | tuple[jax.Array, jax.Array, jax.Array]:
@@ -596,10 +596,10 @@ def ragged_paged_attention(
         cp_rank, and the HEAD_ALONG_SUBLANE layout.
       pcp_ring_mesh_axis_names: All axis names of the mesh the ring runs on,
         in order. Defaults to a one-axis mesh.
-      kv_cache_lens: [max_num_seqs]. Global cached length per sequence. When
+      global_kv_cache_lens: [max_num_seqs]. Cached length per sequence. When
         given it replaces kv_lens - q_len, so the new kv can be longer than
         this device's queries (PCP: the chunk's kv is all-gathered).
-      new_kv_lens: [max_num_seqs]. Length of each sequence's new kv, which
+      global_new_kv_lens: [max_num_seqs]. Length of each sequence's new kv, which
         then starts at keys/values[0] for every sequence (PCP current phase:
         the head and tail chunks share the whole chunk's kv). Defaults to
         the sequence's own query length at cu_q_lens[i].
@@ -654,17 +654,6 @@ def ragged_paged_attention(
         soft_cap=soft_cap,
         mask_value=mask_value,
     )
-    if cp_group_size is None and (pcp_ring_axis_name is not None
-                                  or write_last_seq_only):
-        raise ValueError(
-            "pcp_ring_axis_name / write_last_seq_only require cp_group_size.")
-    if pcp_ring_axis_name is not None and cp_rank is None:
-        raise ValueError("pcp_ring_axis_name requires cp_rank.")
-    if not update_kv_cache and attention_scope != configs.AttentionScope.CACHE_ONLY:
-        raise NotImplementedError(
-            "The kernel infers cache writes from attention_scope"
-            " (CACHE_ONLY adds no new kv); update_kv_cache=False with a"
-            " writing scope is not supported.")
     cp_cfg = None
     if cp_group_size is not None:
         cp_cfg = configs.CPConfig(
@@ -713,8 +702,6 @@ def ragged_paged_attention(
         num_q_heads_per_kv_head = num_q_heads // num_kv_heads
         aligned_num_q_heads_per_kv_head = utils.align_to(
             num_q_heads_per_kv_head, q_packing)
-        # Rows per token are padded to the sublane tile so the kernel's
-        # writeback offsets are tile-aligned (see RpaConfigs.lse_row_stride).
         lse_row_stride = utils.align_to(aligned_num_q_heads_per_kv_head,
                                         num_sublanes)
         max_tokens = queries.shape[0]
@@ -730,38 +717,35 @@ def ragged_paged_attention(
 
     # Compute per-sequence length parameters for the kernel.
     q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-    if kv_cache_lens is None:
+    if global_kv_cache_lens is None:
         global_kv_cache_lens = kv_lens - q_lens
-    else:
-        global_kv_cache_lens = kv_cache_lens
-    if new_kv_lens is None:
+    if global_new_kv_lens is None:
         new_lens = q_lens
         new_kv_starts = cu_q_lens[:-1]
     else:
-        new_lens = new_kv_lens
+        new_lens = global_new_kv_lens
         new_kv_starts = jnp.zeros_like(q_lens)
 
     if attention_scope == configs.AttentionScope.CACHE_ONLY:
         if cp_group_size is not None:
             rank = cp_rank[0] if cp_rank is not None else 0
-            kv_cache_lens = utils.cp_local_cache_len(global_kv_cache_lens,
-                                                     cp_group_size, rank,
-                                                     page_size)
+            local_kv_cache_lens = utils.cp_local_cache_len(
+                global_kv_cache_lens, cp_group_size, rank, page_size)
         else:
-            kv_cache_lens = global_kv_cache_lens
+            local_kv_cache_lens = global_kv_cache_lens
         kv_new_lens = jnp.zeros_like(q_lens)
-        q_offsets = kv_cache_lens
+        q_offsets = local_kv_cache_lens
         if pcp_ring_axis_name is not None:
             # The ring attends every rank's shard, some longer than ours, and
             # all queries follow the whole cache: the causal offset is the
             # global cache length.
             q_offsets = global_kv_cache_lens
     elif attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
-        kv_cache_lens = global_kv_cache_lens
+        local_kv_cache_lens = global_kv_cache_lens
         kv_new_lens = new_lens
         q_offsets = global_kv_cache_lens
     else:  # FULL
-        kv_cache_lens = global_kv_cache_lens
+        local_kv_cache_lens = global_kv_cache_lens
         kv_new_lens = new_lens
         q_offsets = global_kv_cache_lens
     if q_pos_offsets is not None:
@@ -798,15 +782,11 @@ def ragged_paged_attention(
             cu_q_lens=cu_q_lens,
             distribution=distribution,
         )
-        kernel_kv_cache_lens = kv_cache_lens
+        kernel_kv_cache_lens = local_kv_cache_lens
         step_metadata_cls = kernel.StepMetadataComputer
         if cfgs.ring_enabled:
             computer_cls = ring.RingMetadataComputer
             step_metadata_cls = ring.RingStepMetadataComputer
-            # The schedule sizes this rank's fetches by its own shard
-            # (kv_cache_lens) but its block loop by rank 0's; the kernel masks
-            # each block by its source rank's shard. Both need the global
-            # length (see ring.py).
             extra_scalars = (cp_rank_scalar, new_kv_starts,
                              global_kv_cache_lens)
             kernel_kv_cache_lens = global_kv_cache_lens
@@ -820,7 +800,7 @@ def ragged_paged_attention(
         schedule_hbm = schedule.generate_rpa_metadata(
             cu_q_lens,
             q_offsets,
-            kv_cache_lens,
+            local_kv_cache_lens,
             kv_new_lens,
             distribution,
             cfgs=cfgs,
@@ -848,8 +828,6 @@ def ragged_paged_attention(
             o_out, kv_out, _ = result
             lse_out = None
         if not serve_cfgs.writes_kv_cache:
-            # CACHE_ONLY writes nothing: hand back the input cache (there is
-            # no kv output and no alias).
             kv_out = kv_cache
         return o_out, kv_out, lse_out
 

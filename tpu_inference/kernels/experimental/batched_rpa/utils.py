@@ -29,9 +29,7 @@ def cp_local_cache_len(global_kv_cache_len, cp_group_size, cp_rank,
     """Number of cache tokens owned by this CP rank.
 
     The cache is dealt round-robin over the ranks in runs of `interleave_size`
-    tokens (page_size: page interleave, the DCP layout; 1: token interleave,
-    rpa_v3_cp's strided layout). Rank r's local slot j holds global token
-    (j // I) * P * I + r * I + j % I.
+    tokens.
     """
     super_page = cp_group_size * interleave_size
     full_tokens = (global_kv_cache_len // super_page) * interleave_size

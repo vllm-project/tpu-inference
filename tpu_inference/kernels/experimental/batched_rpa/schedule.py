@@ -464,9 +464,6 @@ def _compute_waits(
                                            o_bytes_per_token) // dma_chunk_size
 
         # LSE OUT
-        # LSE rows are padded per token to lse_row_stride (see configs); the
-        # wait must count the padded bytes or the copy-out DMA is still in
-        # flight when the pipeline reuses the buffer.
         lse_bytes_per_token = (cfgs.model.num_kv_heads * cfgs.lse_row_stride *
                                128 * cfgs.serve.dtype_out.itemsize)
         schedule.total_wait_lse_out[step] = (
