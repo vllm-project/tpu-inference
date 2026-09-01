@@ -62,8 +62,9 @@ class BatchedRpaPcpRingTest(jtu.JaxTestCase):
     @parameterized.product(
         dtype=[jnp.float32, jnp.bfloat16],
         P=[2, 4, 8],
+        layout=["head", "seq"],
     )
-    def test_pcp_ring_cache_phase_matches_full_cache(self, dtype, P):
+    def test_pcp_ring_cache_phase_matches_full_cache(self, dtype, P, layout):
         if not jtu.is_device_tpu_at_least(version=4):
             self.skipTest("Expect TPUv4+")
         if jax.device_count() < P:
@@ -90,7 +91,20 @@ class BatchedRpaPcpRingTest(jtu.JaxTestCase):
         q_all = gen((P, q_len, nq, hd))
         k_prev = gen((prev_len, nkv, hd))
         v_prev = gen((prev_len, nkv, hd))
-        merged = merge_kv(k_prev, v_prev)
+        kv_layout = (brpa_configs.KVLayout.SEQ_ALONG_LANE if layout == "seq"
+                     else brpa_configs.KVLayout.HEAD_ALONG_SUBLANE)
+        if layout == "seq":
+            # Token-major [n, nkv_x2, ahd // packing, packing]; the cache
+            # builder moves tokens to the lane (last) dim per page.
+            kv_packing = get_dtype_packing(dtype)
+            ahd = align_to(hd, 8 * kv_packing)
+            merged = jnp.pad(
+                jnp.concat([k_prev, v_prev],
+                           axis=-1).reshape(prev_len, nkv * 2, hd),
+                ((0, 0), (0, 0), (0, ahd - hd)),
+            ).reshape(prev_len, nkv * 2, ahd // kv_packing, kv_packing)
+        else:
+            merged = merge_kv(k_prev, v_prev)
         dummy_kv = jnp.zeros((q_len, nkv, hd), dtype)
 
         # Small blocks so both the lane serialization (2 ring micro-steps per
@@ -111,14 +125,17 @@ class BatchedRpaPcpRingTest(jtu.JaxTestCase):
                                                 dtype=jnp.int32))
 
         def cache_from_tokens(tokens):
-            """[n, nkv_x2 // pack, pack, hd] -> (num_pages, lp, ...) cache."""
+            """Token-major page content -> (num_pages, ...) cache."""
             n = tokens.shape[0]
             npg = max(cdiv(n, lp), 1)
             padded = jnp.pad(tokens,
                              ((0, npg * lp - n), (0, 0), (0, 0), (0, 0)))
-            cache = jnp.zeros((num_pages, lp, *tokens.shape[1:]), dtype)
-            return cache.at[:npg].set(
-                padded.reshape(npg, lp, *tokens.shape[1:]))
+            paged = padded.reshape(npg, lp, *tokens.shape[1:])
+            if layout == "seq":
+                # (npg, lp, planes, hd / p, p) -> (npg, planes, hd / p, p, lp)
+                paged = paged.transpose(0, 2, 3, 4, 1)
+            cache = jnp.zeros((num_pages, *paged.shape[1:]), dtype)
+            return cache.at[:npg].set(paged)
 
         common = dict(
             sm_scale=sm,
@@ -127,6 +144,7 @@ class BatchedRpaPcpRingTest(jtu.JaxTestCase):
             return_lse=True,
             decode_block_sizes=blocks,
             prefill_block_sizes=blocks,
+            kv_layout=kv_layout,
         )
 
         # Reference: full cache in token order, no CP. kv_cache is donated,
