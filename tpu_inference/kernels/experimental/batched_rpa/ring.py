@@ -11,69 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""In-kernel PCP KV ring for the batched RPA CACHE_ONLY cache phase.
-
-The schedule encodes ring rounds into k_idx (block * cp group_size + round);
-only round 0 fetches this rank's block from HBM, later rounds emit zero-size
-fetches and receive the block from the previous rank over ICI instead. Every
-rank runs rank 0's block count (the longest shard under page-interleaving) so
-all devices stay in lock-step, and masking uses the source rank's shard
-length, so one online softmax accumulates the full cache across ranks with no
-LSE merge.
-
-Because the batched kernel serializes consecutive k blocks of a task across
-the batch lanes of a step (one online-softmax chain), each lane is one ring
-micro-step. The ring rotates blocks DIRECTLY between the pipeline's KV
-window buffers: the send at lane b of step g reads this rank's window lane
-(slot(g), b) and lands in the next rank's window lane for the successor
-micro-step — (slot(g), b + 1), or (slot(g + 1), 0) at the last lane. That
-works because the window is deterministic shared state: emit_pipeline
-advances one slot per step from zero each chunk (slot(g) = local step mod
-n_buffer), ring schedules are identical on every rank (same steps, same
-chunk boundaries), and scoped allocations sit at the same VMEM address on
-every device. The schedule's k_idx encoding guarantees each send's successor
-is literally the next lane: rounds are consecutive k_idx values and every
-k range ends on round group_size - 1, which never sends.
-
-Protocol invariants (see PcpRing.stage):
-- Per-step handshake: entering step g, each rank signals its previous rank
-  ("my window regions last read at steps <= g - 1 are free") and waits the
-  matching release from its next rank before starting any send. A send at
-  step g targets regions last read at step g - n_buffer (same-lane
-  successor) or g + 1 - n_buffer (next-step successor), both <= g - 1, so
-  the released regions cover every target, including across chunk
-  boundaries where the slot sequence restarts. The semaphore is balanced
-  (one signal, one wait per rank per step) and ends at zero.
-- Every send is waited at the end of its own step (PcpRing.finalize), before
-  the pipeline can issue a local fetch into the source slot: the earliest
-  such fetch is the next iteration's copy_in phase (its lookahead is capped
-  at cumulative_wait_in + n_buffer, so slot(g) is refetched no earlier than
-  the iteration after body(g) returns).
-- Masked lanes only ever appear at the schedule tail (final flush) and skip
-  the ring identically on every device.
-
-The release at step g proves scalar-core progress past body(g - 1); vector
-reads of body(g - 1) may still be in flight when the neighbor's send lands
-one network hop later. rpa_v3_cp's ring accepts the same class of exposure
-with a zero-step margin (credits released at the end of the same step); here
-the margin is a full step of scalar work plus the send latency.
-
-Length bookkeeping: the schedule sizes this rank's round-0 fetches by its
-own shard length (kv_cache_lens, localized by the wrapper) but sizes the block
-loop by rank 0's shard, and the kernel masks each resident block by the shard
-length of the rank it came from. Both of the latter derive from the GLOBAL
-cache length, which the wrapper passes alongside: to the schedule kernel as an
-extra scalar (RingMetadataComputer) and to the attention kernel in place of
-kv_cache_lens (RingStepMetadataComputer localizes it per lane).
-
-The two computer classes mirror the kernel's plug-in points: the schedule's
-RingMetadataComputer (a schedule_cp.CPMetadataComputer) emits ring-encoded
-k indices and gates HBM fetches to round 0, and the attention kernel's
-RingStepMetadataComputer (a kernel.StepMetadataComputer) decodes them, masks
-by the source rank's shard, and rotates the blocks. Requires an even cp
-group_size, AttentionScope.CACHE_ONLY, and the HEAD_ALONG_SUBLANE layout
-(validated in configs.RpaConfigs.validate_inputs).
-"""
 
 import dataclasses
 
@@ -86,55 +23,32 @@ from jax import lax
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
                                                             schedule_cp, utils)
 
-# Schedule side.
-
-
-def decode_k(k_idx, cfgs):
-    """Decode a ring-encoded schedule k_idx into (block, is_round0)."""
-    ring_block = k_idx // cfgs.serve.cp.group_size
-    ring_is_round0 = k_idx % cfgs.serve.cp.group_size == 0
-    return ring_block, ring_is_round0
-
-
-def block_range(global_cache_len, cfgs):
-    """(start_k_idx, end_k_idx) of the ring-encoded block loop.
-
-    Every rank must run the same number of steps, so size the block loop by
-    rank 0's shard (the longest under page-interleaving) and run group_size
-    rounds per block; short ranks' tails are masked in the kernel.
-    """
-    rank0_cache_len = utils.cp_local_cache_len(global_cache_len,
-                                               cfgs.serve.cp.group_size, 0,
-                                               cfgs.serve.page_size)
-    num_ring_blocks = pl.cdiv(rank0_cache_len, cfgs.bkv_sz)
-    return 0, num_ring_blocks * cfgs.serve.cp.group_size
-
 
 class RingMetadataComputer(schedule_cp.CPMetadataComputer):
-    """CP schedule with ring-encoded k blocks.
-
-    extra_refs = (cp_rank, new_kv_starts, global_kv_cache_lens): the base CP
-    computer keeps rank-owned DMA sizing from the wrapper-localized
-    kv_cache_lens; the ring only changes which k indices a q block iterates
-    (rank 0's block count times group_size rounds) and gates the HBM fetch to
-    round 0.
-    """
 
     @property
     def global_kv_cache_lens_ref(self):
         return self.extra_refs[2]
 
     def k_idx_range(self, *, s_idx, **kwargs):
+        # Every rank must run the same number of steps, so size the block
+        # loop by rank 0's shard (the longest under page-interleaving) and
+        # run group_size rounds per block; short ranks' tails are masked in
+        # the kernel.
         del kwargs
-        return block_range(self.global_kv_cache_lens_ref[s_idx], self.cfgs)
+        group_size = self.cfgs.serve.cp.group_size
+        rank0_cache_len = utils.cp_local_cache_len(
+            self.global_kv_cache_lens_ref[s_idx], group_size, 0,
+            self.cfgs.serve.page_size)
+        num_ring_blocks = pl.cdiv(rank0_cache_len, self.cfgs.bkv_sz)
+        return 0, num_ring_blocks * group_size
 
     def decode_k(self, k_idx):
-        # k_idx is ring-encoded; only round 0 fetches this rank's block from
-        # HBM, later rounds receive it from the previous rank over the ring.
-        return decode_k(k_idx, self.cfgs)
-
-
-# Kernel side.
+        # k_idx is ring-encoded (block * group_size + round); only round 0
+        # fetches this rank's block from HBM, later rounds receive it from
+        # the previous rank over the ring.
+        group_size = self.cfgs.serve.cp.group_size
+        return k_idx // group_size, k_idx % group_size == 0
 
 
 @jax.tree_util.register_dataclass
@@ -158,12 +72,6 @@ class PcpRing:
         self.next_id = self._device_id(lax.rem(self.my_id + 1, self.size))
         self.prev_id = self._device_id(
             lax.rem(self.my_id + self.size - 1, self.size))
-        # The pipeline window's slot sequence restarts at zero each chunk, so
-        # slot arithmetic uses the chunk-local step. Schedule chunks are
-        # 128-step aligned (max_steps_ub is a multiple of num_lanes), so
-        # prefix_steps is always 0 and chunk_start + step is the global step
-        # across chunks; the semaphores are scoped outside the chunk loop, so
-        # the handshake carries across chunk boundaries.
         self.step_local = step
         self.step_global = chunk_start + step
         self.chunk_num_steps = chunk_num_steps
@@ -179,7 +87,7 @@ class PcpRing:
             for name in self.cfgs.serve.cp.ring_mesh_axis_names)
 
     def stage(self, rounds, valids):
-        """Run the per-lane rotation protocol for this step.
+        """Run the per-lane rotation for this step.
 
         rounds/valids hold each lane's ring round and validity, in lane
         order. Entering the step: startup barrier (first step only), then the
@@ -317,8 +225,8 @@ def ring_fetch_step_metadata(
         s_idx = schedule_ref.s_idx[step, b_idx]
         is_valid = s_idx != -1
         q_idx = schedule_ref.q_idx[step, b_idx]
-        # k_idx is ring-encoded (see decode_k); split it before any block
-        # arithmetic.
+        # k_idx is ring-encoded (block * group_size + round); split it
+        # before any block arithmetic.
         k_idx = schedule_ref.k_idx[step, b_idx]
         ring_round = lax.rem(k_idx, pcp_ring.size)
         k_idx = k_idx // pcp_ring.size
@@ -381,10 +289,8 @@ class RingStepMetadataComputer(kernel.StepMetadataComputer):
             sync_sem=pltpu.SemaphoreType.REGULAR,
         ), )
 
-    @classmethod
-    def compiler_params(cls, cfgs: configs.RpaConfigs) -> dict:
-        # The ring's startup barrier needs a barrier semaphore.
-        return {"collective_id": 0}
+    # The ring's startup barrier needs a barrier semaphore.
+    collective_id = 0
 
     def fetch_step_metadata(self, step, schedule_ref, kv_in_vref,
                             extra_scratches, chunk_start, *, cu_q_lens_ref,

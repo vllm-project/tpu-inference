@@ -97,8 +97,6 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
             **kwargs,
         )
 
-    # extra_refs: (cp_rank, new_kv_starts[, ...subclass extras]).
-
     @property
     def rank(self):
         return self.extra_refs[0][0]
@@ -315,10 +313,7 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
 
         # Writeback logic: each new k block is written back by the first q block
         # that attends to it (q positions start at q_offset). With
-        # write_last_seq_only, only the last sequence writes (the PCP current
-        # phase presents the head and tail chunks of one request as two
-        # sequences over the same new kv; the tail's k loop is extended to the
-        # whole new kv so every owned page is written exactly once).
+        # write_last_seq_only, only the last sequence writes.
         q_wb = jnp.maximum(0, (kv_len_start - q_offset)) // cfgs.bq_sz
 
         writes = (new_sz > 0) & (q_idx == q_wb)

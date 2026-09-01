@@ -90,14 +90,11 @@ class CPConfig:
     p // group_size)."""
 
     group_size: int
-    # PCP ring cache phase (CACHE_ONLY): stream the cache shards around this
-    # mesh axis so every rank attends the full cache with its local Q, one
-    # online softmax accumulating all rounds.
+    # PCP ring streams kv cache shards around this mesh axis
     ring_axis_name: str | None = None
-    # All axis names of the mesh the ring runs on, in order. None = a
-    # one-axis mesh.
+    # All axis names of the mesh the ring runs on, in order.
     ring_mesh_axis_names: tuple[str, ...] | None = None
-    # PCP current phase: several sequences (a request's head and tail chunks)
+    # PCP current phase: a request's head and tail chunks
     # share one new kv; only the last sequence writes it back.
     write_last_seq_only: bool = False
 
@@ -129,8 +126,6 @@ class ServingConfigs:
         return 1 + pl.cdiv(self.decode_query_size - 1, self.page_size)
     @property
     def writes_kv_cache(self) -> bool:
-        # CACHE_ONLY attends the cache and adds no new kv; every other scope
-        # writes the new kv back.
         return self.attention_scope != AttentionScope.CACHE_ONLY
 
     @property

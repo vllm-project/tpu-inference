@@ -197,8 +197,6 @@ def fetch_step_metadata(
         is_valid_list.append(is_valid)
 
         if local_k_start_list is not None:
-            # NEW_TOKENS_ONLY: the new kv starts at the cache end (q_offset may
-            # sit further in, e.g. the PCP tail chunk).
             local_k_start_list.append(kv_cache_len_val - k_id)
         if local_k_end_list is not None:
             local_k_end_list.append(kv_cache_len_val - k_id)
@@ -225,13 +223,6 @@ def fetch_step_metadata(
 
 
 class StepMetadataComputer:
-    """Fetches rpa_body's per-step metadata.
-
-    The wrapper picks the class (mirroring the schedule's computer_cls), so a
-    feature like the PCP ring can decode its schedule encoding, declare
-    scratch, and rewrite lane state without touching the kernel. The base
-    class is the identity: plain fetch_step_metadata, no scratch.
-    """
 
     @classmethod
     def scratch_shapes(cls, cfgs: configs.RpaConfigs) -> tuple:
@@ -240,18 +231,11 @@ class StepMetadataComputer:
         del cfgs
         return ()
 
-    @classmethod
-    def compiler_params(cls, cfgs: configs.RpaConfigs) -> dict:
-        """Extra pallas_call compiler params."""
-        del cfgs
-        return {}
+    # Set when the computer's protocol needs a barrier semaphore.
+    collective_id: int | None = None
 
     def __init__(self, cfgs: configs.RpaConfigs):
         self.cfgs = cfgs
-
-    def init(self, *extra_scratches):
-        """One-time scratch initialization, before the first step."""
-        del extra_scratches
 
     def fetch_step_metadata(self, step, schedule_ref, kv_in_vref,
                             extra_scratches, chunk_start, *, cu_q_lens_ref,
@@ -270,11 +254,7 @@ class StepMetadataComputer:
         )
 
     def finalize(self):
-        """Runs at the end of rpa_body, after compute and output writeback.
-
-        The ring waits its in-flight sends here, while they are covered by
-        the step's compute time and before the next iteration's copy_in
-        phase can issue a local fetch into their source buffers."""
+        """Runs at the end of rpa_body, after compute and output writeback."""
 
 
 def generate_mask(
@@ -290,13 +270,6 @@ def generate_mask(
     if (cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY
             and cfgs.model.sliding_window is None
             and step_meta.local_k_start is None):
-        # Every cached key precedes every query, so the causal term is always
-        # true and the mask separates into a per-column condition (key inside
-        # the cache) and a per-row condition (valid, unpadded query). Building
-        # them as broadcast vectors instead of full [tq, s] iota compares cuts
-        # the per-element VALU work from ~5 ops to the one logical_and (the
-        # select is applied by the caller); under the PCP ring this mask work
-        # was ~a quarter of the cache-phase kernel's bundles.
         kv_col = lax.broadcasted_iota(jnp.int32, (1, s), 1)
         q_row = lax.broadcasted_iota(jnp.int32, (tq, 1), 0)
         q_row //= cfgs.aligned_num_q_heads_per_kv_head
@@ -718,9 +691,7 @@ def rpa_kernel(
         b=cu_q_lens[i+1] represents q/k/v of sequence i.
       q_offsets: [max_num_seqs]. Token offset for queries in each sequence.
       kv_cache_lens: [max_num_seqs]. Existing kv cache length of each sequence.
-        Under the PCP ring (cfgs.ring_enabled) this is the GLOBAL cache
-        length; the kernel derives each resident block's source-rank shard
-        length from it (see ring.py).
+        Under the PCP ring this is the global cache length.
       kv_new_lens: [max_num_seqs]. New kv length of each sequence.
       page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
         sequence.
@@ -739,13 +710,7 @@ def rpa_kernel(
       cfgs: Configuration of the kernel.
       computer_cls: Metadata computer the schedule was generated with; it
         defines the schedule's SMEM layout.
-      step_metadata_cls: StepMetadataComputer for rpa_body (the PCP ring's
-        decodes its schedule encoding and rotates the KV blocks).
-
-    Under AttentionScope.CACHE_ONLY there is no new kv, so the kernel emits
-    no kv cache output and does not alias kv_cache to it: aliasing an
-    untouched operand makes XLA copy the whole cache before any launch that
-    has communication (the PCP ring) while the operand stays live afterwards.
+      step_metadata_cls: StepMetadataComputer for rpa_body.
 
     Returns:
       out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
@@ -833,7 +798,6 @@ def rpa_kernel(
             kv_ref_flat[...] = jnp.zeros_like(kv_ref_flat)
 
             step_metadata_computer = step_metadata_cls(cfgs)
-            step_metadata_computer.init(*scratches[3:])
 
             def execute_schedule_chunk(start_step, num_steps):
                 # All reads are aligned to 128 and some extra steps are copied in the
@@ -953,7 +917,9 @@ def rpa_kernel(
         compiler_params=pltpu.CompilerParams(
             vmem_limit_bytes=cfgs.vmem_limit_bytes,
             disable_bounds_checks=True,
-            **step_metadata_cls.compiler_params(cfgs),
+            **({
+                "collective_id": step_metadata_cls.collective_id
+            } if step_metadata_cls.collective_id is not None else {}),
         ),
         input_output_aliases=input_output_aliases,
         name=get_kernel_name(cfgs),
