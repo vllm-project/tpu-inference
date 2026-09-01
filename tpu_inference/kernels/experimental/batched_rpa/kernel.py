@@ -287,6 +287,30 @@ def generate_mask(
     """Generates causal, sliding window, and attention scope mask for QK computation."""
     b, k_heads, tq, s = shape
 
+    if (cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY
+            and cfgs.model.sliding_window is None
+            and step_meta.local_k_start is None):
+        # Every cached key precedes every query, so the causal term is always
+        # true and the mask separates into a per-column condition (key inside
+        # the cache) and a per-row condition (valid, unpadded query). Building
+        # them as broadcast vectors instead of full [tq, s] iota compares cuts
+        # the per-element VALU work from ~5 ops to the one logical_and (the
+        # select is applied by the caller); under the PCP ring this mask work
+        # was ~a quarter of the cache-phase kernel's bundles.
+        kv_col = lax.broadcasted_iota(jnp.int32, (1, s), 1)
+        q_row = lax.broadcasted_iota(jnp.int32, (tq, 1), 0)
+        q_row //= cfgs.aligned_num_q_heads_per_kv_head
+        masks = []
+        for b_idx in range(b):
+            col_ok = kv_col < step_meta.local_k_end[b_idx]
+            row_ok = jnp.logical_and(
+                step_meta.is_valid[b_idx],
+                (bq_start + q_row) < step_meta.q_sz[b_idx],
+            )
+            mask_b = jnp.logical_and(row_ok, col_ok)  # [tq, s]
+            masks.append(jnp.broadcast_to(mask_b[None], (k_heads, tq, s)))
+        return jnp.stack(masks, axis=0)
+
     kv_iota = lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 2)
     q_iota = lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1)
     q_iota //= cfgs.aligned_num_q_heads_per_kv_head
