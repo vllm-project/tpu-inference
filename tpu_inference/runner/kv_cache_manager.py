@@ -347,6 +347,20 @@ class KVCacheManager:
         if cache_config.num_gpu_blocks_override is not None:
             return
 
+        if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+            # Mamba prefix caching addresses recurrent state by block id from
+            # the mamba block table, so every layer's mamba array must span
+            # the whole block pool. The compact layout deliberately makes it
+            # smaller than the pool, which would put valid block ids out of
+            # range. Fall back to the uniform sizing, which already charges
+            # each block for its mamba pages.
+            logger.info(
+                "Compact-mamba sizing skipped: mamba_cache_mode='align' "
+                "needs one mamba slot per block id. Attention capacity is "
+                "lower than with prefix caching off; raise --block-size to "
+                "trade prefix-cache granularity for capacity.")
+            return
+
         devices = self.runner.mesh.devices.flatten()
         try:
             hbm_usage = utils.hbm_usage_bytes(devices)

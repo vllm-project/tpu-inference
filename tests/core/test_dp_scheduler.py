@@ -908,12 +908,20 @@ class TestDPScheduler:
 
         scheduler.assigned_dp_rank = {"req1": 0, "req2": 1}
 
+        # Test structured output flag propagation
+        output_0.has_structured_output_requests = True
+        output_0.pending_structured_output_tokens = False
+        output_1.has_structured_output_requests = False
+        output_1.pending_structured_output_tokens = True
+
         combined = scheduler._combine_scheduler_outputs([output_0, output_1])
 
         assert combined.total_num_scheduled_tokens == 30
 
-        # Verify new per-rank fields
+        # Verify new per-rank fields and structured output propagation
         assert combined.req_ids_per_rank == {0: ["req1"], 1: ["req2"]}
+        assert combined.has_structured_output_requests is True
+        assert combined.pending_structured_output_tokens is True
 
     def test_split_model_output_by_rank(self, mock_vllm_config,
                                         mock_kv_cache_config,

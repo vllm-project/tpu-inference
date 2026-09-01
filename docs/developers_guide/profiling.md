@@ -1,6 +1,6 @@
 # Profiling
 
-There are currently three ways to profile your workload:
+There are currently three ways to profile your workload.
 
 ## Using `examples/tpu_profiling.py`
 
@@ -59,6 +59,7 @@ python3 examples/tpu_profiling.py \
 ```
 
 ## Using `PHASED_PROFILING_DIR`
+
 If you set the following environment variable:
 
 ```
@@ -75,6 +76,7 @@ we will automatically capture profiles during three phases of your workload (ass
 To aid in your analysis, we will also log the batch composition for the profiled batches.
 
 ## Using `USE_JAX_PROFILER_SERVER`
+
 If you set the following environment variable:
 
 ```
