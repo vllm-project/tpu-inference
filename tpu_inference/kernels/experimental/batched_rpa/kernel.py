@@ -238,11 +238,10 @@ class StepMetadataComputer:
         self.cfgs = cfgs
 
     def fetch_step_metadata(self, step, schedule_ref, kv_in_vref,
-                            extra_scratches, chunk_start, *, cu_q_lens_ref,
+                            extra_scratches, chunk_id, *, cu_q_lens_ref,
                             q_offsets_ref, kv_cache_lens_ref, kv_new_lens_ref,
-                            kv_window_ref, chunk_num_steps) -> StepMetadata:
-        del kv_in_vref, extra_scratches, chunk_start
-        del kv_window_ref, chunk_num_steps
+                            kv_window_ref) -> StepMetadata:
+        del kv_in_vref, extra_scratches, chunk_id, kv_window_ref
         return fetch_step_metadata(
             step,
             schedule_ref,
@@ -346,9 +345,8 @@ def rpa_body(
     # Configs.
     cfgs: configs.RpaConfigs,
     step_metadata_computer: StepMetadataComputer,
-    chunk_start: jax.Array | int = 0,
+    chunk_id: jax.Array | int = 0,
     kv_window_ref: jax.Ref | None = None,
-    chunk_num_steps: jax.Array | int | None = None,
 ):
     step = pl.program_id(0)
 
@@ -359,13 +357,12 @@ def rpa_body(
         schedule_ref,
         kv_in_vref,
         extra_scratches,
-        chunk_start,
+        chunk_id,
         cu_q_lens_ref=cu_q_lens_ref,
         q_offsets_ref=q_offsets_ref,
         kv_cache_lens_ref=kv_cache_lens_ref,
         kv_new_lens_ref=kv_new_lens_ref,
         kv_window_ref=kv_window_ref,
-        chunk_num_steps=chunk_num_steps,
     )
 
     # Step 2: Fetch inputs.
@@ -835,9 +832,8 @@ def rpa_kernel(
                         kv_cache_lens_ref=kv_cache_lens_ref,
                         kv_new_lens_ref=kv_new_lens_ref,
                         step_metadata_computer=step_metadata_computer,
-                        chunk_start=aligned_start_step,
+                        chunk_id=start_step // cfgs.max_steps_ub,
                         kv_window_ref=kv_alloc.window_ref,
-                        chunk_num_steps=num_steps + prefix_steps,
                     ),
                     grid=(num_steps + prefix_steps, ),
                     in_specs=(q_alloc.spec, kv_cache_alloc.spec),
