@@ -113,6 +113,21 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_BATCHED_RPA_KERNEL is True
 
 
+def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
+    """MOE_STAGE_WEIGHTS_ON_HOST is on unless it is explicitly turned off."""
+    monkeypatch.delenv("MOE_STAGE_WEIGHTS_ON_HOST", raising=False)
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "false")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "1")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
     """Test that boolean env vars accept string values like 'True' and 'False'"""
 
