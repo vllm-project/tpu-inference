@@ -260,14 +260,16 @@ def calculate_block_sizes(
         return batch_size * num_muls
 
     def find_best_block_sizes(
-            max_batch_size: int,
-            max_n_buffer: int,
-            fixed_bq_sz: int | None = None) -> configs.BlockSizes:
+        max_batch_size: int,
+        max_n_buffer: int,
+        fixed_bq_sz: int | None = None,
+        cap_fraction: float = 0.8,
+    ) -> configs.BlockSizes:
         """Loop through different block sizes to find the most optimal one."""
 
         # Even if we loose some potential performance, we want to avoid OOM at all
         # costs. Therefore, we conservatively only use 80% of the VMEM budget.
-        capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
+        capped_vmem_limit_bytes = vmem_limit_bytes * cap_fraction
 
         bkv_sz = bkv_stride = mxu_column_size
         if fixed_bq_sz is None:
@@ -288,15 +290,28 @@ def calculate_block_sizes(
                                         bkv_sz) > capped_vmem_limit_bytes):
             batch_size -= 1
 
+        # The compute-time terms of the model (softmax statistics and the qk
+        # intermediate) scale with bq_sz * q heads and not with n_buffer, so
+        # with many q heads per device (e.g. 96 under pcp8 x tp1) even the
+        # smallest bq can exceed the cap on its own. Halve bq first (when it
+        # is not fixed) so the buffer-count fallback below has something to
+        # trade; it must never drive n_buffer below 1.
+        min_bq_sz = 16
+        while (fixed_bq_sz is None and bq_sz // 2 >= min_bq_sz
+               and calculate_vmem_usage(batch_size, n_buffer, bq_sz,
+                                        bkv_sz) > capped_vmem_limit_bytes):
+            bq_sz //= 2
+            bq_stride = bq_sz
+
         # As a last resort, attempt to decrease number of buffers to avoid OOM.
-        while (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
-               > capped_vmem_limit_bytes):
+        while (n_buffer > 1
+               and calculate_vmem_usage(batch_size, n_buffer, bq_sz,
+                                        bkv_sz) > capped_vmem_limit_bytes):
             n_buffer -= 1
 
-        # Indicates OOM was triggered even when batch_size=1 or n_buffer=1.
-        # NOTE: If the function does not exit at this point even when either values
-        # are zero, it will trigger infinite loop at the next while loop.
-        if batch_size == 0 or n_buffer == 0:
+        # Indicates OOM was triggered even when batch_size=1 and n_buffer=1.
+        if (calculate_vmem_usage(batch_size, n_buffer, bq_sz, bkv_sz)
+                > capped_vmem_limit_bytes):
             raise ValueError(
                 "Cannot find batch size that fits within VMEM limit.")
 
@@ -438,7 +453,22 @@ def calculate_block_sizes(
     decode_batch_size = 8
     prefill_batch_size = 2
 
-    decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, 1)
+    if serve_cfgs.cp is not None:
+        # Decode-shaped blocks (bq = 1, many lanes, large bkv) carry up to
+        # ~1.5x their buffer bytes in compute-time state the model does not
+        # capture (compile probes on v7x: fp8/hd256 b8 k2048 65.8 MiB for a
+        # 48 MiB window; bf16/hd128 b8 k1024 36 for 24; fp8/hd128/nkv8 b8
+        # k1024 81 for 60). Under CP the DECODE launch only ever sees a
+        # single request's decode step (a few tokens per rank), so its blocks
+        # are not performance-relevant; search them against a budget that
+        # absorbs that factor instead of tuning the generic path.
+        decode_block_sizes = find_best_block_sizes(decode_batch_size,
+                                                   n_buffer,
+                                                   1,
+                                                   cap_fraction=0.55)
+    else:
+        decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer,
+                                                   1)
     if serve_cfgs.cp is not None and serve_cfgs.cp.ring_axis_name is not None:
         prefill_block_sizes = find_ring_block_sizes(n_buffer)
     else:
