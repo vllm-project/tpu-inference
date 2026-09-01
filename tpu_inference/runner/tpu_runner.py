@@ -3071,6 +3071,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
+        is_decode_only = (self.input_batch.request_distribution[0] ==
+                          self.input_batch.num_reqs)
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -3081,6 +3084,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
+                is_decode=is_decode_only,
             )
 
             return attention_metadata_gid

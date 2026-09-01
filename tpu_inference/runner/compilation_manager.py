@@ -384,7 +384,8 @@ class CompilationManager:
                                     is_first_rank=True,
                                     is_last_rank=True,
                                     num_reqs: int,
-                                    pcp_cache_pages: int = 0) -> None:
+                                    pcp_cache_pages: int = 0,
+                                    is_decode: bool = False) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -466,6 +467,7 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
+                is_decode=is_decode,
             )
 
             return attention_metadata_gid
@@ -676,6 +678,15 @@ class CompilationManager:
 
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
+        # Decode-only batches (is_decode=True) use a different XLA graph when
+        # DCP is enabled.  Without continue_decode, they go through the normal
+        # model_fn path (not _execute_continue_decode), so we must precompile
+        # both is_decode=False and is_decode=True to avoid a lazy compilation
+        # the first time a pure-decode batch arrives, which would block the TPU
+        # and inflate TTFT for queued prefill requests.
+        dcp_enabled = ('dcp' in self.runner.mesh.shape
+                       and self.runner.mesh.shape['dcp'] > 1)
+        needs_decode_compile = dcp_enabled and not self.runner.enable_continue_decode
         for num_tokens in self.runner.num_tokens_paddings:
             for num_reqs in self.runner.attn_num_reqs_paddings:
                 dp_sharding = NamedSharding(
@@ -726,6 +737,17 @@ class CompilationManager:
                         is_last_rank=is_last_rank,
                         num_reqs=num_reqs,
                         pcp_cache_pages=_cache_pages)
+                if needs_decode_compile:
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone decode",
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=None,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        is_decode=True)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
