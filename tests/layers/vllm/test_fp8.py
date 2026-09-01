@@ -751,7 +751,7 @@ def _make_fp8_moe_method_and_layer(mesh):
 @pytest.mark.parametrize("stage_on_host", [True, False])
 def test_fp8_moe_weight_loads_follow_moe_stage_weights_on_host(stage_on_host):
     """All four fp8 MoE weights stage per MOE_STAGE_WEIGHTS_ON_HOST."""
-    mesh = test_utils.get_spmd_mesh(4)
+    mesh = test_utils.get_spmd_mesh(jax.local_device_count())
     method, layer = _make_fp8_moe_method_and_layer(mesh)
 
     with patch("tpu_inference.layers.vllm.quantization.fp8._load_weight_for_layer"
@@ -780,7 +780,7 @@ def test_fp8_moe_weight_loads_do_not_stage_on_host_by_default(
         monkeypatch: pytest.MonkeyPatch):
     """Host staging is opt-in, so an untouched environment loads as before."""
     monkeypatch.delenv("MOE_STAGE_WEIGHTS_ON_HOST", raising=False)
-    mesh = test_utils.get_spmd_mesh(4)
+    mesh = test_utils.get_spmd_mesh(jax.local_device_count())
     method, layer = _make_fp8_moe_method_and_layer(mesh)
 
     with patch("tpu_inference.layers.vllm.quantization.fp8._load_weight_for_layer"

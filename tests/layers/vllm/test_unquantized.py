@@ -832,6 +832,12 @@ STAGED_DTYPES = [
     torch.float8_e5m2,
 ]
 
+# CI runs these on a single- or dual-chip host, so nothing below may assume a
+# mesh of a particular width: shapes are sized off the mesh so every spec here
+# splits evenly, and the one case that needs a sharding to *not* split says so.
+NUM_DEVICES = jax.local_device_count()
+STAGED_SHAPE = (8 * NUM_DEVICES, 16 * NUM_DEVICES)
+
 
 @pytest.mark.parametrize("dtype", STAGED_DTYPES)
 def test_host_numpy_view_preserves_shape_dtype_and_values(dtype):
@@ -868,8 +874,8 @@ def test_host_numpy_view_rejects_unbitcastable_layouts(dtype):
 @pytest.mark.parametrize("spec", [P(None, None), P(None, "model"), P("model")])
 def test_load_weight_on_host_matches_device_staging(dtype, spec):
     """Host staging returns the same array the t2j-then-put path would."""
-    tensor = torch.randn(8, 16).to(dtype)
-    mesh = test_utils.get_spmd_mesh(4)
+    tensor = torch.randn(*STAGED_SHAPE).to(dtype)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
     sharding = NamedSharding(mesh, spec)
 
     result = _load_weight_on_host(tensor, sharding)
@@ -883,9 +889,9 @@ def test_load_weight_on_host_matches_device_staging(dtype, spec):
 
 def test_load_weight_on_host_does_not_outlive_the_torch_storage():
     """The view aliases torch storage that callers free the moment we return."""
-    tensor = torch.randn(8, 16)
+    tensor = torch.randn(*STAGED_SHAPE)
     expected = np.array(tensor.numpy(), copy=True)
-    mesh = test_utils.get_spmd_mesh(4)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
 
     result = _load_weight_on_host(tensor,
                                   NamedSharding(mesh, P(None, "model")))
@@ -896,20 +902,38 @@ def test_load_weight_on_host_does_not_outlive_the_torch_storage():
     np.testing.assert_array_equal(np.asarray(result), expected)
 
 
+@pytest.mark.skipif(NUM_DEVICES < 2,
+                    reason="a one-device mesh divides every shape")
 def test_load_weight_on_host_falls_back_when_sharding_does_not_divide():
     """Block scales aren't always divisible along the axes their weight is."""
-    mesh = test_utils.get_spmd_mesh(4)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
     sharding = NamedSharding(mesh, P("model", None))
-    assert _load_weight_on_host(torch.randn(3, 8), sharding) is None
+    # One row more than the mesh can hand out evenly.
+    rows = NUM_DEVICES + 1
+    assert _load_weight_on_host(torch.randn(rows, 8), sharding) is None
+
+
+@patch("tpu_inference.layers.vllm.quantization.unquantized.general_device_put",
+       side_effect=ValueError("cannot shard"))
+def test_load_weight_on_host_falls_back_when_the_put_is_refused(_):
+    """Whatever the put objects to, staging declines instead of raising.
+
+    Same contract as the test above, reached by making the put fail outright
+    rather than by handing it an indivisible shape, so single-chip runners --
+    where every shape divides -- still cover the fallback.
+    """
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, P("model", None))
+    assert _load_weight_on_host(torch.randn(*STAGED_SHAPE), sharding) is None
 
 
 @pytest.mark.parametrize("dtype", STAGED_DTYPES)
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
 def test_load_weight_for_layer_stage_on_host(dtype):
     """stage_on_host produces the same weight, already at `sharding`."""
-    layer = _make_layer_with_weight((8, 16), dtype)
+    layer = _make_layer_with_weight(STAGED_SHAPE, dtype)
     expected = t2j(layer.weight, use_dlpack=False)
-    mesh = test_utils.get_spmd_mesh(4)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
     sharding = NamedSharding(mesh, P(None, "model"))
 
     result = _load_weight_for_layer(layer,
@@ -922,13 +946,15 @@ def test_load_weight_for_layer_stage_on_host(dtype):
     np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
 
 
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized._load_weight_on_host",
+    return_value=None)
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
-def test_load_weight_for_layer_stage_on_host_falls_back_to_t2j():
+def test_load_weight_for_layer_stage_on_host_falls_back_to_t2j(mock_on_host):
     """An unstageable weight still loads, just through the slower path."""
     layer = _make_layer_with_weight((3, 8), torch.float32)
     expected = t2j(layer.weight, use_dlpack=False)
-    mesh = test_utils.get_spmd_mesh(4)
-    # 3 rows do not divide over 4 devices, so host staging cannot serve this.
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
     sharding = NamedSharding(mesh, P("model", None))
 
     result = _load_weight_for_layer(layer,
@@ -936,6 +962,7 @@ def test_load_weight_for_layer_stage_on_host_falls_back_to_t2j():
                                     sharding,
                                     stage_on_host=True)
 
+    mock_on_host.assert_called_once()
     np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
 
 
@@ -944,8 +971,8 @@ def test_load_weight_for_layer_stage_on_host_falls_back_to_t2j():
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
 def test_load_weight_for_layer_does_not_stage_on_host_by_default(mock_on_host):
     """Callers that don't ask for host staging keep the old behaviour."""
-    layer = _make_layer_with_weight((8, 16), torch.bfloat16)
-    mesh = test_utils.get_spmd_mesh(4)
+    layer = _make_layer_with_weight(STAGED_SHAPE, torch.bfloat16)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
     sharding = NamedSharding(mesh, P(None, "model"))
 
     _load_weight_for_layer(layer, "weight", sharding)
@@ -962,8 +989,8 @@ def test_load_weight_for_layer_does_not_stage_on_host_by_default(mock_on_host):
 def test_load_weight_for_layer_stage_on_host_ignored_under_pathways(
         _, mock_on_host):
     """Pathways does its own transfer; host staging must not intercept it."""
-    layer = _make_layer_with_weight((8, 16), torch.bfloat16)
-    mesh = test_utils.get_spmd_mesh(4)
+    layer = _make_layer_with_weight(STAGED_SHAPE, torch.bfloat16)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
     sharding = NamedSharding(mesh, P(None, "model"))
 
     result = _load_weight_for_layer(layer,
@@ -972,4 +999,4 @@ def test_load_weight_for_layer_stage_on_host_ignored_under_pathways(
                                     stage_on_host=True)
 
     mock_on_host.assert_not_called()
-    assert result.shape == (8, 16)
+    assert result.shape == STAGED_SHAPE
