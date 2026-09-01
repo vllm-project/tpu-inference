@@ -70,9 +70,17 @@ def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
 
     numpy has no scalar type for bf16 or the fp8 formats, so those travel as
     uint8 and are reinterpreted with the ml_dtypes type JAX already uses for
-    them -- the same bit cast `tpu_inference.utils.t2j` does. Reinterpreting
-    scales the trailing dimension by the element width on the way out and the
-    numpy view undoes it exactly, but torch can only do it on contiguous data.
+    them -- the same bit cast `tpu_inference.utils.t2j` does, and unlike the
+    torchax `t2j` this module falls back to, which widens them to float32 on
+    the host first. Reinterpreting scales the trailing dimension by the element
+    width on the way out and the numpy view undoes it exactly, but torch can
+    only do it on contiguous data.
+
+    Note that handing torch storage to numpy makes it non-resizable for good,
+    so `untyped_storage().resize_(0)` on the viewed tensor raises from here on.
+    The fp8 MoE callers free through `_free_torch_storage`, which falls back to
+    `set_()` and frees the buffer just the same, but a caller that resizes
+    unguarded cannot be given `stage_on_host`.
     """
     t = tensor.detach()
     if t.device.type != "cpu":
@@ -105,7 +113,10 @@ def _load_weight_on_host(tensor: torch.Tensor,
     Returns None if the weight cannot be staged this way -- most often a shape
     the requested sharding does not divide, since block scales are not always
     divisible along the axes their weight is. Callers reshard afterwards
-    regardless, so falling back to unsharded staging is correct, just slower.
+    regardless, so falling back to unsharded staging is correct. It is not
+    merely slower, though: the fallback is torchax's `t2j`, which widens bf16
+    and fp8 to float32 before it copies, so a weight that declines staging
+    needs 2-4x its own size in host memory on the way through.
     """
     try:
         np_view = _host_numpy_view(tensor)
@@ -166,7 +177,7 @@ def _load_weight_for_layer(
             tensor = new_param
 
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
-        if stage_on_host and sharding is not None:
+        if stage_on_host:
             array = _load_weight_on_host(tensor, sharding)
             if array is not None:
                 return array
