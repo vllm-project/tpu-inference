@@ -44,7 +44,7 @@ from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
-    VllmUnquantizedLinearMethod, _load_weight_for_layer)
+    VllmUnquantizedLinearMethod, _load_weight_for_layer, _release_cpu_storage)
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
@@ -760,6 +760,32 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
 # --- _load_weight_for_layer tests ---
 
 
+def test_release_cpu_storage_clears_resizable_backing():
+    tensor = torch.empty(8, dtype=torch.float32)
+
+    _release_cpu_storage(tensor)
+
+    assert tensor.untyped_storage().size() == 0
+
+
+def test_release_cpu_storage_tolerates_non_resizable_backing():
+    tensor = torch.frombuffer(bytearray(32), dtype=torch.float32)
+
+    _release_cpu_storage(tensor)
+
+    # The caller can now drop the tensor reference instead of resizing the
+    # safetensors-style backing storage in place.
+    assert tensor.untyped_storage().size() == 32
+
+
+def test_release_cpu_storage_propagates_unrelated_runtime_error():
+    tensor = MagicMock(spec=torch.Tensor)
+    tensor.untyped_storage().resize_.side_effect = RuntimeError("unexpected")
+
+    with pytest.raises(RuntimeError, match="unexpected"):
+        _release_cpu_storage(tensor)
+
+
 def _make_layer_with_weight(shape, dtype):
     """Create a simple torch.nn.Module with a 'weight' attribute."""
     layer = torch.nn.Module()
@@ -816,3 +842,32 @@ def test_load_weight_for_layer_pathways_dummy(_, dtype):
     assert result.dtype == to_jax_dtype(dtype)
     # The original tensor's storage should have been freed
     assert layer.weight.untyped_storage().size() == 0
+
+
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized.create_dummy_weights_on_tpu"
+)
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
+    return_value=True)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+def test_load_weight_for_layer_pathways_dummy_non_resizable(
+        _, create_dummy_weights_on_tpu):
+    """Pathways dummy loading tolerates safetensors-style CPU storage."""
+    from tpu_inference.utils import to_jax_dtype
+
+    layer = torch.nn.Module()
+    layer.weight = torch.frombuffer(bytearray(32), dtype=torch.float32)
+    sharding = MagicMock(spec=NamedSharding)
+    dummy_weight = MagicMock()
+    create_dummy_weights_on_tpu.return_value = dummy_weight
+
+    result = _load_weight_for_layer(layer, "weight", sharding)
+
+    assert result is dummy_weight
+    create_dummy_weights_on_tpu.assert_called_once_with(
+        sharding=sharding,
+        weight_shape=(8, ),
+        weight_dtype=to_jax_dtype(torch.float32),
+    )
+    assert layer.weight.untyped_storage().size() == 32
