@@ -24,7 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../scripts/configs/pipeline_config.sh"
 
 # Read CASE_TYPE from the first argument or default to DAILY.
-BM_CASE_TYPE="${BM_CASE_TYPE:-DAILY}"
+BM_CASE_TYPE="${BM_CASE_TYPE:-DEV}"
 
 # Validate BM_CASE_TYPE input.
 case "${BM_CASE_TYPE}" in
