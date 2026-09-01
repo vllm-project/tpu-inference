@@ -28,8 +28,7 @@ import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
-    SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout)
+    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -39,6 +38,7 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
+from tpu_inference.runner.pcp_utils import pcp_seq_arrays, pcp_token_layout
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -402,10 +402,6 @@ class CompilationManager:
         pcp = None
         if pcp_size > 1:
             n_reqs = attn_seqs
-            pcp_spec = NamedSharding(
-                self.runner.mesh,
-                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
-            repl = NamedSharding(self.runner.mesh, PartitionSpec())
             # A well-formed dummy layout: request_distribution is all zeros,
             # so the kernel body does not run, but the traced program still
             # slices these arrays.
@@ -414,25 +410,12 @@ class CompilationManager:
                                                pcp_num_reqs, pcp_size)
             cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
                 chunks, offs, pcp_size, n_reqs)
-            cu_np = np.tile(cu_row, (pcp_size, 1))
-
-            pcp = PCPMetadata(
-                query_start_loc=device_array(self.runner.mesh,
-                                             cu_np,
-                                             sharding=pcp_spec),
-                kv_cache_lens=device_array(self.runner.mesh,
-                                           np.zeros(n_reqs, dtype=np.int32),
-                                           sharding=repl),
-                q_pos_offsets=device_array(self.runner.mesh,
-                                           qpos_np,
-                                           sharding=pcp_spec),
-                kv_new_starts=device_array(self.runner.mesh,
-                                           kv_starts_np,
-                                           sharding=repl),
-                kv_token_order=device_array(self.runner.mesh,
-                                            np.arange(num_tokens,
-                                                      dtype=np.int32),
-                                            sharding=repl),
+            pcp = self.runner.pcp_preprocessor.metadata_to_device(
+                cu_row,
+                qpos_np,
+                np.zeros(n_reqs, dtype=np.int32),
+                kv_starts_np,
+                np.arange(num_tokens, dtype=np.int32),
                 has_cached_kv=pcp_has_cached_kv,
                 num_reqs=pcp_num_reqs,
             )
