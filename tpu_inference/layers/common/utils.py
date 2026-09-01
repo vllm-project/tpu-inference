@@ -19,8 +19,6 @@ import jax.numpy as jnp
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, Sharding
 
-from tpu_inference import envs
-
 # Lazy initialized, since device might not be ready at import time.
 _cpu_mesh = None
 
@@ -138,11 +136,14 @@ def general_device_put(tensor: jax.Array,
     """
 
     def _put(t):
-        multihost_backend = envs.TPU_MULTIHOST_BACKEND
-        # If we are not in multi-host setup, or the tensor is not fully addressable,
-        # we can use jax.device_put directly.
-        if multihost_backend != "ray" or (isinstance(t, jax.Array)
-                                          and not t.is_fully_addressable):
+        # If we are not in multi-host setup, or the tensor is already a
+        # non-fully-addressable global array, we can use jax.device_put directly.
+        # In multi-host (regardless of ray or native jax.distributed), a bare
+        # device_put of a host-local array to a cross-process replicated sharding
+        # triggers multihost_utils.assert_equal -> process_allgather, which
+        # materializes num_processes copies per chip and OOMs on large weights.
+        if jax.process_count() == 1 or (isinstance(t, jax.Array)
+                                        and not t.is_fully_addressable):
             if layout is not None:
                 return jax.device_put(t, Format(layout, sharding))
             else:
