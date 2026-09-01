@@ -63,8 +63,7 @@ class RingSems:
 class PcpRing:
     """Per-step ring state and the per-lane rotation protocol."""
 
-    def __init__(self, cfgs, sems: RingSems, *, step, chunk_start,
-                 chunk_num_steps, kv_window_ref):
+    def __init__(self, cfgs, sems: RingSems, *, step, chunk_id, kv_window_ref):
         self.cfgs = cfgs
         self.sems = sems
         self.size = cfgs.serve.cp.group_size
@@ -73,8 +72,7 @@ class PcpRing:
         self.prev_id = self._device_id(
             lax.rem(self.my_id + self.size - 1, self.size))
         self.step_local = step
-        self.step_global = chunk_start + step
-        self.chunk_num_steps = chunk_num_steps
+        self.step_global = chunk_id * cfgs.max_steps_ub + step
         self.kv_window = kv_window_ref
         self._pending_sends = []
 
@@ -137,8 +135,11 @@ class PcpRing:
         slot = lax.rem(self.step_local, n_buffer)
         # The successor of this step's last lane is the next step's lane 0;
         # the window's slot sequence restarts at zero on a new chunk.
+        # Full chunks have exactly max_steps_ub steps; only the last chunk is
+        # shorter, and its final step never sends (schedules end on the last
+        # round or masked lanes), so the past-the-end value is never used.
         next_step = self.step_local + 1
-        next_slot = jnp.where(next_step < self.chunk_num_steps,
+        next_slot = jnp.where(next_step < self.cfgs.max_steps_ub,
                               lax.rem(next_step, n_buffer), 0)
 
         for b_idx in range(self.cfgs.batch_size):
@@ -293,16 +294,15 @@ class RingStepMetadataComputer(kernel.StepMetadataComputer):
     collective_id = 0
 
     def fetch_step_metadata(self, step, schedule_ref, kv_in_vref,
-                            extra_scratches, chunk_start, *, cu_q_lens_ref,
+                            extra_scratches, chunk_id, *, cu_q_lens_ref,
                             q_offsets_ref, kv_cache_lens_ref, kv_new_lens_ref,
-                            kv_window_ref, chunk_num_steps):
+                            kv_window_ref):
         del kv_in_vref  # the ring addresses the window by slot directly
         (ring_sems, ) = extra_scratches
         pcp_ring = PcpRing(self.cfgs,
                            ring_sems,
                            step=step,
-                           chunk_start=chunk_start,
-                           chunk_num_steps=chunk_num_steps,
+                           chunk_id=chunk_id,
                            kv_window_ref=kv_window_ref)
         meta, rounds, valids = ring_fetch_step_metadata(
             step,
