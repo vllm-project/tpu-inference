@@ -207,7 +207,9 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             "VllmUnquantizedLinearMethod")
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
-        super().__init__(linear_config)
+        vllm_linear.UnquantizedLinearMethod.__init__(self)
+        common_unquantized.UnquantizedLinearMethod.__init__(
+            self, linear_config)
 
     def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
                               args, kwargs):
