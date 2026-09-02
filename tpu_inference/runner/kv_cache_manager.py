@@ -874,6 +874,15 @@ class KVCacheManager:
             mamba_num_blocks = (self._mamba_num_blocks
                                 if self._mamba_num_blocks is not None else
                                 num_blocks)
+            # The mamba cache shards axis 0 over ATTN_DATA (which includes pcp),
+            # but `num_blocks` above was only rounded to BATCH (no pcp). On the
+            # fallback path (`_mamba_num_blocks is None`: uniform sizing under
+            # mamba_cache_mode='align' or a pinned override) an odd count then
+            # fails the NamedSharding tiling check under PCP (e.g. 8121 % 8).
+            # Round down to the mamba axis-0 mesh product so it divides evenly.
+            mamba_divisor = common_utils.get_mesh_shape_product(
+                self.runner.mesh, ShardingAxisName.ATTN_DATA)
+            mamba_num_blocks = (mamba_num_blocks // mamba_divisor) * mamba_divisor
             if self.actual_mamba_num_blocks is None:
                 self.actual_mamba_num_blocks = mamba_num_blocks
 
