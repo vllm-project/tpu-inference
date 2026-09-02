@@ -350,8 +350,6 @@ def rpa_body(
 ):
     step = pl.program_id(0)
 
-    # Step 1: Fetch metadata (a computer like the ring's may also rewrite the
-    # lane state in the KV window; see StepMetadataComputer).
     step_meta = step_metadata_computer.fetch_step_metadata(
         step,
         schedule_ref,
@@ -392,10 +390,7 @@ def rpa_body(
     v_b = []
 
     if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
-        # CACHE_ONLY has no new kv, so there is nothing to stitch; skipping
-        # also keeps the lane buffer untouched by vector stores, which the
-        # PCP ring requires (an in-place stitch would race the send that is
-        # still reading the buffer).
+        # CACHE_ONLY has no new kv, so there is nothing to stitch
         if cfgs.serve.attention_scope != configs.AttentionScope.CACHE_ONLY:
             stitch_results = []
             for b_idx in range(cfgs.batch_size):
@@ -561,7 +556,6 @@ def rpa_body(
         cfgs=cfgs,
     )
 
-    # Step 5: End-of-step bookkeeping (the ring waits its sends here).
     step_metadata_computer.finalize()
 
 

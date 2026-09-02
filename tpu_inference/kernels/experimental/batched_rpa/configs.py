@@ -526,7 +526,3 @@ class RpaConfigs:
                 raise ValueError(
                     "ring_axis_name is a cache-phase path and requires"
                     " AttentionScope.CACHE_ONLY.")
-            # Both layouts rotate: under CACHE_ONLY the cache pages park at
-            # rank-uniform offsets (i * page_size) even in SEQ_ALONG_LANE,
-            # and rpa_body skips the in-place stitch (no new kv), so a
-            # rotated lane buffer is directly interpretable by the receiver.
