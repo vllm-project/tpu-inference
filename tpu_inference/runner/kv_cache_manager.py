@@ -820,18 +820,21 @@ class KVCacheManager:
             page_size_bytes = first_spec.page_size_bytes
 
             if duplicate_shared_layers:
-                total_group_page_size = 0
-                for name in kv_cache_tensor.layers:
-                    spec = layer_name_to_spec[name]
-                    if isinstance(spec, MambaSpec):
-                        total_group_page_size += dataclasses.replace(
-                            spec, page_size_padded=None).page_size_bytes
-                    else:
-                        total_group_page_size += get_attention_page_size_bytes(
-                            self.runner.mesh, spec.block_size,
-                            spec.num_kv_heads, spec.head_size, spec.dtype,
-                            self.use_mla)
-                tensor_num_blocks = kv_cache_tensor.size // total_group_page_size
+                if kv_cache_config.num_blocks > 0:
+                    tensor_num_blocks = kv_cache_config.num_blocks
+                else:
+                    total_group_page_size = 0
+                    for name in kv_cache_tensor.layers:
+                        spec = layer_name_to_spec[name]
+                        if isinstance(spec, MambaSpec):
+                            total_group_page_size += dataclasses.replace(
+                                spec, page_size_padded=None).page_size_bytes
+                        else:
+                            total_group_page_size += get_attention_page_size_bytes(
+                                self.runner.mesh, spec.block_size,
+                                spec.num_kv_heads, spec.head_size, spec.dtype,
+                                self.use_mla)
+                    tensor_num_blocks = kv_cache_tensor.size // total_group_page_size
                 alloc_per_layer = True
             else:
                 if (num_layers > 1 and kv_cache_config.num_blocks > 0
@@ -854,9 +857,36 @@ class KVCacheManager:
                     tensor_num_blocks,
                     self.runner.cache_config.num_gpu_blocks_override)
 
-            mamba_num_blocks = (self._mamba_num_blocks
-                                if self._mamba_num_blocks is not None else
-                                tensor_num_blocks)
+            mamba_cache_mode = getattr(self.runner.cache_config,
+                                       "mamba_cache_mode", "none")
+            if mamba_cache_mode == "align":
+                # Mamba prefix caching ("align" mode) addresses recurrent
+                # state by block ID from the mamba block table, so every
+                # layer's mamba array must span the full block pool.
+                mamba_num_blocks = tensor_num_blocks
+            elif self._mamba_num_blocks is not None:
+                mamba_num_blocks = self._mamba_num_blocks
+            else:
+                # Mamba state is recurrent: one slot per *active* request,
+                # regardless of context length.  Falling back to
+                # tensor_num_blocks (the attention pool size) would allocate
+                # thousands of unused mamba slots and OOM on HBM.  Cap at
+                # max_num_reqs (+1 for the null block), matching the logic
+                # in _maybe_set_compact_mamba_num_blocks_override.
+                num_spec = 0
+                if self.runner.vllm_config.speculative_config is not None:
+                    num_spec = (self.runner.vllm_config.speculative_config.
+                                num_speculative_tokens)
+                mamba_slot_stride = num_spec + 1
+                mamba_num_blocks = (
+                    self.runner.max_num_reqs * mamba_slot_stride + 1)
+                mamba_num_blocks = (
+                    (mamba_num_blocks + divisor - 1) // divisor) * divisor
+                logger.info(
+                    "Compact-mamba sizing was not set; defaulting "
+                    "mamba_num_blocks to %d (max_num_reqs=%d, "
+                    "spec_stride=%d, divisor=%d).", mamba_num_blocks,
+                    self.runner.max_num_reqs, mamba_slot_stride, divisor)
             if self.actual_mamba_num_blocks is None:
                 self.actual_mamba_num_blocks = mamba_num_blocks
 

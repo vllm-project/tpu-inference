@@ -1073,7 +1073,9 @@ class TestKVCacheManager:
             assert isinstance(mamba_states, tuple)
             assert len(mamba_states) == 2
 
-            expected_num_blocks = num_blocks // len(layer_names)
+            # Mamba layers get max_num_reqs + 1 blocks (not tensor_num_blocks)
+            # because mamba state is recurrent — one slot per active request.
+            expected_num_blocks = self.runner.max_num_reqs + 1
             assert mamba_states[0].shape == (expected_num_blocks, 4, 128)
             assert mamba_states[1].shape == (expected_num_blocks, 8, 64, 32)
 
@@ -1508,11 +1510,13 @@ class TestKVCacheManager:
         # Should duplicate the shared cache and allocate successfully with the appropriate num_blocks
         assert len(self.runner.kv_caches) == 2
 
-        # Check that num_blocks are set using unpadded mamba page size.
+        # Check that mamba num_blocks are capped at max_num_reqs + 1
+        # (recurrent state: one slot per active request).
         mamba_states = self.runner.kv_caches[0]
         assert len(mamba_states) == 2
-        assert mamba_states[0].shape[0] == num_blocks
-        assert mamba_states[1].shape[0] == num_blocks
+        expected_mamba_blocks = self.runner.max_num_reqs + 1
+        assert mamba_states[0].shape[0] == expected_mamba_blocks
+        assert mamba_states[1].shape[0] == expected_mamba_blocks
 
         attn_cache = self.runner.kv_caches[1]
         assert attn_cache.shape[0] == num_blocks
@@ -1612,12 +1616,13 @@ class TestKVCacheManager:
             kv_cache_groups=kv_cache_groups,
         )
 
+        self.runner.vllm_config.cache_config.mamba_cache_mode = "align"
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # 10 tensors × 4 duplicated layers = 40 caches, one per layer.
         assert len(self.runner.kv_caches) == 40
 
-        # The whole point of the fix: every layer's physical cache holds
+        # When mamba_cache_mode == 'align', every layer's physical cache holds
         # exactly `kv_cache_config.num_blocks` slots so block ids from
         # vLLM's shared pool can never index out of range.
         for name in (attn_layer_names + mamba_a_names + mamba_b_names +
@@ -1628,7 +1633,7 @@ class TestKVCacheManager:
                 for state in cache:
                     assert state.shape[0] == num_blocks, (
                         f"layer {name} mamba state has "
-                        f"{state.shape[0]} blocks but vLLM pool has "
+                        f"{state.shape[0]} blocks but expected "
                         f"{num_blocks}")
             else:
                 assert cache.shape[0] == num_blocks, (
