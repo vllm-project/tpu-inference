@@ -283,6 +283,8 @@ def pcp_forward(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    kv_layout: batched_rpa_configs.KVLayout = (
+        batched_rpa_configs.KVLayout.HEAD_ALONG_SUBLANE),
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward.
 
@@ -308,13 +310,19 @@ def pcp_forward(
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                      ShardingAxisName.KV_HEAD, None, None)
+    if kv_layout == batched_rpa_configs.KVLayout.SEQ_ALONG_LANE:
+        # SEQ_ALONG_LANE: tokens on the last dim, K/V head planes on dim 1.
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_HEAD,
+                          None, None, ShardingAxisName.KV_CONTEXT)
+    else:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD, None, None)
 
     common = dict(sm_scale=sm_scale,
                   q_scale=q_scale,
                   k_scale=k_scale,
-                  v_scale=v_scale)
+                  v_scale=v_scale,
+                  kv_layout=kv_layout)
 
     cache_pages = md.pcp.cache_pages
 
