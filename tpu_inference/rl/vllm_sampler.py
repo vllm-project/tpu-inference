@@ -143,13 +143,17 @@ class RLVllmSampler:
     ) -> VllmSamplingParams:
         """Builds a vLLM SamplingParams object from any duck-typed request."""
         sparams = _get_val(req, "sampling_params")
+        # `kwargs` is read through `_get_val` too, not `.get`: callers pass the
+        # whole generation-kwargs dict through with unset fields present as
+        # `None`, so a plain `.get(key, default)` finds the key and hands back
+        # `None`, defeating the default before `_get_val` ever sees it.
         return VllmSamplingParams(
             temperature=_get_val(sparams, "temperature",
-                                 kwargs.get("temperature", 0.7)),
-            top_p=_get_val(sparams, "top_p", kwargs.get("top_p", 0.95)),
-            top_k=_get_val(sparams, "top_k", kwargs.get("top_k", -1)),
+                                 _get_val(kwargs, "temperature", 0.7)),
+            top_p=_get_val(sparams, "top_p", _get_val(kwargs, "top_p", 0.95)),
+            top_k=_get_val(sparams, "top_k", _get_val(kwargs, "top_k", -1)),
             max_tokens=_get_val(sparams, "max_tokens",
-                                kwargs.get("max_tokens", 128)),
+                                _get_val(kwargs, "max_tokens", 128)),
             stop=_get_val(sparams, "stop_sequences")
             or _get_val(sparams, "stop") or kwargs.get("stop"),
             logprobs=1
