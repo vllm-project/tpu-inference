@@ -784,9 +784,19 @@ def ragged_paged_attention(
         )
         kernel_kv_cache_lens = local_kv_cache_lens
         step_metadata_cls = kernel.StepMetadataComputer
+        extra_scratch_shapes = ()
+        collective_id = None
+        post_rpa_hook = None
         if cfgs.ring_enabled:
             computer_cls = ring.RingMetadataComputer
             step_metadata_cls = ring.RingStepMetadataComputer
+            extra_scratch_shapes = (ring.RingSems(
+                dma_sems=pltpu.SemaphoreType.DMA((2, )),
+                sync_sem=pltpu.SemaphoreType.REGULAR,
+            ), )
+            # The ring's startup barrier needs a barrier semaphore.
+            collective_id = 0
+            post_rpa_hook = ring.wait_ring_sends
             extra_scalars = (cp_rank_scalar, new_kv_starts,
                              global_kv_cache_lens)
             kernel_kv_cache_lens = global_kv_cache_lens
@@ -821,6 +831,9 @@ def ragged_paged_attention(
             cfgs=cfgs,
             computer_cls=computer_cls,
             step_metadata_cls=step_metadata_cls,
+            extra_scratch_shapes=extra_scratch_shapes,
+            collective_id=collective_id,
+            post_rpa_hook=post_rpa_hook,
         )
         if return_lse:
             o_out, kv_out, lse_out = result
