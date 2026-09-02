@@ -1,21 +1,19 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅ Passing,✅ Passing
-"DCN-based P/D disaggregation",❓ Untested,❓ Untested
-"Group sampling prefix cache",❓ Untested,❓ Untested
+"DCN-based P/D disaggregation",✅ Passing,✅ Passing
 "KV Cache Offload",✅ Passing,✅ Passing
-"LoRA_Torch",❌ Failing,❓ Untested
-"MoE Expert IDs",❓ Untested,❓ Untested
-"Multimodal Inputs",❌ Failing,❓ Untested
-"Out-of-tree model support",❌ Failing,❓ Untested
+"LoRA_Torch",✅ Passing,✅ Passing
+"Multimodal Inputs",✅ Passing,✅ Passing
+"Out-of-tree model support",✅ Passing,✅ Passing
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Speculative Decoding: DFlash",❓ Untested,❓ Untested
-"Speculative Decoding: Eagle3",❓ Untested,❓ Untested
-"Speculative Decoding: Ngram",❓ Untested,❓ Untested
-"Step Pooling (Embedding)",❌ Failing,❓ Untested
-"async scheduler",❓ Untested,❓ Untested
-"hybrid kv cache",❌ Failing,❓ Untested
-"multi-host",❓ Untested,❓ Untested
-"runai_model_streamer_loader",❓ Untested,❓ Untested
-"sampling_params",❓ Untested,❓ Untested
-"structured_decoding",❌ Failing,❓ Untested
+"Speculative Decoding: DFlash",✅ Passing,✅ Passing
+"Speculative Decoding: Eagle3",✅ Passing,✅ Passing
+"Speculative Decoding: Ngram",✅ Passing,✅ Passing
+"Step Pooling (Embedding)",✅ Passing,❓ Untested
+"async scheduler",✅ Passing,✅ Passing
+"hybrid kv cache",✅ Passing,❓ Untested
+"multi-host",✅ Passing,❓ Untested
+"runai_model_streamer_loader",✅ Passing,❓ Untested
+"sampling_params",✅ Passing,❓ Untested
+"structured_decoding",✅ Passing,❓ Untested
