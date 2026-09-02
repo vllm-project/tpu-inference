@@ -283,16 +283,6 @@ class RingStepMetadataComputer(kernel.StepMetadataComputer):
     """StepMetadataComputer that decodes ring-encoded k indices and rotates
     the KV blocks directly between the ranks' pipeline window buffers."""
 
-    @classmethod
-    def scratch_shapes(cls, cfgs: configs.RpaConfigs) -> tuple:
-        return (RingSems(
-            dma_sems=pltpu.SemaphoreType.DMA((2, )),
-            sync_sem=pltpu.SemaphoreType.REGULAR,
-        ), )
-
-    # The ring's startup barrier needs a barrier semaphore.
-    collective_id = 0
-
     def fetch_step_metadata(self, step, schedule_ref, kv_in_vref,
                             extra_scratches, chunk_id, *, cu_q_lens_ref,
                             q_offsets_ref, kv_cache_lens_ref, kv_new_lens_ref,
@@ -315,9 +305,12 @@ class RingStepMetadataComputer(kernel.StepMetadataComputer):
             pcp_ring=pcp_ring,
         )
         pcp_ring.stage(rounds, valids)
-        self._pcp_ring = pcp_ring
+        self.pcp_ring = pcp_ring
         return meta
 
-    def finalize(self):
-        self._pcp_ring.finalize()
-        self._pcp_ring = None
+
+def wait_ring_sends(computer: RingStepMetadataComputer):
+    """rpa_kernel post_rpa_hook: wait the step's sends before the body
+    returns, ahead of the pipeline's next copy_in into their source slots."""
+    computer.pcp_ring.finalize()
+    computer.pcp_ring = None

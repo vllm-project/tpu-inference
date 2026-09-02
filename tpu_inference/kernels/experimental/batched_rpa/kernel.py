@@ -224,16 +224,6 @@ def fetch_step_metadata(
 
 class StepMetadataComputer:
 
-    @classmethod
-    def scratch_shapes(cls, cfgs: configs.RpaConfigs) -> tuple:
-        """Extra scoped scratch allocations, handed back to the instance as
-        rpa_body's extra_scratches."""
-        del cfgs
-        return ()
-
-    # Set when the computer's protocol needs a barrier semaphore.
-    collective_id: int | None = None
-
     def __init__(self, cfgs: configs.RpaConfigs):
         self.cfgs = cfgs
 
@@ -251,9 +241,6 @@ class StepMetadataComputer:
             kv_new_lens_ref,
             cfgs=self.cfgs,
         )
-
-    def finalize(self):
-        """Runs at the end of rpa_body, after compute and output writeback."""
 
 
 def generate_mask(
@@ -347,6 +334,7 @@ def rpa_body(
     step_metadata_computer: StepMetadataComputer,
     chunk_id: jax.Array | int = 0,
     kv_window_ref: jax.Ref | None = None,
+    post_rpa_hook=None,
 ):
     step = pl.program_id(0)
 
@@ -556,7 +544,8 @@ def rpa_body(
         cfgs=cfgs,
     )
 
-    step_metadata_computer.finalize()
+    if post_rpa_hook is not None:
+        post_rpa_hook(step_metadata_computer)
 
 
 # Define main kernel.
@@ -678,6 +667,9 @@ def rpa_kernel(
     computer_cls: type[
         schedule.BaseMetadataComputer] = schedule.BaseMetadataComputer,
     step_metadata_cls: type[StepMetadataComputer] = StepMetadataComputer,
+    extra_scratch_shapes: tuple = (),
+    collective_id: int | None = None,
+    post_rpa_hook=None,
 ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
     """Perform batched ragged paged attention with scheduler data.
 
@@ -763,7 +755,7 @@ def rpa_kernel(
                     cfgs.acc_scratch_shape,
                     dtype=cfgs.serve.dtype_out,
                 ),  # acc
-            ) + step_metadata_cls.scratch_shapes(cfgs),
+            ) + tuple(extra_scratch_shapes),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
             # Initialize KV cache to zeros.
@@ -833,6 +825,7 @@ def rpa_kernel(
                         step_metadata_computer=step_metadata_computer,
                         chunk_id=start_step // cfgs.max_steps_ub,
                         kv_window_ref=kv_alloc.window_ref,
+                        post_rpa_hook=post_rpa_hook,
                     ),
                     grid=(num_steps + prefix_steps, ),
                     in_specs=(q_alloc.spec, kv_cache_alloc.spec),
@@ -913,8 +906,8 @@ def rpa_kernel(
             vmem_limit_bytes=cfgs.vmem_limit_bytes,
             disable_bounds_checks=True,
             **({
-                "collective_id": step_metadata_cls.collective_id
-            } if step_metadata_cls.collective_id is not None else {}),
+                "collective_id": collective_id
+            } if collective_id is not None else {}),
         ),
         input_output_aliases=input_output_aliases,
         name=get_kernel_name(cfgs),
