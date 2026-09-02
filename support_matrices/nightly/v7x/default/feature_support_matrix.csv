@@ -1,11 +1,11 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅ Passing,✅ Passing
-"DCN-based P/D disaggregation",❓ Untested,❓ Untested
+"Collective Communication Matmul",❓ Untested,❓ Untested
+"DCN-based P/D disaggregation",❌ Failing,❓ Untested
 "Group sampling prefix cache",❓ Untested,❓ Untested
 "KV Cache Offload",✅ Passing,✅ Passing
-"LoRA_Torch",❌ Failing,❓ Untested
-"MoE Expert IDs",❓ Untested,❓ Untested
-"Multimodal Inputs",❌ Failing,❓ Untested
+"LoRA_Torch",❓ Untested,❓ Untested
+"Multimodal Inputs",❓ Untested,❓ Untested
 "Out-of-tree model support",❌ Failing,❓ Untested
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
@@ -14,8 +14,9 @@ Feature,CorrectnessTest,PerformanceTest
 "Speculative Decoding: Ngram",❓ Untested,❓ Untested
 "Step Pooling (Embedding)",❌ Failing,❓ Untested
 "async scheduler",❓ Untested,❓ Untested
+"async_logprobs",❓ Untested,❓ Untested
 "hybrid kv cache",❌ Failing,❓ Untested
 "multi-host",❓ Untested,❓ Untested
-"runai_model_streamer_loader",❓ Untested,❓ Untested
+"runai_model_streamer_loader",❌ Failing,❓ Untested
 "sampling_params",❓ Untested,❓ Untested
 "structured_decoding",❌ Failing,❓ Untested

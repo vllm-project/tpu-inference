@@ -127,18 +127,21 @@ def _calculate_num_column_partitions(hidden_size: int, input_size: int,
                                      num_cores: int, num_lanes: int,
                                      num_simd_lanes: int) -> int:
     """Calculates the number of row partitions."""
+
     # Each column partition should be multiple of 128 (number of lanes) due to
     # DMA requirements.
     # Prefer to use a large number of column partitions, as long as each
     # partition's size is not too small for DMA pipeline efficiency and each
     # partition's size can divide the hidden size.
 
+    def _can_split_further(num_column_partitions: int) -> bool:
+        return (num_cores % (num_column_partitions * 2) == 0
+                and hidden_size % (num_lanes * num_column_partitions * 2) == 0)
+
     # Each column partition will do DMA pipelining on col_size.
     preferred_num_stages = 4
     num_column_partitions = 1
-    while (num_cores % (num_column_partitions * 2) == 0
-           and hidden_size % (num_lanes * num_column_partitions * 2) == 0
-           and hidden_size //
+    while (_can_split_further(num_column_partitions) and hidden_size //
            (num_column_partitions * 2 * num_lanes) >= preferred_num_stages):
         next_candidate = num_column_partitions * 2
         next_row_partitions = num_cores // next_candidate
@@ -159,6 +162,11 @@ def _calculate_num_column_partitions(hidden_size: int, input_size: int,
             break
 
         num_column_partitions = next_candidate
+
+    # Keep splitting until num_row_partitions <= num_simd_lanes (hard limit).
+    while (num_cores // num_column_partitions > num_simd_lanes
+           and _can_split_further(num_column_partitions)):
+        num_column_partitions *= 2
 
     return num_column_partitions
 

@@ -284,7 +284,6 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             lora_index_to_id,
             max_loras,
             vocab_size,
-            0,  # extra_vocab_size
             "cpu",
         )
         with torchax.default_env():
@@ -299,8 +298,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 self._sampler_indices_padded.shape,
                 dims=1).to(self.device)
             self._embeddings_indices = self._pad_to_shape(
-                embeddings_indices, self._embeddings_indices.shape,
-                dims=2).to(self.device)
+                embeddings_indices,
+                self._embeddings_indices.shape,
+                dims=self._embeddings_indices.ndim).to(self.device)
             self.indices_len[:] = indices_len
 
     def _update_prefill_metadata(self,

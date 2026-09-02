@@ -30,8 +30,6 @@ from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.attention.backends.utils import (get_kv_cache_layout,
-                                              set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
@@ -150,8 +148,8 @@ class KVCacheManager:
         what the TPU allocates per layer.
 
         For hybrid attention+mamba models, vLLM groups a tensor's memory so
-        that one `KVCacheTensor` is `shared_by` one layer from each kv-cache
-        group (e.g., Qwen3.5: 1 full-attn + 3 linear-attn per shared_by).
+        that one `KVCacheTensor` is `layers` one layer from each kv-cache
+        group (e.g., Qwen3.5: 1 full-attn + 3 linear-attn per layers).
         vLLM's scheduler assumes these layers share a single physical
         tensor at the byte level — each layer's block_table indexes into
         disjoint slots of the same backing allocation, and device kernels
@@ -161,7 +159,7 @@ class KVCacheManager:
         TPU `jax.Array`s are strongly typed, so we cannot overlay an
         attention tensor and a mamba tensor on the same bytes.
         `initialize_kv_cache` therefore allocates one physical array per
-        layer in the `shared_by` group, carving the group's byte budget
+        layer in the `layers` group, carving the group's byte budget
         into separate per-layer tensors. Without the compensation done
         here, vLLM's block pool would hold `num_shared_layers`× more
         block IDs than each per-layer array has slots — the scheduler
@@ -171,7 +169,7 @@ class KVCacheManager:
         slot (corrupted state → gibberish generation).
 
         The fix: set every layer's reported `page_size_padded` equal to the
-        full per-`shared_by` footprint — `num_attn_groups × attn_page +
+        full per-`layers` footprint — `num_attn_groups × attn_page +
         num_mamba_groups × mamba_unpadded`, where `attn_page` is the
         TPU-actual per-block bytes (from `get_attention_page_size_bytes`,
         which accounts for dtype packing like fp8) and `mamba_unpadded` is
@@ -232,7 +230,7 @@ class KVCacheManager:
 
         # Derive vLLM's kv-cache group layout. vLLM splits each type into
         # equal-sized groups of `group_size` layers, then allocates
-        # `group_size` `KVCacheTensor`s, each `shared_by` one layer from
+        # `group_size` `KVCacheTensor`s, each `layers` one layer from
         # every group — so each tensor covers `num_attn_groups +
         # num_mamba_groups` layers.
         #
@@ -692,8 +690,7 @@ class KVCacheManager:
         return kv_cache_spec
 
     def get_kv_cache_layout(self):
-        # return the layout (mostly "NHD" or "HND") of kv cache
-        return get_kv_cache_layout()
+        return DEFAULT_KV_CACHE_LAYOUT
 
     def maybe_reinitialize_input_batch(self,
                                        kv_cache_config: KVCacheConfig) -> None:
@@ -748,7 +745,6 @@ class KVCacheManager:
 
         # set the kv cache layout which is needed by kv connectors
         # NOTE(jcgu): please update the default value when the order changes
-        set_kv_cache_layout(DEFAULT_KV_CACHE_LAYOUT)
         # verify kv cache layout is matched between the cache manager and
         # the kv connector (if configured)
         _required_kv_layout = get_kv_connector_cache_layout()
@@ -780,7 +776,7 @@ class KVCacheManager:
                                     duplicate_shared_layers=False)
             return
 
-        # If this is true, then we'll initialize a new KV cache for each layer in "shared_by"
+        # If this is true, then we'll initialize a new KV cache for each layer in "layers"
         # instead of the default behavior of initializing a single KV cache for each of the
         # shared layers
         duplicate_shared_layers = False
@@ -788,9 +784,9 @@ class KVCacheManager:
             for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
                 if any(
                         isinstance(layer_name_to_spec[layer_name], MambaSpec)
-                        for layer_name in kv_cache_tensor.shared_by):
+                        for layer_name in kv_cache_tensor.layers):
                     # TODO (jacobplatin): we should not be replicating the kv cache for each layer and instead
-                    # should follow the native GPU/Torch approach where every group of layers (shared_by)
+                    # should follow the native GPU/Torch approach where every group of layers (layers)
                     # shares the same underlying raw tensor.
                     logger.warning_once(
                         "MambaSpec does not support shared layers for now, defaulting to single KV cache per layer..."
@@ -798,162 +794,210 @@ class KVCacheManager:
                     duplicate_shared_layers = True
                     non_mtp_tensors = [
                         t for t in kv_cache_config.kv_cache_tensors
-                        if not any("mtp" in name for name in t.shared_by)
+                        if not any("mtp" in name for name in t.layers)
                     ]
                     if non_mtp_tensors:
                         # assert that each kv_cache_tensor in kv_cache_config.kv_cache_tensors has the same number of shared layers
                         # This is needed for models like Qwen3.5 where every 4 layers share the same KV cache (3 linear attn and 1 full attn)
-                        num_shared_layers = len(non_mtp_tensors[0].shared_by)
+                        num_shared_layers = len(non_mtp_tensors[0].layers)
                         for kv_cache_tensor in non_mtp_tensors:
                             assert len(
-                                kv_cache_tensor.shared_by
-                            ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.shared_by)}"
+                                kv_cache_tensor.layers
+                            ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.layers)}"
                     break
 
-        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            if duplicate_shared_layers:
-                total_group_page_size = 0
-                for name in kv_cache_tensor.shared_by:
-                    spec = layer_name_to_spec[name]
-                    # Use the per-layer *TPU-actual* per-block bytes so the
-                    # sum equals the `page_size_padded` that
-                    # `update_mamba_page_size_padded` installed on every
-                    # spec (== attn_page + N × mamba_unpadded). For
-                    # attention, the TPU-actual size includes dtype-
-                    # specific packing (e.g., fp8 KV packs 4 elements per
-                    # 32-bit word) which `spec.real_page_size_bytes`
-                    # doesn't account for — on fp8 models they differ by
-                    # 2×, which would break the num_blocks match here.
-                    if isinstance(spec, MambaSpec):
-                        total_group_page_size += dataclasses.replace(
-                            spec, page_size_padded=None).page_size_bytes
-                    else:
-                        total_group_page_size += get_attention_page_size_bytes(
-                            self.runner.mesh, spec.block_size,
-                            spec.num_kv_heads, spec.head_size, spec.dtype,
-                            self.use_mla)
-                num_blocks = kv_cache_tensor.size // total_group_page_size
-            elif kv_cache_tensor.block_stride:
-                # DeepseekV4 packed layout: vLLM overlays every cache
-                # (main MLA latent + indexer k_cache + compressor state +
-                # SWA) into one contiguous per-block backing buffer, so each
-                # KVCacheTensor reports the *full* packed `size`, the combined
-                # per-block stride (== sum of all packed page sizes), and its
-                # own `offset`. `size` is a multiple of `block_stride`, not of
-                # any single layer's page size, and every packed layer shares
-                # the same `num_blocks`.
-                assert kv_cache_tensor.size % kv_cache_tensor.block_stride == 0
-                num_blocks = (kv_cache_tensor.size //
-                              kv_cache_tensor.block_stride)
-            else:
-                # If sharing KV cache, compute `num_blocks` using the page size
-                # of the first layer.
-                page_size_bytes = layer_name_to_spec[
-                    kv_cache_tensor.shared_by[0]].page_size_bytes
-                assert kv_cache_tensor.size % page_size_bytes == 0
-                num_blocks = kv_cache_tensor.size // page_size_bytes
+        # Default KV cache is sharded over (BATCH=(dp, attn_dp))
+        divisor = common_utils.get_mesh_shape_product(self.runner.mesh,
+                                                      ShardingAxisName.BATCH)
 
-            # Default KV cache is sharded over (BATCH=(dp, attn_dp))
-            divisor = common_utils.get_mesh_shape_product(
-                self.runner.mesh, ShardingAxisName.BATCH)
+        # Pass 1: Group layers by their physical byte slot
+        slots: dict[tuple, list[str]] = {}
+        slot_num_blocks: dict[tuple, int] = {}
+
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            num_layers = len(kv_cache_tensor.layers)
+            first_spec = layer_name_to_spec[kv_cache_tensor.layers[0]]
+            page_size_bytes = first_spec.page_size_bytes
+
+            if duplicate_shared_layers:
+                if kv_cache_config.num_blocks > 0:
+                    tensor_num_blocks = kv_cache_config.num_blocks
+                else:
+                    total_group_page_size = 0
+                    for name in kv_cache_tensor.layers:
+                        spec = layer_name_to_spec[name]
+                        if isinstance(spec, MambaSpec):
+                            total_group_page_size += dataclasses.replace(
+                                spec, page_size_padded=None).page_size_bytes
+                        else:
+                            total_group_page_size += get_attention_page_size_bytes(
+                                self.runner.mesh, spec.block_size,
+                                spec.num_kv_heads, spec.head_size, spec.dtype,
+                                self.use_mla)
+                    tensor_num_blocks = kv_cache_tensor.size // total_group_page_size
+                alloc_per_layer = True
+            else:
+                if (num_layers > 1 and kv_cache_config.num_blocks > 0
+                        and kv_cache_tensor.size >= num_layers *
+                        page_size_bytes * kv_cache_config.num_blocks):
+                    tensor_num_blocks = kv_cache_config.num_blocks
+                    alloc_per_layer = True
+                else:
+                    if kv_cache_config.num_blocks > 0:
+                        tensor_num_blocks = kv_cache_config.num_blocks
+                    else:
+                        assert kv_cache_tensor.size % page_size_bytes == 0
+                        tensor_num_blocks = kv_cache_tensor.size // page_size_bytes
+                    alloc_per_layer = False
 
             # num_blocks must be a multiple of the sharding divisor
-            num_blocks = (num_blocks // divisor) * divisor
-
+            tensor_num_blocks = (tensor_num_blocks // divisor) * divisor
             if self.runner.cache_config.num_gpu_blocks_override is not None:
-                num_blocks = min(
-                    num_blocks,
+                tensor_num_blocks = min(
+                    tensor_num_blocks,
                     self.runner.cache_config.num_gpu_blocks_override)
 
-            # When compact-mamba sizing succeeded (set by
-            # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
-            # allocate `_mamba_num_blocks` (= max_num_reqs + 1) slots while
-            # attention layers keep the full `num_blocks`. When that override
-            # didn't run (CPU tests, user-pinned `num_gpu_blocks_override`),
-            # mamba and attn use the same `num_blocks` — vLLM's uniform sizing.
-            mamba_num_blocks = (self._mamba_num_blocks
-                                if self._mamba_num_blocks is not None else
-                                num_blocks)
+            mamba_cache_mode = getattr(self.runner.cache_config,
+                                       "mamba_cache_mode", "none")
+            if mamba_cache_mode == "align":
+                # Mamba prefix caching ("align" mode) addresses recurrent
+                # state by block ID from the mamba block table, so every
+                # layer's mamba array must span the full block pool.
+                mamba_num_blocks = tensor_num_blocks
+            elif self._mamba_num_blocks is not None:
+                mamba_num_blocks = self._mamba_num_blocks
+            else:
+                # Mamba state is recurrent: one slot per *active* request,
+                # regardless of context length.  Falling back to
+                # tensor_num_blocks (the attention pool size) would allocate
+                # thousands of unused mamba slots and OOM on HBM.  Cap at
+                # max_num_reqs (+1 for the null block), matching the logic
+                # in _maybe_set_compact_mamba_num_blocks_override.
+                num_spec = 0
+                if self.runner.vllm_config.speculative_config is not None:
+                    num_spec = (self.runner.vllm_config.speculative_config.
+                                num_speculative_tokens)
+                mamba_slot_stride = num_spec + 1
+                mamba_num_blocks = (
+                    self.runner.max_num_reqs * mamba_slot_stride + 1)
+                mamba_num_blocks = (
+                    (mamba_num_blocks + divisor - 1) // divisor) * divisor
+                logger.info(
+                    "Compact-mamba sizing was not set; defaulting "
+                    "mamba_num_blocks to %d (max_num_reqs=%d, "
+                    "spec_stride=%d, divisor=%d).", mamba_num_blocks,
+                    self.runner.max_num_reqs, mamba_slot_stride, divisor)
             if self.actual_mamba_num_blocks is None:
                 self.actual_mamba_num_blocks = mamba_num_blocks
 
-            for j, layer_name in enumerate(kv_cache_tensor.shared_by):
-                layer_spec = layer_name_to_spec[layer_name]
-                if isinstance(layer_spec, MambaSpec):
-                    mamba_states = []
-                    for state_index, (shape, dtype) in enumerate(
-                            zip(layer_spec.shapes, layer_spec.dtypes)):
-                        jax_dtype = t2j_dtype(dtype)
-                        cache_shape = (mamba_num_blocks, *shape)
-                        if state_index == 0:
-                            # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
-                            spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                                 None,
-                                                 ShardingAxisName.ATTN_HEAD)
-                        elif state_index == 1:
-                            # ssm_state: [num_blocks, num_heads, head_dim, state_size]
-                            spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
-                                                 ShardingAxisName.ATTN_HEAD,
-                                                 None, None)
-                        else:
-                            spec = PartitionSpec(
-                                None, *([None] * (len(cache_shape) - 1)))
+            offset = getattr(kv_cache_tensor, 'offset', 0)
+            layer_stride = getattr(kv_cache_tensor, 'layer_stride', 0)
+            block_stride = getattr(kv_cache_tensor, 'block_stride', 0)
 
-                        sharding = NamedSharding(self.runner.mesh, spec)
+            if duplicate_shared_layers:
+                # When duplicate_shared_layers is True (hybrid Mamba models),
+                # each layer in every tensor gets its own dedicated physical cache.
+                for j, layer_name in enumerate(kv_cache_tensor.layers):
+                    spec = layer_name_to_spec[layer_name]
+                    slot_key = (i, j, layer_name)
+                    slot_num_blocks[slot_key] = (mamba_num_blocks if
+                                                 isinstance(spec, MambaSpec)
+                                                 else tensor_num_blocks)
+                    slots[slot_key] = [layer_name]
+            else:
+                for j, layer_name in enumerate(kv_cache_tensor.layers):
+                    spec = layer_name_to_spec[layer_name]
+                    if isinstance(spec, MambaSpec):
+                        slot_key = ("mamba", layer_name)
+                        slot_num_blocks[slot_key] = mamba_num_blocks
+                    elif not alloc_per_layer:
+                        # Legacy single-cache aliasing for this tensor
+                        slot_key = (f"tensor_{i}", 0,
+                                    getattr(spec, 'num_kv_heads', None),
+                                    getattr(spec, 'head_size', None),
+                                    getattr(spec, 'dtype', None))
+                        slot_num_blocks[slot_key] = tensor_num_blocks
+                    else:
+                        stride_val = layer_stride if layer_stride > 0 else tensor_num_blocks * page_size_bytes
+                        layer_offset = offset + j * stride_val
+                        slot_key = (
+                            layer_offset,
+                            block_stride,
+                            getattr(spec, 'num_kv_heads', None),
+                            getattr(spec, 'head_size', None),
+                            getattr(spec, 'dtype', None),
+                        )
+                        slot_num_blocks[slot_key] = tensor_num_blocks
 
-                        # NOTE: conv state will always be BF16 and SSM state will always be FP32
-                        # regardless of the `kv-cache-dtype` (as is in upstream vLLM)
-                        mamba_states.append(
-                            create_mamba_cache(cache_shape, jax_dtype,
-                                               sharding))
+                    slots.setdefault(slot_key, []).append(layer_name)
 
-                    metadata["mamba"].count += 1
-                    if metadata["mamba"].shape is None:
-                        # Mamba is a tuple of arrays, so we store a tuple of their metadata
-                        metadata["mamba"].shape = tuple(s.shape
-                                                        for s in mamba_states)
-                        metadata["mamba"].dtype = tuple(s.dtype
-                                                        for s in mamba_states)
-                        metadata["mamba"].sharding = tuple(
-                            s.sharding for s in mamba_states)
+        # Pass 2: Allocate one physical cache per unique slot and map layers
+        for slot_key, layer_names in slots.items():
+            first_layer_name = layer_names[0]
+            layer_spec = layer_name_to_spec[first_layer_name]
+            num_blocks = slot_num_blocks[slot_key]
 
-                    kv_caches.append(tuple(mamba_states))
-                else:
-                    # We should only init a new kv cache for the first layer in shared_by
-                    # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
-                    # is True, we should init a new kv cache for each layer in shared_by
-                    if j == 0 or duplicate_shared_layers:
-                        # NOTE: we'll multiply the num_kv_heads by 2 in the function
-                        block_size = layer_spec.storage_block_size
+            if isinstance(layer_spec, MambaSpec):
+                mamba_states = []
+                for state_index, (shape, dtype) in enumerate(
+                        zip(layer_spec.shapes, layer_spec.dtypes)):
+                    jax_dtype = t2j_dtype(dtype)
+                    cache_shape = (num_blocks, *shape)
+                    if state_index == 0:
+                        # conv_state: [num_blocks, conv_kernel_size, intermediate_size]
+                        spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                                             ShardingAxisName.ATTN_HEAD)
+                    elif state_index == 1:
+                        # ssm_state: [num_blocks, num_heads, head_dim, state_size]
+                        spec = PartitionSpec(ShardingAxisName.ATTN_DATA,
+                                             ShardingAxisName.ATTN_HEAD, None,
+                                             None)
+                    else:
+                        spec = PartitionSpec(
+                            None, *([None] * (len(cache_shape) - 1)))
 
-                        kv_cache = create_kv_caches(
-                            num_blocks=num_blocks,
-                            block_size=block_size,
-                            num_kv_heads=layer_spec.num_kv_heads,
-                            head_size=layer_spec.head_size,
-                            mesh=self.runner.mesh,
-                            layer_names=[f'kv_cache_tensor.{i}'],
-                            cache_dtype=t2j_dtype(layer_spec.dtype),
-                            use_mla=self.use_mla,
-                        )[0]
-                        kv_caches.append(kv_cache)
+                    sharding = NamedSharding(self.runner.mesh, spec)
+                    mamba_states.append(
+                        create_mamba_cache(cache_shape, jax_dtype, sharding))
 
-                        # Update Regular Attention Metadata
-                        metadata["regular_attn"].count += 1
-                        if metadata["regular_attn"].shape is None:
-                            metadata["regular_attn"].shape = kv_cache.shape
-                            metadata["regular_attn"].dtype = kv_cache.dtype
-                            metadata[
-                                "regular_attn"].sharding = kv_cache.sharding
-                # We should only add the blocks for the first layer in shared_by
-                # if duplicate_shared_layers is False.  Otherwise, if duplicate_shared_layers
-                # is True, we should add the blocks for each layer in shared_by.
-                if j == 0 or duplicate_shared_layers:
-                    num_blocks_list.append(mamba_num_blocks if isinstance(
-                        layer_spec, MambaSpec) else num_blocks)
-                layer_idx = (i * num_shared_layers
-                             ) + j if duplicate_shared_layers else i
-                self.runner.layer_name_to_kvcache_index[layer_name] = layer_idx
+                metadata["mamba"].count += 1
+                if metadata["mamba"].shape is None:
+                    metadata["mamba"].shape = tuple(s.shape
+                                                    for s in mamba_states)
+                    metadata["mamba"].dtype = tuple(s.dtype
+                                                    for s in mamba_states)
+                    metadata["mamba"].sharding = tuple(s.sharding
+                                                       for s in mamba_states)
+
+                kv_caches.append(tuple(mamba_states))
+                num_blocks_list.append(num_blocks)
+                cache_idx = len(kv_caches) - 1
+            else:
+                block_size = layer_spec.num_states
+                kv_cache = create_kv_caches(
+                    num_blocks=num_blocks,
+                    block_size=block_size,
+                    num_kv_heads=layer_spec.num_kv_heads,
+                    head_size=layer_spec.head_size,
+                    mesh=self.runner.mesh,
+                    layer_names=[first_layer_name],
+                    cache_dtype=t2j_dtype(layer_spec.dtype),
+                    use_mla=self.use_mla,
+                )[0]
+                kv_caches.append(kv_cache)
+
+                metadata["regular_attn"].count += 1
+                if metadata["regular_attn"].shape is None:
+                    metadata["regular_attn"].shape = kv_cache.shape
+                    metadata["regular_attn"].dtype = kv_cache.dtype
+                    metadata["regular_attn"].sharding = kv_cache.sharding
+
+                num_blocks_list.append(num_blocks)
+                cache_idx = len(kv_caches) - 1
+
+            for layer_name in layer_names:
+                self.runner.layer_name_to_kvcache_index[layer_name] = cache_idx
+
         if self.shared_kv_cache_layers:
             for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
             ):
@@ -1034,7 +1078,7 @@ class KVCacheManager:
         Since vLLM #48993 (``_get_packed_kv_cache_layout``), DSv4's cache
         groups are laid out densely in one shared block slab: every
         ``KVCacheTensor`` spans the whole slab (``size == block_stride *
-        num_blocks``) and its ``shared_by`` lists the layers -- from
+        num_blocks``) and its ``layers`` lists the layers -- from
         *different* cache groups -- that start at the same byte ``offset``.
         A block ID is owned by one cache group at a time, so same-offset
         layers may alias memory, and mixed groups (e.g. an indexer k_cache
@@ -1050,7 +1094,7 @@ class KVCacheManager:
         - Every ``MLAAttentionSpec`` layer gets its own uint8
           ``(num_blocks, rows, 4, lanes)`` array, shaped for the kernel that
           reads it rather than by the generic ``head_size`` formula (with
-          ``T = spec.storage_block_size`` tokens per page):
+          ``T = spec.num_states`` tokens per page):
 
             CSA ``*.attn``        NoPE ``(N, T, 4, 128)``  512B/token
                                   RoPE ``(N, T/4, 4, 128)`` 128B/token, in a
@@ -1083,13 +1127,13 @@ class KVCacheManager:
                         f"of block_stride: size={tensor.size}, "
                         f"block_stride={tensor.block_stride}, "
                         f"offset={tensor.offset}, "
-                        f"shared_by={tensor.shared_by}")
+                        f"layers={tensor.layers}")
                 num_blocks_candidates.add(tensor.size // tensor.block_stride)
             else:
                 # Legacy layout without a packed slab: the tensor is sized
                 # for its own layers' page size.
                 page_size = layer_name_to_spec[
-                    tensor.shared_by[0]].page_size_bytes
+                    tensor.layers[0]].page_size_bytes
                 num_blocks_candidates.add(tensor.size // page_size)
         if len(num_blocks_candidates) != 1:
             raise ValueError(
@@ -1164,7 +1208,7 @@ class KVCacheManager:
         hca_layer_names: set[str] = set()
         for layer_name in mla_layer_names:
             spec = layer_name_to_spec[layer_name]
-            page_size = spec.storage_block_size * common_utils.get_mesh_shape_product(
+            page_size = spec.num_states * common_utils.get_mesh_shape_product(
                 self.runner.mesh, ShardingAxisName.KV_CONTEXT)
             if layer_name.endswith(self._DS_V4_INDEXER_CACHE_SUFFIX):
                 # Lightning indexer: 128 fp8 values + 1 e8m0 scale per token,
@@ -1173,7 +1217,9 @@ class KVCacheManager:
                          self._DS_V4_KV_PACKING, 256)
                 _create_cache(shape, layer_name)
                 layer_to_index[layer_name] = len(kv_caches) - 1
-            elif spec.compress_ratio == self._DS_V4_CSA_COMPRESS_RATIO:
+            elif getattr(spec, "tokens_per_state",
+                         getattr(spec, "compress_ratio",
+                                 1)) == self._DS_V4_CSA_COMPRESS_RATIO:
                 # CSA is split across two arrays, for nope and rope respectively.
                 shape = (num_blocks, page_size, self._DS_V4_KV_PACKING, 128)
                 _create_cache(shape, layer_name)

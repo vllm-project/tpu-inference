@@ -1,4 +1,4 @@
 Feature,CorrectnessTest,PerformanceTest
-"async_logprobs",❌ Failing,❓ Untested
+"MoE Expert IDs",❌ Failing,❓ Untested
 "processed_logprobs",❌ Failing,❓ Untested
 "rl_integration",❌ Failing,❓ Untested

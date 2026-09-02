@@ -844,6 +844,10 @@ class TPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    def synchronize_device(self) -> None:
+        """Block until in-flight device work completes."""
+        jax.effects_barrier()
+
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError(
             "Sleep mode is not supported on TPU: there is no analogue of "

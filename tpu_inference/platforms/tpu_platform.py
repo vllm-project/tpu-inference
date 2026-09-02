@@ -57,6 +57,23 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
             return _jax_device_memory_info()
 
     torch.accelerator.get_memory_info = _patched_get_memory_info
+
+# Monkeypatch torch.accelerator.synchronize to wait for JAX work to complete.
+# Similar to get_memory_info, torch.accelerator.synchronize() calls
+# torch._C._accelerator_getDeviceIndex() which raises "PyTorch is not linked with
+# support for jax devices".
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
+    _orig_synchronize = torch.accelerator.synchronize
+
+    def _patched_synchronize(*args, **kwargs):
+        try:
+            _orig_synchronize(*args, **kwargs)
+        except RuntimeError as e:
+            if "jax" not in str(e):
+                raise
+            jax.effects_barrier()
+
+    torch.accelerator.synchronize = _patched_synchronize
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
