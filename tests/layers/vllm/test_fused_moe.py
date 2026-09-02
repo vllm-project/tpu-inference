@@ -119,7 +119,7 @@ class TestMaybeReduceSharedExpertOutput:
 
     def test_passthrough_when_shared_output_none(self):
         runner = _make_runner()
-        with patch.object(fm, "_all_reduce_over_tp") as reduce:
+        with patch.object(fm, "_sum_partials") as reduce:
             assert runner._maybe_reduce_shared_expert_output(None) is None
         reduce.assert_not_called()
 
@@ -129,7 +129,7 @@ class TestMaybeReduceSharedExpertOutput:
         shared = torch.ones(2, 3)
         with patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=True), \
-             patch.object(fm, "_all_reduce_over_tp") as reduce:
+             patch.object(fm, "_sum_partials") as reduce:
             out = runner._maybe_reduce_shared_expert_output(shared)
         reduce.assert_not_called()
         assert out is shared
@@ -141,7 +141,7 @@ class TestMaybeReduceSharedExpertOutput:
         shared = torch.ones(2, 3)
         with patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=False), \
-             patch.object(fm, "_all_reduce_over_tp") as reduce:
+             patch.object(fm, "_sum_partials") as reduce:
             out = runner._maybe_reduce_shared_expert_output(shared)
         reduce.assert_not_called()
         assert out is shared
@@ -155,26 +155,47 @@ class TestMaybeReduceSharedExpertOutput:
                           new_callable=PropertyMock, return_value=True), \
              patch.object(fm, "_get_mesh", return_value=mesh), \
              patch.object(fm, "is_attn_dp", return_value=False), \
-             patch.object(fm, "_all_reduce_over_tp",
+             patch.object(fm, "_sum_partials",
                           return_value=reduced) as reduce:
             out = runner._maybe_reduce_shared_expert_output(shared)
-        reduce.assert_called_once_with(shared, mesh,
-                                       fm.ShardingAxisName.MLP_TENSOR)
+        reduce.assert_called_once_with(shared)
         assert out is reduced
 
     def test_reduces_shared_output_under_attention_dp(self):
+        # Under attention DP the fused kernel reduces its own output, so the
+        # shared-expert partial stack is summed on the early path (its
+        # leading axis is sharded over the in-group TP axis). Drives the real
+        # ``_fused_output_is_reduced`` property via ``is_attn_dp``.
         runner = _make_runner(shared_experts=object())
         shared = torch.ones(2, 3)
         reduced = torch.full((2, 3), 7.0)
         mesh = object()
         with patch.object(fm, "_get_mesh", return_value=mesh), \
              patch.object(fm, "is_attn_dp", return_value=True), \
-             patch.object(fm, "_all_reduce_over_tp",
+             patch.object(fm, "_sum_partials",
                           return_value=reduced) as reduce:
             out = runner._maybe_reduce_shared_expert_output(shared)
-        reduce.assert_called_once_with(shared, mesh,
-                                       fm.ShardingAxisName.ATTN_HEAD)
+        reduce.assert_called_once_with(shared)
         assert out is reduced
+
+    def test_pcp_is_plain_tp(self):
+        # PCP is not attention DP (tokens are replicated over pcp outside
+        # attention, weights shard over pcp as extra TP), so a GMM backend
+        # whose reduction matches the shared expert's takes the deferred path:
+        # nothing is reduced early, shared + fused are reduced together late.
+        runner = _make_runner(shared_experts=object())
+        shared = torch.ones(2, 3)
+        with patch.object(fm, "_get_mesh", return_value=object()), \
+             patch.object(fm, "is_attn_dp", return_value=False), \
+             patch.object(fm, "select_moe_backend_from_fused_moe_config",
+                          return_value=MoEBackend.GMM_EP), \
+             patch.object(fm, "_gmm_and_shared_reduce_over_same_axes",
+                          return_value=True), \
+             patch.object(fm, "_sum_partials") as reduce:
+            assert runner._fused_output_is_reduced is False
+            out = runner._maybe_reduce_shared_expert_output(shared)
+        reduce.assert_not_called()
+        assert out is shared
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +210,7 @@ class TestMaybeReduceFinalOutput:
         states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
         with patch.object(fm, "_get_mesh", return_value=object()), \
              patch.object(fm, "is_attn_dp", return_value=True), \
-             patch.object(fm, "_all_reduce_over_tp") as reduce:
+             patch.object(fm, "_sum_partials") as reduce:
             out = runner._maybe_reduce_final_output(states, trunc_size=3)
         reduce.assert_not_called()
         torch.testing.assert_close(out, states[..., :3])
@@ -201,7 +222,7 @@ class TestMaybeReduceFinalOutput:
              patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=False), \
-             patch.object(fm, "_all_reduce_over_tp") as reduce:
+             patch.object(fm, "_sum_partials") as reduce:
             out = runner._maybe_reduce_final_output(states, trunc_size=2)
         reduce.assert_not_called()
         torch.testing.assert_close(out, states[..., :2])
@@ -215,7 +236,7 @@ class TestMaybeReduceFinalOutput:
              patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=True), \
-             patch.object(fm, "_all_reduce_over_tp") as reduce:
+             patch.object(fm, "_sum_partials") as reduce:
             out = runner._maybe_reduce_final_output(states, trunc_size=2)
         reduce.assert_not_called()
         torch.testing.assert_close(out, states[..., :2])
@@ -229,9 +250,9 @@ class TestMaybeReduceFinalOutput:
              patch.object(fm, "is_attn_dp", return_value=False), \
              patch.object(fm.VllmMoERunner, "_fused_output_is_reduced",
                           new_callable=PropertyMock, return_value=False), \
-             patch.object(fm, "_all_reduce_over_tp",
+             patch.object(fm, "_sum_partials",
                           return_value=reduced) as reduce:
             out = runner._maybe_reduce_final_output(states, trunc_size=3)
-        reduce.assert_called_once_with(states, mesh)
+        reduce.assert_called_once_with(states)
         # Reduction happens first, then the padding is stripped.
         torch.testing.assert_close(out, reduced[..., :3])

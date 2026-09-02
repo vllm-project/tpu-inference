@@ -36,7 +36,7 @@ MESH_AXIS_NAMES_2D = ('data', 'model')
 
 class ShardingAxisNameBase:
     """Base class for sharding axis names."""
-    SEQUENCE = (
+    DENSE_DATA = (
         'data',
         'attn_dp',
         'attn_dp_expert',
@@ -45,6 +45,11 @@ class ShardingAxisNameBase:
     ATTN_DATA_EXPERT = ('attn_dp_expert', 'expert')
     MLP_DATA = 'data'
     ATTN_HEAD = ('model', 'expert', 'dcp')  # Q heads
+    # Tensor axis for layers whose tokens are replicated across pcp (their
+    # token axis is DENSE_DATA): GDN, MLPs, shared experts, routers, norms.
+    # Only softmax attention keeps tokens split over pcp (ATTN_DATA /
+    # ATTN_HEAD); everything else treats pcp as extra tensor parallelism.
+    DENSE_TENSOR = ('model', 'expert', 'dcp', 'pcp')
     KV_HEAD = ('model', 'expert')
     ATTN_TENSOR = None
     MLP_TENSOR = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
@@ -64,7 +69,7 @@ class ShardingAxisNameBase:
     KV_CONTEXT = ('pcp', 'dcp')
 
     # PCP input sharding
-    PREFILL_CONTEXT = 'pcp'
+    PCP = 'pcp'
 
     # Vision encoder sharding axes
     VIT_BATCH = ('data', 'attn_dp', 'attn_dp_expert')
@@ -77,8 +82,9 @@ class ShardingAxisName2D:
     We should use ShardingAxisNameBase once the new MoE kernel supports
     more general mesh shapes. For now, this is the default sharding axes.
     """
-    SEQUENCE = 'data'
+    DENSE_DATA = 'data'
     ATTN_DATA = 'data'
+    DENSE_TENSOR = 'model'
     MLP_DATA = 'data'
     ATTN_HEAD = 'model'
     KV_HEAD = 'model'
@@ -90,7 +96,7 @@ class ShardingAxisName2D:
     VOCAB = ('data', 'model')
     BATCH = 'data'
     KV_CONTEXT = None
-    PREFILL_CONTEXT = None
+    PCP = None
 
     MODEL = 'model'
 
@@ -139,16 +145,12 @@ ShardingAxisName = LazyShardingAxisName()
 
 
 def is_attn_dp(mesh: Mesh) -> bool:
-    """Whether attention data-parallelism is active on ``mesh``.
-
-    True when the attention-data axes carry a factor beyond plain data
-    parallelism (i.e. ``attn_dp`` * ``attn_dp_expert`` > 1), meaning attention
-    is replicated over more data-parallel shards than the MLP/data axis alone.
-    """
-    attn_dp_size = utils.get_mesh_shape_product(mesh,
-                                                ShardingAxisName.ATTN_DATA)
-    dp_size = utils.get_mesh_shape_product(mesh, ShardingAxisName.MLP_DATA)
-    return (attn_dp_size // dp_size) > 1
+    """Whether attention data parallelism is active on ``mesh``: the attn_dp
+    axes split the token stream into independent request groups. 'pcp' does
+    not count — it splits within a request, and outside attention tokens
+    are replicated over it (plain TP)."""
+    return utils.get_mesh_shape_product(mesh,
+                                        ['attn_dp', 'attn_dp_expert']) > 1
 
 
 @dataclass

@@ -329,14 +329,14 @@ class TestLazyShardingAxisName(unittest.TestCase):
     @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
     def test_use_2d_tp_selects_base(self):
         lazy = LazyShardingAxisName()
-        _ = lazy.SEQUENCE
+        _ = lazy.DENSE_DATA
         self.assertIs(lazy._cls, ShardingAxisNameBase)
 
     @patch("tpu_inference.layers.common.sharding.envs.USE_2D_TP", False)
     @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", False)
     def test_both_false_selects_2d(self):
         lazy = LazyShardingAxisName()
-        _ = lazy.SEQUENCE
+        _ = lazy.DENSE_DATA
         self.assertIs(lazy._cls, ShardingAxisName2D)
 
     def test_cls_cached_after_first_access(self):
@@ -345,7 +345,7 @@ class TestLazyShardingAxisName(unittest.TestCase):
                    False), \
              patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN",
                    False):
-            _ = lazy.SEQUENCE
+            _ = lazy.DENSE_DATA
             first_cls = lazy._cls
 
         # Even with different env vars, _cls should not change
@@ -353,7 +353,7 @@ class TestLazyShardingAxisName(unittest.TestCase):
                    True), \
              patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN",
                    True):
-            _ = lazy.SEQUENCE
+            _ = lazy.DENSE_DATA
             self.assertIs(lazy._cls, first_cls)
 
     def test_initialized_after_env_change_uses_new_value(self):
@@ -372,7 +372,7 @@ class TestLazyShardingAxisName(unittest.TestCase):
                    True), \
              patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN",
                    False):
-            _ = lazy.SEQUENCE  # initialized here, after env changed
+            _ = lazy.DENSE_DATA  # initialized here, after env changed
             self.assertIs(lazy._cls, ShardingAxisNameBase)
 
 
