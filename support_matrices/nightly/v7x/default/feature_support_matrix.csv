@@ -1,19 +1,22 @@
 Feature,CorrectnessTest,PerformanceTest
 "Chunked Prefill",✅ Passing,✅ Passing
-"DCN-based P/D disaggregation",✅ Passing,✅ Passing
+"Collective Communication Matmul",❓ Untested,❓ Untested
+"DCN-based P/D disaggregation",❌ Failing,❓ Untested
+"Group sampling prefix cache",❓ Untested,❓ Untested
 "KV Cache Offload",✅ Passing,✅ Passing
-"LoRA_Torch",✅ Passing,✅ Passing
-"Multimodal Inputs",✅ Passing,✅ Passing
-"Out-of-tree model support",✅ Passing,✅ Passing
+"LoRA_Torch",❓ Untested,❓ Untested
+"Multimodal Inputs",❓ Untested,❓ Untested
+"Out-of-tree model support",❌ Failing,❓ Untested
 "Prefix Caching",✅ Passing,✅ Passing
 "Single Program Multi Data",✅ Passing,✅ Passing
-"Speculative Decoding: DFlash",✅ Passing,✅ Passing
-"Speculative Decoding: Eagle3",✅ Passing,✅ Passing
-"Speculative Decoding: Ngram",✅ Passing,✅ Passing
-"Step Pooling (Embedding)",✅ Passing,❓ Untested
-"async scheduler",✅ Passing,✅ Passing
-"hybrid kv cache",✅ Passing,❓ Untested
-"multi-host",✅ Passing,❓ Untested
-"runai_model_streamer_loader",✅ Passing,❓ Untested
-"sampling_params",✅ Passing,❓ Untested
-"structured_decoding",✅ Passing,❓ Untested
+"Speculative Decoding: DFlash",❓ Untested,❓ Untested
+"Speculative Decoding: Eagle3",❓ Untested,❓ Untested
+"Speculative Decoding: Ngram",❓ Untested,❓ Untested
+"Step Pooling (Embedding)",❌ Failing,❓ Untested
+"async scheduler",❓ Untested,❓ Untested
+"async_logprobs",❓ Untested,❓ Untested
+"hybrid kv cache",❌ Failing,❓ Untested
+"multi-host",❓ Untested,❓ Untested
+"runai_model_streamer_loader",❌ Failing,❓ Untested
+"sampling_params",❓ Untested,❓ Untested
+"structured_decoding",❌ Failing,❓ Untested
