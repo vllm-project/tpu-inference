@@ -38,8 +38,6 @@ from tpu_inference import envs
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
                                                             ring, schedule,
                                                             schedule_cp, utils)
-from tpu_inference.kernels.experimental.batched_rpa.tuned_params import \
-    get_tuned_params
 
 
 def default_kv_layout() -> configs.KVLayout:
@@ -644,7 +642,6 @@ def ragged_paged_attention(
         vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
 
     max_num_seqs = kv_lens.shape[0]
-    kv_packing = utils.get_dtype_packing(kv_cache.dtype)
     if kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
         page_size = kv_cache.shape[4]
     else:
