@@ -346,21 +346,9 @@ class KVCacheManager:
             both unset.
         """
         cache_config = self.runner.cache_config
-        if cache_config.num_gpu_blocks_override is not None:
-            return
-
-        if getattr(cache_config, "mamba_cache_mode", "none") == "align":
-            # Mamba prefix caching addresses recurrent state by block id from
-            # the mamba block table, so every layer's mamba array must span
-            # the whole block pool. The compact layout deliberately makes it
-            # smaller than the pool, which would put valid block ids out of
-            # range. Fall back to the uniform sizing, which already charges
-            # each block for its mamba pages.
-            logger.info(
-                "Compact-mamba sizing skipped: mamba_cache_mode='align' "
-                "needs one mamba slot per block id. Attention capacity is "
-                "lower than with prefix caching off; raise --block-size to "
-                "trade prefix-cache granularity for capacity.")
+        is_align_mode = (getattr(cache_config, "mamba_cache_mode",
+                                 "none") == "align")
+        if cache_config.num_gpu_blocks_override is not None and not is_align_mode:
             return
 
         devices = self.runner.mesh.devices.flatten()
@@ -410,9 +398,33 @@ class KVCacheManager:
             num_spec = (self.runner.vllm_config.speculative_config.
                         num_speculative_tokens)
         mamba_slot_stride = num_spec + 1
-        mamba_num_blocks = self.runner.max_num_reqs * mamba_slot_stride + 1
+        active_mamba_blocks = self.runner.max_num_reqs * mamba_slot_stride + 1
+        if is_align_mode:
+            # Under align mode, Mamba prefix caching uses a decoupled block pool.
+            # We allocate slots for active requests plus a checkpoint budget
+            # for cached prefix states.
+            checkpoint_budget = (self.runner.vllm_config.additional_config.get(
+                "mamba_cache_checkpoint_budget", None))
+            if checkpoint_budget is None:
+                # Default checkpoint budget scales with concurrency (8x max_num_reqs)
+                checkpoint_budget = self.runner.max_num_reqs * 8
+            else:
+                checkpoint_budget = int(checkpoint_budget)
+            mamba_num_blocks = active_mamba_blocks + checkpoint_budget
+        else:
+            mamba_num_blocks = active_mamba_blocks
+
         mamba_num_blocks = (
             (mamba_num_blocks + divisor - 1) // divisor) * divisor
+
+        if cache_config.num_gpu_blocks_override is not None:
+            # Respect user-pinned attention override, but still register decoupled mamba pool
+            self._mamba_num_blocks = int(mamba_num_blocks)
+            cache_config.mamba_num_blocks = int(mamba_num_blocks)
+            from tpu_inference.core.hybrid_coordinator import \
+                set_mamba_num_blocks
+            set_mamba_num_blocks(int(mamba_num_blocks))
+            return
 
         # Attention block count: fits into HBM left after mamba.
         # `attn_page_size_bytes` is per-block per-attention-layer; the
@@ -422,6 +434,16 @@ class KVCacheManager:
         mamba_per_tensor = (num_mamba_groups * mamba_num_blocks *
                             unpadded_mamba_page_size_bytes)
         attn_per_tensor_avail = avail_per_tensor - mamba_per_tensor
+        if attn_per_tensor_avail <= 0 and is_align_mode:
+            # If checkpoint budget is too large for this hardware's HBM,
+            # scale it down so at least 50% of the budget is reserved for Attention
+            mamba_slot_cost = num_mamba_groups * unpadded_mamba_page_size_bytes
+            max_mamba_blocks = (avail_per_tensor // 2) // mamba_slot_cost
+            if max_mamba_blocks > active_mamba_blocks:
+                mamba_num_blocks = ((max_mamba_blocks // divisor) * divisor)
+                mamba_per_tensor = mamba_num_blocks * mamba_slot_cost
+                attn_per_tensor_avail = avail_per_tensor - mamba_per_tensor
+
         if attn_per_tensor_avail <= 0:
             # Mamba already saturates the budget — pathological
             # configuration (e.g., mamba_unpadded × max_num_reqs alone
@@ -450,18 +472,22 @@ class KVCacheManager:
 
         cache_config.num_gpu_blocks_override = int(attn_num_blocks)
         self._mamba_num_blocks = int(mamba_num_blocks)
+        cache_config.mamba_num_blocks = int(mamba_num_blocks)
+        from tpu_inference.core.hybrid_coordinator import set_mamba_num_blocks
+        set_mamba_num_blocks(int(mamba_num_blocks))
 
         attn_bytes = num_attn_layers * attn_num_blocks * attn_page_size_bytes
         mamba_bytes = (num_mamba_layers * mamba_num_blocks *
                        unpadded_mamba_page_size_bytes)
+        mode_str = " (align mode)" if is_align_mode else ""
         logger.info(
-            "Compact-mamba KV cache: num_gpu_blocks_override=%d (attn), "
+            "Compact-mamba KV cache%s: num_gpu_blocks_override=%d (attn), "
             "_mamba_num_blocks=%d. HBM split: attn=%d layers × %d blocks "
             "× %d B = %.2f GiB; mamba=%d layers × %d slots × %d B = "
-            "%.2f GiB; total=%.2f GiB / avail=%.2f GiB.", attn_num_blocks,
-            mamba_num_blocks, num_attn_layers, attn_num_blocks,
-            attn_page_size_bytes, attn_bytes / (2**30), num_mamba_layers,
-            mamba_num_blocks, unpadded_mamba_page_size_bytes,
+            "%.2f GiB; total=%.2f GiB / avail=%.2f GiB.", mode_str,
+            attn_num_blocks, mamba_num_blocks, num_attn_layers,
+            attn_num_blocks, attn_page_size_bytes, attn_bytes / (2**30),
+            num_mamba_layers, mamba_num_blocks, unpadded_mamba_page_size_bytes,
             mamba_bytes / (2**30), (attn_bytes + mamba_bytes) / (2**30),
             avail / (2**30))
 

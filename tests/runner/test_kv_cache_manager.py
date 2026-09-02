@@ -1285,6 +1285,81 @@ class TestKVCacheManager:
         assert manager._mamba_num_blocks is None
         assert self.runner.cache_config.num_gpu_blocks_override == 999
 
+    def test_compact_mamba_override_in_align_mode_allocates_checkpoint_budget(
+            self):
+        """In align mode (prefix caching enabled), compact-mamba allocates
+        active slots (max_num_reqs + 1) plus a checkpoint budget (default
+        max(max_num_reqs * 3, 1536)) for Mamba, and sizes the Attention pool
+        from the remaining HBM."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        max_num_reqs = 256
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        expected_mamba = 257 + 256 * 8
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_mamba
+
+        avail_per_tensor = (304 * 2**30) // 15
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+
+    def test_compact_mamba_override_in_align_mode_custom_checkpoint_budget(
+            self):
+        """Custom mamba_cache_checkpoint_budget in additional_config is honored."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        max_num_reqs = 256
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.vllm_config.additional_config[
+            "mamba_cache_checkpoint_budget"] = 2000
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        expected_mamba = 257 + 2000
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_mamba
+
+        avail_per_tensor = (304 * 2**30) // 15
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)
         layers = {'layer.0': mock_attn}
