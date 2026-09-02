@@ -94,7 +94,11 @@ _MMLU_CHOICES = ["A", "B", "C", "D", None]
 
 # Everything up to and including the last reasoning close tag. Greedy on
 # purpose: a trace that quotes a close tag should not end the block early.
-_REASONING_BLOCK_RE = re.compile(r"(?is).*</(?:think|thinking|reasoning)>")
+# Anchored on purpose too: the block can only start at the beginning of the
+# text, and saying so keeps the engine from retrying the greedy `.*` from every
+# offset when there is no close tag at all -- the common case for a
+# non-reasoning model, and quadratic in the length of the completion.
+_REASONING_BLOCK_RE = re.compile(r"(?is)^.*</(?:think|thinking|reasoning)>")
 _REASONING_OPEN_RE = re.compile(r"(?i)<(?:think|thinking|reasoning)>")
 
 
@@ -309,10 +313,16 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
         # Markdown wrapped: *A*, **B**, _C_, __D__
         re.compile(r'(?x)(?<![A-Za-z0-9])(?:\*{1,2}|_{1,2})([' +
                    possible_choices + r'])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])'),
-        # Final fallback: line that's exactly "A", "B.", "C)", etc.
+        # Final fallback: line that's exactly "A", "B.", "C)", etc. The outer
+        # quotes are single on purpose -- as a triple-quoted string the
+        # `possible_choices` splice is literal text, which collapses the class
+        # to the letters of this source line and grades prose such as
+        # "however ..." as the answer H. The trailing `$` has no `.*` before
+        # it for the same reason: with one, every line *starting* with a
+        # choice letter matches, which is not "exactly".
         re.compile(
-            r'''(?x)^\s*(?:\*{1,2}|_{1,2})?([' + possible_choices + r'])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*.*$''',
-            re.MULTILINE),
+            r'(?x)^\s*(?:\*{1,2}|_{1,2})?([' + possible_choices +
+            r'])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*$', re.MULTILINE),
     ]
 
     # Also check for gpt-oss style "assistantfinal" block
@@ -365,10 +375,12 @@ def eval_accuracy_gpqa(request_outputs: List[RequestFuncOutput]) -> dict:
     total = 0
     unparsed = 0
 
+    # Failed requests are scored, not skipped, to match eval_accuracy_mmlu.
+    # Their generated_text is empty, so they land in `unparsed` -- which is
+    # where a request that produced no readable answer belongs, whatever the
+    # reason. Skipping them instead would hide a run that mostly errored out
+    # behind an accuracy computed over the handful that succeeded.
     for output in request_outputs:
-        if not output.success:
-            continue
-
         generated_text = output.generated_text
         target = output.input_request.completion  # This is 'A', 'B', 'C', or 'D'
 
@@ -384,10 +396,10 @@ def eval_accuracy_gpqa(request_outputs: List[RequestFuncOutput]) -> dict:
         "accuracy": round(accuracy, 4),
         "correct": correct,
         "total": total,
-        # No answer could be read out of the response -- truncated generation or
-        # an answer format the patterns miss. These count against accuracy, so a
-        # high rate here means the accuracy number is measuring the harness
-        # rather than the model.
+        # No answer could be read out of the response -- a failed request, a
+        # truncated generation, or an answer format the patterns miss. These
+        # count against accuracy, so a high rate here means the accuracy number
+        # is measuring the harness rather than the model.
         "unparsed": unparsed,
         "unparsed_rate": round(unparsed / total, 4) if total > 0 else 0.0,
         "gen_num": len(request_outputs),
