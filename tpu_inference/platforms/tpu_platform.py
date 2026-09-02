@@ -50,6 +50,13 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
             except AttributeError:
                 # Backend exposes no memory stats; callers that derive a budget
                 # from this take their minimum-work path instead of crashing.
+                # `logger` is resolved from module globals at call time, so it
+                # is defined by the time any caller reaches this branch.
+                logger.warning(
+                    "JAX backend exposes no memory stats; reporting 0 bytes "
+                    "free/total from torch.accelerator.get_memory_info(). "
+                    "Callers that size work by free HBM will fall back to "
+                    "their minimum-work path, which may hurt performance.")
                 return 0, 0
 
     torch.accelerator.get_memory_info = _patched_get_memory_info
