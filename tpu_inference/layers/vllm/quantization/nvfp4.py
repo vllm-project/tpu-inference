@@ -265,6 +265,8 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
             weight_jax,
             weight_scale_jax,
             self.linear_config.weight_sharding,
+            self.linear_config.input_sharding,
+            self.linear_config.output_sharding,
             mesh=self.linear_config.mesh,
             defer_all_reduce=self.linear_config.defer_all_reduce)
 
@@ -288,6 +290,8 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
                 weight,
                 weight_scale,
                 self.linear_config.weight_sharding,
+                self.linear_config.input_sharding,
+                self.linear_config.output_sharding,
                 mesh=mesh,
                 defer_all_reduce=self.linear_config.defer_all_reduce)
 

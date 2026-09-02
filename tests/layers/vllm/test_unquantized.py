@@ -39,7 +39,7 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
-from tpu_inference.layers.vllm.custom_ops.fused_moe import _all_reduce_over_tp
+from tpu_inference.layers.vllm.custom_ops.fused_moe import _sum_partials
 from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
@@ -212,9 +212,10 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
 @pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 def test_row_parallel_linear_defer_all_reduce(model, num_devices):
     """reduce_results=False routes through sharded_matmul: the layer returns
-    per-shard partial sums (the psum is actually skipped, which a plain einsum
+    the per-shard partial sums stacked under a leading axis sharded over the
+    contraction axis (the psum is actually skipped, which a plain einsum
     under GSPMD cannot do) and the caller's single deferred all-reduce
-    (VllmMoERunner._all_reduce_over_tp) reconstructs the full result.
+    (VllmMoERunner._sum_partials) reconstructs the full result.
 
     No bias: vLLM's RowParallelLinear rejects reduce_results=False with an
     in-layer bias."""
@@ -278,10 +279,10 @@ def test_row_parallel_linear_defer_all_reduce(model, num_devices):
         if num_devices > 1:
             # The psum was actually skipped: pre-reduction output is partial,
             # not the full matmul.
-            partial = j2t(deferred.to(torch.float32)).to(dtype)
+            partial = j2t(deferred[0].to(torch.float32)).to(dtype)
             assert not torch.allclose(partial, expected)
 
-        reduced = _all_reduce_over_tp(deferred, mesh)
+        reduced = _sum_partials(deferred)
         jax_output = j2t(reduced.to(torch.float32)).to(dtype)
 
     torch.testing.assert_close(expected, jax_output)

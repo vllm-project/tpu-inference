@@ -325,11 +325,15 @@ def moe_gmm_local(x: jax.Array,
                 out = jax.lax.psum(chunk_hidden,
                                    axis_name=reduction_axis).astype(x.dtype)
             else:
-                out = chunk_hidden.astype(x.dtype)
+                # Deferred: hand the partial out under a leading axis sharded
+                # over the reduction axis (an honest sharding, summed later by
+                # linear.sum_partials) rather than a replicated out_spec.
+                out = chunk_hidden.astype(x.dtype)[None]
         out_list.append(out)
 
-    return jnp.concatenate(out_list,
-                           axis=0) if len(out_list) > 1 else out_list[0]
+    if len(out_list) == 1:
+        return out_list[0]
+    return jnp.concatenate(out_list, axis=1 if defer_all_reduce else 0)
 
 
 def tensor_parallel_gmm(
@@ -372,6 +376,9 @@ def tensor_parallel_gmm(
 
     if scatter_results:
         final_out_specs = attn_data_p_spec
+    elif defer_all_reduce:
+        final_out_specs = P(ShardingAxisName.MLP_TENSOR,
+                            ShardingAxisName.MLP_DATA)
     else:
         final_out_specs = data_p_spec
 
@@ -457,6 +464,8 @@ def expert_parallel_gmm(
         final_out_specs = attn_data_p_spec
     elif enable_rs_kernel:
         final_out_specs = ep_data_p_spec
+    elif defer_all_reduce:
+        final_out_specs = P(ShardingAxisName.EXPERT, ShardingAxisName.MLP_DATA)
     else:
         final_out_specs = data_p_spec
 
@@ -785,4 +794,4 @@ def fused_moe_func(
             defer_all_reduce=defer_all_reduce,
         )
 
-    return x[:num_tokens, :hidden_size]
+    return x[..., :num_tokens, :hidden_size]

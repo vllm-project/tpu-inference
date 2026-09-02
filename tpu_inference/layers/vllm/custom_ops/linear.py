@@ -15,6 +15,7 @@
 import jax
 import jax.numpy as jnp
 import torch
+from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, shard_map, torch_view
@@ -39,13 +40,29 @@ class VllmRowParallelLinear(RowParallelLinear):
 
         linear_config = getattr(self.quant_method, "linear_config", None)
         if linear_config is not None:
-            linear_config.defer_all_reduce = not self.reduce_results
+            linear_config.set_defer_all_reduce(not self.reduce_results)
 
     def forward(
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         return super().forward(input_)
+
+
+def _pin_input_replicated(module, input_):
+    """An attention q/k/v layer takes the residual stream, which is
+    replicated over pcp; pin that layout so the matmul's slice to the
+    attention token layout does not propagate the split back into the
+    residual (re-gathered before every dense layer). No-op unless the
+    layer's config marks it (attention column projections) and a mesh is
+    present."""
+    lc = getattr(getattr(module, "quant_method", None), "linear_config", None)
+    if lc is None or not getattr(lc, "pin_input_replicated", False) \
+            or lc.mesh is None:
+        return input_
+    spec = P(ShardingAxisName.DENSE_DATA, None)
+    input_.shard_(NamedSharding(lc.mesh, spec))  # in-place, returns None
+    return input_
 
 
 @ColumnParallelLinear.register_oot
@@ -55,7 +72,7 @@ class VllmColumnParallelLinear(ColumnParallelLinear):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        return super().forward(input_)
+        return super().forward(_pin_input_replicated(self, input_))
 
 
 @ReplicatedLinear.register_oot
@@ -159,6 +176,7 @@ class VllmQKVParallelLinear(QKVParallelLinear):
         self,
         x: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        x = _pin_input_replicated(self, x)
         if self.num_kv_head_replicas == 1:
             return super().forward(x)
 

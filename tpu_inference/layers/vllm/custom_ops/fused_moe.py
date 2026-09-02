@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import jax
 import torch
 from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
-from torchax.interop import jax_view, shard_map, torch_view
+from torchax.interop import jax_view, torch_view
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
+from tpu_inference.layers.common.linear import sum_partials
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import ShardingAxisName, is_attn_dp
 from tpu_inference.layers.vllm.interface.moe import \
@@ -39,24 +38,17 @@ def _get_mesh() -> Mesh | None:
         return None
 
 
-def _all_reduce_over_tp(t: torch.Tensor,
-                        mesh: Mesh,
-                        axis_name=None) -> torch.Tensor:
-    """All-reduce an unreduced local sum over the TP axis."""
-    if axis_name is None:
-        axis_name = ShardingAxisName.MLP_TENSOR
-    spec = P(ShardingAxisName.ATTN_DATA, None)
-
-    @shard_map(mesh=mesh, in_specs=spec, out_specs=spec, check_vma=False)
-    def _reduce(x):
-        return jax.lax.psum(x, axis_name=axis_name)
-
-    return torch_view(_reduce(jax_view(t)))
+def _sum_partials(t: torch.Tensor) -> torch.Tensor:
+    """Reduce the leading partial axis of a deferred (unreduced) output — a
+    shared expert's down_proj and/or the fused experts — with one all-reduce
+    (see linear.sum_partials)."""
+    return torch_view(sum_partials(jax_view(t)))
 
 
 def _gmm_and_shared_reduce_over_same_axes(mesh: Mesh,
                                           moe_backend: MoEBackend) -> bool:
-    """Whether the GMM reduction collapses exactly the shared expert's TP axes.
+    """Whether the GMM reduction collapses exactly the shared expert's TP axes
+    (DENSE_TENSOR, the axis its linears shard over).
 
     Only axes that actually shard (size > 1) on ``mesh`` count, so axis-name
     tuples that differ only in size-1 axes still match.
@@ -69,7 +61,7 @@ def _gmm_and_shared_reduce_over_same_axes(mesh: Mesh,
         return frozenset(a for a in axes
                          if get_mesh_shape_product(mesh, a) > 1)
 
-    return effective(gmm_axis) == effective(ShardingAxisName.MLP_TENSOR)
+    return effective(gmm_axis) == effective(ShardingAxisName.DENSE_TENSOR)
 
 
 @MoERunner.register_oot
@@ -121,9 +113,10 @@ class VllmMoERunner(MoERunner):
         """Early all-reduce path: reduce the shared-expert output on its own.
 
         When the fused kernel already reduced its output, the shared-expert
-        output (produced unreduced by its RowParallelLinear, whose all-reduce
-        was skipped via ``reduce_results=False``) must be reduced separately so the
-        two match before being summed downstream. Under sequence parallelism a
+        output (a ``[n_shards, tokens, hidden]`` partial stack from its
+        RowParallelLinear, whose all-reduce was skipped via
+        ``reduce_results=False``) must be reduced separately so the two match
+        before being summed downstream. Under sequence parallelism a
         separate all-gather step in the model handles this instead.
         """
         mesh = _get_mesh()
@@ -134,11 +127,12 @@ class VllmMoERunner(MoERunner):
         if fused_output_is_reduced is None:
             fused_output_is_reduced = self._fused_output_is_reduced
 
+        # The partial stack is sharded over the shared expert's own TP axis
+        # (DENSE_TENSOR; ATTN_HEAD under attention DP), so summing it is the
+        # right reduction on every mesh — PCP is plain TP here.
         if (shared_output is not None and fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel):
-            axis_name = (ShardingAxisName.ATTN_HEAD
-                         if is_attn_dp(mesh) else ShardingAxisName.MLP_TENSOR)
-            shared_output = _all_reduce_over_tp(shared_output, mesh, axis_name)
+            shared_output = _sum_partials(shared_output)
         return shared_output
 
     def _maybe_reduce_final_output(
@@ -150,10 +144,10 @@ class VllmMoERunner(MoERunner):
         """Late all-reduce path: reduce the combined (shared + fused) output.
 
         When the fused kernel did not reduce its output, the shared and fused
-        outputs were summed while still unreduced and the combined result is
-        all-reduced here in a single collective instead of two. Under attention-DP the
-        reduction is handled by a separate reduce-scatter pass in the model, so
-        only the padding is stripped here.
+        partial stacks were summed while still unreduced and the combined
+        result is all-reduced here in a single collective instead of two.
+        Under attention-DP the reduction is handled by a separate
+        reduce-scatter pass in the model, so only the padding is stripped here.
         """
         mesh = _get_mesh()
         if mesh is None:
@@ -166,5 +160,5 @@ class VllmMoERunner(MoERunner):
         is_sequence_parallel = self.moe_config.is_sequence_parallel
 
         if not is_dp and not is_sequence_parallel and not output_is_reduced:
-            states = _all_reduce_over_tp(states, mesh)
+            states = _sum_partials(states)
         return states[..., :trunc_size]

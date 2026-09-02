@@ -100,37 +100,38 @@ def run_jax_gdn_attention(
         read_state_indices = state_indices
 
     in_specs = (
-        P(ShardingAxisName.ATTN_DATA,
-          ShardingAxisName.ATTN_HEAD),  # j_mixed_qkv
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_b
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # j_a
-        P(ShardingAxisName.ATTN_DATA, None,
-          ShardingAxisName.ATTN_HEAD),  # conv_state
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+        P(ShardingAxisName.DENSE_DATA,
+          ShardingAxisName.DENSE_TENSOR),  # j_mixed_qkv
+        P(ShardingAxisName.DENSE_DATA, ShardingAxisName.DENSE_TENSOR),  # j_b
+        P(ShardingAxisName.DENSE_DATA, ShardingAxisName.DENSE_TENSOR),  # j_a
+        P(ShardingAxisName.DENSE_DATA, None,
+          ShardingAxisName.DENSE_TENSOR),  # conv_state
+        P(ShardingAxisName.DENSE_DATA, ShardingAxisName.DENSE_TENSOR, None,
           None),  # recurrent_state
-        P(ShardingAxisName.ATTN_HEAD, None, None),  # j_conv_weight
-        P(ShardingAxisName.ATTN_HEAD)
+        P(ShardingAxisName.DENSE_TENSOR, None, None),  # j_conv_weight
+        P(ShardingAxisName.DENSE_TENSOR)
         if j_conv_bias is not None else None,  # j_conv_bias
-        P(ShardingAxisName.ATTN_HEAD),  # j_A_log
-        P(ShardingAxisName.ATTN_HEAD),  # j_dt_bias
-        P(ShardingAxisName.ATTN_DATA),  # query_start_loc
-        P(ShardingAxisName.ATTN_DATA),  # state_indices
-        P(ShardingAxisName.ATTN_DATA),  # distribution
-        P(ShardingAxisName.ATTN_DATA),  # seq_lens
-        P(ShardingAxisName.ATTN_DATA),  # read_state_indices
+        P(ShardingAxisName.DENSE_TENSOR),  # j_A_log
+        P(ShardingAxisName.DENSE_TENSOR),  # j_dt_bias
+        P(ShardingAxisName.DENSE_DATA),  # query_start_loc
+        P(ShardingAxisName.DENSE_DATA),  # state_indices
+        P(ShardingAxisName.DENSE_DATA),  # distribution
+        P(ShardingAxisName.DENSE_DATA),  # seq_lens
+        P(ShardingAxisName.DENSE_DATA),  # read_state_indices
     )
 
     out_specs = (
         (
-            P(ShardingAxisName.ATTN_DATA, None,
-              ShardingAxisName.ATTN_HEAD),  # new_conv_state
-            P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None,
+            P(ShardingAxisName.DENSE_DATA, None,
+              ShardingAxisName.DENSE_TENSOR),  # new_conv_state
+            P(ShardingAxisName.DENSE_DATA, ShardingAxisName.DENSE_TENSOR, None,
               None),  # new_recurrent_state
         ),
-        P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD),  # output
+        P(ShardingAxisName.DENSE_DATA,
+          ShardingAxisName.DENSE_TENSOR),  # output
     )
 
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.DENSE_TENSOR)
 
     p_run_jax_gdn_attention_local = functools.partial(
         wrapper.fused_conv1d_gdn,

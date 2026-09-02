@@ -480,7 +480,8 @@ class VllmModelWrapper:
             out_shardings=(
                 None,  # kv_caches - keep original sharding
                 NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                              PartitionSpec(ShardingAxisName.DENSE_DATA,
+                                            None)),
                 None,  # list of aux hidden states
                 None,  # expert ids
             ),
@@ -493,7 +494,8 @@ class VllmModelWrapper:
             out_shardings=(
                 None,  # kv_caches - keep original sharding
                 NamedSharding(self.mesh,
-                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+                              PartitionSpec(ShardingAxisName.DENSE_DATA,
+                                            None)),
                 None,  # empty list
                 None,  # expert ids
             ),

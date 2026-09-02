@@ -1712,14 +1712,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 full_hidden_states,
                 lora_metadata,
             )
-            logits = self._select_from_array_fn(
-                full_logits, logits_indices, self.mesh,
-                self.vllm_config.sharding_config.prefill_cp_size)
+            logits = self._select_from_array_fn(full_logits, logits_indices,
+                                                self.mesh)
         else:
             full_logits = None
-            hidden_states = self._select_from_array_fn(
-                hidden_states, logits_indices, self.mesh,
-                self.vllm_config.sharding_config.prefill_cp_size)
+            hidden_states = self._select_from_array_fn(hidden_states,
+                                                       logits_indices,
+                                                       self.mesh)
             logits = self.compute_logits_fn(
                 self.state_leaves,
                 hidden_states,
@@ -2025,8 +2024,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 bonus_rng = step_rng
                 rejection_rng = step_rng
             bonus_logits = self._select_from_array_fn(
-                logits, spec_decode_metadata.bonus_logits_indices, self.mesh,
-                self.vllm_config.sharding_config.prefill_cp_size)
+                logits, spec_decode_metadata.bonus_logits_indices, self.mesh)
             bonus_token_ids, processed_bonus_logits = sample(
                 bonus_rng,
                 self.mesh,
@@ -2034,8 +2032,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 tpu_sampling_metadata,
             )
             target_logits = self._select_from_array_fn(
-                logits, spec_decode_metadata.target_logits_indices, self.mesh,
-                self.vllm_config.sharding_config.prefill_cp_size)
+                logits, spec_decode_metadata.target_logits_indices, self.mesh)
             assert input_ids is not None
             draft_token_ids = self._extract_draft_token_ids(
                 input_ids, spec_decode_metadata.final_logits_indices,
@@ -2282,19 +2279,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         return model_runner_output
 
     @staticmethod
-    @functools.partial(jax.jit, static_argnums=(2, 3))
-    def _select_from_array_fn(array, indices_to_select, mesh, pcp_size=1):
+    @functools.partial(jax.jit, static_argnums=(2, ))
+    def _select_from_array_fn(array, indices_to_select, mesh):
 
         def select_local_fn(local_array, local_indices):
-            if pcp_size > 1:
-                # Under PCP each shard holds a slice of the sequence, so the
-                # rows named by `local_indices` may live on another shard.
-                # TODO(wenxindong): Remove the all-gather.
-                local_array = jax.lax.all_gather(
-                    local_array,
-                    ShardingAxisName.PREFILL_CONTEXT,
-                    axis=0,
-                    tiled=True)
             # XLA keeps the whole row-gather output in scoped VMEM, so one
             # gather of [n, vocab_shard] logits rows exceeds the 32M scoped
             # limit once n grows (e.g. spec decode with max_num_seqs=16:
@@ -2309,10 +2297,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             out = jax.lax.map(lambda ix: local_array[ix], idx)
             return out.reshape(-1, *local_array.shape[1:])[:n]
 
+        # The rows named by `local_indices` may live anywhere in the
+        # sequence under PCP, so the array is taken replicated over pcp
+        # (DENSE_DATA; the model returns hidden states that way).
         ret = jax.shard_map(
             select_local_fn,
             mesh=mesh,
-            in_specs=(PartitionSpec(ShardingAxisName.ATTN_DATA),
+            in_specs=(PartitionSpec(ShardingAxisName.DENSE_DATA),
                       PartitionSpec(ShardingAxisName.ATTN_DATA)),
             out_specs=PartitionSpec(ShardingAxisName.ATTN_DATA))(
                 array, indices_to_select)
@@ -2917,9 +2908,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 last % pcp_chunk_size)
             logits_indices_view[1:] = -1
 
-            pcp_spec = NamedSharding(
-                self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
-                                         None))
+            pcp_spec = NamedSharding(self.mesh,
+                                     PartitionSpec(ShardingAxisName.PCP, None))
             repl = NamedSharding(self.mesh, PartitionSpec())
             (pcp_query_start_loc,
              pcp_q_pos_offsets) = device_array(self.mesh,
