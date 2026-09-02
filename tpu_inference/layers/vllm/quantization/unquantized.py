@@ -123,7 +123,7 @@ def _load_weight_on_host(tensor: torch.Tensor,
         if np_view is None:
             return None
         array = general_device_put(np_view, sharding)
-    except Exception as e:
+    except (ValueError, IndexError) as e:
         logger.warning_once(
             f"Host staging unavailable for {tuple(tensor.shape)}"
             f" {tensor.dtype} at {sharding}: {e}")
