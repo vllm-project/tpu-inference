@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    USE_VOCAB_SHARDED_SAMPLING: bool = False
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
     # Empty (default) = use the built-in tuned/heuristic sizes.
@@ -357,6 +358,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Sample from vocab-sharded logits instead of all-gathering the full
+    # [batch, vocab] logits on every decode step: each tensor-parallel shard
+    # keeps its top candidates and only those are exchanged. Exact for rows
+    # with 0 < top_k <= 64 and top_p > 0 (greedy rows are always exact); a
+    # batch with any other sampling row falls back to the replicated path.
+    # The sampled tokens follow the same distribution as the replicated path
+    # but are not bitwise identical (the random draw is over the candidates).
+    # Not compatible with logprobs_mode="processed_*".
+    "USE_VOCAB_SHARDED_SAMPLING":
+    env_bool("USE_VOCAB_SHARDED_SAMPLING"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
     # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
     # built-in tuned/heuristic sizes. Lets operators retune the decode

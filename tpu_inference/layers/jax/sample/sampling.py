@@ -21,6 +21,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
+from tpu_inference import envs
 from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
@@ -32,6 +33,12 @@ if TYPE_CHECKING:
     from tpu_inference.runner.input_batch import CachedRequestState
 
 _SAMPLING_EPS = 1e-5
+
+# Candidates each vocab shard contributes to vocab-sharded sampling. Rows with
+# 0 < top_k <= this many candidates are sampled exactly (see
+# _can_sample_vocab_sharded).
+VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES = 64
+_MASKED_LOGIT = -1e12
 
 
 @dataclass
@@ -102,6 +109,158 @@ def _apply_sampling_transforms(
     return logits
 
 
+def _mesh_axes(mesh: Mesh, axis_name) -> tuple[str, ...]:
+    """The names in `axis_name` (a name or a tuple of names) present in mesh."""
+    names = axis_name if isinstance(axis_name,
+                                    (tuple, list)) else (axis_name, )
+    return tuple(name for name in names if name in mesh.axis_names)
+
+
+def _vocab_sharded_specs(mesh: Mesh):
+    """(batch_axes, vocab_axis) for vocab-sharded sampling, or None.
+
+    Returns None when the mesh has no model axis to shard the vocab over, in
+    which case there is nothing to gain from the sharded path.
+    """
+    vocab_axes = _mesh_axes(mesh, ShardingAxisName.MODEL)
+    if not vocab_axes:
+        return None
+    batch_axes = _mesh_axes(mesh, ShardingAxisName.ATTN_DATA)
+    return (batch_axes or None), vocab_axes[0]
+
+
+def _can_sample_vocab_sharded(
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata) -> jax.Array:
+    """Whether every row is sampled exactly by the vocab-sharded path.
+
+    A row is exact when it is greedy (the argmax is always among the
+    candidates) or when 0 < top_k <= VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES and
+    top_p > 0, since the union of the per-shard top candidates then contains
+    the whole top-k set and the top-p cutoff is computed over that set. Padded
+    request slots carry DEFAULT_SAMPLING_PARAMS (temperature -1, top_k 0), so
+    they count as greedy and never force the fallback.
+    """
+    is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+    top_k = tpu_sampling_metadata.top_k
+    exact = ((top_k > 0) & (top_k <= VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES) &
+             (tpu_sampling_metadata.top_p > 0.0))
+    return jnp.all(is_greedy | exact)
+
+
+def _merged_candidates(logits: jax.Array, vocab_axis: str,
+                       num_candidates: int) -> tuple[jax.Array, jax.Array]:
+    """Top candidates of every vocab shard, gathered along the vocab axis.
+
+    Args:
+        logits: this shard's slice, (batch_shard, vocab_shard).
+        vocab_axis: mesh axis the vocab is sharded over.
+        num_candidates: candidates taken from each shard.
+
+    Returns:
+        (values, token_ids), each (batch_shard, num_shards * num_candidates),
+        with token_ids in the global vocab.
+    """
+    vocab_shard = logits.shape[-1]
+    values, local_ids = jax.lax.top_k(logits, num_candidates)
+    token_ids = local_ids + jax.lax.axis_index(vocab_axis) * vocab_shard
+    values = jax.lax.all_gather(values, vocab_axis)
+    token_ids = jax.lax.all_gather(token_ids, vocab_axis)
+    num_shards = values.shape[0]
+    values = jnp.transpose(values,
+                           (1, 0, 2)).reshape(-1, num_shards * num_candidates)
+    token_ids = jnp.transpose(token_ids,
+                              (1, 0, 2)).reshape(-1,
+                                                 num_shards * num_candidates)
+    return values, token_ids
+
+
+def _sample_vocab_sharded_block(
+    rng: jax.Array,
+    logits: jax.Array,
+    temperature: jax.Array,
+    top_k: jax.Array,
+    top_p: jax.Array,
+    batch_axes: tuple[str, ...] | None,
+    vocab_axis: str,
+) -> jax.Array:
+    """Per-shard body of vocab-sharded sampling; returns (batch_shard,) tokens.
+
+    Mirrors sample()'s replicated path on the merged candidates: temperature,
+    top-k (ties at the k-th value kept, like topk_mask), top-p (smallest
+    prefix of the sorted probabilities with mass >= p, like topp_mask), then a
+    categorical draw; greedy rows take the argmax (lowest id among ties, like
+    jnp.argmax). Candidates that are not in a row's top-k set are masked, so
+    the softmax normalizes over exactly the same set as the replicated path.
+    """
+    num_candidates = VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES
+    values, token_ids = _merged_candidates(logits, vocab_axis, num_candidates)
+
+    row_max = jnp.max(values, axis=-1, keepdims=True)
+    greedy_tokens = jnp.min(jnp.where(values >= row_max, token_ids,
+                                      jnp.iinfo(jnp.int32).max),
+                            axis=-1)
+
+    scaled = values / temperature[:, None]
+    sorted_desc = -jnp.sort(-scaled, axis=-1)
+    kth = jnp.take_along_axis(sorted_desc,
+                              jnp.clip(top_k, 1, scaled.shape[-1])[:, None] -
+                              1,
+                              axis=-1)
+    masked = jnp.where((top_k > 0)[:, None] & (scaled < kth), _MASKED_LOGIT,
+                       scaled)
+
+    probs = jax.nn.softmax(masked, axis=-1)
+    sorted_probs = -jnp.sort(-probs, axis=-1)
+    cumulative = jnp.cumsum(sorted_probs, axis=-1)
+    cutoff_index = jnp.argmax(cumulative >= top_p[:, None], axis=-1)
+    cutoff = jnp.take_along_axis(sorted_probs, cutoff_index[:, None], axis=-1)
+    masked = jnp.where((top_p < 1.0)[:, None] & (probs < cutoff),
+                       _MASKED_LOGIT, masked)
+
+    # Every batch shard receives the same key; fold in the shard's index so
+    # rows on different shards draw independent noise.
+    shard_index = jnp.int32(0)
+    for axis in batch_axes or ():
+        shard_index = (shard_index * jax.lax.axis_size(axis) +
+                       jax.lax.axis_index(axis))
+    choice = jax.random.categorical(jax.random.fold_in(rng, shard_index),
+                                    masked)
+    sampled = jnp.take_along_axis(token_ids, choice[:, None], axis=-1)[:, 0]
+    tokens = jnp.where(temperature < _SAMPLING_EPS, greedy_tokens, sampled)
+    # The value is already identical on every vocab shard (it is built from
+    # the gathered candidates); the reduction makes that replication explicit
+    # for the shard_map output spec.
+    return jax.lax.pmax(tokens, vocab_axis)
+
+
+def _sample_vocab_sharded(
+    rng: jax.Array,
+    mesh: Mesh,
+    logits: jax.Array,
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+    batch_axes: tuple[str, ...] | None,
+    vocab_axis: str,
+) -> jax.Array:
+    """Samples from logits sharded over the vocab; returns replicated tokens."""
+    batch_spec = P(batch_axes)
+    logits_spec = P(batch_axes, vocab_axis)
+    logits = jax.lax.with_sharding_constraint(logits,
+                                              NamedSharding(mesh, logits_spec))
+
+    def block(rng, logits, temperature, top_k, top_p):
+        return _sample_vocab_sharded_block(rng, logits, temperature, top_k,
+                                           top_p, batch_axes, vocab_axis)
+
+    tokens = jax.shard_map(
+        block,
+        mesh=mesh,
+        in_specs=(P(), logits_spec, batch_spec, batch_spec, batch_spec),
+        out_specs=batch_spec,
+    )(rng, logits, tpu_sampling_metadata.temperature.astype(jnp.float32),
+      tpu_sampling_metadata.top_k, tpu_sampling_metadata.top_p)
+    return jax.lax.with_sharding_constraint(tokens, NamedSharding(mesh, P()))
+
+
 @jax.jit(static_argnames=["mesh"])
 def sample(
     rng: jax.Array,
@@ -109,12 +268,61 @@ def sample(
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
 ) -> jax.Array:
+    """Samples the next token of every row of (B, vocab_size) logits.
+
+    Returns (tokens, logits): the logits are the processed (temperature /
+    top-k / top-p) ones for sampled rows and the raw ones for greedy rows.
+
+    With USE_VOCAB_SHARDED_SAMPLING the logits are not all-gathered over the
+    vocab: each vocab shard contributes its top candidates and sampling runs on
+    those (see _sample_vocab_sharded_block). The returned logits are then the
+    raw, still vocab-sharded logits, which is why that mode rejects
+    logprobs_mode="processed_*" (see TpuPlatform.check_and_update_config).
+    """
     # (B, vocab_size)
     if tpu_sampling_metadata._cache_collision_dummy is not None:
         # Force a dependency on the dummy tensor's shape to ensure unique HLO.
         logits = logits + 0 * jnp.sum(
             tpu_sampling_metadata._cache_collision_dummy)
 
+    vocab_sharded_specs = (_vocab_sharded_specs(mesh)
+                           if tpu_sampling_metadata.do_sampling
+                           and envs.USE_VOCAB_SHARDED_SAMPLING else None)
+    if vocab_sharded_specs is not None:
+        # Both branches of the cond return the logits with the vocab still
+        # sharded, so choosing the fallback at runtime never adds the
+        # all-gather to the sharded path.
+        batch_axes, vocab_axis = vocab_sharded_specs
+        logits = logits.astype(jnp.float32)
+        logits_sharding = NamedSharding(mesh, P(batch_axes, vocab_axis))
+
+        def sharded(operands):
+            rng, logits = operands
+            tokens = _sample_vocab_sharded(rng, mesh, logits,
+                                           tpu_sampling_metadata, batch_axes,
+                                           vocab_axis)
+            return tokens, logits
+
+        def replicated(operands):
+            rng, logits = operands
+            tokens, ret_logits = _sample_replicated(rng, mesh, logits,
+                                                    tpu_sampling_metadata)
+            return tokens, jax.lax.with_sharding_constraint(
+                ret_logits, logits_sharding)
+
+        return jax.lax.cond(_can_sample_vocab_sharded(tpu_sampling_metadata),
+                            sharded, replicated, (rng, logits))
+
+    return _sample_replicated(rng, mesh, logits, tpu_sampling_metadata)
+
+
+def _sample_replicated(
+    rng: jax.Array,
+    mesh: Mesh,
+    logits: jax.Array,
+    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+) -> tuple[jax.Array, jax.Array]:
+    """sample() over logits replicated along the vocab."""
     if tpu_sampling_metadata.do_sampling:
         # Unshard the logits explicity to avoid latency increase.
         # TODO(gxd3): revisit if the 2nd dimension of the logits can be sharded

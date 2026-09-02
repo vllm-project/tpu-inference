@@ -336,6 +336,14 @@ class TpuPlatform(Platform):
                     "MLA models require both the NEW_MODEL_DESIGN=1 environment "
                     "variable to be set and DP attention set via: --additional_config \'{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true}}}\'"
                 )
+        if (envs.USE_VOCAB_SHARDED_SAMPLING and vllm_config.model_config
+                and str(vllm_config.model_config.logprobs_mode).startswith(
+                    "processed")):
+            raise ValueError(
+                "USE_VOCAB_SHARDED_SAMPLING samples from vocab-sharded logits "
+                "and does not produce processed logits; use logprobs_mode="
+                "'raw_logprobs' or 'raw_logits', or unset the env var.")
+
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
