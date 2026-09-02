@@ -38,7 +38,7 @@ from safetensors import safe_open
 from vllm.config import ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
 from tpu_inference import envs, utils
 from tpu_inference.layers.common.utils import (cpu_mesh_context,
@@ -874,6 +874,10 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
     def __init__(self,
                  model,
                  pytorch_pooler: Optional[torch.nn.Module] = None,
+                 skip_prefixes: Optional[list[str]] = None,
+                 skip_substrs: Optional[list[str]] = None,
+                 ignore_unexpected_prefixes: Optional[list[str]] = None,
+                 ignore_unexpected_suffixes: Optional[list[str]] = None,
                  **kwargs):
         assert isinstance(model, JaxModule)
         self.pytorch_pooler = pytorch_pooler
@@ -920,7 +924,26 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                                       permute_dims=permute_dims,
                                       param_name=name))
 
-        super().__init__(model, **kwargs)
+        loader_kwargs = {}
+        if ignore_unexpected_prefixes is not None:
+            loader_kwargs[
+                "ignore_unexpected_prefixes"] = ignore_unexpected_prefixes
+        if ignore_unexpected_suffixes is not None:
+            loader_kwargs[
+                "ignore_unexpected_suffixes"] = ignore_unexpected_suffixes
+        for k, v in kwargs.items():
+            if k not in ("skip_prefixes", "skip_substrs"):
+                loader_kwargs[k] = v
+
+        super().__init__(model, **loader_kwargs)
+        # Older vLLM AutoWeightsLoader versions still own skip_prefixes /
+        # skip_substrs and reset them in __init__ (newer versions removed the
+        # kwargs and never touch the attributes), so ours must be assigned
+        # after super().__init__ and merged with whatever it set.
+        self.skip_prefixes = getattr(self, "skip_prefixes", []) + (
+            list(skip_prefixes) if skip_prefixes else [])
+        self.skip_substrs = getattr(self, "skip_substrs", []) + (
+            list(skip_substrs) if skip_substrs else [])
         # Book mark those already done processing, skip if visited.
         self._process_weights_after_loading_per_module = defaultdict(
             lambda: False)
@@ -943,7 +966,10 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 remap.append((fused_name, shard_name, shard_id))
         return remap
 
-    def load_weights(self, weights: Iterable, **kwargs) -> set:
+    def load_weights(self,
+                     weights: Iterable,
+                     mapper: Optional[WeightsMapper] = None,
+                     **kwargs) -> set:
         """Route packed (e.g. fused gate_up_proj) checkpoint weights, then
         delegate the rest to the standard recursive auto-loader.
 
@@ -954,13 +980,23 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
         and fuses them. Weights whose fused param does not exist (e.g. the
         vision tower's unfused gate/up projections) fall through unchanged.
         """
+        if self.skip_prefixes or self.skip_substrs:
+            skip_prefix_dict = {p: None for p in self.skip_prefixes}
+            skip_substr_dict = {s: None for s in self.skip_substrs}
+            skip_mapper = WeightsMapper(
+                orig_to_new_prefix=skip_prefix_dict,
+                orig_to_new_substr=skip_substr_dict,
+            )
+            mapper = (mapper
+                      | skip_mapper) if mapper is not None else skip_mapper
+
         remap = self._packed_remap()
         if not remap:
             # No packed/fused params to route. Skip building the full param
             # dict: materializing the entire parameter tree up front
             # transiently doubles device HBM, so go straight to the streaming
             # recursive loader.
-            return super().load_weights(weights, **kwargs)
+            return super().load_weights(weights, mapper=mapper, **kwargs)
         params_dict = dict(self.module.named_parameters())
         routed_loaded: set = set()
 
@@ -981,7 +1017,9 @@ class JaxAutoWeightsLoader(AutoWeightsLoader):
                 else:
                     yield name, weight
 
-        autoloaded = super().load_weights(_route(weights), **kwargs)
+        autoloaded = super().load_weights(_route(weights),
+                                          mapper=mapper,
+                                          **kwargs)
 
         # Routed weights are written directly into their fused param via
         # `weight_loader` above and never re-enter the streaming weights

@@ -649,6 +649,8 @@ def get_model(
     is_draft_model: bool = False,
     shared_params: Optional[dict[str, jax.Array]] = None,
 ) -> ModelInterface:
+    # Warning: Please DO NOT remove the below logging line.
+    # If you are making changes, inform/reach out to https://github.com/sethiay.
     logger.info(
         "Loading model with MODEL_IMPL_TYPE=%s",
         envs.DRAFT_MODEL_IMPL_TYPE if is_draft_model else envs.MODEL_IMPL_TYPE)
@@ -656,28 +658,28 @@ def get_model(
 
     match impl:
         case "flax_nnx":
-            with jax.set_mesh(mesh):
-                arch = getattr(vllm_config.model_config.hf_config,
-                               "architectures", [None])[0]
-                if vllm_config.parallel_config.pipeline_parallel_size > 1 and arch in _PP_DISABLED_MODELS:
-                    logger.warning(
-                        "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
-                        arch)
-                    return get_vllm_model(vllm_config, rng, mesh,
-                                          is_draft_model, shared_params)
-                try:
-                    # Try to load the flax model first
+            arch = getattr(vllm_config.model_config.hf_config, "architectures",
+                           [None])[0]
+            if vllm_config.parallel_config.pipeline_parallel_size > 1 and arch in _PP_DISABLED_MODELS:
+                logger.warning(
+                    "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
+                    arch)
+                return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
+                                      shared_params)
+            try:
+                # Try to load the flax model first
+                with jax.set_mesh(mesh):
                     return get_flax_model(vllm_config, rng, mesh,
                                           is_draft_model)
-                except UnsupportedArchitectureError as e:
-                    # Convert the error message to a string to check its contents
-                    error_msg = str(e)
+            except UnsupportedArchitectureError as e:
+                # Convert the error message to a string to check its contents
+                error_msg = str(e)
 
-                    logger.warning(error_msg)
+                logger.warning(error_msg)
 
-                    # Fall back to the vLLM model and updating the dtype accordingly
-                    return get_vllm_model(vllm_config, rng, mesh,
-                                          is_draft_model, shared_params)
+                # Fall back to the vLLM model and updating the dtype accordingly
+                return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
+                                      shared_params)
         case "vllm":
             return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
                                   shared_params)

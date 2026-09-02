@@ -1,0 +1,343 @@
+{
+  "global_env": {
+    "GCP_PROJECT_ID": "cloud-tpu-inference-test",
+    "GCS_BUCKET": "vllm-cb-storage2",
+    "GCP_INSTANCE_ID": "vllm-bm-inst",
+    "GCP_DATABASE_ID": "vllm-bm-bk-runs"
+  },
+  "benchmark_cases": [
+    {
+      "case_name": "Qwen3-Coder-480B-A35B-FP8-tpu7x-8-dataset_random-inlen_1024-outlen_1024-torchax",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "SERVER_WAIT_MINS": 180,
+        "BENCHMARK_TIMEOUT": "4h",
+        "BK_TIMEOUT_IN_MINUTES": 360
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 9216,
+          "no-enable-prefix-caching": true,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "block-size": 256,
+          "enable-expert-parallel": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 1024,
+          "num-prompts": 320,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-Coder-480B-A35B-FP8-tpu7x-8-dataset_random-inlen_1024-outlen_8192-torchax",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "SERVER_WAIT_MINS": 180,
+        "BENCHMARK_TIMEOUT": "4h",
+        "BK_TIMEOUT_IN_MINUTES": 360
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 9216,
+          "no-enable-prefix-caching": true,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "block-size": 256,
+          "enable-expert-parallel": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 8192,
+          "num-prompts": 320,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-Coder-480B-A35B-FP8-tpu7x-8-dataset_random-inlen_8192-outlen_1024-torchax",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 8192,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "SERVER_WAIT_MINS": 180,
+        "BENCHMARK_TIMEOUT": "4h",
+        "BK_TIMEOUT_IN_MINUTES": 360
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 9216,
+          "no-enable-prefix-caching": true,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "block-size": 256,
+          "enable-expert-parallel": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "random-input-len": 8192,
+          "random-output-len": 1024,
+          "num-prompts": 320,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-Coder-480B-A35B-FP8-tpu7x-8-dataset_random-inlen_1024-outlen_1024-torchax-libtpuopt",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "SERVER_WAIT_MINS": 180,
+        "BENCHMARK_TIMEOUT": "4h",
+        "BK_TIMEOUT_IN_MINUTES": 360
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1",
+          "LIBTPU_INIT_ARGS": "--xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative --xla_jf_crs_combiner_threshold_in_bytes=0 --xla_tpu_scheduler_percent_shared_memory_limit=1000 --xla_jf_enable_producer_consumer_multi_output_fusion=false --xla_tpu_enable_domain_passes=true --xla_collective_optimize_constant_table=ENABLED --xla_jf_fusion_max_instruction_count_for_window_config=65536"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 9216,
+          "no-enable-prefix-caching": true,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "block-size": 256,
+          "enable-expert-parallel": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 1024,
+          "num-prompts": 320,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-Coder-480B-A35B-FP8-tpu7x-8-dataset_random-inlen_1024-outlen_8192-torchax-libtpuopt",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 1024,
+        "OUTPUT_LEN": 8192,
+        "PREFIX_LEN": 0,
+        "SERVER_WAIT_MINS": 180,
+        "BENCHMARK_TIMEOUT": "4h",
+        "BK_TIMEOUT_IN_MINUTES": 360
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1",
+          "LIBTPU_INIT_ARGS": "--xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative --xla_jf_crs_combiner_threshold_in_bytes=0 --xla_tpu_scheduler_percent_shared_memory_limit=1000 --xla_jf_enable_producer_consumer_multi_output_fusion=false --xla_tpu_enable_domain_passes=true --xla_collective_optimize_constant_table=ENABLED --xla_jf_fusion_max_instruction_count_for_window_config=65536"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 9216,
+          "no-enable-prefix-caching": true,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "block-size": 256,
+          "enable-expert-parallel": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "random-input-len": 1024,
+          "random-output-len": 8192,
+          "num-prompts": 320,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    },
+    {
+      "case_name": "Qwen3-Coder-480B-A35B-FP8-tpu7x-8-dataset_random-inlen_8192-outlen_1024-torchax-libtpuopt",
+      "ci_queue": [
+        "tpu_v7x_8_queue"
+      ],
+      "env": {
+        "RUN_TYPE": "DAILY_AX_JAX",
+        "EXPECTED_ETEL": 43200000,
+        "INPUT_LEN": 8192,
+        "OUTPUT_LEN": 1024,
+        "PREFIX_LEN": 0,
+        "SERVER_WAIT_MINS": 180,
+        "BENCHMARK_TIMEOUT": "4h",
+        "BK_TIMEOUT_IN_MINUTES": 360
+      },
+      "server_command_options": {
+        "command_type": "vllm_serve",
+        "env": {
+          "VLLM_USE_V1": "1",
+          "TPU_BACKEND_TYPE": "jax",
+          "MODEL_IMPL_TYPE": "vllm",
+          "USE_BATCHED_RPA_KERNEL": "1",
+          "LIBTPU_INIT_ARGS": "--xla_tpu_enable_sparse_core_collective_offload_all_reduce=false --xla_tpu_all_gather_collective_matmul_mode=post_spmd_conservative --xla_tpu_reduce_scatter_collective_matmul_mode=post_spmd_conservative --xla_jf_crs_combiner_threshold_in_bytes=0 --xla_tpu_scheduler_percent_shared_memory_limit=1000 --xla_jf_enable_producer_consumer_multi_output_fusion=false --xla_tpu_enable_domain_passes=true --xla_collective_optimize_constant_table=ENABLED --xla_jf_fusion_max_instruction_count_for_window_config=65536"
+        },
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "seed": 42,
+          "max-num-seqs": 512,
+          "max-num-batched-tokens": 8192,
+          "tensor-parallel-size": {
+            "v7x-8": 8
+          },
+          "max-model-len": 9216,
+          "no-enable-prefix-caching": true,
+          "kv-cache-dtype": "fp8",
+          "gpu-memory-utilization": 0.8,
+          "block-size": 256,
+          "enable-expert-parallel": true,
+          "async-scheduling": true
+        }
+      },
+      "client_command_options": {
+        "command_type": "vllm_bench_serve",
+        "args": {
+          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "backend": "vllm",
+          "request-rate": "inf",
+          "dataset-name": "random",
+          "random-input-len": 8192,
+          "random-output-len": 1024,
+          "num-prompts": 320,
+          "percentile-metrics": "ttft,tpot,itl,e2el",
+          "ignore-eos": true
+        }
+      }
+    }
+  ]
+}

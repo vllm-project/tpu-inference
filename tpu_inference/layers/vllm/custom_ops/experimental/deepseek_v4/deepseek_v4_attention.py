@@ -109,8 +109,16 @@ class VllmDeepseekV4SWACache(DeepseekV4SWACache):
         dtype: torch.dtype,
         prefix: str,
         cache_config,
+        backend_cls=None,
     ):
-        super().__init__(head_dim, window_size, dtype, prefix, cache_config)
+        # vLLM #47808 added ``backend_cls`` to DeepseekV4SWACache and the base
+        # attention ctor always passes it; None keeps the default SWA backend.
+        super().__init__(head_dim,
+                         window_size,
+                         dtype,
+                         prefix,
+                         cache_config,
+                         backend_cls=backend_cls)
         compressed_kv_cache_bz = cache_config.block_size
         # We would like to overlay the SWA cache with CSA's main NOPE cache
         # on the same KV-Tensor, whose shape is [num_pages, page_size, 4, 128]
@@ -187,6 +195,9 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
 
     # Abstract platform hooks required to instantiate the DeepseekV4Attention
     # ABC; unused on the TPU pass-through path.
+    from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+    backend_cls = DeepseekV4SparseMLABackend
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
@@ -210,7 +221,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 num_kv_heads=1,
                 head_size=align_to(448 + 64 * 2 + 7, 128),
                 dtype=torch.uint8,
-                compress_ratio=self.compress_ratio,
+                tokens_per_state=self.compress_ratio,
                 alignment=None,
             )
         else:
@@ -222,7 +233,7 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                 num_kv_heads=1,
                 head_size=512 * 2,
                 dtype=torch.uint8,
-                compress_ratio=self.compress_ratio,
+                tokens_per_state=self.compress_ratio,
                 alignment=None,
             )
 

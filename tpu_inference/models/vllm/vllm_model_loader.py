@@ -24,9 +24,17 @@ from vllm.model_executor.model_loader.runai_streamer_loader import \
     RunaiModelStreamerLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+
+
+def _patch_tied_embedding_mapper(model: torch.nn.Module) -> None:
+    """Ensure checkpoint weights targeting lm_head are skipped when word embeddings are tied but self.lm_head is not defined."""
+    if hasattr(model, "hf_to_vllm_mapper") and not hasattr(model, "lm_head"):
+        model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
+            orig_to_new_prefix={"lm_head.": None})
 
 
 def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
@@ -102,6 +110,7 @@ class IncrementalModelLoader(DefaultModelLoader):
                                          model_config=model_config)
             # Override weight loader logic of each parameter to support incremental loading.
             attach_incremental_weight_loader(model)
+            _patch_tied_embedding_mapper(model)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
@@ -142,6 +151,7 @@ class RunaiIncrementalModelLoader(RunaiModelStreamerLoader):
                                          model_config=model_config)
             # Override weight loader logic of each parameter to support incremental loading.
             attach_incremental_weight_loader(model)
+            _patch_tied_embedding_mapper(model)
             # Quantization does not happen in `load_weights` but after it
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)

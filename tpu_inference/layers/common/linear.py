@@ -16,8 +16,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
 
-from tpu_inference.kernels.megablox.gmm_v2 import gmm_v2
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName

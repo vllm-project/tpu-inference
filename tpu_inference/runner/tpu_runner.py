@@ -1521,7 +1521,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     req_id, []))
 
             end_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            num_sampled_tokens = len(sampled_ids)
+            num_sampled_tokens = min(len(sampled_ids),
+                                     pre_num_placeholder_tokens)
             assert num_sampled_tokens <= pre_num_placeholder_tokens
             start_idx = end_idx - pre_num_placeholder_tokens
             assert end_idx <= self.max_model_len, (
@@ -1529,8 +1530,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
-                                           num_sampled_tokens] = sampled_ids
+            self.input_batch.token_ids_cpu[
+                req_idx, start_idx:start_idx +
+                num_sampled_tokens] = sampled_ids[:num_sampled_tokens]
             self.input_batch.num_tokens_no_spec[
                 req_idx] = start_idx + num_sampled_tokens
             self.input_batch.num_tokens[
@@ -1618,7 +1620,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # request_distribution[0] tracks the number of decode requests.
         is_decode_only = self.input_batch.request_distribution[
             0] == self.input_batch.num_reqs
-        if is_decode_only and self.enable_continue_decode:
+        has_structured_output = getattr(scheduler_output,
+                                        "has_structured_output_requests",
+                                        False)
+        if (is_decode_only and self.enable_continue_decode
+                and not has_structured_output):
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
@@ -2262,15 +2268,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             if not sampled_ids:
                 continue
 
+            num_sampled = len(sampled_ids)
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            end_idx = start_idx + len(sampled_ids)
+            end_idx = start_idx + num_sampled
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
+            self.input_batch.token_ids_cpu[
+                req_idx, start_idx:end_idx] = sampled_ids[:num_sampled]
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_state.output_token_ids.extend(sampled_ids)
@@ -2478,10 +2485,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         is_decode_only = (self.input_batch.request_distribution[0] ==
                           self.input_batch.num_reqs)
+        has_structured_output = getattr(scheduler_output,
+                                        "has_structured_output_requests",
+                                        False)
+        use_continue_decode = (is_decode_only and self.enable_continue_decode
+                               and not has_structured_output)
 
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
-        if is_decode_only and self.enable_continue_decode:
+        if use_continue_decode:
             padded_num_scheduled_tokens_per_dp_rank = padded_num_reqs_per_dp_rank
         else:
             padded_num_scheduled_tokens_per_dp_rank = runner_utils.get_padded_token_len(
@@ -2513,7 +2525,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             logits_indices_selector = all_positions[sorted_indices]
 
             tokens_indices_selector = None
-            if self.enable_continue_decode:
+            if use_continue_decode:
                 all_token_positions = np.concatenate([
                     np.arange(len(req_indices_dp[dp_rank])) +
                     padded_num_scheduled_tokens_per_dp_rank * dp_rank
@@ -3149,7 +3161,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # pure-attention models, leaving the field None keeps AttentionMetadata
         # byte-identical to the pre-compact-mamba layout (so the model_fn
         # signature on those models is unchanged).
-        if self.kv_cache_config.has_mamba_layers:
+        # In align mode (prefix caching), mamba state indices are derived on-device
+        # from the block tables, so mamba_state_indices is None.
+        if (self.kv_cache_config.has_mamba_layers and getattr(
+                self.cache_config, "mamba_cache_mode", "none") != "align"):
             # Reorder mamba_state_indices per DP rank (like block_tables)
             # and convert global slot ids to rank-local indices so they
             # index correctly into the per-rank shard of the mamba state.

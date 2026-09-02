@@ -176,9 +176,10 @@ def load_and_select_states(
     prev_recurrent_state_list = []
 
     for idx in range(cfg.seq_tile_size):
-        s_idx = metadata_ref.p_id_to_s_idx[p_id, idx]
-        real_sizes = metadata_ref.p_id_to_r_size[p_id, idx]
-        is_first_tile = metadata_ref.p_id_is_first_tile[p_id, idx]
+        record = metadata_ref.get_record(p_id, idx)
+        s_idx = record.s_idx
+        real_sizes = record.r_size
+        is_first_tile = record.is_first_tile
         has_initial_state = metadata_ref.s_idx_has_initial_state[s_idx]
 
         # NOTE: The VMEM window holds one state per window position and the
