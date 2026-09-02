@@ -321,6 +321,7 @@ def _ragged_paged_attention_kernel_loop(
     q_pos_offset_ref: jax.Array | None,  # i32[max_num_seqs]
     kv_new_starts_ref: jax.Array | None,  # i32[max_num_seqs]
     kv_write_seq_mask_ref: jax.Array | None,  # i32[max_num_seqs]
+    kv_page_order_ref: jax.Array | None,  # i32[kv_buffer_tokens // page_size]
     # Input
     q_hbm_ref,  # [actual_num_kv_heads, max_num_tokens, num_q_heads_per_kv_head // q_packing, q_packing, head_dim]
     kv_hbm_ref,  # [max_num_tokens, num_kv_heads_x2 // kv_packing, kv_packing, head_dim]
@@ -763,24 +764,55 @@ def _ragged_paged_attention_kernel_loop(
             # Fetch new kvs.
             if not skip_current_attn:
                 new_kv_len_start = _seq_kv_new_end - kv_left_frm_new
-                if pcp_chunk_size is not None:
-                    two_p = 2 * cp_group_size
-                    chunk_idx = new_kv_len_start // pcp_chunk_size
-                    offset_in_chunk = (new_kv_len_start -
-                                       chunk_idx * pcp_chunk_size)
-                    rank_slot = jnp.where(chunk_idx < cp_group_size,
-                                          2 * chunk_idx,
-                                          2 * (two_p - 1 - chunk_idx) + 1)
-                    new_kv_len_start = (rank_slot * pcp_chunk_size +
-                                        offset_in_chunk)
                 debug_print("[RPA debug] new_kv_len_start={}",
                             new_kv_len_start)
-                _async_copy(
-                    kv_hbm_ref.at[pl.ds(new_kv_len_start, bkv_sz_frm_new)],
-                    vmem_ref.at[pl.ds(bkv_sz_frm_cache, bkv_sz_frm_new)],
-                    sem,
-                    wait,
-                )
+                if kv_page_order_ref is not None:
+                    # PCP: the new-KV buffer is still in the rank order the
+                    # all_gather produced; kv_page_order maps each token-order
+                    # page to the page holding it there. Every zigzag chunk is
+                    # a whole number of pages, so a token-order page is
+                    # contiguous in the buffer and the run splits into at most
+                    # bkv_p + 1 page pieces (the first and last may be
+                    # partial), fetched like the cache pages above. The pieces
+                    # sum to bkv_sz_frm_new, so the single wait below still
+                    # accounts for every byte.
+                    num_map_pages = kv_page_order_ref.shape[0]
+                    first_page = new_kv_len_start // page_size
+                    head_skip = new_kv_len_start % page_size
+                    for i in range(bkv_p + 1):
+                        src_in_page = head_skip if i == 0 else 0
+                        dst_off = (0 if i == 0 else i * page_size - head_skip)
+                        sz = jnp.clip(bkv_sz_frm_new - dst_off, 0,
+                                      page_size - src_in_page)
+                        page_idx = jnp.minimum(first_page + i,
+                                               num_map_pages - 1)
+                        _async_copy(
+                            kv_hbm_ref.at[pl.ds(
+                                kv_page_order_ref[page_idx] * page_size +
+                                src_in_page, sz)],
+                            vmem_ref.at[pl.ds(bkv_sz_frm_cache + dst_off,
+                                              sz)],
+                            sem,
+                            wait=False,
+                        )
+                else:
+                    if pcp_chunk_size is not None:
+                        two_p = 2 * cp_group_size
+                        chunk_idx = new_kv_len_start // pcp_chunk_size
+                        offset_in_chunk = (new_kv_len_start -
+                                           chunk_idx * pcp_chunk_size)
+                        rank_slot = jnp.where(chunk_idx < cp_group_size,
+                                              2 * chunk_idx,
+                                              2 * (two_p - 1 - chunk_idx) + 1)
+                        new_kv_len_start = (rank_slot * pcp_chunk_size +
+                                            offset_in_chunk)
+                    _async_copy(
+                        kv_hbm_ref.at[pl.ds(new_kv_len_start,
+                                            bkv_sz_frm_new)],
+                        vmem_ref.at[pl.ds(bkv_sz_frm_cache, bkv_sz_frm_new)],
+                        sem,
+                        wait,
+                    )
         else:
             fetch_sz = 0
             if not skip_cache_attn:
@@ -1814,6 +1846,7 @@ def static_validate_inputs(
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs] - PCP
     kv_new_starts: jax.Array | None = None,  # i32[max_num_seqs] - PCP
     kv_write_seq_mask: jax.Array | None = None,  # i32[max_num_seqs] - PCP
+    kv_page_order: jax.Array | None = None,  # i32[kv_tokens // page_size]
     pcp_chunk_size: int | None = None,
     cp_group_size: int | None = None,
     cp_rank: jax.Array | int | None = None,
@@ -2022,6 +2055,29 @@ def static_validate_inputs(
                 "kv_new_starts and pcp_chunk_size are mutually exclusive: the "
                 "rank-order remap assumes a single request's new-KV buffer.")
 
+    if kv_page_order is not None:
+        if kv_cache_lens is None or cp_group_size is None:
+            raise ValueError(
+                "PCP (kv_page_order) requires kv_cache_lens and "
+                "cp_group_size.")
+        if pcp_chunk_size is not None:
+            raise ValueError(
+                "kv_page_order and pcp_chunk_size are mutually exclusive: "
+                "both describe how to unshuffle the rank-order new-KV "
+                "buffer.")
+        if kv_page_order.dtype != jnp.int32:
+            raise ValueError(
+                f"Expected int32 dtype for kv_page_order, got "
+                f"{kv_page_order.dtype}")
+        if k.shape[0] % page_size != 0:
+            raise ValueError(
+                f"PCP (kv_page_order) needs the new-KV buffer rows "
+                f"{k.shape[0]} to be a multiple of {page_size=}.")
+        if kv_page_order.shape != (k.shape[0] // page_size, ):
+            raise ValueError(
+                f"Expected kv_page_order.shape to be "
+                f"({k.shape[0] // page_size},), got {kv_page_order.shape}")
+
     # No constraints for the following inputs.
     del sm_scale
     del mask_value
@@ -2208,6 +2264,7 @@ def ragged_paged_attention(
     q_pos_offsets: jax.Array | None = None,  # i32[max_num_seqs]
     kv_new_starts: jax.Array | None = None,  # i32[max_num_seqs]
     kv_write_seq_mask: jax.Array | None = None,  # i32[max_num_seqs]
+    kv_page_order: jax.Array | None = None,  # i32[kv_tokens // page_size]
     pcp_chunk_size: int | None = None,
     pcp_ring_axis_name: str | None = None,
     pcp_ring_mesh_axis_names: tuple[str, ...] | None = None,
@@ -2274,6 +2331,13 @@ def ragged_paged_attention(
       kv_lens/kv_cache_lens), so each of them would redundantly write the same
       strided current KV; the mask selects exactly one per request (its tail).
       Leave None to let every sequence write, as in the non-PCP path.
+    kv_page_order: PCP only. Per-page indirection map for the new-KV buffer
+      (`keys`/`values`): entry j is the page of that buffer holding token-order
+      page j. Lets the kernel fetch current K/V straight from the rank-order
+      all_gather result, page by page like the paged cache, instead of needing
+      the buffer pre-gathered into token order or a single global
+      `pcp_chunk_size`. Requires every zigzag chunk to be a whole number of
+      pages. Mutually exclusive with pcp_chunk_size.
     use_causal_mask: if true, use causal mask.
     skip_kv_mask: only set to true if use_causal_mask=False and each dynamic
       kv_len % bkv_csz == 0. Set to true can improve performance.
@@ -2331,6 +2395,7 @@ def ragged_paged_attention(
         q_pos_offsets=q_pos_offsets,
         kv_new_starts=kv_new_starts,
         kv_write_seq_mask=kv_write_seq_mask,
+        kv_page_order=kv_page_order,
         pcp_chunk_size=pcp_chunk_size,
         cp_group_size=cp_group_size,
         cp_rank=cp_rank,
@@ -2492,7 +2557,8 @@ def ragged_paged_attention(
             cp_rank if cp_group_size is not None else None,
             q_pos_offsets,
             kv_new_starts,
-            kv_write_seq_mask)
+            kv_write_seq_mask,
+            kv_page_order)
 
         num_scalers = len(scalar_prefetches)
         # None in scalar_prefetches contribute 0 pytree leaves, so
