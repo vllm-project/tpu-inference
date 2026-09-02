@@ -283,8 +283,7 @@ def pcp_forward(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
-    kv_layout: batched_rpa_configs.KVLayout = (
-        batched_rpa_configs.KVLayout.HEAD_ALONG_SUBLANE),
+    kv_layout: batched_rpa_configs.KVLayout | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward.
 
@@ -295,6 +294,8 @@ def pcp_forward(
       2. current phase         local Q (head+tail) attends all-gathered current KV
       3. merge_attn_states     lse-weighted combine
     """
+    if kv_layout is None:
+        kv_layout = batched_rpa.default_kv_layout()
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
     two_p = 2 * pcp_size

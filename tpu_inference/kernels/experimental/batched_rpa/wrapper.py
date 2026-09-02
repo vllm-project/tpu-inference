@@ -42,6 +42,12 @@ from tpu_inference.kernels.experimental.batched_rpa.tuned_params import \
     get_tuned_params
 
 
+def default_kv_layout() -> configs.KVLayout:
+    """Layout used when the caller does not pass one (env-selectable)."""
+    return (configs.KVLayout.SEQ_ALONG_LANE if envs.USE_BATCHED_RPA_SEQ_ON_LANE
+            else configs.KVLayout.HEAD_ALONG_SUBLANE)
+
+
 def prepare_inputs(
     q: jax.Array,
     k: jax.Array,
@@ -149,8 +155,10 @@ def get_kv_cache_shape(
     actual_num_kv_heads,
     actual_head_dim,
     kv_dtype,
-    kv_layout: configs.KVLayout = configs.KVLayout.HEAD_ALONG_SUBLANE,
+    kv_layout: configs.KVLayout | None = None,
 ):
+    if kv_layout is None:
+        kv_layout = default_kv_layout()
     num_lanes = pltpu.get_tpu_info().num_lanes
     num_sublanes = pltpu.get_tpu_info().num_sublanes
     kv_packing = utils.get_dtype_packing(kv_dtype)
@@ -533,7 +541,7 @@ def ragged_paged_attention(
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
-    kv_layout: configs.KVLayout = configs.KVLayout.HEAD_ALONG_SUBLANE,
+    kv_layout: configs.KVLayout | None = None,
     cp_group_size: int | None = None,
     cp_rank: jax.Array | None = None,
     attention_scope: configs.AttentionScope = configs.AttentionScope.FULL,
@@ -626,6 +634,8 @@ def ragged_paged_attention(
     if debug_mode:
         raise ValueError("Debug mode is not supported.")
 
+    if kv_layout is None:
+        kv_layout = default_kv_layout()
     out_dtype = jnp.dtype(queries.dtype if out_dtype is None else out_dtype)
 
     if mask_value is None:
@@ -786,7 +796,6 @@ def ragged_paged_attention(
         step_metadata_cls = kernel.StepMetadataComputer
         extra_scratch_shapes = ()
         collective_id = None
-        post_rpa_hook = None
         if cfgs.ring_enabled:
             computer_cls = ring.RingMetadataComputer
             step_metadata_cls = ring.RingStepMetadataComputer
@@ -796,7 +805,6 @@ def ragged_paged_attention(
             ), )
             # The ring's startup barrier needs a barrier semaphore.
             collective_id = 0
-            post_rpa_hook = ring.wait_ring_sends
             extra_scalars = (cp_rank_scalar, new_kv_starts,
                              global_kv_cache_lens)
             kernel_kv_cache_lens = global_kv_cache_lens
@@ -833,7 +841,6 @@ def ragged_paged_attention(
             step_metadata_cls=step_metadata_cls,
             extra_scratch_shapes=extra_scratch_shapes,
             collective_id=collective_id,
-            post_rpa_hook=post_rpa_hook,
         )
         if return_lse:
             o_out, kv_out, lse_out = result
