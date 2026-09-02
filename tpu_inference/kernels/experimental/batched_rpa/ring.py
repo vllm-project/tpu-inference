@@ -98,10 +98,6 @@ class PcpRing:
         assert len(rounds) == len(valids) == self.cfgs.batch_size
         assert not self._pending_sends
 
-        # Startup rendezvous with both neighbors before any remote traffic:
-        # on a cold first execution a fast device's RDMA could otherwise land
-        # on a neighbor that is still loading the program and lose part of
-        # the block to its startup initialization.
         @pl.when(self.step_global == 0)
         def ring_startup_barrier():
             barrier_sem = pltpu.get_barrier_semaphore()
@@ -119,10 +115,7 @@ class PcpRing:
             )
             pl.semaphore_wait(barrier_sem, 2)
 
-        # Per-step handshake: tell the previous rank its sends of this step
-        # may land (our regions last read at earlier steps are free), then
-        # wait for the next rank's matching release before any send. Signal
-        # first so every rank releases before it blocks.
+        # Per-step handshake
         pl.semaphore_signal(
             self.sems.sync_sem,
             1,
@@ -133,11 +126,6 @@ class PcpRing:
 
         n_buffer = self.cfgs.n_buffer
         slot = lax.rem(self.step_local, n_buffer)
-        # The successor of this step's last lane is the next step's lane 0;
-        # the window's slot sequence restarts at zero on a new chunk.
-        # Full chunks have exactly max_steps_ub steps; only the last chunk is
-        # shorter, and its final step never sends (schedules end on the last
-        # round or masked lanes), so the past-the-end value is never used.
         next_step = self.step_local + 1
         next_slot = jnp.where(next_step < self.cfgs.max_steps_ub,
                               lax.rem(next_step, n_buffer), 0)
@@ -162,17 +150,10 @@ class PcpRing:
                 device_id_type=pl.DeviceIdType.MESH,
             )
 
-            # For rounds > 0 the lane's HBM fetch was zero-size; the block
-            # lands here over ICI instead, sent by the previous rank's
-            # predecessor micro-step. All lanes have identical shapes, so
-            # this descriptor waits the matching byte count.
             @pl.when(receives_b)
             def wait_ring_recv():
                 remote_op.wait_recv()
 
-            # Round 0 sends this rank's own HBM fetch (complete: the
-            # pipeline's wait_in ran before the body); later rounds forward
-            # the block that just landed above.
             @pl.when(sends_b)
             def start_rotate():
                 remote_op.start()
@@ -180,12 +161,7 @@ class PcpRing:
             self._pending_sends.append((sends_b, remote_op))
 
     def finalize(self):
-        """Wait this step's sends, at the end of the step.
-
-        Must run before the body returns: the next iteration's copy_in phase
-        may issue a local HBM fetch into this step's window slot, which would
-        otherwise race an in-flight send still reading it.
-        """
+        """Wait this step's sends, at the end of the step."""
         for sends_b, remote_op in self._pending_sends:
 
             @pl.when(sends_b)
@@ -206,13 +182,6 @@ def ring_fetch_step_metadata(
     cfgs: configs.RpaConfigs,
     pcp_ring: PcpRing,
 ):
-    """kernel.fetch_step_metadata for ring-encoded schedules.
-
-    Decodes each lane's (block, round), masks the resident block by its
-    SOURCE rank's shard length (kv_cache_lens_ref holds the global cache
-    length under the ring), and returns the per-lane rounds/valids for
-    PcpRing.stage. CACHE_ONLY only: kv_new_lens is all zeros.
-    """
     causal_offset_list = []
     bkv_sz_frm_cache_list = []
     new_kv_len_start_list = []
@@ -236,8 +205,8 @@ def ring_fetch_step_metadata(
 
         k_id = jnp.where(is_valid, k_idx * cfgs.bkv_sz, 0)
         # After ring_round hops the resident block came from rank
-        # (my_id - ring_round); mask it by that rank's shard length, not ours
-        # (kv_cache_lens_ref holds the global length under the ring).
+        # (my_id - ring_round); mask it by that rank's shard length
+        # (kv_cache_lens_ref holds the global length under the ring)
         src_rank = lax.rem(pcp_ring.my_id + pcp_ring.size - ring_round,
                            pcp_ring.size)
         src_cache_len = utils.cp_local_cache_len(kv_cache_lens_ref[s_idx],
@@ -258,8 +227,7 @@ def ring_fetch_step_metadata(
         is_valid_list.append(is_valid)
         local_k_end_list.append(kv_cache_len_val - k_id)
 
-        # Stitching metadata (unused by HEAD_ALONG_SUBLANE, the only layout
-        # the ring supports; kept for StepMetadata's shape).
+        # Stitching metadata
         kv_left = jnp.maximum(total_kv_len - k_id, 0)
         kv_left_frm_cache = jnp.maximum(kv_cache_len_val - k_id, 0)
         kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
@@ -305,6 +273,4 @@ class RingStepMetadataComputer(kernel.StepMetadataComputer):
             pcp_ring=pcp_ring,
         )
         pcp_ring.stage(rounds, valids)
-        # end_step waits this step's sends before the body returns, ahead of
-        # the pipeline's next copy_in into their source slots.
         return meta, pcp_ring.finalize

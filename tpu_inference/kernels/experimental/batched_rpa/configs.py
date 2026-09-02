@@ -517,11 +517,6 @@ class RpaConfigs:
                 )
 
         if self.serve.cp is not None and self.serve.cp.ring_axis_name is not None:
-            if self.serve.cp.group_size % 2 != 0:
-                # The ring double-buffers by round parity; an odd group size
-                # would collide the incoming block with the round-0 fill.
-                raise ValueError("The ring requires an even cp group_size, got"
-                                 f" {self.serve.cp.group_size}.")
             if self.serve.attention_scope != AttentionScope.CACHE_ONLY:
                 raise ValueError(
                     "ring_axis_name is a cache-phase path and requires"

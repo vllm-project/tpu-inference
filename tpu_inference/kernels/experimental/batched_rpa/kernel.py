@@ -337,8 +337,7 @@ def rpa_body(
 ):
     step = pl.program_id(0)
 
-    # end_step (when not None) runs after output writeback; the ring waits
-    # its in-flight sends there.
+    # Step 1: Fetch metadata.
     step_meta, end_step = step_metadata_computer.fetch_step_metadata(
         step,
         schedule_ref,
