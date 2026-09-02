@@ -237,6 +237,8 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
             weight_jax,
             weight_scale_jax,
             self.linear_config.weight_sharding,
+            self.linear_config.input_sharding,
+            self.linear_config.output_sharding,
             mesh=self.linear_config.mesh,
             maybe_quantize_x=(self.activation_type != W4A4ActivationType.BF16),
         )
@@ -263,6 +265,8 @@ class VllmCompressedTensorsW4A4Fp4(CompressedTensorsW4A4Fp4):
                 weight_jax,
                 weight_scale_jax,
                 self.linear_config.weight_sharding,
+                self.linear_config.input_sharding,
+                self.linear_config.output_sharding,
                 mesh=self.linear_config.mesh,
                 maybe_quantize_x=(self.activation_type
                                   != W4A4ActivationType.BF16),

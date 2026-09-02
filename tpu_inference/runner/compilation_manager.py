@@ -412,9 +412,8 @@ class CompilationManager:
         pcp = None
         if pcp_size > 1:
             n_reqs = self.runner.max_num_reqs
-            pcp_spec = NamedSharding(
-                self.runner.mesh,
-                PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
+            pcp_spec = NamedSharding(self.runner.mesh,
+                                     PartitionSpec(ShardingAxisName.PCP, None))
             repl = NamedSharding(self.runner.mesh, PartitionSpec())
             pcp = PCPMetadata(
                 query_start_loc=device_array(self.runner.mesh,
@@ -851,7 +850,6 @@ class CompilationManager:
                     array,
                     indices_to_select,
                     self.runner.mesh,
-                    self.runner.vllm_config.sharding_config.prefill_cp_size,
                     compile_only=True,
                     array_size=array_size,
                     index_size=indices_count,
@@ -1279,7 +1277,6 @@ class CompilationManager:
                     array,
                     indices_bonus,
                     self.runner.mesh,
-                    self.runner.vllm_config.sharding_config.prefill_cp_size,
                     num_logits=num_logits,
                     num_reqs=num_reqs,
                 )
@@ -1293,7 +1290,6 @@ class CompilationManager:
                     array,
                     indices_target,
                     self.runner.mesh,
-                    self.runner.vllm_config.sharding_config.prefill_cp_size,
                     num_logits=num_logits,
                 )
 

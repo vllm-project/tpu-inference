@@ -90,13 +90,32 @@ def xla_quantized_matmul(
     return out.astype(x.dtype)
 
 
+def _axes(spec_entry):
+    if spec_entry is None:
+        return ()
+    return spec_entry if isinstance(spec_entry, tuple) else (spec_entry, )
+
+
+def sum_partials(partials: jax.Array) -> jax.Array:
+    """Reduce the leading partial axis produced by a deferred matmul (or a
+    deferred fused MoE): one all-reduce over the axis it is sharded on."""
+    return jnp.sum(partials, axis=0)
+
+
 def sharded_matmul(x: jax.Array,
                    w: jax.Array,
                    weight_sharding: P | NamedSharding,
+                   input_sharding: P,
+                   output_sharding: P,
                    *,
                    mesh: Mesh | None = None,
                    defer_all_reduce: bool = False) -> jax.Array:
     """Matmul that can skip its all-reduce (``defer_all_reduce=True``).
+
+    ``weight_sharding``, ``input_sharding`` and ``output_sharding`` are the
+    shard_map specs of w, x and the result, decided by the layer's
+    QuantLinearConfig. x may carry extra leading batch dims after its token
+    dim.
 
     A plain einsum under GSPMD is always all-reduced by the partitioner, so it
     runs in shard_map. No bias: vLLM's RowParallelLinear rejects
@@ -105,25 +124,43 @@ def sharded_matmul(x: jax.Array,
     if isinstance(weight_sharding, NamedSharding):
         mesh = mesh or weight_sharding.mesh
         weight_sharding = weight_sharding.spec
-    in_axis, out_axis = weight_sharding
-    # x may have extra leading batch dims.
+    in_axis, _ = weight_sharding
     batch_dims = (None, ) * (x.ndim - 2)
-    x_spec = P(ShardingAxisName.ATTN_DATA, *batch_dims, in_axis)
+    input_sharding = P(input_sharding[0], *batch_dims, input_sharding[-1])
+    output_sharding = P(*output_sharding[:-1], *batch_dims,
+                        output_sharding[-1])
+    in_tokens = _axes(input_sharding[0])
+    out_tokens = _axes(output_sharding[-2])
+
+    # The attention q/k/v layer has already pinned its input replicated
+    # over pcp (VllmColumnParallelLinear.forward); this slices it to the
+    # matmul's token layout.
     x = jax.lax.with_sharding_constraint(
         x,
-        NamedSharding(mesh, x_spec) if mesh else x_spec)
+        NamedSharding(mesh, input_sharding) if mesh else input_sharding)
 
     def wrapper(x, w):
         out = x @ w
-        if in_axis and not defer_all_reduce:
+        if in_axis is not None:
+            if defer_all_reduce:
+                # Hand the partial sums out under a leading axis sharded
+                # over the contraction axis (see sum_partials): a partial
+                # must never leave shard_map declared replicated, XLA takes
+                # that as a promise.
+                return out[None]
             out = jax.lax.psum(out, axis_name=in_axis)
+        # All-gather any token axis the output no longer splits over (an
+        # attention out-projection under pcp rejoins the replicated residual).
+        for axis in in_tokens:
+            if axis not in out_tokens and jax.lax.axis_size(axis) > 1:
+                out = jax.lax.all_gather(out, axis, axis=0, tiled=True)
         return out
 
     return jax.shard_map(
         wrapper,
         mesh=mesh,
-        in_specs=(x_spec, weight_sharding),
-        out_specs=P(ShardingAxisName.ATTN_DATA, *batch_dims, out_axis),
+        in_specs=(input_sharding, weight_sharding),
+        out_specs=output_sharding,
         check_vma=False,
     )(x, w)
 
@@ -132,6 +169,8 @@ def sharded_quantized_matmul(x: jax.Array,
                              w_q: jax.Array,
                              w_s: jax.Array,
                              weight_sharding: P | NamedSharding,
+                             input_sharding: P,
+                             output_sharding: P,
                              *,
                              mesh: Mesh | None = None,
                              defer_all_reduce: bool = False,
@@ -144,6 +183,8 @@ def sharded_quantized_matmul(x: jax.Array,
         w_q: Weight quantized array. [n_input_features, n_output_features]
         w_s: Weight quantization scale. [n_output_features] for xla quantized matmul, [n_blocks, 1, n_output_features] for quantized matmul kernel
         weight_sharding: PartitionSpec or NamedSharding for the weight tensor.
+        input_sharding, output_sharding: PartitionSpecs of x and of the result,
+            decided by the layer's QuantLinearConfig.
         mesh: (Optional) Mesh to shard on. If None, mesh from current context is used, similar to jax.shard_map().
         defer_all_reduce: (Optional) If True, defer the all-reduce (psum) over
             the contracting (in) axis: it is not performed here even when that
@@ -167,7 +208,8 @@ def sharded_quantized_matmul(x: jax.Array,
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
     in_axis, out_axis = weight_spec
-    x_sharding = P(ShardingAxisName.ATTN_DATA, in_axis)
+    in_tokens = _axes(input_sharding[0])
+    out_tokens = _axes(output_sharding[-2])
     enable_quantized_matmul_kernel = w_s is not None and (len(
         w_s.shape) == 3 or len(w_s.shape) == 4)
     if enable_quantized_matmul_kernel:
@@ -186,11 +228,11 @@ def sharded_quantized_matmul(x: jax.Array,
         else:
             # 1D (channelwise) case
             scale_sharding = P(out_axis, )
-    out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
-
+    # x was pinned replicated over pcp by the attention layer if needed
+    # (VllmColumnParallelLinear.forward); slice it to the matmul's layout.
     x = jax.lax.with_sharding_constraint(
         x,
-        NamedSharding(mesh, x_sharding) if mesh else x_sharding)
+        NamedSharding(mesh, input_sharding) if mesh else input_sharding)
 
     def wrapper(x, w_q, w_s):
         if enable_quantized_matmul_kernel:
@@ -210,15 +252,25 @@ def sharded_quantized_matmul(x: jax.Array,
                                           w_q,
                                           w_s,
                                           quantize_activation=maybe_quantize_x)
-        if in_axis and not defer_all_reduce:
+        if in_axis is not None:
+            if defer_all_reduce:
+                # Partial sums under a leading axis sharded over the
+                # contraction axis (see sum_partials): a partial must never
+                # leave shard_map declared replicated.
+                return output[None]
             output = jax.lax.psum(output, axis_name=in_axis)
+        # All-gather any token axis the output no longer splits over (an
+        # attention out-projection under pcp rejoins the replicated residual).
+        for axis in in_tokens:
+            if axis not in out_tokens and jax.lax.axis_size(axis) > 1:
+                output = jax.lax.all_gather(output, axis, axis=0, tiled=True)
         return output
 
     return jax.shard_map(
         wrapper,
         mesh=mesh,
-        in_specs=(x_sharding, weight_spec, scale_sharding),
-        out_specs=(out_sharding),
+        in_specs=(input_sharding, weight_spec, scale_sharding),
+        out_specs=output_sharding,
         check_vma=False,
     )(x, w_q, w_s)
 
