@@ -370,6 +370,20 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
+        self.weight_scale_refine = None
+        self.moe_block_shape = self.weight_block_size
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            refined_shape = vllm_fp8.refine_fp8_moe_block_shape(
+                self.moe, self.weight_block_size)
+            if refined_shape is not None:
+                block_n, block_k = self.weight_block_size
+                self.weight_scale_refine = (
+                    block_n // refined_shape[0],
+                    block_k // refined_shape[1],
+                )
+                self.moe_block_shape = refined_shape
+
         self.fp8_backend = None
 
         self.mesh = mesh

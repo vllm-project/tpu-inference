@@ -678,13 +678,13 @@ class TestQwen25VLMMEncoderJITIntegration:
 
     @staticmethod
     def _clear_rope_cache(manager):
-        """Drop visual.get_rope_by_thw's lru_cache before a test.
+        """Drop visual._rope_by_thw_cache before a test.
 
         It is keyed on (t, h, w) only, and the tensors it caches are plain
         torch or torchax depending on which path filled it first, so a
         previous test's entries must not leak into this one.
         """
-        manager.model.visual.get_rope_by_thw.cache_clear()
+        manager.model.visual._rope_by_thw_cache.clear()
 
     def _assert_padded_matches_eager(self, manager, mesh, grids):
         self._clear_rope_cache(manager)
