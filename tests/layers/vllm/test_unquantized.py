@@ -887,19 +887,23 @@ def test_load_weight_on_host_matches_device_staging(dtype, spec):
     np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
 
 
-def test_load_weight_on_host_does_not_outlive_the_torch_storage():
-    """The view aliases torch storage that callers free the moment we return."""
-    tensor = torch.randn(*STAGED_SHAPE)
-    expected = np.array(tensor.numpy(), copy=True)
+@patch("jax.block_until_ready")
+def test_load_weight_on_host_blocks_before_returning(mock_block):
+    """The staged copy is forced here, not left to whoever consumes the array.
+
+    The numpy view aliases torch storage that callers free the moment this
+    returns, so the transfer has to have landed before it does. Nothing
+    observable distinguishes that from a deferred copy: `device_put` from a
+    host buffer is synchronous on the CPU backend CI runs, so reading the
+    array back -- or even scribbling over the source buffer first -- passes
+    either way. Hence the assertion on the barrier itself.
+    """
     mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
 
-    result = _load_weight_on_host(tensor,
+    result = _load_weight_on_host(torch.randn(*STAGED_SHAPE),
                                   NamedSharding(mesh, P(None, "model")))
-    # The copy has to have landed before the caller drops the host bytes.
-    assert result.is_ready()
-    tensor.set_(torch.storage.UntypedStorage())
 
-    np.testing.assert_array_equal(np.asarray(result), expected)
+    mock_block.assert_called_once_with(result)
 
 
 @pytest.mark.skipif(NUM_DEVICES < 2,
