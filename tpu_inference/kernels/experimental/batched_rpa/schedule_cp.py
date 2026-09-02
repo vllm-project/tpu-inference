@@ -16,15 +16,12 @@
 import dataclasses
 import functools
 from collections.abc import Sequence
-from typing import Any
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
-from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference.kernels.experimental.batched_rpa import (configs, schedule,
-                                                            utils)
+from tpu_inference.kernels.experimental.batched_rpa import configs, schedule
 
 
 @jax.tree_util.register_dataclass
