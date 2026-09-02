@@ -240,7 +240,7 @@ class StepMetadataComputer:
             kv_cache_lens_ref,
             kv_new_lens_ref,
             cfgs=self.cfgs,
-        )
+        ), None
 
 
 def generate_mask(
@@ -334,11 +334,12 @@ def rpa_body(
     step_metadata_computer: StepMetadataComputer,
     chunk_id: jax.Array | int = 0,
     kv_window_ref: jax.Ref | None = None,
-    post_rpa_hook=None,
 ):
     step = pl.program_id(0)
 
-    step_meta = step_metadata_computer.fetch_step_metadata(
+    # end_step (when not None) runs after output writeback; the ring waits
+    # its in-flight sends there.
+    step_meta, end_step = step_metadata_computer.fetch_step_metadata(
         step,
         schedule_ref,
         kv_in_vref,
@@ -544,8 +545,8 @@ def rpa_body(
         cfgs=cfgs,
     )
 
-    if post_rpa_hook is not None:
-        post_rpa_hook(step_metadata_computer)
+    if end_step is not None:
+        end_step()
 
 
 # Define main kernel.
@@ -669,7 +670,6 @@ def rpa_kernel(
     step_metadata_cls: type[StepMetadataComputer] = StepMetadataComputer,
     extra_scratch_shapes: tuple = (),
     collective_id: int | None = None,
-    post_rpa_hook=None,
 ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
     """Perform batched ragged paged attention with scheduler data.
 
@@ -825,7 +825,6 @@ def rpa_kernel(
                         step_metadata_computer=step_metadata_computer,
                         chunk_id=start_step // cfgs.max_steps_ub,
                         kv_window_ref=kv_alloc.window_ref,
-                        post_rpa_hook=post_rpa_hook,
                     ),
                     grid=(num_steps + prefix_steps, ),
                     in_specs=(q_alloc.spec, kv_cache_alloc.spec),

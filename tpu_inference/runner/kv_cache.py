@@ -97,7 +97,11 @@ def get_kv_cache_shape_with_mesh(mesh: Mesh,
             get_kv_cache_shape_fn(total_num_pages, physical_block_size,
                                   actual_num_kv_heads // model_cnt,
                                   actual_head_dim, kv_dtype))
-        shape[2] *= model_cnt
+        if envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+            # SEQ_ALONG_LANE: K/V head planes on dim 1, tokens on the last dim.
+            shape[1] *= model_cnt
+        else:
+            shape[2] *= model_cnt
     return tuple(shape)
 
 
@@ -181,6 +185,12 @@ def create_kv_caches(
         sharding = NamedSharding(
             mesh,
             PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT))
+    elif envs.USE_BATCHED_RPA_KERNEL and envs.USE_BATCHED_RPA_SEQ_ON_LANE:
+        # SEQ_ALONG_LANE: K/V head planes on dim 1, tokens on the last dim.
+        sharding = NamedSharding(
+            mesh,
+            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_HEAD,
+                          None, None, ShardingAxisName.KV_CONTEXT))
     else:
         sharding = NamedSharding(
             mesh,

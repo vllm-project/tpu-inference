@@ -305,12 +305,6 @@ class RingStepMetadataComputer(kernel.StepMetadataComputer):
             pcp_ring=pcp_ring,
         )
         pcp_ring.stage(rounds, valids)
-        self.pcp_ring = pcp_ring
-        return meta
-
-
-def wait_ring_sends(computer: RingStepMetadataComputer):
-    """rpa_kernel post_rpa_hook: wait the step's sends before the body
-    returns, ahead of the pipeline's next copy_in into their source slots."""
-    computer.pcp_ring.finalize()
-    computer.pcp_ring = None
+        # end_step waits this step's sends before the body returns, ahead of
+        # the pipeline's next copy_in into their source slots.
+        return meta, pcp_ring.finalize
