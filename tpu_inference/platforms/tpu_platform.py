@@ -490,6 +490,19 @@ class TpuPlatform(Platform):
             patch_vllm_scheduler_for_continue_decode()
 
     @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config) -> None:
+        # Mamba (GDN) groups with prefix caching get dedicated block pools;
+        # vLLM maps their spec to the TPU manager through this hook, in
+        # every process that builds a KV cache coordinator.
+        from tpu_inference.core.mamba_block_pool import (TPUMambaManager,
+                                                         TPUMambaSpec)
+        from vllm.v1.kv_cache_interface import MambaSpec
+        from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+        KVCacheSpecRegistry.register(TPUMambaSpec,
+                                     TPUMambaManager,
+                                     uniform_type_base_spec=MambaSpec)
+
+    @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.

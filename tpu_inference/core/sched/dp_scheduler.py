@@ -14,6 +14,7 @@
 
 import atexit
 import copy
+import dataclasses
 import gc
 import multiprocessing
 import multiprocessing.reduction
@@ -31,6 +32,7 @@ import cloudpickle
 import numpy as np
 import torch
 from vllm.config import VllmConfig
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
@@ -558,6 +560,15 @@ class DPScheduler(SchedulerInterface):
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)
             rank_kv_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
+            for group in rank_kv_config.kv_cache_groups:
+                spec = group.kv_cache_spec
+                num_blocks = getattr(spec, "num_blocks", None)
+                if isinstance(spec, MambaSpec) and num_blocks is not None:
+                    # Dedicated mamba block pools (`TPUMambaSpec`, mamba
+                    # prefix caching) are sharded across DP ranks exactly
+                    # like the attention pool.
+                    group.kv_cache_spec = dataclasses.replace(
+                        spec, num_blocks=num_blocks // self.dp_size)
             self.per_rank_kv_cache_configs.append(rank_kv_config)
 
     def _send_command(self,
