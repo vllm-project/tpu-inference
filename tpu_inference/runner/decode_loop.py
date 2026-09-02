@@ -274,9 +274,16 @@ def _decode_core_impl(
             lp_ids_buf = lp_ids_buf.at[i].set(lp_ids_step)
             lp_val_buf = lp_val_buf.at[i].set(lp_val_step)
             lp_ranks_buf = lp_ranks_buf.at[i].set(lp_ranks_step)
+        if continue_decode_eos_check_interval <= 0:
+            # cond_fn never reads the EOS flag in this mode. Carrying it
+            # unchanged lets the compiler drop the per-step `any_hit_eos`
+            # reduction, which is a cross-DP all-reduce over every device
+            # on each decode iteration.
+            new_eos_flag = eos_flag
+        else:
+            new_eos_flag = jnp.logical_or(eos_flag, hit)
         return _pack(i + 1, next_ct, new_mask, new_pos, new_sl, kvc, tb, eb,
-                     lp_ids_buf, lp_val_buf, lp_ranks_buf,
-                     jnp.logical_or(eos_flag, hit))
+                     lp_ids_buf, lp_val_buf, lp_ranks_buf, new_eos_flag)
 
     init_carry = _pack(
         jnp.array(0, dtype=jnp.int32),
