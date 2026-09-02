@@ -16,6 +16,7 @@ Tests for the JAX-based rejection sampler for speculative decoding on TPU.
 This test suite is structured to mirror the GPU rejection sampler tests.
 """
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import List, Tuple
 
 import jax
@@ -1132,6 +1133,73 @@ class TestNonGreedyRejectionSampler:
                 sampling_metadata=metadata,
                 key=None,  # No key provided
             )
+
+    def test_synthetic_acceptance_length_three(self, mesh, test_helper):
+        """Synthetic TPC 3.0 accepts 2 draft tokens then recovers."""
+        config = SimpleNamespace(rejection_sample_method="synthetic",
+                                 synthetic_acceptance_rates=[1.0, 1.0, 0.0])
+        rejection_sampler = RejectionSampler(mesh, config)
+        metadata = test_helper.create_sampling_metadata(all_greedy=True)
+
+        draft_token_ids = jnp.array([10, 20, 30], dtype=jnp.int32)
+        target_logits = test_helper.create_target_logits_from_tokens(
+            [11, 21, 31], VOCAB_SIZE)
+        num_draft_tokens = jnp.array([3], dtype=jnp.int32)
+        bonus_token_ids = jnp.array([99], dtype=jnp.int32)
+
+        output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            draft_probs=None,
+            target_logits=target_logits,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=metadata,
+            key=jax.random.PRNGKey(1),
+        )
+
+        parsed_output = rejection_sampler.parse_output(
+            output,
+            VOCAB_SIZE,
+            np.asarray(num_draft_tokens),
+            batch_size=1,
+            padded_tokens_length=3,
+            dp_size=1,
+            req_indices_dp={0: [0]},
+        )
+        assert parsed_output == [[10, 20, 31]]
+
+    def test_synthetic_acceptance_length_two_point_five(self, mesh,
+                                                        test_helper):
+        """Synthetic TPC 2.5 accepts the second draft token about half the time."""
+        batch_size = 512
+        config = SimpleNamespace(rejection_sample_method="synthetic",
+                                 synthetic_acceptance_rates=[1.0, 0.5, 0.0])
+        rejection_sampler = RejectionSampler(mesh, config)
+        metadata = test_helper.create_sampling_metadata(all_greedy=True,
+                                                        batch_size=batch_size)
+
+        draft_token_ids = jnp.array([10, 20, 30] * batch_size,
+                                    dtype=jnp.int32)
+        target_logits = test_helper.create_target_logits_from_tokens(
+            [11, 21, 31] * batch_size, VOCAB_SIZE)
+        num_draft_tokens = jnp.full((batch_size, ), 3, dtype=jnp.int32)
+        bonus_token_ids = jnp.full((batch_size, ), 99, dtype=jnp.int32)
+
+        output = rejection_sampler(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=num_draft_tokens,
+            draft_probs=None,
+            target_logits=target_logits,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=metadata,
+            key=jax.random.PRNGKey(2),
+        )
+
+        main_tokens = np.asarray(output)[:batch_size * 3].reshape(
+            batch_size, 3)
+        assert np.mean(main_tokens[:, 0] == 10) == 1.0
+        assert 0.4 < np.mean(main_tokens[:, 1] == 20) < 0.6
+        assert np.mean(main_tokens[:, 2] == 30) == 0.0
 
     def test_non_greedy_vs_greedy_same_perfect_case(self, rejection_sampler,
                                                     test_helper):
