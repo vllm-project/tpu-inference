@@ -350,18 +350,10 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
     #
     # The letter must not run straight into an alphanumeric, or every sentence
     # opening with a word like "Although" or "Because" is graded as its first
-    # letter. On a sample of English prose that fired on 17% of sentences for
-    # ABCD and 43% for MMMU-Pro's ABCDEFGHIJ, and the wrong answers it produced
-    # were indistinguishable from real ones -- precisely what `unparsed` exists
-    # to surface. The lookahead is a strict tightening of the old bare
-    # first-character check: it never grades a response that check left alone,
-    # and never turns one letter into another, so accuracy can only hold steady
-    # or fall and `unparsed` can only rise.
+    # letter.
     #
     # A lookahead rather than a required character, so a response that is just
-    # "D" still matches at end of text. It also subsumes the old emptiness
-    # guard: `"" in "ABCD"` is True, so an empty response used to be reported
-    # as the answer `""`, and now simply fails to match.
+    # "D" still matches at end of text.
     match = re.match(r'^([' + possible_choices + r'])(?![A-Za-z0-9])',
                      text.strip(), re.IGNORECASE)
     if match:
