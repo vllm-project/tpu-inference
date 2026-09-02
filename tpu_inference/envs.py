@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    MAMBA_ALIGN_STATE_MEM_FRACTION: float = 0.3
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
@@ -427,6 +428,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DP scheduler: timeout (ms) to force flush pending requests.
     "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    # Hybrid mamba/linear-attention models with prefix caching (mamba
+    # "align" mode): fraction of the KV cache HBM budget reserved for mamba
+    # state slots. Every mamba kv-cache group gets a dedicated block pool of
+    # that many slots; the rest of the budget is attention KV cache. A
+    # running request pins 2 slots per mamba group and a cached prefix
+    # keeps 1, so this bounds live + cached conversations per group.
+    "MAMBA_ALIGN_STATE_MEM_FRACTION":
+    lambda: float(os.getenv("MAMBA_ALIGN_STATE_MEM_FRACTION", "0.3")),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
     "VLLM_MOE_CHUNK_SIZE":
