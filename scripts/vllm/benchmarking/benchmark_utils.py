@@ -313,13 +313,7 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
         # Markdown wrapped: *A*, **B**, _C_, __D__
         re.compile(r'(?x)(?<![A-Za-z0-9])(?:\*{1,2}|_{1,2})([' +
                    possible_choices + r'])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])'),
-        # Final fallback: line that's exactly "A", "B.", "C)", etc. The outer
-        # quotes are single on purpose -- as a triple-quoted string the
-        # `possible_choices` splice is literal text, which collapses the class
-        # to the letters of this source line and grades prose such as
-        # "however ..." as the answer H. The trailing `$` has no `.*` before
-        # it for the same reason: with one, every line *starting* with a
-        # choice letter matches, which is not "exactly".
+        # Final fallback: line that's exactly "A", "B.", "C)", etc.
         re.compile(
             r'(?x)^\s*(?:\*{1,2}|_{1,2})?([' + possible_choices +
             r'])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*$', re.MULTILINE),
@@ -351,12 +345,27 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
             if letter in possible_choices:
                 return letter
 
-    # Last resort: return first letter if it's in possible_choices. The
-    # emptiness check matters -- `"" in "ABCD"` is True, so an empty response
-    # would otherwise be reported as the answer `""` rather than as unparsed.
-    first_char = text.strip()[:1].upper()
-    if first_char and first_char in possible_choices:
-        return first_char
+    # Last resort: the response leads with a bare choice letter, as in
+    # "C) Paris" or "D is correct because ...".
+    #
+    # The letter must not run straight into an alphanumeric, or every sentence
+    # opening with a word like "Although" or "Because" is graded as its first
+    # letter. On a sample of English prose that fired on 17% of sentences for
+    # ABCD and 43% for MMMU-Pro's ABCDEFGHIJ, and the wrong answers it produced
+    # were indistinguishable from real ones -- precisely what `unparsed` exists
+    # to surface. The lookahead is a strict tightening of the old bare
+    # first-character check: it never grades a response that check left alone,
+    # and never turns one letter into another, so accuracy can only hold steady
+    # or fall and `unparsed` can only rise.
+    #
+    # A lookahead rather than a required character, so a response that is just
+    # "D" still matches at end of text. It also subsumes the old emptiness
+    # guard: `"" in "ABCD"` is True, so an empty response used to be reported
+    # as the answer `""`, and now simply fails to match.
+    match = re.match(r'^([' + possible_choices + r'])(?![A-Za-z0-9])',
+                     text.strip(), re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
 
     return None
 

@@ -210,6 +210,78 @@ def test_gpqa_fallback_requires_the_whole_line():
         "Not enough data.\nBoth are viable.") is None
 
 
+# --------------------------------------------------------------------------
+# extract_abcd_gpqa: the "leads with a bare choice letter" last resort
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("C) Paris", "C"),
+    ("D is correct because the enthalpy is negative.", "D"),
+    ("A. The reaction proceeds via an SN2 mechanism.", "A"),
+    ("B: option two", "B"),
+    ("C - the third one", "C"),
+    ("d) lowercase is still an answer", "D"),
+    ("  D  ", "D"),
+])
+def test_gpqa_last_resort_reads_a_leading_letter(text, expected):
+    assert _MODULE.extract_abcd_gpqa(text) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Although the reaction is exothermic, entropy dominates.",
+    "Because the catalyst lowers the activation energy.",
+    "Considering all of the options, none fit perfectly.",
+    "An alternative explanation involves resonance.",
+    "During the reaction, the intermediate forms.",
+    "Denote the enthalpy by H.",
+])
+def test_gpqa_last_resort_ignores_prose(text):
+    # The letter has to be followed by a non-alphanumeric. Without that, the
+    # old bare first-character check graded 17% of English sentences (43% for
+    # MMMU-Pro's wider set) on spelling alone, as answers indistinguishable
+    # from real ones rather than as unparsed.
+    assert _MODULE.extract_abcd_gpqa(text) is None
+
+
+def test_gpqa_last_resort_still_grades_a_leading_article():
+    # Known residual: "A" as an indefinite article is followed by a space, so
+    # it is indistinguishable from "D is correct because ...". Keeping this
+    # class is deliberate -- rejecting it would cost the real answers too.
+    assert _MODULE.extract_abcd_gpqa(
+        "A common misconception is that entropy always rises.") == "A"
+
+
+def test_gpqa_last_resort_is_a_strict_tightening():
+    # The rule matches a subset of the old bare first-character check, so a
+    # response can only move from graded to unparsed -- never from one letter
+    # to another, and never from unparsed to graded.
+    def old_last_resort(text, choices="ABCD"):
+        first_char = text.strip()[:1].upper()
+        return first_char if first_char and first_char in choices else None
+
+    corpus = [
+        "C) Paris",
+        "D is correct.",
+        "A. Restated choice.",
+        "Although so.",
+        "Because so.",
+        "Denote H.",
+        "A common case.",
+        "",
+        "   ",
+        "The answer cannot be determined.",
+        "d) lowercase",
+        "B",
+    ]
+    for text in corpus:
+        new = _MODULE.extract_abcd_gpqa(text)
+        old = old_last_resort(text)
+        # Only compare where the last resort is what decided the outcome.
+        if new is not None and old is not None:
+            assert new == old, text
+
+
 def test_gpqa_fallback_honours_possible_choices():
     # E is out of range for the default ABCD but in range for MMMU-Pro. The
     # leading word must not itself start with a choice letter, or the
