@@ -47,6 +47,13 @@ steps:
       # ~6.7h, against the ~35 min the low-effort run took. This budget covers
       # serve for the whole job, not just bring-up, so it has to span the evals.
       VLLM_ENGINE_READY_TIMEOUT_S: "36000"
+      # Mirror engine stats into the Buildkite log during the eval leg. Read by
+      # run_multihost.sh on the host, so it belongs here rather than in
+      # MULTIHOST_ENV_VARS. 120s is coarse enough not to bloat the log over a
+      # multi-hour eval and fine enough to pin down when an engine stops
+      # retiring requests -- #960 sat wedged for two hours indistinguishably
+      # from a slow tail because nothing but the client progress bar was visible.
+      SERVE_LOG_TAIL_INTERVAL_S: "120"
       # Tail /root/vllm_serve.log into the Buildkite log every 60s while waiting
       # for /health. Read by wait_for_server in run_multihost.sh (on the host,
       # not inside the container, so it belongs here and not in

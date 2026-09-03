@@ -511,6 +511,32 @@ wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "$SERVER
 set -x
 [[ $_WAIT_RC -eq 0 ]] || exit "$_WAIT_RC"
 
+# The serve log only reaches the Buildkite log at cleanup, which leaves the
+# entire benchmark/eval phase blind: an engine that wedges mid-eval looks
+# identical to a slow one -- a frozen client progress bar and nothing else --
+# and a cancelled job never reaches the cleanup dump at all, so the evidence is
+# lost exactly when it is most wanted. When SERVE_LOG_TAIL_INTERVAL_S is set,
+# mirror the engine's own stats and error lines into the Buildkite log while the
+# client runs. Unset by default, so no other pipeline changes behaviour.
+_SERVE_TAIL_PID=""
+if [[ -n "${SERVE_LOG_TAIL_INTERVAL_S:-}" ]]; then
+  echo "--- Mirroring vllm serve stats every ${SERVE_LOG_TAIL_INTERVAL_S}s"
+  # xtrace off for the same reason as the health poll above: this loop would
+  # otherwise emit a few lines of trace per tick for the whole eval leg.
+  set +x
+  (
+    while true; do
+      sleep "${SERVE_LOG_TAIL_INTERVAL_S}"
+      docker exec node tail -c 20000 /root/vllm_serve.log 2>/dev/null \
+        | tr '\r' '\n' \
+        | grep -aE "Running:.*Waiting:|EngineDeadError|EngineCore|Traceback|IndexError|RESOURCE_EXHAUSTED" \
+        | tail -3 | sed 's/^/[serve] /' || true
+    done
+  ) &
+  _SERVE_TAIL_PID=$!
+  set -x
+fi
+
 # 5. Run Benchmarks / Validation
 if [[ "${CASE_FILE:-}" == *.json ]]; then
   # JSON (.json): Delegates to run_bm.sh for advanced benchmark logic.
@@ -537,6 +563,11 @@ else
     -H 'Content-Type: application/json' \
     -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
   "
+fi
+
+if [[ -n "${_SERVE_TAIL_PID}" ]]; then
+  kill "${_SERVE_TAIL_PID}" >/dev/null 2>&1 || true
+  wait "${_SERVE_TAIL_PID}" >/dev/null 2>&1 || true
 fi
 
 echo "--- Tests completed successfully"
