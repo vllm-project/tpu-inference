@@ -191,6 +191,7 @@ def get_kv_cache_shape(
         "use_causal_mask",
         "update_kv_cache",
         "kv_layout",
+        "decode_query_size",
     ),
     # Donation of transient inputs can fail for some runtime buffer layouts in
     # the experimental tuning path. Keep donation only for kv_cache, which is
@@ -226,6 +227,7 @@ def ragged_paged_attention(
     use_causal_mask: bool = True,
     update_kv_cache: bool = True,
     kv_layout: configs.KVLayout | None = None,
+    decode_query_size: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -254,6 +256,8 @@ def ragged_paged_attention(
         q_scale: Quantization scale value of queries.
         k_scale: Quantization scale value of keys.
         v_scale: Quantization scale value of values.
+        decode_query_size: Number of query tokens in deode (1 by default,
+             can be higher in case of speculative decoding)
         chunk_prefill_size: Not used.
         decode_block_sizes: Kernel block size to use during decode.
         prefill_block_sizes: Kernel block size to use during prefill.
@@ -310,6 +314,7 @@ def ragged_paged_attention(
         soft_cap=soft_cap,
         mask_value=mask_value,
     )
+
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,
         num_page_indices=num_page_indices,
@@ -322,6 +327,7 @@ def ragged_paged_attention(
         scale_k=k_scale,
         scale_v=v_scale,
         kv_layout=kv_layout,
+        decode_query_size=decode_query_size,
     )
 
     q_hbm, new_kv_hbm = prepare_inputs(
@@ -343,7 +349,8 @@ def ragged_paged_attention(
                 model_cfgs,
                 serve_cfgs,
                 case='decode',
-                vmem_limit_bytes=vmem_limit_bytes)
+                vmem_limit_bytes=vmem_limit_bytes,
+                decode_query_size=decode_query_size)
         else:
             effective_blocks = prefill_block_sizes or get_tuned_params(
                 model_cfgs,

@@ -15,6 +15,7 @@ from vllm.utils.collection_utils import swap_dict_values
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
+from tpu_inference import envs
 from tpu_inference.runner.block_table import MultiGroupBlockTable
 
 _SAMPLING_EPS = 1e-5
@@ -65,6 +66,7 @@ class InputBatch:
         dp_size: int = 1,
     ):
         self.is_spec_decode = is_spec_decode
+        self.num_speculative_tokens = num_speculative_tokens
         self.max_num_reqs = max_num_reqs
         self.dp_size = dp_size
         self.max_model_len = max_model_len
@@ -684,6 +686,12 @@ class InputBatch:
     @property
     def all_greedy(self) -> bool:
         return len(self.random_reqs) == 0
+
+    @property
+    def max_decode_tokens(self) -> int:
+        if self.is_spec_decode and envs.USE_BATCHED_RPA_KERNEL:
+            return self.num_speculative_tokens + 1
+        return 1
 
     @property
     def max_num_logprobs(self) -> Optional[int]:
