@@ -17,9 +17,10 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 from absl.testing import absltest, parameterized
+from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.flash_attention.kernel import (
-    BlockSizes, calculate_vmem_usage_bytes)
+    BlockSizes, calculate_vmem_usage_bytes, flash_attention)
 
 jax.config.parse_flags_with_absl()
 
@@ -27,12 +28,14 @@ jax.config.parse_flags_with_absl()
 class MockTpuInfo:
     num_lanes = 128
     num_sublanes = 8
+    vmem_capacity_bytes = 32 * 1024 * 1024
 
 
 class FlashAttentionVmemEstimationTest(parameterized.TestCase):
 
     def setUp(self):
         super().setUp()
+        self.enter_context(jax.disable_jit())
         # Mock get_tpu_info to return predictable values and allow CPU testing
         self.mock_get_tpu_info = self.enter_context(
             mock.patch("jax.experimental.pallas.tpu.get_tpu_info",
@@ -159,7 +162,7 @@ class FlashAttentionVmemEstimationTest(parameterized.TestCase):
         self.assertEqual(total_bytes_seg, base_bytes + 69632)
 
     def test_vmem_estimation_sequence_length_guard(self):
-        """Tests that long sequences (>2048) or sequences exceeding 32MB VMEM do not override block_k."""
+        """Tests that long sequences exceeding VMEM capacity do not override block_k."""
         block_sizes = BlockSizes.get_default(1, 16, 30976, 30976, 72)
 
         # Calculate VMEM for MMMU 30,976 visual tokens
@@ -171,8 +174,9 @@ class FlashAttentionVmemEstimationTest(parameterized.TestCase):
             kv_seq_len=30976,
         )
 
-        # 30,976 tokens require ~46MB, which exceeds the 32MB physical VMEM budget
-        self.assertGreater(total_bytes_30k, 32 * 1024 * 1024)
+        vmem_capacity = pltpu.get_tpu_info().vmem_capacity_bytes
+        # 30,976 tokens require ~46MB, which exceeds the physical VMEM budget
+        self.assertGreater(total_bytes_30k, vmem_capacity)
 
     def test_vmem_estimation_short_sequence_fits(self):
         """Tests that short sequences (e.g. 512, 1024) require well below 32MB VMEM."""
@@ -186,6 +190,60 @@ class FlashAttentionVmemEstimationTest(parameterized.TestCase):
         )
         # 1024 tokens require ~2MB, well within budget
         self.assertLess(total_bytes_1k, 5 * 1024 * 1024)
+
+    def test_dynamic_block_sizing_override_for_short_sequence(self):
+        """Verifies that short sequences override block_k to kv_seq_len when VMEM allows."""
+        q = jnp.zeros((1, 16, 1024, 64), dtype=jnp.bfloat16)
+        k = jnp.zeros((1, 16, 1024, 64), dtype=jnp.bfloat16)
+        v = jnp.zeros((1, 16, 1024, 64), dtype=jnp.bfloat16)
+
+        with mock.patch(
+                "tpu_inference.kernels.flash_attention.kernel._flash_attention"
+        ) as mock_flash:
+            flash_attention(q, k, v)
+            mock_flash.assert_called_once()
+            _, kwargs = mock_flash.call_args
+            # For 1024 tokens with d_model=64, estimated VMEM is ~2MB, well below 32MB * 0.9.
+            # Thus block_k and block_k_major should be overridden to 1024.
+            passed_block_sizes = kwargs.get(
+                "block_sizes") or mock_flash.call_args[0][8]
+            self.assertEqual(passed_block_sizes.block_k, 1024)
+            self.assertEqual(passed_block_sizes.block_k_major, 1024)
+
+    def test_dynamic_block_sizing_guard_for_large_sequence(self):
+        """Verifies that large sequences (e.g. 30k tokens) do NOT override block_k to prevent VMEM OOM."""
+        q = jnp.zeros((1, 16, 128, 72), dtype=jnp.bfloat16)
+        k = jnp.zeros((1, 16, 30976, 72), dtype=jnp.bfloat16)
+        v = jnp.zeros((1, 16, 30976, 72), dtype=jnp.bfloat16)
+
+        with mock.patch(
+                "tpu_inference.kernels.flash_attention.kernel._flash_attention"
+        ) as mock_flash:
+            flash_attention(q, k, v)
+            mock_flash.assert_called_once()
+            passed_block_sizes = mock_flash.call_args[0][8]
+            # 30,976 tokens require ~47.6MB, exceeding 32MB * 0.9 (28.8MB).
+            # BlockSizes should NOT override block_k to 30976; it must retain default block size (128).
+            self.assertNotEqual(passed_block_sizes.block_k, 30976)
+            self.assertEqual(passed_block_sizes.block_k, 128)
+
+    def test_dynamic_block_sizing_custom_vmem_limit(self):
+        """Verifies that an explicitly passed vmem_limit_bytes is strictly respected."""
+        q = jnp.zeros((1, 16, 128, 128), dtype=jnp.bfloat16)
+        k = jnp.zeros((1, 16, 4096, 128), dtype=jnp.bfloat16)
+        v = jnp.zeros((1, 16, 4096, 128), dtype=jnp.bfloat16)
+
+        # 4096 tokens with d_model=128 requires ~6.06MB.
+        # Under default 32MB limit (32 * 0.9 = 28.8MB), it fits and overrides block_k to 4096.
+        # But with a constrained 4MB limit (4 * 0.9 = 3.6MB), it exceeds the limit and does NOT override.
+        with mock.patch(
+                "tpu_inference.kernels.flash_attention.kernel._flash_attention"
+        ) as mock_flash:
+            flash_attention(q, k, v, vmem_limit_bytes=4 * 1024 * 1024)
+            mock_flash.assert_called_once()
+            passed_block_sizes = mock_flash.call_args[0][8]
+            self.assertNotEqual(passed_block_sizes.block_k, 4096)
+            self.assertEqual(passed_block_sizes.block_k, 128)
 
 
 if __name__ == "__main__":

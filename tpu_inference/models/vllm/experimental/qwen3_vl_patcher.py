@@ -47,6 +47,7 @@ import torch
 import torch.nn.functional as F
 import vllm.model_executor.models.qwen3_vl as qwen3_vl_mod
 import vllm.model_executor.models.utils as vllm_utils
+import vllm.v1.attention.ops.vit_attn_wrappers as vit_attn_wrappers
 from torch import nn
 from torchax.interop import jax_view, torch_view
 from vllm.multimodal import NestedTensors
@@ -61,29 +62,12 @@ from tpu_inference.logger import init_logger
 logger = init_logger(__name__)
 
 # Architectures considered part of the Qwen3-VL / Qwen3.5 family
-QWEN3_VL_ARCHS = set()
-
-try:
-    from vllm.model_executor.models.qwen3_vl import \
-        Qwen3VLForConditionalGeneration
-    QWEN3_VL_ARCHS.add(Qwen3VLForConditionalGeneration)
-except ImportError:
-    pass
-
-try:
-    from vllm.model_executor.models.qwen3_vl_moe import \
-        Qwen3VLMoeForConditionalGeneration
-    QWEN3_VL_ARCHS.add(Qwen3VLMoeForConditionalGeneration)
-except ImportError:
-    pass
-
-try:
-    from vllm.model_executor.models.qwen3_5 import (
-        Qwen3_5ForConditionalGeneration, Qwen3_5MoeForConditionalGeneration)
-    QWEN3_VL_ARCHS.add(Qwen3_5ForConditionalGeneration)
-    QWEN3_VL_ARCHS.add(Qwen3_5MoeForConditionalGeneration)
-except ImportError:
-    pass
+_SUPPORTED_QWEN_VL_ARCHS = frozenset({
+    "Qwen3VLForConditionalGeneration",
+    "Qwen3VLMoeForConditionalGeneration",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+})
 
 LARGE_ATTN_ELEMENT_THRESHOLD = 40 * 1024 * 1024  # 40M elements (~160MB in float32)
 
@@ -496,18 +480,21 @@ def _patched_flatten_embeddings(embeddings: NestedTensors) -> torch.Tensor:
     return torch.cat(tuple(_patched_flatten_embeddings(t) for t in embeddings))
 
 
-def apply_qwen3_vl_patches(vllm_model):
+def apply_qwen3_vl_patches(vllm_model: nn.Module):
     """Apply Qwen3-VL specific patches for stateless Deepstack support and Vision Flash Attention."""
-    # Patch SDPA specifically in ViT attention wrappers and Qwen vision modules
-    # to redirect large sequence video attention to encoder_only_flash_attention.
-    try:
-        from vllm.v1.attention.ops import vit_attn_wrappers
-        vit_attn_wrappers.F.scaled_dot_product_attention = _flash_attn_sdpa
-    except (ImportError, AttributeError):
-        pass
+    # Idempotency guard: prevent repeatedly wrapping vllm_model methods
+    # (such as forward and embed_input_ids) if patches are invoked multiple times.
+    if getattr(vllm_model, "_qwen3_vl_patches_applied", False):
+        return
+    vllm_model._qwen3_vl_patches_applied = True
 
+    # Patch SDPA in Qwen vision module and ViT attention wrappers to redirect
+    # large sequence video attention to encoder_only_flash_attention without
+    # materializing dense O(S^2) attention matrices.
     if hasattr(qwen3_vl_mod, "F"):
         qwen3_vl_mod.F.scaled_dot_product_attention = _flash_attn_sdpa
+    if hasattr(vit_attn_wrappers, "F"):
+        vit_attn_wrappers.F.scaled_dot_product_attention = _flash_attn_sdpa
 
     if not getattr(vllm_model, "use_deepstack", False):
         return
@@ -565,9 +552,12 @@ def apply_qwen3_vl_patches(vllm_model):
         )
 
 
-def is_qwen3_vl(vllm_model) -> bool:
-    """Check if the given vLLM model is of architecture Qwen3VL or Qwen3.5."""
-    return any(isinstance(vllm_model, arch) for arch in QWEN3_VL_ARCHS)
+def is_qwen3_vl(vllm_model: nn.Module) -> bool:
+    """Check if the given vLLM model is of architecture Qwen3-VL or Qwen3.5."""
+    architectures = (getattr(getattr(vllm_model, "config", None),
+                             "architectures", ()) or ())
+    return (any(arch in _SUPPORTED_QWEN_VL_ARCHS for arch in architectures)
+            or vllm_model.__class__.__name__ in _SUPPORTED_QWEN_VL_ARCHS)
 
 
 def maybe_apply_qwen3_vl_patches(vllm_model: nn.Module) -> None:
