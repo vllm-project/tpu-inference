@@ -147,6 +147,10 @@ def get_padded_num_reqs_with_upper_limit(x: int, upper_limit: int) -> int:
 
 
 def get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
+    # Gang-symmetric dispatch: a single max bucket so every process pads request
+    # counts identically (see tpu_inference.envs.GANG_SYMMETRIC_DISPATCH).
+    if envs.GANG_SYMMETRIC_DISPATCH:
+        return [int(max_req_size)]
     # assert min_req_size is power of 2
     assert (min_req_size & (min_req_size - 1) == 0) and min_req_size > 0
     paddings: list = []
@@ -160,6 +164,9 @@ def get_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
 
 def get_attn_req_paddings(min_req_size: int, max_req_size: int) -> list[int]:
     """Get num reqs paddings with custom override to reduce compilation time"""
+    if envs.GANG_SYMMETRIC_DISPATCH:
+        # Single max bucket for gang-symmetric dispatch.
+        return [max_req_size]
     if not envs.ATTN_BUCKETIZED_NUM_REQS:
         reqs = [max_req_size]
     elif envs.ATTN_CUSTOM_NUM_REQS_BUCKETS:
@@ -189,6 +196,10 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
         first increase the size to twice,
         then increase the padding size by padding_gap.
     """
+    # Gang-symmetric dispatch: a single max bucket so every process pads token
+    # counts identically (see tpu_inference.envs.GANG_SYMMETRIC_DISPATCH).
+    if envs.GANG_SYMMETRIC_DISPATCH:
+        return [int(max_token_size)]
     # assert min_token_size is power of 2
     assert (min_token_size & (min_token_size - 1) == 0) and min_token_size > 0
     paddings = []
