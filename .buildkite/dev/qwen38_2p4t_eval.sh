@@ -57,9 +57,12 @@ mkdir -p "${ART}" "${DATA}"
 # the next run can say whether that was enough.
 #
 # Concurrency is per-eval because the KV pool, not the request count, is the
-# binding constraint: 660 blocks x 128 = 84480 tokens total, so a longer output
-# budget has to buy itself a smaller batch. See the kv-fit call in
-# run_serving_eval, which checks the arithmetic against the live pool.
+# binding constraint: a longer output budget has to buy itself a smaller batch.
+# The defaults below are sized against the 660-block pool that hybrid sizing
+# used to produce (660 x 128 = 84480 tokens); with mamba-aware block sizing the
+# pool is ~23x that, and the binding constraint becomes max_num_reqs instead.
+# Either way the kv-fit call in run_serving_eval checks the arithmetic against
+# the live pool rather than against this comment.
 GPQA_N="${GPQA_NUM_PROMPTS:-198}"        # the whole of GPQA-Diamond
 GPQA_OUT="${GPQA_OUTPUT_LEN:-6144}"
 GPQA_CONC="${GPQA_CONCURRENCY:-10}"      # 10 x 56 blocks = 560 of 660 (85%)
@@ -73,6 +76,12 @@ GSM8K_TIMEOUT="${GSM8K_TIMEOUT_S:-3600}"
 # GSM8K only: short completions over the raw endpoint, so it fits a wider batch.
 EVAL_CONCURRENCY="${EVAL_CONCURRENCY:-24}"
 REASONING_EFFORT="${EVAL_REASONING_EFFORT:-low}"
+
+# Which evals to run, comma-separated. Isolating one variable -- reasoning
+# effort, sampling, a KV sizing change -- wants a single leg, not all three:
+# the other two cost slice time without informing the comparison.
+EVAL_SUITE="${EVAL_SUITE:-gpqa,gsm8k,mmlu}"
+wants() { [[ ",${EVAL_SUITE}," == *",$1,"* ]]; }
 SYS_PROMPT="${EVAL_SYSTEM_PROMPT:-Answer with only the letter in parentheses, e.g. (A).}"
 
 STATUS_JSON="${ART}/eval_summary.json"
@@ -221,9 +230,11 @@ PY
 
 cd "${BENCH_DIR}" || exit 1
 
+if wants gpqa; then
 run_serving_eval gpqa "${GPQA_PATH}" "${GPQA_N}" "${GPQA_TIMEOUT}" \
   "${GPQA_CONC}" "${GPQA_OUT}" \
   --gpqa-use-chat-template --gpqa-output-len "${GPQA_OUT}"
+fi
 
 # ---------------------------------------------------------------------------
 # GSM8K, via lm_eval against the same server.
@@ -244,6 +255,7 @@ run_serving_eval gpqa "${GPQA_PATH}" "${GPQA_N}" "${GPQA_TIMEOUT}" \
 # whatever lm_eval version the image has, fall back to the stock task rather
 # than lose the eval.
 # ---------------------------------------------------------------------------
+if wants gsm8k; then
 echo "--- gsm8k (lm_eval local-completions, 8-shot CoT)"
 GSM8K_TASK="gsm8k_cot"
 INCLUDE_DIR="${DATA}/lm_eval_tasks"
@@ -329,12 +341,15 @@ else
   record gsm8k "ok" "${secs}" "flexible-extract=${flex:-?} strict-match=${strict:-?}"
 fi
 fi
+fi
 
 # MMLU last: the longest of the three, and the one whose partial loss costs
 # least because the other two have already landed.
+if wants mmlu; then
 run_serving_eval mmlu "${MMLU_PATH}" "${MMLU_N}" "${MMLU_TIMEOUT}" \
   "${MMLU_CONC}" "${MMLU_OUT}" \
   --mmlu-use-chat-template --mmlu-output-len "${MMLU_OUT}" --mmlu-num-shots 0
+fi
 
 echo "--- eval summary"
 cat "${STATUS_JSON}"; echo

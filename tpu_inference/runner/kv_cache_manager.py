@@ -798,7 +798,8 @@ class KVCacheManager:
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             if duplicate_shared_layers:
-                total_group_page_size = 0
+                attn_group_page_size = 0
+                mamba_group_page_size = 0
                 for name in kv_cache_tensor.shared_by:
                     spec = layer_name_to_spec[name]
                     # Use the per-layer *TPU-actual* per-block bytes so the
@@ -811,14 +812,67 @@ class KVCacheManager:
                     # doesn't account for — on fp8 models they differ by
                     # 2×, which would break the num_blocks match here.
                     if isinstance(spec, MambaSpec):
-                        total_group_page_size += dataclasses.replace(
+                        mamba_group_page_size += dataclasses.replace(
                             spec, page_size_padded=None).page_size_bytes
                     else:
-                        total_group_page_size += get_attention_page_size_bytes(
+                        attn_group_page_size += get_attention_page_size_bytes(
                             self.runner.mesh, spec.block_size,
                             spec.num_kv_heads, spec.head_size, spec.dtype,
                             self.use_mla)
-                num_blocks = kv_cache_tensor.size // total_group_page_size
+                total_group_page_size = (attn_group_page_size +
+                                         mamba_group_page_size)
+
+                # `total_group_page_size` prices *every* block at one attention
+                # page plus N mamba pages, i.e. it assumes mamba takes one slot
+                # per block. `_maybe_set_compact_mamba_num_blocks_override`
+                # breaks exactly that assumption -- when it succeeds, the mamba
+                # layers below allocate a flat `_mamba_num_blocks` slots
+                # (max_num_reqs + 1) no matter how many attention blocks there
+                # are. Dividing by the combined page size then charges the
+                # attention pool for mamba capacity that is never allocated,
+                # and the difference is simply left unused: on Qwen3.5-style
+                # 2.4T (23 groups of 1 attn + 3 mamba, 66 mamba slots) it costs
+                # a factor of 23, and ~325 GiB of the 377 GiB budget goes idle.
+                #
+                # So when mamba is compacted, subtract its real footprint from
+                # the tensor and give the remainder to attention. Both branches
+                # stay bounded by the physical tensor size; the
+                # `num_gpu_blocks_override` clamp below is still the backstop,
+                # and the two should now agree to within rounding.
+                if (self._mamba_num_blocks is not None
+                        and attn_group_page_size > 0):
+                    mamba_bytes = (self._mamba_num_blocks *
+                                   mamba_group_page_size)
+                    attn_bytes_avail = kv_cache_tensor.size - mamba_bytes
+                    if attn_bytes_avail > 0:
+                        num_blocks = attn_bytes_avail // attn_group_page_size
+                    else:
+                        # Mamba alone overruns the tensor. Should be impossible
+                        # -- the override path already refuses to set
+                        # `_mamba_num_blocks` in that case -- but fall back to
+                        # the conservative combined-page sizing rather than
+                        # hand a negative block count to the allocator.
+                        logger.warning(
+                            "Compact-mamba block sizing fell back: mamba "
+                            "(%d slots × %d B = %d B) exceeds tensor size %d B.",
+                            self._mamba_num_blocks, mamba_group_page_size,
+                            mamba_bytes, kv_cache_tensor.size)
+                        num_blocks = (kv_cache_tensor.size //
+                                      total_group_page_size)
+                else:
+                    num_blocks = (kv_cache_tensor.size //
+                                  total_group_page_size)
+
+                if i == 0:
+                    logger.info(
+                        "Hybrid KV block sizing: tensor=%d B, attn_page=%d B, "
+                        "mamba_page=%d B (×%d slots when compacted), "
+                        "combined_page=%d B -> num_blocks=%d "
+                        "(uniform sizing would give %d).",
+                        kv_cache_tensor.size, attn_group_page_size,
+                        mamba_group_page_size, self._mamba_num_blocks or 0,
+                        total_group_page_size, num_blocks,
+                        kv_cache_tensor.size // total_group_page_size)
             elif kv_cache_tensor.block_stride:
                 # DeepseekV4 packed layout: vLLM overlays every cache
                 # (main MLA latent + indexer k_cache + compressor state +

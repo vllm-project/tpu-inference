@@ -169,7 +169,7 @@ steps:
           'TPU_WEIGHT_LOAD_PROFILE_EVERY=10000' \
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=2' \
-          'MAX_MODEL_LEN=12288' \
+          'MAX_MODEL_LEN=40960' \
           'MAX_NUM_SEQS=32' \
           'MAX_NUM_BATCHED_TOKENS=2048' \
           'GPU_MEMORY_UTILIZATION=0.92' \
@@ -180,6 +180,11 @@ steps:
           'NUM_PROMPTS=128' \
           'MAX_CONCURRENCY=8' \
           'NUM_WARMUPS=32' \
+          'EVAL_SUITE=gpqa' \
+          'EVAL_REASONING_EFFORT=xhigh' \
+          'GPQA_OUTPUT_LEN=32768' \
+          'GPQA_CONCURRENCY=32' \
+          'GPQA_TIMEOUT_S=14400' \
           "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
           "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
           $$CACHE_ENV \
