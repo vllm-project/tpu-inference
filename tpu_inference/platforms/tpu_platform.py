@@ -25,28 +25,19 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
 
     torch.accelerator.empty_cache = _patched_empty_cache
 
-# Monkeypatch torch.accelerator.get_memory_info to answer from the JAX device.
+# Monkeypatch torch.accelerator.get_memory_info to answer from the JAX devices.
 # torchax registers "jax" as a PrivateUse1 device, and torch.accelerator's memory
 # APIs resolve the device via torch._C._accelerator_getDeviceIndex(), which
 # raises "PyTorch is not linked with support for jax devices". vLLM model code
 # on the torchax path calls get_memory_info() to size work by free HBM (e.g.
 # Gemma4ForConditionalGeneration._process_image_input chunks the vision
 # encoder by it), and an unhandled raise there kills the EngineCore mid-request.
+# Delegate to TpuPlatform.mem_get_info() so the numbers stay SPMD-aggregated
+# across local devices, matching the global tensor dimensions the budget math
+# is expressed in.
 if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
                                              "get_memory_info"):
     _orig_get_memory_info = torch.accelerator.get_memory_info
-
-    def _jax_device_memory_info() -> Tuple[int, int]:
-        """(free_bytes, total_bytes) of the first local JAX device.
-
-        Falls back to (0, 0) when the backend exposes no memory stats; callers
-        that derive a budget from it then take their minimum-work path instead
-        of crashing.
-        """
-        stats = jax.local_devices()[0].memory_stats() or {}
-        total = int(stats.get("bytes_limit", 0))
-        in_use = int(stats.get("bytes_in_use", 0))
-        return max(total - in_use, 0), total
 
     def _patched_get_memory_info(*args, **kwargs) -> Tuple[int, int]:
         try:
@@ -54,7 +45,19 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
         except RuntimeError as e:
             if "jax" not in str(e):
                 raise
-            return _jax_device_memory_info()
+            try:
+                return TpuPlatform.mem_get_info()
+            except AttributeError:
+                # Backend exposes no memory stats; callers that derive a budget
+                # from this take their minimum-work path instead of crashing.
+                # `logger` is resolved from module globals at call time, so it
+                # is defined by the time any caller reaches this branch.
+                logger.warning(
+                    "JAX backend exposes no memory stats; reporting 0 bytes "
+                    "free/total from torch.accelerator.get_memory_info(). "
+                    "Callers that size work by free HBM will fall back to "
+                    "their minimum-work path, which may hurt performance.")
+                return 0, 0
 
     torch.accelerator.get_memory_info = _patched_get_memory_info
 
