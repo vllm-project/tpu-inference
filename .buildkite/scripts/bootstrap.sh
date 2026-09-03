@@ -111,6 +111,14 @@ if [ "$BUILDKITE_PULL_REQUEST" != "false" ]; then
       exit 1
     fi
 
+    # Validate YAML custom step outcomes
+    if python3 .buildkite/scripts/validate_step_outcomes.py; then
+      echo "All step outcomes validation passed."
+    else
+      echo "+++ ❌ Step outcomes validation failed. Failing build."
+      exit 1
+    fi
+
     MODEL_FILES="add_model_to_ci\.py|tpu_optimized_model_template\.yml|vllm_native_model_template\.yml"
     FEATURE_FILES="add_feature_to_ci\.py|feature_template\.yml|parallelism_template\.yml"
 
