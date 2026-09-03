@@ -13,6 +13,7 @@
 # limitations under the License.
 import dataclasses
 import os
+from enum import IntEnum
 from typing import TYPE_CHECKING, List
 
 import jax
@@ -61,6 +62,16 @@ logger = init_logger(__name__)
 # default layout (order) used by kv cache manager
 # N=num_blocks, H=num_heads and D=head_size
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
+
+
+class MambaCheckpointBudgetMultiplier(IntEnum):
+    """Multiplier for the default Mamba prefix cache checkpoint budget.
+
+    Under align mode, Mamba prefix caching uses a decoupled block pool with a
+    checkpoint budget for cached prefix states:
+        checkpoint_budget = max_num_reqs * MambaCheckpointBudgetMultiplier.DEFAULT
+    """
+    DEFAULT = 2
 
 
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
@@ -348,7 +359,8 @@ class KVCacheManager:
         cache_config = self.runner.cache_config
         is_align_mode = (getattr(cache_config, "mamba_cache_mode",
                                  "none") == "align")
-        if cache_config.num_gpu_blocks_override is not None and not is_align_mode:
+        user_pinned_override = cache_config.num_gpu_blocks_override is not None
+        if user_pinned_override and not is_align_mode:
             return
 
         devices = self.runner.mesh.devices.flatten()
@@ -406,8 +418,9 @@ class KVCacheManager:
             checkpoint_budget = (self.runner.vllm_config.additional_config.get(
                 "mamba_cache_checkpoint_budget", None))
             if checkpoint_budget is None:
-                # Default checkpoint budget scales with concurrency (8x max_num_reqs)
-                checkpoint_budget = self.runner.max_num_reqs * 8
+                # Default checkpoint budget scales with concurrency
+                checkpoint_budget = (self.runner.max_num_reqs *
+                                     MambaCheckpointBudgetMultiplier.DEFAULT)
             else:
                 checkpoint_budget = int(checkpoint_budget)
             mamba_num_blocks = active_mamba_blocks + checkpoint_budget
@@ -417,15 +430,13 @@ class KVCacheManager:
         mamba_num_blocks = (
             (mamba_num_blocks + divisor - 1) // divisor) * divisor
 
-        if cache_config.num_gpu_blocks_override is not None:
+        if user_pinned_override:
             # Respect user-pinned attention override, but still register decoupled mamba pool
             self._mamba_num_blocks = int(mamba_num_blocks)
             cache_config.mamba_num_blocks = int(mamba_num_blocks)
-            from tpu_inference.core.hybrid_coordinator import (
-                install_hybrid_coordinator_hooks, set_mamba_num_blocks)
+            from tpu_inference.core.hybrid_coordinator import \
+                set_mamba_num_blocks
             set_mamba_num_blocks(int(mamba_num_blocks))
-            if cache_config.enable_prefix_caching:
-                install_hybrid_coordinator_hooks(self.runner.vllm_config)
             return
 
         # Attention block count: fits into HBM left after mamba.
@@ -475,11 +486,8 @@ class KVCacheManager:
         cache_config.num_gpu_blocks_override = int(attn_num_blocks)
         self._mamba_num_blocks = int(mamba_num_blocks)
         cache_config.mamba_num_blocks = int(mamba_num_blocks)
-        from tpu_inference.core.hybrid_coordinator import (
-            install_hybrid_coordinator_hooks, set_mamba_num_blocks)
+        from tpu_inference.core.hybrid_coordinator import set_mamba_num_blocks
         set_mamba_num_blocks(int(mamba_num_blocks))
-        if cache_config.enable_prefix_caching:
-            install_hybrid_coordinator_hooks(self.runner.vllm_config)
 
         attn_bytes = num_attn_layers * attn_num_blocks * attn_page_size_bytes
         mamba_bytes = (num_mamba_layers * mamba_num_blocks *

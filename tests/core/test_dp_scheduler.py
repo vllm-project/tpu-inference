@@ -137,7 +137,7 @@ class TestDPScheduler:
         mock_structured_output_manager,
     ):
         """Test that mamba_num_blocks is partitioned per DP rank."""
-        mock_kv_cache_config.mamba_num_blocks = 60
+        mock_vllm_config.cache_config.mamba_num_blocks = 60
         scheduler = self._create_scheduler(
             mock_vllm_config,
             mock_kv_cache_config,

@@ -1289,9 +1289,10 @@ class TestKVCacheManager:
             self):
         """In align mode (prefix caching enabled), compact-mamba allocates
         active slots (max_num_reqs + 1) plus a checkpoint budget (default
-        max(max_num_reqs * 3, 1536)) for Mamba, and sizes the Attention pool
+        2x max_num_reqs) for Mamba, and sizes the Attention pool
         from the remaining HBM."""
-        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        from tpu_inference.runner.kv_cache_manager import (
+            KVCacheManager, MambaCheckpointBudgetMultiplier)
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
 
@@ -1313,7 +1314,7 @@ class TestKVCacheManager:
                                              attn_page=attn_page,
                                              unpadded_mamba=unpadded_mamba)
 
-        expected_mamba = 257 + 256 * 8
+        expected_mamba = (257 + 256 * MambaCheckpointBudgetMultiplier.DEFAULT)
         assert manager._mamba_num_blocks == expected_mamba
         assert self.runner.cache_config.mamba_num_blocks == expected_mamba
 
