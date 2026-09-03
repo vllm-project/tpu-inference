@@ -62,12 +62,17 @@ class QuantLinearConfig:
         if defer_all_reduce:
             self.set_defer_all_reduce(True)
 
-        self.bias_sharding = P(self.weight_sharding[1])
+        # The output (free) axis is reliably output_sharding[1] — a 2D
+        # P(tokens, out_axis) — and equals weight_sharding[1] for a plain 2D
+        # matmul; a batched einsum weight can be a bare/ND spec (P()), so read
+        # the bias/n_shards axis from output_sharding instead.
+        out_feature_axis = self.output_sharding[1]
+        self.bias_sharding = P(out_feature_axis)
         # n_shards is always the TP degree for the weight's output axis, derived
         # from the active mesh.  get_mesh_shape_product returns 1 when the axis
         # is None or absent from the mesh, so no explicit fallback is needed.
         self.n_shards = get_mesh_shape_product(
-            jax.sharding.get_abstract_mesh(), self.weight_sharding[1])
+            jax.sharding.get_abstract_mesh(), out_feature_axis)
         self.enable_quantized_matmul_kernel = envs.ENABLE_QUANTIZED_MATMUL_KERNEL
         self.requant_block_size = envs.REQUANTIZE_BLOCK_SIZE
         self.requant_weight_dtype = to_jax_dtype(envs.REQUANTIZE_WEIGHT_DTYPE)

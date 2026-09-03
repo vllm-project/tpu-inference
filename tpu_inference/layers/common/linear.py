@@ -205,6 +205,13 @@ def sharded_quantized_matmul(x: jax.Array,
     else:
         weight_spec = weight_sharding
 
+    # Support arbitrary-rank activations (e.g. batched [T, N, H]) by padding the
+    # 2D input/output specs with replicated batch dims, mirroring sharded_matmul.
+    batch_dims = (None, ) * (x.ndim - 2)
+    input_sharding = P(input_sharding[0], *batch_dims, input_sharding[-1])
+    output_sharding = P(*output_sharding[:-1], *batch_dims,
+                        output_sharding[-1])
+
     # NOTE (jacobplatin/kyuyeunk) there have been numeric issues (concerning) NaNs
     # with the kernel and thus we disable it for now.
     in_axis, out_axis = weight_spec
