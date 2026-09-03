@@ -26,7 +26,7 @@ steps:
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
-    timeout_in_minutes: 480
+    timeout_in_minutes: 660
     env:
       TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
       MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
@@ -40,7 +40,13 @@ steps:
       # bound a pathological run, and a load regression is far more useful as a
       # slow progress tail than as a killed job. timeout_in_minutes above has to
       # exceed it or Buildkite kills the job first.
-      VLLM_ENGINE_READY_TIMEOUT_S: "18000"
+      # Raised 5h -> 10h for the xhigh eval leg. Measured on #959: at
+      # reasoning_effort=xhigh, GPQA requests retire at ~122s each at conc 32,
+      # i.e. ~3900s of latency per request, because most of them run the 32768
+      # output cap to exhaustion rather than stopping on EOS. 198 of those is
+      # ~6.7h, against the ~35 min the low-effort run took. This budget covers
+      # serve for the whole job, not just bring-up, so it has to span the evals.
+      VLLM_ENGINE_READY_TIMEOUT_S: "36000"
       # Tail /root/vllm_serve.log into the Buildkite log every 60s while waiting
       # for /health. Read by wait_for_server in run_multihost.sh (on the host,
       # not inside the container, so it belongs here and not in
@@ -184,7 +190,7 @@ steps:
           'EVAL_REASONING_EFFORT=xhigh' \
           'GPQA_OUTPUT_LEN=32768' \
           'GPQA_CONCURRENCY=32' \
-          'GPQA_TIMEOUT_S=14400' \
+          'GPQA_TIMEOUT_S=28800' \
           "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
           "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
           $$CACHE_ENV \

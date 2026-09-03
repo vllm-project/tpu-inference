@@ -63,6 +63,14 @@ mkdir -p "${ART}" "${DATA}"
 # pool is ~23x that, and the binding constraint becomes max_num_reqs instead.
 # Either way the kv-fit call in run_serving_eval checks the arithmetic against
 # the live pool rather than against this comment.
+# benchmark_serving's warmup loop is *serial* -- it awaits each warmup request
+# one at a time -- so its cost scales with the output cap, not with concurrency.
+# At out=32768 that cost 38 min of an eval leg (#959) and is unbounded in the
+# worst case: 8 samples x a 32k generation. The server has already served 128
+# perf-leg requests plus the smoke test by the time evals run, so this warmup
+# buys nothing but a shape that JAX has mostly bucketed already. Default it off
+# and let the first few eval requests absorb any residual compile.
+EVAL_WARMUP_MODE="${EVAL_WARMUP_MODE:-none}"
 GPQA_N="${GPQA_NUM_PROMPTS:-198}"        # the whole of GPQA-Diamond
 GPQA_OUT="${GPQA_OUTPUT_LEN:-6144}"
 GPQA_CONC="${GPQA_CONCURRENCY:-10}"      # 10 x 56 blocks = 560 of 660 (85%)
@@ -198,6 +206,7 @@ run_serving_eval() {  # name path num-prompts timeout concurrency out-len extra.
     --chat-template-system-prompt "${SYS_PROMPT}" \
     --chat-template-kwargs "{\"reasoning_effort\": \"${REASONING_EFFORT}\"}" \
     --run-eval \
+    --warmup-mode "${EVAL_WARMUP_MODE}" \
     "$@" 2>&1 | tee "${ART}/eval_${name}.log"
   rc=${PIPESTATUS[0]}
   secs=$((SECONDS - t0))
