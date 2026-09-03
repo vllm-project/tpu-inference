@@ -54,11 +54,15 @@ COPY . .
 RUN python3 -m pip install build
 RUN python3 -m build
 
+# Install rustup for vLLM rust frontend
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Build vllm-tpu wheel
 WORKDIR /workspace
 ARG VLLM_COMMIT_HASH
 RUN VLLM_TPU_VERSION=$(date -u +%Y%m%d) && \
-    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
+    VLLM_REQUIRE_RUST_FRONTEND=1 bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
 
 # Install vllm-tpu wheel
 RUN pip install --no-cache-dir vllm/dist/*.whl

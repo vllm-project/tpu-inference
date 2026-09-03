@@ -61,9 +61,13 @@ RUN git clone $VLLM_REPO . && \
         git checkout $VLLM_COMMIT_HASH; \
     fi
 
+# Install Rust toolchain for vLLM Rust frontend
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 RUN --mount=type=cache,target=/root/.cache/pip pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements/tpu.txt --retries 3
 RUN --mount=type=cache,target=/root/.cache/pip pip install setuptools-rust>=1.9.0
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
+RUN --mount=type=cache,target=/root/.cache/pip VLLM_REQUIRE_RUST_FRONTEND=1 VLLM_TARGET_DEVICE="tpu" pip install --no-build-isolation -e .
 
 # Install test dependencies
 RUN --mount=type=cache,target=/root/.cache/pip python3 -m pip install -e tests/vllm_test_utils

@@ -128,6 +128,7 @@ fi
 echo "Ensuring 'build' package is installed..."
 pip install build
 echo "Executing the vLLM TPU build script..."
+export VLLM_REQUIRE_RUST_FRONTEND=1
 bash tools/vllm-tpu/build.sh "${VLLM_TPU_VERSION}"
 
 echo "--- Build complete! ---"
