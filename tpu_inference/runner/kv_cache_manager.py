@@ -448,12 +448,17 @@ class KVCacheManager:
                             unpadded_mamba_page_size_bytes)
         attn_per_tensor_avail = avail_per_tensor - mamba_per_tensor
         if attn_per_tensor_avail <= 0 and is_align_mode:
-            # If checkpoint budget is too large for this hardware's HBM,
-            # scale it down so at least 50% of the budget is reserved for Attention
+            # Scale down checkpoint budget if it starves Attention
             mamba_slot_cost = num_mamba_groups * unpadded_mamba_page_size_bytes
             max_mamba_blocks = (avail_per_tensor // 2) // mamba_slot_cost
-            if max_mamba_blocks > active_mamba_blocks:
-                mamba_num_blocks = ((max_mamba_blocks // divisor) * divisor)
+            # Lower bound must be ceiling-aligned so it is never < active_mamba_blocks
+            min_mamba_blocks = (
+                (active_mamba_blocks + divisor - 1) // divisor) * divisor
+            # Upper bound target is floor-aligned to stay within 50% budget
+            target_mamba = (max_mamba_blocks // divisor) * divisor
+            clamped_mamba = max(min_mamba_blocks, target_mamba)
+            if clamped_mamba < mamba_num_blocks:
+                mamba_num_blocks = clamped_mamba
                 mamba_per_tensor = mamba_num_blocks * mamba_slot_cost
                 attn_per_tensor_avail = avail_per_tensor - mamba_per_tensor
 

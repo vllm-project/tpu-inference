@@ -1361,6 +1361,46 @@ class TestKVCacheManager:
         assert (
             self.runner.cache_config.num_gpu_blocks_override == expected_attn)
 
+    def test_compact_mamba_override_in_align_mode_tight_hbm_clamps_gracefully(
+            self):
+        """In tight HBM where 50% budget <= active_mamba_blocks, checkpoint
+        budget shrinks to 0 (clamped to active_mamba_blocks) rather than
+        aborting compact sizing."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        # Set avail_per_tensor = 600 MiB (total avail = 600 * 15 = 9000 MiB across 4 devices)
+        avail_per_device = (600 * (2**20) * 15) // 4
+        attn_page = 2**20  # 1 MiB
+        unpadded_mamba = 2 * (2**20)  # 2 MiB
+        max_num_reqs = 64  # active_mamba_blocks = 65, default budget = 128 -> unclamped = 193
+        # mamba_slot_cost = 3 * 2 MiB = 6 MiB
+        # 50% HBM = 300 MiB -> max_mamba_blocks = 50 (< active_mamba_blocks=65)
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        # Clamped to active_mamba_blocks (65) rather than aborting to uniform layout
+        expected_mamba = 65
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_mamba
+
+        avail_per_tensor = 600 * (2**20)
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert self.runner.cache_config.num_gpu_blocks_override == expected_attn
+
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)
         layers = {'layer.0': mock_attn}

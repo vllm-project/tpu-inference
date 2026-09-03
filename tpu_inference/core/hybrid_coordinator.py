@@ -132,6 +132,11 @@ class TPUDualBlockPool(BlockPool):
         )
 
     def evict_blocks(self, block_ids: set[int]) -> None:
+        """Evict invalid blocks from cache on KV transfer failures.
+
+        Note: Block IDs are assumed to belong to attention_pool, as external
+        KV transfer load failures only apply to Attention KV cache.
+        """
         attn_ids = {
             bid
             for bid in block_ids if bid < len(self.attention_pool.blocks)
@@ -142,11 +147,15 @@ class TPUDualBlockPool(BlockPool):
     def get_cached_block(
             self, block_hash: BlockHash,
             kv_cache_group_ids: list[int]) -> list[KVCacheBlock] | None:
-        if any(gid in self.mamba_group_ids for gid in kv_cache_group_ids):
-            return self.mamba_pool.get_cached_block(block_hash,
-                                                    kv_cache_group_ids)
-        return self.attention_pool.get_cached_block(block_hash,
-                                                    kv_cache_group_ids)
+        cached_blocks: list[KVCacheBlock] = []
+        for gid in kv_cache_group_ids:
+            pool = (self.mamba_pool
+                    if gid in self.mamba_group_ids else self.attention_pool)
+            block = pool.get_cached_block(block_hash, [gid])
+            if not block:
+                return None
+            cached_blocks.extend(block)
+        return cached_blocks
 
 
 class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):

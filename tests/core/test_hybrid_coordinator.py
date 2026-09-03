@@ -96,6 +96,59 @@ class TestTPUDualBlockPool:
 
         assert dual_pool.reset_prefix_cache() is True
 
+    def test_get_cached_block_multi_group(self):
+        pool_attn = BlockPool(num_gpu_blocks=100,
+                              enable_caching=True,
+                              hash_block_size=16)
+        pool_mamba = BlockPool(num_gpu_blocks=20,
+                               enable_caching=True,
+                               hash_block_size=16)
+        dual_pool = TPUDualBlockPool(pool_attn,
+                                     pool_mamba,
+                                     mamba_group_ids={1})
+
+        pool_attn.get_cached_block = MagicMock()
+        pool_mamba.get_cached_block = MagicMock()
+
+        blk_attn = MagicMock()
+        blk_mamba = MagicMock()
+
+        # Both hit
+        pool_attn.get_cached_block.return_value = [blk_attn]
+        pool_mamba.get_cached_block.return_value = [blk_mamba]
+
+        res = dual_pool.get_cached_block("hash1", [0, 1])
+        assert res == [blk_attn, blk_mamba]
+        pool_attn.get_cached_block.assert_called_with("hash1", [0])
+        pool_mamba.get_cached_block.assert_called_with("hash1", [1])
+
+        # Miss on mamba
+        pool_mamba.get_cached_block.return_value = None
+        assert dual_pool.get_cached_block("hash2", [0, 1]) is None
+
+        # Miss on attn
+        pool_attn.get_cached_block.return_value = None
+        pool_mamba.get_cached_block.return_value = [blk_mamba]
+        assert dual_pool.get_cached_block("hash3", [0, 1]) is None
+
+    def test_evict_blocks_targets_attention_pool_only(self):
+        pool_attn = BlockPool(num_gpu_blocks=100,
+                              enable_caching=True,
+                              hash_block_size=16)
+        pool_mamba = BlockPool(num_gpu_blocks=20,
+                               enable_caching=True,
+                               hash_block_size=16)
+        dual_pool = TPUDualBlockPool(pool_attn,
+                                     pool_mamba,
+                                     mamba_group_ids={1})
+
+        pool_attn.evict_blocks = MagicMock()
+        pool_mamba.evict_blocks = MagicMock()
+
+        dual_pool.evict_blocks({5, 20, 200})
+        pool_attn.evict_blocks.assert_called_once_with({5, 20})
+        pool_mamba.evict_blocks.assert_not_called()
+
 
 class TestTPUHybridKVCacheCoordinator:
 

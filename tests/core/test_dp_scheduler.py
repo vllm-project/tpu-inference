@@ -137,7 +137,7 @@ class TestDPScheduler:
         mock_structured_output_manager,
     ):
         """Test that mamba_num_blocks is partitioned per DP rank."""
-        mock_vllm_config.cache_config.mamba_num_blocks = 60
+        mock_kv_cache_config.mamba_num_blocks = 60
         scheduler = self._create_scheduler(
             mock_vllm_config,
             mock_kv_cache_config,
@@ -147,6 +147,24 @@ class TestDPScheduler:
         for rank_config in scheduler.per_rank_kv_cache_configs:
             assert rank_config.num_blocks == 50
             assert rank_config.mamba_num_blocks == 30
+
+    def test_init_without_mamba_num_blocks_on_kv_cache_config(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Test that mamba_num_blocks on cache_config is ignored if not on kv_cache_config."""
+        mock_vllm_config.cache_config.mamba_num_blocks = 60
+        scheduler = self._create_scheduler(
+            mock_vllm_config,
+            mock_kv_cache_config,
+            mock_structured_output_manager,
+        )
+        assert len(scheduler.per_rank_kv_cache_configs) == 2
+        for rank_config in scheduler.per_rank_kv_cache_configs:
+            assert rank_config.num_blocks == 50
+            assert getattr(rank_config, "mamba_num_blocks", None) is None
 
     def test_init_with_prefix_caching_enabled(
         self,

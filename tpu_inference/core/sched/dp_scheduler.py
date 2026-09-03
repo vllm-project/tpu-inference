@@ -161,11 +161,9 @@ def _scheduler_worker_process(
     gc.enable()
     cache_config = getattr(vllm_config, "cache_config", None)
     if getattr(cache_config, "mamba_cache_mode", "none") == "align":
-        from tpu_inference.core.hybrid_coordinator import (
-            install_hybrid_coordinator_hooks, set_mamba_num_blocks)
+        from tpu_inference.core.hybrid_coordinator import \
+            install_hybrid_coordinator_hooks
         install_hybrid_coordinator_hooks(vllm_config)
-        set_mamba_num_blocks(kv_cache_config.mamba_num_blocks)
-        cache_config.mamba_num_blocks = kv_cache_config.mamba_num_blocks
 
     # Initialize the scheduler in this process
     import inspect
@@ -562,10 +560,7 @@ class DPScheduler(SchedulerInterface):
         multiprocessing.active_children()
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
-        mamba_num_blocks = getattr(
-            getattr(self.vllm_config, "cache_config", None),
-            "mamba_num_blocks", None)
-
+        mamba_num_blocks = getattr(kv_cache_config, "mamba_num_blocks", None)
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)
