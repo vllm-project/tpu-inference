@@ -29,6 +29,7 @@ serving-side clip-bound contract WITHOUT requiring a gated HF checkpoint:
 
 Synthetic tiny modules — fast, no network, CPU-only.
 """
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -53,6 +54,20 @@ def _make_einsum(use_clipped):
     return Gemma4ClippableEinsum("td,do->to", (4, 3),
                                  use_clipped_linears=use_clipped,
                                  rngs=_rngs())
+
+
+@pytest.fixture(autouse=True)
+def _pin_to_cpu():
+    """Pin this module to CPU, as the module docstring already states.
+
+    These are synthetic numeric unit tests, but CI runs the suite inside
+    the TPU image, so without this JAX binds them to a real TPU. On the
+    MXU a float32 einsum at nnx.Einsum's default ``precision=None`` runs
+    at reduced (bfloat16-based) precision, which breaks the tight
+    tolerances below against their exact numpy/jnp references.
+    """
+    with jax.default_device(jax.devices("cpu")[0]):
+        yield
 
 
 # ---------------------------------------------------------------------------
