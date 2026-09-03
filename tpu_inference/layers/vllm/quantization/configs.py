@@ -122,12 +122,13 @@ class VllmQuantLinearConfig(QuantLinearConfig):
         """Softmax-attention projection (q/k/v, o_proj)? o_proj and an MLP
         down_proj are both RowParallelLinear, so attention is told apart by
         the module path (self_attn.*, attn.*, attention.*); GDN's
-        linear_attn.* is not attention in this sense."""
+        linear_attn.* / linear_attention.* is not attention in this sense."""
         if isinstance(layer, QKVParallelLinear):
             return True
         prefix = getattr(layer, "prefix", "")
-        return ("attn" in prefix
-                or "attention" in prefix) and "linear_attn" not in prefix
+        return (("attn" in prefix or "attention" in prefix)
+                and "linear_attn" not in prefix
+                and "linear_attention" not in prefix)
 
     def get_input_sharding(self, x: torchax.tensor.Tensor):
         if not self.enable_sp:
