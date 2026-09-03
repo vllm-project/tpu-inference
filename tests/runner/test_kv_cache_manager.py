@@ -1262,13 +1262,16 @@ class TestKVCacheManager:
         assert self.runner.cache_config.num_gpu_blocks_override is None
 
     def test_compact_mamba_override_respects_user_pinned_override(self):
-        """When the user pins `num_gpu_blocks_override` explicitly,
-        compact-mamba must not clobber it (their explicit choice wins)."""
+        """A user-pinned `num_gpu_blocks_override` caps the attention pool
+        but must not switch mamba back to the uniform layout: mamba is
+        recurrent, so sizing it off the pin would allocate `pin` slots per
+        layer for requests that cannot exist."""
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
         manager = KVCacheManager(self.runner)
         manager.use_mla = False
         manager._hybrid_uniform_page_size_bytes = 2**20
 
+        self.runner.cache_config.gpu_memory_utilization = 1.0
         self.runner.cache_config.num_gpu_blocks_override = 999
         self.runner.scheduler_config = MagicMock(max_num_seqs=256)
         self.runner.max_num_reqs = 256
@@ -1280,10 +1283,43 @@ class TestKVCacheManager:
                                              attn_page=2**20,
                                              unpadded_mamba=4 * 2**20)
 
-        # User's override survives; mamba sizing is left alone so
-        # `initialize_kv_cache` allocates the uniform `num_blocks`.
-        assert manager._mamba_num_blocks is None
+        # 999 is far below what fits, so the pin survives untouched...
         assert self.runner.cache_config.num_gpu_blocks_override == 999
+        # ...and mamba is still compact rather than 999 slots per layer.
+        assert manager._mamba_num_blocks == 257
+
+    def test_compact_mamba_override_clamps_pin_above_capacity(self):
+        """A pin larger than what actually fits is lowered to the fit.
+        Honouring it verbatim would let the scheduler hand out block IDs
+        past the end of the pool the worker allocates."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+        manager._hybrid_uniform_page_size_bytes = 2**20
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 4 * (2**20)
+        max_num_reqs = 256
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = 10**9
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        avail_per_tensor = (304 * 2**30) // 15
+        expected_attn = (avail_per_tensor - 3 *
+                         (max_num_reqs + 1) * unpadded_mamba) // attn_page
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+        assert manager._mamba_num_blocks == max_num_reqs + 1
 
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)

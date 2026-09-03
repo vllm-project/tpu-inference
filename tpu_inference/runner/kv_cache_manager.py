@@ -312,10 +312,13 @@ class KVCacheManager:
         mamba state by per-request slot id rather than by `block_tables`,
         since the mamba leading dim is now smaller than the attn pool).
         See `gdn_attention_op.gdn_attention_core_tpu`.
-        Skipped if the user pinned `num_gpu_blocks_override` or
-        `hbm_usage_bytes` cannot read HBM (e.g. CPU-only tests). In those
-        cases vLLM keeps its uniform sizing; the page-size padding done in
-        the caller still keeps the per-layer block-ID range correct.
+        Skipped if `hbm_usage_bytes` cannot read HBM (e.g. CPU-only tests);
+        vLLM then keeps its uniform sizing and the page-size padding done in
+        the caller still keeps the per-layer block-ID range correct. A
+        user-pinned `num_gpu_blocks_override` does *not* skip it -- the pin
+        is applied as an upper bound on `attn_num_blocks` instead, because
+        the pin is how the scheduler's pool size is communicated and letting
+        it fall back to uniform sizing would size mamba off it too.
 
         Sizing math
         -----------
@@ -346,8 +349,15 @@ class KVCacheManager:
             both unset.
         """
         cache_config = self.runner.cache_config
-        if cache_config.num_gpu_blocks_override is not None:
-            return
+        # A user-pinned override is a *cap* on the attention pool, not a reason
+        # to abandon compact mamba sizing. It has to be passed on the command
+        # line to reach the scheduler at all (see `initialize_kv_cache`), and
+        # if that also switched mamba back to the uniform layout, mamba would
+        # allocate `pin` slots per layer instead of `max_num_reqs + 1` -- on a
+        # 69-mamba-layer model that is hundreds of GiB of recurrent state for
+        # requests that cannot exist, i.e. an immediate OOM. So honour the pin
+        # by clamping `attn_num_blocks` to it below, and keep mamba compact.
+        user_pinned_blocks = cache_config.num_gpu_blocks_override
 
         devices = self.runner.mesh.devices.flatten()
         try:
@@ -426,6 +436,15 @@ class KVCacheManager:
         attn_num_blocks = attn_per_tensor_avail // (num_attn_groups *
                                                     attn_page_size_bytes)
         attn_num_blocks = (attn_num_blocks // divisor) * divisor
+        if user_pinned_blocks is not None:
+            # The pin is what engine-core already built the scheduler's block
+            # pool from, so it is the number that governs admission. Never
+            # exceed it (the surplus would be unaddressable) and never exceed
+            # what actually fits (the scheduler would hand out block IDs past
+            # the allocation). Taking the min satisfies both; the launcher is
+            # expected to pin below the fit, and `initialize_kv_cache` raises
+            # if the pin wins by enough to matter.
+            attn_num_blocks = min(attn_num_blocks, user_pinned_blocks)
         if attn_num_blocks <= 0:
             logger.warning(
                 "Compact-mamba sizing skipped: attn_num_blocks=0 after "
@@ -930,8 +949,8 @@ class KVCacheManager:
             # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
             # allocate `_mamba_num_blocks` (= max_num_reqs + 1) slots while
             # attention layers keep the full `num_blocks`. When that override
-            # didn't run (CPU tests, user-pinned `num_gpu_blocks_override`),
-            # mamba and attn use the same `num_blocks` — vLLM's uniform sizing.
+            # didn't run (CPU tests, or HBM not readable), mamba and attn use
+            # the same `num_blocks` — vLLM's uniform sizing.
             mamba_num_blocks = (self._mamba_num_blocks
                                 if self._mamba_num_blocks is not None else
                                 num_blocks)
