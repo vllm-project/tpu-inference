@@ -37,6 +37,7 @@ from tpu_inference import utils as common_utils
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
                                            get_attention_page_size_bytes)
+from tpu_inference.core.mamba_block_pool import TPUMambaSpec
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -1436,6 +1437,157 @@ class TestKVCacheManager:
         assert manager._mamba_num_blocks is None
         assert self.runner.cache_config.num_gpu_blocks_override == 999
 
+    def _run_align_mamba_override(self, manager, *, avail_gib, fraction,
+                                  attn_page=2**20, unpadded_mamba=4 * 2**20):
+        """Helper: run the mamba-align (dedicated mamba pools) sizing with
+        Qwen3.5-shaped layer counts, `avail_gib` of free HBM spread over 4
+        mock devices and `fraction` of it reserved for mamba state."""
+        from tpu_inference import envs as tpu_envs
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.scheduler_config = MagicMock(max_num_seqs=256)
+        self.runner.max_num_reqs = 256
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_gib * (2**30) // 4)] * 4), \
+             patch.object(tpu_envs, "MAMBA_ALIGN_STATE_MEM_FRACTION",
+                          fraction):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+    def test_align_mamba_override_splits_attention_and_mamba_pools(self):
+        """With mamba prefix caching ("align"), sizing gives every mamba
+        group a dedicated block pool: MAMBA_ALIGN_STATE_MEM_FRACTION of the
+        budget buys `S` state slots per mamba layer, attention gets the
+        rest; attention reaches vLLM through `num_gpu_blocks_override` and
+        the mamba count through `TPUMambaSpec.num_blocks`."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+        self.runner.dp_size = 1
+
+        avail = 304 * (2**30)
+        attn_page = 2**20
+        unpadded_mamba = 4 * (2**20)
+        self._run_align_mamba_override(manager, avail_gib=304, fraction=0.25)
+
+        # S = floor(0.25 × 304 GiB / (45 layers × 4 MiB)) = 432 slots.
+        expected_mamba = int(avail * 0.25) // (45 * unpadded_mamba)
+        assert expected_mamba == 432
+        # Attention gets what is left: (304 GiB − 45 × 432 × 4 MiB) / (15 × 1 MiB).
+        expected_attn = (avail - 45 * expected_mamba * unpadded_mamba) // (
+            15 * attn_page)
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.num_gpu_blocks_override == expected_attn
+        # Sanity: the split uses the whole budget without exceeding it.
+        used = (45 * expected_mamba * unpadded_mamba +
+                15 * expected_attn * attn_page)
+        assert avail - 15 * attn_page < used <= avail
+
+    def test_align_mamba_override_rounds_both_pools_to_dp_size(self):
+        """The DP scheduler splits both pools evenly across ranks, so both
+        counts must be multiples of the DP size."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+        self.runner.dp_size = 4
+
+        self._run_align_mamba_override(manager, avail_gib=304, fraction=0.25)
+
+        assert manager._mamba_num_blocks % 4 == 0
+        assert self.runner.cache_config.num_gpu_blocks_override % 4 == 0
+        assert manager._mamba_num_blocks == 432  # already a multiple of 4
+
+    def test_align_mamba_override_skipped_for_bad_fraction(self):
+        """A fraction outside (0, 1) leaves vLLM's uniform sizing alone."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+        self.runner.dp_size = 1
+
+        self._run_align_mamba_override(manager, avail_gib=304, fraction=1.5)
+
+        assert manager._mamba_num_blocks is None
+        assert self.runner.cache_config.num_gpu_blocks_override is None
+
+    def test_align_mamba_override_skipped_when_hbm_probe_fails(self):
+        """Like compact-mamba: no HBM probe, no override."""
+        from tpu_inference import envs as tpu_envs
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.scheduler_config = MagicMock(max_num_seqs=256)
+        self.runner.max_num_reqs = 256
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                side_effect=RuntimeError("no devices")), \
+             patch.object(tpu_envs, "MAMBA_ALIGN_STATE_MEM_FRACTION", 0.3):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=2**20,
+                                             unpadded_mamba=4 * 2**20)
+
+        assert manager._mamba_num_blocks is None
+        assert self.runner.cache_config.num_gpu_blocks_override is None
+
+    def test_get_kv_cache_spec_wraps_mamba_spec_with_dedicated_pool(self):
+        """In align mode with split sizing, the mamba layers' specs handed
+        to vLLM are `TPUMambaSpec`s carrying the dedicated pool size, and
+        the attention spec is untouched."""
+        from tpu_inference import envs as tpu_envs
+
+        class DummyMamba(MambaBase):
+
+            def __init__(self):
+                super().__init__()
+
+            def get_state_shape(self):
+                return ((3, 12288), (64, 128, 128))
+
+            def get_state_dtype(self):
+                return (torch.bfloat16, torch.float32)
+
+            @property
+            def mamba_type(self):
+                return "dummy"
+
+        mock_attn = MagicMock(spec=Attention)
+        mock_attn.attn_type = AttentionType.DECODER
+        mock_attn.num_kv_heads = 2
+        mock_attn.head_size = 256
+        mock_attn.sliding_window = None
+        mock_attn.kv_sharing_target_layer_name = None
+        layers = {'linear_attn': DummyMamba(), 'full_attn': mock_attn}
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            layers
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.mamba_block_size = \
+            self.runner.cache_config.block_size
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.dp_size = 1
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                return_value=layers), \
+             patch("tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                   return_value=[(0, 304 * (2**30) // 4)] * 4), \
+             patch.object(tpu_envs, "MAMBA_ALIGN_STATE_MEM_FRACTION", 0.25):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        manager = self.runner.kv_cache_manager
+        assert manager._mamba_num_blocks is not None
+        mamba_spec = kv_cache_spec['linear_attn']
+        assert isinstance(mamba_spec, TPUMambaSpec)
+        assert mamba_spec.num_blocks == manager._mamba_num_blocks
+        assert mamba_spec.mamba_cache_mode == "align"
+        assert not isinstance(kv_cache_spec['full_attn'], MambaSpec)
+        assert self.runner.cache_config.num_gpu_blocks_override is not None
+
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)
         layers = {'layer.0': mock_attn}
@@ -1444,6 +1596,75 @@ class TestKVCacheManager:
         with patch('tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config', return_value=layers), \
              patch.object(self.runner.kv_cache_manager, 'update_mamba_page_size_padded') as mock_update:
             mock_update.assert_not_called()
+
+    def test_hybrid_mamba_num_blocks_align_dedicated_pool(self):
+        """With mamba prefix caching and `TPUMambaSpec.num_blocks` (dedicated
+        per-group mamba pools), mamba layers are allocated exactly that many
+        slots while attention layers keep the full block pool."""
+        num_blocks = 100
+        mamba_num_blocks = 7
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.num_gpu_blocks_override = None
+
+        attn_spec_block_size = self.runner.vllm_config.cache_config.block_size
+        attn_page_size = get_attention_page_size_bytes(self.runner.mesh,
+                                                       attn_spec_block_size,
+                                                       8, 128, torch.bfloat16,
+                                                       False)
+        mamba_shapes = ((4, 128), (8, 32, 32))
+        mamba_dtypes = (torch.bfloat16, torch.float32)
+        mamba_unpadded_page_size = sum(
+            int(np.prod(shape)) * torch.tensor([], dtype=dtype).element_size()
+            for shape, dtype in zip(mamba_shapes, mamba_dtypes))
+        mamba_spec = TPUMambaSpec(
+            block_size=attn_spec_block_size,
+            shapes=mamba_shapes,
+            dtypes=mamba_dtypes,
+            page_size_padded=attn_page_size,
+            mamba_cache_mode="align",
+            num_blocks=mamba_num_blocks)
+        tensor_size = num_blocks * (mamba_unpadded_page_size + attn_page_size)
+
+        attn_spec = MagicMock(spec=FullAttentionSpec)
+        attn_spec.block_size = attn_spec_block_size
+        attn_spec.page_size_bytes = attn_page_size
+        attn_spec.num_kv_heads = 8
+        attn_spec.head_size = 128
+        attn_spec.dtype = torch.bfloat16
+
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=tensor_size,
+                    layers=layer_names,
+                    layer_stride=tensor_size,
+                    block_stride=attn_page_size,
+                )
+            ],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=['layer.0'],
+                                 kv_cache_spec=mamba_spec),
+                KVCacheGroupSpec(layer_names=['layer.1'],
+                                 kv_cache_spec=attn_spec),
+            ],
+        )
+
+        # CPU devices report no memory stats; keep the post-init HBM log
+        # from aborting the test before the allocation is checked.
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_gb",
+                return_value="n/a"):
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+        assert len(self.runner.kv_caches) == 2
+        mamba_states = self.runner.kv_caches[0]
+        assert mamba_states[0].shape[0] == mamba_num_blocks
+        assert mamba_states[1].shape[0] == mamba_num_blocks
+        assert self.runner.kv_caches[1].shape[0] == num_blocks
+        assert self.runner.kv_cache_manager.actual_mamba_num_blocks == \
+            mamba_num_blocks
 
     def test_hybrid_mamba_num_blocks(self):
         num_blocks = 100
