@@ -905,6 +905,27 @@ class KVCacheManager:
                     num_blocks,
                     self.runner.cache_config.num_gpu_blocks_override)
 
+            # The scheduler hands out block IDs in
+            # `[0, kv_cache_config.num_blocks)`, but that count is computed in
+            # the engine-core process by vLLM's `get_kv_cache_config()`, while
+            # the pool is sized here, in the worker. The two only agree if the
+            # launcher passes `--num-gpu-blocks-override`; worker-side mutations
+            # of `cache_config` never cross the process boundary. If the engine
+            # believes in more blocks than we allocate, block IDs past our
+            # allocation index out of bounds, so fail rather than silently
+            # corrupt KV.
+            #
+            # The round-down to `divisor` above is expected to lose up to
+            # `divisor - 1` blocks on every model, and has always done so, so
+            # only a gap wider than that is a real misconfiguration.
+            if kv_cache_config.num_blocks - num_blocks >= divisor:
+                raise ValueError(
+                    f"Scheduler was configured with "
+                    f"kv_cache_config.num_blocks={kv_cache_config.num_blocks} "
+                    f"but this worker only allocates {num_blocks} blocks per "
+                    f"KV cache tensor. Lower --num-gpu-blocks-override to at "
+                    f"most {num_blocks}.")
+
             # When compact-mamba sizing succeeded (set by
             # `_maybe_set_compact_mamba_num_blocks_override`), mamba layers
             # allocate `_mamba_num_blocks` (= max_num_reqs + 1) slots while

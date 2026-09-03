@@ -146,14 +146,43 @@ steps:
         # pins the output, so the sample is 16 full waves of identical work
         # rather than 4.
         #
-        # MAX_CONCURRENCY 16 -> 8 is forced by HBM. Build #951 sized the full-
-        # attention pool at 660 blocks x 128 tokens; one 9216-token request
-        # holds 72 of them, so 9 requests fill it and 16 would preempt. With
-        # prefix caching off a preempted request is re-prefilled from scratch,
-        # which inflates the numbers and adds exactly the run-to-run variance
-        # this change is meant to remove. 8 x 72 = 576 blocks, 87% of the pool.
-        # qwen38_2p4t_kv_fit.py re-checks this against the live server and
-        # fails the leg rather than publishing a preempting run.
+        # MAX_CONCURRENCY stays at 8 for comparability, not because of HBM any
+        # more. It was 16 -> 8 originally because build #951 sized the full-
+        # attention pool at 660 blocks x 128 tokens: one 9216-token request
+        # holds 72 of them, so 8 x 72 = 576 blocks was 87% of the pool and 16
+        # would have preempted. NUM_GPU_BLOCKS_OVERRIDE (below) lifts the pool
+        # to 12288 blocks, so 8 is now 4.7% and there is room to raise it --
+        # but #953/#959/#960 are all at 8, so changing it here would break the
+        # only perf baseline we have. Raise it in a dedicated run.
+        #
+        # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made #960's
+        # eval unscoreable. The runner sizes the attention pool against mamba's
+        # real footprint and allocates ~15,150 blocks, but it does so
+        # worker-side, after engine-core has already built the scheduler's
+        # block pool from vLLM's uniform hybrid sizing -- and the
+        # `num_gpu_blocks_override` it sets never crosses the RPC boundary. So
+        # #960 ran with 15,150 blocks of HBM reserved and 661 admitted against
+        # (83,822 tokens, "Maximum concurrency ... 2.05x"), 13x oversubscribed
+        # at conc 32, and lost 28 of 198 GPQA questions to preemption.
+        # Passing it on the serve command line puts it in the engine-core
+        # config, which is the only place get_kv_cache_config() reads it.
+        #
+        # 12288 = 32 requests x ceil(40960/128) = 10,240 blocks of worst-case
+        # demand plus 20% headroom, and ~19% below what the runner allocates so
+        # a small change in the profiled tensor size cannot make the engine
+        # believe in blocks the worker never allocated. initialize_kv_cache
+        # asserts that bound and refuses to start if it is ever violated.
+        #
+        # BENCH_REQUEST_TIMEOUT_S bounds a single request. The benchmark client
+        # hardcoded a 6h aiohttp total, and that timeout is also how long a
+        # stuck request holds its slot in the concurrency semaphore -- so on
+        # #960, 28 requests that the engine had already dropped kept 28 of 32
+        # slots occupied until the leg's own 8h wall clock ran out. The engine
+        # went idle at 13:38 and the job burned another 3h56m, 57% of the leg,
+        # with nothing running. 7200s is ~4x the measured P99 E2EL of 1622s and
+        # covers a full 32768-token generation even at 200ms/token, so it
+        # cannot truncate a legitimate answer; it just stops one wedged request
+        # from costing four hours.
         #
         # MAX_NUM_BATCHED_TOKENS stays at 2048, so an 8192-token prompt is four
         # chunked-prefill passes. Raising it would grow the profiling peak that
@@ -184,6 +213,7 @@ steps:
           'ATTN_DP_SIZE=2' \
           'MAX_MODEL_LEN=40960' \
           'MAX_NUM_SEQS=32' \
+          'NUM_GPU_BLOCKS_OVERRIDE=12288' \
           'MAX_NUM_BATCHED_TOKENS=2048' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
@@ -198,6 +228,7 @@ steps:
           'GPQA_OUTPUT_LEN=32768' \
           'GPQA_CONCURRENCY=32' \
           'GPQA_TIMEOUT_S=28800' \
+          'BENCH_REQUEST_TIMEOUT_S=7200' \
           "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
           "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
           $$CACHE_ENV \

@@ -31,6 +31,37 @@ GPU_MEM_UTIL="${GPU_MEMORY_UTILIZATION:-0.92}"
 BLOCK_SIZE="${BLOCK_SIZE:-128}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 
+# Attention blocks the *scheduler* is allowed to hand out.
+#
+# The runner sizes the attention pool against mamba's real footprint (a flat
+# `max_num_reqs+1` slots per mamba layer, not one slot per attention block), so
+# it physically allocates ~23x more attention blocks than vLLM's uniform sizing
+# would. That calculation happens worker-side, inside `initialize_kv_cache`,
+# which is *after* the engine-core process has already built the scheduler's
+# block pool from its own `get_kv_cache_config()`. The worker also sets
+# `cache_config.num_gpu_blocks_override`, but only on its own copy of the
+# config -- `get_kv_cache_spec()` returns specs, not config mutations, so that
+# value never crosses the process boundary.
+#
+# Net effect without this flag: the HBM is reserved but the scheduler still
+# hands out blocks from the small uniform count, and the surplus is allocated
+# and unaddressable. Measured on build #960 -- 15,150 blocks allocated,
+# `kv_cache_config.num_blocks=661` in use, `GPU KV cache size: 83,822 tokens,
+# Maximum concurrency for 40,960 tokens per request: 2.05x`. At conc 32 that is
+# ~13x oversubscribed, and the resulting preemption storm cost 28 of 198 GPQA
+# questions.
+#
+# Setting it here puts the value in the engine-core config before
+# `get_kv_cache_config()` runs, which is the only place it is read. It must not
+# exceed what the runner actually allocates; `initialize_kv_cache` asserts that
+# and refuses to start if it does.
+NUM_GPU_BLOCKS_OVERRIDE="${NUM_GPU_BLOCKS_OVERRIDE:-}"
+
+VLLM_EXTRA_ARGS=()
+if [[ -n "${NUM_GPU_BLOCKS_OVERRIDE}" ]]; then
+  VLLM_EXTRA_ARGS+=(--num-gpu-blocks-override "${NUM_GPU_BLOCKS_OVERRIDE}")
+fi
+
 # ---------------------------------------------------------------------------
 # Where the weights come from.
 #
@@ -272,4 +303,5 @@ exec vllm serve "${MODEL_PATH}" \
   --kv-cache-dtype "${KV_CACHE_DTYPE}" \
   --gpu-memory-utilization "${GPU_MEM_UTIL}" \
   --no-enable-prefix-caching \
-  --async-scheduling
+  --async-scheduling \
+  ${VLLM_EXTRA_ARGS[@]+"${VLLM_EXTRA_ARGS[@]}"}
