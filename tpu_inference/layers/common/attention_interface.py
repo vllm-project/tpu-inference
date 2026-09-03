@@ -35,7 +35,7 @@ from tpu_inference.kernels.mla.v2.kernel import mla_ragged_paged_attention
 from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, SharedAttentionMetadata, resolve_use_causal_mask)
 from tpu_inference.layers.common.cp_attention import dcp_forward, pcp_forward
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -475,6 +475,11 @@ def sharded_ragged_paged_attention(
             "update_kv_cache=False (KV-share) is not supported on the "
             "head_dim==64 RPA kernel.")
 
+    if use_hd64 and not use_causal_mask:
+        raise NotImplementedError(
+            "Bidirectional attention is not supported on the head_dim==64 "
+            "RPA kernel")
+
     def _ragged_paged_attention(*args):
         kwargs = dict(
             sm_scale=sm_scale,
@@ -516,7 +521,7 @@ def attention(
     v_scale: float | None = None,
     sinks: jax.Array | None = None,
     update_kv_cache: bool = True,
-    use_causal_mask: bool = True,
+    use_causal_mask: bool | None = None,
     shared_attention_metadata: SharedAttentionMetadata | None = None,
     attn_logits_soft_cap: float | None = None,
 ) -> Tuple[jax.Array, jax.Array]:
@@ -539,10 +544,14 @@ def attention(
         sm_scale = head_dim_original**-0.5
 
     md = attention_metadata
+    use_causal_mask = resolve_use_causal_mask(md, use_causal_mask)
     # shared_attention_metadata is None for flax models, and is used for vllm models to share the metadata across layers.
     shared_md = shared_attention_metadata if shared_attention_metadata is not None else md
 
     if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
+        if not use_causal_mask:
+            raise NotImplementedError(
+                "Bidirectional attention is not supported with DCP")
         return dcp_forward(
             mesh,
             q,
