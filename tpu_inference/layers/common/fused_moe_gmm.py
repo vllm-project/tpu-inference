@@ -41,6 +41,25 @@ logger = init_logger(__name__)
 TARGET_SLOT_CHUNK_SIZE = 2048
 
 
+def _invert_permutation(permutation: jax.Array) -> jax.Array:
+    """Construct the exact inverse of a one-dimensional permutation."""
+    inverse = jnp.zeros_like(permutation)
+    positions = jnp.arange(permutation.size, dtype=permutation.dtype)
+    return inverse.at[permutation].set(positions)
+
+
+def _tokens_from_sorted_assignments(sorted_assignments: jax.Array,
+                                    topk: int) -> jax.Array:
+    """Maps flattened route assignments back to their source tokens.
+
+    Route assignments are flattened from a token-major ``[tokens, topk]``
+    tensor. Assignment ``i`` therefore belongs to token ``i // topk``. This
+    avoids materializing ``arange(tokens).repeat(topk)`` and gathering it with
+    the expert-sort permutation.
+    """
+    return sorted_assignments // topk
+
+
 def _override_token_indices_for_random_routing(
         topk_indices: jax.Array, global_num_experts: int) -> jax.Array:
     logger.warning(
@@ -672,18 +691,17 @@ def fused_moe_func(
             topk_indices, global_num_experts)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
-        num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        token_indices = jnp.arange(num_tokens_local,
-                                   dtype=jnp.int32).repeat(topk)
-        token_indices_sorted = token_indices[topk_argsort_indices]
+        token_indices_sorted = _tokens_from_sorted_assignments(
+            topk_argsort_indices, topk)
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
-        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        topk_argsort_revert_indices = _invert_permutation(
+            topk_argsort_indices)
 
         if use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,

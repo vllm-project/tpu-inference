@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
+import numpy as np
 import pytest
 from jax import numpy as jnp
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader import get_model_loader
 
@@ -25,12 +27,67 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  ShardingAxisName)
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
-from tpu_inference.models.jax.gemma4 import Gemma4DecoderLayer
+from tpu_inference.models.jax.gemma4 import (
+    Gemma4DecoderLayer,
+    Gemma4MoE,
+    _gather_and_select_global_kv_heads,
+)
 from tpu_inference.models.jax.gemma4_mm import Gemma4ForConditionalGeneration
 
 
+def test_gather_and_select_global_kv_heads():
+    """One collective must reproduce generic KV-head replication exactly."""
+    if len(jax.devices()) < 8:
+        pytest.skip("requires an 8-device TPU slice")
+
+    mesh_shape = tuple(8 if axis == "model" else 1
+                       for axis in MESH_AXIS_NAMES)
+    mesh = Mesh(np.asarray(jax.devices()[:8]).reshape(mesh_shape),
+                MESH_AXIS_NAMES)
+
+    # This is the global Gemma 4 layout before attention: two logical KV
+    # heads, with each 512-wide head split across the eight model shards.
+    source = jnp.arange(2 * 2 * 512, dtype=jnp.float32).reshape(2, 2, 512)
+    source = jax.device_put(
+        source,
+        NamedSharding(mesh, P("data", None, "model")),
+    )
+
+    actual = _gather_and_select_global_kv_heads(source, mesh, 2)
+    expected = jnp.repeat(source, repeats=4, axis=1)
+
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    assert actual.sharding.spec == P(ShardingAxisName.ATTN_DATA, "model",
+                                     None)
+
+
 class TestGemma4ForConditionalGeneration:
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_moe_respects_return_routed_experts_config(self, enabled):
+        text_config = MagicMock()
+        text_config.num_experts = 128
+        text_config.hidden_size = 2816
+        text_config.moe_intermediate_size = 1408
+        text_config.top_k_experts = 8
+
+        with patch.object(JaxRoutedExperts, "__init__",
+                          return_value=None) as routed_experts_init:
+            Gemma4MoE(
+                config=text_config,
+                dtype=jnp.bfloat16,
+                mesh=MagicMock(),
+                rngs=MagicMock(),
+                quant_config=MagicMock(),
+                enable_return_routed_experts=enabled,
+            )
+
+        assert (routed_experts_init.call_args.kwargs[
+            "enable_return_routed_experts"] is enabled)
 
     def _run_model_loading_test(self, model_name, pp_rank, pp_world_size,
                                 load_format, truncate_layers, rng, mesh,
