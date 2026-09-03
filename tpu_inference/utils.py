@@ -145,8 +145,13 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                     e)
     else:
         for device in devices:
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
+            stats = device.memory_stats()
+            if stats:
+                hbm_used = stats["bytes_in_use"]
+                hbm_limit = stats["bytes_limit"]
+            else:
+                hbm_used = 0
+                hbm_limit = 0
             usage.append((hbm_used, hbm_limit))
 
     return usage

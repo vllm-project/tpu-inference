@@ -35,6 +35,24 @@ def get_mamba_num_blocks() -> int | None:
     return _GLOBAL_MAMBA_NUM_BLOCKS
 
 
+def is_mamba_spec(spec: Any) -> bool:
+    """Check if a KV cache spec represents a Mamba layer."""
+    if isinstance(spec, MambaSpec):
+        return True
+    if hasattr(spec, "kv_cache_specs"):
+        return any(
+            isinstance(s, MambaSpec) for s in spec.kv_cache_specs.values())
+    if "Mamba" in type(spec).__name__:
+        return True
+    return False
+
+
+def is_mamba_group(group: Any) -> bool:
+    """Check if a KV cache group contains Mamba layers."""
+    spec = getattr(group, "kv_cache_spec", group)
+    return is_mamba_spec(spec)
+
+
 class TPUDualBlockPool(BlockPool):
     """A composite BlockPool that coordinates separate Attention and Mamba pools.
 
@@ -120,12 +138,6 @@ class TPUDualBlockPool(BlockPool):
         }
         if attn_ids:
             self.attention_pool.evict_blocks(attn_ids)
-        mamba_ids = {
-            bid
-            for bid in block_ids if bid < len(self.mamba_pool.blocks)
-        }
-        if mamba_ids:
-            self.mamba_pool.evict_blocks(mamba_ids)
 
     def get_cached_block(
             self, block_hash: BlockHash,
@@ -163,13 +175,17 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.mamba_group_ids = {
             i
             for i, g in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(g.kv_cache_spec, MambaSpec)
+            if is_mamba_group(g)
         }
         self.attention_group_ids = {
             i
             for i, g in enumerate(kv_cache_config.kv_cache_groups)
-            if not isinstance(g.kv_cache_spec, MambaSpec)
+            if not is_mamba_group(g)
         }
+
+        assert len(self.mamba_group_ids) > 0, (
+            f"[TPUHybridKVCacheCoordinator] No Mamba groups identified in "
+            f"kv_cache_groups: {kv_cache_config.kv_cache_groups}")
 
         # Resolve mamba_num_blocks
         if mamba_num_blocks is None:
@@ -219,6 +235,16 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
         self.single_type_managers = tuple(new_managers)
 
+        for i in self.mamba_group_ids:
+            assert self.single_type_managers[
+                i].block_pool is self.mamba_block_pool, (
+                    f"Manager {i} block_pool was not re-bound to mamba_block_pool!"
+                )
+        for i in self.attention_group_ids:
+            assert self.single_type_managers[
+                i].block_pool is self.attention_block_pool, (
+                    f"Manager {i} block_pool is not attention_block_pool!")
+
         # Replace self.block_pool with TPUDualBlockPool
         self.block_pool = TPUDualBlockPool(
             self.attention_block_pool,
@@ -262,7 +288,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
                 drop_eagle_block = use_eagle and idx not in eagle_verified
                 _max_length = curr_hit_length
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                if drop_eagle_block and not is_mamba_spec(spec):
                     eagle_margin = (
                         self.hash_block_size if self.enable_partial_hash_hits
                         and manager_cls.supports_fine_grained_hash_lookup
@@ -271,8 +297,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     _max_length = min(curr_hit_length + eagle_margin,
                                       max_cache_hit_length)
 
-                pool = (self.mamba_block_pool if isinstance(spec, MambaSpec)
-                        else self.attention_block_pool)
+                pool = (self.mamba_block_pool
+                        if is_mamba_spec(spec) else self.attention_block_pool)
 
                 hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
@@ -328,8 +354,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         hit_lengths: list[int] = [0] * num_groups
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
-            pool = (self.mamba_block_pool if isinstance(spec, MambaSpec) else
-                    self.attention_block_pool)
+            pool = (self.mamba_block_pool
+                    if is_mamba_spec(spec) else self.attention_block_pool)
             blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
@@ -572,7 +598,8 @@ def tpu_get_kv_cache_coordinator(
     **kwargs,
 ) -> KVCacheCoordinator:
     enable_caching = kwargs.get("enable_caching", False)
-    if enable_caching and kv_cache_config.has_mamba_layers:
+    has_mamba = any(is_mamba_group(g) for g in kv_cache_config.kv_cache_groups)
+    if enable_caching and has_mamba:
         return TPUHybridKVCacheCoordinator(kv_cache_config, *args, **kwargs)
     return orig_get_kv_cache_coordinator(kv_cache_config, *args, **kwargs)
 
@@ -592,6 +619,9 @@ def install_hybrid_coordinator_hooks(vllm_config: Any | None = None) -> None:
     if "vllm.v1.core.sched.scheduler" in sys.modules:
         sys.modules[
             "vllm.v1.core.sched.scheduler"].KVCacheManager = TPUKVCacheManager
+    if "vllm.v1.core.sched.async_scheduler" in sys.modules:
+        sys.modules[
+            "vllm.v1.core.sched.async_scheduler"].KVCacheManager = TPUKVCacheManager
 
     _HOOKS_INSTALLED = True
     logger.info(

@@ -421,9 +421,11 @@ class KVCacheManager:
             # Respect user-pinned attention override, but still register decoupled mamba pool
             self._mamba_num_blocks = int(mamba_num_blocks)
             cache_config.mamba_num_blocks = int(mamba_num_blocks)
-            from tpu_inference.core.hybrid_coordinator import \
-                set_mamba_num_blocks
+            from tpu_inference.core.hybrid_coordinator import (
+                install_hybrid_coordinator_hooks, set_mamba_num_blocks)
             set_mamba_num_blocks(int(mamba_num_blocks))
+            if cache_config.enable_prefix_caching:
+                install_hybrid_coordinator_hooks(self.runner.vllm_config)
             return
 
         # Attention block count: fits into HBM left after mamba.
@@ -473,8 +475,11 @@ class KVCacheManager:
         cache_config.num_gpu_blocks_override = int(attn_num_blocks)
         self._mamba_num_blocks = int(mamba_num_blocks)
         cache_config.mamba_num_blocks = int(mamba_num_blocks)
-        from tpu_inference.core.hybrid_coordinator import set_mamba_num_blocks
+        from tpu_inference.core.hybrid_coordinator import (
+            install_hybrid_coordinator_hooks, set_mamba_num_blocks)
         set_mamba_num_blocks(int(mamba_num_blocks))
+        if cache_config.enable_prefix_caching:
+            install_hybrid_coordinator_hooks(self.runner.vllm_config)
 
         attn_bytes = num_attn_layers * attn_num_blocks * attn_page_size_bytes
         mamba_bytes = (num_mamba_layers * mamba_num_blocks *
@@ -902,6 +907,7 @@ class KVCacheManager:
                                 num_blocks)
             if self.actual_mamba_num_blocks is None:
                 self.actual_mamba_num_blocks = mamba_num_blocks
+            kv_cache_config.mamba_num_blocks = int(mamba_num_blocks)
 
             for j, layer_name in enumerate(kv_cache_tensor.shared_by):
                 layer_spec = layer_name_to_spec[layer_name]
