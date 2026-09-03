@@ -1,12 +1,12 @@
 # ==============================================================================
 # Dockerfile.pypi Purpose:
-# This Dockerfile is used for building and testing vLLM-TPU as a distributable 
-# Python package. 
+# This Dockerfile is used for building and testing vLLM-TPU as a distributable
+# Python package.
 #
 # Key differences from the standard Dockerfile:
 # 1. It builds a redistributable wheel (.whl) for vllm-tpu.
 # 2. It installs the 'tpu-inference' package from a package index.
-# 3. Use this file if you are verifying the PyPI distribution flow or need 
+# 3. Use this file if you are verifying the PyPI distribution flow or need
 #    a production-ready wheel installation rather than an editable source build.
 # ==============================================================================
 
@@ -36,6 +36,11 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# Install rustup for vLLM rust frontend. Keep this before copying project
+# sources so it remains cached when application code changes.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Install tpu_inference
 WORKDIR /workspace/tpu_inference
 COPY requirements.txt .
@@ -54,15 +59,11 @@ COPY . .
 RUN python3 -m pip install build
 RUN python3 -m build
 
-# Install rustup for vLLM rust frontend
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 # Build vllm-tpu wheel
 WORKDIR /workspace
 ARG VLLM_COMMIT_HASH
 RUN VLLM_TPU_VERSION=$(date -u +%Y%m%d) && \
-    VLLM_REQUIRE_RUST_FRONTEND=1 bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
+    bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
 
 # Install vllm-tpu wheel
 RUN pip install --no-cache-dir vllm/dist/*.whl
