@@ -85,6 +85,9 @@ if TYPE_CHECKING:
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
     VERIFY_WEIGHTS: bool = False
+    SAMPLING_MICROBATCH_SIZE: int = 0
+    SAMPLING_KEEP_SHARDED_LOGITS: bool = False
+    USE_DISTRIBUTED_TOPK_SAMPLING: bool = False
 
 
 def env_with_choices(
@@ -508,7 +511,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # RL weight sync: verify tensor checksums after each Raiden H2D transfer.
     "VERIFY_WEIGHTS":
     env_bool("VERIFY_WEIGHTS", default=False),
+    # Microbatch size for sampling block. Set to 0 to disable microbatching (disabled by default).
+    "SAMPLING_MICROBATCH_SIZE":
+    lambda: int(os.getenv("SAMPLING_MICROBATCH_SIZE", "0")),
+    # Keep vocabulary logits sharded across TP shards during sampling to avoid
+    # an expensive all-gather across TP before sampling.
+    "SAMPLING_KEEP_SHARDED_LOGITS":
+    env_bool("SAMPLING_KEEP_SHARDED_LOGITS", default=False),
+    # Sample supported top-k requests from compact sharded candidates. The
+    # sampler falls back to its general path for unsupported or incomplete
+    # candidate sets.
+    "USE_DISTRIBUTED_TOPK_SAMPLING":
+    env_bool("USE_DISTRIBUTED_TOPK_SAMPLING", default=False),
 }
+
 
 
 def __getattr__(name: str) -> Any:

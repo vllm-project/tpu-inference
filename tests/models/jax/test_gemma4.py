@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import jax
 import pytest
@@ -25,12 +25,35 @@ from tpu_inference.distributed.jax_parallel_state import \
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
-from tpu_inference.models.jax.gemma4 import Gemma4DecoderLayer
+from tpu_inference.models.jax.gemma4 import Gemma4DecoderLayer, Gemma4MoE
 from tpu_inference.models.jax.gemma4_mm import Gemma4ForConditionalGeneration
 
 
 class TestGemma4ForConditionalGeneration:
+
+    @pytest.mark.parametrize("enabled", [False, True])
+    def test_moe_respects_return_routed_experts_config(self, enabled):
+        text_config = MagicMock()
+        text_config.num_experts = 128
+        text_config.hidden_size = 2816
+        text_config.moe_intermediate_size = 1408
+        text_config.top_k_experts = 8
+
+        with patch.object(JaxRoutedExperts, "__init__",
+                          return_value=None) as routed_experts_init:
+            Gemma4MoE(
+                config=text_config,
+                dtype=jnp.bfloat16,
+                mesh=MagicMock(),
+                rngs=MagicMock(),
+                quant_config=MagicMock(),
+                enable_return_routed_experts=enabled,
+            )
+
+        assert (routed_experts_init.call_args.kwargs[
+            "enable_return_routed_experts"] is enabled)
 
     def _run_model_loading_test(self, model_name, pp_rank, pp_world_size,
                                 load_format, truncate_layers, rng, mesh,
