@@ -17,9 +17,40 @@ from unittest import mock
 import jax.numpy as jnp
 import pytest
 
+import tpu_inference.kernels.experimental.batched_rpa.tuned_params as tp_module
 from tpu_inference.kernels.experimental.batched_rpa import configs
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
-    TunableParams, TuningKey, get_tuned_params)
+    TunableParams, TuningKey, get_block_sizes_override, get_tuned_params)
+
+
+@pytest.mark.parametrize("case", ["decode", "prefill", "mixed"])
+def test_get_block_sizes_override(case):
+    env_name = f"BATCHED_RPA_{case.upper()}_BLOCK_SIZES"
+    with mock.patch.object(tp_module.envs, env_name,
+                           [2048, 512, 1536, 2, 3]):
+        assert get_block_sizes_override(case, 128) == configs.BlockSizes(
+            bq_sz=2048,
+            bq_c_sz=512,
+            bkv_sz=1536,
+            batch_size=2,
+            n_buffer=3,
+        )
+
+
+@pytest.mark.parametrize(
+    "values,error",
+    [
+        ([1, 1, 128, 8], "exactly five"),
+        ([1, 1, 0, 8, 3], "must be positive"),
+        ([2048, 768, 1536, 2, 3], "divide bq_sz"),
+        ([2048, 512, 1500, 2, 3], "multiple of page_size"),
+    ],
+)
+def test_get_block_sizes_override_validation(values, error):
+    with mock.patch.object(tp_module.envs,
+                           "BATCHED_RPA_MIXED_BLOCK_SIZES", values):
+        with pytest.raises(ValueError, match=error):
+            get_block_sizes_override("mixed", 128)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -122,6 +153,49 @@ def test_get_tuned_params_populated_mapping_hit():
 
     assert result == _BLOCK_SIZES
     mock_calc.assert_not_called()
+
+
+def test_decode_bkv_size_env_overrides_only_tuned_kv_tile():
+    import tpu_inference.kernels.experimental.batched_rpa.tuned_params as tp_module
+
+    sliding_model_config = configs.ModelConfigs(
+        num_q_heads=16,
+        num_kv_heads=2,
+        head_dim=128,
+        mask_value=-1e9,
+        sliding_window=1024,
+    )
+    key = TuningKey.from_config(sliding_model_config,
+                                _SERVE_CONFIG,
+                                case='decode')
+    global_key = TuningKey.from_config(_MODEL_CONFIG,
+                                       _SERVE_CONFIG,
+                                       case='decode')
+    mapping = {key: _TUNABLE, global_key: _TUNABLE}
+    tpu_info = mock.Mock(mxu_column_size=128)
+
+    with mock.patch.dict(tp_module.tuned_params_mapping, mapping, clear=True), \
+         mock.patch.object(tp_module.envs,
+                           "BATCHED_RPA_DECODE_SLIDING_BKV_SIZE", 1024), \
+         mock.patch.object(tp_module.pltpu,
+                           "get_tpu_info", return_value=tpu_info):
+        result = get_tuned_params(sliding_model_config,
+                                  _SERVE_CONFIG,
+                                  vmem_limit_bytes=1 << 28,
+                                  case='decode')
+        global_result = get_tuned_params(_MODEL_CONFIG,
+                                         _SERVE_CONFIG,
+                                         vmem_limit_bytes=1 << 28,
+                                         case='decode')
+
+    assert result == configs.BlockSizes(
+        bq_sz=_BLOCK_SIZES.bq_sz,
+        bq_c_sz=_BLOCK_SIZES.bq_c_sz,
+        bkv_sz=1024,
+        batch_size=_BLOCK_SIZES.batch_size,
+        n_buffer=_BLOCK_SIZES.n_buffer,
+    )
+    assert global_result == _BLOCK_SIZES
 
 
 # ---------------------------------------------------------------------------

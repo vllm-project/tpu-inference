@@ -44,6 +44,10 @@ if TYPE_CHECKING:
     CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    BATCHED_RPA_DECODE_SLIDING_BKV_SIZE: int = 0
+    BATCHED_RPA_DECODE_BLOCK_SIZES: list[int] = []
+    BATCHED_RPA_PREFILL_BLOCK_SIZES: list[int] = []
+    BATCHED_RPA_MIXED_BLOCK_SIZES: list[int] = []
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
     # Empty (default) = use the built-in tuned/heuristic sizes.
@@ -85,6 +89,11 @@ if TYPE_CHECKING:
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
     VERIFY_WEIGHTS: bool = False
+    SAMPLING_MICROBATCH_SIZE: int = 0
+    SAMPLING_KEEP_SHARDED_LOGITS: bool = False
+    USE_DISTRIBUTED_TOPK_SAMPLING: bool = False
+    GEMMA4_EARLY_GLOBAL_KV_GATHER: bool = False
+    GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS: bool = False
 
 
 def env_with_choices(
@@ -357,6 +366,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Optional KV tile-size override for the experimental batched-RPA decode
+    # kernel. Zero keeps its built-in tuner decision.
+    "BATCHED_RPA_DECODE_SLIDING_BKV_SIZE":
+    lambda: int(os.getenv("BATCHED_RPA_DECODE_SLIDING_BKV_SIZE", "0")),
+    # Optional full block-size overrides for the experimental batched-RPA
+    # kernel, per request case. The five values match BlockSizes:
+    # bq_sz,bq_c_sz,bkv_sz,batch_size,n_buffer.
+    "BATCHED_RPA_DECODE_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_DECODE_BLOCK_SIZES"),
+    "BATCHED_RPA_PREFILL_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_PREFILL_BLOCK_SIZES"),
+    "BATCHED_RPA_MIXED_BLOCK_SIZES":
+    env_int_list("BATCHED_RPA_MIXED_BLOCK_SIZES"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
     # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
     # built-in tuned/heuristic sizes. Lets operators retune the decode
@@ -508,7 +530,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # RL weight sync: verify tensor checksums after each Raiden H2D transfer.
     "VERIFY_WEIGHTS":
     env_bool("VERIFY_WEIGHTS", default=False),
+    # Microbatch size for sampling block. Set to 0 to disable microbatching (disabled by default).
+    "SAMPLING_MICROBATCH_SIZE":
+    lambda: int(os.getenv("SAMPLING_MICROBATCH_SIZE", "0")),
+    # Keep vocabulary logits sharded across TP shards during sampling to avoid
+    # an expensive all-gather across TP before sampling.
+    "SAMPLING_KEEP_SHARDED_LOGITS":
+    env_bool("SAMPLING_KEEP_SHARDED_LOGITS", default=False),
+    # Sample supported top-k requests from compact sharded candidates. The
+    # sampler falls back to its general path for unsupported or incomplete
+    # candidate sets.
+    "USE_DISTRIBUTED_TOPK_SAMPLING":
+    env_bool("USE_DISTRIBUTED_TOPK_SAMPLING", default=False),
+    # Reconstruct Gemma 4's shared raw global K/V projection once before K and
+    # V normalization, instead of independently resharding both afterwards.
+    "GEMMA4_EARLY_GLOBAL_KV_GATHER":
+    env_bool("GEMMA4_EARLY_GLOBAL_KV_GATHER", default=False),
+    # Store one complete Gemma 4 global K/V head on every tensor-parallel
+    # shard, trading additional K projection work for zero KV communication.
+    "GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS":
+    env_bool("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", default=False),
 }
+
 
 
 def __getattr__(name: str) -> Any:

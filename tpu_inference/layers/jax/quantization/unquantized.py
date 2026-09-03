@@ -189,6 +189,18 @@ class UnquantizedFusedMoEMethod(QuantizeMethodBase, FusedMoEMethodBase):
             layer: The layer to process.
         """
         if layer.moe_backend == MoEBackend.FUSED_MOE:
+            # The streaming loader may invoke post-processing before every
+            # expert tensor for this module has arrived. Fusing at that point
+            # would consume the placeholder parameters and delete the source
+            # parameters, preventing the remaining shards from being loaded.
+            if any(
+                    any(weight is None for weight in param._weights_to_load)
+                    for param in (
+                        layer.kernel_gating_EDF,
+                        layer.kernel_up_proj_EDF,
+                        layer.kernel_down_proj_EFD,
+                    )):
+                return False
             # TODO(#3041): Remove once we remove JaxMoe from code base.
             edf_sharding = getattr(layer, 'edf_sharding', ())
             if edf_sharding:
