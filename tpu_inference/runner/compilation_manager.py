@@ -394,7 +394,7 @@ class CompilationManager:
 
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         metadata_attn_sharding = NamedSharding(
-            self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
+            self.runner.mesh, PartitionSpec(ShardingAxisName.DENSE_DATA))
         pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
 
         # Keep existing pattern for complex array operations
@@ -681,7 +681,7 @@ class CompilationManager:
                     self.runner.mesh,
                     PartitionSpec(ShardingAxisName.ATTN_DATA, ))
                 metadata_attn_sharding = NamedSharding(
-                    self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
+                    self.runner.mesh, PartitionSpec(ShardingAxisName.DENSE_DATA))
                 input_ids = self._create_dummy_tensor(
                     (num_tokens, ), jnp.int32, metadata_attn_sharding)
                 if self.runner.uses_mrope:
