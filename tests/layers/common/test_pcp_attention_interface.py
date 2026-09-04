@@ -58,6 +58,12 @@ def _to_rank_order(x, pcp, C):
         x.reshape(2 * pcp, C, *x.shape[1:])[_row_perm(pcp)].reshape(x.shape))
 
 
+def _kv_token_order(pcp, C):
+    """Single-request `kv_token_order`: token t -> its slot in rank order."""
+    order = _inv_row(pcp)[:, None] * C + np.arange(C)[None, :]
+    return jnp.asarray(order.reshape(-1), jnp.int32)
+
+
 def _pcp_meta(pcp, C, num_current):
     """The per-rank fused current-phase metadata, exactly as _prepare_inputs
     builds it: cu = [0, C, C + tail_real] and q_pos_offsets = [head, tail]."""
@@ -309,7 +315,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=jnp.asarray(cu),
                 kv_cache_lens=pad1(per_seq(L)),
                 q_pos_offsets=jnp.asarray(qpos),
-                cache_pages=cdiv(max(L), PAGE * pcp),
+                has_cached_kv=max(L) > 0,
                 kv_new_starts=jnp.asarray(kv_new_starts),
                 kv_token_order=jnp.asarray(kv_order),
                 num_reqs=num_reqs_bucket or R,
@@ -513,9 +519,9 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu_q_lens,
                 kv_cache_lens=kv_cache_lens,
                 q_pos_offsets=q_pos_offsets,
-                # pages the CACHED tokens occupy (a token-ordered page holds
-                # PAGE*pcp tokens); 0 elides the cache phase.
-                cache_pages=cdiv(L, PAGE * pcp),
+                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
+                kv_token_order=_kv_token_order(pcp, C),
+                has_cached_kv=L > 0,
             ),
         )
         new_cache, out = pcp_forward(self._mesh(pcp),
@@ -614,8 +620,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             got = cache[page, r * PAGE + off]
             self.assertAllClose(got, ref[i], atol=2e-2, rtol=2e-2)
 
-    @parameterized.parameters((2, False), (4, False), (2, True), (4, True))
-    def test_noncontiguous_block_table(self, pcp, tight_hint):
+    @parameterized.parameters(2, 4)
+    def test_noncontiguous_block_table(self, pcp):
         """The cache phase must be correct when the request's pages are an
         arbitrary, non-contiguous subset of a cache that is bigger than the
         request -- i.e. what a real server looks like, where one KV cache holds
@@ -623,10 +629,6 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         table width).  The ring fetches each round-0 block through the block
         table, so an indexing bug shows up as a numerical mismatch against the
         plain-attention reference.
-
-        `tight_hint` additionally exercises the `cache_pages` bound: True
-        passes a rung strictly tighter than the block-table width, False passes
-        the full width.
         """
         if jax.device_count() < pcp:
             self.skipTest(f"needs {pcp} devices")
@@ -673,21 +675,6 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         def pad1(xs):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
-        # `cache_pages` is the static bound the runner supplies: the number of
-        # pages the CACHED tokens occupy (page P of the token-ordered cache
-        # holds gpage = PAGE*pcp tokens), rounded up to a power of two.  It is
-        # strictly tighter than pages_per_seq here, so it exercises the bound.
-        gpage = PAGE * pcp
-        live = cdiv(L, gpage)
-        # tight_hint=True exercises the bound (a rung strictly tighter than the
-        # block-table width); False passes the loosest legal value, i.e. the
-        # full width, so the compaction runs without the extra bound.
-        hint = (1 << (max(live - 1, 0)).bit_length()) if tight_hint else pps
-        self.assertGreaterEqual(hint, live, "hint must cover live pages")
-        if tight_hint:
-            self.assertLess(hint, pps,
-                            "hint must be tighter than pages_per_seq")
-
         cu, qpos = _pcp_meta(pcp, C, num_current)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
@@ -698,7 +685,9 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu,
                 kv_cache_lens=pad1([L, L]),
                 q_pos_offsets=qpos,
-                cache_pages=hint,
+                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
+                kv_token_order=_kv_token_order(pcp, C),
+                has_cached_kv=True,
             ),
         )
         _, out = pcp_forward(self._mesh(pcp), _to_rank_order(q, pcp, C),
@@ -714,7 +703,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
 
     @parameterized.parameters(2, 4)
     def test_first_chunk_skips_cache_phase(self, pcp):
-        """cache_pages=0 elides the cache phase; with no cached tokens the
+        """has_cached_kv=False elides the cache phase; with no cached tokens the
         result must still match plain attention over the current chunk."""
         if jax.device_count() < pcp:
             self.skipTest(f"needs {pcp} devices")
@@ -764,7 +753,9 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu,
                 kv_cache_lens=pad1([0, 0]),
                 q_pos_offsets=qpos,
-                cache_pages=0,
+                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
+                kv_token_order=_kv_token_order(pcp, C),
+                has_cached_kv=False,
             ),
         )
         _, out = pcp_forward(self._mesh(pcp), _to_rank_order(q, pcp, C),

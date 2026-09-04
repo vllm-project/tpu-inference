@@ -54,8 +54,7 @@ from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
-    SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout,
-    round_up_pcp_cache_pages)
+    SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -1049,12 +1048,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
-        # PCP presents each request to the attention kernel as TWO fused seqs
-        # (its head chunk and its tail chunk), so the attention metadata
-        # buffers need twice the slots. Sampling/logits stay per-request.
+        # PCP presents each request to the attention kernel as two fused seqs
+        # (head and tail chunk), so the attention metadata buffers need twice
+        # the slots.  Sampling/logits stay per-request.
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         self.attn_max_num_seqs = self.max_num_reqs * (2 if pcp_size > 1 else 1)
-        self._pcp_multireq_seen = 0  # multi-request batches logged so far
 
         additional_sizes = self.vllm_config.additional_config.get(
             "compilation_sizes", [])
@@ -1070,19 +1068,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
-        # PCP rounds every request's chunk size up independently, so the buffer
-        # the layout needs (pcp_size * S) can exceed the scheduler's token
-        # budget: 2*C_i <= n_i/P + 2, hence
-        #     pcp_size * S <= sum(n_i) + 2 * pcp_size * num_reqs.
-        # The scheduler admits by sum(n_i), so without a bucket above
-        # max_num_batched_tokens a legal batch has nowhere to land and
-        # get_padded_token_len asserts. Add exactly that headroom rather than
-        # letting the ladder double, which would waste half the token buffer.
+        # PCP rounds every request's chunk size up independently, so the token
+        # buffer the layout needs can exceed max_num_batched_tokens by up to
+        # 2 * pcp_size * max_num_seqs; add a bucket with exactly that headroom.
         if pcp_size > 1:
             _worst = (scheduler_config.max_num_batched_tokens +
                       2 * pcp_size * scheduler_config.max_num_seqs)
-            # 128 keeps the bucket TPU-friendly and is a multiple of any
-            # power-of-two pcp_size we support, which T_pad % pcp == 0 needs.
+            # 128-aligned so T_pad % pcp_size == 0 for any power-of-two pcp.
             additional_sizes = list(additional_sizes) + [
                 common_utils.align_to(_worst * self.dp_size, 128)
             ]
@@ -1150,17 +1142,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
 
-        # PCP request-count ladder. `PCPMetadata.num_reqs` is a static meta
-        # field, so this is the set of multi-request variants precompilation
-        # has to warm; keeping 1 on the ladder is what holds single-request
-        # batches on exactly today's code path instead of pushing them onto
-        # the multi-request path via request padding.
-        # Capped to {1, max_num_seqs} rather than a full power-of-2 ladder:
-        # every rung multiplies the precompile cross product with the
-        # cache_pages rungs, and a 4-rung ladder pushed warmup past 40 minutes
-        # on Qwen3-8B. 1 keeps single-request batches on today's path; the top
-        # rung serves everything else at the cost of padding the fused request
-        # count up. Widen only if that padding shows up in a profile.
+        # PCP request-count ladder: `PCPMetadata.num_reqs` is a static meta
+        # field, so every rung is a compiled variant.  {1, max_num_seqs} keeps
+        # single-request batches on the single-request path and everything
+        # else on one padded multi-request variant (a wider ladder pushed
+        # warmup past 40 minutes on Qwen3-8B).
         _max_seqs = scheduler_config.max_num_seqs
         if pcp_size > 1 and _max_seqs > 1:
             self.pcp_num_reqs_paddings = [1, _max_seqs]
@@ -2463,17 +2449,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
 
-        # PCP rounds each request's chunk size up independently, so the buffer
-        # it needs (pcp_size * S) can exceed the raw token count. Size the
-        # bucket off the padded requirement or the layout will not fit.
+        # PCP rounds each request's chunk size up independently, so size the
+        # bucket off the layout's padded requirement, not the raw token count.
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
             for dp_rank in range(dp_size):
                 counts = scheduled_tokens_per_dp_rank[dp_rank]
                 if not counts:
                     continue
-                # Must match the layout `_prepare_inputs` builds, or the
-                # bucket will be one short of what the layout needs.
                 _, _, s_live = pcp_token_layout([int(c) for c in counts],
                                                 pcp_size)
                 max_num_scheduled_tokens_across_dp = max(
@@ -2924,9 +2907,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 int(self.input_batch.num_computed_tokens_cpu[i])
                 for i in req_idxs
             ]
-            # Prefill-only. A decode request would still occupy 2P query rows
-            # to carry one real token, and mixing decodes in breaks the uniform
-            # contiguous per-rank layout this depends on.
+            # Prefill-only: a decode request would occupy 2P query rows to
+            # carry one token.
             for n_i, l_i in zip(counts, computed):
                 if n_i == 1 and l_i > 0:
                     raise NotImplementedError(
@@ -2934,23 +2916,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         f"request (num_scheduled=1, num_computed={l_i}).")
 
             num_pcp_reqs = len(counts)
-            # Announce genuinely concurrent PCP batches (the first 200): a
-            # multi-request build that the scheduler only ever feeds one
-            # request at a time is indistinguishable in every benchmark
-            # number otherwise.
-            if num_pcp_reqs > 1 and self._pcp_multireq_seen < 200:
-                logger.info(
-                    "PCP multi-request batch #%d: %d requests, "
-                    "scheduled tokens %s, computed %s",
-                    self._pcp_multireq_seen, num_pcp_reqs, counts, computed)
-                self._pcp_multireq_seen += 1
             two_p = 2 * pcp_size
-            # The layout covers the LIVE requests only. Both attention phases
-            # iterate the live seq count from request_distribution (the ring
-            # cache phase takes one seq per request, the current phase two),
-            # so the slots that pad the request count up to the static
-            # `PCPMetadata.num_reqs` bucket never reach the kernel and need no
-            # rows.
+            # The layout covers the live requests only: both attention phases
+            # iterate the seq count from request_distribution, so the slots
+            # padding the count up to `PCPMetadata.num_reqs` need no rows.
             chunk, off, s_live = pcp_token_layout(counts, pcp_size)
             t_pad = padded_num_scheduled_tokens_per_dp_rank
             assert t_pad % pcp_size == 0 and t_pad >= pcp_size * s_live, (
@@ -2958,23 +2927,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 f"tokens ({num_pcp_reqs} reqs, chunks {chunk})")
             s_pad = t_pad // pcp_size
             if num_pcp_reqs == 1:
-                # Single request: use the SINGLE-REQUEST layout, chunk =
-                # t_pad / 2P with head and tail each filling half of every
-                # rank's slice. pcp_forward's R == 1 current phase (the
-                # kernel-side rank-order remap / to_token_order) derives the
-                # chunk from the padded buffer width, not from metadata, so
-                # a request packed at ceil(n / 2P) would have its K/V
-                # reordered against the wrong chunk size. The extra tail rows
-                # are padding like any other.
+                # Single request: chunk = t_pad / 2P, filling every rank's
+                # slice.  pcp_forward's kernel-side K/V remap derives the chunk
+                # from the buffer width, so the layout must match it.
                 assert t_pad % two_p == 0, (t_pad, two_p)
                 chunk = [t_pad // two_p]
                 off = [0]
 
-            # Token buffers: natural token order -> rank order. `perm[g]` is
-            # the source index for global slot g, or -1 where the slot is
-            # padding (past a request's end, or the dead tail of a region).
-            # `kv_order` maps the all-gathered current K/V from rank order into
-            # request-major token order, which is what kv_new_starts indexes.
+            # `perm[g]` is the token-order source of global rank-order slot g
+            # (-1 for padding); `kv_order` is the inverse map for the
+            # all-gathered current K/V, into request-major token order.
             src_off = np.cumsum([0] + counts)[:-1]
             perm = np.full(t_pad, -1, np.int64)
             kv_order = np.zeros(t_pad, np.int32)
@@ -2982,9 +2944,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for i in range(num_pcp_reqs):
                 c_i = chunk[i]
                 j = np.arange(c_i)
-                # Request i's block in the request-major K/V buffer starts at
-                # 2P * sum(chunk[:i]) == pcp_size * off[i] (== kv_new_starts).
-                kv_base = pcp_size * off[i]
+                kv_base = pcp_size * off[i]  # == kv_new_starts of request i
                 for h in (0, 1):
                     chunk_idx = ranks if h == 0 else two_p - 1 - ranks
                     dst = (ranks[:, None] * s_pad + off[i] + h * c_i +
@@ -2992,8 +2952,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     tok = chunk_idx[:, None] * c_i + j[None, :]
                     real = tok < counts[i]
                     perm[dst[real]] = src_off[i] + tok[real]
-                    # Every (h, rank) pair together covers all 2P chunks, so
-                    # this writes each of the request's 2P*C_i slots once.
                     kv_order[kv_base + tok.ravel()] = dst.ravel()
 
             valid = perm >= 0
@@ -3019,9 +2977,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             kv_cache_lens_np = np.zeros(n_off, np.int32)
             kv_cache_lens_np[:n_seqs] = per_seq(computed)
 
-            # cu_q_lens is rank-invariant now that both halves are full length
-            # (a clipped tail cannot be expressed in a cumulative array); only
-            # q_pos_offsets still varies by rank.
+            # cu_q_lens is rank-invariant (both halves are full length); only
+            # q_pos_offsets varies by rank.
             cu_row, pcp_qpos_np, kv_new_starts_np = pcp_seq_arrays(
                 chunk, off, pcp_size, n_off)
             # A zero-length seq inside the iterated range hangs the kernel.
@@ -3029,9 +2986,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 f"zero-length PCP seq in cu_q_lens: {cu_row[:n_seqs + 1]}")
             pcp_cu_np = np.tile(cu_row, (pcp_size, 1))
 
-            # logits_indices: the global slot holding each request's last real
-            # token. _select_from_array_fn already all-gathers under PCP and
-            # indexes globally, so nothing downstream changes.
+            # logits_indices: the global slot of each request's last token.
             logits_indices_view[:] = -1
             for i in range(num_pcp_reqs):
                 last = counts[i] - 1
@@ -3049,7 +3004,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              pcp_q_pos_offsets) = device_array(self.mesh,
                                                (pcp_cu_np, pcp_qpos_np),
                                                sharding=pcp_spec)
-            multi = num_pcp_reqs > 1
             (pcp_kv_cache_lens, pcp_kv_new_starts,
              pcp_kv_token_order) = device_array(
                  self.mesh, (kv_cache_lens_np, kv_new_starts_np, kv_order),
@@ -3058,13 +3012,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=pcp_query_start_loc,
                 kv_cache_lens=pcp_kv_cache_lens,
                 q_pos_offsets=pcp_q_pos_offsets,
-                # Bucket on the largest cached count so the rung bounds every
-                # request in the batch; only the `== 0` elision depends on it.
-                cache_pages=round_up_pcp_cache_pages(
-                    max(computed, default=0), self.block_size,
-                    self.max_num_blocks_per_req),
-                kv_new_starts=pcp_kv_new_starts if multi else None,
-                kv_token_order=pcp_kv_token_order if multi else None,
+                kv_new_starts=pcp_kv_new_starts,
+                kv_token_order=pcp_kv_token_order,
+                has_cached_kv=any(l_i > 0 for l_i in computed),
                 num_reqs=runner_utils.get_padded_token_len(
                     self.pcp_num_reqs_paddings, num_pcp_reqs),
             )
@@ -3134,13 +3084,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                               _num_reqs])
 
             if pcp_size > 1:
-                # PCP fuses each request's head+tail chunks into one launch as
-                # two sequences of the same request. The kernel indexes
-                # page_indices as `seq_idx * pages_per_seq`, and the writing
-                # seq is the tail -- so every tail must carry a copy of its
-                # request's block table, not the zero padding, or its strided
-                # KV write lands on page 0 (the reserved null block) and the
-                # request silently loses its current chunk's KV.
+                # Each request is two fused seqs (head, tail) and the kernel
+                # indexes page_indices by seq, so the tail must carry a copy
+                # of its request's block table or its KV write lands on page 0.
                 n = num_req_per_dp_rank[0]
                 block_tables_view[:2 * n] = np.repeat(block_tables_view[:n],
                                                       2,

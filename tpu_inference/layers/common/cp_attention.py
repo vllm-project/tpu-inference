@@ -293,16 +293,7 @@ def pcp_forward(
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
-    two_p = 2 * pcp_size
-    padded_q_len = q.shape[0]
-    C = padded_q_len // two_p
-
-    # Precompute inv_row on host: maps rank-order chunk index → token order.
-    _row = [c for r in range(pcp_size) for c in (r, two_p - 1 - r)]
-    _inv = [0] * two_p
-    for _i, _c in enumerate(_row):
-        _inv[_c] = _i
-    inv_row = jnp.array(_inv, jnp.int32)
+    C = q.shape[0] // (2 * pcp_size)
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
@@ -314,30 +305,22 @@ def pcp_forward(
                   k_scale=k_scale,
                   v_scale=v_scale)
 
-    cache_pages = md.pcp.cache_pages
+    has_cached_kv = md.pcp.has_cached_kv
     num_reqs = md.pcp.num_reqs
     multi_req = num_reqs > 1
 
     def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
                   kv_cache_lens_local, page_indices_local, distribution_local,
-                  pcp_cu_q_lens_local, pcp_q_pos_offsets_local, *pcp_extra):
-        # Multi-request extras (see in_specs below); empty when num_reqs == 1.
-        kv_new_starts_local = kv_token_order_local = None
-        if multi_req:
-            kv_new_starts_local, kv_token_order_local = pcp_extra
+                  pcp_cu_q_lens_local, pcp_q_pos_offsets_local,
+                  kv_new_starts_local, kv_token_order_local):
         axis_idx = lax.axis_index(pcp_axis)
         cp_rank = jnp.reshape(axis_idx, (1, )).astype(jnp.int32)
 
         def all_gather_tokens(x):
             return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
-        def to_token_order(x):  # rank-order chunks -> global token order
-            return all_gather_tokens(x).reshape(two_p, C,
-                                                *x.shape[1:])[inv_row].reshape(
-                                                    padded_q_len, *x.shape[1:])
-
         # ---- Cache phase --------------------------------------------------
-        if cache_pages == 0:
+        if not has_cached_kv:
             # Nothing cached (first chunk of a chunked prefill): the cache
             # phase would attend an empty cache, be fully masked, and have its
             # -inf result discarded by merge_attn_states.  Skip it outright.
@@ -345,12 +328,9 @@ def pcp_forward(
         else:
             if not multi_req:
                 # Single request: one seq spanning this rank's whole local
-                # buffer (head + tail + padding).  Kept verbatim from the
-                # single-request ring path because it is valid for ANY
-                # current-phase cu_q_lens, including the clipped-tail,
-                # per-rank one that older callers and the single-request
-                # tests build.  With full-length tails the general
-                # construction below gives the same call.
+                # buffer (head + tail + padding).  Valid for any current-phase
+                # cu_q_lens, including the per-rank clipped-tail form that
+                # single-request callers build.
                 cu_cache = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(
                     q_local.shape[0])
                 kv_lens_cache = kv_lens_local
@@ -358,24 +338,13 @@ def pcp_forward(
                 page_indices_cache = page_indices_local
                 distribution_cache = jnp.array([0, 0, 1], jnp.int32)
             else:
-                # One cache-phase seq per REQUEST, spanning its head+tail run
-                # (rows [off_i, off_i + 2*C_i)); no causal mask here, so head
-                # and tail need not be told apart, and one seq of 2*C_i rows
-                # rounds up to fewer query tiles than two seqs of C_i -- and
-                # the ring re-streams the request's cache once per tile.
-                # Every array is the current-phase array with the head/tail
-                # duplication undone (every second entry), and the seq count
-                # is half.
-                #
-                # Lock-step: the ring's remote copies and semaphores are
-                # matched by loop position, so every rank must run the
-                # identical (seq, tile, block, round) schedule.  All three
-                # inputs that fix it are rank-invariant by construction --
-                # distribution is replicated, cu_q_lens is the same on every
-                # rank because the runner gives both halves the full chunk
-                # length, and the block count comes from the replicated
-                # global cache length.  q_pos_offsets, the one per-rank
-                # array, is not passed here.
+                # One cache-phase seq per request spanning its head+tail run
+                # (no causal mask here, so the two need not be told apart):
+                # every array is the current-phase array with the head/tail
+                # duplication undone, and the seq count is half.  The ring
+                # runs in lock-step across ranks, so everything passed here is
+                # rank-invariant; q_pos_offsets, the one per-rank array, is
+                # not passed.
                 cu_cache = pcp_cu_q_lens_local[0][0::2]
                 kv_lens_cache = kv_lens_local[0::2]
                 kv_cache_lens_cache = kv_cache_lens_local[0::2]
@@ -403,30 +372,20 @@ def pcp_forward(
                 update_kv_cache=False,
                 **common)
 
-        # Current phase: local Q (head+tail chunks) attends all-gathered current KV.
-        # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
-        # remap_kv: if C aligns with page_size, all_gather_tokens() avoids an extra gather-reorder.
+        # ---- Current phase ------------------------------------------------
+        # Local Q (head+tail chunks) attends the all-gathered current K/V.  A
+        # single request with a page-aligned chunk hands the kernel the
+        # rank-order buffer and lets it remap addresses (pcp_chunk_size);
+        # otherwise the gathered K/V is reordered into request-major token
+        # order here, which is what kv_new_starts indexes.
         page_size = kv_cache_local.shape[1]
-        if multi_req:
-            # Chunk size is per request, so the kernel-side rank-order remap
-            # (one global chunk size) does not apply.  Reorder in JAX instead,
-            # into request-major token order, which is what kv_new_starts
-            # indexes into.
-            remap_kv = False
-            k_curr = jnp.take(all_gather_tokens(k_local),
-                              kv_token_order_local,
-                              axis=0)
-            v_curr = jnp.take(all_gather_tokens(v_local),
-                              kv_token_order_local,
-                              axis=0)
-        else:
-            remap_kv = (C >= page_size) and (C % page_size == 0)
-            k_curr = all_gather_tokens(
-                k_local) if remap_kv else to_token_order(k_local)
-            v_curr = all_gather_tokens(
-                v_local) if remap_kv else to_token_order(v_local)
-        # Each request's tail seq performs the fused strided KV write; the head
-        # would otherwise redundantly write the same tokens.
+        remap_kv = not multi_req and C >= page_size and C % page_size == 0
+        k_curr = all_gather_tokens(k_local)
+        v_curr = all_gather_tokens(v_local)
+        if not remap_kv:
+            k_curr = jnp.take(k_curr, kv_token_order_local, axis=0)
+            v_curr = jnp.take(v_curr, kv_token_order_local, axis=0)
+        # Each request's tail seq performs the fused strided KV write.
         max_seqs = kv_lens_local.shape[0]
         kv_write_seq_mask = jnp.zeros(max_seqs,
                                       jnp.int32).at[1:2 * num_reqs:2].set(1)
@@ -443,9 +402,9 @@ def pcp_forward(
             cp_group_size=pcp_size,
             kv_cache_lens=kv_cache_lens_local,
             q_pos_offsets=pcp_q_pos_offsets_local[0],
-            kv_new_starts=kv_new_starts_local,
+            kv_new_starts=None if remap_kv else kv_new_starts_local,
             kv_write_seq_mask=kv_write_seq_mask,
-            pcp_chunk_size=(C if remap_kv else None),
+            pcp_chunk_size=C if remap_kv else None,
             skip_cache_attn=True,
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
@@ -458,20 +417,6 @@ def pcp_forward(
             out, _ = merge_attn_states(context_out, context_lse, curr_out,
                                        curr_lse)
         return kv_cache_updated, out.astype(q.dtype)
-
-    # Multi-request extras, appended so the single-request signature is
-    # untouched. Both are replicated and rank-invariant.
-    extra_specs, extra_args = (), ()
-    if multi_req:
-        if md.pcp.kv_new_starts is None or md.pcp.kv_token_order is None:
-            raise ValueError(
-                "PCP with num_reqs > 1 requires md.pcp.kv_new_starts and "
-                "md.pcp.kv_token_order; the runner must build both.")
-        extra_specs = (
-            P(),  # pcp.kv_new_starts: replicated
-            P(),  # pcp.kv_token_order: replicated
-        )
-        extra_args = (md.pcp.kv_new_starts, md.pcp.kv_token_order)
 
     return jax.shard_map(
         _shard_fn,
@@ -487,9 +432,11 @@ def pcp_forward(
             P(),  # distribution: replicated
             P(pcp_axis, None),  # pcp.query_start_loc: per-rank cu_q_lens
             P(pcp_axis, None),  # pcp.q_pos_offsets: per-rank position offsets
-        ) + extra_specs,
+            P(),  # pcp.kv_new_starts: replicated
+            P(),  # pcp.kv_token_order: replicated
+        ),
         out_specs=(kv_cache_spec, q_spec),
         check_vma=False,
     )(q, k, v, kv_cache, md.seq_lens, md.pcp.kv_cache_lens, md.block_tables,
       md.request_distribution, md.pcp.query_start_loc, md.pcp.q_pos_offsets,
-      *extra_args)
+      md.pcp.kv_new_starts, md.pcp.kv_token_order)

@@ -29,8 +29,7 @@ from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
-    SharedAttentionMetadata, pcp_cache_page_buckets, pcp_seq_arrays,
-    pcp_token_layout)
+    SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
@@ -362,19 +361,6 @@ class CompilationManager:
                 num_tokens=num_tokens,
             )
 
-    def _pcp_cache_page_buckets(self) -> list[int]:
-        """Rungs of the shared `pcp_cache_pages` ladder to precompile.
-
-        It is a META field of PCPMetadata, so each value is its own compiled
-        program; precompiling the ladder keeps the first request of each rung
-        off the compile path.  Non-PCP runs use a single value (0), where the
-        field is never read.
-        """
-        pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
-        if pcp_size <= 1:
-            return [0]
-        return pcp_cache_page_buckets(self.runner.max_num_blocks_per_req)
-
     def _precompile_backbone_helper(self,
                                     name,
                                     *,
@@ -385,7 +371,7 @@ class CompilationManager:
                                     is_first_rank=True,
                                     is_last_rank=True,
                                     num_reqs: int,
-                                    pcp_cache_pages: int = 0,
+                                    pcp_has_cached_kv: bool = False,
                                     pcp_num_reqs: int = 1) -> None:
         num_tokens = None
         if input_ids is not None:
@@ -420,26 +406,15 @@ class CompilationManager:
                 self.runner.mesh,
                 PartitionSpec(ShardingAxisName.PREFILL_CONTEXT, None))
             repl = NamedSharding(self.runner.mesh, PartitionSpec())
-            # Build a well-formed layout rather than an all-zero one. Both
-            # attention phases iterate the seq count from request_distribution
-            # (all zeros here, so the kernel body does not run during
-            # precompile), but the traced program still slices these arrays,
-            # and a realistic dummy keeps this path honest if that ever
-            # changes: query_start_loc entries that repeat inside the iterated
-            # range would be zero-length seqs, which hang the kernel.
-            cu_np = np.zeros((pcp_size, n_reqs + 1), np.int32)
-            qpos_np = np.zeros((pcp_size, n_reqs), np.int32)
-            kv_starts_np = np.zeros(n_reqs, np.int32)
-            if pcp_num_reqs > 1:
-                chunk = num_tokens // (2 * pcp_size * pcp_num_reqs)
-                assert chunk >= 1, (
-                    f"{num_tokens=} cannot hold {pcp_num_reqs} PCP requests; "
-                    "this bucket should have been skipped")
-                chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
-                                                   pcp_num_reqs, pcp_size)
-                cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
-                    chunks, offs, pcp_size, n_reqs)
-                cu_np = np.tile(cu_row, (pcp_size, 1))
+            # A well-formed dummy layout: request_distribution is all zeros,
+            # so the kernel body does not run, but the traced program still
+            # slices these arrays.
+            chunk = num_tokens // (2 * pcp_size * pcp_num_reqs)
+            chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
+                                               pcp_num_reqs, pcp_size)
+            cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
+                chunks, offs, pcp_size, n_reqs)
+            cu_np = np.tile(cu_row, (pcp_size, 1))
 
             pcp = PCPMetadata(
                 query_start_loc=device_array(self.runner.mesh,
@@ -451,16 +426,14 @@ class CompilationManager:
                 q_pos_offsets=device_array(self.runner.mesh,
                                            qpos_np,
                                            sharding=pcp_spec),
-                cache_pages=pcp_cache_pages,
-                kv_new_starts=device_array(
-                    self.runner.mesh, kv_starts_np, sharding=repl)
-                if pcp_num_reqs > 1 else None,
-                # A real permutation: jnp.take with out-of-range or duplicated
-                # indices is not what the runtime does.
-                kv_token_order=device_array(
-                    self.runner.mesh,
-                    np.arange(num_tokens, dtype=np.int32),
-                    sharding=repl) if pcp_num_reqs > 1 else None,
+                kv_new_starts=device_array(self.runner.mesh,
+                                           kv_starts_np,
+                                           sharding=repl),
+                kv_token_order=device_array(self.runner.mesh,
+                                            np.arange(num_tokens,
+                                                      dtype=np.int32),
+                                            sharding=repl),
+                has_cached_kv=pcp_has_cached_kv,
                 num_reqs=pcp_num_reqs,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only
@@ -748,16 +721,13 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
-                _cache_rungs = self._pcp_cache_page_buckets()
                 _pcp = self.runner.vllm_config.sharding_config.prefill_cp_size
-                for _cache_pages in _cache_rungs:
+                # has_cached_kv is a static field; non-PCP runs never read it.
+                _cache_rungs = (False, True) if _pcp > 1 else (False, )
+                for _has_cached_kv in _cache_rungs:
                     for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
-                        # cache_pages only decides whether the cache phase is
-                        # elided at all (== 0); the ladder is {0, max}, so
-                        # every rung here is reachable.
-                        # A bucket that cannot give every request a chunk of at
-                        # least one token per rank can never carry that many
-                        # requests at runtime, so the variant is unreachable.
+                        # A bucket that cannot give every request one token
+                        # per chunk never carries that many requests.
                         if (_pcp_reqs > 1
                                 and num_tokens < 2 * _pcp * _pcp_reqs):
                             continue
@@ -770,7 +740,7 @@ class CompilationManager:
                             is_first_rank=is_first_rank,
                             is_last_rank=is_last_rank,
                             num_reqs=num_reqs,
-                            pcp_cache_pages=_cache_pages,
+                            pcp_has_cached_kv=_has_cached_kv,
                             pcp_num_reqs=_pcp_reqs)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:

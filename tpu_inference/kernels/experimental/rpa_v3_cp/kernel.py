@@ -438,11 +438,8 @@ def _ragged_paged_attention_kernel_loop(
         return cu_q_lens_ref[seq_idx + 1] - cu_q_lens_ref[seq_idx]
 
     def get_kv_new_end(seq_idx):
-        # End of this seq's current-KV block *inside the new-KV buffer*, used
-        # only as a read offset into kv_hbm_ref. Under PCP that buffer holds
-        # the all-gathered current K/V; with one request its block starts at 0,
-        # so the length is also the end. With several requests packed back to
-        # back, kv_new_starts gives each seq's base.
+        # End of this seq's block inside the new-KV buffer (a read offset into
+        # kv_hbm_ref); under PCP kv_new_starts gives each seq's base.
         if kv_cache_lens_ref is not None:
             if kv_new_starts_ref is not None:
                 return kv_new_starts_ref[seq_idx] + get_kv_new_len(seq_idx)
@@ -2021,11 +2018,6 @@ def static_validate_inputs(
         if kv_cache_lens is None:
             raise ValueError("PCP (kv_new_starts) requires kv_cache_lens.")
         if pcp_chunk_size is not None:
-            # The remap at fetch time rewrites a token-order offset into rank
-            # order assuming the new-KV buffer holds exactly one request's
-            # chunks. Per-request bases are only meaningful once the buffer has
-            # been reordered in JAX, which is the path that leaves
-            # pcp_chunk_size unset.
             raise ValueError(
                 "kv_new_starts and pcp_chunk_size are mutually exclusive: the "
                 "rank-order remap assumes a single request's new-KV buffer.")

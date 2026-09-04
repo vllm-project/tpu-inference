@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools
-import math
 from dataclasses import dataclass
 
 import jax
@@ -27,7 +26,7 @@ from vllm.utils.math_utils import cdiv
         "query_start_loc", "kv_cache_lens", "q_pos_offsets", "kv_new_starts",
         "kv_token_order"
     ],
-    meta_fields=["cache_pages", "num_reqs"],
+    meta_fields=["has_cached_kv", "num_reqs"],
 )
 @dataclass
 class PCPMetadata:
@@ -42,27 +41,19 @@ class PCPMetadata:
     # (pcp_size, max_num_reqs) int32 — per-rank, per-seq Q position offsets.
     # Sharded as P('pcp', None).
     q_pos_offsets: jax.Array
-    # STATIC (meta field): a rung of `pcp_cache_page_buckets` giving an UPPER
-    # bound on the KV pages any request's cached tokens occupy (taken over the
-    # batch).  0 means nothing is cached, in which case the cache phase is
-    # elided entirely; that elision is the only thing the value decides now
-    # that the cache phase is the in-kernel ring.  REQUIRED: a default would
-    # silently elide the cache phase for any caller that forgot to set it.
-    cache_pages: int
     # (max_num_seqs,) int32 — base offset of each fused seq's current-KV block
-    # inside the all-gathered new-KV buffer.  Replicated (P()).  None for a
-    # single request, where every block starts at 0 and the kernel's implicit
-    # base of 0 is already right.
-    kv_new_starts: jax.Array | None = None
+    # inside the all-gathered new-KV buffer (zeros for a single request).
+    # Replicated (P()).
+    kv_new_starts: jax.Array
     # (padded_num_tokens,) int32 — permutation taking the all-gathered current
     # K/V from rank order to request-major token order.  Replicated (P()).
-    # None keeps the single-request fast path, where the kernel remaps
-    # addresses itself via `pcp_chunk_size`.
-    kv_token_order: jax.Array | None = None
-    # STATIC (meta field): number of requests fused into this launch, padded to
-    # its own bucket ladder.  1 keeps the batch on exactly the single-request
-    # code path (kernel-side rank-order remap of the current K/V, no
-    # kv_new_starts) rather than the multi-request one.
+    kv_token_order: jax.Array
+    # STATIC (meta field): whether any request in the batch has cached KV.
+    # False elides the cache phase entirely.  REQUIRED: a default would
+    # silently elide the cache phase for any caller that forgot to set it.
+    has_cached_kv: bool
+    # STATIC (meta field): number of requests fused into this launch, padded
+    # to `runner.pcp_num_reqs_paddings`.
     num_reqs: int = 1
 
 
@@ -186,25 +177,6 @@ jax.tree_util.register_pytree_node(
         groups, layer_names_per_group),
 )
 
-# After PR #3277 (in-kernel ring cache phase) `cache_pages` only decides whether
-# the cache phase runs at all (0 elides it); every nonzero rung compiles the
-# same kernel, so the ladder is just {0, max}. Each rung multiplies the PCP
-# precompile set, so keep this at 2 unless the value gains another use.
-PCP_CACHE_PAGE_BUCKET_COUNT = 2
-
-
-def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
-    """The buckets for the `pcp_cache_pages` value, including 0.
-    """
-    buckets = {0, max_num_blocks_per_req}
-    n = PCP_CACHE_PAGE_BUCKET_COUNT - len(buckets)
-    if n > 0 and max_num_blocks_per_req > 1:
-        step = math.log(max_num_blocks_per_req) / (n + 1)
-        for i in range(1, n + 1):
-            v = 1 << max(0, round(math.exp(step * i)).bit_length() - 1)
-            buckets.add(min(max(v, 1), max_num_blocks_per_req))
-    return sorted(buckets)
-
 
 def pcp_token_layout(num_scheduled_tokens: list[int],
                      pcp_size: int) -> tuple[list[int], list[int], int]:
@@ -263,16 +235,3 @@ def pcp_seq_arrays(chunk: list[int], off: list[int], pcp_size: int,
     kv_new_starts = np.zeros(n_off, np.int32)
     kv_new_starts[:2 * n_reqs] = np.repeat(pcp_size * o, 2)
     return cu_row, q_pos, kv_new_starts
-
-
-def round_up_pcp_cache_pages(num_computed_tokens: int, block_size: int,
-                             max_num_blocks_per_req: int) -> int:
-    """Round a request's number of kv pages up to the nearest bucket.
-    """
-    if num_computed_tokens <= 0:
-        return 0
-    live_pages = cdiv(num_computed_tokens, block_size)
-    for b in pcp_cache_page_buckets(max_num_blocks_per_req):
-        if b >= live_pages:
-            return b
-    return max_num_blocks_per_req
