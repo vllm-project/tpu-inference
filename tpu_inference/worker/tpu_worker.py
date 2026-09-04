@@ -807,7 +807,8 @@ class TPUWorker(WorkerBase):
 
     def bind_raiden_sync(self,
                          worker_index: int = 0,
-                         parallelism: int = 4) -> dict:
+                         parallelism: int = 4,
+                         job_name: str = "rollout") -> dict:
         """Binds this worker's live weights to Raiden and returns wire-safe
         registration metadata (never the arrays)."""
         from tpu_inference.rl import \
@@ -816,12 +817,48 @@ class TPUWorker(WorkerBase):
         state = self.get_weights_state()
         if self._raiden_rl_weight_sync is None:
             self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
-                job_name="rollout",
+                job_name=job_name,
                 worker_index=worker_index,
                 parallelism=parallelism,
             )
         self._raiden_rl_weight_sync.bind(state)
         return self._raiden_rl_weight_sync.metadata_dict()
+
+    def refresh_model_state_leaves(self) -> None:
+        """Re-points the runner's dispatch view at the freshly synced weights.
+
+        `model_fn` takes `state_leaves` as its first argument; it is derived
+        from `state` at load time and goes stale once the weights behind
+        `state` are replaced. runner/lora_utils.py does the same fix-up.
+        """
+        from flax import nnx  # pylint: disable=g-import-not-at-top
+
+        runner = self.model_runner
+        # Install the synced tree before re-deriving leaves; under FFI
+        # `runner.state` still holds the pre-sync arrays. See
+        # RaidenWorkerSync.synced_state(); None on the legacy path.
+        sync = self._raiden_rl_weight_sync
+        synced = sync.synced_state() if sync is not None else None
+        if synced is not None:
+            cur = getattr(runner, "state", None)
+            # Undo extract_weight_state's {"base": state["model"]} wrap. Fail
+            # loudly rather than guess: nnx.State.__setitem__ creates missing
+            # keys instead of raising, so a wrong path would silently drop a
+            # level and fail the next round's manifest preflight.
+            if isinstance(synced, dict) and set(synced) == {"base"}:
+                if cur is None or "model" not in cur:
+                    raise RuntimeError(
+                        "weight sync bound MaxText params but runner.state has "
+                        "no 'model' key; cannot publish without corrupting the "
+                        "variable paths")
+                cur["model"] = synced["base"]
+            else:
+                runner.state = synced
+
+        if isinstance(runner.state, nnx.State):
+            runner.state_leaves = tuple(jax.tree_util.tree_leaves(runner.state))
+        else:
+            runner.state_leaves = runner.state
 
     def get_raiden_metadata(self) -> dict:
         """Re-fetches the current binding's wire-safe metadata without rebinding."""
