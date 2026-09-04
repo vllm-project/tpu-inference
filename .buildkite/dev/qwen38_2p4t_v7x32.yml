@@ -31,16 +31,16 @@ steps:
       TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
       MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
       NEW_MODEL_DESIGN: "1"       # required: sharding.validate() rejects attn_dp>1 without it
-      # Health-wait budget. Build #943 was killed by the 7200s default with the
+      # Health-wait budget. Build tc#943 was killed by the 7200s default with the
       # runai streamer at 63% (180271/287119 tensors) after 1:58:40 and still
       # advancing. MOE_STAGE_WEIGHTS_ON_HOST since cut the load from 3h34m to
-      # 33m (#951), and AOT precompilation adds ~20 min ahead of /health now
+      # 33m (tc#951), and AOT precompilation adds ~20 min ahead of /health now
       # that SKIP_JAX_PRECOMPILE is off, so ~55 min is the expectation.
       # Deliberately left at 5h rather than trimmed to fit: the budget exists to
       # bound a pathological run, and a load regression is far more useful as a
       # slow progress tail than as a killed job. timeout_in_minutes above has to
       # exceed it or Buildkite kills the job first.
-      # Raised 5h -> 10h for the xhigh eval leg. Measured on #959: at
+      # Raised 5h -> 10h for the xhigh eval leg. Measured on tc#959: at
       # reasoning_effort=xhigh, GPQA requests retire at ~122s each at conc 32,
       # i.e. ~3900s of latency per request, because most of them run the 32768
       # output cap to exhaustion rather than stopping on EOS. 198 of those is
@@ -51,7 +51,7 @@ steps:
       # run_multihost.sh on the host, so it belongs here rather than in
       # MULTIHOST_ENV_VARS. 120s is coarse enough not to bloat the log over a
       # multi-hour eval and fine enough to pin down when an engine stops
-      # retiring requests -- #960 sat wedged for two hours indistinguishably
+      # retiring requests -- tc#960 sat wedged for two hours indistinguishably
       # from a slow tail because nothing but the client progress bar was visible.
       SERVE_LOG_TAIL_INTERVAL_S: "120"
       # Tail /root/vllm_serve.log into the Buildkite log every 60s while waiting
@@ -110,9 +110,9 @@ steps:
 
         # Compilation-cache disk guard. SKIP_JAX_PRECOMPILE is off from this
         # build on, so the cache now takes an entry per shape bucket instead of
-        # the handful the lazy path produced (#947: 8 entries, 90 MB). The
+        # the handful the lazy path produced (tc#947: 8 entries, 90 MB). The
         # checkpoint disks are read-only, so the cache has nowhere to live but
-        # the host root filesystem, which had 54 GB free on #947.
+        # the host root filesystem, which had 54 GB free on tc#947.
         #
         # MAX_GB makes JAX evict LRU entries itself -- its default is -1,
         # unlimited. MIN_FREE_GB is the point at which caching is abandoned
@@ -147,21 +147,21 @@ steps:
         # rather than 4.
         #
         # MAX_CONCURRENCY stays at 8 for comparability, not because of HBM any
-        # more. It was 16 -> 8 originally because build #951 sized the full-
+        # more. It was 16 -> 8 originally because build tc#951 sized the full-
         # attention pool at 660 blocks x 128 tokens: one 9216-token request
         # holds 72 of them, so 8 x 72 = 576 blocks was 87% of the pool and 16
         # would have preempted. NUM_GPU_BLOCKS_OVERRIDE (below) lifts the pool
         # to 12288 blocks, so 8 is now 4.7% and there is room to raise it --
-        # but #953/#959/#960 are all at 8, so changing it here would break the
+        # but tc#953/tc#959/tc#960 are all at 8, so changing it here would break the
         # only perf baseline we have. Raise it in a dedicated run.
         #
-        # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made #960's
+        # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made tc#960's
         # eval unscoreable. The runner sizes the attention pool against mamba's
         # real footprint and allocates ~15,150 blocks, but it does so
         # worker-side, after engine-core has already built the scheduler's
         # block pool from vLLM's uniform hybrid sizing -- and the
         # `num_gpu_blocks_override` it sets never crosses the RPC boundary. So
-        # #960 ran with 15,150 blocks of HBM reserved and 661 admitted against
+        # tc#960 ran with 15,150 blocks of HBM reserved and 661 admitted against
         # (83,822 tokens, "Maximum concurrency ... 2.05x"), 13x oversubscribed
         # at conc 32, and lost 28 of 198 GPQA questions to preemption.
         # Passing it on the serve command line puts it in the engine-core
@@ -185,7 +185,7 @@ steps:
         # BENCH_REQUEST_TIMEOUT_S bounds a single request. The benchmark client
         # hardcoded a 6h aiohttp total, and that timeout is also how long a
         # stuck request holds its slot in the concurrency semaphore -- so on
-        # #960, 28 requests that the engine had already dropped kept 28 of 32
+        # tc#960, 28 requests that the engine had already dropped kept 28 of 32
         # slots occupied until the leg's own 8h wall clock ran out. The engine
         # went idle at 13:38 and the job burned another 3h56m, 57% of the leg,
         # with nothing running. 7200s is ~4x the measured P99 E2EL of 1622s and

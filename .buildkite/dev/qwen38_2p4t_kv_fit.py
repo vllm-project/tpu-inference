@@ -35,7 +35,7 @@ _NUM_BLOCKS_RE = re.compile(r"Init kv-cache \|.*?num_blocks=\[([0-9,\s]+)\]")
 # RPC boundary and do not reach it unless the launcher also passes
 # `--num-gpu-blocks-override`.
 #
-# Build #960 is why this is parsed separately: the worker allocated 15,150
+# Build tc#960 is why this is parsed separately: the worker allocated 15,150
 # attention blocks and this gate happily reported a 1,939,200-token pool, while
 # the scheduler was admitting against 661 blocks / 83,822 tokens. The benchmark
 # leg passed the gate and the eval leg then lost 28 of 198 questions to the
@@ -83,7 +83,7 @@ def main() -> int:
 
     # The scheduler's count is the one that gates admission. Fall back to the
     # worker's only if the layout line is missing, and say so, because that
-    # fallback is exactly the blind spot that let #960 through.
+    # fallback is exactly the blind spot that let tc#960 through.
     if sched_blocks:
         pool = sched_blocks
     else:

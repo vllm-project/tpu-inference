@@ -6,7 +6,7 @@
 # (linear_num_key_heads=16, see qwen35_397b_capedge_serve.sh for the derivation).
 #
 # What is already cleared, and what is not:
-#   tp_size=4  -> 4 key heads/device   v7x-8 build #942, and locally on the 27B
+#   tp_size=4  -> 4 key heads/device   v7x-8 build tc#942, and locally on the 27B
 #   tp_size=8  -> 2 key heads/device   locally on the 27B
 #   tp_size=16 -> 1 key head/device    <-- this run; the v7x-32 plan needs it
 #   tp_size=32 -> 0                    malformed; why the 2.4T cannot use plain tp=32
@@ -30,14 +30,14 @@ steps:
       TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
       MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForConditionalGeneration
       # Append-only build output; the tty renderer redraws the whole table per
-      # update and buried a real serve failure under docker progress on #939.
+      # update and buried a real serve failure under docker progress on tc#939.
       BUILDKIT_PROGRESS: "plain"
       # HOST_HF_HOME is deliberately left at run_multihost.sh's /tmp/hf_home
       # default. Pointing it at the persistent /mnt/disks/persist/models cache
-      # to avoid re-pulling 378 GiB is what broke #944: the snapshot cached
+      # to avoid re-pulling 378 GiB is what broke tc#944: the snapshot cached
       # there has no usable tokenizer.json, so every rank died in
       # qwen3_5.py:712 cached_tokenizer_from_config after ~19 s. That cache is
-      # only known-good on the v7x-8 queue, where #942 used it; the v7x-16
+      # only known-good on the v7x-8 queue, where tc#942 used it; the v7x-16
       # hosts are different machines with independently-seeded disks. Neither
       # transformers 5.16.1 nor the repo itself is at fault -- both were
       # reproduced clean locally. A cold download costs one-off wall clock and

@@ -27,7 +27,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 GPU_MEM_UTIL="${GPU_MEMORY_UTILIZATION:-0.92}"
 # 128, not 256: USE_BATCHED_RPA_SEQ_ON_LANE selects KVLayout.SEQ_ALONG_LANE,
 # whose tile alignment hard-requires page_size==128
-# (batched_rpa/configs.py:360-363). Confirmed the hard way on build #940.
+# (batched_rpa/configs.py:360-363). Confirmed the hard way on build tc#940.
 BLOCK_SIZE="${BLOCK_SIZE:-128}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 
@@ -45,7 +45,7 @@ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 #
 # Net effect without this flag: the HBM is reserved but the scheduler still
 # hands out blocks from the small uniform count, and the surplus is allocated
-# and unaddressable. Measured on build #960 -- 15,150 blocks allocated,
+# and unaddressable. Measured on build tc#960 -- 15,150 blocks allocated,
 # `kv_cache_config.num_blocks=661` in use, `GPU KV cache size: 83,822 tokens,
 # Maximum concurrency for 40,960 tokens per request: 2.05x`. At conc 32 that is
 # ~13x oversubscribed, and the resulting preemption storm cost 28 of 198 GPQA
@@ -247,7 +247,7 @@ env | grep -E '^(VLLM_|MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_|ATTN_|SKIP_JAX|MOE_
 # ---------------------------------------------------------------------------
 # runai_streamer throughput.
 #
-# Build #943 streamed 63% of the 287119 tensors in 1:58:40 -- ~218 MB/s per
+# Build tc#943 streamed 63% of the 287119 tensors in 1:58:40 -- ~218 MB/s per
 # host against 2469 GB, i.e. ~3h just to load. Two defaults explain it, and
 # both are plain env vars that libstreamer and requests_iterator.py read
 # directly (no vLLM CLI plumbing needed, so they reach the Ray workers via

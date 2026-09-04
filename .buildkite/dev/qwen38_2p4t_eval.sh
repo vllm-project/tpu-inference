@@ -65,7 +65,7 @@ mkdir -p "${ART}" "${DATA}"
 # the live pool rather than against this comment.
 # benchmark_serving's warmup loop is *serial* -- it awaits each warmup request
 # one at a time -- so its cost scales with the output cap, not with concurrency.
-# At out=32768 that cost 38 min of an eval leg (#959) and is unbounded in the
+# At out=32768 that cost 38 min of an eval leg (tc#959) and is unbounded in the
 # worst case: 8 samples x a 32k generation. The server has already served 128
 # perf-leg requests plus the smoke test by the time evals run, so this warmup
 # buys nothing but a shape that JAX has mostly bucketed already. Default it off
@@ -164,7 +164,7 @@ evaluate.load("accuracy")
 print("[eval] evaluate+nltk ready")
 PY
 
-# Build #952 died here: lm_eval put 576 requests on a server sized for 64, the
+# Build tc#952 died here: lm_eval put 576 requests on a server sized for 64, the
 # KV pool hit 99.8%, and the resulting preemption storm tripped a mamba
 # slot-pool underflow in the runner that killed the engine outright -- taking
 # the eval that was running and the one after it with it. So the shape check is
@@ -315,7 +315,7 @@ GSM8K_ARGS=(
   --num_fewshot 8
   # batch_size 1, NOT EVAL_CONCURRENCY. lm_eval's local-completions puts
   # batch_size prompts in one request body and runs num_concurrent of those
-  # bodies at once, so the two multiply: build #952 asked for 24 and 24 and got
+  # bodies at once, so the two multiply: build tc#952 asked for 24 and 24 and got
   # 24 x 24 = 576 requests in flight (observed: 62 running, 514 waiting, KV at
   # 99.8%), which oversubscribed the pool badly enough to kill the engine. With
   # batch_size 1, num_concurrent is the real in-flight cap.
@@ -330,7 +330,7 @@ if ! server_up; then
   rc=0 secs=0
 else
 # The 8-shot CoT prompt is ~1000 tokens and max_gen_toks is 512, so this is the
-# cheapest shape of the three -- but it is the one that broke #952, so it states
+# cheapest shape of the three -- but it is the one that broke tc#952, so it states
 # its budget like the others.
 python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
   --tokens-per-request $((1536 + 512)) --concurrency "${EVAL_CONCURRENCY}" \

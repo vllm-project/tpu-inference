@@ -60,7 +60,7 @@ done
 # Writability here means "root inside the container can write through the bind
 # mount", not "this ssh user can write". A previous build's container created
 # this directory as root, so `touch` as the agent user fails on a directory
-# that is in fact perfectly usable -- which is how build #948 talked itself out
+# that is in fact perfectly usable -- which is how build tc#948 talked itself out
 # of a cache with 54 GB free. The two things that genuinely stop the container
 # writing are the directory not existing and not being creatable, or the
 # filesystem being mounted read-only.

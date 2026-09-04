@@ -61,7 +61,7 @@ env | grep -E '^(VLLM_|MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_|ATTN_|SKIP_JAX|MOE_
 # tokenizer.json takes down every rank ~19 s into model construction with a
 # "Couldn't instantiate the backend tokenizer" ValueError whose text blames
 # missing sentencepiece/tiktoken -- both of which are installed, and neither of
-# which is the problem. That cost build #944 ten minutes to reach and a full log
+# which is the problem. That cost build tc#944 ten minutes to reach and a full log
 # download to read. Resolve it here instead, in seconds, with the cache listing
 # attached.
 echo "--- tokenizer preflight (HF_HOME=${HF_HOME:-<unset>}) ---"

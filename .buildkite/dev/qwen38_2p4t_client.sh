@@ -23,7 +23,7 @@ NUM_PROMPTS="${NUM_PROMPTS:-128}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-8}"
 
 # --fail-with-body, not plain -sS: curl exits 0 on an HTTP 500, which on build
-# #940 let a dead engine report the job as passed.
+# tc#940 let a dead engine report the job as passed.
 echo "--- smoke test (triggers first-request compilation) ---"
 time curl -sS --fail-with-body --max-time 5400 "http://localhost:${PORT}/v1/completions" \
   -X POST -H 'Content-Type: application/json' \
@@ -31,7 +31,7 @@ time curl -sS --fail-with-body --max-time 5400 "http://localhost:${PORT}/v1/comp
   | tee "${ART}/smoke.json"
 echo
 
-# --num-warmups: build #947 ran with 0 and the means were unusable -- mean TTFT
+# --num-warmups: build tc#947 ran with 0 and the means were unusable -- mean TTFT
 # 44.5s against a 1.35s median, because the first few requests absorbed
 # just-in-time compilation and the percentile machinery counts them like any
 # other. serve.py fires the warmups concurrently under the same

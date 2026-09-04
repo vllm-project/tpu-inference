@@ -106,7 +106,7 @@ fi
 # real pass/fail of the de-risk -- the benchmark below is just numbers.
 #
 # --fail-with-body, not plain -sS: curl exits 0 on an HTTP 500 and would let a
-# dead engine sail through as a pass. Build #940 did exactly that -- the engine
+# dead engine sail through as a pass. Build tc#940 did exactly that -- the engine
 # died on a kernel assertion, the smoke test recorded the 500 body, the bench
 # then failed all 64 requests with connection-refused, and the job still
 # reported `passed`.
