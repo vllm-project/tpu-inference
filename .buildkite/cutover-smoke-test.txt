@@ -1,0 +1,5 @@
+Scratch file for verifying CI after the Buildkite org cutover.
+
+Touches no source code. It exists only because bootstrap.sh skips builds whose
+changed files are all docs, icons or CODEOWNERS, and a smoke test needs a real
+build. Delete this file and close the PR once the run is green.
