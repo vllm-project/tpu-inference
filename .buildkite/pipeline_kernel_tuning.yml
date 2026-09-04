@@ -19,14 +19,14 @@
 # HOW TO TRIGGER THIS PIPELINE
 # ─────────────────────────────
 # Option A — Buildkite UI:
-#   Go to https://buildkite.com/tpu-commons/tpu-inference-kernel-tuning
+#   Go to https://buildkite.com/vllm/tpu-inference-kernel-tuning
 #   Click "New Build", set branch to your branch, click "Create Build".
 #
 # Option B — Buildkite API (requires BUILDKITE_API_TOKEN in your env):
 #   curl -s -X POST \
 #     -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
 #     -H "Content-Type: application/json" \
-#     "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-kernel-tuning/builds" \
+#     "https://api.buildkite.com/v2/organizations/vllm/pipelines/tpu-inference-kernel-tuning/builds" \
 #     -d "{\"commit\": \"$(git rev-parse HEAD)\", \"branch\": \"$(git rev-parse --abbrev-ref HEAD)\", \"message\": \"my test\"}"
 #
 steps:
