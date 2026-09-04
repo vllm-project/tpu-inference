@@ -65,17 +65,14 @@ logger = init_logger(__name__)
 
 
 def _release_cpu_storage(tensor: torch.Tensor) -> None:
-    """Release resizable CPU storage and tolerate safetensors backing."""
-    try:
-        tensor.untyped_storage().resize_(0)
-    except RuntimeError as exc:
-        if "not resizable" not in str(exc):
-            raise
-        # Safetensors can expose non-resizable storage. Callers may still drop
-        # their tensor reference without mutating the backing storage.
-        logger.debug(
-            "CPU weight storage is non-resizable; deferring to reference cleanup"
-        )
+    """Release CPU storage, including non-resizable mmap-backed storage."""
+    storage = tensor.untyped_storage()
+    if storage.resizable():
+        storage.resize_(0)
+        return
+
+    with torch.no_grad():
+        tensor.set_(torch.storage.UntypedStorage())
 
 
 def _load_weight_for_layer(
@@ -241,7 +238,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         weight = _load_weight_for_layer(layer, "weight", loading_sharding)
         weight = jnp.transpose(weight)
 
-        # Release resizable CPU storage before replacing the module parameter.
+        # Release CPU storage before replacing the module parameter.
         _release_cpu_storage(layer.weight)
         delattr(layer, 'weight')
         if layer.bias is not None and not layer.skip_bias_add:
@@ -372,7 +369,7 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
         w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
         w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
-        # Release resizable CPU storage before removing the module parameters.
+        # Release CPU storage before removing the module parameters.
         _release_cpu_storage(layer.w13_weight)
         _release_cpu_storage(layer.w2_weight)
         delattr(layer, 'w13_weight')

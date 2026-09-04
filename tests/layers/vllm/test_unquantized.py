@@ -762,28 +762,41 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
 
 def test_release_cpu_storage_clears_resizable_backing():
     tensor = torch.empty(8, dtype=torch.float32)
+    storage = tensor.untyped_storage()
+    assert storage.resizable()
 
     _release_cpu_storage(tensor)
 
     assert tensor.untyped_storage().size() == 0
+    assert storage.size() == 0
 
 
-def test_release_cpu_storage_tolerates_non_resizable_backing():
+def test_release_cpu_storage_detaches_non_resizable_backing():
     tensor = torch.frombuffer(bytearray(32), dtype=torch.float32)
+    storage = tensor.untyped_storage()
+    assert not storage.resizable()
 
     _release_cpu_storage(tensor)
 
-    # The caller can now drop the tensor reference instead of resizing the
-    # safetensors-style backing storage in place.
-    assert tensor.untyped_storage().size() == 32
+    assert tensor.untyped_storage().size() == 0
+    # Detach this tensor without resizing storage retained by other owners.
+    assert storage.size() == 32
 
 
-def test_release_cpu_storage_propagates_unrelated_runtime_error():
-    tensor = MagicMock(spec=torch.Tensor)
-    tensor.untyped_storage().resize_.side_effect = RuntimeError("unexpected")
+@pytest.mark.parametrize("resizable", [False, True])
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_release_cpu_storage_clears_leaf_parameter(resizable, requires_grad):
+    tensor = (torch.empty(8, dtype=torch.float32) if resizable else
+              torch.frombuffer(bytearray(32), dtype=torch.float32))
+    parameter = torch.nn.Parameter(tensor, requires_grad=requires_grad)
+    assert parameter.is_leaf
+    assert parameter.untyped_storage().resizable() == resizable
 
-    with pytest.raises(RuntimeError, match="unexpected"):
-        _release_cpu_storage(tensor)
+    with torch.enable_grad():
+        _release_cpu_storage(parameter)
+
+    assert parameter.untyped_storage().size() == 0
+    assert parameter.requires_grad == requires_grad
 
 
 def _make_layer_with_weight(shape, dtype):
@@ -853,7 +866,7 @@ def test_load_weight_for_layer_pathways_dummy(_, dtype):
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 def test_load_weight_for_layer_pathways_dummy_non_resizable(
         _, create_dummy_weights_on_tpu):
-    """Pathways dummy loading tolerates safetensors-style CPU storage."""
+    """Pathways dummy loading detaches safetensors-style CPU storage."""
     from tpu_inference.utils import to_jax_dtype
 
     layer = torch.nn.Module()
@@ -870,4 +883,4 @@ def test_load_weight_for_layer_pathways_dummy_non_resizable(
         weight_shape=(8, ),
         weight_dtype=to_jax_dtype(torch.float32),
     )
-    assert layer.weight.untyped_storage().size() == 32
+    assert layer.weight.untyped_storage().size() == 0
