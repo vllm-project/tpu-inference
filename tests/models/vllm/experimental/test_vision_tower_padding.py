@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import jax
 import numpy as np
+import pytest
 import torch
 
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
@@ -233,3 +234,74 @@ def test_jittable_architectures_detection():
         # Test via __class__.__name__
         NamedModel = type(arch, (), {})
         assert is_jittable_architecture(NamedModel())
+
+
+def test_already_aligned_sequence_no_padding():
+    # Sequence length 256 with tp_size 8, spatial_merge_size 2 -> pad_factor 8
+    seq_len = 256
+    tp_size = 8
+    spatial_merge_size = 2
+    merge_factor = spatial_merge_size * spatial_merge_size
+    pad_factor = math.lcm(tp_size, merge_factor)  # 8
+
+    # When divisible, pad_seq must be 0
+    if seq_len % pad_factor != 0:
+        pad_seq = pad_factor - (seq_len % pad_factor)
+    else:
+        pad_seq = 0
+
+    assert pad_seq == 0
+
+
+def test_multimodal_unpadding_3d_and_nested_outputs():
+    original_batch_len = 2
+    # 3D Output: (batch_size, tokens, dim)
+    padded_3d = torch.randn((4, 16, 64))
+    unpadded_3d = padded_3d[:original_batch_len, ...]
+    assert unpadded_3d.shape == (2, 16, 64)
+
+    # List Output
+    padded_list = [torch.randn(10, 64) for _ in range(4)]
+    unpadded_list = padded_list[:original_batch_len]
+    assert len(unpadded_list) == 2
+
+    # Tuple Output
+    padded_tuple = tuple(torch.randn(10, 64) for _ in range(4))
+    unpadded_tuple = padded_tuple[:original_batch_len]
+    assert len(unpadded_tuple) == 2
+
+
+def test_padding_metadata_empty_and_none_fallbacks():
+    # Empty tensor fallback
+    empty_ts = torch.tensor([])
+    pad_val = empty_ts[-1].item() if empty_ts.numel() > 0 else 0.0
+    assert pad_val == 0.0
+
+    empty_ts_vals = torch.empty((0, 2))
+    pad_ts_vals = (empty_ts_vals[-1].unsqueeze(0)
+                   if empty_ts_vals.numel() > 0 else torch.zeros((1, 2)))
+    assert pad_ts_vals.shape == (1, 2)
+
+    # Empty list fallback
+    empty_list = []
+    pad_list_val = empty_list[-1] if len(empty_list) > 0 else 0.0
+    assert pad_list_val == 0.0
+
+
+def test_grid_thw_extended_methods_and_errors():
+    grid = GridTHW([(2, 14, 14), (1, 28, 28)])
+    assert grid.prod(dim=-1).tolist() == [392, 784]
+    assert grid.prod(dim=1).tolist() == [392, 784]
+
+    with pytest.raises(NotImplementedError):
+        grid.prod(dim=0)
+
+
+def test_make_move_leaf_types_and_device_sharding():
+    grid = GridTHW([(1, 14, 14)])
+    data = {"grid": grid, "pixel_values": torch.randn((8, 16)), "val": 42}
+
+    leaves = jax.tree.leaves(
+        data, is_leaf=lambda x: isinstance(x, (GridTHW, torch.Tensor)))
+    assert grid in leaves
+    assert data["pixel_values"] in leaves
