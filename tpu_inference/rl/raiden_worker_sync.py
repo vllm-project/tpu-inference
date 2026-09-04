@@ -61,9 +61,22 @@ def extract_weight_state(state: Any, model: Any) -> Any:
     """
     maxtext = is_maxtext_model(model)
     if state is not None:
+        try:
+            from flax import nnx
+            if hasattr(state, "filter"):
+                state = state.filter(nnx.Param)
+        except Exception:
+            pass
         if maxtext:
             try:
-                return {"base": state["model"]}
+                m_state = state["model"]
+                try:
+                    from flax import nnx
+                    if hasattr(m_state, "filter"):
+                        m_state = m_state.filter(nnx.Param)
+                except Exception:
+                    pass
+                return {"base": m_state}
             except (KeyError, TypeError):
                 pass
         return state
@@ -108,10 +121,13 @@ def _bindable(arr: Any) -> bool:
 
 def _filter_bindable(names: List[str],
                      arrays: List[Any]) -> Tuple[List[str], List[Any]]:
-    """Drops leaves the native layer cannot bind (e.g. RNG-key arrays)."""
+    """Drops leaves the native layer cannot bind (e.g. RNG-key arrays, runtime cache)."""
     keep_names: List[str] = []
     keep_arrays: List[Any] = []
     for name, arr in zip(names, arrays):
+        # Exclude runtime KV cache arrays that are not trainable model weights
+        if "cache" in name.lower():
+            continue
         if _bindable(arr):
             if hasattr(arr, "block_until_ready"):
                 arr.block_until_ready()
@@ -178,6 +194,10 @@ class RaidenWorkerSync:
     def bind(self, state: Any) -> None:
         """Binds (or rebinds after a weight update) this worker's weights."""
         self.names, self.arrays = _filter_bindable(*flatten_weights(state))
+        if self.names:
+            pairs = sorted(zip(self.names, self.arrays), key=lambda x: x[0])
+            self.names = [p[0] for p in pairs]
+            self.arrays = [p[1] for p in pairs]
         if _ws_lib is None:
             raise RuntimeError(
                 f"{self.job_name}: tpu_sync is not importable, cannot bind "
