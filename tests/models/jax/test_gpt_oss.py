@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
+from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 
 from tpu_inference.models.jax.gpt_oss import GptOss
 
@@ -36,7 +37,7 @@ class MockHFConfigDirectTheta:
         self.intermediate_size = 1024
         self.num_experts_per_tok = 1
         self.rms_norm_eps = 1e-5
-        self.swiglu_limit = 1.0
+        self.swiglu_limit = 7.0
         self.sliding_window = None
         self.rope_theta = 10000.0
         self.rope_scaling = {
@@ -60,7 +61,7 @@ class MockHFConfigScalingTheta:
         self.intermediate_size = 1024
         self.num_experts_per_tok = 1
         self.rms_norm_eps = 1e-5
-        self.swiglu_limit = 1.0
+        self.swiglu_limit = 7.0
         self.sliding_window = None
         # No self.rope_theta attribute here
         self.rope_scaling = {
@@ -79,6 +80,7 @@ class MockVllmConfig:
         self.model_config.dtype = jnp.bfloat16
         self.model_config.enable_return_routed_experts = False
         self.model_config.hf_config = hf_config
+        self.model_config.quantization = None
         self.cache_config = MagicMock(cache_dtype="auto")
         self.additional_config = {}
 
@@ -96,13 +98,18 @@ class TestGptOssModel(unittest.TestCase):
                 "model",
             ),
         )
+        # GptOssMoE derives its MoE backend from the current vLLM parallel
+        # config, so model construction needs one set.
+        self.default_vllm_config = VllmConfig(device_config=DeviceConfig(
+            device="cpu"))
 
     def test_model_init_with_direct_rope_theta(self):
         """Tests that GptOss initializes correctly when rope_theta is directly in hf_config."""
         hf_config = MockHFConfigDirectTheta()
         vllm_config = MockVllmConfig(hf_config)
 
-        with jax.set_mesh(self.mesh):
+        with jax.set_mesh(self.mesh), set_current_vllm_config(
+                self.default_vllm_config):
             model = GptOss(
                 vllm_config=vllm_config,
                 rng=jax.random.PRNGKey(42),
@@ -119,7 +126,8 @@ class TestGptOssModel(unittest.TestCase):
         hf_config = MockHFConfigScalingTheta()
         vllm_config = MockVllmConfig(hf_config)
 
-        with jax.set_mesh(self.mesh):
+        with jax.set_mesh(self.mesh), set_current_vllm_config(
+                self.default_vllm_config):
             model = GptOss(
                 vllm_config=vllm_config,
                 rng=jax.random.PRNGKey(42),
