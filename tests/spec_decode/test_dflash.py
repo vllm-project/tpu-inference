@@ -13,6 +13,7 @@
 # limitations under the License.
 """Unit tests for the JAX DFlash speculative decoding proposer."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import jax
@@ -20,7 +21,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
+from transformers import PretrainedConfig
 
+from tpu_inference.models.common.model_loader import _get_model_architecture
+from tpu_inference.models.jax.dflash import (DFlashForCausalLM,
+                                             get_dflash_sliding_window)
 from tpu_inference.spec_decode.jax.dflash import DFlashProposer
 
 
@@ -111,6 +116,22 @@ class MockDraftModelInterface:
 
 
 # ----- Existing Minimal Tests -----
+def test_dflash_sliding_window_requires_explicit_enablement():
+    config = SimpleNamespace(sliding_window=2048, use_sliding_window=True)
+    assert get_dflash_sliding_window(config) == 2048
+    config.use_sliding_window = False
+    assert get_dflash_sliding_window(config) is None
+
+
+def test_registry_supports_muse_glimmer_assistant_architectures():
+    for architecture in (
+            "MuseGlimmerAssistantModel",
+            "DFlashMuseGlimmerAssistantModel",
+    ):
+        config = PretrainedConfig(architectures=[architecture])
+        assert _get_model_architecture(config) is DFlashForCausalLM
+
+
 def test_propose_uses_target_model_logits():
     proposer = object.__new__(DFlashProposer)
     proposer.mesh = _make_single_device_mesh()
