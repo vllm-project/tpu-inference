@@ -70,8 +70,15 @@ class VllmQuantLinearConfig(QuantLinearConfig):
             input_sharding = P(ShardingAxisName.DENSE_DATA, None)
             output_sharding = P(ShardingAxisName.DENSE_DATA, None)
         else:
-            raise NotImplementedError(
-                f"Unsupported linear layer type {type(layer)}")
+            # Unknown layer type (real layers are always one of the three
+            # above): default to replicated, mirroring the base config's
+            # leniency, rather than failing.
+            logger.warning(
+                "Unsupported linear layer type %s; defaulting to replicated "
+                "sharding (may hurt performance).", type(layer))
+            weight_sharding = P(None, None)
+            input_sharding = P(ShardingAxisName.DENSE_DATA, None)
+            output_sharding = P(ShardingAxisName.DENSE_DATA, None)
 
         super().__init__(
             enable_sp=vllm_config.compilation_config.pass_config.enable_sp,
