@@ -84,6 +84,22 @@ class KVLayout(enum.StrEnum):
 
 
 @dataclasses.dataclass(frozen=True)
+class CPConfig:
+    """Context parallelism: the KV cache is page-interleaved over the group
+    (rank r owns pages p with p % group_size == r, at local slot
+    p // group_size)."""
+
+    group_size: int
+    # PCP ring streams kv cache shards around this mesh axis
+    ring_axis_name: str | None = None
+    # All axis names of the mesh the ring runs on, in order.
+    ring_mesh_axis_names: tuple[str, ...] | None = None
+    # PCP current phase: a request's head and tail chunks
+    # share one new kv; only the last sequence writes it back.
+    write_last_seq_only: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class ServingConfigs:
     """Serving config that can change depending on use cases."""
 
@@ -100,9 +116,13 @@ class ServingConfigs:
     kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
     smem_fraction_limit_for_schedule_generation: float = 0.33
     max_schedule_size_multiplier: int = 16
-    cp_group_size: int | None = None
+    cp: CPConfig | None = None
     attention_scope: AttentionScope = AttentionScope.FULL
     return_lse: bool = False
+
+    @property
+    def writes_kv_cache(self) -> bool:
+        return self.attention_scope != AttentionScope.CACHE_ONLY
 
     @property
     def pages_per_seq(self) -> int:
@@ -191,6 +211,12 @@ class RpaConfigs:
         return self.block.n_buffer
 
     # Define derived values.
+
+    @property
+    def ring_enabled(self) -> bool:
+        return (self.serve.cp is not None
+                and self.serve.cp.ring_axis_name is not None
+                and self.serve.attention_scope == AttentionScope.CACHE_ONLY)
 
     @property
     def max_steps_ub(self) -> int:
@@ -353,7 +379,7 @@ class RpaConfigs:
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return 5
         if (self.serve.kv_layout == KVLayout.HEAD_ALONG_SUBLANE
-                and self.serve.cp_group_size is not None):
+                and self.serve.cp is not None):
             return 5
         return 4
 
@@ -367,12 +393,18 @@ class RpaConfigs:
         )
 
     @property
+    def lse_row_stride(self) -> int:
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
+        return utils.align_to(self.aligned_num_q_heads_per_kv_head,
+                              num_sublanes)
+
+    @property
     def lse_vmem_shape(self):
         num_lanes = pltpu.get_tpu_info().num_lanes
         return (
             self.block.batch_size,
             self.model.num_kv_heads,
-            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
+            self.block.bq_sz * self.lse_row_stride,
             num_lanes,
         )
 
@@ -407,9 +439,9 @@ class RpaConfigs:
                 f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")
         if k.shape != v.shape:
             raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
-        if not (q.shape[0] == k.shape[0] == v.shape[0]):
+        if k.shape[0] < q.shape[0]:
             raise ValueError(
-                "Expected number of sequences in Q, K, and V to be the same, but got"
+                "Expected at least as many K/V tokens as Q tokens, but got"
                 f" {q.shape[0]=}, {k.shape[0]=}, and {v.shape[0]=}")
         if not (q.shape[2] == k.shape[2] == v.shape[2]):
             raise ValueError(
@@ -474,7 +506,7 @@ class RpaConfigs:
             raise ValueError(f"Expected {distribution.shape=} to be (3,).")
 
         # Context Parallel Support
-        if self.serve.cp_group_size is not None:
+        if self.serve.cp is not None:
             if self.serve.attention_scope == AttentionScope.FULL:
                 raise ValueError(
                     "Context Parallel does not support AttentionScope.FULL"
@@ -483,3 +515,9 @@ class RpaConfigs:
                 raise ValueError(
                     "Context Parallel does not support sliding window right now"
                 )
+
+        if self.serve.cp is not None and self.serve.cp.ring_axis_name is not None:
+            if self.serve.attention_scope != AttentionScope.CACHE_ONLY:
+                raise ValueError(
+                    "ring_axis_name is a cache-phase path and requires"
+                    " AttentionScope.CACHE_ONLY.")

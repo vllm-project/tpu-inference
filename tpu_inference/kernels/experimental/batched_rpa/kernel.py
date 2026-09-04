@@ -104,7 +104,15 @@ def calculate_and_store_out(
 
     def _stage_lse(b_idx: int, batch_m: jax.Array, batch_l: jax.Array):
         lse_val = batch_m + jnp.log(jnp.maximum(batch_l, 1e-9))
-        lse_o_vref[b_idx] = lse_val.astype(cfgs.serve.dtype_out)
+        lse_val = lse_val.astype(cfgs.serve.dtype_out)
+        aligned_q = cfgs.aligned_num_q_heads_per_kv_head
+        if cfgs.lse_row_stride != aligned_q:
+            kv, tq, lanes = lse_val.shape
+            lse_val = jnp.pad(
+                lse_val.reshape(kv, tq // aligned_q, aligned_q, lanes),
+                ((0, 0), (0, 0), (0, cfgs.lse_row_stride - aligned_q), (0, 0)),
+            ).reshape(kv, -1, lanes)
+        lse_o_vref[b_idx] = lse_val
 
     if cfgs.fuse_accum:
         for b in range(cfgs.batch_size):
@@ -189,7 +197,7 @@ def fetch_step_metadata(
         is_valid_list.append(is_valid)
 
         if local_k_start_list is not None:
-            local_k_start_list.append(q_offset - k_id)
+            local_k_start_list.append(kv_cache_len_val - k_id)
         if local_k_end_list is not None:
             local_k_end_list.append(kv_cache_len_val - k_id)
 
@@ -214,6 +222,27 @@ def fetch_step_metadata(
     )
 
 
+class StepMetadataComputer:
+
+    def __init__(self, cfgs: configs.RpaConfigs):
+        self.cfgs = cfgs
+
+    def fetch_step_metadata(self, step, schedule_ref, kv_in_vref,
+                            extra_scratches, chunk_id, *, cu_q_lens_ref,
+                            q_offsets_ref, kv_cache_lens_ref, kv_new_lens_ref,
+                            kv_window_ref) -> StepMetadata:
+        del kv_in_vref, extra_scratches, chunk_id, kv_window_ref
+        return fetch_step_metadata(
+            step,
+            schedule_ref,
+            cu_q_lens_ref,
+            q_offsets_ref,
+            kv_cache_lens_ref,
+            kv_new_lens_ref,
+            cfgs=self.cfgs,
+        ), None
+
+
 def generate_mask(
     shape: tuple[int, int, int, int],
     *,
@@ -224,8 +253,27 @@ def generate_mask(
     """Generates causal, sliding window, and attention scope mask for QK computation."""
     b, k_heads, tq, s = shape
 
-    kv_iota = lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 2)
-    q_iota = lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1)
+    if (cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY
+            and cfgs.model.sliding_window is None
+            and step_meta.local_k_start is None):
+        kv_col = lax.broadcasted_iota(jnp.int32, (1, s), 1)
+        q_row = lax.broadcasted_iota(jnp.int32, (tq, 1), 0)
+        q_row //= cfgs.aligned_num_q_heads_per_kv_head
+        masks = []
+        for b_idx in range(b):
+            col_ok = kv_col < step_meta.local_k_end[b_idx]
+            row_ok = jnp.logical_and(
+                step_meta.is_valid[b_idx],
+                (bq_start + q_row) < step_meta.q_sz[b_idx],
+            )
+            mask_b = jnp.logical_and(row_ok, col_ok)  # [tq, s]
+            masks.append(jnp.broadcast_to(mask_b[None], (k_heads, tq, s)))
+        return jnp.stack(masks, axis=0)
+
+    # No mask term depends on the kv head, so compute on [tq, s] and
+    # broadcast over k_heads at the end.
+    kv_iota = lax.broadcasted_iota(jnp.int32, (tq, s), 1)
+    q_iota = lax.broadcasted_iota(jnp.int32, (tq, s), 0)
     q_iota //= cfgs.aligned_num_q_heads_per_kv_head
     q_kv_diff = q_iota - kv_iota
 
@@ -260,7 +308,7 @@ def generate_mask(
         )
         mask_b = jnp.logical_and(mask_b, valid_q)
 
-        masks.append(mask_b)
+        masks.append(jnp.broadcast_to(mask_b[None], (k_heads, tq, s)))
 
     return jnp.stack(masks, axis=0)
 
@@ -277,7 +325,7 @@ def rpa_body(
     m_scratch_ref: jax.Ref,
     l_scratch_ref: jax.Ref,
     acc_scratch_ref: jax.Ref,
-    *,
+    *extra_scratches: jax.Ref,
     # Passed refs
     cu_q_lens_ref: jax.Ref,
     q_offsets_ref: jax.Ref,
@@ -285,18 +333,24 @@ def rpa_body(
     kv_new_lens_ref: jax.Ref,
     # Configs.
     cfgs: configs.RpaConfigs,
+    step_metadata_computer: StepMetadataComputer,
+    chunk_id: jax.Array | int = 0,
+    kv_window_ref: jax.Ref | None = None,
 ):
     step = pl.program_id(0)
 
     # Step 1: Fetch metadata.
-    step_meta = fetch_step_metadata(
+    step_meta, end_step = step_metadata_computer.fetch_step_metadata(
         step,
         schedule_ref,
-        cu_q_lens_ref,
-        q_offsets_ref,
-        kv_cache_lens_ref,
-        kv_new_lens_ref,
-        cfgs=cfgs,
+        kv_in_vref,
+        extra_scratches,
+        chunk_id,
+        cu_q_lens_ref=cu_q_lens_ref,
+        q_offsets_ref=q_offsets_ref,
+        kv_cache_lens_ref=kv_cache_lens_ref,
+        kv_new_lens_ref=kv_new_lens_ref,
+        kv_window_ref=kv_window_ref,
     )
 
     # Step 2: Fetch inputs.
@@ -326,23 +380,25 @@ def rpa_body(
     v_b = []
 
     if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
-        stitch_results = []
-        for b_idx in range(cfgs.batch_size):
-            res = stitch_utils.stitch_new_kv_lane(
-                kv_in_vref,
-                b_idx,
-                step_meta.bkv_sz_frm_cache[b_idx],
-                step_meta.new_kv_len_start[b_idx],
-                cfgs=cfgs,
-            )
-            stitch_results.append(res)
-        for b_idx in range(cfgs.batch_size):
-            stitch_utils.store_new_kv_lane(
-                kv_in_vref,
-                b_idx,
-                stitch_results[b_idx],
-                cfgs=cfgs,
-            )
+        # CACHE_ONLY has no new kv, so there is nothing to stitch
+        if cfgs.serve.attention_scope != configs.AttentionScope.CACHE_ONLY:
+            stitch_results = []
+            for b_idx in range(cfgs.batch_size):
+                res = stitch_utils.stitch_new_kv_lane(
+                    kv_in_vref,
+                    b_idx,
+                    step_meta.bkv_sz_frm_cache[b_idx],
+                    step_meta.new_kv_len_start[b_idx],
+                    cfgs=cfgs,
+                )
+                stitch_results.append(res)
+            for b_idx in range(cfgs.batch_size):
+                stitch_utils.store_new_kv_lane(
+                    kv_in_vref,
+                    b_idx,
+                    stitch_results[b_idx],
+                    cfgs=cfgs,
+                )
         for b_idx in range(cfgs.batch_size):
             ks = []
             vs = []
@@ -490,6 +546,9 @@ def rpa_body(
         cfgs=cfgs,
     )
 
+    if end_step is not None:
+        end_step()
+
 
 # Define main kernel.
 
@@ -609,7 +668,10 @@ def rpa_kernel(
     cfgs: configs.RpaConfigs,
     computer_cls: type[
         schedule.BaseMetadataComputer] = schedule.BaseMetadataComputer,
-) -> tuple[jax.Array, jax.Array, jax.Array | None]:
+    step_metadata_cls: type[StepMetadataComputer] = StepMetadataComputer,
+    extra_scratch_shapes: tuple = (),
+    collective_id: int | None = None,
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
     """Perform batched ragged paged attention with scheduler data.
 
     Args:
@@ -618,6 +680,7 @@ def rpa_kernel(
         b=cu_q_lens[i+1] represents q/k/v of sequence i.
       q_offsets: [max_num_seqs]. Token offset for queries in each sequence.
       kv_cache_lens: [max_num_seqs]. Existing kv cache length of each sequence.
+        Under the PCP ring this is the global cache length.
       kv_new_lens: [max_num_seqs]. New kv length of each sequence.
       page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
         sequence.
@@ -634,14 +697,18 @@ def rpa_kernel(
         concatenated along num kv heads dim.
       lse_hbm: pre-allocated buffer for LSE output. None when return_lse=False.
       cfgs: Configuration of the kernel.
+      computer_cls: Metadata computer the schedule was generated with; it
+        defines the schedule's SMEM layout.
+      step_metadata_cls: StepMetadataComputer for rpa_body.
 
     Returns:
       out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
       new_kv_cache: [num_pages, page_size, num_kv_heads // kv_packing, kv_packing,
-        head_dim]. Result of new kv cache.
+        head_dim]. Result of new kv cache, or None under CACHE_ONLY.
       lse_out: [max_num_tokens, num_q_heads] LSE values, or None.
     """
     return_lse = cfgs.serve.return_lse
+    writes_kv_cache = cfgs.serve.writes_kv_cache
 
     def ragged_paged_attention_pipeline(
         # Scalar prefetch.
@@ -658,7 +725,7 @@ def rpa_kernel(
         lse_hbm_ref: jax.Ref | None,
         # Outputs.
         o_hbm_ref: jax.Ref,
-        o_kv_cache_hbm_ref: jax.Ref,
+        o_kv_cache_hbm_ref: jax.Ref | None,
         o_lse_hbm_ref: jax.Ref | None = None,
     ):
 
@@ -689,7 +756,7 @@ def rpa_kernel(
                     cfgs.acc_scratch_shape,
                     dtype=cfgs.serve.dtype_out,
                 ),  # acc
-            ),
+            ) + tuple(extra_scratch_shapes),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
             # Initialize KV cache to zeros.
@@ -718,6 +785,8 @@ def rpa_kernel(
             kv_ref_flat = kv_alloc.window_ref.bitcast(jnp.uint32).reshape(
                 -1, num_lanes)
             kv_ref_flat[...] = jnp.zeros_like(kv_ref_flat)
+
+            step_metadata_computer = step_metadata_cls(cfgs)
 
             def execute_schedule_chunk(start_step, num_steps):
                 # All reads are aligned to 128 and some extra steps are copied in the
@@ -754,6 +823,9 @@ def rpa_kernel(
                         q_offsets_ref=q_offsets_ref,
                         kv_cache_lens_ref=kv_cache_lens_ref,
                         kv_new_lens_ref=kv_new_lens_ref,
+                        step_metadata_computer=step_metadata_computer,
+                        chunk_id=start_step // cfgs.max_steps_ub,
+                        kv_window_ref=kv_alloc.window_ref,
                     ),
                     grid=(num_steps + prefix_steps, ),
                     in_specs=(q_alloc.spec, kv_cache_alloc.spec),
@@ -793,16 +865,22 @@ def rpa_kernel(
     num_scalar_prefetch = len(scalar_prefetches)
     num_active_scalers = len(scalar_prefetches)
 
-    out_shape = [q_hbm, kv_cache_hbm, lse_hbm if return_lse else None]
+    out_shape = [
+        q_hbm,
+        kv_cache_hbm if writes_kv_cache else None,
+        lse_hbm if return_lse else None,
+    ]
 
     schedule_leaves = len(jax.tree_util.tree_leaves(schedule_hbm))
-    input_output_aliases = {
-        num_active_scalers + schedule_leaves: 0,
-        num_active_scalers + schedule_leaves + 2: 1,
-    }
+    input_output_aliases = {num_active_scalers + schedule_leaves: 0}  # q -> o
+    lse_out_idx = 1
+    if writes_kv_cache:
+        # kv_cache -> updated_kv_cache
+        input_output_aliases[num_active_scalers + schedule_leaves + 2] = 1
+        lse_out_idx = 2
     if return_lse:
         input_output_aliases[num_active_scalers + schedule_leaves + 3] = (
-            2  # lse_hbm -> out[2]
+            lse_out_idx  # lse_hbm -> lse_out
         )
 
     return pl.pallas_call(
@@ -819,14 +897,17 @@ def rpa_kernel(
             ],
             out_specs=[
                 pl.BlockSpec(memory_space=pltpu.HBM),  # aliased_o_hbm_ref
-                pl.BlockSpec(
-                    memory_space=pltpu.HBM),  # aliased_kv_cache_hbm_ref
+                pl.BlockSpec(memory_space=pltpu.HBM)
+                if writes_kv_cache else None,  # aliased_kv_cache_hbm_ref
                 pl.BlockSpec(memory_space=pltpu.HBM) if return_lse else None,
             ],
         ),
         compiler_params=pltpu.CompilerParams(
             vmem_limit_bytes=cfgs.vmem_limit_bytes,
             disable_bounds_checks=True,
+            **({
+                "collective_id": collective_id
+            } if collective_id is not None else {}),
         ),
         input_output_aliases=input_output_aliases,
         name=get_kernel_name(cfgs),

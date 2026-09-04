@@ -14,6 +14,7 @@
 """Context Parallel (CP) DMA schedule computation for Batched RPA."""
 
 import dataclasses
+import functools
 from collections.abc import Sequence
 
 import jax
@@ -95,7 +96,133 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
 
     @property
     def rank(self):
-        return self.extra_refs[0][0] if self.extra_refs else 0
+        return self.extra_refs[0][0]
+
+    @property
+    def new_kv_starts_ref(self):
+        return self.extra_refs[1]
+
+    def compute(self, *args, distribution_ref, **kwargs):
+        # The sequence that writes the new kv under write_last_seq_only.
+        self.wb_seq = distribution_ref[2] - 1
+        return super().compute(*args,
+                               distribution_ref=distribution_ref,
+                               **kwargs)
+
+    def decode_k(self, k_idx):
+        """(k block, HBM fetch gate) of a schedule k_idx; None = always fetch."""
+        return k_idx, None
+
+    def k_idx_range(self, *, s_idx, q_idx, q_offset, q_sz_task, kv_cache_len,
+                    kv_new_len, num_k):
+        """[start_k_idx, end_k_idx) of the k blocks one q block iterates."""
+        del kv_new_len
+        cfgs = self.cfgs
+
+        start_k_idx = 0
+        if (sliding_window := cfgs.model.sliding_window) is not None:
+            sw_start_idx = q_offset + q_idx * cfgs.bq_sz - sliding_window + 1
+            start_k_idx = jnp.maximum(0, sw_start_idx) // cfgs.bkv_sz
+
+        end_k_idx_causal = (q_offset + q_idx * cfgs.bq_sz + q_sz_task -
+                            1) // cfgs.bkv_sz + 1
+        end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
+
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+            start_k_idx = jnp.maximum(start_k_idx, kv_cache_len // cfgs.bkv_sz)
+
+        if cfgs.serve.cp.write_last_seq_only:
+            # The writing sequence must visit every new kv block it owns, not
+            # only the causal range of its own queries.
+            end_k_idx = jnp.where(s_idx == self.wb_seq, num_k, end_k_idx)
+        return start_k_idx, end_k_idx
+
+    @jax.named_scope("seq_loop_cp")
+    def seq_loop(
+        self,
+        s_idx,
+        carry: schedule.LoopCarry,
+        *,
+        cu_q_lens_ref,
+        q_offsets_ref,
+        kv_cache_lens_ref,
+        kv_new_lens_ref,
+    ) -> schedule.LoopCarry:
+        q_start = cu_q_lens_ref[s_idx]
+        q_end = cu_q_lens_ref[s_idx + 1]
+        q_len = q_end - q_start
+        q_offset = q_offsets_ref[s_idx]
+        kv_cache_len = kv_cache_lens_ref[s_idx]
+        kv_new_len = kv_new_lens_ref[s_idx]
+        new_kv_start = self.new_kv_starts_ref[s_idx]
+        k_len = kv_cache_len + kv_new_len
+
+        num_q = pl.cdiv(q_len, self.cfgs.bq_sz)
+        if self.cfgs.serve.cp.write_last_seq_only:
+            # A sequence with no queries (a PCP tail chunk on a short step,
+            # e.g. decode) must still run one q block so its k loop writes the
+            # new kv it owns.
+            num_q = jnp.maximum(num_q, 1)
+        num_k = pl.cdiv(k_len, self.cfgs.bkv_sz)
+
+        q_loop_fn = functools.partial(
+            self.q_loop,
+            s_idx=s_idx,
+            q_start=q_start,
+            q_end=q_end,
+            q_offset=q_offset,
+            kv_cache_len=kv_cache_len,
+            kv_new_len=kv_new_len,
+            new_kv_start=new_kv_start,
+            num_k=num_k,
+        )
+
+        return jax.lax.fori_loop(0, num_q, q_loop_fn, carry)
+
+    @jax.named_scope("q_loop_cp")
+    def q_loop(
+        self,
+        q_idx,
+        carry: schedule.LoopCarry,
+        *,
+        s_idx,
+        q_start,
+        q_end,
+        q_offset,
+        kv_cache_len,
+        kv_new_len,
+        new_kv_start,
+        num_k,
+    ) -> schedule.LoopCarry:
+        cfgs = self.cfgs
+        q_src = q_start + q_idx * cfgs.bq_sz
+        q_sz_task = jnp.clip(q_end - q_src, 0, cfgs.bq_sz)
+
+        start_k_idx, end_k_idx = self.k_idx_range(
+            s_idx=s_idx,
+            q_idx=q_idx,
+            q_offset=q_offset,
+            q_sz_task=q_sz_task,
+            kv_cache_len=kv_cache_len,
+            kv_new_len=kv_new_len,
+            num_k=num_k,
+        )
+
+        k_loop_fn = functools.partial(
+            self.k_loop,
+            s_idx=s_idx,
+            q_idx=q_idx,
+            q_end=q_end,
+            q_src=q_src,
+            q_sz_task=q_sz_task,
+            q_offset=q_offset,
+            kv_cache_len=kv_cache_len,
+            kv_new_len=kv_new_len,
+            new_kv_start=new_kv_start,
+            end_k_idx=end_k_idx,
+        )
+
+        return jax.lax.fori_loop(start_k_idx, end_k_idx, k_loop_fn, carry)
 
     @jax.named_scope("k_loop_cp")
     def k_loop(
@@ -108,8 +235,10 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
         q_end,
         q_src,
         q_sz_task,
+        q_offset,
         kv_cache_len,
         kv_new_len,
+        new_kv_start,
         end_k_idx,
     ) -> schedule.LoopCarry:
         cfgs = self.cfgs
@@ -127,20 +256,22 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
         sched.dma_q[step, target_lane, 0] = q_src
         sched.dma_q[step, target_lane, 1] = q_sz_task
 
-        kv_len_start = k_idx * cfgs.bkv_sz
-        kv_p_start = k_idx * cfgs.bkv_p
+        k_block, fetch = self.decode_k(k_idx)
+        kv_len_start = k_block * cfgs.bkv_sz
+        kv_p_start = k_block * cfgs.bkv_p
         k_len = kv_cache_len + kv_new_len
         kv_left = k_len - kv_len_start
         kv_left_frm_cache = jnp.maximum(kv_cache_len - kv_len_start, 0)
         p_offset = s_idx * cfgs.serve.pages_per_seq + kv_p_start
 
-        cp_group_size = cfgs.serve.cp_group_size
-        assert cp_group_size is not None
+        cp_group_size = cfgs.serve.cp.group_size
 
         for i in range(cfgs.bkv_p_cache):
             dst_vmem = i << cfgs.serve.page_size_log2
             dma_sz = kv_left_frm_cache - dst_vmem
             dma_sz = jnp.clip(dma_sz, 0, cfgs.serve.page_size)
+            if fetch is not None:
+                dma_sz = jnp.where(fetch, dma_sz, 0)
 
             if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
                 if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
@@ -178,18 +309,23 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
         new_sz = jnp.minimum(cfgs.bkv_sz - bkv_sz_cache, kv_left_frm_new)
 
         # Writeback logic: each new k block is written back by the first q block
-        # that attends to it.
-        q_wb = jnp.maximum(0, (kv_len_start - kv_cache_len)) // cfgs.bq_sz
+        # that attends to it (q positions start at q_offset). With
+        # write_last_seq_only, only the last sequence writes.
+        q_wb = jnp.maximum(0, (kv_len_start - q_offset)) // cfgs.bq_sz
 
-        do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb), 1, 0)
+        writes = (new_sz > 0) & (q_idx == q_wb)
+        if cfgs.serve.cp.write_last_seq_only:
+            writes = writes & (s_idx == self.wb_seq)
+        do_writeback = jnp.where(writes, 1, 0)
         sched.do_writeback[step, target_lane] = do_writeback
-        src_hbm = q_end - kv_left_frm_new
+        src_hbm = new_kv_start + (kv_new_len - kv_left_frm_new)
 
         def fill_dma_kv_new(i, dst_vmem, dma_sz, slot_start):
             dma_entry = sched.dma_kv_new[step, target_lane, i]
             if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
                 cache_pages = pl.cdiv(bkv_sz_cache, cfgs.serve.page_size)
-                hbm_token_idx_base = q_end - kv_left_frm_new
+                hbm_token_idx_base = new_kv_start + (kv_new_len -
+                                                     kv_left_frm_new)
                 new_tok_offset = hbm_token_idx_base % cfgs.serve.page_size
                 num_pages_to_fetch = jnp.where(
                     new_sz > 0,

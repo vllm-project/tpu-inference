@@ -14,6 +14,8 @@
 
 import dataclasses
 import functools
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 import jax
@@ -462,9 +464,8 @@ def _compute_waits(
                                            o_bytes_per_token) // dma_chunk_size
 
         # LSE OUT
-        lse_bytes_per_token = (cfgs.model.num_kv_heads *
-                               cfgs.aligned_num_q_heads_per_kv_head * 128 *
-                               cfgs.serve.dtype_out.itemsize)
+        lse_bytes_per_token = (cfgs.model.num_kv_heads * cfgs.lse_row_stride *
+                               128 * cfgs.serve.dtype_out.itemsize)
         schedule.total_wait_lse_out[step] = (
             o_out_tokens * lse_bytes_per_token) // dma_chunk_size
 

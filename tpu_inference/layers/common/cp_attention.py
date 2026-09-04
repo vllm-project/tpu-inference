@@ -19,6 +19,8 @@ from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+import tpu_inference.kernels.experimental.batched_rpa.configs as batched_rpa_configs
+import tpu_inference.kernels.experimental.batched_rpa.wrapper as batched_rpa
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -281,6 +283,7 @@ def pcp_forward(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    kv_layout: batched_rpa_configs.KVLayout | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward.
 
@@ -291,6 +294,8 @@ def pcp_forward(
       2. current phase         local Q (head+tail) attends all-gathered current KV
       3. merge_attn_states     lse-weighted combine
     """
+    if kv_layout is None:
+        kv_layout = batched_rpa.default_kv_layout()
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
     two_p = 2 * pcp_size
@@ -306,13 +311,19 @@ def pcp_forward(
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                      ShardingAxisName.KV_HEAD, None, None)
+    if kv_layout == batched_rpa_configs.KVLayout.SEQ_ALONG_LANE:
+        # SEQ_ALONG_LANE: tokens on the last dim, K/V head planes on dim 1.
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_HEAD,
+                          None, None, ShardingAxisName.KV_CONTEXT)
+    else:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD, None, None)
 
     common = dict(sm_scale=sm_scale,
                   q_scale=q_scale,
                   k_scale=k_scale,
-                  v_scale=v_scale)
+                  v_scale=v_scale,
+                  kv_layout=kv_layout)
 
     cache_pages = md.pcp.cache_pages
 
@@ -339,7 +350,7 @@ def pcp_forward(
         else:
             cu_ring = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(
                 q_local.shape[0])
-            context_out, _, context_lse = _rpa_cp_call(
+            context_out, _, context_lse = batched_rpa.ragged_paged_attention(
                 q_local,
                 k_local,
                 v_local,
@@ -350,24 +361,16 @@ def pcp_forward(
                 jnp.array([0, 0, 1], jnp.int32),
                 cp_rank=cp_rank,
                 cp_group_size=pcp_size,
-                kv_cache_lens=kv_cache_lens_local,
+                global_kv_cache_lens=kv_cache_lens_local,
+                attention_scope=batched_rpa_configs.AttentionScope.CACHE_ONLY,
                 pcp_ring_axis_name=pcp_axis,
                 pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
-                skip_current_attn=True,
-                use_causal_mask=False,
-                update_kv_cache=False,
+                return_lse=True,
                 **common)
 
-        # Current phase: local Q (head+tail chunks) attends all-gathered current KV.
-        # pcp_cu_q_lens_local[0] = [0, chunk, chunk+tail_real]; pcp_q_pos_offsets_local[0] = [head_offset, tail_offset].
-        # remap_kv: if C aligns with page_size, all_gather_tokens() avoids an extra gather-reorder.
-        page_size = kv_cache_local.shape[1]
-        remap_kv = (C >= page_size) and (C % page_size == 0)
-        k_curr = all_gather_tokens(k_local) if remap_kv else to_token_order(
-            k_local)
-        v_curr = all_gather_tokens(v_local) if remap_kv else to_token_order(
-            v_local)
-        curr_out, kv_cache_updated, curr_lse = _rpa_cp_call(
+        k_curr = to_token_order(k_local)
+        v_curr = to_token_order(v_local)
+        curr_out, kv_cache_updated, curr_lse = batched_rpa.ragged_paged_attention(
             q_local,
             k_curr,
             v_curr,
@@ -378,10 +381,11 @@ def pcp_forward(
             distribution_local,
             cp_rank=cp_rank,
             cp_group_size=pcp_size,
-            kv_cache_lens=kv_cache_lens_local,
+            global_kv_cache_lens=kv_cache_lens_local,
+            global_new_kv_lens=kv_lens_local - kv_cache_lens_local,
             q_pos_offsets=pcp_q_pos_offsets_local[0],
-            pcp_chunk_size=(C if remap_kv else None),
-            skip_cache_attn=True,
+            attention_scope=batched_rpa_configs.AttentionScope.NEW_TOKENS_ONLY,
+            return_lse=True,
             use_causal_mask=use_causal_mask,
             update_kv_cache=update_kv_cache,
             write_last_seq_only=True,
