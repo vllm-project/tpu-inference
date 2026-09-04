@@ -270,8 +270,10 @@ def generate_mask(
             masks.append(jnp.broadcast_to(mask_b[None], (k_heads, tq, s)))
         return jnp.stack(masks, axis=0)
 
-    kv_iota = lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 2)
-    q_iota = lax.broadcasted_iota(jnp.int32, (k_heads, tq, s), 1)
+    # No mask term depends on the kv head, so compute on [tq, s] and
+    # broadcast over k_heads at the end.
+    kv_iota = lax.broadcasted_iota(jnp.int32, (tq, s), 1)
+    q_iota = lax.broadcasted_iota(jnp.int32, (tq, s), 0)
     q_iota //= cfgs.aligned_num_q_heads_per_kv_head
     q_kv_diff = q_iota - kv_iota
 
@@ -306,7 +308,7 @@ def generate_mask(
         )
         mask_b = jnp.logical_and(mask_b, valid_q)
 
-        masks.append(mask_b)
+        masks.append(jnp.broadcast_to(mask_b[None], (k_heads, tq, s)))
 
     return jnp.stack(masks, axis=0)
 
