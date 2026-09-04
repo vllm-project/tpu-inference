@@ -437,10 +437,10 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
             main_distribution = swa_attn_metadata.request_distribution
 
         # All array inputs and outputs are sharded along the leading axis on
-        # ShardingAxisName.ATTN_DATA (caches on ShardingAxisName.BATCH);
+        # ShardingAxisName.ATTN_DATA (caches on ShardingAxisName.DENSE_DATA);
         # `attention_sinks` is replicated. The kernels run per-shard.
         data_spec = P(ShardingAxisName.ATTN_DATA)
-        cache_spec = P(ShardingAxisName.BATCH)
+        cache_spec = P(ShardingAxisName.DENSE_DATA)
         in_specs = (
             data_spec,  # q
             data_spec,  # new_kv

@@ -64,8 +64,8 @@ class ShardingAxisNameBase:
     # Standard name for the model sharding axis.
     MODEL = 'model'
 
-    # These axes are used in KV caches management.
-    BATCH = ('data', 'attn_dp', 'attn_dp_expert')
+    # KV caches shard their batch/block (leading) axis on DENSE_DATA and their
+    # context axis on KV_CONTEXT.
     KV_CONTEXT = ('pcp', 'dcp')
 
     # PCP input sharding
@@ -94,7 +94,6 @@ class ShardingAxisName2D:
     EXPERT = 'model'
     EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
-    BATCH = 'data'
     KV_CONTEXT = None
     PCP = None
 

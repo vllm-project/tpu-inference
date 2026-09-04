@@ -2653,7 +2653,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         data_parallel_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
         metadata_attn_sharding = NamedSharding(
-            self.mesh, PartitionSpec(ShardingAxisName.BATCH))
+            self.mesh, PartitionSpec(ShardingAxisName.DENSE_DATA))
 
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,
