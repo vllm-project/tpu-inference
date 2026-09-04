@@ -77,7 +77,7 @@ def get_links() -> dict[str, str]:
     job_id = os.getenv('BUILDKITE_JOB_ID')
     if build_number and job_id:
         result[
-            'buildkite'] = f'https://buildkite.com/organizations/tpu-commons/pipelines/tpu-inference-benchmark/builds/{build_number}/jobs/{job_id}/log'
+            'buildkite'] = f'https://buildkite.com/organizations/vllm/pipelines/tpu-inference-benchmark/builds/{build_number}/jobs/{job_id}/log'
     return result
 
 
