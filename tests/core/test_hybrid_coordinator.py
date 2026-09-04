@@ -12,12 +12,12 @@ from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference.core.hybrid_coordinator import (
     TPUDualBlockPool, TPUHybridKVCacheCoordinator, TPUKVCacheManager,
-    install_hybrid_coordinator_hooks)
+    install_hybrid_coordinator_hooks, set_mamba_num_blocks)
 
 
 def _make_mock_hybrid_kv_cache_config(
     num_attn_blocks: int = 500,
-    mamba_num_blocks: int = 50,
+    mamba_num_blocks: int | None = 50,
     block_size: int = 16,
 ) -> KVCacheConfig:
     attn_spec = FullAttentionSpec(
@@ -41,7 +41,8 @@ def _make_mock_hybrid_kv_cache_config(
         kv_cache_tensors=[],
         kv_cache_groups=groups,
     )
-    cfg.mamba_num_blocks = mamba_num_blocks
+    if mamba_num_blocks is not None:
+        set_mamba_num_blocks(mamba_num_blocks)
     return cfg
 
 
@@ -306,3 +307,55 @@ class TestHybridCoordinatorHooks:
         install_hybrid_coordinator_hooks()
         assert mgr_mod.KVCacheManager is TPUKVCacheManager
         assert callable(coord_mod.get_kv_cache_coordinator)
+
+    def test_tpu_get_kv_cache_coordinator_resolves_from_global(self):
+        from tpu_inference.core.hybrid_coordinator import (
+            TPUHybridKVCacheCoordinator, set_mamba_num_blocks,
+            tpu_get_kv_cache_coordinator)
+
+        set_mamba_num_blocks(64)
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                mamba_num_blocks=None)
+        assert getattr(cfg, "mamba_num_blocks", None) is None
+
+        coord_kwargs = dict(
+            max_model_len=1024,
+            max_in_flight_tokens=128,
+            use_eagle=False,
+            enable_caching=True,
+            enable_kv_cache_events=False,
+            dcp_world_size=1,
+            pcp_world_size=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+        )
+        coord = tpu_get_kv_cache_coordinator(cfg, **coord_kwargs)
+        assert isinstance(coord, TPUHybridKVCacheCoordinator)
+        assert coord.mamba_num_blocks == 64
+
+    def test_tpu_get_kv_cache_coordinator_raises_if_missing(self):
+        import pytest
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            tpu_get_kv_cache_coordinator
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                mamba_num_blocks=None)
+        assert getattr(cfg, "mamba_num_blocks", None) is None
+
+        coord_kwargs = dict(
+            max_model_len=1024,
+            max_in_flight_tokens=128,
+            use_eagle=False,
+            enable_caching=True,
+            enable_kv_cache_events=False,
+            dcp_world_size=1,
+            pcp_world_size=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+        )
+        with pytest.raises(ValueError,
+                           match="mamba_num_blocks must be registered"):
+            tpu_get_kv_cache_coordinator(cfg, **coord_kwargs)

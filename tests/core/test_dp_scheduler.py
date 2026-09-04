@@ -55,6 +55,7 @@ class TestDPScheduler:
         config.cache_config = MagicMock()
         config.cache_config.enable_prefix_caching = False
         config.cache_config.prefix_caching_hash_algo = "sha256"
+        config.cache_config.mamba_num_blocks = None
         return config
 
     @pytest.fixture
@@ -136,8 +137,8 @@ class TestDPScheduler:
         mock_kv_cache_config,
         mock_structured_output_manager,
     ):
-        """Test that mamba_num_blocks is partitioned per DP rank."""
-        mock_kv_cache_config.mamba_num_blocks = 60
+        """Test that mamba_num_blocks is partitioned per DP rank from cache_config."""
+        mock_vllm_config.cache_config.mamba_num_blocks = 60
         scheduler = self._create_scheduler(
             mock_vllm_config,
             mock_kv_cache_config,
@@ -148,14 +149,13 @@ class TestDPScheduler:
             assert rank_config.num_blocks == 50
             assert rank_config.mamba_num_blocks == 30
 
-    def test_init_without_mamba_num_blocks_on_kv_cache_config(
+    def test_init_without_mamba_num_blocks(
         self,
         mock_vllm_config,
         mock_kv_cache_config,
         mock_structured_output_manager,
     ):
-        """Test that mamba_num_blocks on cache_config is ignored if not on kv_cache_config."""
-        mock_vllm_config.cache_config.mamba_num_blocks = 60
+        """Test that rank configs have no mamba_num_blocks if not configured."""
         scheduler = self._create_scheduler(
             mock_vllm_config,
             mock_kv_cache_config,

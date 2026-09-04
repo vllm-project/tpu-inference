@@ -20,8 +20,34 @@ from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
-_GLOBAL_MAMBA_NUM_BLOCKS: int | None = None
+# ==============================================================================
+# Decoupled Mamba Block Capacity Lifecycle:
+# ------------------------------------------------------------------------------
+# 1. PRODUCER (tpu_inference/runner/kv_cache_manager.py):
+#    During device HBM memory profiling, KVCacheManager calculates the physical
+#    compact Mamba block capacity and writes it to two places:
+#      - cache_config.mamba_num_blocks = int(mamba_num_blocks)
+#      - set_mamba_num_blocks(int(mamba_num_blocks))
+#
+# 2. PARTITIONER / PROPAGATION:
+#    - DP Serving (tpu_inference/core/sched/dp_scheduler.py):
+#      DPScheduler reads the total capacity from `vllm_config.cache_config.mamba_num_blocks`
+#      and shards it per rank:
+#        rank_kv_config.num_blocks = kv_cache_config.num_blocks // dp_size
+#        rank_kv_config.mamba_num_blocks = mamba_num_blocks // dp_size
+#      In the worker subprocess (_scheduler_worker_process), each rank sets:
+#        set_mamba_num_blocks(kv_cache_config.mamba_num_blocks)
+#        cache_config.mamba_num_blocks = kv_cache_config.mamba_num_blocks
+#    - Non-DP Serving (DP=1):
+#      Runs in the same process where KVCacheManager registered the total capacity via
+#      set_mamba_num_blocks().
+#
+# 3. CONSUMER (TPUHybridKVCacheCoordinator):
+#    Resolves mamba_num_blocks directly from get_mamba_num_blocks() (or an explicit
+#    argument) and initializes an independent Mamba BlockPool, failing fast if not set.
+# ==============================================================================
 _HOOKS_INSTALLED: bool = False
+_GLOBAL_MAMBA_NUM_BLOCKS: int | None = None
 
 
 def set_mamba_num_blocks(num_blocks: int) -> None:
@@ -198,12 +224,11 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # Resolve mamba_num_blocks
         if mamba_num_blocks is None:
-            mamba_num_blocks = getattr(kv_cache_config, "mamba_num_blocks",
-                                       None)
-        if mamba_num_blocks is None:
             mamba_num_blocks = get_mamba_num_blocks()
         if mamba_num_blocks is None:
-            mamba_num_blocks = min(kv_cache_config.num_blocks, 2048)
+            raise ValueError(
+                "[TPUHybridKVCacheCoordinator] mamba_num_blocks must be registered "
+                "via set_mamba_num_blocks().")
         self.mamba_num_blocks = int(mamba_num_blocks)
 
         logger.info(
