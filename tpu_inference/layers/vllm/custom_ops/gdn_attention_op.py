@@ -124,9 +124,6 @@ def gdn_attention_core_tpu(
     j_conv_weight = reorder_concatenated_tensor_for_sharding(
         j_conv_weight, [key_dim, key_dim, value_dim], tp_size, 0)
     if pcp_size > 1:
-        # Permute tokens after the feature reorder (they commute) so the
-        # linear's un-interleave and this re-interleave stay adjacent for XLA
-        # to fold into a shard-local op instead of resharding via all-to-all.
         j_mixed_qkv = j_mixed_qkv[tok_order]
 
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
@@ -213,7 +210,6 @@ def gdn_attention_core_tpu(
          read_state_indices=read_state_indices_sliced,
      )
     if pcp_size > 1:
-        # Back to the runner's rank-order layout for the layers downstream.
         j_output = j_output[rank_order]
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
