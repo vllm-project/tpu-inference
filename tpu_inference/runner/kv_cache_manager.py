@@ -30,9 +30,20 @@ from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
 from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, MambaSpec,
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec,
+                                        KVCacheTensor, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
+
+if not hasattr(KVCacheTensor, "layers"):
+    KVCacheTensor.layers = property(
+        lambda self: getattr(self, "shared_by", []),
+        lambda self, val: setattr(self, "shared_by", val),
+    )
+if not hasattr(AttentionSpec, "num_states"):
+    AttentionSpec.num_states = property(
+        lambda self: getattr(self, "block_size", 16),
+    )
 
 from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
@@ -973,7 +984,7 @@ class KVCacheManager:
                 num_blocks_list.append(num_blocks)
                 cache_idx = len(kv_caches) - 1
             else:
-                block_size = layer_spec.num_states
+                block_size = getattr(layer_spec, "block_size", getattr(layer_spec, "num_states", self.runner.cache_config.block_size))
                 kv_cache = create_kv_caches(
                     num_blocks=num_blocks,
                     block_size=block_size,

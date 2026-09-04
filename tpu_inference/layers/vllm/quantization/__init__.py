@@ -29,7 +29,10 @@ from tpu_inference.layers.vllm.quantization.deepseek_v4_fp8 import \
     VllmDeepseekV4Fp8Config
 from tpu_inference.layers.vllm.quantization.fp8 import VllmFp8Config
 from tpu_inference.layers.vllm.quantization.mxfp4 import VllmMxfp4Config
-from tpu_inference.layers.vllm.quantization.nvfp4 import VllmNvfp4Config
+try:
+    from tpu_inference.layers.vllm.quantization.nvfp4 import VllmNvfp4Config
+except ImportError:
+    VllmNvfp4Config = None
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedConfig
 
@@ -43,9 +46,10 @@ def get_tpu_quantization_config(vllm_config: VllmConfig,
         quant_methods.AWQ: VllmAWQConfig,
         quant_methods.FP8: VllmFp8Config,
         quant_methods.MXFP4: VllmMxfp4Config,
-        quant_methods.NVFP4: VllmNvfp4Config,
         quant_methods.DSV4_FP8: VllmDeepseekV4Fp8Config,
     }
+    if VllmNvfp4Config is not None:
+        method_to_config[quant_methods.NVFP4] = VllmNvfp4Config
     if model_config.quantization not in method_to_config:
         raise NotImplementedError(
             f"{model_config.quantization} quantization method not supported."
