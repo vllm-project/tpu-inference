@@ -391,26 +391,33 @@ class JaxRoutedExperts(JaxModule):
         D = hidden_size
         F = intermediate_size_moe
 
-        # Weights are initially unsharded; quant method shards them in
-        # process_weights_after_loading via shard_moe_weights.
+        # Assign the final loading layout up front. Otherwise each full expert
+        # tensor is temporarily replicated on every device before the quant
+        # method gets a chance to redistribute it, which can exhaust HBM.
+        self.use_ep = self._compute_use_ep()
+        self.edf_sharding, self.efd_sharding = self._get_weight_shardings(
+            mesh, self.use_ep)
+
         self.kernel_gating_EDF = create_param(rngs,
                                               shape=(E, D, F),
                                               dtype=dtype,
+                                              sharding=self.edf_sharding,
                                               random_init=random_init)
         self.kernel_gating_EDF.set_metadata(_weights_to_load=[None] * E)
         self.kernel_up_proj_EDF = create_param(rngs,
                                                shape=(E, D, F),
                                                dtype=dtype,
+                                               sharding=self.edf_sharding,
                                                random_init=random_init)
         self.kernel_up_proj_EDF.set_metadata(_weights_to_load=[None] * E)
         self.kernel_down_proj_EFD = create_param(rngs,
                                                  shape=(E, F, D),
                                                  dtype=dtype,
+                                                 sharding=self.efd_sharding,
                                                  random_init=random_init)
         self.kernel_down_proj_EFD.set_metadata(_weights_to_load=[None] * E)
 
         # Derive use_ep from the vLLM parallel config (same formula as torchax).
-        self.use_ep = self._compute_use_ep()
         self.moe_backend = select_moe_backend(self.use_ep)
         # Needed by apply_jax for the input sharding constraint.
         self.activation = hidden_act
@@ -439,6 +446,36 @@ class JaxRoutedExperts(JaxModule):
         pc = get_current_vllm_config().parallel_config
         return (pc.data_parallel_size * pc.prefill_context_parallel_size *
                 pc.tensor_parallel_size) > 1 and pc.enable_expert_parallel
+
+    @staticmethod
+    def _get_weight_shardings(
+            mesh: jax.sharding.Mesh,
+            use_ep: bool) -> tuple[tuple, tuple]:
+        """Return EDF/EFD layouts without assigning one mesh axis twice."""
+        def active_axis(candidates):
+            axes = tuple(axis for axis in candidates
+                         if mesh.shape.get(axis, 1) > 1)
+            if not axes:
+                return None
+            return axes[0] if len(axes) == 1 else axes
+
+        if "expert" in mesh.axis_names:
+            expert_axis = active_axis(
+                ("attn_dp", "attn_dp_expert", "expert", "model", "dcp",
+                 "pcp"))
+            tensor_axis = active_axis(
+                ("attn_dp", "attn_dp_expert", "expert", "model", "dcp",
+                 "pcp"))
+        else:
+            expert_axis = tensor_axis = active_axis(("model", ))
+
+        if not use_ep:
+            return (None, None, tensor_axis), (None, tensor_axis, None)
+
+        # GMM EP shards complete experts across the aggregate expert axis. It
+        # requires each local expert to retain its full hidden/intermediate
+        # dimensions; sharding F here makes the kernel mistake local F for D.
+        return (expert_axis, None, None), (expert_axis, None, None)
 
     def __call__(
         self,
@@ -477,10 +514,14 @@ class JaxRoutedExperts(JaxModule):
                 raise ValueError(f"Unexpected param type in {rel_name}, "
                                  "expected gate_proj, up_proj, or down_proj")
             assert isinstance(jax_param, nnx.Param)
+            permute_dims = ((0, 2, 1)
+                            if self.moe_backend == MoEBackend.FUSED_MOE else
+                            None)
             jax_param._weights_to_load[
                 expert_id] = jax_array_from_reshaped_torch(torch_weight,
                                                            reshape_dims=(1, ) +
-                                                           torch_weight.shape)
+                                                           torch_weight.shape,
+                                                           permute_dims=permute_dims)
             cnt += 1
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
