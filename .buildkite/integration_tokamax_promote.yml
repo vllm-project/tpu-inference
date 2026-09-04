@@ -1,0 +1,38 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+steps:
+  - wait: ~
+  # -----------------------------------------------------------------
+  # Bump the tokamax pin on main. The wait above means this only runs once
+  # every uploaded step passed; the per-TPU "TPU Test Notification" steps
+  # turn the soft_fail test steps into a hard build failure, so a red test
+  # really does block this promote.
+  # -----------------------------------------------------------------
+  - label: "Promote validated tokamax nightly to main"
+    key: "promote_tokamax"
+    agents:
+      queue: "cpu"
+    commands:
+      - |
+        TOKAMAX_VERSION=$(buildkite-agent meta-data get "TOKAMAX_VERSION")
+        TOKAMAX_PREVIOUS_VERSION=$(buildkite-agent meta-data get "TOKAMAX_PREVIOUS_VERSION" --default "unknown")
+        bash .buildkite/scripts/update_tokamax_pin.sh "$$TOKAMAX_VERSION"
+        buildkite-agent annotate ":white_check_mark: tokamax bumped: $$TOKAMAX_PREVIOUS_VERSION -> $$TOKAMAX_VERSION" --style "success"
+
+notify:
+  - email: "ullm-test-notifications-external@google.com"
+    if: build.state == "failed" && build.source == "schedule"
+  - slack: "vllm#tpu-ci-notifications"
+    if: build.state == "failed" && build.source == "schedule"
