@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 from tpu_inference import utils
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.pp_utils import PPMissingLayer
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.kv_cache import (DEFAULT_KV_CACHE_DTYPE,
                                            create_kv_caches)
@@ -217,6 +218,155 @@ def qwix_quantize_nnx_model(model: nnx.Module, qwix_config: List[dict],
     return model
 
 
+def qwix_quantize_nnx_model_streaming(
+        model: nnx.Module, qwix_config: List[dict], rng: jax.Array,
+        mesh: Mesh, num_hidden_layers: int, kv_cache_block_size: int,
+        kv_cache_num_kv_heads: int | tuple[int, ...],
+        kv_cache_head_size: int | tuple[int, ...],
+        kv_cache_dtype: str) -> nnx.Module:
+    """
+    Layer-by-layer streaming variant of `qwix_quantize_nnx_model`.
+
+    `qwix.quantize_model` internally does `nnx.clone(model)`, which
+    allocates a full duplicate copy of every weight it's given. Calling it
+    once on the whole model (inside a single `jax.jit`) therefore requires
+    the original bf16 weights and the cloned bf16-on-its-way-to-int8
+    weights to be resident in HBM at the same time for the *entire* model
+    at once. For a model that's already using a large fraction of a chip's
+    HBM just for its bf16 weights, this overflows available HBM even
+    though the final int8 model is much smaller than the original.
+
+    This variant instead quantizes one submodule (embed_tokens, one
+    decoder layer, or norm) at a time, each via its own `jax.jit` call with
+    `donate_argnums=(0,)`. Each call fully executes and returns before the
+    next one starts, so only one submodule's weights are ever doubled at a
+    time -- peak extra HBM is bounded by the largest single submodule (one
+    decoder layer) instead of the whole model.
+
+    qwix's per-instance interception (it swaps `instance.__class__` to run
+    quantized ops) is why this composes correctly: the unmodified parent
+    `__call__` methods just do `self.submodule(...)`, which dispatches to
+    whatever `type(submodule).__call__` is at call time -- quantizing a
+    submodule in place is enough, no changes needed to any parent module.
+
+    lm_head is intentionally left unquantized, matching this model's
+    existing convention (see `quant_config=None` in
+    `Glm4MoeLiteForCausalLM.__init__`).
+    """
+    qwix_rules = parse_qwix_config_to_rules(qwix_config)
+    logger.info(f"Qwix rules (streaming): {qwix_rules}")
+    logger.info(f"Memory usage before applying quantization of params: "
+                f"hbm={utils.hbm_usage_gb(jax.local_devices())}Gb")
+
+    if kv_cache_dtype != "auto":
+        kv_cache_jnp_dtype = utils.to_jax_dtype(kv_cache_dtype)
+    else:
+        kv_cache_jnp_dtype = DEFAULT_KV_CACHE_DTYPE
+
+    head_sizes = kv_cache_head_size
+    if isinstance(head_sizes, int):
+        head_sizes = (head_sizes, ) * num_hidden_layers
+
+    num_kv_heads_tuple = kv_cache_num_kv_heads
+    if isinstance(num_kv_heads_tuple, int):
+        num_kv_heads_tuple = (num_kv_heads_tuple, ) * num_hidden_layers
+
+    use_mla = model.vllm_config.model_config.use_mla
+    hidden_size = model.vllm_config.model_config.hf_config.hidden_size
+    dp_size = model.vllm_config.sharding_config.total_dp_size
+
+    # NOTE: the inputs don't need to match the actual ones, as long as the
+    # consumed weights are the same (same convention as
+    # `qwix_quantize_nnx_model` above).
+    input_ids = jax.random.randint(rng,
+                                   (DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS, ),
+                                   0,
+                                   100,
+                                   dtype=jnp.int32)
+    positions = jax.random.randint(rng,
+                                   (DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS, ),
+                                   0,
+                                   100,
+                                   dtype=jnp.int32)
+    block_tables = jax.random.randint(rng,
+                                      (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS *
+                                       DEFAULT_MAX_NUM_BLOCKS_PER_REQ, ),
+                                      0,
+                                      100,
+                                      dtype=jnp.int32)
+    query_start_loc = jax.random.randint(
+        rng, (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS + dp_size, ),
+        0,
+        100,
+        dtype=jnp.int32)
+    seq_lens = jax.random.randint(rng,
+                                  (DEFAULT_MAX_NUM_SEQS_FOR_MODEL_INPUTS, ),
+                                  0,
+                                  100,
+                                  dtype=jnp.int32)
+    num_seqs = jax.random.randint(rng, (1, ), 0, 100, dtype=jnp.int32)
+    request_distribution = jnp.array([0, 0, num_seqs[0]] * dp_size,
+                                     dtype=jnp.int32)
+
+    (input_ids, positions, block_tables,
+     query_start_loc, seq_lens, request_distribution) = device_array(
+         mesh, (input_ids, positions, block_tables, query_start_loc, seq_lens,
+                request_distribution))
+
+    attention_metadata = AttentionMetadata(
+        input_positions=positions,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution)
+
+    x_dummy = device_array(
+        mesh,
+        jax.random.normal(rng,
+                          (DEFAULT_NUM_TOKENS_FOR_MODEL_INPUTS, hidden_size),
+                          dtype=model.vllm_config.model_config.dtype))
+
+    def _quantize_submodule(submodule, *args, **kwargs):
+        return qwix.quantize_model(submodule, qwix.PtqProvider(qwix_rules),
+                                   *args, **kwargs)
+
+    jit_quantize = jax.jit(_quantize_submodule, donate_argnums=(0, ))
+
+    inner_model = model.model
+
+    if not isinstance(inner_model.embed_tokens, PPMissingLayer):
+        inner_model.embed_tokens = jit_quantize(inner_model.embed_tokens,
+                                                input_ids)
+        logger.info("Quantized embed_tokens; hbm="
+                   f"{utils.hbm_usage_gb(jax.local_devices())}Gb")
+
+    for i in range(num_hidden_layers):
+        layer = inner_model.layers[i]
+        if isinstance(layer, PPMissingLayer):
+            continue
+        layer_cache = create_kv_caches(
+            num_blocks=DEFAULT_NUM_BLOCKS_FOR_JIT_KV_CACHE,
+            block_size=kv_cache_block_size,
+            num_kv_heads=num_kv_heads_tuple[i],
+            head_size=head_sizes[i],
+            mesh=mesh,
+            layer_names=[f"layer.{i}"],
+            cache_dtype=kv_cache_jnp_dtype,
+            use_mla=use_mla,
+        )
+        inner_model.layers[i] = jit_quantize(layer, layer_cache[0], x_dummy,
+                                             attention_metadata)
+        logger.info(f"Quantized layer {i + 1}/{num_hidden_layers}; hbm="
+                   f"{utils.hbm_usage_gb(jax.local_devices())}Gb")
+
+    if not isinstance(inner_model.norm, PPMissingLayer):
+        inner_model.norm = jit_quantize(inner_model.norm, x_dummy)
+        logger.info("Quantized norm; hbm="
+                   f"{utils.hbm_usage_gb(jax.local_devices())}Gb")
+
+    return model
+
+
 def quantization_config_file_path_to_dict(
         quantization_config_file_path: str) -> dict:
     """
@@ -372,27 +522,25 @@ def apply_qwix_quantization(
 
     if not apply_to_abstract_model:
         assert isinstance(model_or_model_fn, nnx.Module)
-        qwix_quantize_nnx_model_with_config = functools.partial(
-            qwix_quantize_nnx_model, qwix_config=qwix_config)
-        # NOTE: it's REALLY important `qwix_quantize_nnx_model_with_config` is jitted
-        # or else you'll run into hanging
-        model_or_model_fn = jax.jit(qwix_quantize_nnx_model_with_config,
-                                    donate_argnums=(0, ),
-                                    static_argnames=(
-                                        "mesh",
-                                        "num_hidden_layers",
-                                        "kv_cache_block_size",
-                                        "kv_cache_num_kv_heads",
-                                        "kv_cache_head_size",
-                                        "kv_cache_dtype",
-                                    ))(model=model_or_model_fn,
-                                       rng=rng,
-                                       mesh=mesh,
-                                       num_hidden_layers=num_hidden_layers,
-                                       kv_cache_block_size=block_size,
-                                       kv_cache_num_kv_heads=num_kv_heads,
-                                       kv_cache_head_size=head_size,
-                                       kv_cache_dtype=kv_cache_dtype)
+        # NOTE: this must NOT be wrapped in an outer `jax.jit` -- the whole
+        # point of `qwix_quantize_nnx_model_streaming` is to quantize one
+        # submodule at a time via its own `jax.jit` call that fully executes
+        # (freeing that submodule's temporary bf16 copy) before moving to the
+        # next one. Wrapping it in an outer `jax.jit` would inline all of
+        # those nested calls into a single XLA program again, defeating the
+        # peak-HBM reduction this is for (see the docstring on
+        # `qwix_quantize_nnx_model_streaming` for why the non-streaming,
+        # single-`jax.jit` version above needs ~2x the model's HBM footprint).
+        model_or_model_fn = qwix_quantize_nnx_model_streaming(
+            model_or_model_fn,
+            qwix_config=qwix_config,
+            rng=rng,
+            mesh=mesh,
+            num_hidden_layers=num_hidden_layers,
+            kv_cache_block_size=block_size,
+            kv_cache_num_kv_heads=num_kv_heads,
+            kv_cache_head_size=head_size,
+            kv_cache_dtype=kv_cache_dtype)
 
         return model_or_model_fn
 
