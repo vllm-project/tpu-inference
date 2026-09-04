@@ -42,6 +42,26 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
+# buildkite-agent, for `artifact upload` from inside the test container.
+#
+# On bare metal the agent runs on the TPU VM, so a step's artifact_paths uploads
+# from the agent's own working directory. Under Kubernetes the agent is in a
+# different pod from the test and cannot see what the test wrote, so the test
+# uploads its own artifacts. BUILDKITE_AGENT_ACCESS_TOKEN, BUILDKITE_BUILD_ID
+# and BUILDKITE_JOB_ID are already forwarded into the workload pod, which is
+# what `artifact upload` needs.
+#
+# Only the CLI is wanted. Nothing here should ever run `buildkite-agent start`:
+# this container is a workload, not an agent.
+#
+# Copied from the official image rather than downloaded: the binary is a
+# static Go executable, so it works on this base unchanged, and the pin is
+# an image tag rather than a URL. Pinned because the version is part of what
+# the image is, and an unpinned pull makes two builds of the same commit
+# differ.
+COPY --from=buildkite/agent:3.137.0 /usr/local/bin/buildkite-agent /usr/local/bin/buildkite-agent
+RUN buildkite-agent --version
+
 # Conditionally install google-cloud-cli for benchmarking infrastructure
 RUN if [ "$BM_INFRA" = "true" ]; then \
         apt-get update && apt-get install -y gnupg curl \
