@@ -566,9 +566,8 @@ class DPScheduler(SchedulerInterface):
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
         # mamba_num_blocks is computed during device HBM profiling and written to
         # vllm_config.cache_config. Symmetrically partition across DP ranks.
-        mamba_num_blocks = getattr(
-            getattr(self.vllm_config, "cache_config", None),
-            "mamba_num_blocks", None)
+        mamba_num_blocks = getattr(self.vllm_config.cache_config,
+                                   "mamba_num_blocks", None)
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)

@@ -75,7 +75,7 @@ def _generate(mode: str,
             }
         }
     if budget is not None:
-        additional_config["mamba_cache_checkpoint_budget"] = budget
+        additional_config["custom_mamba_cache_size"] = budget
 
     llm = LLM(
         model=MODEL_NAME,
