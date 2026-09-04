@@ -287,8 +287,9 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         per_rank = rpa_v3_cp.get_kv_cache_shape(npages, page, NKV // tp, HD,
                                                 kv_dtype)
         cache_shape = (npages, gpage, per_rank[2] * tp) + tuple(per_rank[3:])
-        cache_spec = P(ShardingAxisName.DENSE_DATA, ShardingAxisName.KV_CONTEXT,
-                       ShardingAxisName.KV_HEAD, None, None)
+        cache_spec = P(ShardingAxisName.DENSE_DATA,
+                       ShardingAxisName.KV_CONTEXT, ShardingAxisName.KV_HEAD,
+                       None, None)
 
         def put(x, s):
             return jax.device_put(x, NamedSharding(mesh, s))

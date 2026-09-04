@@ -681,7 +681,8 @@ class CompilationManager:
                     self.runner.mesh,
                     PartitionSpec(ShardingAxisName.ATTN_DATA, ))
                 metadata_attn_sharding = NamedSharding(
-                    self.runner.mesh, PartitionSpec(ShardingAxisName.DENSE_DATA))
+                    self.runner.mesh,
+                    PartitionSpec(ShardingAxisName.DENSE_DATA))
                 input_ids = self._create_dummy_tensor(
                     (num_tokens, ), jnp.int32, metadata_attn_sharding)
                 if self.runner.uses_mrope:
