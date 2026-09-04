@@ -123,6 +123,31 @@ verify_image_vllm() {
   echo "[verify-vllm] OK: ${image_ref} contains expected vLLM ${expected_vllm}."
 }
 
+verify_image_tokamax() {
+  local image_ref="$1"
+  local expected_tokamax="${2:-}"
+  if [[ -z "${expected_tokamax}" ]]; then
+    return 0
+  fi
+  local actual_tokamax rc=0 err
+  err=$(mktemp)
+  actual_tokamax=$(docker run --rm --entrypoint python3 "${image_ref}" \
+    -c 'import importlib.metadata as m; print(m.version("tokamax"))' 2>"${err}") || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    echo "[FATAL][verify-tokamax] Could not read the tokamax version from ${image_ref} (exit ${rc}):" >&2
+    cat "${err}" >&2
+    rm -f "${err}"
+    exit 1
+  fi
+  rm -f "${err}"
+  if [[ "${actual_tokamax}" != "${expected_tokamax}" ]]; then
+    echo "[FATAL][verify-tokamax] ${image_ref} contains tokamax ${actual_tokamax}," >&2
+    echo "[FATAL][verify-tokamax] but this build is validating ${expected_tokamax}." >&2
+    exit 1
+  fi
+  echo "[verify-tokamax] ${image_ref} contains tokamax ${actual_tokamax}."
+}
+
 setup_environment() {
   local image_name_param=${1:-"vllm-tpu"}
   local should_push=${2:-"false"}
@@ -179,12 +204,22 @@ setup_environment() {
       VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH" --default "")
       TPU_INFERENCE_HASH="$BUILDKITE_COMMIT"
   fi
+
+  # Non-empty only in the tokamax integration pipeline, which validates a
+  # candidate nightly that is not yet pinned in requirements.txt. Every other
+  # pipeline leaves this empty and is unaffected by the two blocks below.
+  local TOKAMAX_VERSION=""
+  if [ -n "${BUILDKITE:-}" ]; then
+    TOKAMAX_VERSION=$(buildkite-agent meta-data get "TOKAMAX_VERSION" --default "")
+  fi
  
   # Include the vLLM commit in the cache tag so an image is uniquely identified
   # by BOTH its tpu-inference commit and its vLLM commit. Without this, the CI
   # pipeline (LKG vLLM) and the integration pipeline (HEAD vLLM) produce the same
   # tag for the same tpu-inference commit and can overwrite each other's image in
   # the registry -- a test could then silently run a different vLLM than intended.
+  # Similarly, we bake the tokamax commit in the cache tag below.
+  # The tag has 128 char limit.
   local CACHE_TAG="${TPU_INFERENCE_HASH}-${LOCAL_TPU_VERSION}"
   if [[ -n "${VLLM_COMMIT_HASH}" ]]; then
     CACHE_TAG="${TPU_INFERENCE_HASH}-${VLLM_COMMIT_HASH}-${LOCAL_TPU_VERSION}"
@@ -200,6 +235,10 @@ setup_environment() {
     exit 1
   fi
 
+  if [[ -n "${TOKAMAX_VERSION}" ]]; then
+    CACHE_TAG="${CACHE_TAG}-tkmx${TOKAMAX_VERSION//[^a-zA-Z0-9]/}"
+  fi
+
   # ==========================================
   # Pull-Only Mode for TPU execution nodes
   # ==========================================
@@ -208,11 +247,18 @@ setup_environment() {
     # -q: the layer-by-layer pull progress is several hundred lines per job.
     docker pull -q "${CI_IMAGE_REPO}:${CACHE_TAG}"
     verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
+    verify_image_tokamax "${CI_IMAGE_REPO}:${CACHE_TAG}" "${TOKAMAX_VERSION}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
     # Export the computed CI cache image name so calling scripts can use it.
     export EXPORTED_CI_CACHE_IMAGE="${CI_IMAGE_REPO}:${CACHE_TAG}"
     return 0
+  fi
+
+  if [[ -n "${TOKAMAX_VERSION}" ]]; then
+    echo "[tokamax] Pinning the build context to tokamax==${TOKAMAX_VERSION}"
+    sed -i "s/^tokamax==.*$/tokamax==${TOKAMAX_VERSION}/" requirements.txt
+    grep -n '^tokamax==' requirements.txt
   fi
 
   # Build with specific hash and 'latest' tag for convenience
@@ -228,6 +274,7 @@ setup_environment() {
   # Fail fast if the freshly built image does not contain the expected vLLM
   # commit (guards against a mis-set VLLM_COMMIT_HASH build-arg).
   verify_image_vllm "${IMAGE_NAME}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
+  verify_image_tokamax "${IMAGE_NAME}:${CACHE_TAG}" "${TOKAMAX_VERSION}"
 
   # ==========================================
   # Push to CI Image Registry (Executed by dedicate CPU builder)
