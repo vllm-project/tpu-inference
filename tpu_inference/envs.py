@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
+    MOE_STAGE_WEIGHTS_ON_HOST: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
@@ -317,6 +318,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_REQUANTIZE_CLIP_PERCENTILE":
     lambda: float(pct)
     if (pct := os.getenv("MOE_REQUANTIZE_CLIP_PERCENTILE")) else None,
+    # Build each FP8 MoE expert weight directly at its expert sharding from
+    # host memory, instead of staging the whole tensor on one device and
+    # slicing it back apart. Much faster the wider the mesh gets, but opt-in
+    # for now: set to 1 to take it. Only VllmFp8MoEMethod (and the
+    # deepseek_v4_fp8 method built on it) honors this today; the other
+    # quantized MoE methods (nvfp4, compressed-tensors, mxfp4, awq) still
+    # stage the full tensor on device regardless.
+    "MOE_STAGE_WEIGHTS_ON_HOST":
+    env_bool("MOE_STAGE_WEIGHTS_ON_HOST", default=False),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This

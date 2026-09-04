@@ -237,10 +237,12 @@ class Gemma4Attention(JaxModule):
                  mesh: Mesh,
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
+                 decode_query_size: int = 1,
                  prefix: str = ""):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.rms_norm_eps = config.rms_norm_eps
+        self.decode_query_size = decode_query_size
 
         # Assuming Gemma 4 also uses a custom scalar, not 1/sqrt(head_dim)
         self.scaling = 1.0
@@ -489,6 +491,7 @@ class Gemma4Attention(JaxModule):
             k_scale=k_scale,
             v_scale=v_scale,
             update_kv_cache=not self.is_kv_shared_layer,
+            decode_query_size=self.decode_query_size,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -505,6 +508,7 @@ class Gemma4DecoderLayer(JaxModule):
                  mesh: Mesh,
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
+                 decode_query_size: int = 1,
                  prefix: str = ""):
         text_config: Gemma4TextConfig = config.hf_config.text_config
         rms_norm_eps = text_config.rms_norm_eps
@@ -541,6 +545,7 @@ class Gemma4DecoderLayer(JaxModule):
                                          mesh=mesh,
                                          kv_cache_dtype=kv_cache_dtype,
                                          quant_config=quant_config,
+                                         decode_query_size=decode_query_size,
                                          prefix=prefix + ".self_attn")
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
@@ -846,6 +851,10 @@ class Gemma4Model(JaxModule):
             self.per_layer_input_scale = 0.0
             self.per_layer_projection_scale = 0.0
 
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        decode_query_size = (spec_config.num_speculative_tokens +
+                             1) if spec_config else 1
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,
             lambda layer_index: Gemma4DecoderLayer(
@@ -856,6 +865,7 @@ class Gemma4Model(JaxModule):
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config,
+                decode_query_size=decode_query_size,
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
 

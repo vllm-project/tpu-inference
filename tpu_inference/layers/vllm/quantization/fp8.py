@@ -370,6 +370,20 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         self.block_quant: bool = self.weight_block_size is not None
         self.weight_scale_name = ("weight_scale_inv"
                                   if self.block_quant else "weight_scale")
+        self.weight_scale_refine = None
+        self.moe_block_shape = self.weight_block_size
+        if self.block_quant:
+            assert self.weight_block_size is not None
+            refined_shape = vllm_fp8.refine_fp8_moe_block_shape(
+                self.moe, self.weight_block_size)
+            if refined_shape is not None:
+                block_n, block_k = self.weight_block_size
+                self.weight_scale_refine = (
+                    block_n // refined_shape[0],
+                    block_k // refined_shape[1],
+                )
+                self.moe_block_shape = refined_shape
+
         self.fp8_backend = None
 
         self.mesh = mesh
@@ -426,15 +440,30 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
 
         ep_sharding = NamedSharding(self.mesh, P(ShardingAxisName.EXPERT))
 
-        w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
-        w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
+        # process_quantized_moe_weights below opens by putting each of these
+        # four at exactly `ep_sharding`, so building them there in the first
+        # place gives the same array without a full-size stop on one device.
+        on_host = envs.MOE_STAGE_WEIGHTS_ON_HOST
+
+        w13_weight = _load_weight_for_layer(layer,
+                                            "w13_weight",
+                                            ep_sharding,
+                                            stage_on_host=on_host)
+        w2_weight = _load_weight_for_layer(layer,
+                                           "w2_weight",
+                                           ep_sharding,
+                                           stage_on_host=on_host)
 
         scale_w13_name = f"w13_{self.weight_scale_name}"
         scale_w2_name = f"w2_{self.weight_scale_name}"
-        w13_weight_scale = _load_weight_for_layer(layer, scale_w13_name,
-                                                  ep_sharding)
-        w2_weight_scale = _load_weight_for_layer(layer, scale_w2_name,
-                                                 ep_sharding)
+        w13_weight_scale = _load_weight_for_layer(layer,
+                                                  scale_w13_name,
+                                                  ep_sharding,
+                                                  stage_on_host=on_host)
+        w2_weight_scale = _load_weight_for_layer(layer,
+                                                 scale_w2_name,
+                                                 ep_sharding,
+                                                 stage_on_host=on_host)
 
         p_w13_scale = getattr(layer, scale_w13_name)
         p_w2_scale = getattr(layer, scale_w2_name)

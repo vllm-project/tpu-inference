@@ -196,7 +196,14 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
     # Abstract platform hooks required to instantiate the DeepseekV4Attention
     # ABC; unused on the TPU pass-through path.
     from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
-    backend_cls = DeepseekV4SparseMLABackend
+
+    class _TPUDeepseekV4Backend(DeepseekV4SparseMLABackend):
+
+        @staticmethod
+        def get_name() -> str:
+            return "TPU_MLA"
+
+    backend_cls = _TPUDeepseekV4Backend
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
