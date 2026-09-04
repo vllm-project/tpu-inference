@@ -15,15 +15,9 @@
 
 # Bootstrap for the scheduled "tpu-tokamax-integration" pipeline.
 #
-# Resolves the newest tokamax nightly on PyPI, runs the JAX test suites against
-# it, and - only if every test passes - pushes the requirements.txt bump to main
-# (see integration_tokamax_promote.yml). No human in the loop.
-#
-# The pipeline deliberately pins vLLM to vllm_lkg.version rather than tracking
-# HEAD: tokamax must be the only thing that changed, so that a red build means
-# "this tokamax nightly broke us" and nothing else.
-#
-# Configure the Buildkite pipeline's "Steps" to run this script.
+# 1. Resolves the newest tokamax nightly on PyPI
+# 2. Runs the JAX test suites against it.
+# 3. Only if every test passes, it pushes the requirements.txt bump to main.
 
 set -euo pipefail
 
@@ -63,17 +57,13 @@ set_jax_envs() {
     esac
 }
 
-# -----------------------------------------------------------------------------
-# 1. Resolve the candidate version and short-circuit if there is nothing to do.
-# -----------------------------------------------------------------------------
 CURRENT_VERSION="$(sed -n 's/^tokamax==\(.*\)$/\1/p' "${REQUIREMENTS_FILE}")"
 if [[ -z "${CURRENT_VERSION}" ]]; then
     echo "ERROR: no 'tokamax==' pin found in ${REQUIREMENTS_FILE}." >&2
     exit 1
 fi
 
-# TOKAMAX_VERSION can be set in the build env to re-test / force a specific
-# version from the Buildkite UI.
+# TOKAMAX_VERSION can be set in the build env from the Buildkite UI.
 NEW_VERSION="${TOKAMAX_VERSION:-}"
 if [[ -z "${NEW_VERSION}" ]]; then
     echo "--- :package: Resolving the newest tokamax nightly from PyPI"
@@ -114,9 +104,6 @@ echo "Pinned tokamax version   : ${CURRENT_VERSION}"
 echo "Candidate tokamax version: ${NEW_VERSION}"
 
 if [[ "${CURRENT_VERSION}" == "${NEW_VERSION}" ]]; then
-    # tokamax does not publish a nightly every single day. Uploading no test
-    # steps here is what keeps this pipeline from burning a full v6e+v7x TPU run
-    # to re-validate a version main is already on.
     echo "Already on ${NEW_VERSION}. Nothing to bump; skipping the test run."
     buildkite-agent annotate \
         ":white_check_mark: tokamax already pinned to \`${NEW_VERSION}\` - no bump needed." \
@@ -126,26 +113,14 @@ fi
 
 buildkite-agent meta-data set "TOKAMAX_VERSION" "${NEW_VERSION}"
 buildkite-agent meta-data set "TOKAMAX_PREVIOUS_VERSION" "${CURRENT_VERSION}"
+# buildkite-agent annotate posts a markdown banner at the top of the build page
 buildkite-agent annotate \
     ":arrow_up: Validating tokamax bump \`${CURRENT_VERSION}\` :arrow_right: \`${NEW_VERSION}\`. main is bumped only if every step below passes." \
     --style "info"
 
-# -----------------------------------------------------------------------------
-# 2. Pin vLLM to the LKG so tokamax is the only variable in this build.
-# -----------------------------------------------------------------------------
 VLLM_COMMIT_HASH="$(get_vllm_commit_hash)"
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm LKG commit hash: ${VLLM_COMMIT_HASH}"
-
-# -----------------------------------------------------------------------------
-# 3. Upload the pipelines.
-# -----------------------------------------------------------------------------
-# Deliberately NOT setting RUN_KERNEL_TESTS / RUN_KERNEL_COLLECTIVES_TESTS.
-# tests/kernels/gmm_test.py imports the vendored copy at
-# tpu_inference/kernels/megablox/gmm_v2.py, not tokamax, so those suites pass
-# green regardless of which tokamax is installed. The coverage that matters here
-# is _test_7_1 / _test_7_2 (ungated) plus the tpu7x-gated end-to-end GMM steps
-# (_test_18, _test_30, _test_32, _test_24), none of which need extra flags.
 
 # Buildkite inserts uploaded steps in reverse order, so the promote has to be
 # uploaded first for it to end up last.
@@ -159,7 +134,6 @@ set_jax_envs v6
 upload_with_priority .buildkite/pipeline_jax.yml "${JOB_PRIORITY}"
 set_jax_envs unset
 
-# Uploaded last so the Docker build steps appear at the top of the Buildkite UI.
 upload_with_priority .buildkite/pipeline_build.yml "${JOB_PRIORITY}"
 
 echo "--- Tokamax Integration Bootstrap Finished"
