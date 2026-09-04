@@ -297,6 +297,15 @@ class TestTPUHybridKVCacheCoordinator:
         # Mamba block list has length 3 (with null blocks inserted before the match)
         assert len(hit_blocks[1]) == 3
 
+        # Test find_longest_cache_hit_per_group inherited from upstream
+        per_group_blocks, per_group_lengths = coord.find_longest_cache_hit_per_group(
+            block_hashes=hashes,
+            max_cache_hit_length=160,
+        )
+        assert per_group_lengths == (80, 48)
+        assert len(per_group_blocks[0]) == 5
+        assert len(per_group_blocks[1]) == 3
+
 
 class TestHybridCoordinatorHooks:
 
@@ -359,3 +368,67 @@ class TestHybridCoordinatorHooks:
         with pytest.raises(ValueError,
                            match="mamba_num_blocks must be registered"):
             tpu_get_kv_cache_coordinator(cfg, **coord_kwargs)
+
+
+class TestTPUKVCacheManager:
+
+    def test_allocate_slots_dual_pool_gating(self):
+        set_mamba_num_blocks(5)
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=10,
+                                                mamba_num_blocks=5)
+        manager = TPUKVCacheManager(
+            kv_cache_config=cfg,
+            max_model_len=1024,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            enable_caching=True,
+        )
+        assert isinstance(manager.coordinator, TPUHybridKVCacheCoordinator)
+
+        req = Request(
+            request_id="req-1",
+            prompt_token_ids=list(range(32)),
+            sampling_params=MagicMock(),
+            pooling_params=None,
+        )
+        req.block_hashes = [BlockHash(f"h_{i}".encode()) for i in range(2)]
+        req.status = RequestStatus.RUNNING
+
+        # 1. Successful allocation
+        blocks = manager.allocate_slots(request=req, num_new_tokens=32)
+        assert blocks is not None
+        assert len(blocks.blocks[0]) == 2  # 2 attn blocks
+        assert len(blocks.blocks[1]) == 2  # 2 mamba blocks (1 null + 1 state)
+
+        # 2. Attention pool exhaustion -> returns None for new request
+        coord = manager.coordinator
+        free_attn = coord.attention_block_pool.get_num_free_blocks()
+        allocated_attn = coord.attention_block_pool.get_new_blocks(free_attn)
+        req2 = Request(
+            request_id="req-2",
+            prompt_token_ids=list(range(16)),
+            sampling_params=MagicMock(),
+            pooling_params=None,
+        )
+        req2.block_hashes = [BlockHash(b"h_req2")]
+        req2.status = RequestStatus.WAITING
+        blocks_no_attn = manager.allocate_slots(request=req2,
+                                                num_new_tokens=16)
+        assert blocks_no_attn is None
+        coord.attention_block_pool.free_blocks(allocated_attn)
+
+        # 3. Mamba pool exhaustion -> returns None (prevents ValueError crash in get_new_blocks)
+        free_mamba = coord.mamba_block_pool.get_num_free_blocks()
+        allocated_mamba = coord.mamba_block_pool.get_new_blocks(free_mamba)
+        req3 = Request(
+            request_id="req-3",
+            prompt_token_ids=list(range(16)),
+            sampling_params=MagicMock(),
+            pooling_params=None,
+        )
+        req3.block_hashes = [BlockHash(b"h_req3")]
+        req3.status = RequestStatus.WAITING
+        blocks_no_mamba = manager.allocate_slots(request=req3,
+                                                 num_new_tokens=16)
+        assert blocks_no_mamba is None
+        coord.mamba_block_pool.free_blocks(allocated_mamba)

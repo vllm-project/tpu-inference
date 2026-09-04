@@ -4,7 +4,6 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
                                                KVCacheCoordinator)
@@ -14,8 +13,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, get_manager_for_kv_cache_spec)
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        MambaSpec)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
@@ -68,8 +66,6 @@ def is_mamba_spec(spec: Any) -> bool:
     if hasattr(spec, "kv_cache_specs"):
         return any(
             isinstance(s, MambaSpec) for s in spec.kv_cache_specs.values())
-    if "Mamba" in type(spec).__name__:
-        return True
     return False
 
 
@@ -249,6 +245,10 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             metrics_collector=self.attention_block_pool.metrics_collector,
         )
 
+        # Unify null_block instance across both pools so TPUDualBlockPool,
+        # attention pool, and Mamba managers share the exact same null block.
+        self.mamba_block_pool.null_block = self.attention_block_pool.null_block
+
         # Re-bind Mamba managers to mamba_block_pool
         new_managers = list(self.single_type_managers)
         for i in self.mamba_group_ids:
@@ -288,122 +288,6 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # Re-verify and split groups so attention_groups binds to updated managers
         self.verify_and_split_kv_cache_groups()
-
-    def find_longest_cache_hit(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
-        hit_length = max_cache_hit_length
-        longest_hit_length = 0
-        hit_blocks_by_group: list[list[KVCacheBlock]
-                                  | None] = [None] * num_groups
-        hit_length_by_group: list[int] = [0] * num_groups
-
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0].spec, FullAttentionSpec)
-        eagle_verified: set[int] = set()
-
-        while True:
-            curr_hit_length = hit_length
-
-            for idx, (spec, group_ids, manager_cls,
-                      use_eagle) in enumerate(self.attention_groups):
-                first_group_id = group_ids[0]
-                group_block_size = self.single_type_managers[
-                    first_group_id].block_size
-                cached_blocks = hit_blocks_by_group[first_group_id]
-                if isinstance(spec,
-                              FullAttentionSpec) and cached_blocks is not None:
-                    curr_hit_length = min(curr_hit_length,
-                                          hit_length_by_group[first_group_id])
-                    continue
-
-                drop_eagle_block = use_eagle and idx not in eagle_verified
-                _max_length = curr_hit_length
-                if drop_eagle_block and not is_mamba_spec(spec):
-                    eagle_margin = (
-                        self.hash_block_size if self.enable_partial_hash_hits
-                        and manager_cls.supports_fine_grained_hash_lookup
-                        and group_block_size > self.hash_block_size else
-                        group_block_size)
-                    _max_length = min(curr_hit_length + eagle_margin,
-                                      max_cache_hit_length)
-
-                pool = (self.mamba_block_pool
-                        if is_mamba_spec(spec) else self.attention_block_pool)
-
-                hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
-                    block_hashes=block_hashes,
-                    max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=pool,
-                    kv_cache_spec=spec,
-                    drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self._cache_hit_alignment_tokens,
-                    dcp_world_size=(self.dcp_world_size if isinstance(
-                        spec, FullAttentionSpec) else 1),
-                )
-                if drop_eagle_block:
-                    eagle_verified.add(idx)
-                elif _new_hit_length < curr_hit_length:
-                    eagle_verified.clear()
-                curr_hit_length = _new_hit_length
-                for group_id, blocks in zip(group_ids, hit_blocks):
-                    hit_blocks_by_group[group_id] = blocks
-                    hit_length_by_group[group_id] = _new_hit_length
-
-                longest_hit_length = max(longest_hit_length, curr_hit_length)
-
-            if curr_hit_length >= hit_length:
-                break
-            hit_length = curr_hit_length
-            if is_simple_hybrid:
-                break
-
-        # Truncate full attention blocks to final hit_length
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            group_block_size = self.single_type_managers[
-                first_group.group_ids[0]].block_size
-            num_blocks = cdiv(hit_length, group_block_size)
-            for group_id in first_group.group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
-                    del blks[num_blocks:]
-                    hit_length_by_group[group_id] = hit_length
-
-        num_uncached_common_prefix_tokens = longest_hit_length - hit_length
-        cache_hit_blocks = tuple(blocks if blocks is not None else []
-                                 for blocks in hit_blocks_by_group)
-        return cache_hit_blocks, hit_length, num_uncached_common_prefix_tokens
-
-    def find_longest_cache_hit_per_group(
-        self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], tuple[int, ...]]:
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
-        hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
-        hit_lengths: list[int] = [0] * num_groups
-
-        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
-            pool = (self.mamba_block_pool
-                    if is_mamba_spec(spec) else self.attention_block_pool)
-            blocks, group_hit = manager_cls.find_longest_cache_hit(
-                block_hashes=block_hashes,
-                max_length=max_cache_hit_length,
-                kv_cache_group_ids=group_ids,
-                block_pool=pool,
-                kv_cache_spec=spec,
-                drop_eagle_block=use_eagle,
-                alignment_tokens=self._cache_hit_alignment_tokens,
-            )
-            for gid, blks in zip(group_ids, blocks):
-                hit_blocks[gid] = blks
-                hit_lengths[gid] = group_hit
-
-        return tuple(hit_blocks), tuple(hit_lengths)
 
     def can_allocate_tokens(
         self,
