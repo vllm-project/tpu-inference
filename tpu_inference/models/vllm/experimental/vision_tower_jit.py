@@ -128,7 +128,10 @@ class GridTHW(tuple):
 
 def is_video_supported_model(vllm_model, vllm_config: VllmConfig) -> bool:
     """Check if the model architecture supports video multimodal inputs."""
-    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    model_config = getattr(vllm_config, "model_config",
+                           None) if vllm_config else None
+    hf_config = getattr(model_config, "hf_config",
+                        None) if model_config else None
     model_type = getattr(hf_config, "model_type",
                          "").lower() if hf_config else ""
     return any(v_arch in model_type
