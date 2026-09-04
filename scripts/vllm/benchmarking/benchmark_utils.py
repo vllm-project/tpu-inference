@@ -88,6 +88,41 @@ def write_to_json(filename: str, records: list) -> None:
         )
 
 
+# MMLU answers are scored as indices into this list; None is "no answer could be
+# read out of the response".
+_MMLU_CHOICES = ["A", "B", "C", "D", None]
+
+# Everything up to and including the last reasoning close tag. Greedy on
+# purpose: a trace that quotes a close tag should not end the block early.
+# Anchored on purpose too: the block can only start at the beginning of the
+# text, and saying so keeps the engine from retrying the greedy `.*` from every
+# offset when there is no close tag at all -- the common case for a
+# non-reasoning model, and quadratic in the length of the completion.
+_REASONING_BLOCK_RE = re.compile(r"(?is)^.*</(?:think|thinking|reasoning)>")
+_REASONING_OPEN_RE = re.compile(r"(?i)<(?:think|thinking|reasoning)>")
+
+
+def strip_reasoning(text: str) -> str:
+    """Drop a reasoning model's chain of thought, keeping only the answer.
+
+    The answer extractors below take the *first* match in the text, so a trace
+    that weighs "(B)" before settling on "(D)" is scored as B. That is not a
+    corner case for models whose chat template makes thinking mandatory and
+    offers no way to ask for a bare answer.
+
+    An opening tag with no close means the generation was truncated mid-thought.
+    There is no answer in it, so return nothing rather than let the extractors
+    grade abandoned reasoning -- that turns a silent wrong answer into a visible
+    unparsed one.
+    """
+    stripped, n_subs = _REASONING_BLOCK_RE.subn("", text, count=1)
+    if n_subs:
+        return stripped.lstrip()
+    if _REASONING_OPEN_RE.search(text):
+        return ""
+    return text
+
+
 def postprocess_text_mmlu(preds: List[str],
                           targets: List[str]) -> Tuple[List[int], List[int]]:
     """
@@ -99,9 +134,10 @@ def postprocess_text_mmlu(preds: List[str],
 
     Returns:
         Tuple[List[int], List[int]]: List of predicted answers and list of target answers"""
-    choices = ["A", "B", "C", "D", None]
+    choices = _MMLU_CHOICES
 
     def _parse_answer(output):
+        output = strip_reasoning(output)
         # TODO: This parser handles output regardless of whether a chat template is enabled.
         # Currently, the chat-template parsing rules are based on the gpt-oss format.
         # We will need to add rules for other models, as their output formats may differ.
@@ -181,6 +217,12 @@ def eval_accuracy_mmlu(request_outputs: List[RequestFuncOutput]) -> dict:
         references=targets,
     )
     result = {k: float(round(np.mean(v), 4)) for k, v in result.items()}
+    # postprocess_text_mmlu maps an unreadable answer to the index of None. Those
+    # count as wrong, so report them: a high rate means the accuracy number is
+    # measuring the harness rather than the model.
+    unparsed = sum(1 for p in preds if p == _MMLU_CHOICES.index(None))
+    result["unparsed"] = unparsed
+    result["unparsed_rate"] = round(unparsed / len(preds), 4) if preds else 0.0
     result["gen_num"] = len(preds)
     print("\nResults\n")
     print(result)
@@ -243,6 +285,8 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
     """
     import re
 
+    text = strip_reasoning(text)
+
     patterns = [
         # "Answer: (C)" or "Answers: (B)"
         re.compile(r'(?ix)\bAnswer[s]?\b\s*[:\-–]?\s*\(\s*([' +
@@ -271,8 +315,8 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
                    possible_choices + r'])(?:\*{1,2}|_{1,2})(?![A-Za-z0-9])'),
         # Final fallback: line that's exactly "A", "B.", "C)", etc.
         re.compile(
-            r'''(?x)^\s*(?:\*{1,2}|_{1,2})?([' + possible_choices + r'])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*.*$''',
-            re.MULTILINE),
+            r'(?x)^\s*(?:\*{1,2}|_{1,2})?([' + possible_choices +
+            r'])(?:\*{1,2}|_{1,2})?\s*[\.\)\-–:]?\s*$', re.MULTILINE),
     ]
 
     # Also check for gpt-oss style "assistantfinal" block
@@ -301,10 +345,19 @@ def extract_abcd_gpqa(text: str, possible_choices: str = 'ABCD') -> str:
             if letter in possible_choices:
                 return letter
 
-    # Last resort: return first letter if it's in possible_choices
-    first_char = text.strip()[:1].upper()
-    if first_char in possible_choices:
-        return first_char
+    # Last resort: the response leads with a bare choice letter, as in
+    # "C) Paris" or "D is correct because ...".
+    #
+    # The letter must not run straight into an alphanumeric, or every sentence
+    # opening with a word like "Although" or "Because" is graded as its first
+    # letter.
+    #
+    # A lookahead rather than a required character, so a response that is just
+    # "D" still matches at end of text.
+    match = re.match(r'^([' + possible_choices + r'])(?![A-Za-z0-9])',
+                     text.strip(), re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
 
     return None
 
@@ -321,16 +374,21 @@ def eval_accuracy_gpqa(request_outputs: List[RequestFuncOutput]) -> dict:
     """
     correct = 0
     total = 0
+    unparsed = 0
 
+    # Failed requests are scored, not skipped, to match eval_accuracy_mmlu.
+    # Their generated_text is empty, so they land in `unparsed` -- which is
+    # where a request that produced no readable answer belongs, whatever the
+    # reason. Skipping them instead would hide a run that mostly errored out
+    # behind an accuracy computed over the handful that succeeded.
     for output in request_outputs:
-        if not output.success:
-            continue
-
         generated_text = output.generated_text
         target = output.input_request.completion  # This is 'A', 'B', 'C', or 'D'
 
         extracted = extract_abcd_gpqa(generated_text)
-        if extracted == target.upper():
+        if extracted is None:
+            unparsed += 1
+        elif extracted == target.upper():
             correct += 1
         total += 1
 
@@ -339,6 +397,12 @@ def eval_accuracy_gpqa(request_outputs: List[RequestFuncOutput]) -> dict:
         "accuracy": round(accuracy, 4),
         "correct": correct,
         "total": total,
+        # No answer could be read out of the response -- a failed request, a
+        # truncated generation, or an answer format the patterns miss. These
+        # count against accuracy, so a high rate here means the accuracy number
+        # is measuring the harness rather than the model.
+        "unparsed": unparsed,
+        "unparsed_rate": round(unparsed / total, 4) if total > 0 else 0.0,
         "gen_num": len(request_outputs),
     }
     print("\nGPQA Results\n")
