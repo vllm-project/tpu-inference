@@ -127,9 +127,6 @@ class VllmMoERunner(MoERunner):
         if fused_output_is_reduced is None:
             fused_output_is_reduced = self._fused_output_is_reduced
 
-        # The partial stack is sharded over the shared expert's own TP axis
-        # (DENSE_TENSOR; ATTN_HEAD under attention DP), so summing it is the
-        # right reduction on every mesh — PCP is plain TP here.
         if (shared_output is not None and fused_output_is_reduced
                 and not self.moe_config.is_sequence_parallel):
             shared_output = _sum_partials(shared_output)

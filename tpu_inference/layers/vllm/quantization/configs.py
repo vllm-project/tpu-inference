@@ -43,13 +43,9 @@ class VllmQuantLinearConfig(QuantLinearConfig):
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
 
-        # Softmax attention keeps its tokens split over pcp (ATTN_DATA) and
-        # shards heads over ATTN_HEAD; every other linear — GDN projections,
-        # dense MLPs, shared experts, routers — sees tokens replicated over
-        # pcp (DENSE_DATA) and shards over DENSE_TENSOR, which also spans pcp.
-        # A reduced row-parallel output is always DENSE_DATA (an attention
-        # out-projection is gathered over pcp back onto the residual stream);
-        # a deferred one is the partial stack [n_shards, tokens, out].
+        # Attention shards tokens over pcp (ATTN_DATA) and heads over
+        # ATTN_HEAD; every other linear replicates tokens over pcp (DENSE_DATA)
+        # and shards over DENSE_TENSOR (which spans pcp).
         if self._is_attention(layer):
             tensor_axis, tokens = (ShardingAxisName.ATTN_HEAD,
                                    ShardingAxisName.ATTN_DATA)
