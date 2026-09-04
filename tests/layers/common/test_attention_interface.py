@@ -24,7 +24,8 @@ from tpu_inference.layers.common.attention_interface import (
     attention, mla_attention, segment_ids_from_cu_seqlens,
     sharded_ragged_paged_attention)
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMaskKind, AttentionMaskSpec, AttentionMetadata,
+    SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.kv_cache import get_kv_cache_shape_with_mesh
 
@@ -63,7 +64,11 @@ def mesh():
 # ---- Test for `attention` ----
 
 
-def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
+def _test_attention(monkeypatch,
+                    mesh,
+                    head_dim,
+                    use_sinks=False,
+                    attention_mask_spec=None):
     """
     Tests the main `attention` function.
 
@@ -107,6 +112,9 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         )
 
     # Create AttentionMetadata
+    metadata_kwargs = {}
+    if attention_mask_spec is not None:
+        metadata_kwargs["attention_mask_spec"] = attention_mask_spec
     attention_metadata = AttentionMetadata(
         input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
         block_tables=jnp.zeros((MAX_NUM_SEQS * MAX_BLOCKS_PER_SEQ, ),
@@ -114,6 +122,7 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+        **metadata_kwargs,
     )
     shared_attention_metadata = SharedAttentionMetadata(
         input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
@@ -138,6 +147,11 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
     # 3. Assert
     # Check that both mocked kernels were called
     mock_paged_attn_kernel.assert_called_once()
+    expected_causal = (attention_mask_spec is None
+                       or attention_mask_spec.kind is AttentionMaskKind.CAUSAL)
+    if head_dim != 64:
+        assert mock_paged_attn_kernel.call_args.kwargs[
+            "use_causal_mask"] is expected_causal
 
     # Check output shapes
     assert final_kv_cache.shape == kv_cache.shape
@@ -157,6 +171,26 @@ def test_attention_hd64(monkeypatch, mesh):
 
 def test_attention_sink(monkeypatch, mesh):
     _test_attention(monkeypatch, mesh, 64, True)
+
+
+def test_attention_bidirectional_from_metadata(monkeypatch, mesh):
+    _test_attention(
+        monkeypatch,
+        mesh,
+        128,
+        attention_mask_spec=AttentionMaskSpec(AttentionMaskKind.BIDIRECTIONAL),
+    )
+
+
+def test_attention_bidirectional_hd64_fails_loudly(monkeypatch, mesh):
+    with pytest.raises(NotImplementedError, match="head_dim==64"):
+        _test_attention(
+            monkeypatch,
+            mesh,
+            64,
+            attention_mask_spec=AttentionMaskSpec(
+                AttentionMaskKind.BIDIRECTIONAL),
+        )
 
 
 def test_attention_sink_no_64_raises_error(monkeypatch, mesh):
