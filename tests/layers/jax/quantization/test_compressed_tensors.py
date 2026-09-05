@@ -174,3 +174,13 @@ class TestCompressedTensorsConfig:
         # proj1 ignored, proj2 still quantized.
         assert isinstance(mlp.proj1.quant_method, UnquantizedLinearMethod)
         assert isinstance(mlp.proj2.quant_method, Fp8BlockwiseLinearMethod)
+
+    def test_target_regex_routes_layer(self, rngs, mesh):
+        """A layer matched by target regex gets quantized, while unmatched gets skipped."""
+        cfg = _fp8_block_config()
+        cfg["config_groups"]["group_0"]["targets"] = ["re:.*proj1"]
+        config = CompressedTensorsConfig(cfg)
+        with jax.set_mesh(mesh):
+            mlp = _MLP(16, 16, rngs, config, prefix="mlp")
+        assert isinstance(mlp.proj1.quant_method, Fp8BlockwiseLinearMethod)
+        assert isinstance(mlp.proj2.quant_method, UnquantizedLinearMethod)

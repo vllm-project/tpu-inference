@@ -20,6 +20,7 @@ import pytest
 import torch
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
+from tpu_inference import envs
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 
 
@@ -89,6 +90,17 @@ class TestTpuPlatform:
         expected_communicator = "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"
         assert TpuPlatform.get_device_communicator_cls(
         ) == expected_communicator
+
+    def test_additional_env_vars_covers_moe_stage_weights_on_host(self):
+        """A weight-loading flag the workers never see is a flag that does
+        nothing.
+
+        Ray copies only vLLM-prefixed variables plus this list into the worker
+        actors, and process_weights_after_loading runs there -- which is why
+        the MOE_REQUANTIZE_* flags beside it are listed too.
+        """
+        assert "MOE_STAGE_WEIGHTS_ON_HOST" in TpuPlatform.additional_env_vars
+        assert "MOE_STAGE_WEIGHTS_ON_HOST" in envs.environment_variables
 
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):

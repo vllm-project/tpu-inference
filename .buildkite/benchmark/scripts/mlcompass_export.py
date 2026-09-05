@@ -73,11 +73,12 @@ def read_metrics_file(file_path: str) -> dict[str, float]:
 
 def get_links() -> dict[str, str]:
     result = {}
+    org = os.getenv('BUILDKITE_ORGANIZATION_SLUG')
     build_number = os.getenv('BUILDKITE_BUILD_NUMBER')
     job_id = os.getenv('BUILDKITE_JOB_ID')
-    if build_number and job_id:
+    if org and build_number and job_id:
         result[
-            'buildkite'] = f'https://buildkite.com/organizations/tpu-commons/pipelines/tpu-inference-benchmark/builds/{build_number}/jobs/{job_id}/log'
+            'buildkite'] = f'https://buildkite.com/organizations/{org}/pipelines/tpu-inference-benchmark/builds/{build_number}/jobs/{job_id}/log'
     return result
 
 
