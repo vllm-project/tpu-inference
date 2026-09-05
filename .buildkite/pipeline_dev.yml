@@ -23,7 +23,9 @@ steps:
     timeout_in_minutes: 120
     env:
       TPU_VERSION: "tpu7x"
-      ALLREDUCE_JAX_ARGS: "--iterations 100 --warmups 10"
+      # 1-D mesh device orders: jax.devices() order, mesh_utils ring order, and the
+      # exact replica_groups order torch_tpu's tpu_dist process group used.
+      ALLREDUCE_JAX_ARGS: "--iterations 100 --warmups 10 --modes ar_1d,rs_ag_1d --orders iota,mesh_utils,explicit:8-9-12-13-14-15-10-11-0-1-4-5-6-7-2-3-24-25-28-29-30-31-26-27-16-17-20-21-22-23-18-19"
       # Match the torch_tpu image's libtpu (tt pins 0.0.44.1; this image pins 0.0.44).
       LIBTPU_PIP_SPEC: "libtpu==0.0.44.1"
     agents:

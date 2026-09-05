@@ -64,6 +64,14 @@ def parse_args():
     p.add_argument("--warmups", type=int, default=10)
     p.add_argument("--iterations", type=int, default=100)
     p.add_argument("--modes", default="ar_1d,ar_4d,rs_ag_1d,rs_ag_4d,chunks2")
+    p.add_argument(
+        "--orders",
+        default="iota",
+        help="comma-separated 1-D mesh device orders for the *_1d and chunks2 "
+        "modes: iota (jax.devices() order), mesh_utils "
+        "(mesh_utils.create_device_mesh ring order), or explicit:<device ids "
+        "joined by '-'>; 4-D modes ignore this",
+    )
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--out-dir",
                    default=os.environ.get("ALLREDUCE_JAX_OUT", "/results"))
@@ -86,9 +94,24 @@ def smap(f, mesh, in_specs, out_specs):
                          check_vma=False)
 
 
-def build_meshes():
+def order_devices(order):
     devs = jax.devices()
-    mesh_1d = Mesh(np.array(devs, dtype=object), ("tp", ))
+    if order == "iota":
+        return list(devs)
+    if order == "mesh_utils":
+        from jax.experimental import mesh_utils
+        return list(mesh_utils.create_device_mesh((len(devs), )).flat)
+    if order.startswith("explicit:"):
+        by_id = {d.id: d for d in devs}
+        ids = [int(v) for v in order[len("explicit:"):].split("-")]
+        assert sorted(ids) == sorted(by_id), (ids, sorted(by_id))
+        return [by_id[i] for i in ids]
+    raise ValueError(order)
+
+
+def build_meshes(order="iota"):
+    devs = jax.devices()
+    mesh_1d = Mesh(np.array(order_devices(order), dtype=object), ("tp", ))
     keyed = {}
     for d in devs:
         c = tuple(getattr(d, "coords", ()))
@@ -168,9 +191,11 @@ def main():
     log(f"process {jax.process_index()}/{jax.process_count()}, "
         f"{jax.local_device_count()} local / {world} global devices")
 
-    mesh_1d, mesh_4d, dims = build_meshes()
-    log(f"physical dims (x,y,z,c) = {dims}; 1-D mesh order = "
-        f"{[d.id for d in mesh_1d.devices.flat]}")
+    _, mesh_4d, dims = build_meshes()
+    meshes_1d = {o: build_meshes(o)[0] for o in args.orders.split(",")}
+    for o, m in meshes_1d.items():
+        log(f"physical dims (x,y,z,c) = {dims}; 1-D mesh order {o} = "
+            f"{[d.id for d in m.devices.flat]}")
 
     out_dir = args.out_dir if jax.process_index() == 0 else None
     if out_dir:
@@ -181,19 +206,26 @@ def main():
     message_bytes = args.tokens * args.width * jnp.dtype(dtype).itemsize
     expected = (world + 1) / 2 + 1
 
+    runs = []
     for mode in args.modes.split(","):
+        if mode.endswith("_4d"):
+            runs.append((mode, "physical"))
+        else:
+            runs.extend((mode, o) for o in meshes_1d)
+    for mode, order in runs:
         if mode.endswith("_4d"):
             if mesh_4d is None:
                 log(f"skip {mode}: no 4-D mesh")
                 continue
             mesh, axes = mesh_4d, ("x", "y", "z", "c")
         else:
-            mesh, axes = mesh_1d, ("tp", )
+            mesh, axes = meshes_1d[order], ("tp", )
+        tag = mode if order in ("physical", "iota") else f"{mode}@{order}"
         fn = build_fn(mode, mesh, axes, world, dtype)
         sh = NamedSharding(mesh, P())
         x = jax.device_put(jnp.zeros((args.tokens, args.width), dtype), sh)
 
-        multihost_utils.sync_global_devices("pre_" + mode)
+        multihost_utils.sync_global_devices("pre_" + tag)
         y = fn(x)
         jax.block_until_ready(y)
         observed = float(np.asarray(y[0, 0]))
@@ -204,12 +236,11 @@ def main():
 
         if out_dir:
             lowered = fn.lower(x)
-            with open(os.path.join(out_dir, f"{mode}.after_optimizations.txt"),
+            with open(os.path.join(out_dir, f"{tag}.after_optimizations.txt"),
                       "w") as f:
                 f.write(lowered.compile().as_text())
-            with open(
-                    os.path.join(out_dir, f"{mode}.before_optimizations.txt"),
-                    "w") as f:
+            with open(os.path.join(out_dir, f"{tag}.before_optimizations.txt"),
+                      "w") as f:
                 f.write(lowered.as_text())
 
         for _ in range(args.warmups):
@@ -226,9 +257,9 @@ def main():
         pipelined_ms = (time.perf_counter_ns() - t0) / 1e6 / args.iterations
 
         if not args.no_profile:
-            multihost_utils.sync_global_devices("prof_" + mode)
+            multihost_utils.sync_global_devices("prof_" + tag)
             if out_dir:
-                pdir = os.path.join(out_dir, "profile", mode)
+                pdir = os.path.join(out_dir, "profile", tag)
                 jax.profiler.start_trace(pdir)
                 jax.block_until_ready(fn(x))
                 jax.profiler.stop_trace()
@@ -240,7 +271,9 @@ def main():
             [median], dtype=jnp.float32),
                                                     tiled=True)
         rec = {
-            "mode": mode,
+            "mode": tag,
+            "order": order,
+            "device_order": [int(d.id) for d in mesh.devices.flat],
             "world_size": world,
             "shape": [args.tokens, args.width],
             "dtype": args.dtype,
