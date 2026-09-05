@@ -575,8 +575,10 @@ class KVCacheManager:
                         draft_num_layers = 1
                     num_kv_heads = common_utils.get_padded_num_heads(
                         draft_hf_config.num_key_value_heads, model_cnt)
+                    configured_head_size = vars(draft_hf_config).get(
+                        "head_dim")
                     head_size = common_utils.get_padded_head_dim(
-                        draft_hf_config.hidden_size //
+                        configured_head_size or draft_hf_config.hidden_size //
                         draft_hf_config.num_attention_heads)
                     for i in range(draft_num_layers):
                         if self.use_mla:
