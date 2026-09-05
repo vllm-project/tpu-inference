@@ -23,7 +23,13 @@ set -x
 export SSH_USER="${SSH_USER:-$(whoami)}"
 CONTAINER_NAME="arjax"
 RESULTS_DIR="${RESULTS_DIR:-$HOME/allreduce_jax_results}"
-BENCH_CMD="timeout 2700 python /workspace/tpu_inference/tests/e2e/allreduce_bench_jax.py --out-dir /results ${ALLREDUCE_JAX_ARGS:-}"
+# Optional libtpu override for the run (e.g. LIBTPU_PIP_SPEC=libtpu==0.0.44.1) so the
+# JAX numbers can be compared against a torch_tpu image pinned to a different libtpu.
+PIP_PREFIX=""
+if [[ -n "${LIBTPU_PIP_SPEC:-}" ]]; then
+  PIP_PREFIX="pip install -q --no-deps ${LIBTPU_PIP_SPEC} && pip show libtpu | grep -i ^version && "
+fi
+BENCH_CMD="${PIP_PREFIX}timeout 2700 python /workspace/tpu_inference/tests/e2e/allreduce_bench_jax.py --out-dir /results ${ALLREDUCE_JAX_ARGS:-}"
 
 # Automatic worker IP discovery (same as run_multihost.sh)
 if [[ -z "${WORKER_IPS:-}" ]]; then

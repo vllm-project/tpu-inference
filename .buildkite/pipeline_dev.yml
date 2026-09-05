@@ -24,12 +24,14 @@ steps:
     env:
       TPU_VERSION: "tpu7x"
       ALLREDUCE_JAX_ARGS: "--iterations 100 --warmups 10"
+      # Match the torch_tpu image's libtpu (tt pins 0.0.44.1; this image pins 0.0.44).
+      LIBTPU_PIP_SPEC: "libtpu==0.0.44.1"
     agents:
       queue: tpu_v7x_32_queue
     commands:
       - bash .buildkite/scripts/run_allreduce_jax.sh
       - |
-        dest="gs://cuiq-inference-test/woosuk1/jax-build-$${BUILDKITE_BUILD_NUMBER}"
+        dest="gs://cuiq-inference-test/woosuk1/jax-build-$${BUILDKITE_BUILD_NUMBER}$${LIBTPU_PIP_SPEC:+-$${LIBTPU_PIP_SPEC//[=]/-}}"
         if gcloud storage cp -r perf_results/allreduce_jax "$$dest/"; then
           echo "uploaded to $$dest"
         else
