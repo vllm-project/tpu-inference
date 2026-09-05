@@ -38,6 +38,7 @@ from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.cp_attention import dcp_forward, pcp_forward
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import replicate_kv_heads_for_tp
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
 
@@ -425,20 +426,10 @@ def sharded_ragged_paged_attention(
     decode_query_size: int = 1,
 ):
     """Shards along KV heads."""
-    # Handle GQA/MQA where num_kv_heads < tp_size
-    # We replicate KV heads to match tp_size so that we can shard them evenly.
+    # Handle GQA/MQA where num_kv_heads < tp_size: replicate KV heads so the
+    # head dim shards evenly.
     # TODO (ranlihao): This is not performant and introduces extra overhead during inference. We need to handle this during weight loading
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
-    if tp_size > 1:
-        num_kv_heads = k.shape[1]
-        if num_kv_heads < tp_size:
-            if tp_size % num_kv_heads != 0:
-                raise ValueError(
-                    f"For GQA/MQA, tp_size {tp_size} must be divisible by num_kv_heads {num_kv_heads}"
-                )
-            factor = tp_size // num_kv_heads
-            k = jnp.repeat(k, factor, axis=1)
-            v = jnp.repeat(v, factor, axis=1)
+    k, v = replicate_kv_heads_for_tp(mesh, k, v)
 
     qkv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_cache_spec = P(ShardingAxisName.ATTN_DATA, None,
@@ -651,14 +642,14 @@ def mla_attention(
         keyvalue_skh_sharding or P(ShardingAxisName.MLP_TENSOR, None),  # k
         keyvalue_skh_sharding
         or P(ShardingAxisName.MLP_TENSOR, None),  # k_rope
-        P(ShardingAxisName.BATCH),  # kv_cache
+        P(ShardingAxisName.DENSE_DATA),  # kv_cache
         P(ShardingAxisName.ATTN_DATA),  # md.seq_lens
         P(ShardingAxisName.ATTN_DATA),  # md.page_indices_flat
         P(ShardingAxisName.ATTN_DATA),  # md.query_start_loc
         P(ShardingAxisName.ATTN_DATA),  # md.distribution
     )
     out_specs = (
-        P(ShardingAxisName.BATCH),  # kv cache
+        P(ShardingAxisName.DENSE_DATA),  # kv cache
         attn_o_nth_sharding
         or P(None, ShardingAxisName.MLP_TENSOR, None)  # attn output
     )

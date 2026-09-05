@@ -287,8 +287,9 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         per_rank = rpa_v3_cp.get_kv_cache_shape(npages, page, NKV // tp, HD,
                                                 kv_dtype)
         cache_shape = (npages, gpage, per_rank[2] * tp) + tuple(per_rank[3:])
-        cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                       ShardingAxisName.KV_HEAD, None, None)
+        cache_spec = P(ShardingAxisName.DENSE_DATA,
+                       ShardingAxisName.KV_CONTEXT, ShardingAxisName.KV_HEAD,
+                       None, None)
 
         def put(x, s):
             return jax.device_put(x, NamedSharding(mesh, s))
@@ -315,7 +316,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
             pcp_cu[r, 2:] = C + treal
             pcp_qp[r, 0] = r * C
             pcp_qp[r, 1] = toff
-        pcp_spec = P(ShardingAxisName.PREFILL_CONTEXT, None)
+        pcp_spec = P(ShardingAxisName.PCP, None)
         pcp_cu = put(jnp.asarray(pcp_cu), pcp_spec)
         pcp_qp = put(jnp.asarray(pcp_qp), pcp_spec)
         fns = {}
@@ -350,7 +351,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                     out = jax.shard_map(functools.partial(
                         layer_collectives,
                         axis=ShardingAxisName.ATTN_HEAD,
-                        gather_axis=ShardingAxisName.PREFILL_CONTEXT),
+                        gather_axis=ShardingAxisName.PCP),
                                         mesh=mesh,
                                         in_specs=q_spec,
                                         out_specs=q_spec,

@@ -806,9 +806,9 @@ class KVCacheManager:
                             ) == num_shared_layers, f"Expected all non-MTP kv_cache_tensors to have the same number of shared layers {num_shared_layers}, but found {len(kv_cache_tensor.layers)}"
                     break
 
-        # Default KV cache is sharded over (BATCH=(dp, attn_dp))
-        divisor = common_utils.get_mesh_shape_product(self.runner.mesh,
-                                                      ShardingAxisName.BATCH)
+        # Default KV cache is sharded over (DENSE_DATA=(dp, attn_dp))
+        divisor = common_utils.get_mesh_shape_product(
+            self.runner.mesh, ShardingAxisName.DENSE_DATA)
 
         # Pass 1: Group layers by their physical byte slot
         slots: dict[tuple, list[str]] = {}
@@ -1143,10 +1143,10 @@ class KVCacheManager:
                 f"{kv_cache_config.kv_cache_tensors}")
         num_blocks = num_blocks_candidates.pop()
 
-        # Default KV cache is sharded over (BATCH=(dp, attn_dp)); num_blocks
+        # Default KV cache is sharded over (DENSE_DATA=(dp, attn_dp)); num_blocks
         # must be a multiple of the sharding divisor.
-        divisor = common_utils.get_mesh_shape_product(self.runner.mesh,
-                                                      ShardingAxisName.BATCH)
+        divisor = common_utils.get_mesh_shape_product(
+            self.runner.mesh, ShardingAxisName.DENSE_DATA)
         num_blocks = (num_blocks // divisor) * divisor
         if self.runner.cache_config.num_gpu_blocks_override is not None:
             num_blocks = min(num_blocks,

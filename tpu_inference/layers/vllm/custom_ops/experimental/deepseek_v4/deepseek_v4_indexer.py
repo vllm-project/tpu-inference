@@ -157,7 +157,7 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
         # ShardingAxisName.ATTN_DATA; the kernel runs per-shard inside the
         # shard_map. Static kwargs are captured in the closure.
         data_spec = P(ShardingAxisName.ATTN_DATA)
-        cache_spec = P(ShardingAxisName.BATCH)
+        cache_spec = P(ShardingAxisName.DENSE_DATA)
         in_specs = (
             data_spec,  # q
             data_spec,  # indexer_weights

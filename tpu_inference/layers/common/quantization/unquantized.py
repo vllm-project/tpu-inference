@@ -61,6 +61,8 @@ class UnquantizedLinearMethod:
                 x_jax,
                 weight_jax,
                 self.linear_config.weight_sharding,
+                self.linear_config.input_sharding,
+                self.linear_config.output_sharding,
                 mesh=self.linear_config.mesh,
                 defer_all_reduce=self.linear_config.defer_all_reduce,
             )

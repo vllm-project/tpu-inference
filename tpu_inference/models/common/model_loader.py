@@ -355,7 +355,7 @@ def get_flax_model(
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
-        PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+        PartitionSpec(ShardingAxisName.DENSE_DATA, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(

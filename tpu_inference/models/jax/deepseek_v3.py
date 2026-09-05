@@ -453,7 +453,7 @@ class DeepseekV3Attention(DeepseekV3BaseAttention):
             self.query_tnh,  # q
             self.keyvalue_skh,  # k
             self.keyvalue_skh,  # v
-            P(ShardingAxisName.BATCH, None,
+            P(ShardingAxisName.DENSE_DATA, None,
               ShardingAxisName.ATTN_HEAD),  # kv_cache
             P(),  # md.seq_lens: Replicated
             P(),  # page_indices_flat: Replicated

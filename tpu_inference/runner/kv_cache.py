@@ -180,11 +180,13 @@ def create_kv_caches(
     if use_mla:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT))
+            PartitionSpec(ShardingAxisName.DENSE_DATA,
+                          ShardingAxisName.KV_CONTEXT))
     else:
         sharding = NamedSharding(
             mesh,
-            PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+            PartitionSpec(ShardingAxisName.DENSE_DATA,
+                          ShardingAxisName.KV_CONTEXT,
                           ShardingAxisName.KV_HEAD))
 
     sharded_allocate = _get_kv_cache_allocator(cache_shape, cache_dtype,
@@ -200,8 +202,9 @@ def create_kv_cache_of_shape(
     """Creates a single zero-filled KV cache array with an explicit shape.
     """
     sharding = NamedSharding(
-        mesh, PartitionSpec(ShardingAxisName.BATCH,
-                            ShardingAxisName.KV_CONTEXT))
+        mesh,
+        PartitionSpec(ShardingAxisName.DENSE_DATA,
+                      ShardingAxisName.KV_CONTEXT))
     return _get_kv_cache_allocator(tuple(cache_shape), cache_dtype, sharding)()
 
 

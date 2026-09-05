@@ -29,6 +29,7 @@ from tpu_inference.layers.common.process_weights.moe_weights import (
     shard_moe_weights)
 from tpu_inference.layers.common.quantization import unquantized as jax_common
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
     cpu_mesh_context, reorder_concatenated_tensor_for_sharding)
 from tpu_inference.layers.jax import JaxModule
@@ -358,11 +359,16 @@ class UnquantizedConfig(QuantizationConfig):
             # Read the weight's partition spec so n_shards = get_mesh_shape_product
             # picks up the TP degree from the active mesh automatically.
             sharding = layer.weight.get_metadata().get("out_sharding", None)
-            weight_sharding = P(*sharding) if sharding is not None else None
-            linear_config = QuantLinearConfig(enable_sp=False,
-                                              output_sizes=list(
-                                                  layer.output_sizes),
-                                              weight_sharding=weight_sharding)
+            weight_sharding = P(
+                *sharding) if sharding is not None else P(None, None)
+            # A column projection on tokens split over ATTN_DATA.
+            linear_config = QuantLinearConfig(
+                enable_sp=False,
+                output_sizes=list(layer.output_sizes),
+                weight_sharding=weight_sharding,
+                input_sharding=P(ShardingAxisName.ATTN_DATA, None),
+                output_sharding=P(ShardingAxisName.ATTN_DATA,
+                                  weight_sharding[1]))
             return UnquantizedMergedLinearMethod(linear_config)
         if isinstance(layer, JaxEinsum):
             # Derive output's last dim from the einsum string.
@@ -371,8 +377,13 @@ class UnquantizedConfig(QuantizationConfig):
             last_out_char = einsum_str.split("->")[1][-1]
             out_size = layer.kernel_shape[w_axis.index(last_out_char)]
 
-            linear_config = QuantLinearConfig(enable_sp=False,
-                                              output_sizes=[out_size])
+            # Applied through the einsum path: the 2D specs are not used.
+            linear_config = QuantLinearConfig(
+                enable_sp=False,
+                output_sizes=[out_size],
+                weight_sharding=P(None, None),
+                input_sharding=P(ShardingAxisName.ATTN_DATA, None),
+                output_sharding=P(ShardingAxisName.ATTN_DATA, None))
             return UnquantizedLinearMethod(linear_config)
         if isinstance(layer, (JaxRoutedExperts, JaxMoE)):
             return UnquantizedFusedMoEMethod(layer)
