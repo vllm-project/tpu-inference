@@ -13,17 +13,18 @@
 # limitations under the License.
 
 import functools
-import math
 from dataclasses import dataclass
 
 import jax
-from vllm.utils.math_utils import cdiv
 
 
 @functools.partial(
     jax.tree_util.register_dataclass,
-    data_fields=["query_start_loc", "kv_cache_lens", "q_pos_offsets"],
-    meta_fields=["cache_pages"],
+    data_fields=[
+        "query_start_loc", "kv_cache_lens", "q_pos_offsets", "kv_new_starts",
+        "kv_token_order"
+    ],
+    meta_fields=["has_cached_kv", "num_reqs"],
 )
 @dataclass
 class PCPMetadata:
@@ -38,12 +39,20 @@ class PCPMetadata:
     # (pcp_size, max_num_reqs) int32 — per-rank, per-seq Q position offsets.
     # Sharded as P('pcp', None).
     q_pos_offsets: jax.Array
-    # STATIC (meta field): a rung of `pcp_cache_page_buckets` giving an UPPER
-    # bound on the KV pages this request's cached tokens occupy, used to bound
-    # the gather-KV cache all-gather.  0 means nothing is cached, in which case
-    # the cache phase is elided entirely.  REQUIRED: a default would silently
-    # elide the cache phase for any caller that forgot to set it.
-    cache_pages: int
+    # (max_num_seqs,) int32 — base offset of each fused seq's current-KV block
+    # inside the all-gathered new-KV buffer (zeros for a single request).
+    # Replicated (P()).
+    kv_new_starts: jax.Array
+    # (padded_num_tokens,) int32 — permutation taking the all-gathered current
+    # K/V from rank order to request-major token order.  Replicated (P()).
+    kv_token_order: jax.Array
+    # STATIC (meta field): whether any request in the batch has cached KV.
+    # False elides the cache phase entirely.  REQUIRED: a default would
+    # silently elide the cache phase for any caller that forgot to set it.
+    has_cached_kv: bool
+    # STATIC (meta field): number of requests fused into this launch, padded
+    # to `runner.pcp_num_reqs_paddings`.
+    num_reqs: int = 1
 
 
 @functools.partial(
@@ -91,7 +100,7 @@ class AttentionMetadata(object):
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
 
-    # PCP gather-KV only. Number of kv pages occupied by the current request.
+    # PCP only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
 
 
@@ -165,31 +174,3 @@ jax.tree_util.register_pytree_node(
     lambda layer_names_per_group, groups: GroupedAttentionMetadata(
         groups, layer_names_per_group),
 )
-
-PCP_CACHE_PAGE_BUCKET_COUNT = 5
-
-
-def pcp_cache_page_buckets(max_num_blocks_per_req: int) -> list[int]:
-    """The buckets for the `pcp_cache_pages` value, including 0.
-    """
-    buckets = {0, max_num_blocks_per_req}
-    n = PCP_CACHE_PAGE_BUCKET_COUNT - len(buckets)
-    if n > 0 and max_num_blocks_per_req > 1:
-        step = math.log(max_num_blocks_per_req) / (n + 1)
-        for i in range(1, n + 1):
-            v = 1 << max(0, round(math.exp(step * i)).bit_length() - 1)
-            buckets.add(min(max(v, 1), max_num_blocks_per_req))
-    return sorted(buckets)
-
-
-def round_up_pcp_cache_pages(num_computed_tokens: int, block_size: int,
-                             max_num_blocks_per_req: int) -> int:
-    """Round a request's number of kv pages up to the nearest bucket.
-    """
-    if num_computed_tokens <= 0:
-        return 0
-    live_pages = cdiv(num_computed_tokens, block_size)
-    for b in pcp_cache_page_buckets(max_num_blocks_per_req):
-        if b >= live_pages:
-            return b
-    return max_num_blocks_per_req
