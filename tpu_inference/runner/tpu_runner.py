@@ -1062,7 +1062,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP,
+            # Never pad a step past the scheduler's own token budget: a full
+            # chunked-prefill step must not jump to the next exponential
+            # bucket (which can be ~2x the budget and, on some shapes, compiles
+            # into a program that returns wrong last-position logits).
+            include_max_token_size=True)
         self.num_tokens_paddings = sorted(self.num_tokens_paddings +
                                           additional_sizes)
         self.num_tokens_paddings_per_dp = [
