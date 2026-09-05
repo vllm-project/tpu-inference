@@ -21,11 +21,11 @@ from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference.layers.jax.sample.sampling import (PromptLogprobsAsyncData,
-                                                      PromptLogprobsReqSnap,
-                                                      compute_logprobs,
-                                                      compute_prompt_logprobs,
-                                                      gather_logprobs, sample)
+from tpu_inference.layers.jax.sample.sampling import (
+    VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES, PromptLogprobsAsyncData,
+    PromptLogprobsReqSnap, _apply_sampling_transforms,
+    _can_sample_vocab_sharded, compute_logprobs, compute_prompt_logprobs,
+    gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -292,3 +292,123 @@ class TestComputePromptLogprobs:
         assert snap.start_idx == 0
         assert snap.num_logits == 2
         assert snap.is_last_chunk is False
+
+
+class TestVocabShardedSampling:
+    """USE_VOCAB_SHARDED_SAMPLING: sampling over per-shard candidates.
+
+    The mesh shards the vocab over every local device, so on a multi-device
+    host (or `--xla_force_host_platform_device_count`) the candidates really
+    are merged across shards; the assertions hold for any device count.
+    """
+
+    @staticmethod
+    def _mesh():
+        devices = np.array(jax.devices())
+        return Mesh(devices.reshape(1, -1), ("data", ShardingAxisName.MODEL))
+
+    @staticmethod
+    def _metadata(temperature, top_k, top_p):
+        return TPUSupportedSamplingMetadata(
+            temperature=jnp.asarray(temperature, dtype=jnp.float32),
+            top_k=jnp.asarray(top_k, dtype=jnp.int32),
+            top_p=jnp.asarray(top_p, dtype=jnp.float32),
+            _cache_collision_dummy=None,
+            do_sampling=True,
+            logprobs=False,
+        )
+
+    def _sample(self, monkeypatch, enabled, rng, logits, metadata):
+        monkeypatch.setenv("USE_VOCAB_SHARDED_SAMPLING",
+                           "1" if enabled else "0")
+        # The env var is read at trace time; do not reuse a trace made with
+        # the other setting.
+        sample.clear_cache()
+        tokens, _ = sample(rng, self._mesh(), logits, metadata)
+        return np.asarray(tokens)
+
+    @staticmethod
+    def _allowed(logits, metadata):
+        processed = _apply_sampling_transforms(logits, metadata)
+        return np.asarray(processed > -1e11)
+
+    def test_can_sample_vocab_sharded(self):
+        cap = VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES
+        # Real rows with 0 < top_k <= cap and top_p > 0, plus padded slots
+        # (DEFAULT_SAMPLING_PARAMS: temperature -1, top_k 0) which are greedy.
+        ok = self._metadata([0.7, 1.0, -1.0, -1.0], [50, cap, 0, 0],
+                            [0.95, 1.0, 1.0, 1.0])
+        assert bool(_can_sample_vocab_sharded(ok))
+        # A real row without a top-k filter, or above the candidate budget,
+        # forces the replicated path.
+        no_top_k = self._metadata([0.7, 0.7], [50, 0], [1.0, 1.0])
+        assert not bool(_can_sample_vocab_sharded(no_top_k))
+        too_many = self._metadata([0.7, 0.7], [50, cap + 1], [1.0, 1.0])
+        assert not bool(_can_sample_vocab_sharded(too_many))
+        # Greedy rows are exact whatever their top_k.
+        greedy = self._metadata([0.0, 0.0], [0, cap + 1], [1.0, 1.0])
+        assert bool(_can_sample_vocab_sharded(greedy))
+
+    def test_greedy_rows_match_argmax(self, monkeypatch):
+        logits = jax.random.normal(jax.random.PRNGKey(1), (8, 1024))
+        # Rows 0-3 greedy (incl. padded-slot params), rows 4-7 sampled.
+        metadata = self._metadata([0.0, -1.0, 0.0, -1.0] + [0.7] * 4,
+                                  [0, 0, 5, 0] + [20] * 4,
+                                  [1.0, 1.0, 0.5, 1.0] + [0.9] * 4)
+        tokens = self._sample(monkeypatch, True, jax.random.PRNGKey(0), logits,
+                              metadata)
+        np.testing.assert_array_equal(
+            tokens[:4],
+            np.asarray(jnp.argmax(logits, axis=-1))[:4])
+
+    def test_greedy_ties_take_lowest_id(self, monkeypatch):
+        logits = jnp.zeros((2, 1024)).at[0, 7].set(3.0).at[0, 900].set(3.0)
+        logits = logits.at[1, 1023].set(2.0).at[1, 500].set(2.0)
+        metadata = self._metadata([0.0, 0.0], [0, 0], [1.0, 1.0])
+        tokens = self._sample(monkeypatch, True, jax.random.PRNGKey(0), logits,
+                              metadata)
+        np.testing.assert_array_equal(tokens, [7, 500])
+
+    def test_sampled_tokens_stay_in_top_k_top_p_set(self, monkeypatch):
+        logits = 3.0 * jax.random.normal(jax.random.PRNGKey(2), (64, 1024))
+        metadata = self._metadata([0.7] * 64, [20] * 64, [0.9] * 64)
+        allowed = self._allowed(logits, metadata)
+        for seed in range(4):
+            tokens = self._sample(monkeypatch, True, jax.random.PRNGKey(seed),
+                                  logits, metadata)
+            assert allowed[np.arange(64), tokens].all()
+
+    def test_distribution_matches_replicated_path(self, monkeypatch):
+        num_rows, vocab = 8192, 256
+        row = 2.0 * jax.random.normal(jax.random.PRNGKey(3), (vocab, ))
+        logits = jnp.broadcast_to(row, (num_rows, vocab))
+        metadata = self._metadata([0.8] * num_rows, [6] * num_rows,
+                                  [0.95] * num_rows)
+        reference = np.asarray(
+            jax.nn.softmax(_apply_sampling_transforms(logits, metadata)[0]))
+        tokens = self._sample(monkeypatch, True, jax.random.PRNGKey(0), logits,
+                              metadata)
+        empirical = np.bincount(tokens, minlength=vocab) / num_rows
+        # Every draw is inside the kept set and the frequencies match the
+        # reference probabilities to well within binomial noise.
+        assert empirical[reference == 0].sum() == 0
+        tolerance = 5 * np.sqrt(reference * (1 - reference) / num_rows)
+        assert (np.abs(empirical - reference) <= tolerance + 1e-3).all()
+
+    def test_falls_back_when_a_row_exceeds_the_candidate_budget(
+            self, monkeypatch):
+        logits = jax.random.normal(jax.random.PRNGKey(4), (8, 1024))
+        metadata = self._metadata([0.7] * 8, [50] * 7 + [2000], [0.95] * 8)
+        rng = jax.random.PRNGKey(5)
+        sharded = self._sample(monkeypatch, True, rng, logits, metadata)
+        replicated = self._sample(monkeypatch, False, rng, logits, metadata)
+        # The fallback is the replicated path itself, same key, same draw.
+        np.testing.assert_array_equal(sharded, replicated)
+
+    def test_env_off_keeps_the_replicated_path(self, monkeypatch):
+        logits = jax.random.normal(jax.random.PRNGKey(6), (4, 1024))
+        metadata = self._metadata([0.7] * 4, [50] * 4, [0.95] * 4)
+        rng = jax.random.PRNGKey(7)
+        tokens = self._sample(monkeypatch, False, rng, logits, metadata)
+        allowed = self._allowed(logits, metadata)
+        assert allowed[np.arange(4), tokens].all()

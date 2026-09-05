@@ -205,6 +205,29 @@ class TestTpuPlatform:
                            match="VLLM_ENABLE_V1_MULTIPROCESSING must be 0"):
             TpuPlatform.check_and_update_config(vllm_config)
 
+    @pytest.mark.parametrize("logprobs_mode,raises", [
+        ("processed_logprobs", True),
+        ("processed_logits", True),
+        ("raw_logprobs", False),
+    ])
+    def test_check_and_update_config_vocab_sharded_sampling_logprobs_mode(
+            self, vllm_config, monkeypatch, logprobs_mode, raises):
+        """Vocab-sharded sampling returns raw, sharded logits, so it cannot
+        serve the processed logprobs modes."""
+        monkeypatch.setenv("USE_VOCAB_SHARDED_SAMPLING", "1")
+        vllm_config.model_config.logprobs_mode = logprobs_mode
+        with patch.object(TpuPlatform,
+                          "_initialize_sharding_config",
+                          side_effect=RuntimeError("stop here")):
+            if raises:
+                with pytest.raises(ValueError,
+                                   match="USE_VOCAB_SHARDED_SAMPLING"):
+                    TpuPlatform.check_and_update_config(vllm_config)
+            else:
+                # Passes the check and continues into the rest of the setup.
+                with pytest.raises(RuntimeError, match="stop here"):
+                    TpuPlatform.check_and_update_config(vllm_config)
+
     @pytest.mark.parametrize("impl_type,resolved,expected_flag", [
         ("auto", "flax_nnx", False),
         ("flax_nnx", None, False),

@@ -112,6 +112,11 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
     assert envs.USE_BATCHED_RPA_KERNEL is True
 
+    # Test USE_VOCAB_SHARDED_SAMPLING (default False)
+    assert envs.USE_VOCAB_SHARDED_SAMPLING is False
+    monkeypatch.setenv("USE_VOCAB_SHARDED_SAMPLING", "1")
+    assert envs.USE_VOCAB_SHARDED_SAMPLING is True
+
 
 def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
     """MOE_STAGE_WEIGHTS_ON_HOST is opt-in: off unless it is asked for."""
