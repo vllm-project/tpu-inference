@@ -62,11 +62,20 @@ def get_kv_transfer_metadata(kv: list[Any]) -> tuple[str, int]:
     return dims_str, kv_size_bytes
 
 
+# jax.profiler.TraceAnnotation is a nanobind function, and nanobind rejects
+# calls with more than 1024 keyword arguments. Keep the per-request kwargs
+# below that so a large batch cannot fail execute_model while tracing is on.
+MAX_TRACED_REQUEST_IDS = 1000
+
+
 def extract_request_ids_for_tracing(
     input_batch: InputBatch,
     scheduler_output: Optional[Any] = None,
 ) -> dict[str, str]:
-    """Extracts request IDs from an InputBatch and formats them for XProf tracing."""
+    """Extracts request IDs from an InputBatch and formats them for XProf tracing.
+
+    At most MAX_TRACED_REQUEST_IDS ids are returned (in batch order).
+    """
     req_id_kwargs = {}
     try:
         num_reqs = input_batch.num_reqs
@@ -84,6 +93,10 @@ def extract_request_ids_for_tracing(
                     continue
             active_req_ids.append(rid)
 
+        if len(active_req_ids) > MAX_TRACED_REQUEST_IDS:
+            logger.debug(f"Tracing only the first {MAX_TRACED_REQUEST_IDS} of "
+                         f"{len(active_req_ids)} active request IDs.")
+            active_req_ids = active_req_ids[:MAX_TRACED_REQUEST_IDS]
         trimmed_req_ids = [
             trim_request_id_suffix(rid) for rid in active_req_ids
         ]
