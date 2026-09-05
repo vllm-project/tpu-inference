@@ -98,10 +98,13 @@ echo "--- Starting benchmark on workers..."
 for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker system prune -a --volumes -f || true" || true
   # shellcheck disable=SC2029
+  # JAX may place process 0 (the one that writes HLO + traces) on any host,
+  # so every container gets the results volume and the head gathers them.
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
-    "gcloud auth configure-docker us-central1-docker.pkg.dev -q && \
+    "rm -rf ${RESULTS_DIR} && mkdir -p ${RESULTS_DIR} && \
+     gcloud auth configure-docker us-central1-docker.pkg.dev -q && \
      docker pull ${DOCKER_IMAGE} && \
-     docker run -d ${DOCKER_RUN_ARGS[*]} ${DOCKER_IMAGE} -c '${BENCH_CMD}'"
+     docker run -d ${DOCKER_RUN_ARGS[*]} -v ${RESULTS_DIR}:/results ${DOCKER_IMAGE} -c '${BENCH_CMD}'"
 done
 
 echo "--- Starting benchmark on head node (foreground)..."
@@ -120,6 +123,12 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker logs ${CONTAINER_NAME} 2>&1 | tail -n 100" || true
 done
 
+echo "--- Gathering results from workers"
+for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
+  # shellcheck disable=SC2029
+  ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" "docker wait ${CONTAINER_NAME} >/dev/null 2>&1 || true; cd ${RESULTS_DIR} && tar cf - ." \
+    | tar xf - -C "${RESULTS_DIR}" || echo "no results from ${worker_ip}"
+done
 echo "--- Results in ${RESULTS_DIR}"
 find "${RESULTS_DIR}" -type f | sed 's/^/  /' || true
 mkdir -p perf_results && cp -r "${RESULTS_DIR}" perf_results/allreduce_jax || true

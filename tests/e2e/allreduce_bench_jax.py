@@ -175,6 +175,8 @@ def main():
     out_dir = args.out_dir if jax.process_index() == 0 else None
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "process0_host.txt"), "w") as f:
+            f.write(os.uname().nodename + "\n")
 
     message_bytes = args.tokens * args.width * jnp.dtype(dtype).itemsize
     expected = (world + 1) / 2 + 1
@@ -260,6 +262,9 @@ def main():
             "expected": expected,
         }
         log("ALLREDUCE_JAX_RESULT " + json.dumps(rec))
+        if out_dir:
+            with open(os.path.join(out_dir, "results.jsonl"), "a") as f:
+                f.write(json.dumps(rec) + "\n")
 
     multihost_utils.sync_global_devices("done")
     log("ALLREDUCE_JAX_DONE")
