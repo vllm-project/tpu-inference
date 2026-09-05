@@ -22,7 +22,10 @@ set -x
 
 export SSH_USER="${SSH_USER:-$(whoami)}"
 CONTAINER_NAME="arjax"
-RESULTS_DIR="${RESULTS_DIR:-$HOME/allreduce_jax_results}"
+# Per-build directory: files inside are written by root from the container, so
+# the agent user cannot rm an old one; stale dirs are removed through docker.
+RESULTS_DIR="${RESULTS_DIR:-$HOME/allreduce_jax_results_${BUILDKITE_BUILD_NUMBER:-$$}}"
+CLEAN_OLD_RESULTS="docker run --rm -v \$HOME:/h --entrypoint /bin/sh ${DOCKER_IMAGE_FOR_CLEAN:-busybox} -c 'rm -rf /h/allreduce_jax_results*' >/dev/null 2>&1 || true"
 # Optional libtpu override for the run (e.g. LIBTPU_PIP_SPEC=libtpu==0.0.44.1) so the
 # JAX numbers can be compared against a torch_tpu image pinned to a different libtpu.
 PIP_PREFIX=""
@@ -107,7 +110,7 @@ for worker_ip in "${WORKER_IPS_ARRAY[@]}"; do
   # JAX may place process 0 (the one that writes HLO + traces) on any host,
   # so every container gets the results volume and the head gathers them.
   ssh "${SSH_OPTS[@]}" "${SSH_USER}@${worker_ip}" \
-    "rm -rf ${RESULTS_DIR} && mkdir -p ${RESULTS_DIR} && \
+    "${CLEAN_OLD_RESULTS}; mkdir -p ${RESULTS_DIR} && \
      gcloud auth configure-docker us-central1-docker.pkg.dev -q && \
      docker pull ${DOCKER_IMAGE} && \
      docker run -d ${DOCKER_RUN_ARGS[*]} -v ${RESULTS_DIR}:/results ${DOCKER_IMAGE} -c '${BENCH_CMD}'"
@@ -116,7 +119,8 @@ done
 echo "--- Starting benchmark on head node (foreground)..."
 # setup_environment removes the local image after pushing; pull it back.
 docker pull "${DOCKER_IMAGE}"
-rm -rf "${RESULTS_DIR}" && mkdir -p "${RESULTS_DIR}"
+eval "${CLEAN_OLD_RESULTS}"
+mkdir -p "${RESULTS_DIR}"
 set +e
 docker run "${DOCKER_RUN_ARGS[@]}" -v "${RESULTS_DIR}:/results" "${DOCKER_IMAGE}" -c "${BENCH_CMD}"
 HEAD_EXIT=$?
