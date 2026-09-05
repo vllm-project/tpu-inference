@@ -15,7 +15,8 @@
 # Utilities to support JIT compilation of VisionTower.
 
 import math
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -24,8 +25,6 @@ import torch
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
     Qwen3OmniMoeConfig
 from vllm.config import VllmConfig
-from vllm.model_executor.models.qwen3_omni_moe_thinker import \
-    Qwen3OmniMoeThinkerForConditionalGeneration
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -33,14 +32,22 @@ from tpu_inference.utils import to_jax_dtype
 logger = init_logger(__name__)
 
 # Architectures whose embed_multimodal function is safe to wrap with jax.jit.
-JITTABLE_ARCHS = {
-    Qwen3OmniMoeThinkerForConditionalGeneration,
-}
+_SUPPORTED_JITTABLE_ARCHS = frozenset({
+    "Qwen3OmniMoeThinkerForConditionalGeneration",
+    "Qwen3VLForConditionalGeneration",
+    "Qwen3VLMoeForConditionalGeneration",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForConditionalGeneration",
+})
 
 
 def is_jittable_architecture(vllm_model) -> bool:
     """Check if the given vLLM model is of an architecture that supports JIT compilation."""
-    is_jittable = any(isinstance(vllm_model, arch) for arch in JITTABLE_ARCHS)
+    architectures = (getattr(getattr(vllm_model, "config", None),
+                             "architectures", ()) or ())
+    is_jittable = (any(arch in _SUPPORTED_JITTABLE_ARCHS
+                       for arch in architectures) or
+                   vllm_model.__class__.__name__ in _SUPPORTED_JITTABLE_ARCHS)
     if is_jittable:
         logger.info_once(
             f"{type(vllm_model)}'s vision tower supports JIT compilation.")
@@ -82,11 +89,12 @@ def maybe_jit_embed_multimodal_func(embed_multimodal_func_jax: Callable,
         return embed_multimodal_func_jax
 
 
+@jax.tree_util.register_pytree_node_class
 class GridTHW(tuple):
     """Tensor-like wrapper for image/video grid_thw arguments.
 
     - tuple subclass so isinstance(x, tuple) is True — passes vLLM's
-    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026). 
+    tensor_schema type check (e.g. https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2026).
     - Implements a minimal tensor-like API (ndim, shape, tolist, prod) expected by vLLM's
     _process_image_input (https://github.com/vllm-project/vllm/blob/9744b699bafed423909ed10da96b80eb0542424b/vllm/model_executor/models/qwen3_vl.py#L2072)
 
@@ -102,6 +110,12 @@ class GridTHW(tuple):
 
         flat: tuple = _nested_to_tuple(values)
         return super().__new__(cls, flat)
+
+    def __getitem__(self, key):
+        val = super().__getitem__(key)
+        if isinstance(key, slice):
+            return type(self)(val)
+        return val
 
     # ---- tensor-like API expected by _process_image_input ----
 
@@ -124,10 +138,17 @@ class GridTHW(tuple):
     def __repr__(self):
         return f"GridTHW({tuple(self)})"
 
+    def tree_flatten(self):
+        return (), tuple(self)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(aux_data)
+
 
 def maybe_precompile_vision_encoder_fn(
-        params: Any, embed_multimodal_fn: Optional[Callable], vllm_model,
-        vllm_config: VllmConfig) -> Optional[Callable]:
+        params: Any, embed_multimodal_fn: Callable | None, vllm_model,
+        vllm_config: VllmConfig) -> Callable | None:
     """Return a precompile function for jittable vision encoders, or None.
 
     The returned function accepts a single argument (run_compilation_fn) and
@@ -161,7 +182,7 @@ def maybe_precompile_vision_encoder_fn(
         for num_patches in num_patches_paddings:
             # Split num_patches into (h, w) by distributing bits evenly.
             # For any power-of-2 num_patches = 2^k: h=2^(k//2), w=2^(k-k//2).
-            k = int(round(math.log2(num_patches)))
+            k = round(math.log2(num_patches))
             h = 1 << (k // 2)
             w = 1 << (k - k // 2)
 
@@ -185,7 +206,7 @@ def maybe_precompile_vision_encoder_fn(
 
 def maybe_prepare_for_jit(kwargs: dict, vllm_model) -> dict:
     """Convert certain kwargs to JIT-friendly formats, if needed.
-    
+
     Specifically, convert "image_grid_thw", "video_grid_thw", and "grid_thw" to
     GridTHW instances, which are tuple subclasses that can be hashed in jax.jit.
     """

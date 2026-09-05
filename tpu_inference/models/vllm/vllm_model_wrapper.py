@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import math
 import time
 from collections.abc import Sequence
 from contextlib import nullcontext
@@ -64,8 +65,8 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.models.vllm.experimental.model_patcher import (
     apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
-    maybe_jit_embed_multimodal_func, maybe_precompile_vision_encoder_fn,
-    maybe_prepare_for_jit)
+    GridTHW, maybe_jit_embed_multimodal_func,
+    maybe_precompile_vision_encoder_fn, maybe_prepare_for_jit)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import (
     get_vllm_model_wrapper_context, set_vllm_model_wrapper_context)
 from tpu_inference.runner.lora_utils import replace_lora_metadata
@@ -131,6 +132,14 @@ class _VllmRunner(torch.nn.Module):
         return self.vllm_model.compute_logits(hidden_state)
 
 
+def _grid_to_list(grid: Any) -> list:
+    if isinstance(grid, GridTHW):
+        return list(grid)
+    if isinstance(grid, torch.Tensor):
+        return grid.tolist()
+    return list(grid)
+
+
 class VllmModelWrapper:
     """ Wraps a vLLM Pytorch model and let it run on the JAX engine. """
 
@@ -152,6 +161,26 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+
+    def _get_model_tp_size(self) -> int:
+        """Returns the size of the 'model' (TP) axis in mesh, falling back to tensor_parallel_size."""
+        if self.mesh is not None and hasattr(
+                self.mesh, "shape") and "model" in self.mesh.shape:
+            return self.mesh.shape["model"]
+        return self.vllm_config.parallel_config.tensor_parallel_size
+
+    def _get_activation_sharding_divisor(self) -> int:
+        """Returns the total divisor required for activation axis 0 across all active sharding axes."""
+        divisor = 1
+        if self.mesh is not None and hasattr(self.mesh, "shape"):
+            candidate_axes = ("data", "attn_dp", "attn_dp_expert", "pcp",
+                              "dcp", "model")
+            for ax in candidate_axes:
+                if ax in self.mesh.shape:
+                    divisor = math.lcm(divisor, self.mesh.shape[ax])
+        else:
+            divisor = self.vllm_config.parallel_config.tensor_parallel_size
+        return max(1, divisor)
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -581,22 +610,173 @@ class VllmModelWrapper:
 
                 kwargs = maybe_prepare_for_jit(kwargs, self.model.vllm_model)
 
-                def move(v: torch.Tensor) -> torch.Tensor:
-                    if not isinstance(v, torch.Tensor):
-                        logger.warning(f"Expect torch.Tensor, got {type(v)}")
-                        return v
-                    return t2j(v, use_dlpack=False)
+                is_video = "video_grid_thw" in kwargs
+                grid_key = "video_grid_thw" if is_video else "image_grid_thw"
+                pixel_key = "pixel_values_videos" if is_video else "pixel_values"
+
+                padded_anything = False
+                original_batch_len = 0
+                original_pixels_len = 0
+                merge_factor = 1
+
+                if grid_key in kwargs and pixel_key in kwargs:
+                    grid = kwargs[grid_key]
+                    pixels = kwargs[pixel_key]
+                    original_batch_len = len(grid)
+                    original_pixels_len = pixels.shape[0]
+
+                    # 1. Determine spatial merge size (default to 1 for non-merging vision models)
+                    visual = getattr(self.model.vllm_model, "visual", None)
+                    if visual is None and hasattr(self.model.vllm_model,
+                                                  "model"):
+                        visual = getattr(self.model.vllm_model.model,
+                                         "vision_tower", None)
+                    spatial_merge_size = getattr(visual, "spatial_merge_size",
+                                                 1) if visual else 1
+                    merge_factor = spatial_merge_size * spatial_merge_size
+
+                    # 2. Determine total activation sharding divisor across all active mesh axes (model, attn_dp, pcp, data)
+                    sharding_divisor = self._get_activation_sharding_divisor()
+
+                    # Pad factor is LCM of all active sharding divisors and merged patch block size
+                    pad_factor = math.lcm(sharding_divisor, merge_factor)
+
+                    # Ensure sequence length is divisible by pad_factor
+                    seq_len = pixels.shape[0]
+                    if seq_len % pad_factor != 0:
+                        padded_anything = True
+                        pad_seq = pad_factor - (seq_len % pad_factor)
+
+                        dummy_grid_thw = (max(1, pad_seq // merge_factor),
+                                          spatial_merge_size,
+                                          spatial_merge_size)
+
+                        pad_pixels_seq = torch.zeros(
+                            (pad_seq, *pixels.shape[1:]),
+                            dtype=pixels.dtype,
+                            device=pixels.device)
+                        pixels = torch.cat([pixels, pad_pixels_seq], dim=0)
+                        kwargs[pixel_key] = pixels
+
+                        grid_list = _grid_to_list(grid)
+                        grid_list.append(dummy_grid_thw)
+
+                        grid = GridTHW(grid_list) if isinstance(
+                            grid, GridTHW) else torch.tensor(
+                                grid_list,
+                                device=grid.device if isinstance(
+                                    grid, torch.Tensor) else None)
+                        kwargs[grid_key] = grid
+
+                        if "second_per_grid_ts" in kwargs:
+                            ts = kwargs["second_per_grid_ts"]
+                            if ts is not None:
+                                if isinstance(ts, torch.Tensor):
+                                    pad_ts = torch.full(
+                                        (1, ),
+                                        ts[-1].item()
+                                        if ts.numel() > 0 else 0.0,
+                                        dtype=ts.dtype,
+                                        device=ts.device)
+                                    kwargs["second_per_grid_ts"] = torch.cat(
+                                        [ts, pad_ts], dim=0)
+                                elif isinstance(ts, (list, tuple)):
+                                    last_val = ts[-1] if len(ts) > 0 else 0.0
+                                    kwargs["second_per_grid_ts"] = list(ts) + [
+                                        last_val
+                                    ]
+
+                        if "timestamps" in kwargs:
+                            ts_vals = kwargs["timestamps"]
+                            if ts_vals is not None:
+                                if isinstance(ts_vals, torch.Tensor):
+                                    pad_ts_vals = ts_vals[-1].unsqueeze(
+                                        0) if ts_vals.numel(
+                                        ) > 0 else torch.zeros(
+                                            (1, *ts_vals.shape[1:]),
+                                            dtype=ts_vals.dtype,
+                                            device=ts_vals.device)
+                                    kwargs["timestamps"] = torch.cat(
+                                        [ts_vals, pad_ts_vals], dim=0)
+                                elif isinstance(ts_vals, (list, tuple)):
+                                    last_val = ts_vals[-1] if len(
+                                        ts_vals) > 0 else [0.0, 0.0]
+                                    kwargs["timestamps"] = list(ts_vals) + [
+                                        last_val
+                                    ]
+
+                def make_move(param_name: str):
+
+                    def move(v: Any) -> Any:
+                        if isinstance(v, (int, float, str, bool, jax.Array,
+                                          GridTHW)) or v is None:
+                            return v
+                        if isinstance(v, (tuple, list)):
+                            return type(v)(move(x) for x in v)
+                        if not isinstance(v, torch.Tensor):
+                            logger.warning(
+                                f"Expect torch.Tensor, got {type(v)}")
+                            return v
+                        arr = t2j(v, use_dlpack=False)
+                        if hasattr(self, "mesh") and getattr(
+                                self.mesh, "devices", None) is not None:
+                            from jax.sharding import (NamedSharding,
+                                                      PartitionSpec)
+
+                            # Shard pixel values over model (TP) axis if divisible and axis exists
+                            if param_name in ("pixel_values",
+                                              "pixel_values_videos"):
+                                tp_size = self._get_model_tp_size()
+                                has_model_axis = ("model" in self.mesh.shape if
+                                                  hasattr(self.mesh, "shape")
+                                                  else "model" in getattr(
+                                                      self.mesh, "axis_names",
+                                                      ()))
+                                if arr.shape[
+                                        0] % tp_size == 0 and tp_size > 1 and has_model_axis:
+                                    spec = PartitionSpec("model", None)
+                                else:
+                                    spec = PartitionSpec()
+                            else:
+                                spec = PartitionSpec()
+
+                            arr = jax.device_put(
+                                arr, NamedSharding(self.mesh, spec))
+                        return arr
+
+                    return move
 
                 # Ensure all tensors are moved into accelerator so the
                 # computation with weights can work properly.
                 call_kwargs = {
-                    k: jax.tree.map(move, v)
+                    k:
+                    jax.tree.map(make_move(k),
+                                 v,
+                                 is_leaf=lambda x: isinstance(
+                                     x, (GridTHW, torch.Tensor, jax.Array)))
                     for k, v in kwargs.items()
                 }
 
-                return maybe_jit_embed_multimodal_func(
+                out = maybe_jit_embed_multimodal_func(
                     embed_multimodal_func_jax,
                     self.model.vllm_model)(params_and_buffers, **call_kwargs)
+
+                # Strip sequence padding tokens from multimodal output
+                if padded_anything:
+                    if isinstance(out, (list, tuple)):
+                        out = out[:original_batch_len]
+                    elif hasattr(out, "shape"):
+                        if len(out.shape) == 3:
+                            out = out[:original_batch_len, ...]
+                        elif len(out.shape) == 2:
+                            original_tokens_len = original_pixels_len // merge_factor
+                            out = out[:original_tokens_len, :]
+                        else:
+                            logger.warning(
+                                f"Unexpected multimodal output shape: {out.shape}. Stripping skipped."
+                            )
+
+                return out
 
         return embed_multimodal_func_torch
 
