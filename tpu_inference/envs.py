@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
+    SKIP_STRUCTURED_DECODING_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
@@ -249,6 +250,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
     env_bool("SKIP_JAX_PRECOMPILE", default=False),
+    # Skip only structured-decoding precompilation during initialization.
+    "SKIP_STRUCTURED_DECODING_PRECOMPILE":
+    env_bool("SKIP_STRUCTURED_DECODING_PRECOMPILE", default=False),
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
