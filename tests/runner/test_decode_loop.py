@@ -17,7 +17,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.runner.decode_loop import (TpuSamplingState, _split_rngs,
+from tpu_inference.runner.decode_loop import (TpuSamplingState,
+                                              _decode_core_impl, _split_rngs,
                                               _update_loop_state,
                                               continue_decode)
 
@@ -406,6 +407,102 @@ def test_continue_decode_no_exit_on_eos():
     )
     assert np.array_equal(token_buffer, expected_tokens)
     assert np.array_equal(final_state.active_mask, [False, False])
+
+
+def _lower_decode_core(continue_decode_eos_check_interval):
+    """Lower the fused loop with stub model/sampler fns and return its HLO."""
+    batch_size = 2
+    static_argnames = (
+        "model_fn",
+        "compute_logits_fn",
+        "sample_fn",
+        "mesh",
+        "static_max_decode_steps",
+        "eos_token_id",
+        "padding_token_id",
+        "dp_size",
+        "pad_len",
+        "has_experts",
+        "expert_shape",
+        "expert_dtype",
+        "layer_name_to_kvcache_index",
+        "is_first_rank",
+        "is_last_rank",
+        "max_logprobs",
+        "logprobs_mode",
+        "continue_decode_eos_check_interval",
+    )
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        logits = jnp.zeros((batch_size, 100))
+        return logits.at[:, 0].set(hidden_states[:, 0, 0])
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata):
+        pos = logits[:, 0].astype(jnp.int32)
+        token_table = jnp.array(
+            [[42, 43], [44, 99], [99, 50], [60, 61], [70, 71]],
+            dtype=jnp.int32)
+        return token_table[pos, jnp.arange(batch_size)], None
+
+    step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), 5, 5)
+    # jit directly rather than through continue_decode(): its jit carries
+    # compiler_options, which JAX rejects on a nested jit under .lower().
+    lowered = jax.jit(
+        _decode_core_impl, static_argnames=static_argnames
+    ).lower(
+        state={},
+        kv_caches=[jnp.zeros((2, 10))],
+        step_rngs=step_rngs,
+        sampling_metadata=None,
+        inputs_embeds=None,
+        lora_metadata=None,
+        intermediate_tensors=None,
+        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+        mamba_state_indices=None,
+        current_tokens=jnp.array([10, 20], dtype=jnp.int32),
+        active_mask=jnp.array([True, True], dtype=jnp.bool_),
+        input_positions=jnp.array([0, 0], dtype=jnp.int32),
+        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        mesh=None,
+        max_decode_steps=5,
+        static_max_decode_steps=5,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        dp_size=1,
+        pad_len=0,
+        has_experts=False,
+        expert_shape=None,
+        expert_dtype=None,
+        layer_name_to_kvcache_index=(),
+        is_first_rank=True,
+        is_last_rank=True,
+        max_logprobs=0,
+        logprobs_mode="raw",
+        continue_decode_eos_check_interval=continue_decode_eos_check_interval,
+    )
+    return lowered.compile().as_text()
+
+
+def test_continue_decode_no_exit_on_eos_drops_eos_reduction():
+    """With the EOS check disabled, the compiled loop body must not reduce
+    the per-request EOS hits: cond_fn never reads the flag, so the carried
+    value is left untouched and the reduction (a cross-DP all-reduce on every
+    decode step in the multi-device program) is dead code.
+    """
+    assert "reduce_or" in _lower_decode_core(1)
+    assert "reduce_or" not in _lower_decode_core(-1)
 
 
 def test_continue_decode_exit_on_eos_interval():
