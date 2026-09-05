@@ -68,6 +68,9 @@ if TYPE_CHECKING:
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
     USE_GMM_FUSED_RS_KERNEL: bool = False
+    RS_KERNEL_BACKEND: str = "sc"
+    VLLM_TPU_FP8_REDUCE_SCATTER: bool = False
+    VLLM_TPU_FP8_RS_STATIC_SCALE: float | None = None
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
@@ -173,6 +176,29 @@ def env_bool(env_name: str,
         return parsed_value
 
     return _get_bool_env
+
+
+def env_positive_float_or_none(
+        env_name: str) -> Callable[[], float | None]:
+    """Tri-state positive float: unset/empty -> None; otherwise a float > 0.
+
+    Used for knobs where absence selects a different code path (here, None ->
+    dynamic FP8 scaling) and any provided value must be strictly positive
+    (the reduce-scatter kernel computes 1/scale, so 0 would divide by zero).
+    """
+
+    def _get() -> float | None:
+        value = os.getenv(env_name)
+        if value is None or value.strip() == "":
+            return None
+        parsed = float(value)
+        if not parsed > 0.0:
+            raise ValueError(
+                f"{env_name} must be a positive float (got {value!r}); "
+                f"unset it to use dynamic scaling.")
+        return parsed
+
+    return _get
 
 
 def env_str_list(env_name: str) -> Callable[[], list[str]]:
@@ -427,6 +453,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable fused GMM reduce-scatter kernel for MoE
     "USE_GMM_FUSED_RS_KERNEL":
     env_bool("USE_GMM_FUSED_RS_KERNEL", default=False),
+    # Which hierarchical reduce-scatter implementation ENABLE_RS_KERNEL
+    # selects. "sc" is the SparseCore kernel (default, unchanged
+    # behaviour); "tc" is the TensorCore kernel in hierrs_tc, which is
+    # the only backend that implements the FP8 wire below.
+    "RS_KERNEL_BACKEND":
+    env_with_choices("RS_KERNEL_BACKEND", "sc", ["sc", "tc"]),
+    # Transfer Phase-2 (inter-chip) reduce-scatter data as float8_e4m3fn on the
+    # ICI wire, dequantizing + accumulating in BF16 on arrival. Only takes
+    # effect when ENABLE_RS_KERNEL is also set. Default off (BF16 wire).
+    "VLLM_TPU_FP8_REDUCE_SCATTER":
+    env_bool("VLLM_TPU_FP8_REDUCE_SCATTER", default=False),
+    # Fixed FP8 scale for the Phase-2 reduce-scatter wire. Unset/empty ->
+    # per-chunk dynamic scaling (max|x|/448, the default). A positive float ->
+    # static scaling at that factor, skipping the send-side max-abs reduction.
+    # Only takes effect with ENABLE_RS_KERNEL + VLLM_TPU_FP8_REDUCE_SCATTER.
+    "VLLM_TPU_FP8_RS_STATIC_SCALE":
+    env_positive_float_or_none("VLLM_TPU_FP8_RS_STATIC_SCALE"),
     # Number of worker threads for parallel XLA precompilation.
     "NUM_PRECOMPILE_WORKERS":
     lambda: int(os.getenv("NUM_PRECOMPILE_WORKERS") or "1"),
