@@ -59,6 +59,7 @@ _VLLM_PREFERRED_ARCHITECTURES: frozenset[str] = frozenset({
     "Qwen3MoeForCausalLM",
     "KimiK25ForConditionalGeneration",
     "Qwen3_5MoeForConditionalGeneration",
+    "Qwen3_5ForConditionalGeneration",
 })
 
 # List of architectures that don't have pipeline parallelism support in jax yet.
