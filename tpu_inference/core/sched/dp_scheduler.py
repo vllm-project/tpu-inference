@@ -159,6 +159,16 @@ def _scheduler_worker_process(
     import gc
     atexit._clear()
     gc.enable()
+    cache_config = getattr(vllm_config, "cache_config", None)
+    if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+        from tpu_inference.core.hybrid_coordinator import (
+            install_hybrid_coordinator_hooks, set_mamba_num_blocks)
+        install_hybrid_coordinator_hooks(vllm_config)
+        mamba_num_blocks = getattr(kv_cache_config, "mamba_num_blocks", None)
+        if mamba_num_blocks is not None:
+            set_mamba_num_blocks(mamba_num_blocks)
+            cache_config.mamba_num_blocks = mamba_num_blocks
+
     # Initialize the scheduler in this process
     import inspect
     sig = inspect.signature(original_scheduler_cls)
@@ -585,10 +595,16 @@ class DPScheduler(SchedulerInterface):
         multiprocessing.active_children()
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
+        # mamba_num_blocks is computed during device HBM profiling and written to
+        # vllm_config.cache_config. Symmetrically partition across DP ranks.
+        mamba_num_blocks = getattr(self.vllm_config.cache_config,
+                                   "mamba_num_blocks", None)
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)
             rank_kv_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
+            if mamba_num_blocks is not None:
+                rank_kv_config.mamba_num_blocks = mamba_num_blocks // self.dp_size
             self.per_rank_kv_cache_configs.append(rank_kv_config)
 
     def _send_command(self,
