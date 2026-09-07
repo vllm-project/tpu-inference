@@ -95,6 +95,17 @@ SYS_PROMPT="${EVAL_SYSTEM_PROMPT:-Answer with only the letter in parentheses, e.
 STATUS_JSON="${ART}/eval_summary.json"
 declare -a RESULTS=()
 
+# A perf-only run (a batch-size sweep, a sharding change) has nothing to score
+# and the eval leg costs ~55 min of the org's only 32-chip slice. Without this
+# an empty EVAL_SUITE still reaches the summary block at the bottom, which cats
+# a STATUS_JSON that was never written and exits 1.
+if [ -z "${EVAL_SUITE}" ] || [ "${EVAL_SUITE}" = "none" ]; then
+  echo "--- eval leg skipped (EVAL_SUITE='${EVAL_SUITE}')"
+  printf '{"model": "%s", "reasoning_effort": "%s", "skipped": true, "results": []}\n' \
+    "${MODEL}" "${REASONING_EFFORT}" > "${STATUS_JSON}"
+  exit 0
+fi
+
 record() {  # name status seconds note
   RESULTS+=("{\"eval\": \"$1\", \"status\": \"$2\", \"seconds\": $3, \"note\": \"$4\"}")
   printf '%s\n' "[eval] $1: $2 (${3}s) $4"

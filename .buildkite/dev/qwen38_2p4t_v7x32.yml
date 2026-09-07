@@ -13,7 +13,8 @@
 # One server, three legs: a smoke test and a perf benchmark
 # (qwen38_2p4t_client.sh), then GPQA/GSM8K/MMLU (qwen38_2p4t_eval.sh). Loading
 # and precompiling costs ~55 min, so everything that needs this model runs
-# against the one instance.
+# against the one instance. BENCH_SWEEP selects the perf legs and EVAL_SUITE the
+# accuracy ones; either can be narrowed to isolate a variable.
 #
 # Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_v7x32.yml
 #
@@ -146,14 +147,45 @@ steps:
         # pins the output, so the sample is 16 full waves of identical work
         # rather than 4.
         #
-        # MAX_CONCURRENCY stays at 8 for comparability, not because of HBM any
-        # more. It was 16 -> 8 originally because build tc#951 sized the full-
-        # attention pool at 660 blocks x 128 tokens: one 9216-token request
-        # holds 72 of them, so 8 x 72 = 576 blocks was 87% of the pool and 16
-        # would have preempted. NUM_GPU_BLOCKS_OVERRIDE (below) lifts the pool
-        # to 12288 blocks, so 8 is now 4.7% and there is room to raise it --
-        # but tc#953/tc#959/tc#960 are all at 8, so changing it here would break the
-        # only perf baseline we have. Raise it in a dedicated run.
+        # MAX_NUM_SEQS 32 -> 80 and BENCH_SWEEP are this run's whole point: the
+        # dedicated batch-size run the comment below has been deferring.
+        #
+        # The batch the server can hold is dp_size x max_num_seqs
+        # (tpu_runner.py:1049), so 80 gives 160 -- the DP scheduler hands each
+        # of the two ranks the full max_num_seqs (dp_scheduler.py:561) and half
+        # the block pool (:591), i.e. 80 requests against 6144 blocks per rank.
+        # A 9216-token request holds 72 blocks, so peak demand is 5760 of 6144
+        # per rank: 94% utilisation, but preemption is impossible by
+        # construction because no rank can admit an 81st request. That matters
+        # here -- preemption under attn_dp>=2 leaks mamba slots.
+        #
+        # 160 is one step below the HBM ceiling of 172. Derivation, calibration
+        # against tc#960 and build #2, and the formula for other configs are in
+        # experiments/.../KV_HBM_BATCH_SIZE_MODEL.md; the short version is that
+        # one recurrent slot costs 24.35 attention blocks, so each concurrent
+        # request costs 72 + 24.35 = 96.35 block-equivalents out of a measured
+        # budget of 16,757, and 160 spends 92.3% of it.
+        #
+        # BENCH_SWEEP runs two legs against the one server. Latency and
+        # throughput are the same measurement read at two ends of the
+        # concurrency curve: at conc 8 the TTFT/TPOT numbers are per-request
+        # latency on a near-idle machine and directly comparable to
+        # tc#953/tc#959/tc#960/tc#962/#2; at conc 160 they are queueing delay and
+        # the throughput number is the one that means something. Keeping the
+        # conc-8 leg is what makes the throughput gain attributable -- on its
+        # own a saturated run cannot separate "decode got slower" from "the
+        # batch got bigger". MAX_CONCURRENCY stays 8 so bench.json keeps
+        # meaning what it meant in every earlier MANIFEST.
+        #
+        # n=640 at conc 160 is four full waves, matching the 16 waves the conc-8
+        # leg gets from n=128. It is also the cheaper leg in wall-clock terms:
+        # chunked prefill caps the engine at max_num_batched_tokens per rank per
+        # step regardless of batch size, so 5x the prompts costs well under 5x
+        # the time.
+        #
+        # EVAL_SUITE=none skips the ~55 min accuracy leg. Nothing here changes
+        # what the model computes, and GPQA at xhigh is already settled at
+        # 0.899-0.904 across tc#962 and #2.
         #
         # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made tc#960's
         # eval unscoreable. The runner sizes the attention pool against mamba's
@@ -167,8 +199,15 @@ steps:
         # Passing it on the serve command line puts it in the engine-core
         # config, which is the only place get_kv_cache_config() reads it.
         #
-        # 12288 = 32 requests x ceil(40960/128) = 10,240 blocks of worst-case
-        # demand plus 20% headroom, and ~19% below what the runner allocates.
+        # 12288 is held fixed across the batch-size change so the attention pool
+        # is identical to build #2 and max_num_seqs is the only variable. It
+        # clears the 11,520 blocks that 160 concurrent 9216-token requests need,
+        # and the extra 96 mamba slots (66 -> 162) cost 1.76 GB/device, putting
+        # the run at a predicted 86.9 GB of the 94.74 GB physical wall. Note
+        # that on the pinned path there is no software check for this: setting
+        # the flag early-returns _maybe_set_compact_mamba_num_blocks_override
+        # (kv_cache_manager.py:347) before `avail` is ever computed, so the
+        # allocation either fits physically or the TPU allocator OOMs.
         # Since #3481 the worker takes its own tensor sizing *from*
         # kv_cache_config.num_blocks, so the two can no longer disagree in the
         # direction that matters -- but the flag is still required, because
@@ -229,7 +268,7 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=2' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=32' \
+          'MAX_NUM_SEQS=80' \
           'NUM_GPU_BLOCKS_OVERRIDE=12288' \
           'MAX_NUM_BATCHED_TOKENS=2048' \
           'GPU_MEMORY_UTILIZATION=0.92' \
@@ -239,8 +278,9 @@ steps:
           'OUTPUT_LEN=1024' \
           'NUM_PROMPTS=128' \
           'MAX_CONCURRENCY=8' \
+          'BENCH_SWEEP=8:128 160:640' \
           'NUM_WARMUPS=32' \
-          'EVAL_SUITE=gpqa' \
+          'EVAL_SUITE=none' \
           'EVAL_REASONING_EFFORT=xhigh' \
           'GPQA_OUTPUT_LEN=32768' \
           'GPQA_CONCURRENCY=32' \

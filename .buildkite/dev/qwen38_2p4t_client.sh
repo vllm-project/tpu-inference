@@ -40,34 +40,57 @@ echo
 # than only the single-request path.
 NUM_WARMUPS="${NUM_WARMUPS:-32}"
 
-# Will the requested shape fit the KV cache, or will the scheduler preempt to
-# make it fit? At 8192+1024 a single request holds 72 of the pool's 660 blocks,
-# so this is a live constraint rather than a formality, and an oversubscribed
-# run still reports numbers -- they just measure re-prefill. Fail before the
-# benchmark rather than publish those.
-python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
-  --tokens-per-request $((INPUT_LEN + OUTPUT_LEN)) \
-  --concurrency "${MAX_CONCURRENCY}" \
-  --block-size "${BLOCK_SIZE:-128}"
+# One server, N benchmark legs. Latency and throughput are the same measurement
+# read at two ends of the concurrency curve and there is no single point that
+# reports both honestly: at conc 8 the TTFT/TPOT numbers are per-request latency
+# with the machine nearly idle, at saturation they are queueing delay and the
+# throughput number is the one that means something. Running both against the
+# one server costs a few minutes on top of a ~55 min bring-up and makes the
+# throughput gain attributable -- a lone saturated run cannot tell "decode got
+# slower" from "the batch got bigger".
+#
+# Format: space-separated "concurrency[:num_prompts]", run in the order given.
+# Defaults to the single legacy leg, so an unset BENCH_SWEEP is a no-op.
+BENCH_SWEEP="${BENCH_SWEEP:-${MAX_CONCURRENCY}:${NUM_PROMPTS}}"
 
-echo "--- benchmark (in=${INPUT_LEN} out=${OUTPUT_LEN} n=${NUM_PROMPTS} conc=${MAX_CONCURRENCY} num_warmups=${NUM_WARMUPS}) ---"
-vllm bench serve \
-  --backend vllm \
-  --model "${MODEL}" \
-  --host 127.0.0.1 --port "${PORT}" \
-  --dataset-name random \
-  --random-input-len "${INPUT_LEN}" \
-  --random-output-len "${OUTPUT_LEN}" \
-  --num-prompts "${NUM_PROMPTS}" \
-  --max-concurrency "${MAX_CONCURRENCY}" \
-  --num-warmups "${NUM_WARMUPS}" \
-  --request-rate inf --seed 42 --ignore-eos \
-  --percentile-metrics ttft,tpot,itl,e2el \
-  --save-result --result-dir "${ART}" --result-filename bench.json \
-  2>&1 | tee "${ART}/bench.log"
+declare -a LEG_FILES=()
+for leg in ${BENCH_SWEEP}; do
+  conc="${leg%%:*}"
+  if [ "${leg}" = "${conc}" ]; then prompts="${NUM_PROMPTS}"; else prompts="${leg##*:}"; fi
 
-# `vllm bench serve` exits 0 even when every request failed, so check the result.
-python3 - "${ART}/bench.json" <<'PY'
+  # Warmups have to reach the concurrency being measured or the timed run pays
+  # for the batch shapes the warmups never compiled -- see the note above.
+  warmups="${NUM_WARMUPS}"
+  [ "${warmups}" -lt "${conc}" ] && warmups="${conc}"
+
+  # Will the requested shape fit the KV cache, or will the scheduler preempt to
+  # make it fit? At 8192+1024 a single request holds 72 blocks, so this is a
+  # live constraint rather than a formality, and an oversubscribed run still
+  # reports numbers -- they just measure re-prefill. Fail before the benchmark
+  # rather than publish those.
+  python3 "${DEV_DIR}/qwen38_2p4t_kv_fit.py" \
+    --tokens-per-request $((INPUT_LEN + OUTPUT_LEN)) \
+    --concurrency "${conc}" \
+    --block-size "${BLOCK_SIZE:-128}"
+
+  echo "--- benchmark (in=${INPUT_LEN} out=${OUTPUT_LEN} n=${prompts} conc=${conc} num_warmups=${warmups}) ---"
+  vllm bench serve \
+    --backend vllm \
+    --model "${MODEL}" \
+    --host 127.0.0.1 --port "${PORT}" \
+    --dataset-name random \
+    --random-input-len "${INPUT_LEN}" \
+    --random-output-len "${OUTPUT_LEN}" \
+    --num-prompts "${prompts}" \
+    --max-concurrency "${conc}" \
+    --num-warmups "${warmups}" \
+    --request-rate inf --seed 42 --ignore-eos \
+    --percentile-metrics ttft,tpot,itl,e2el \
+    --save-result --result-dir "${ART}" --result-filename "bench_c${conc}.json" \
+    2>&1 | tee "${ART}/bench_c${conc}.log"
+
+  # `vllm bench serve` exits 0 even when every request failed, so check.
+  python3 - "${ART}/bench_c${conc}.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 done, failed = d.get("completed", 0), d.get("failed", 0)
@@ -85,6 +108,41 @@ print(f"[bench] mean_ttft_ms={mt:.0f} median_ttft_ms={md:.0f} "
 if done == 0:
     sys.exit("[bench] FAILED: no request completed")
 PY
+  LEG_FILES+=("${ART}/bench_c${conc}.json")
+done
+
+# Keep the legacy artifact name pointing at the leg run at MAX_CONCURRENCY, so
+# every prior MANIFEST's `bench.json` still means the same thing.
+if [ -f "${ART}/bench_c${MAX_CONCURRENCY}.json" ]; then
+  cp "${ART}/bench_c${MAX_CONCURRENCY}.json" "${ART}/bench.json"
+  cp "${ART}/bench_c${MAX_CONCURRENCY}.log" "${ART}/bench.log"
+fi
+
+# One table across the sweep. Throughput alone is not a result -- the point of
+# the low-concurrency leg is that median TPOT next to it says whether a
+# throughput gain came from batching or from something getting faster.
+if [ "${#LEG_FILES[@]}" -gt 1 ]; then
+  echo "--- benchmark sweep summary"
+  python3 - "${LEG_FILES[@]}" <<'PY'
+import json, sys
+# max_concurrent_requests is the batch the server actually reached, as opposed
+# to the ceiling the client asked for -- the one column that says whether
+# max_num_seqs x dp_size was really achieved.
+hdr = ("conc", "peak_bs", "n", "dur_s", "out_tok/s", "tot_tok/s",
+       "med_ttft", "p99_ttft", "med_tpot", "p99_tpot", "med_e2el")
+print("  ".join(f"{h:>10}" for h in hdr))
+for path in sys.argv[1:]:
+    d = json.load(open(path))
+    row = (d.get("max_concurrency", "?"), d.get("max_concurrent_requests", "?"),
+           d.get("completed", 0), f"{d.get('duration', 0):.1f}",
+           f"{d.get('output_throughput', 0):.1f}",
+           f"{d.get('total_token_throughput', 0):.1f}",
+           f"{d.get('median_ttft_ms', 0):.0f}", f"{d.get('p99_ttft_ms', 0):.0f}",
+           f"{d.get('median_tpot_ms', 0):.2f}", f"{d.get('p99_tpot_ms', 0):.2f}",
+           f"{d.get('median_e2el_ms', 0):.0f}")
+    print("  ".join(f"{str(c):>10}" for c in row))
+PY
+fi
 
 # Did the local-disk compilation cache actually get written? This is the head
 # host's copy only; each of the other three hosts has its own under the same
