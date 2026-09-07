@@ -20,11 +20,13 @@ from vllm.config import VllmConfig
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.kv_cache_interface import KVCacheConfig
+import torch
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 
+from tpu_inference.core.mamba_block_pool import TPUMambaSpec
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand,
     update_vllm_config_for_dp_scheduler)
@@ -62,6 +64,7 @@ class TestDPScheduler:
         """Create a mock KVCacheConfig for testing."""
         config = MagicMock(spec=KVCacheConfig)
         config.num_blocks = 100
+        config.kv_cache_groups = []
         return config
 
     @pytest.fixture
@@ -129,6 +132,34 @@ class TestDPScheduler:
                 # Verify processes were started
                 mock_process = mock_ctx.Process.return_value
                 assert mock_process.start.call_count == 2
+
+    def test_init_splits_dedicated_mamba_pools_across_ranks(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """Dedicated mamba block pools (`TPUMambaSpec.num_blocks`, mamba
+        prefix caching) are sharded across DP ranks like the attention pool."""
+        mamba_spec = TPUMambaSpec(block_size=16,
+                                  shapes=((1, ), ),
+                                  dtypes=(torch.float32, ),
+                                  mamba_cache_mode="align",
+                                  num_blocks=40)
+        mock_kv_cache_config.kv_cache_groups = [
+            KVCacheGroupSpec(["mamba"], mamba_spec)
+        ]
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        assert len(scheduler.per_rank_kv_cache_configs) == 2
+        for rank_config in scheduler.per_rank_kv_cache_configs:
+            assert rank_config.num_blocks == 50
+            rank_spec = rank_config.kv_cache_groups[0].kv_cache_spec
+            assert isinstance(rank_spec, TPUMambaSpec)
+            assert rank_spec.num_blocks == 20
+        # The scheduler-level config keeps the global size.
+        assert mamba_spec.num_blocks == 40
 
     def test_init_with_prefix_caching_enabled(
         self,
