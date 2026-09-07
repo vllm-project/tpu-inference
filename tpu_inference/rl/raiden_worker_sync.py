@@ -14,11 +14,14 @@ tunix's `weight_sync.dict_to_metadata` defines the metadata shape.
 
 from __future__ import annotations
 
+import logging
 import socket
 from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+
+logger = logging.getLogger(__name__)
 
 _ws_lib: Any = None
 _RAIDEN_IMPORT_ERROR: Optional[Exception] = None
@@ -108,16 +111,49 @@ def _bindable(arr: Any) -> bool:
 
 def _filter_bindable(names: List[str],
                      arrays: List[Any]) -> Tuple[List[str], List[Any]]:
-    """Drops leaves the native layer cannot bind (e.g. RNG-key arrays)."""
+    """Drops leaves the native layer cannot bind (e.g. RNG-key arrays).
+
+    Dropping is silent by design for the RNG-key case, but a dropped *weight*
+    is a silent partial sync -- the rollout keeps a stale copy of that tensor
+    with no error anywhere. Log what went, so the drop is at least auditable.
+    """
     keep_names: List[str] = []
     keep_arrays: List[Any] = []
+    dropped: List[str] = []
     for name, arr in zip(names, arrays):
         if _bindable(arr):
             if hasattr(arr, "block_until_ready"):
                 arr.block_until_ready()
             keep_names.append(name)
             keep_arrays.append(arr)
+        else:
+            dropped.append(name)
+    if dropped:
+        logger.warning(
+            "raiden bind: %d of %d leaves are not bindable and will NOT be "
+            "synced: %s%s", len(dropped), len(names), dropped[:8],
+            " ..." if len(dropped) > 8 else "")
     return keep_names, keep_arrays
+
+
+def _describe(names: List[str], arrays: List[Any], limit: int = 5) -> str:
+    """Type/dtype/shape of the first few leaves, for failure diagnostics.
+
+    `_bindable` swallows every exception, so when it rejects everything the
+    reason is invisible. Reporting the leaf *type* alongside dtype/shape is
+    what distinguishes the plausible causes: a framework tensor that never
+    became a `jax.Array` (torch/torchax dtype, no `.devices()`), an
+    integer/quantised leaf, or arrays sitting on a non-TPU platform.
+    """
+    out = []
+    for name, arr in list(zip(names, arrays))[:limit]:
+        out.append(f"{name}: "
+                   f"type={type(arr).__module__}.{type(arr).__name__} "
+                   f"dtype={getattr(arr, 'dtype', '?')} "
+                   f"shape={tuple(getattr(arr, 'shape', ()))}")
+    if len(names) > limit:
+        out.append(f"... and {len(names) - limit} more")
+    return "; ".join(out) if out else "<no array leaves at all>"
 
 
 def _axis_name(axis: Any) -> str:
@@ -177,11 +213,25 @@ class RaidenWorkerSync:
 
     def bind(self, state: Any) -> None:
         """Binds (or rebinds after a weight update) this worker's weights."""
-        self.names, self.arrays = _filter_bindable(*flatten_weights(state))
         if _ws_lib is None:
             raise RuntimeError(
                 f"{self.job_name}: tpu_sync is not importable, cannot bind "
                 f"weight_synchronizer. Original error: {_RAIDEN_IMPORT_ERROR}")
+        all_names, all_arrays = flatten_weights(state)
+        self.names, self.arrays = _filter_bindable(all_names, all_arrays)
+        # Binding nothing is not a benign no-op: registration succeeds, every
+        # sync round moves zero bytes, and the rollout silently serves the
+        # initial policy forever. Without this check the run instead dies
+        # further down in metadata_dict(), which reports the *absence of a
+        # sharding mesh* -- an accidental guard that names the wrong cause and
+        # sends debugging at sharding config. Fail here, with the real one.
+        if not self.names:
+            raise RuntimeError(
+                f"{self.job_name}: bind() found {len(all_names)} array leaves "
+                f"in the weight state but none are bindable, so there is "
+                f"nothing to synchronise. Bindable requires ndim >= 1, a "
+                f"floating dtype, and all devices on the tpu platform. "
+                f"Leaves seen: {_describe(all_names, all_arrays)}")
         if self._sync is None:
             self._sync = _ws_lib.WeightSynchronizer(
                 self.arrays,
