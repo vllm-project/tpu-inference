@@ -198,16 +198,24 @@ def build_fn(mode, mesh, axes, world, dtype):
         # Staged per-axis reduce-scatter then all-gather in reverse, so each
         # stage runs on one link class (c = D2D, x/y = ICI pairs, z = chain)
         # and the data shrinks before the slow stages. Suffix picks the order.
-        stage_axes = tuple(mode.split("_")[-1]) if mode != "rs_ag_hier" else (
-            "c", "x", "y", "z")
+        stage_axes = (tuple(mode.split("_")[-1]) if mode not in
+                      ("rs_ag_hier", "rs_ag_hierob") else ("c", "x", "y", "z"))
         assert set(stage_axes) == set(axes), (stage_axes, axes)
+
+        # Without a barrier XLA folds the chain of per-axis reduce-scatters
+        # back into one 32-device ring; "hierob" keeps each stage separate.
+        barrier = "hierob" in mode
 
         def inner(x):
             v = contribution(x)
             for ax in stage_axes:
                 v = lax.psum_scatter(v, ax, scatter_dimension=0, tiled=True)
+                if barrier:
+                    v = lax.optimization_barrier(v)
             for ax in reversed(stage_axes):
                 v = lax.all_gather(v, ax, axis=0, tiled=True)
+                if barrier:
+                    v = lax.optimization_barrier(v)
             return v + 1
 
     elif mode == "chunks2":
