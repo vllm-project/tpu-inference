@@ -1,0 +1,29 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dev pipeline: tpu7x-32 smoke test — every host prints jax.devices() and
+# one psum runs across all 32 devices. DEV_PIPELINE_FILE=.buildkite/pipeline_dev_smoke.yml
+
+steps:
+  - label: "tpu7x-32 smoke: jax.devices() on every host"
+    key: tpu7x_32_smoke
+    timeout_in_minutes: 60
+    env:
+      TPU_VERSION: "tpu7x"
+      BENCH_SCRIPT: "tests/e2e/tpu_smoke.py"
+      BENCH_SCRIPT_ARGS: ""
+    agents:
+      queue: tpu_v7x_32_queue
+    commands:
+      - bash .buildkite/scripts/run_allreduce_jax.sh

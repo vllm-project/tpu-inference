@@ -32,7 +32,9 @@ PIP_PREFIX=""
 if [[ -n "${LIBTPU_PIP_SPEC:-}" ]]; then
   PIP_PREFIX="pip install -q --no-deps ${LIBTPU_PIP_SPEC} && pip show libtpu | grep -i ^version && "
 fi
-BENCH_CMD="${PIP_PREFIX}timeout 2700 python /workspace/tpu_inference/tests/e2e/allreduce_bench_jax.py --out-dir /results ${ALLREDUCE_JAX_ARGS:-}"
+# BENCH_SCRIPT overrides the per-host program (repo-relative), e.g. a smoke test.
+BENCH_SCRIPT="${BENCH_SCRIPT:-tests/e2e/allreduce_bench_jax.py}"
+BENCH_CMD="${PIP_PREFIX}timeout 2700 python /workspace/tpu_inference/${BENCH_SCRIPT} ${BENCH_SCRIPT_ARGS---out-dir /results ${ALLREDUCE_JAX_ARGS:-}}"
 
 # Automatic worker IP discovery (same as run_multihost.sh)
 if [[ -z "${WORKER_IPS:-}" ]]; then
