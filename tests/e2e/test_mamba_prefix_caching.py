@@ -20,6 +20,7 @@ process that already built one fails the engine-core handshake on TPU.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -54,7 +55,10 @@ QUESTIONS = [
 ]
 
 
-def _generate(mode: str, out_path: str, dp_size: int = 1) -> None:
+def _generate(mode: str,
+              out_path: str,
+              dp_size: int = 1,
+              budget: int | None = None) -> None:
     """Generate the prompt set in this process and dump the result.
 
     Only called in the child process (see `__main__` below), so vllm is
@@ -65,13 +69,13 @@ def _generate(mode: str, out_path: str, dp_size: int = 1) -> None:
 
     additional_config = {}
     if dp_size > 1:
-        additional_config = {
-            "sharding": {
-                "sharding_strategy": {
-                    "enable_dp_attention": True
-                }
+        additional_config["sharding"] = {
+            "sharding_strategy": {
+                "enable_dp_attention": True
             }
         }
+    if budget is not None:
+        additional_config["custom_mamba_cache_size"] = budget
 
     llm = LLM(
         model=MODEL_NAME,
@@ -112,7 +116,7 @@ def _generate(mode: str, out_path: str, dp_size: int = 1) -> None:
             }, f)
 
 
-def _run_case(mode: str, dp_size: int = 1) -> dict:
+def _run_case(mode: str, dp_size: int = 1, budget: int | None = None) -> dict:
     """Run one engine in a subprocess and return its result."""
     with tempfile.TemporaryDirectory() as tmp:
         out_path = os.path.join(tmp, f"{mode}_dp{dp_size}.json")
@@ -120,36 +124,66 @@ def _run_case(mode: str, dp_size: int = 1) -> dict:
                    MODEL_IMPL_TYPE="vllm",
                    SKIP_JAX_PRECOMPILE="1",
                    VLLM_XLA_CHECK_RECOMPILATION="0")
-        proc = subprocess.run(
-            [sys.executable, __file__, mode, out_path,
-             str(dp_size)],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=1800)
+        cmd = [sys.executable, __file__, mode, out_path, str(dp_size)]
+        if budget is not None:
+            cmd.append(str(budget))
+        proc = subprocess.run(cmd,
+                              env=env,
+                              capture_output=True,
+                              text=True,
+                              timeout=1800)
         if not os.path.exists(out_path):
             raise AssertionError(
                 f"prefix-caching-{mode} (dp={dp_size}) run produced no output\n"
                 f"--- stdout ---\n{proc.stdout[-4000:]}\n"
                 f"--- stderr ---\n{proc.stderr[-4000:]}")
         with open(out_path) as f:
-            return json.load(f)
+            data = json.load(f)
+
+        # Parse compact mamba KV cache log from stdout/stderr of EngineCore
+        combined_logs = proc.stdout + proc.stderr
+        match = re.search(
+            r"Compact-mamba KV cache.*?num_gpu_blocks_override=(\d+).*?_mamba_num_blocks=(\d+)",
+            combined_logs,
+        )
+        if match:
+            data["cache_info"] = {
+                "num_gpu_blocks_override": int(match.group(1)),
+                "mamba_num_blocks": int(match.group(2)),
+            }
+        return data
 
 
-def _verify_mamba_prefix_caching(dp_size: int = 1):
+def _verify_mamba_prefix_caching(dp_size: int = 1, budget: int | None = None):
     """Verify greedy output consistency with prefix caching on vs off."""
-    baseline = _run_case("off", dp_size=dp_size)
-    cached = _run_case("on", dp_size=dp_size)
+    baseline = _run_case("off", dp_size=dp_size, budget=budget)
+    cached = _run_case("on", dp_size=dp_size, budget=budget)
 
     queries = cached["metrics"].get("vllm:prefix_cache_queries", 0)
     hits = cached["metrics"].get("vllm:prefix_cache_hits", 0)
     print(
-        f"  prefix cache (dp={dp_size}): {hits:.0f}/{queries:.0f} tokens hit "
+        f"  prefix cache (dp={dp_size}, budget={budget}): {hits:.0f}/{queries:.0f} tokens hit "
         f"({hits / queries if queries else 0:.1%})")
 
     assert hits > 0, (
         f"no prefix cache hits (dp={dp_size}): the shared prefix was never "
         f"reused, so this test did not exercise mamba state reuse")
+
+    # Verify decoupled dual KV cache pools
+    if "cache_info" in cached:
+        info = cached["cache_info"]
+        attn_blocks = info.get("num_gpu_blocks_override")
+        mamba_blocks = info.get("mamba_num_blocks")
+        print(
+            f"  KV Cache pools (dp={dp_size}): Attention={attn_blocks} blocks, "
+            f"Mamba={mamba_blocks} blocks")
+        if mamba_blocks is not None and attn_blocks is not None:
+            assert attn_blocks > mamba_blocks, (
+                f"Attention pool ({attn_blocks}) must be larger than compact Mamba pool ({mamba_blocks})"
+            )
+            if budget is not None:
+                # With spec budget, mamba pool should be close to active + budget
+                assert mamba_blocks <= 8 * 2 + budget + 8
 
     mismatched = [
         i for i, (
@@ -163,8 +197,8 @@ def _verify_mamba_prefix_caching(dp_size: int = 1):
 
     assert not mismatched, (
         f"{len(mismatched)}/{len(QUESTIONS)} prompts changed when prefix "
-        f"caching was enabled (dp={dp_size}); linear-attention state is not "
-        f"being reused correctly")
+        f"caching was enabled (dp={dp_size}, budget={budget}); linear-attention "
+        f"state is not being reused correctly")
 
 
 def test_mamba_prefix_caching_matches_baseline():
@@ -177,7 +211,14 @@ def test_mamba_prefix_caching_dp_matches_baseline():
     _verify_mamba_prefix_caching(dp_size=2)
 
 
+def test_mamba_prefix_caching_with_tight_checkpoint_budget():
+    """Verify that under a tight checkpoint budget, eviction triggers in Mamba,
+    the coordinator reconciles min(L_attn, L_mamba), and generation remains bit-exact."""
+    _verify_mamba_prefix_caching(dp_size=1, budget=16)
+
+
 if __name__ == "__main__":
     # Child entry point for `_run_case`.
     dp = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    _generate(sys.argv[1], sys.argv[2], dp)
+    budget = int(sys.argv[4]) if len(sys.argv) > 4 else None
+    _generate(sys.argv[1], sys.argv[2], dp, budget=budget)

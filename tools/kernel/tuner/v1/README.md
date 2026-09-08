@@ -358,7 +358,7 @@ Make sure to specify `KERNEL_TUNING_TPU_VERSION` and `KERNEL_TUNING_TPU_CORES` s
 curl -s -X POST \
   -H "Authorization: Bearer $BUILDKITE_API_TOKEN" \
   -H "Content-Type: application/json" \
-  "https://api.buildkite.com/v2/organizations/tpu-commons/pipelines/tpu-inference-kernel-tuning/builds" \
+  "https://api.buildkite.com/v2/organizations/vllm/pipelines/tpu-inference-kernel-tuning/builds" \
   -d '{
     "commit": "'"$(git rev-parse HEAD)"'",
     "branch": "'"$(git rev-parse --abbrev-ref HEAD)"'",

@@ -369,6 +369,10 @@ class TpuPlatform(Platform):
                     "supported on TPU with mamba prefix caching because the "
                     "TPU runner does not implement KV cache block copies; "
                     "leave --prefix-match-unit unset.")
+            elif cache_config.enable_prefix_caching:
+                from tpu_inference.core.hybrid_coordinator import \
+                    install_hybrid_coordinator_hooks
+                install_hybrid_coordinator_hooks(vllm_config)
 
         # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
         # CPU processor and instead normalizes inside the vLLM model's vision
