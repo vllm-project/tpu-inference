@@ -24,7 +24,9 @@ import jax.numpy as jnp
 
 def main():
     try:
-        jax.distributed.initialize()
+        # Hosts start their containers up to ~4 min apart (sequential image
+        # pulls); the default 5-min registration window is too tight.
+        jax.distributed.initialize(initialization_timeout=1800)
     except Exception as e:  # single-host runs don't need it
         print(f"TPU_SMOKE jax.distributed.initialize skipped: {e}", flush=True)
     host = os.uname().nodename

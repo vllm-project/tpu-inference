@@ -235,7 +235,9 @@ def build_fn(mode, mesh, axes, world, dtype):
 def main():
     args = parse_args()
     try:
-        jax.distributed.initialize()
+        # Hosts start their containers up to ~4 min apart (sequential image
+        # pulls); the default 5-min registration window is too tight.
+        jax.distributed.initialize(initialization_timeout=1800)
     except Exception as e:  # single-host runs don't need it
         print(f"jax.distributed.initialize skipped: {e}", flush=True)
     dtype = getattr(jnp, args.dtype)
