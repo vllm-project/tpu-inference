@@ -53,6 +53,59 @@ NUM_WARMUPS="${NUM_WARMUPS:-32}"
 # Defaults to the single legacy leg, so an unset BENCH_SWEEP is a no-op.
 BENCH_SWEEP="${BENCH_SWEEP:-${MAX_CONCURRENCY}:${NUM_PROMPTS}}"
 
+# --- server-side metrics ----------------------------------------------------
+# The client can only see TTFT, which is `queue_time + prefill_time` glued
+# together (v1/metrics/stats.py:540,544), so it cannot say whether a slow first
+# token means slow prefill or a long admission queue. vLLM exports the two
+# phases separately on /metrics along with vllm:prompt_tokens (an exact
+# prefill-token counter, no 10s bucketing) and vllm:iteration_tokens_total (the
+# per-step token histogram, which is the direct test of whether
+# max_num_batched_tokens is the binding constraint). Scrape it.
+#
+# Counters are cumulative from server start, so a leg is a delta between two
+# scrapes. METRICS_SAMPLE_S additionally leaves a coarse timeseries behind so a
+# sub-window can be sliced offline; set it to 0 to take only the endpoints.
+METRICS_ENABLE="${METRICS_ENABLE:-1}"
+METRICS_SAMPLE_S="${METRICS_SAMPLE_S:-5}"
+METRICS_URL="http://127.0.0.1:${PORT}/metrics"
+# The two endpoint scrapes are stored in full. The timeseries exists only to
+# slice rates over a sub-window, so it drops the _bucket lines -- those are 80%
+# of the bytes and the distributions are already in the endpoints.
+METRICS_FILTER='^vllm:(prompt_tokens|generation_tokens|request_success|num_preemptions|num_requests_(running|waiting)|prefix_cache_|request_(queue|prefill|decode|inference)_time_seconds|time_to_first_token_seconds|iteration_tokens_total|kv_cache_usage_perc)'
+METRICS_FILTER_DROP='_bucket\{'
+
+# Never let instrumentation fail the run: a scrape that 404s or times out
+# leaves an empty file and the report degrades to "n/a".
+snap_metrics() {
+  [ "${METRICS_ENABLE}" = "1" ] || return 0
+  curl -sS --max-time 30 "${METRICS_URL}" > "$1" 2>/dev/null \
+    || { echo "[metrics] scrape failed for ${1##*/}; continuing" >&2; : > "$1"; }
+}
+
+SAMPLER_PID=""
+start_sampler() {
+  [ "${METRICS_ENABLE}" = "1" ] || return 0
+  [ "${METRICS_SAMPLE_S}" -gt 0 ] 2>/dev/null || return 0
+  : > "$1"
+  (
+    while :; do
+      printf '# SNAPSHOT t=%s\n' "$(date +%s.%N)" >> "$1"
+      curl -sS --max-time 5 "${METRICS_URL}" 2>/dev/null \
+        | grep -E "${METRICS_FILTER}" | grep -vE "${METRICS_FILTER_DROP}" >> "$1" || true
+      sleep "${METRICS_SAMPLE_S}"
+    done
+  ) &
+  SAMPLER_PID=$!
+}
+stop_sampler() {
+  [ -n "${SAMPLER_PID}" ] || return 0
+  kill "${SAMPLER_PID}" 2>/dev/null || true
+  wait "${SAMPLER_PID}" 2>/dev/null || true
+  SAMPLER_PID=""
+}
+# A benchmark that dies mid-leg must not leave the sampler running.
+trap stop_sampler EXIT
+
 declare -a LEG_FILES=()
 for leg in ${BENCH_SWEEP}; do
   conc="${leg%%:*}"
@@ -74,6 +127,9 @@ for leg in ${BENCH_SWEEP}; do
     --block-size "${BLOCK_SIZE:-128}"
 
   echo "--- benchmark (in=${INPUT_LEN} out=${OUTPUT_LEN} n=${prompts} conc=${conc} num_warmups=${warmups}) ---"
+  snap_metrics "${ART}/metrics_c${conc}_pre.prom"
+  start_sampler "${ART}/metrics_c${conc}_series.prom"
+  metrics_t0="$(date +%s.%N)"
   vllm bench serve \
     --backend vllm \
     --model "${MODEL}" \
@@ -88,6 +144,24 @@ for leg in ${BENCH_SWEEP}; do
     --percentile-metrics ttft,tpot,itl,e2el \
     --save-result --result-dir "${ART}" --result-filename "bench_c${conc}.json" \
     2>&1 | tee "${ART}/bench_c${conc}.log"
+
+  # Snapshot and report before the pass/fail check below, so a leg that dies
+  # still leaves its server-side metrics behind -- that is exactly the leg
+  # whose metrics are worth having.
+  stop_sampler
+  if [ "${METRICS_ENABLE}" = "1" ]; then
+    metrics_t1="$(date +%s.%N)"
+    metrics_window="$(awk -v a="${metrics_t0}" -v b="${metrics_t1}" \
+      'BEGIN{printf "%.3f", b-a}' || echo 0)"
+    snap_metrics "${ART}/metrics_c${conc}_post.prom"
+    python3 "${DEV_DIR}/qwen38_2p4t_metrics.py" \
+      --pre "${ART}/metrics_c${conc}_pre.prom" \
+      --post "${ART}/metrics_c${conc}_post.prom" \
+      --series "${ART}/metrics_c${conc}_series.prom" \
+      --bench "${ART}/bench_c${conc}.json" \
+      --label "c${conc}" --window-s "${metrics_window}" \
+      --json "${ART}/metrics_c${conc}.json" || true
+  fi
 
   # `vllm bench serve` exits 0 even when every request failed, so check.
   python3 - "${ART}/bench_c${conc}.json" <<'PY'
@@ -128,16 +202,30 @@ import json, sys
 # max_concurrent_requests is the batch the server actually reached, as opposed
 # to the ceiling the client asked for -- the one column that says whether
 # max_num_seqs x dp_size was really achieved.
-hdr = ("conc", "peak_bs", "n", "dur_s", "out_tok/s", "tot_tok/s",
-       "med_ttft", "p99_ttft", "med_tpot", "p99_tpot", "med_e2el")
+# med_ttft is kept for continuity with earlier builds, but q_ms/pf_ms are the
+# columns to read: they are the server's own split of that same TTFT into
+# admission queue and prefill, so they say which half moved. Note the windows
+# differ -- out_tok/s and tot_tok/s are the timed run, while pf_tok/s, q_ms and
+# pf_ms come from counters spanning the whole invocation, warmups included.
+hdr = ("conc", "peak_bs", "n", "dur_s", "out_tok/s", "tot_tok/s", "pf_tok/s",
+       "med_ttft", "p99_ttft", "q_ms", "pf_ms", "med_tpot", "p99_tpot", "med_e2el")
 print("  ".join(f"{h:>10}" for h in hdr))
 for path in sys.argv[1:]:
     d = json.load(open(path))
+    try:
+        m = json.load(open(path.replace("bench_c", "metrics_c")))
+    except (OSError, ValueError):
+        m = {}
+    def mv(k, prec=1):
+        v = m.get(k)
+        return f"{v:.{prec}f}" if isinstance(v, (int, float)) else "n/a"
     row = (d.get("max_concurrency", "?"), d.get("max_concurrent_requests", "?"),
            d.get("completed", 0), f"{d.get('duration', 0):.1f}",
            f"{d.get('output_throughput', 0):.1f}",
            f"{d.get('total_token_throughput', 0):.1f}",
+           mv("prompt_tokens_per_s"),
            f"{d.get('median_ttft_ms', 0):.0f}", f"{d.get('p99_ttft_ms', 0):.0f}",
+           mv("queue_time_ms", 0), mv("prefill_time_ms", 0),
            f"{d.get('median_tpot_ms', 0):.2f}", f"{d.get('p99_tpot_ms', 0):.2f}",
            f"{d.get('median_e2el_ms', 0):.0f}")
     print("  ".join(f"{str(c):>10}" for c in row))

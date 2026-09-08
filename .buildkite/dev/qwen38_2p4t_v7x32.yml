@@ -16,6 +16,13 @@
 # against the one instance. BENCH_SWEEP selects the perf legs and EVAL_SUITE the
 # accuracy ones; either can be narrowed to isolate a variable.
 #
+# Each perf leg is bracketed by a /metrics scrape, because the client-visible
+# TTFT is `queue_time + prefill_time` fused and cannot attribute a slow first
+# token to either. The server splits them, and also exports an exact prefill
+# token counter and the per-step token histogram that says whether
+# MAX_NUM_BATCHED_TOKENS is actually the binding constraint. METRICS_ENABLE=0
+# turns it off; METRICS_SAMPLE_S=0 keeps the endpoints but drops the timeseries.
+#
 # Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_v7x32.yml
 #
 # tpu_v7x_32_queue has exactly one agent, so this monopolises the org's only
