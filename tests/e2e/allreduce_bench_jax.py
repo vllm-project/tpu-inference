@@ -94,10 +94,44 @@ def smap(f, mesh, in_specs, out_specs):
                          check_vma=False)
 
 
+def _snake(axes):
+    """Boustrophedon coordinate order: consecutive coords differ by one step
+    on exactly one axis (from vllm-torchtpu PR 332's build_ring_mesh)."""
+    if not axes:
+        return [()]
+    sub = _snake(axes[1:])
+    return [(v, ) + s for i, v in enumerate(axes[0])
+            for s in (sub if i % 2 == 0 else sub[::-1])]
+
+
+def ring_hops(devs):
+    """Physical hop count of every ring edge (cyclic) for a device order:
+    0 = same chip (D2D), 1 = one ICI link, >1 = routed through other chips."""
+    hops = []
+    for a, b in zip(devs, devs[1:] + devs[:1]):
+        ca, cb = tuple(a.coords), tuple(b.coords)
+        hops.append(sum(abs(x - y) for x, y in zip(ca, cb)))
+    return hops
+
+
 def order_devices(order):
     devs = jax.devices()
     if order == "iota":
         return list(devs)
+    if order == "snake":
+        by_chip = {}
+        for d in devs:
+            by_chip.setdefault(tuple(d.coords), []).append(d)
+        ndim = len(next(iter(by_chip)))
+        axes = [sorted({c[i] for c in by_chip}) for i in range(ndim)]
+        out = []
+        for coord in _snake(axes):
+            if coord not in by_chip:
+                raise ValueError(f"chip grid not full (missing {coord})")
+            out.extend(
+                sorted(by_chip[coord],
+                       key=lambda d: int(getattr(d, "core_on_chip", 0))))
+        return out
     if order == "mesh_utils":
         from jax.experimental import mesh_utils
         return list(mesh_utils.create_device_mesh((len(devs), )).flat)
@@ -160,6 +194,22 @@ def build_fn(mode, mesh, axes, world, dtype):
                                  tiled=True)
             return lax.all_gather(s, axis_arg, axis=0, tiled=True) + 1
 
+    elif mode.startswith("rs_ag_hier"):
+        # Staged per-axis reduce-scatter then all-gather in reverse, so each
+        # stage runs on one link class (c = D2D, x/y = ICI pairs, z = chain)
+        # and the data shrinks before the slow stages. Suffix picks the order.
+        stage_axes = tuple(mode.split("_")[-1]) if mode != "rs_ag_hier" else (
+            "c", "x", "y", "z")
+        assert set(stage_axes) == set(axes), (stage_axes, axes)
+
+        def inner(x):
+            v = contribution(x)
+            for ax in stage_axes:
+                v = lax.psum_scatter(v, ax, scatter_dimension=0, tiled=True)
+            for ax in reversed(stage_axes):
+                v = lax.all_gather(v, ax, axis=0, tiled=True)
+            return v + 1
+
     elif mode == "chunks2":
 
         def inner(x):
@@ -194,8 +244,16 @@ def main():
     _, mesh_4d, dims = build_meshes()
     meshes_1d = {o: build_meshes(o)[0] for o in args.orders.split(",")}
     for o, m in meshes_1d.items():
+        devs_o = list(m.devices.flat)
         log(f"physical dims (x,y,z,c) = {dims}; 1-D mesh order {o} = "
-            f"{[d.id for d in m.devices.flat]}")
+            f"{[d.id for d in devs_o]}")
+        try:
+            h = ring_hops(devs_o)
+            log(f"  ring hops for order {o}: "
+                f"{ {k: h.count(k) for k in sorted(set(h))} } "
+                f"(max {max(h)}; edges {h})")
+        except Exception as e:
+            log(f"  ring hops for order {o}: n/a ({e})")
 
     out_dir = args.out_dir if jax.process_index() == 0 else None
     if out_dir:
@@ -208,12 +266,12 @@ def main():
 
     runs = []
     for mode in args.modes.split(","):
-        if mode.endswith("_4d"):
+        if mode.endswith("_4d") or mode.startswith("rs_ag_hier"):
             runs.append((mode, "physical"))
         else:
             runs.extend((mode, o) for o in meshes_1d)
     for mode, order in runs:
-        if mode.endswith("_4d"):
+        if mode.endswith("_4d") or mode.startswith("rs_ag_hier"):
             if mesh_4d is None:
                 log(f"skip {mode}: no 4-D mesh")
                 continue
@@ -229,7 +287,7 @@ def main():
         y = fn(x)
         jax.block_until_ready(y)
         observed = float(np.asarray(y[0, 0]))
-        tol = 0.0 if mode != "rs_ag_1d" and mode != "rs_ag_4d" else 0.5
+        tol = 0.5 if mode.startswith("rs_ag") else 0.0
         if abs(observed - expected) > tol:
             raise RuntimeError(f"{mode}: observed {observed}, expected "
                                f"{expected}")
@@ -274,6 +332,9 @@ def main():
             "mode": tag,
             "order": order,
             "device_order": [int(d.id) for d in mesh.devices.flat],
+            "ring_hops": (ring_hops(list(mesh.devices.flat))
+                          if not mode.endswith("_4d")
+                          and not mode.startswith("rs_ag_hier") else None),
             "world_size": world,
             "shape": [args.tokens, args.width],
             "dtype": args.dtype,
