@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import jax
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from tpu_inference.runner.input_batch import CachedRequestState
 
 _SAMPLING_EPS = 1e-5
-
 
 
 @dataclass
@@ -84,6 +83,9 @@ def _apply_sampling_transforms(
     Returns:
         Processed logits with temperature, top-k, and top-p applied.
     """
+    if not tpu_sampling_metadata.do_sampling:
+        return logits
+
     # Temperature scaling
     temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
     temperatures = jnp.expand_dims(temperatures, axis=-1)
@@ -115,6 +117,9 @@ def _apply_sampling_transforms_microbatched(
     set out of fast TPU memory. Keep the existing path for small or non-divisible
     batches, and split larger divisible batches into fixed-size chunks.
     """
+    if not tpu_sampling_metadata.do_sampling:
+        return logits
+
     batch_size = logits.shape[0]
     microbatch_size = envs.SAMPLING_MICROBATCH_SIZE
     if (microbatch_size <= 0
@@ -134,11 +139,11 @@ def _apply_sampling_transforms_microbatched(
 
     def transform_microbatch(inputs):
         chunk_logits, temperature, top_k, top_p = inputs
-        chunk_metadata = TPUSupportedSamplingMetadata(
+        chunk_metadata = replace(
+            tpu_sampling_metadata,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
-            do_sampling=True,
         )
         return _apply_sampling_transforms(chunk_logits, chunk_metadata)
 
