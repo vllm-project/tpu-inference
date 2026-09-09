@@ -21,9 +21,9 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
+from tpu_inference import envs
 from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
-from tpu_inference import envs
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -122,8 +122,7 @@ def _apply_sampling_transforms_microbatched(
 
     batch_size = logits.shape[0]
     microbatch_size = envs.SAMPLING_MICROBATCH_SIZE
-    if (microbatch_size <= 0
-            or batch_size <= microbatch_size
+    if (microbatch_size <= 0 or batch_size <= microbatch_size
             or batch_size % microbatch_size != 0):
         return _apply_sampling_transforms(logits, tpu_sampling_metadata)
 
@@ -153,7 +152,6 @@ def _apply_sampling_transforms_microbatched(
          microbatch_top_p),
     )
     return processed_logits.reshape(logits.shape)
-
 
 
 @jax.jit(static_argnames=["mesh"])

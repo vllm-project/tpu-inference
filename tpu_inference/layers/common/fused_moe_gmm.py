@@ -696,8 +696,7 @@ def fused_moe_func(
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
-        topk_argsort_revert_indices = _invert_permutation(
-            topk_argsort_indices)
+        topk_argsort_revert_indices = _invert_permutation(topk_argsort_indices)
 
         if use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,
