@@ -58,6 +58,7 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
 def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     # Ensure clean environment for boolean vars by setting to default "0"
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
+    monkeypatch.setenv("SKIP_STRUCTURED_DECODING_PRECOMPILE", "0")
     monkeypatch.setenv("VLLM_XLA_CHECK_RECOMPILATION", "0")
     monkeypatch.setenv("NEW_MODEL_DESIGN", "0")
     monkeypatch.setenv("ENABLE_QUANTIZED_MATMUL_KERNEL", "0")
@@ -72,6 +73,13 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.SKIP_JAX_PRECOMPILE is True
     monkeypatch.setenv("SKIP_JAX_PRECOMPILE", "0")
     assert envs.SKIP_JAX_PRECOMPILE is False
+
+    # Test SKIP_STRUCTURED_DECODING_PRECOMPILE (default False)
+    assert envs.SKIP_STRUCTURED_DECODING_PRECOMPILE is False
+    monkeypatch.setenv("SKIP_STRUCTURED_DECODING_PRECOMPILE", "1")
+    assert envs.SKIP_STRUCTURED_DECODING_PRECOMPILE is True
+    monkeypatch.setenv("SKIP_STRUCTURED_DECODING_PRECOMPILE", "0")
+    assert envs.SKIP_STRUCTURED_DECODING_PRECOMPILE is False
 
     # Test DISABLE_WEIGHT_REQUANTIZATION (default False)
     assert envs.DISABLE_WEIGHT_REQUANTIZATION is False
