@@ -186,3 +186,111 @@ def test_prepare_inputs_rejects_decode():
     buf = np.zeros(16, np.int32)
     with pytest.raises(NotImplementedError):
         pre.prepare_inputs([1], [5], 16, buf, buf, buf, buf, buf)
+
+
+# ---------------- page-aligned layout and the kv_page_order map --------------
+#
+# The kernel's kv_page_order fetch is only correct if every token-order page
+# of the new-KV buffer is CONTIGUOUS in the rank-order all_gather result and
+# the map points at its first row. These tests pin that invariant against a
+# brute-force per-token expansion of the zigzag layout.
+
+
+def _per_token_order(chunk, off, pcp, s_pad):
+    """Brute force: token-order index -> rank-order row, for every slot."""
+    two_p = 2 * pcp
+    total = two_p * sum(chunk)
+    order = np.zeros(total, np.int64)
+    ranks = np.arange(pcp)
+    base = 0
+    for c_i, o_i in zip(chunk, off):
+        j = np.arange(c_i)
+        for h in (0, 1):
+            chunk_idx = ranks if h == 0 else two_p - 1 - ranks
+            dst = ranks[:, None] * s_pad + o_i + h * c_i + j[None, :]
+            tok = chunk_idx[:, None] * c_i + j[None, :]
+            order[base + tok.ravel()] = dst.ravel()
+        base += two_p * c_i
+    return order
+
+
+@pytest.mark.parametrize("pcp,ns", [(1, [1]), (2, [1, 2]), (4, [3]),
+                                    (8, [5, 7, 2])])
+def test_align_one_matches_tight_layout(pcp, ns):
+    tight = pcp_token_layout(ns, pcp)
+    assert tight == pcp_token_layout(ns, pcp, align=1)
+
+
+@pytest.mark.parametrize("pcp", [2, 4, 8])
+@pytest.mark.parametrize("align", [16, 128])
+def test_aligned_chunks_and_offsets(pcp, align):
+    ns = [1, 130, 22061, 3000, align, 2 * pcp * align]
+    C, off, s_live = pcp_token_layout(ns, pcp, align=align)
+    for n_i, c_i in zip(ns, C):
+        assert c_i % align == 0
+        assert 2 * pcp * c_i >= n_i
+        # Tightest aligned chunk: one align-quantum less no longer covers.
+        assert 2 * pcp * (c_i - align) < n_i
+    for o_i in off:
+        assert o_i % align == 0
+    assert s_live == sum(2 * c for c in C)
+
+
+def test_padding_bound_per_request():
+    pcp, align = 2, 128
+    for n in [1, 127, 128, 129, 511, 512, 513, 22061]:
+        C, _, _ = pcp_token_layout([n], pcp, align=align)
+        waste = 2 * pcp * C[0] - n
+        assert waste < 2 * pcp * align
+
+
+def _check_page_order(ns, pcp, page):
+    C, off, s_live = pcp_token_layout(ns, pcp, align=page)
+    # Bucket: the next multiple of 2 * pcp * page covering the live rows.
+    q = 2 * pcp * page
+    t_pad = (pcp * s_live + q - 1) // q * q
+    s_pad = t_pad // pcp
+    got = pcp_page_order(C, off, pcp, s_pad, t_pad, page)
+    assert got.shape == (t_pad // page, )
+    assert got.dtype == np.int32
+    want = _per_token_order(C, off, pcp, s_pad)
+    live_pages = 2 * pcp * sum(C) // page
+    for p in range(live_pages):
+        seg = want[p * page:(p + 1) * page]
+        # The invariant the kernel fetch relies on: one contiguous run...
+        assert np.all(np.diff(seg) == 1), (p, seg[:4])
+        # ...starting exactly where the map says.
+        assert got[p] * page == seg[0], p
+    # In-range even for dead entries (the kernel clamps but still reads).
+    assert np.all((got >= 0) & (got < t_pad // page))
+
+
+@pytest.mark.parametrize("pcp", [2, 4, 8])
+@pytest.mark.parametrize("page", [16, 128])
+def test_page_order_matches_per_token_map(pcp, page):
+    _check_page_order([22061, 3000], pcp, page)
+    _check_page_order([1, 130, 4 * pcp * page + 3], pcp, page)
+
+
+@pytest.mark.parametrize("pcp", [2, 4])
+def test_page_order_single_request_is_r1_of_general(pcp):
+    # One request must produce the same map whether it is "the single
+    # request" or the first of a batch: R = 1 is not a special case.
+    page = 16
+    (c, ), (o, ), s_live = pcp_token_layout([1000], pcp, align=page)
+    t_pad = pcp * s_live
+    one = pcp_page_order([c], [o], pcp, s_live, t_pad, page)
+    live = 2 * pcp * c // page
+    want = _per_token_order([c], [o], pcp, s_live)
+    for p in range(live):
+        assert one[p] * page == want[p * page]
+
+
+def test_page_order_rejects_unaligned_chunk():
+    with pytest.raises(AssertionError):
+        pcp_page_order([24], [0], 2, 48, 96, 16)
+
+
+def test_page_order_rejects_unaligned_region():
+    with pytest.raises(AssertionError):
+        pcp_page_order([16], [0], 2, 40, 80, 16)
