@@ -58,26 +58,29 @@ def _to_rank_order(x, pcp, C):
         x.reshape(2 * pcp, C, *x.shape[1:])[_row_perm(pcp)].reshape(x.shape))
 
 
-def _kv_token_order(pcp, C):
-    """Single-request `kv_token_order`: token t -> its slot in rank order."""
-    order = _inv_row(pcp)[:, None] * C + np.arange(C)[None, :]
-    return jnp.asarray(order.reshape(-1), jnp.int32)
-
-
 def _pcp_meta(pcp, C, num_current):
     """The per-rank fused current-phase metadata, exactly as _prepare_inputs
-    builds it: cu = [0, C, C + tail_real] and q_pos_offsets = [head, tail]."""
+    builds it: cu = [0, C, 2C] (both halves full length -- rank-invariant, as
+    the merged path requires) and q_pos_offsets = [head, tail]."""
+    del num_current  # tails are full length; padding rows are simply unused
     two_p = 2 * pcp
     cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
     qpos = np.zeros((pcp, MAX_SEQ), np.int32)
     for r in range(pcp):
-        tail_off = (two_p - 1 - r) * C
-        tail_real = int(np.clip(num_current - tail_off, 0, C))
-        cu[r, 1] = C  # seq 0 (head) is always fully real
-        cu[r, 2:] = C + tail_real  # seq 1 (tail) is clamped
+        cu[r, 1] = C
+        cu[r, 2:] = 2 * C
         qpos[r, 0] = r * C
-        qpos[r, 1] = tail_off
+        qpos[r, 1] = (two_p - 1 - r) * C
     return jnp.asarray(cu), jnp.asarray(qpos)
+
+
+def _single_req_extras(pcp, C):
+    """kv_new_starts / kv_page_order for ONE request filling 2P*C rows, as
+    the merged path requires for any request count."""
+    t_pad = 2 * pcp * C
+    return (jnp.zeros(MAX_SEQ, jnp.int32),
+            jnp.asarray(pcp_page_order([C], [0], pcp, t_pad // pcp, t_pad,
+                                       PAGE)))
 
 
 class PcpAttentionInterfaceTest(jtu.JaxTestCase):
@@ -274,24 +277,20 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 sm_scale=SM_SCALE)
             exp.append(np.asarray(e[:n[i]]))
 
-        # Token buffers in rank order, the request-major K/V permutation, and
-        # the per-page unshuffle map (the production helper) for the kernel's
-        # in-fetch reorder.
+        # Token buffers in rank order, plus the per-page K/V unshuffle map
+        # (the production helper) for the kernel's in-fetch reorder.
         def empty(width):
             return np.zeros((t_pad, width, HD), np.float32)
 
         q_buf, k_buf, v_buf = empty(NQ), empty(NKV), empty(NKV)
         page_order = pcp_page_order(C, off, pcp, s_pad, t_pad, PAGE)
-        kv_order = np.zeros(t_pad, np.int32)
         for i in range(R):
-            kv_base = pcp * off[i]
             for h in (0, 1):
                 for r in range(pcp):
                     c = r if h == 0 else two_p - 1 - r
                     for j in range(C[i]):
                         g = r * s_pad + off[i] + h * C[i] + j
                         t = c * C[i] + j
-                        kv_order[kv_base + t] = g
                         if t < n[i]:
                             q_buf[g] = np.asarray(cur[i][0][t], np.float32)
                             k_buf[g] = np.asarray(cur[i][1][t], np.float32)
@@ -321,7 +320,6 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 q_pos_offsets=jnp.asarray(qpos),
                 has_cached_kv=max(L) > 0,
                 kv_new_starts=jnp.asarray(kv_new_starts),
-                kv_token_order=jnp.asarray(kv_order),
                 kv_page_order=jnp.asarray(page_order),
                 num_reqs=num_reqs_bucket or R,
             ),
@@ -514,6 +512,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         kv_lens = pad1([kv_total, kv_total])
         kv_cache_lens = pad1([L, L])
         cu_q_lens, q_pos_offsets = _pcp_meta(pcp, C, num_current)
+        kv_new_starts, kv_page_order = _single_req_extras(pcp, C)
         distribution = jnp.array([0, 0, 2], jnp.int32)  # head + tail
 
         md = AttentionMetadata(
@@ -525,11 +524,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu_q_lens,
                 kv_cache_lens=kv_cache_lens,
                 q_pos_offsets=q_pos_offsets,
-                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
-                kv_token_order=_kv_token_order(pcp, C),
-                # Empty, as the runner passes for one request: the
-                # single-request path unshuffles without the map.
-                kv_page_order=jnp.zeros(0, jnp.int32),
+                kv_new_starts=kv_new_starts,
+                kv_page_order=kv_page_order,
                 has_cached_kv=L > 0,
             ),
         )
@@ -685,6 +681,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
         cu, qpos = _pcp_meta(pcp, C, num_current)
+        kv_new_starts, kv_page_order = _single_req_extras(pcp, C)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
             seq_lens=pad1([kv_total, kv_total]),
@@ -694,11 +691,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu,
                 kv_cache_lens=pad1([L, L]),
                 q_pos_offsets=qpos,
-                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
-                kv_token_order=_kv_token_order(pcp, C),
-                # Empty, as the runner passes for one request: the
-                # single-request path unshuffles without the map.
-                kv_page_order=jnp.zeros(0, jnp.int32),
+                kv_new_starts=kv_new_starts,
+                kv_page_order=kv_page_order,
                 has_cached_kv=True,
             ),
         )
@@ -756,6 +750,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
         cu, qpos = _pcp_meta(pcp, C, num_current)
+        kv_new_starts, kv_page_order = _single_req_extras(pcp, C)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
             seq_lens=pad1([kv_total, kv_total]),
@@ -765,11 +760,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu,
                 kv_cache_lens=pad1([0, 0]),
                 q_pos_offsets=qpos,
-                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
-                kv_token_order=_kv_token_order(pcp, C),
-                # Empty, as the runner passes for one request: the
-                # single-request path unshuffles without the map.
-                kv_page_order=jnp.zeros(0, jnp.int32),
+                kv_new_starts=kv_new_starts,
+                kv_page_order=kv_page_order,
                 has_cached_kv=False,
             ),
         )

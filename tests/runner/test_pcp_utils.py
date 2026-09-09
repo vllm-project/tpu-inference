@@ -67,11 +67,8 @@ def test_token_layout(pcp, counts):
 @pytest.mark.parametrize("pcp,counts", LAYOUTS)
 def test_batch_layout(pcp, counts):
     t_pad, chunk, off = _layout(counts, pcp)
-    if len(counts) == 1:
-        # Single request: the chunk comes from the buffer width.
-        assert chunk == [t_pad // (2 * pcp)] and off == [0]
-    else:
-        assert (chunk, off) == pcp_token_layout(counts, pcp, align=PAGE)[:2]
+    # One layout for any request count: R = 1 is not a special case.
+    assert (chunk, off) == pcp_token_layout(counts, pcp, align=PAGE)[:2]
 
 
 def test_batch_layout_rejects_short_buffer():
@@ -83,7 +80,7 @@ def test_batch_layout_rejects_short_buffer():
 def test_token_permutation(pcp, counts):
     t_pad, chunk, off = _layout(counts, pcp)
     s_pad = t_pad // pcp
-    perm, kv_order = pcp_token_permutation(counts, chunk, off, t_pad, pcp)
+    perm = pcp_token_permutation(counts, chunk, off, t_pad, pcp)
     total = sum(counts)
     # Every real token lands in exactly one slot; everything else is padding.
     assert sorted(perm[perm >= 0].tolist()) == list(range(total))
@@ -91,17 +88,13 @@ def test_token_permutation(pcp, counts):
     for i, n_i in enumerate(counts):
         c_i = chunk[i]
         for tok in range(n_i):
-            slot = kv_order[pcp * off[i] + tok]
-            # kv_order undoes perm on the live rows.
-            assert perm[slot] == src_off[i] + tok
-            # Zigzag: chunk k sits on rank k (head) or 2P-1-k (tail).
+            # Zigzag: chunk k sits on rank k (head) or 2P-1-k (tail), at row
+            # rank * s_pad + off_i + half * C_i + tok % C_i.
             k = tok // c_i
             rank = k if k < pcp else 2 * pcp - 1 - k
-            assert slot // s_pad == rank
-    # Slots reserved for a request are distinct across the request.
-    for i in range(len(counts)):
-        lo, hi = pcp * off[i], pcp * off[i] + 2 * pcp * chunk[i]
-        assert len(set(kv_order[lo:hi].tolist())) == hi - lo
+            half = 0 if k < pcp else 1
+            slot = rank * s_pad + off[i] + half * c_i + tok % c_i
+            assert perm[slot] == src_off[i] + tok
 
 
 @pytest.mark.parametrize("pcp,counts", LAYOUTS)
@@ -150,7 +143,7 @@ def test_prepare_inputs(pcp, counts):
     md = pre.prepare_inputs(counts, computed, t_pad, positions, input_ids,
                             seq_lens, request_distribution, logits_indices)
 
-    perm, kv_order = pcp_token_permutation(counts, chunk, off, t_pad, pcp)
+    perm = pcp_token_permutation(counts, chunk, off, t_pad, pcp)
     live = perm >= 0
     assert np.array_equal(input_ids[live], 1000 + perm[live])
     assert np.array_equal(positions[live], perm[live])
@@ -174,15 +167,11 @@ def test_prepare_inputs(pcp, counts):
         np.asarray(md.kv_cache_lens)[:n_seqs], np.repeat(computed, 2))
     assert md.has_cached_kv == (max(computed) > 0)
     assert md.num_reqs == (1 if n_reqs == 1 else 8)
-    assert np.array_equal(np.asarray(md.kv_token_order), kv_order)
-    if n_reqs > 1:
-        # The kernel unshuffles through the per-page map; a single request
-        # gets an empty one and keeps the kernel-side remap.
-        assert np.array_equal(
-            np.asarray(md.kv_page_order),
-            pcp_page_order(chunk, off, pcp, t_pad // pcp, t_pad, PAGE))
-    else:
-        assert np.asarray(md.kv_page_order).shape == (0, )
+    # The kernel unshuffles the all-gathered K/V through the per-page map,
+    # for any request count.
+    assert np.array_equal(
+        np.asarray(md.kv_page_order),
+        pcp_page_order(chunk, off, pcp, t_pad // pcp, t_pad, PAGE))
     assert np.array_equal(
         np.asarray(md.kv_new_starts)[:n_seqs],
         np.repeat([pcp * o for o in off], 2))
