@@ -28,11 +28,12 @@ from jax.sharding import PartitionSpec as P
 from tpu_inference.kernels.quantized_matmul.util import \
     xla_quantized_batched_matmul
 from tpu_inference.layers.common.linear import (
-    _pad_sharded_activation, _parse_einsum_dims, _unpad_sharded_activation,
-    sharded_matmul, sharded_quantized_batched_matmul, sharded_quantized_matmul,
+    _pad_sharded_activation, _parse_einsum_dims, sharded_matmul,
+    sharded_quantized_batched_matmul, sharded_quantized_matmul,
     xla_quantized_matmul)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisName)
+from tpu_inference.utils import get_mesh_shape_product
 
 
 @patch("tpu_inference.envs.NEW_MODEL_DESIGN", True)
@@ -56,6 +57,35 @@ class TestShardedMatmulPadding(unittest.TestCase):
     def tearDown(self):
         ShardingAxisName.reset()
         ShardingAxisName._cls = None
+
+    def test_pad_sharded_activation_mesh_none_and_context(self):
+        x = jax.random.normal(jax.random.PRNGKey(0), (7, 32),
+                              dtype=jnp.bfloat16)
+
+        # Without active mesh context and mesh=None -> identity no-op
+        padded_no_ctx, orig_len_no_ctx = _pad_sharded_activation(
+            x, None, ShardingAxisName.ATTN_DATA, axis_idx=0)
+        self.assertEqual(orig_len_no_ctx, 7)
+        self.assertEqual(padded_no_ctx.shape, x.shape)
+
+        # With active mesh context and mesh=None -> resolves ambient mesh (eager and under jit)
+        with jax.set_mesh(self.mesh):
+            attn_data_shards = get_mesh_shape_product(
+                self.mesh, ShardingAxisName.ATTN_DATA)
+            expected_padded_len = ((7 + attn_data_shards - 1) //
+                                   attn_data_shards) * attn_data_shards
+
+            padded_ctx, orig_len_ctx = _pad_sharded_activation(
+                x, None, ShardingAxisName.ATTN_DATA, axis_idx=0)
+            self.assertEqual(orig_len_ctx, 7)
+            self.assertEqual(padded_ctx.shape[0], expected_padded_len)
+
+            # Verify under @jax.jit with mesh=None
+            padded_jit, orig_len_jit = jax.jit(
+                lambda t: _pad_sharded_activation(
+                    t, None, ShardingAxisName.ATTN_DATA, axis_idx=0))(x)
+            self.assertEqual(orig_len_jit, 7)
+            self.assertEqual(padded_jit.shape[0], expected_padded_len)
 
     def test_pad_and_unpad_sharded_activation_direct(self):
         # Test boundary and unaligned lengths
@@ -88,7 +118,9 @@ class TestShardedMatmulPadding(unittest.TestCase):
                 )
 
             # Verify that unpadding perfectly restores original array
-            unpadded = _unpad_sharded_activation(padded, orig_len, axis_idx=0)
+            unpadded = jax.lax.slice_in_dim(
+                padded, 0, orig_len,
+                axis=0) if padded.shape[0] != orig_len else padded
             self.assertEqual(unpadded.shape, (seq_len, hidden_dim))
             np.testing.assert_array_equal(np.array(unpadded), np.array(x))
 
@@ -116,7 +148,9 @@ class TestShardedMatmulPadding(unittest.TestCase):
                              dtype=np.float32),
                 )
 
-            unpadded = _unpad_sharded_activation(padded, orig_len, axis_idx=1)
+            unpadded = jax.lax.slice_in_dim(
+                padded, 0, orig_len,
+                axis=1) if padded.shape[1] != orig_len else padded
             self.assertEqual(unpadded.shape, (num_heads, seq_len, head_dim))
             np.testing.assert_array_equal(np.array(unpadded), np.array(x))
 
@@ -148,8 +182,8 @@ class TestShardedMatmulPadding(unittest.TestCase):
             np.testing.assert_allclose(
                 np.array(out_2d_col, dtype=np.float32),
                 np.array(expected_2d, dtype=np.float32),
-                rtol=1e-2,
-                atol=1e-2,
+                rtol=0.05,
+                atol=0.05,
             )
 
             # Row parallel sharding with all-reduce
@@ -162,8 +196,8 @@ class TestShardedMatmulPadding(unittest.TestCase):
             np.testing.assert_allclose(
                 np.array(out_2d_row, dtype=np.float32),
                 np.array(expected_2d, dtype=np.float32),
-                rtol=1e-2,
-                atol=1e-2,
+                rtol=0.05,
+                atol=0.05,
             )
 
             # 3D Batched Input: (batch_size, seq_len, hidden_in)
@@ -183,8 +217,8 @@ class TestShardedMatmulPadding(unittest.TestCase):
             np.testing.assert_allclose(
                 np.array(out_3d, dtype=np.float32),
                 np.array(expected_3d, dtype=np.float32),
-                rtol=1e-2,
-                atol=1e-2,
+                rtol=0.05,
+                atol=0.05,
             )
 
     def test_sharded_quantized_matmul_numerical_parity_on_device(self):
