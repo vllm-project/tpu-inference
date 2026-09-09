@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     PREFILL_SLICES: str = ""
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
+    SKIP_PROMPT_LOGPROBS_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     MODEL_IMPL_TYPE: str = "auto"
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
@@ -249,6 +250,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
     env_bool("SKIP_JAX_PRECOMPILE", default=False),
+    # Skip the auxiliary prompt-logprobs precompile loop specifically. The prompt
+    # logprobs graph is off the execution path unless prompt_logprobs is requested
+    # (return_logprobs=False), so precompiling it is pure startup overhead there. On
+    # the bare-SPMD multi-host backend it can also hang startup at the compile-time
+    # rendezvous if hosts diverge on the loop trip count. Default off = no change.
+    "SKIP_PROMPT_LOGPROBS_PRECOMPILE":
+    env_bool("SKIP_PROMPT_LOGPROBS_PRECOMPILE", default=False),
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
