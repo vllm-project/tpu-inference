@@ -447,6 +447,7 @@ class JaxRoutedExperts(JaxModule):
         return (pc.data_parallel_size * pc.prefill_context_parallel_size *
                 pc.tensor_parallel_size) > 1 and pc.enable_expert_parallel
 
+    # TODO: refactor with moe_weights.py:_get_expert_shard_axis
     @staticmethod
     def _get_weight_shardings(
             mesh: jax.sharding.Mesh,
@@ -461,11 +462,9 @@ class JaxRoutedExperts(JaxModule):
 
         if "expert" in mesh.axis_names:
             expert_axis = active_axis(
-                ("attn_dp", "attn_dp_expert", "expert", "model", "dcp",
-                 "pcp"))
+                ("attn_dp_expert", "expert", "model", "attn_dp", "dcp", "pcp"))
             tensor_axis = active_axis(
-                ("attn_dp", "attn_dp_expert", "expert", "model", "dcp",
-                 "pcp"))
+                ("model", "attn_dp", "dcp", "pcp"))
         else:
             expert_axis = tensor_axis = active_axis(("model", ))
 
