@@ -160,6 +160,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     from tpu_inference.layers.common.attention_metadata import (
         AttentionMetadata, PCPMetadata)
     from tpu_inference.layers.common.cp_attention import pcp_forward
+    from tpu_inference.runner.pcp_utils import pcp_page_order
     from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                       ShardingAxisName,
                                                       ShardingAxisNameBase)
@@ -306,28 +307,25 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
             (MAX_SEQ * pages_per_seq, ),
             jnp.int32).at[:2 * pages_per_seq].set(jnp.concatenate([pg, pg]))
         dist = jnp.array([0, 0, 2], jnp.int32)
+        # Full-length tails (rank-invariant cu), as the merged layout
+        # requires; the rows past the real tokens are padding.
         pcp_cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
         pcp_qp = np.zeros((pcp, MAX_SEQ), np.int32)
         for r in range(pcp):
-            toff = (two_p - 1 - r) * C
-            treal = int(np.clip(chunk - toff, 0, C))
             pcp_cu[r, 1] = C
-            pcp_cu[r, 2:] = C + treal
+            pcp_cu[r, 2:] = 2 * C
             pcp_qp[r, 0] = r * C
-            pcp_qp[r, 1] = toff
+            pcp_qp[r, 1] = (two_p - 1 - r) * C
         pcp_spec = P(ShardingAxisName.PREFILL_CONTEXT, None)
         pcp_cu = put(jnp.asarray(pcp_cu), pcp_spec)
         pcp_qp = put(jnp.asarray(pcp_qp), pcp_spec)
-        # Single request: every seq's current-KV block starts at 0, and
-        # kv_token_order maps token t to its slot in the rank-order buffer.
-        row_perm = [c for r in range(pcp) for c in (r, two_p - 1 - r)]
-        inv_row = np.empty(two_p, np.int64)
-        inv_row[row_perm] = np.arange(two_p)
-        kv_order = (inv_row[:, None] * C + np.arange(C)[None, :]).reshape(-1)
+        # Single request: every seq's current-KV block starts at 0, and the
+        # kernel unshuffles the rank-order buffer through the per-page map.
+        assert C % page == 0, (C, page)
         kv_starts = put(jnp.zeros((MAX_SEQ, ), jnp.int32), P())
-        kv_order = put(jnp.asarray(kv_order, jnp.int32), P())
-        # Empty page map, as the runner passes for a single request.
-        kv_pages = put(jnp.zeros((0, ), jnp.int32), P())
+        kv_pages = put(
+            jnp.asarray(pcp_page_order([C], [0], pcp, chunk // pcp, chunk,
+                                       page)), P())
         fns = {}
 
         def fn_for(has_cached_kv):
@@ -346,7 +344,6 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                         kv_cache_lens=kvcl,
                                         q_pos_offsets=pcp_qp,
                                         kv_new_starts=kv_starts,
-                                        kv_token_order=kv_order,
                                         kv_page_order=kv_pages,
                                         has_cached_kv=_hc),
                     )

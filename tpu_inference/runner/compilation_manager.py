@@ -385,6 +385,14 @@ class CompilationManager:
         metadata_attn_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
         pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
+        # A bucket that cannot give every request a chunk of at least one KV
+        # page per rank can never be picked at runtime (chunks are page
+        # multiples, and the runner's bucket sizing takes the layout's row
+        # count into account), so the variant is unreachable -- for a single
+        # request too.
+        if (pcp_size > 1 and num_tokens <
+                2 * pcp_size * self.runner.block_size * pcp_num_reqs):
+            return
 
         # Keep existing pattern for complex array operations
         # Under PCP each request becomes two fused seqs, so the attention
@@ -406,28 +414,24 @@ class CompilationManager:
             # so the kernel body does not run, but the traced program still
             # slices these arrays.
             block = self.runner.block_size
-            page_order_np = np.zeros(0, np.int32)
-            if pcp_num_reqs > 1:
-                # Largest page-multiple chunk that fits every request.
-                chunk = (num_tokens // (2 * pcp_size * pcp_num_reqs) //
-                         block * block)
-                assert chunk >= block, (
-                    f"{num_tokens=} cannot hold {pcp_num_reqs} PCP requests "
-                    "with page-multiple chunks; this bucket should have been "
-                    "skipped")
-                chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
-                                                   pcp_num_reqs,
-                                                   pcp_size,
-                                                   align=block)
-                # A real in-range map: the kernel prefetches these as page
-                # indices even though no seq iterates during precompile.
-                page_order_np = pcp_page_order(chunks, offs, pcp_size,
-                                               num_tokens // pcp_size,
-                                               num_tokens, block)
-            else:
-                chunk = num_tokens // (2 * pcp_size)
-                chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk],
-                                                   pcp_size)
+            # Largest page-multiple chunk that fits every request.  Any
+            # request count (1 included) runs the same layout and needs the
+            # same arrays.
+            chunk = (num_tokens // (2 * pcp_size * pcp_num_reqs) // block *
+                     block)
+            assert chunk >= block, (
+                f"{num_tokens=} cannot hold {pcp_num_reqs} PCP requests "
+                "with page-multiple chunks; this bucket should have been "
+                "skipped")
+            chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
+                                               pcp_num_reqs,
+                                               pcp_size,
+                                               align=block)
+            # A real in-range map: the kernel prefetches these as page
+            # indices even though no seq iterates during precompile.
+            page_order_np = pcp_page_order(chunks, offs, pcp_size,
+                                           num_tokens // pcp_size,
+                                           num_tokens, block)
             cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
                 chunks, offs, pcp_size, attn_seqs)
             pcp = self.runner.pcp_preprocessor.metadata_to_device(
@@ -435,7 +439,6 @@ class CompilationManager:
                 qpos_np,
                 np.zeros(attn_seqs, dtype=np.int32),
                 kv_starts_np,
-                np.arange(num_tokens, dtype=np.int32),
                 page_order_np,
                 has_cached_kv=pcp_has_cached_kv,
                 num_reqs=pcp_num_reqs,
@@ -730,14 +733,8 @@ class CompilationManager:
                 _cache_rungs = (False, True) if _pcp > 1 else (False, )
                 for _has_cached_kv in _cache_rungs:
                     for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
-                        # A bucket that cannot give every request a chunk of
-                        # at least one KV page per rank can never carry that
-                        # many requests at runtime (chunks are page
-                        # multiples), so the variant is unreachable.
-                        if (_pcp_reqs > 1 and num_tokens <
-                                2 * _pcp * self.runner.block_size *
-                                _pcp_reqs):
-                            continue
+                        # Unreachable-bucket variants are skipped inside
+                        # _precompile_backbone_helper.
                         self._precompile_backbone_helper(
                             f"worker{self.runner.rank} backbone",
                             input_ids=input_ids,

@@ -22,7 +22,7 @@ import jax
     jax.tree_util.register_dataclass,
     data_fields=[
         "query_start_loc", "kv_cache_lens", "q_pos_offsets", "kv_new_starts",
-        "kv_token_order", "kv_page_order"
+        "kv_page_order"
     ],
     meta_fields=["has_cached_kv", "num_reqs"],
 )
@@ -43,22 +43,19 @@ class PCPMetadata:
     # inside the all-gathered new-KV buffer (zeros for a single request).
     # Replicated (P()).
     kv_new_starts: jax.Array
-    # (padded_num_tokens,) int32 — permutation taking the all-gathered current
-    # K/V from rank order to request-major token order.  Replicated (P()).
-    kv_token_order: jax.Array
     # (padded_num_tokens // page_size,) int32 — per-page map from token-order
     # pages of the all-gathered current K/V to the pages holding them in rank
-    # order (`pcp_page_order`).  Replicated (P()).  With several requests the
-    # kernel unshuffles through it during its KV fetch; a single request
-    # passes an empty array and keeps the kernel-side arithmetic remap or the
-    # `kv_token_order` gather.
+    # order (`pcp_page_order`).  Replicated (P()).  The kernel unshuffles
+    # through it during its KV fetch, for any request count (a single request
+    # is R = 1 of the general page-aligned zigzag pack).
     kv_page_order: jax.Array
     # STATIC (meta field): whether any request in the batch has cached KV.
     # False elides the cache phase entirely.  REQUIRED: a default would
     # silently elide the cache phase for any caller that forgot to set it.
     has_cached_kv: bool
     # STATIC (meta field): number of requests fused into this launch, padded
-    # to `runner.pcp_num_reqs_paddings`.
+    # to `runner.pcp_num_reqs_paddings`.  Every rung runs the same layout and
+    # code path; the rung only sizes the compiled variant's write mask.
     num_reqs: int = 1
 
 

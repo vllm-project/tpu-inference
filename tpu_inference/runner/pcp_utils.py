@@ -75,20 +75,14 @@ def pcp_batch_layout(num_scheduled_tokens: list[int],
                      align: int = 1) -> tuple[list[int], list[int]]:
     """Chunk sizes and slot offsets of a batch inside a `t_pad`-row buffer.
 
-    A single request fills the buffer (chunk = t_pad / 2P) because
-    pcp_forward's kernel-side K/V remap derives the chunk from the buffer
-    width.
+    One layout for any request count: a single request is simply R = 1 of
+    the general page-aligned zigzag pack.
     """
-    two_p = 2 * pcp_size
     chunk, off, s_live = pcp_token_layout(num_scheduled_tokens, pcp_size,
                                           align)
     assert t_pad % pcp_size == 0 and t_pad >= pcp_size * s_live, (
         f"PCP token bucket {t_pad} cannot hold {pcp_size * s_live} tokens "
         f"({len(num_scheduled_tokens)} reqs, chunks {chunk})")
-    if len(num_scheduled_tokens) == 1:
-        assert t_pad % two_p == 0, (t_pad, two_p)
-        chunk = [t_pad // two_p]
-        off = [0]
     return chunk, off
 
 
@@ -151,28 +145,25 @@ def pcp_page_order(chunk: list[int], off: list[int], pcp_size: int,
 
 def pcp_token_permutation(num_scheduled_tokens: list[int], chunk: list[int],
                           off: list[int], t_pad: int,
-                          pcp_size: int) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (perm, kv_order): perm[g] is the natural-order source of
-    rank-order slot g (-1 for padding); kv_order maps the all-gathered
-    current K/V from rank order to request-major token order."""
+                          pcp_size: int) -> np.ndarray:
+    """Returns perm: perm[g] is the natural-order source of rank-order
+    slot g (-1 for padding).  The K/V side needs no per-token map -- the
+    kernel unshuffles the rank-order buffer through `pcp_page_order`."""
     two_p = 2 * pcp_size
     s_pad = t_pad // pcp_size
     src_off = np.cumsum([0] + list(num_scheduled_tokens))[:-1]
     perm = np.full(t_pad, -1, np.int64)
-    kv_order = np.zeros(t_pad, np.int32)
     ranks = np.arange(pcp_size)
     for i, n_i in enumerate(num_scheduled_tokens):
         c_i = chunk[i]
         j = np.arange(c_i)
-        kv_base = pcp_size * off[i]
         for h in (0, 1):
             chunk_idx = ranks if h == 0 else two_p - 1 - ranks
             dst = (ranks[:, None] * s_pad + off[i] + h * c_i + j[None, :])
             tok = chunk_idx[:, None] * c_i + j[None, :]
             real = tok < n_i
             perm[dst[real]] = src_off[i] + tok[real]
-            kv_order[kv_base + tok.ravel()] = dst.ravel()
-    return perm, kv_order
+    return perm
 
 
 class PCPPreprocessor:
@@ -195,7 +186,6 @@ class PCPPreprocessor:
     def metadata_to_device(self, cu_row: np.ndarray, q_pos: np.ndarray,
                            kv_cache_lens: np.ndarray,
                            kv_new_starts: np.ndarray,
-                           kv_token_order: np.ndarray,
                            kv_page_order: np.ndarray, *, has_cached_kv: bool,
                            num_reqs: int) -> PCPMetadata:
         """Place host arrays as a `PCPMetadata`; also used by the compilation
@@ -203,17 +193,14 @@ class PCPPreprocessor:
         query_start_loc, q_pos_offsets = device_array(
             self.mesh, (np.tile(cu_row, (self.pcp_size, 1)), q_pos),
             sharding=self._pcp_spec)
-        (kv_cache_lens, kv_new_starts, kv_token_order,
-         kv_page_order) = device_array(
-             self.mesh,
-             (kv_cache_lens, kv_new_starts, kv_token_order, kv_page_order),
-             sharding=self._repl_spec)
+        kv_cache_lens, kv_new_starts, kv_page_order = device_array(
+            self.mesh, (kv_cache_lens, kv_new_starts, kv_page_order),
+            sharding=self._repl_spec)
         return PCPMetadata(
             query_start_loc=query_start_loc,
             kv_cache_lens=kv_cache_lens,
             q_pos_offsets=q_pos_offsets,
             kv_new_starts=kv_new_starts,
-            kv_token_order=kv_token_order,
             kv_page_order=kv_page_order,
             has_cached_kv=has_cached_kv,
             num_reqs=num_reqs,
@@ -245,19 +232,14 @@ class PCPPreprocessor:
         num_pcp_reqs = len(counts)
         chunk, off = pcp_batch_layout(counts, t_pad, pcp_size,
                                       align=self.page_size)
-        perm, kv_order = pcp_token_permutation(counts, chunk, off, t_pad,
-                                               pcp_size)
+        perm = pcp_token_permutation(counts, chunk, off, t_pad, pcp_size)
         # Per-page unshuffle map for the all-gathered current K/V; the kernel
         # walks it during its KV fetch, so the rank-order buffer needs no
-        # gather pass. Single-request batches keep the kernel's arithmetic
-        # remap and need no map (the overridden t_pad-derived chunk may not
-        # be page-aligned on small buckets).
-        if num_pcp_reqs > 1:
-            kv_page_order = pcp_page_order(chunk, off, pcp_size,
-                                           t_pad // pcp_size, t_pad,
-                                           self.page_size)
-        else:
-            kv_page_order = np.zeros(0, np.int32)
+        # gather pass.  One layout for any request count: a single request is
+        # simply R = 1 here.
+        kv_page_order = pcp_page_order(chunk, off, pcp_size,
+                                       t_pad // pcp_size, t_pad,
+                                       self.page_size)
         valid = perm >= 0
         src_idx = perm[valid]
         for buf in (positions, input_ids):
@@ -286,17 +268,24 @@ class PCPPreprocessor:
         assert np.all(np.diff(cu_row[:n_seqs + 1]) > 0), (
             f"zero-length PCP seq in cu_q_lens: {cu_row[:n_seqs + 1]}")
 
-        # The global slot of each request's last token.
+        # The global slot of each request's last token: token n_i - 1 sits
+        # in zigzag chunk c (rank c heads, rank 2P-1-c tails), at row
+        # rank * s_pad + off_i + half * C_i + (n_i - 1) % C_i.
+        s_pad = t_pad // pcp_size
+        last = np.asarray(counts) - 1
+        c_arr = np.asarray(chunk)
+        ci = last // c_arr
+        half = (ci >= pcp_size).astype(np.int64)
+        rank = np.where(half == 0, ci, 2 * pcp_size - 1 - ci)
         logits_indices[:] = -1
-        logits_indices[:num_pcp_reqs] = kv_order[pcp_size * np.asarray(off) +
-                                                 np.asarray(counts) - 1]
+        logits_indices[:num_pcp_reqs] = (rank * s_pad + np.asarray(off) +
+                                         half * c_arr + last % c_arr)
 
         return self.metadata_to_device(
             cu_row,
             q_pos_np,
             kv_cache_lens_np,
             kv_new_starts_np,
-            kv_order,
             kv_page_order,
             has_cached_kv=any(l_i > 0 for l_i in computed),
             num_reqs=runner_utils.get_padded_token_len(self.num_reqs_paddings,
