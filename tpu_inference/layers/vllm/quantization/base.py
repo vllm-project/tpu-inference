@@ -70,3 +70,16 @@ class VllmQuantizationMethod(ABC):
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         raise NotImplementedError
+
+    def process_weights(self, layer: torch.nn.Module, *args, **kwargs):
+        """Turns canonical-layout (vLLM Parameter layout) jax arrays into this
+        method's processed, sharded on-device weights.
+
+        `process_weights_after_loading` is the loading shell around it; the
+        in-place weight update path (`tpu_inference.models.vllm.weight_sync`)
+        calls it directly with arrays that are already on device, so the two
+        paths share one implementation. Methods that do not implement it do
+        not support in-place weight updates.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support in-place weight updates")

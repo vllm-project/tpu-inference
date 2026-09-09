@@ -347,6 +347,31 @@ class VllmModelWrapper:
         )
         return params, lora_manager
 
+    # ------------------------------------------------------------------
+    # Weight sync (RL): canonical vLLM layout -> internal torchax layout.
+    # ------------------------------------------------------------------
+    def canonical_weight_specs(
+            self, state: dict[str, Any]) -> dict[str, jax.ShapeDtypeStruct]:
+        """Trainer-facing weight contract: vLLM TP=1 parameter names/shapes.
+
+        `state` is the runner's flat params dict (`model_runner.state`).
+        See `tpu_inference.models.vllm.weight_sync`.
+        """
+        from tpu_inference.models.vllm import weight_sync
+        return weight_sync.canonical_weight_specs(self.model.vllm_model, state)
+
+    def load_canonical_weights(self,
+                               weights: dict[str, jax.Array],
+                               state: dict[str, Any],
+                               strict: bool = False) -> list[str]:
+        """Write canonical-layout arrays into `state` (the runner's flat params
+        dict) in place, re-running this path's weight processing/sharding."""
+        from tpu_inference.models.vllm import weight_sync
+        return weight_sync.load_canonical_weights(self.model.vllm_model,
+                                                  weights,
+                                                  state,
+                                                  strict=strict)
+
     def jit_step_func(self):
 
         def step_fun_impl(
