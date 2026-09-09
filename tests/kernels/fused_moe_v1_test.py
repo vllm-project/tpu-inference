@@ -455,6 +455,52 @@ class MoEKernelTest(jtu.JaxTestCase):
             bd2c=256,
         )
 
+    def test_6d_multi_axis_mesh(self):
+        if not jtu.is_device_tpu_at_least(version=7):
+            self.skipTest("Expect TPUv7+")
+        num_devices = len(self.mesh_devices)
+        mesh_shape = (1, 1, 1, 1, num_devices, 1)
+        mesh_axis_names = (
+            "data",
+            "attn_dp",
+            "attn_dp_expert",
+            "expert",
+            "model",
+            "dcp",
+        )
+        original_mesh = self.mesh
+        self.mesh = Mesh(
+            np.array(self.mesh_devices).reshape(mesh_shape),
+            axis_names=mesh_axis_names,
+        )
+        try:
+            dtype = jnp.bfloat16
+            top_k = 8
+            num_experts = 128
+            hidden_size = 1024
+            intermediate_size = 1024
+            num_tokens = 8 * 32
+            self._test_moe(
+                dtype=dtype,
+                top_k=top_k,
+                num_experts=num_experts,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                num_tokens=num_tokens,
+                seed=1234,
+                renormalize_topk_logits=True,
+                bt=32,
+                bf=512,
+                bd1=512,
+                bd2=512,
+                btc=32,
+                bfc=256,
+                bd1c=256,
+                bd2c=256,
+            )
+        finally:
+            self.mesh = original_mesh
+
 
 if __name__ == "__main__":
     absltest.main(testLoader=jtu.JaxTestLoader())
