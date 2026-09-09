@@ -241,6 +241,50 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
             raise e
 
 
+class JaxFallbackTest(parameterized.TestCase):
+    """Exercise weighted fallback numerics without SparseCore hardware."""
+
+    @parameterized.named_parameters(
+        ("bf16_group8", jnp.bfloat16, 8, False, False),
+        ("bf16_group8_zero_nan", jnp.bfloat16, 8, True, True),
+        ("bf16_group8_propagate_nan", jnp.bfloat16, 8, False, True),
+        ("bf16_group5", jnp.bfloat16, 5, False, False),
+        ("float32_group8", jnp.float32, 8, False, False),
+        ("float32_group5", jnp.float32, 5, True, True),
+    )
+    def test_signed_weights_duplicate_indices_and_partial_width(
+            self, dtype, group_size, zero_nan, include_nan):
+        rng = np.random.default_rng(1729)
+        values = rng.standard_normal((47, 131)).astype(np.float32)
+        indices = rng.integers(-47, 47, size=group_size * 8, dtype=np.int32)
+        weights = rng.uniform(-1, 1, size=(8, group_size)).astype(np.float32)
+        # Repeated negative indices exercise normal JAX gather semantics.
+        indices[:2] = -1
+        weights[0, :2] = [0.25, -0.75]
+        if include_nan:
+            values[3] = np.nan
+            indices[2:4] = 3
+            weights[0, 2:4] = 0.0
+        x = jnp.asarray(values, dtype=dtype)
+        idx = jnp.asarray(indices)
+        w = jnp.asarray(weights)
+        actual = jax.jit(dgr_mod._jax_fallback,
+                         static_argnums=(3, 4))(x, idx, w, group_size,
+                                                zero_nan)
+        expected = reference_dense_gather_reduce(x, idx, w, group_size,
+                                                 zero_nan)
+        self.assertEqual(actual.shape, (8, 131))
+        self.assertEqual(actual.dtype, dtype)
+        np.testing.assert_allclose(actual,
+                                   expected,
+                                   atol=1e-2,
+                                   rtol=1e-2,
+                                   equal_nan=True)
+        if include_nan:
+            self.assertEqual(bool(np.isnan(np.asarray(actual[0])).all()),
+                             not zero_nan)
+
+
 class IsCompatibleTest(parameterized.TestCase):
     """Hardware-independent tests for the is_compatible() fallback gate.
 

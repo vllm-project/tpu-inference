@@ -253,6 +253,25 @@ def _jax_fallback(x,
                   topk_weights,
                   reduce_group_size,
                   topk_wgt_zero_nan=False):
+    if x.dtype == jnp.bfloat16 and reduce_group_size == 8:
+        # Gather each group position separately so the addition tree operates
+        # on independent output rows without a group-axis reduction.
+        group_indices = indices.reshape((-1, 8))
+        contributions = []
+        for k in range(8):
+            gathered = x[group_indices[:, k]].astype(jnp.float32)
+            weights = topk_weights[:, k, None]
+            weighted = gathered * weights.astype(jnp.float32)
+            if topk_wgt_zero_nan:
+                weighted = jnp.where(weights == 0.0, 0.0, weighted)
+            contributions.append(weighted)
+
+        out = (((contributions[0] + contributions[1]) +
+                (contributions[2] + contributions[3])) +
+               ((contributions[4] + contributions[5]) +
+                (contributions[6] + contributions[7])))
+        return out.astype(x.dtype)
+
     token_hidden_full = x[indices]
     cur_sorted = token_hidden_full.reshape(
         (-1, reduce_group_size, x.shape[-1]))
