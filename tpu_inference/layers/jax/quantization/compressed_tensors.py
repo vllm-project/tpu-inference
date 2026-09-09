@@ -18,13 +18,16 @@ reuse its config-group parsing and scheme detection, then dispatches each layer
 to the existing JAX fp8 quant methods.
 """
 
+from collections.abc import Iterable
 from types import MappingProxyType
 from typing import Optional
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import \
     CompressedTensorsConfig as VllmUpstreamCTConfig
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    check_equal_or_regex_match, should_ignore_layer)
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import \
+    should_ignore_layer
+from vllm.model_executor.layers.quantization.utils.config_utils import \
+    is_equal_or_regex_match
 
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.linear import (JaxEinsum,
@@ -57,6 +60,12 @@ def _weight_block_size(weight_quant) -> Optional[list[int]]:
     return list(block) if block is not None else None
 
 
+def _check_equal_or_regex_match(layer_name: str,
+                                targets: Iterable[str]) -> bool:
+    return any(
+        is_equal_or_regex_match(layer_name, target) for target in targets)
+
+
 class CompressedTensorsConfig(QuantizationConfig):
     """JAX-native ``compressed-tensors`` config; registered in the quant map."""
 
@@ -77,7 +86,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         first, then the module class name.
         """
         for target in self._target_scheme_map:
-            if check_equal_or_regex_match(prefix, [target]):
+            if _check_equal_or_regex_match(prefix, [target]):
                 return self._target_scheme_map[target]
         # compressed-tensors also targets layers by module class name (e.g.
         # "Linear"). Upstream matches on module.__class__.__name__; our JAX

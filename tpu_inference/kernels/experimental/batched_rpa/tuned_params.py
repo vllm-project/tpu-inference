@@ -96,6 +96,7 @@ def calculate_block_sizes(
     model_cfgs: configs.ModelConfigs,
     serve_cfgs: configs.ServingConfigs,
     vmem_limit_bytes: int,
+    decode_query_size: int = 1,
 ) -> tuple[configs.BlockSizes, configs.BlockSizes]:
     """Calculate optimal block size for decode and prefill."""
 
@@ -277,23 +278,28 @@ def calculate_block_sizes(
     decode_batch_size = 8
     prefill_batch_size = 2
 
-    decode_block_sizes = find_best_block_sizes(decode_batch_size, n_buffer, 1)
+    decode_block_sizes = find_best_block_sizes(decode_batch_size,
+                                               n_buffer,
+                                               fixed_bq_sz=decode_query_size)
     prefill_block_sizes = find_best_block_sizes(prefill_batch_size, n_buffer)
 
     return decode_block_sizes, prefill_block_sizes
 
 
-def get_tuned_params(
-        model_config: configs.ModelConfigs,
-        serve_config: configs.ServingConfigs,
-        vmem_limit_bytes: int | None = None,
-        case: Literal['decode', 'prefill'] = 'decode') -> configs.BlockSizes:
+def get_tuned_params(model_config: configs.ModelConfigs,
+                     serve_config: configs.ServingConfigs,
+                     vmem_limit_bytes: int | None = None,
+                     case: Literal['decode', 'prefill'] = 'decode',
+                     decode_query_size: int = 1) -> configs.BlockSizes:
     if vmem_limit_bytes is None:
         vmem_limit_bytes = pltpu.get_tpu_info().vmem_capacity_bytes
     tuning_key = TuningKey.from_config(model_config, serve_config, case=case)
     if tuning_key not in tuned_params_mapping:
         decode_block_sizes, prefill_block_sizes = calculate_block_sizes(
-            model_config, serve_config, vmem_limit_bytes)
+            model_config,
+            serve_config,
+            vmem_limit_bytes,
+            decode_query_size=decode_query_size)
         block_sizes = decode_block_sizes if case == 'decode' else prefill_block_sizes
     else:
         block_sizes = tuned_params_mapping[tuning_key].to_block_sizes()

@@ -123,7 +123,8 @@ fi
 if [[ "${IS_MULTI_HOST_BENCH:-false}" != "true" ]]; then
     echo "Ensuring we have the latest image for ${DOCKER_IMAGE}..."
     docker rmi "${DOCKER_IMAGE}" > /dev/null 2>&1 || true
-    docker pull "${DOCKER_IMAGE}"
+    # -q: the layer-by-layer pull progress is ~600 lines per multihost job.
+    docker pull -q "${DOCKER_IMAGE}"
 else
     echo "IS_MULTI_HOST_BENCH is true, skipping image pull to use prebuilt image ${DOCKER_IMAGE}."
 fi

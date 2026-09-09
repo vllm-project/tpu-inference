@@ -40,7 +40,9 @@ cleanup_docker_resource() {
 
   # Iterate and cleanup
   for IMG in "${TARGET_IMAGES[@]}"; do
-    echo "----------------------------------------"
+    # Not "---...": Buildkite reads a leading `---` as a log group header, so a
+    # plain dashed rule silently opens an anonymous group per image.
+    echo "========================================"
     echo "Starting cleanup for ${IMG}"
 
     # Use format to get "Repository ID" and use awk for exact or suffix matching.
@@ -65,8 +67,10 @@ cleanup_docker_resource() {
       fi
       
       echo "Removing old ${IMG} image(s) by ID..."
-      # Using ID directly ensures all tags of that specific image are untagged and removed
-      echo "$OLD_IMAGES" | xargs -r docker rmi -f
+      # Using ID directly ensures all tags of that specific image are untagged and removed.
+      # Output is one "Untagged:"/"Deleted:" line per layer -- dozens of lines of
+      # sha256 noise per run, with nothing actionable in them.
+      echo "$OLD_IMAGES" | xargs -r docker rmi -f >/dev/null
     else
       echo "No images matching ${IMG} found to clean up."
     fi
@@ -201,7 +205,8 @@ setup_environment() {
   # ==========================================
   if [[ "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
     echo "Pulling pre-built Docker image: ${CI_IMAGE_REPO}:${CACHE_TAG} ..."
-    docker pull "${CI_IMAGE_REPO}:${CACHE_TAG}"
+    # -q: the layer-by-layer pull progress is several hundred lines per job.
+    docker pull -q "${CI_IMAGE_REPO}:${CACHE_TAG}"
     verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"

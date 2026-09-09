@@ -422,6 +422,7 @@ def sharded_ragged_paged_attention(
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
     attn_logits_soft_cap: float | None = None,
+    decode_query_size: int = 1,
 ):
     """Shards along KV heads."""
     # Handle GQA/MQA where num_kv_heads < tp_size
@@ -490,6 +491,8 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
+            if envs.USE_BATCHED_RPA_KERNEL:
+                kwargs["decode_query_size"] = decode_query_size
         return func(*args, **kwargs)
 
     return jax.shard_map(
@@ -519,6 +522,7 @@ def attention(
     use_causal_mask: bool = True,
     shared_attention_metadata: SharedAttentionMetadata | None = None,
     attn_logits_soft_cap: float | None = None,
+    decode_query_size: int = 1,
 ) -> Tuple[jax.Array, jax.Array]:
     # T: seq_len
     # N: num_heads
@@ -572,7 +576,6 @@ def attention(
             update_kv_cache=update_kv_cache,
             use_causal_mask=use_causal_mask,
         )
-
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(
         mesh,
@@ -593,6 +596,7 @@ def attention(
         update_kv_cache=update_kv_cache,
         use_causal_mask=use_causal_mask,
         attn_logits_soft_cap=attn_logits_soft_cap,
+        decode_query_size=decode_query_size,
     )
 
     return kv_cache, output

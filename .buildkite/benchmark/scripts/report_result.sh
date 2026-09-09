@@ -175,42 +175,41 @@ fi
   python3 "$(dirname "$0")/parse_benchmark_log.py" "$BM_LOG" "$RESULT_FILE" || true
 
   if [ "$EXIT_CODE" -eq 0 ]; then
+    if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
+      # Accuracy run logic validation
+      if ! grep -q "AccuracyMetrics" "$RESULT_FILE"; then
+        echo "Error: Accuracy run ($RUN_TYPE) but no AccuracyMetrics found."
+        exit 1
+      fi
+    else
+      # Performance run logic validation
+      # Extract Throughput from RESULT_FILE to check against EXPECTED_THROUGHPUT
+      throughput=$(grep "^Throughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+      
+      if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Failed to get the throughput and this is not an accuracy run."
+        exit 1
+      fi
 
-  if [[ "$RUN_TYPE" == *"ACCURACY"* ]]; then
-    # Accuracy run logic validation
-    if ! grep -q "AccuracyMetrics" "$RESULT_FILE"; then
-      echo "Error: Accuracy run ($RUN_TYPE) but no AccuracyMetrics found."
-      exit 1
-    fi
-  else
-    # Performance run logic validation
-    # Extract Throughput from RESULT_FILE to check against EXPECTED_THROUGHPUT
-    throughput=$(grep "^Throughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
-    
-    if [[ -z "$throughput" || ! "$throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-      echo "Failed to get the throughput and this is not an accuracy run."
-      exit 1
-    fi
+      output_token_throughput=$(grep "^OutputTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+      if [[ -z "$output_token_throughput" || ! "$output_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Failed to get output_token_throughput."
+        exit 1
+      fi
 
-    output_token_throughput=$(grep "^OutputTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
-    if [[ -z "$output_token_throughput" || ! "$output_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-      echo "Failed to get output_token_throughput."
-      exit 1
-    fi
+      total_token_throughput=$(grep "^TotalTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
+      if [[ -z "$total_token_throughput" || ! "$total_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Failed to get total_token_throughput."
+        exit 1
+      fi
 
-    total_token_throughput=$(grep "^TotalTokenThroughput=" "$RESULT_FILE" | cut -d "=" -f 2 || true)
-    if [[ -z "$total_token_throughput" || ! "$total_token_throughput" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-      echo "Failed to get total_token_throughput."
-      exit 1
+      # Compare throughput using awk for float support
+      EXPECTED_THROUGHPUT_VAL="${EXPECTED_THROUGHPUT:-0}"
+      IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2 || $1 == 0) print 1; else print 0}')
+      if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
+        echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
+      fi
     fi
-
-    # Compare throughput using awk for float support
-    EXPECTED_THROUGHPUT_VAL="${EXPECTED_THROUGHPUT:-0}"
-    IS_LOW_THROUGHPUT=$(echo "$throughput $EXPECTED_THROUGHPUT_VAL" | awk '{if ($1 < $2 || $1 == 0) print 1; else print 0}')
-    if [ "$IS_LOW_THROUGHPUT" -eq 1 ]; then
-      echo "Error: throughput($throughput) is less than expected($EXPECTED_THROUGHPUT_VAL) or is 0"
-    fi
-  fi
   else
     echo "--- Skipping metric validation because EXIT_CODE ($EXIT_CODE) indicates failure."
   fi
@@ -218,6 +217,11 @@ fi
 
 # Database Reporting Logic (ON CONFLICT (RecordId) DO UPDATE SET)
 if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_PROJECT_ID:-}" && -n "${GCP_INSTANCE_ID:-}" ]]; then
+  if [ "$EXIT_CODE" -ne 0 ]; then
+    echo "--- run_bm.sh failed with exit code $EXIT_CODE. Skipping DB reporting."
+    exit 0
+  fi
+
   MANDATORY_VARS=(
     "RECORD_ID"
     "DEVICE"
@@ -281,9 +285,7 @@ if [[ "${UPLOAD_DB:-true}" == "true" && -n "${GCP_DATABASE_ID:-}" && -n "${GCP_P
           insert_vals+=", $val_str"
           # Use excluded keyword to refer to the proposed insert value
           update_metrics+=", ${key}=excluded.${key}"
-          if [ "$EXIT_CODE" -eq 0 ]; then
-              FINAL_STATUS="COMPLETED"
-          fi
+          FINAL_STATUS="COMPLETED"
       done < "$RESULT_FILE"
   fi
 

@@ -93,7 +93,7 @@ fi
 
 # Auto-generate SSH Key if it doesn't exist (e.g. in Buildkite CI)
 if [ ! -f ~/.ssh/id_rsa ]; then
-    echo "--- Auto-generating SSH key for passwordless auth..."
+    echo "~~~ Auto-generating SSH key for passwordless auth..."
     mkdir -p ~/.ssh
     ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/id_rsa -q
 fi
@@ -105,7 +105,7 @@ cleanup() {
   if [[ "${CLEANUP_DONE:-}" == "true" ]]; then return; fi
   CLEANUP_DONE="true"
   set +e
-  echo "🧹 Cleaning up containers on head and workers..."
+  echo "~~~ 🧹 Cleaning up containers on head and workers..."
   IFS=',' read -r -a WORKER_IPS_ARRAY <<< "${WORKER_IPS:-}"
   
   echo "   -> Cleaning workers..."
@@ -136,7 +136,34 @@ cleanup() {
   echo "✅ Cleanup complete."
   set -e
 }
-trap cleanup EXIT SIGINT SIGTERM
+
+# Buildkite expands the last `---` group whenever a log contains no `+++` group
+# at all, so a failing job used to open on whatever the cleanup trap printed
+# last. Run cleanup first, then emit the failure summary as a `+++` group: it is
+# expanded by default, and its presence suppresses the `---` fallback entirely.
+on_exit() {
+  local rc=$?
+  cleanup
+  { set +x; } 2>/dev/null
+  if [[ ${rc} -ne 0 ]]; then
+    echo "+++ :boom: ${BUILDKITE_LABEL:-Multihost run} failed (exit ${rc})"
+    if [[ -s /tmp/vllm_serve.log ]]; then
+      local fatal
+      fatal=$(grep -m5 -E '\b[A-Za-z_]*(Error|Exception): |\[Errno [0-9]+\]|EngineCore failed to start|ActorDiedError' /tmp/vllm_serve.log || true)
+      if [[ -n "${fatal}" ]]; then
+        echo "First errors in the vLLM server log:"
+        echo "${fatal}"
+        echo
+      fi
+      echo "Last 40 lines of the vLLM server log:"
+      tail -n 40 /tmp/vllm_serve.log
+    else
+      echo "No vLLM server log was produced; the run failed during cluster bring-up."
+    fi
+  fi
+  return ${rc}
+}
+trap on_exit EXIT SIGINT SIGTERM
 
 wait_for_server() {
   local port=$1
@@ -212,7 +239,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
 # Prune Head Node BEFORE building the new image to ensure we have disk space
-echo "--- Pruning Docker on Head Node to clear disk space..."
+echo "~~~ Pruning Docker on Head Node to clear disk space..."
 docker system prune -a --volumes -f || true
 
 # Source the environment setup script
@@ -336,7 +363,7 @@ if [[ "${VLLM_SERVE_CMD}" =~ --port[=\ ]+([0-9]+) ]]; then
 fi
 
 # Clean up potential leftovers from previous runs
-echo "--- Cleaning up previous cluster state..."
+echo "~~~ Cleaning up previous cluster state..."
 cleanup
 CLEANUP_DONE="false"
 

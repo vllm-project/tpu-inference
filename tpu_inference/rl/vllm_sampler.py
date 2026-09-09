@@ -143,13 +143,16 @@ class RLVllmSampler:
     ) -> VllmSamplingParams:
         """Builds a vLLM SamplingParams object from any duck-typed request."""
         sparams = _get_val(req, "sampling_params")
+        # `kwargs` goes through `_get_val` too: callers pass unset fields as
+        # explicit `None`, so `.get(key, default)` returns `None` rather than
+        # the default, defeating it before `_get_val` can coalesce.
         return VllmSamplingParams(
             temperature=_get_val(sparams, "temperature",
-                                 kwargs.get("temperature", 0.7)),
-            top_p=_get_val(sparams, "top_p", kwargs.get("top_p", 0.95)),
-            top_k=_get_val(sparams, "top_k", kwargs.get("top_k", -1)),
+                                 _get_val(kwargs, "temperature", 0.7)),
+            top_p=_get_val(sparams, "top_p", _get_val(kwargs, "top_p", 0.95)),
+            top_k=_get_val(sparams, "top_k", _get_val(kwargs, "top_k", -1)),
             max_tokens=_get_val(sparams, "max_tokens",
-                                kwargs.get("max_tokens", 128)),
+                                _get_val(kwargs, "max_tokens", 128)),
             stop=_get_val(sparams, "stop_sequences")
             or _get_val(sparams, "stop") or kwargs.get("stop"),
             logprobs=1
@@ -173,6 +176,12 @@ class RLVllmSampler:
                 text = output_choice.text
                 token_ids_arr = np.array(output_choice.token_ids,
                                          dtype=np.int32)
+                # On the RequestOutput, not the CompletionOutput. Tunix feeds
+                # this into np.asarray(..., dtype=np.int32), so omitting it
+                # surfaces as "int() argument must be ... not 'NoneType'".
+                prompt_token_ids_arr = np.array(
+                    getattr(final_output, "prompt_token_ids", None) or [],
+                    dtype=np.int32)
                 cum_logprob = float(
                     getattr(output_choice, "cumulative_logprob", 0.0) or 0.0)
 
@@ -194,6 +203,7 @@ class RLVllmSampler:
                     request_id=req_id,
                     text=text,
                     token_ids=token_ids_arr,
+                    prompt_token_ids=prompt_token_ids_arr,
                     logprobs=logprobs_arr,
                     cumulative_logprob=cum_logprob,
                     routed_experts=routed_experts,
@@ -211,6 +221,7 @@ class RLVllmSampler:
                 request_id=req_id,
                 text="",
                 token_ids=np.zeros(0, dtype=np.int32),
+                prompt_token_ids=np.zeros(0, dtype=np.int32),
                 logprobs=None,
                 cumulative_logprob=0.0,
                 routed_experts=None,
@@ -229,6 +240,7 @@ class RLVllmSampler:
                 request_id=req_id,
                 text="",
                 token_ids=np.zeros(0, dtype=np.int32),
+                prompt_token_ids=np.zeros(0, dtype=np.int32),
                 logprobs=None,
                 cumulative_logprob=0.0,
                 routed_experts=None,

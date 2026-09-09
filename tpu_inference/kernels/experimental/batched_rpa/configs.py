@@ -77,6 +77,11 @@ class ServingConfigs:
     scale_k: int | None = None
     scale_v: int | None = None
     kv_layout: KVLayout = KVLayout.HEAD_ALONG_SUBLANE
+    decode_query_size: int = 1
+
+    @property
+    def max_decode_bkv_p_new(self) -> int:
+        return 1 + pl.cdiv(self.decode_query_size - 1, self.page_size)
 
     @property
     def pages_per_seq(self) -> int:
@@ -222,7 +227,7 @@ class RpaConfigs:
     @property
     def bkv_p_new(self) -> int:
         if self.mode == RpaCase.DECODE:
-            return 1
+            return min(self.serve.max_decode_bkv_p_new, self.bkv_p)
         if self.serve.kv_layout == KVLayout.SEQ_ALONG_LANE:
             return self.bkv_p + 1
         return self.bkv_p

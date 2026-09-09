@@ -190,6 +190,12 @@ class RaidenWorkerSync:
                 unsafe_skip_buffer_lock=True,
                 listener_port=0,
                 bind_ip=None,
+                # Ingest each slice as it lands. At the default (False), h2d()
+                # unpacks whatever is staged when it is called, installing
+                # in-flight tensors torn -- silently, as checksums that are
+                # partway between the initial and synced values. Matches how
+                # tunix's in-process destination already binds.
+                auto_h2d=True,
             )
         else:
             self._sync.bind_weights(self.arrays)
@@ -213,15 +219,24 @@ class RaidenWorkerSync:
         return getter() if getter is not None else {}
 
     def checksums(self, sample: int = 3) -> dict:
-        """Per-tensor float32 abs-sums for cross-process verification."""
+        """Per-tensor float32 abs-sums for cross-process verification.
+
+        `__grand_total__` covers every bound tensor: a three-tensor sample
+        says nothing about how much of the model actually arrived.
+        """
 
         def total(arr):
             return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
 
-        return {
+        out = {
             name: total(arr)
             for name, arr in list(zip(self.names, self.arrays))[:sample]
         }
+        out["__grand_total__"] = sum(total(arr) for arr in self.arrays)
+        # Totals only compare if both sides bound the same tensors.
+        out["__tensor_count__"] = len(self.arrays)
+        out["__element_count__"] = int(sum(a.size for a in self.arrays))
+        return out
 
     def metadata_dict(self) -> dict:
         """Wire-safe registration metadata, shaped for tunix's

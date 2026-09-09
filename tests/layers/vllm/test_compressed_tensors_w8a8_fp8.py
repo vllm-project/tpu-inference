@@ -468,6 +468,5 @@ def test_blockwise_config_construction():
                                               linear_config=mock_linear_config)
 
     assert scheme.weight_block_size == [128, 128]
-    assert scheme.cutlass_block_fp8_supported is False
     assert not scheme.use_aiter_and_is_supported
     assert scheme.act_q_group_shape == (1, 128)

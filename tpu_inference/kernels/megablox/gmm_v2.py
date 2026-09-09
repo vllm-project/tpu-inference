@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# NOTE: This is a stale version. For all new development on this kernel, please
+# develop in the tokamax repo tokamax/_src/ops/experimental/gmm_v2/gmm_v2.py
+
 import dataclasses
 import functools
 from abc import ABC, abstractmethod

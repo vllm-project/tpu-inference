@@ -96,7 +96,7 @@ class VllmDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             num_kv_heads=1,
             head_size=align_to(128 + 1, 128),
             dtype=torch.uint8,
-            compress_ratio=self.compress_ratio,
+            tokens_per_state=self.compress_ratio,
             # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
             # the indexer's compressor state cache. V3.2 keeps the legacy layout.
             alignment=None,

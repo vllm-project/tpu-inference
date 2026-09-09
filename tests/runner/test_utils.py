@@ -14,9 +14,10 @@ from jax._src.interpreters import pxla
 from jax._src.pallas.utils import next_power_of_2
 
 from tpu_inference.runner.utils import (
-    PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR, AggregatedStatsLogger,
-    ForbidCompile, InferencePhase, LatencyTracker, PhasedBasedProfiler,
-    determine_phase_from_batch_composition_stats, get_batch_composition_stats,
+    MAX_TRACED_REQUEST_IDS, PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR,
+    AggregatedStatsLogger, ForbidCompile, InferencePhase, LatencyTracker,
+    PhasedBasedProfiler, determine_phase_from_batch_composition_stats,
+    extract_request_ids_for_tracing, get_batch_composition_stats,
     get_padded_num_reqs_with_upper_limit, get_padded_token_len,
     get_req_paddings, get_token_paddings)
 
@@ -98,6 +99,41 @@ def test_get_paddings():
     actual_paddings = get_token_paddings(min_token_size, max_token_size,
                                          padding_gap)
     assert actual_paddings == expected_paddings
+
+
+def _tracing_batch(num_reqs):
+    input_batch = MagicMock()
+    input_batch.num_reqs = num_reqs
+    input_batch.req_ids = [f"cmpl-{i}" for i in range(num_reqs)]
+    scheduler_output = MagicMock()
+    scheduler_output.num_scheduled_tokens = {
+        rid: 1
+        for rid in input_batch.req_ids
+    }
+    return input_batch, scheduler_output
+
+
+def test_extract_request_ids_for_tracing():
+    input_batch, scheduler_output = _tracing_batch(3)
+    scheduler_output.num_scheduled_tokens["cmpl-1"] = 0
+    kwargs = extract_request_ids_for_tracing(input_batch, scheduler_output)
+    # Requests with nothing scheduled this step are skipped; numbering is
+    # contiguous over the traced ones.
+    assert kwargs == {"request_id1": "cmpl-0", "request_id2": "cmpl-2"}
+
+
+def test_extract_request_ids_for_tracing_caps_kwargs():
+    num_reqs = MAX_TRACED_REQUEST_IDS + 500
+    input_batch, scheduler_output = _tracing_batch(num_reqs)
+    kwargs = extract_request_ids_for_tracing(input_batch, scheduler_output)
+    assert len(kwargs) == MAX_TRACED_REQUEST_IDS
+    assert kwargs["request_id1"] == "cmpl-0"
+    assert kwargs[f"request_id{MAX_TRACED_REQUEST_IDS}"] == (
+        f"cmpl-{MAX_TRACED_REQUEST_IDS - 1}")
+    # nanobind rejects calls with more than 1024 keyword arguments; the
+    # capped mapping must still be accepted by TraceAnnotation.
+    with jax.profiler.TraceAnnotation("execute_model", **kwargs):
+        pass
 
 
 def test_get_padded_token_len():

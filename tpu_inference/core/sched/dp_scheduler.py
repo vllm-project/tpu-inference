@@ -159,6 +159,16 @@ def _scheduler_worker_process(
     import gc
     atexit._clear()
     gc.enable()
+    cache_config = getattr(vllm_config, "cache_config", None)
+    if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+        from tpu_inference.core.hybrid_coordinator import (
+            install_hybrid_coordinator_hooks, set_mamba_num_blocks)
+        install_hybrid_coordinator_hooks(vllm_config)
+        mamba_num_blocks = getattr(kv_cache_config, "mamba_num_blocks", None)
+        if mamba_num_blocks is not None:
+            set_mamba_num_blocks(mamba_num_blocks)
+            cache_config.mamba_num_blocks = mamba_num_blocks
+
     # Initialize the scheduler in this process
     import inspect
     sig = inspect.signature(original_scheduler_cls)
@@ -228,6 +238,9 @@ def _scheduler_worker_process(
                     model_runner_output = data
                     scheduler_output = _cached_scheduler_outputs.popleft()
 
+                    # Tokens removed by the rewrite below, per request.
+                    shortfalls: Dict[str, int] = {}
+
                     if model_runner_output.sampled_token_ids:
                         # Synchronize the locally cached `num_scheduled_tokens` with the actual
                         # count of generated tokens from the continue-decode multi-step execution.
@@ -243,11 +256,39 @@ def _scheduler_worker_process(
                                 num_sampled = len(model_runner_output.
                                                   sampled_token_ids[req_idx])
                                 if num_sampled > 0:
+                                    original = (scheduler_output.
+                                                num_scheduled_tokens[req_id])
+                                    if original != num_sampled:
+                                        shortfalls[req_id] = (original -
+                                                              num_sampled)
                                     scheduler_output.num_scheduled_tokens[
                                         req_id] = num_sampled
 
                     result = scheduler.update_from_output(
                         scheduler_output, model_runner_output)
+
+                    # Track in-flight and stale output tokens on the
+                    # SCHEDULED count, not the SAMPLED count.
+                    # _update_after_schedule (vllm scheduler.py) adds the
+                    # scheduled count to num_in_flight_tokens, but
+                    # update_from_output subtracts the sampled count the
+                    # overwrite above left there, and the difference stays
+                    # attached to the request.
+                    #
+                    # Preemption copies that difference into
+                    # num_stale_output_tokens, and schedule()
+                    # then parks the request forever, waiting on output
+                    # tokens that never arrive.
+                    for req_id, shortfall in shortfalls.items():
+                        request = scheduler.requests.get(req_id)
+                        if request is None:
+                            continue  # finished and dropped during the update
+                        request.num_in_flight_tokens = max(
+                            0, request.num_in_flight_tokens - shortfall)
+                        if request.num_stale_output_tokens > 0:
+                            request.num_stale_output_tokens = max(
+                                0, request.num_stale_output_tokens - shortfall)
+
                     _send_result(result)
 
                 case SchedulerCommand.GET_GRAMMAR_BITMASK:
@@ -554,10 +595,16 @@ class DPScheduler(SchedulerInterface):
         multiprocessing.active_children()
 
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
+        # mamba_num_blocks is computed during device HBM profiling and written to
+        # vllm_config.cache_config. Symmetrically partition across DP ranks.
+        mamba_num_blocks = getattr(self.vllm_config.cache_config,
+                                   "mamba_num_blocks", None)
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)
             rank_kv_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
+            if mamba_num_blocks is not None:
+                rank_kv_config.mamba_num_blocks = mamba_num_blocks // self.dp_size
             self.per_rank_kv_cache_configs.append(rank_kv_config)
 
     def _send_command(self,
