@@ -1798,6 +1798,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         # Limit max_decode_steps to not cross block boundaries
         max_decode_steps = min(self.static_max_decode_steps, min_remaining)
+        if envs.GANG_SYMMETRIC_DISPATCH:
+            # Gang-symmetric dispatch: pin the per-step decode count so every
+            # process runs the same number of decode Executes (min_remaining is
+            # data-dependent and would desync the gang). The caller must ensure
+            # max_model_len >= max_prompt + static_max_decode_steps so this does
+            # not overrun a KV block boundary.
+            max_decode_steps = self.static_max_decode_steps
         if max_decode_steps <= 0:
             max_decode_steps = 1
         max_decode_steps_arr = jnp.array(max_decode_steps, dtype=jnp.int32)
