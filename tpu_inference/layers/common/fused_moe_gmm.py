@@ -42,7 +42,13 @@ TARGET_SLOT_CHUNK_SIZE = 2048
 
 
 def _invert_permutation(permutation: jax.Array) -> jax.Array:
-    """Construct the exact inverse of a one-dimensional permutation."""
+    """Construct the exact inverse of a one-dimensional permutation.
+
+    Precondition: `permutation` must be a valid 1D permutation (bijection) of
+    integers in the range `[0, permutation.size - 1]`. For any permutation `p`,
+    the inverse permutation satisfies `inv_p[p[i]] = i`, which can be computed
+    directly with a single scatter update `inverse.at[permutation].set(positions)`.
+    """
     inverse = jnp.zeros_like(permutation)
     positions = jnp.arange(permutation.size, dtype=permutation.dtype)
     return inverse.at[permutation].set(positions)
