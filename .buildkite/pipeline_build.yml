@@ -20,7 +20,15 @@
       - exit_status: "*"
         limit: 3
   commands:
-    - exit 1
+    - |
+      echo "=== CURRENT BUILDKITE RETRY COUNT: $${BUILDKITE_RETRY_COUNT:-0} ==="
+      if [ "$${BUILDKITE_RETRY_COUNT:-0}" -lt 3 ]; then
+        echo "Failing step to trigger next retry..."
+        exit 1
+      else
+        echo "SUCCESS: Reached retry attempt 3! Pipeline retry is working properly."
+        exit 0
+      fi
     # - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
 steps:
