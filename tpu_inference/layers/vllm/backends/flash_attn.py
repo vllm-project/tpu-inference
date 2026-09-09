@@ -251,11 +251,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
                 q_scale = k_scale = v_scale = None
                 if self.kv_cache_quantized_dtype:
-                    # Quantize K and V views
-                    k_jax, v_jax = quantize_kv(self.kv_cache_quantized_dtype,
-                                               k_jax, v_jax,
-                                               layer._k_scale_float,
-                                               layer._v_scale_float)
+                    if k_jax is not None:
+                        # Quantize K and V views
+                        k_jax, v_jax = quantize_kv(
+                            self.kv_cache_quantized_dtype, k_jax, v_jax,
+                            layer._k_scale_float, layer._v_scale_float)
                     k_scale = layer._k_scale_float
                     v_scale = layer._v_scale_float
 
@@ -353,8 +353,8 @@ def _format_attention_output(
 def _jax_attn_func(
     kv_cache: jax.Array,
     q: jax.Array,
-    k: jax.Array,
-    v: jax.Array,
+    k: jax.Array | None,
+    v: jax.Array | None,
     sinks: jax.Array | None,
     attention_metadata: AttentionMetadata,
     shared_attention_metadata: SharedAttentionMetadata,
@@ -371,6 +371,10 @@ def _jax_attn_func(
     update_kv_cache: bool = True,
 ) -> Tuple[jax.Array, jax.Array]:
     q_len = q.shape[0]
+    if k is None or v is None:
+        assert not update_kv_cache, "only KV-shared layers may omit k/v"
+        k = v = jnp.zeros((q_len, num_kv_heads * head_size),
+                          dtype=kv_cache.dtype)
     q, k, v = _prepare_qkv_layout(q, k, v, num_heads, num_kv_heads, head_size)
 
     new_kv_cache, outputs = attention(
