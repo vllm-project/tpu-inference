@@ -22,8 +22,12 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 from tpu_inference.runner.pcp_utils import (PCPPreprocessor, pcp_batch_layout,
                                             pcp_buffer_tokens,
                                             pcp_max_buffer_tokens,
-                                            pcp_seq_arrays, pcp_token_layout,
+                                            pcp_page_order, pcp_seq_arrays,
+                                            pcp_token_layout,
                                             pcp_token_permutation)
+
+# KV page size the production layout aligns chunks to (cache block_size).
+PAGE = 16
 
 # (pcp_size, scheduled tokens per request)
 LAYOUTS = [
@@ -38,13 +42,14 @@ LAYOUTS = [
 
 def _t_pad(counts, pcp):
     """A power-of-two bucket that holds the layout and is divisible by 2P."""
-    return next_power_of_2(max(pcp_buffer_tokens(counts, pcp), 2 * pcp))
+    return next_power_of_2(
+        max(pcp_buffer_tokens(counts, pcp, align=PAGE), 2 * pcp))
 
 
 def _layout(counts, pcp):
     """(t_pad, chunk, off) of a batch in the bucket `_t_pad` picks."""
     t_pad = _t_pad(counts, pcp)
-    chunk, off = pcp_batch_layout(counts, t_pad, pcp)
+    chunk, off = pcp_batch_layout(counts, t_pad, pcp, align=PAGE)
     return t_pad, chunk, off
 
 
@@ -66,7 +71,7 @@ def test_batch_layout(pcp, counts):
         # Single request: the chunk comes from the buffer width.
         assert chunk == [t_pad // (2 * pcp)] and off == [0]
     else:
-        assert (chunk, off) == pcp_token_layout(counts, pcp)[:2]
+        assert (chunk, off) == pcp_token_layout(counts, pcp, align=PAGE)[:2]
 
 
 def test_batch_layout_rejects_short_buffer():
@@ -124,7 +129,7 @@ def test_prepare_inputs(pcp, counts):
     if len(jax.devices()) < pcp:
         pytest.skip(f"needs {pcp} devices")
     mesh = Mesh(np.array(jax.devices()[:pcp]), ("pcp", ))
-    pre = PCPPreprocessor(pcp, mesh, [1, 8])
+    pre = PCPPreprocessor(pcp, mesh, [1, 8], PAGE)
 
     t_pad, chunk, off = _layout(counts, pcp)
     n_reqs = len(counts)
@@ -170,6 +175,14 @@ def test_prepare_inputs(pcp, counts):
     assert md.has_cached_kv == (max(computed) > 0)
     assert md.num_reqs == (1 if n_reqs == 1 else 8)
     assert np.array_equal(np.asarray(md.kv_token_order), kv_order)
+    if n_reqs > 1:
+        # The kernel unshuffles through the per-page map; a single request
+        # gets an empty one and keeps the kernel-side remap.
+        assert np.array_equal(
+            np.asarray(md.kv_page_order),
+            pcp_page_order(chunk, off, pcp, t_pad // pcp, t_pad, PAGE))
+    else:
+        assert np.asarray(md.kv_page_order).shape == (0, )
     assert np.array_equal(
         np.asarray(md.kv_new_starts)[:n_seqs],
         np.repeat([pcp * o for o in off], 2))
@@ -179,7 +192,7 @@ def test_prepare_inputs_rejects_decode():
     if len(jax.devices()) < 2:
         pytest.skip("needs 2 devices")
     mesh = Mesh(np.array(jax.devices()[:2]), ("pcp", ))
-    pre = PCPPreprocessor(2, mesh, [1, 8])
+    pre = PCPPreprocessor(2, mesh, [1, 8], PAGE)
     # Rejected before any buffer is touched, so shapes do not matter.
     buf = np.zeros(16, np.int32)
     with pytest.raises(NotImplementedError):

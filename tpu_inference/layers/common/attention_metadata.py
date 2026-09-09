@@ -22,7 +22,7 @@ import jax
     jax.tree_util.register_dataclass,
     data_fields=[
         "query_start_loc", "kv_cache_lens", "q_pos_offsets", "kv_new_starts",
-        "kv_token_order"
+        "kv_token_order", "kv_page_order"
     ],
     meta_fields=["has_cached_kv", "num_reqs"],
 )
@@ -46,6 +46,13 @@ class PCPMetadata:
     # (padded_num_tokens,) int32 — permutation taking the all-gathered current
     # K/V from rank order to request-major token order.  Replicated (P()).
     kv_token_order: jax.Array
+    # (padded_num_tokens // page_size,) int32 — per-page map from token-order
+    # pages of the all-gathered current K/V to the pages holding them in rank
+    # order (`pcp_page_order`).  Replicated (P()).  With several requests the
+    # kernel unshuffles through it during its KV fetch; a single request
+    # passes an empty array and keeps the kernel-side arithmetic remap or the
+    # `kv_token_order` gather.
+    kv_page_order: jax.Array
     # STATIC (meta field): whether any request in the batch has cached KV.
     # False elides the cache phase entirely.  REQUIRED: a default would
     # silently elide the cache phase for any caller that forgot to set it.
