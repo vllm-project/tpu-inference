@@ -56,16 +56,7 @@ BLOCK_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
 
 
 def _describe_signature(kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Keep only the scalars that identify a precompilation variant.
-
-    `_run_compilation`'s `**kwargs` are descriptive -- the lowering itself uses
-    `*args` and `call_kwargs` -- so they exist to name the padding combination
-    being compiled, e.g. `{'num_tokens': 64, 'num_reqs': 64}`. Callers also
-    hand it payload objects (`_precompile_backbone` passes a whole
-    `SharedAttentionMetadata`), whose repr dumps every element of its JAX
-    arrays into the log, once per combination. Drop anything that isn't a
-    scalar: it identifies nothing and buries the line it belongs to.
-    """
+    """Keep only the scalars that identify a precompilation variant."""
     return {
         k: v
         for k, v in kwargs.items()
