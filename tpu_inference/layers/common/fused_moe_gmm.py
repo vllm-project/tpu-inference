@@ -672,12 +672,18 @@ def fused_moe_func(
             topk_indices, global_num_experts)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
-        num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
         topk_argsort_indices = jnp.argsort(topk_indices_flat)
-        token_indices = jnp.arange(num_tokens_local,
-                                   dtype=jnp.int32).repeat(topk)
-        token_indices_sorted = token_indices[topk_argsort_indices]
+        # topk_indices_flat is flattened token-major, so flat index i maps to
+        # token i // topk. Hence token_indices_sorted == topk_argsort_indices //
+        # topk, computed directly to avoid materializing an arange().repeat()
+        # buffer plus a gather. Use a bit-shift when topk is a power of two.
+        topk_argsort_indices_i32 = topk_argsort_indices.astype(jnp.int32)
+        if topk & (topk - 1) == 0:
+            token_indices_sorted = topk_argsort_indices_i32 >> (
+                topk.bit_length() - 1)
+        else:
+            token_indices_sorted = topk_argsort_indices_i32 // topk
         # Below one_hot is equivalent to jnp.bincount(topk_indices_flat,
         # length=global_num_experts) but is more performant.
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
