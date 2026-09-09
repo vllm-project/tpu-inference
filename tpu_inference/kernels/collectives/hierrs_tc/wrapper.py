@@ -182,7 +182,18 @@ def _plan_work_scratch(local_seq_len, hidden_dim_size, itemsize, fp8_comm,
     # not, and none should reject one that does.
     if need + operand > capacity * _VMEM_TOTAL_SAFETY:
         _warn_work_scratch_off(work, capacity)
-        return False, vmem_frac
+        # HBM fallback for the WORK SET -- but do not inherit the fat 0.95
+        # claim for the scoped scratch that remains. The claim is what starves
+        # XLA's memory-space assignment: with 0.95 (60.8 of 64 MiB) MSA has
+        # ~3 MiB and colours nothing (the fusion-barrier 0/240), while a
+        # need-sized claim leaves it room to promote the operand and output to
+        # S(1) on its own -- measured: S(1) copies appear at every shape whose
+        # claim stays small, vanish at the 0.95 claim, and no annotation API
+        # is involved (with_memory_space_constraint compiles to identical HLO).
+        # 1.5x headroom on the scoped estimate; an underestimate fails loudly
+        # at compile time (CompileTimeScopedVmemOom), never silently.
+        scoped_frac = min(vmem_frac, (scoped * 1.5) / capacity)
+        return False, scoped_frac
     # Claim exactly what this shape needs, not a fixed fraction. Claiming more
     # steals alternate memory MSA needs to colour the operand; claiming less
     # raises CompileTimeScopedVmemOom.
@@ -236,11 +247,13 @@ def _pin_unsupported_once() -> None:
     if not _PIN_UNSUPPORTED_WARNED:
         _PIN_UNSUPPORTED_WARNED = True
         print(
-            "hierrs_tc: VMEM operand pinning disabled -- this JAX "
-            f"({jax.__version__}) rejects a Pallas memory-space annotation on "
-            "an aval that escapes into an ordinary primitive. The kernel runs "
-            "unpinned (correct, and the measured cost is ~0.3% on the fp8 wire "
-            "and ~2.2% on bf16). Set RS_VMEM_INPUT=2 to force the old path.",
+            "hierrs_tc: explicit VMEM operand annotation disabled (and known "
+            f"to be a no-op on this JAX ({jax.__version__}): "
+            "with_memory_space_constraint compiles to byte-identical HLO). "
+            "Operand/output colouring is done by XLA's memory-space assignment "
+            "instead, whenever the scoped-VMEM claim leaves it room -- see the "
+            "need-sized claims in _plan_work_scratch. "
+            "Set RS_VMEM_INPUT=2 to force the old annotation path.",
             flush=True)
 
 
