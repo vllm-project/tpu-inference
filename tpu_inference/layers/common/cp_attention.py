@@ -312,7 +312,8 @@ def pcp_forward(
     def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
                   kv_cache_lens_local, page_indices_local, distribution_local,
                   pcp_cu_q_lens_local, pcp_q_pos_offsets_local,
-                  kv_new_starts_local, kv_token_order_local):
+                  kv_new_starts_local, kv_token_order_local,
+                  kv_page_order_local):
         axis_idx = lax.axis_index(pcp_axis)
         cp_rank = jnp.reshape(axis_idx, (1, )).astype(jnp.int32)
 
@@ -373,16 +374,19 @@ def pcp_forward(
                 **common)
 
         # ---- Current phase ------------------------------------------------
-        # Local Q (head+tail chunks) attends the all-gathered current K/V.  A
-        # single request with a page-aligned chunk hands the kernel the
-        # rank-order buffer and lets it remap addresses (pcp_chunk_size);
-        # otherwise the gathered K/V is reordered into request-major token
-        # order here, which is what kv_new_starts indexes.
+        # Local Q (head+tail chunks) attends the all-gathered current K/V.
+        # With several requests every chunk is a page multiple, so the kernel
+        # unshuffles the rank-order buffer itself through the kv_page_order
+        # map during its KV fetch; no gather pass here.  A single request
+        # with a page-aligned chunk instead lets the kernel remap addresses
+        # (pcp_chunk_size); otherwise the gathered K/V is reordered into
+        # request-major token order here, which is what kv_new_starts
+        # indexes.
         page_size = kv_cache_local.shape[1]
         remap_kv = not multi_req and C >= page_size and C % page_size == 0
         k_curr = all_gather_tokens(k_local)
         v_curr = all_gather_tokens(v_local)
-        if not remap_kv:
+        if not multi_req and not remap_kv:
             k_curr = jnp.take(k_curr, kv_token_order_local, axis=0)
             v_curr = jnp.take(v_curr, kv_token_order_local, axis=0)
         # Each request's tail seq performs the fused strided KV write.
@@ -404,6 +408,7 @@ def pcp_forward(
             q_pos_offsets=pcp_q_pos_offsets_local[0],
             kv_new_starts=None if remap_kv else kv_new_starts_local,
             kv_write_seq_mask=kv_write_seq_mask,
+            kv_page_order=kv_page_order_local if multi_req else None,
             pcp_chunk_size=C if remap_kv else None,
             skip_cache_attn=True,
             use_causal_mask=use_causal_mask,
@@ -434,9 +439,10 @@ def pcp_forward(
             P(pcp_axis, None),  # pcp.q_pos_offsets: per-rank position offsets
             P(),  # pcp.kv_new_starts: replicated
             P(),  # pcp.kv_token_order: replicated
+            P(),  # pcp.kv_page_order: replicated
         ),
         out_specs=(kv_cache_spec, q_spec),
         check_vma=False,
     )(q, k, v, kv_cache, md.seq_lens, md.pcp.kv_cache_lens, md.block_tables,
       md.request_distribution, md.pcp.query_start_loc, md.pcp.q_pos_offsets,
-      md.pcp.kv_new_starts, md.pcp.kv_token_order)
+      md.pcp.kv_new_starts, md.pcp.kv_token_order, md.pcp.kv_page_order)

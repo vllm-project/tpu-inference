@@ -326,6 +326,8 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         kv_order = (inv_row[:, None] * C + np.arange(C)[None, :]).reshape(-1)
         kv_starts = put(jnp.zeros((MAX_SEQ, ), jnp.int32), P())
         kv_order = put(jnp.asarray(kv_order, jnp.int32), P())
+        # Empty page map, as the runner passes for a single request.
+        kv_pages = put(jnp.zeros((0, ), jnp.int32), P())
         fns = {}
 
         def fn_for(has_cached_kv):
@@ -345,6 +347,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                         q_pos_offsets=pcp_qp,
                                         kv_new_starts=kv_starts,
                                         kv_token_order=kv_order,
+                                        kv_page_order=kv_pages,
                                         has_cached_kv=_hc),
                     )
                     cache, out = pcp_forward(mesh,

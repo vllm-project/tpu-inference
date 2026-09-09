@@ -38,7 +38,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
-from tpu_inference.runner.pcp_utils import pcp_seq_arrays, pcp_token_layout
+from tpu_inference.runner.pcp_utils import (pcp_page_order, pcp_seq_arrays,
+                                            pcp_token_layout)
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -404,9 +405,29 @@ class CompilationManager:
             # A well-formed dummy layout: request_distribution is all zeros,
             # so the kernel body does not run, but the traced program still
             # slices these arrays.
-            chunk = num_tokens // (2 * pcp_size * pcp_num_reqs)
-            chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
-                                               pcp_num_reqs, pcp_size)
+            block = self.runner.block_size
+            page_order_np = np.zeros(0, np.int32)
+            if pcp_num_reqs > 1:
+                # Largest page-multiple chunk that fits every request.
+                chunk = (num_tokens // (2 * pcp_size * pcp_num_reqs) //
+                         block * block)
+                assert chunk >= block, (
+                    f"{num_tokens=} cannot hold {pcp_num_reqs} PCP requests "
+                    "with page-multiple chunks; this bucket should have been "
+                    "skipped")
+                chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
+                                                   pcp_num_reqs,
+                                                   pcp_size,
+                                                   align=block)
+                # A real in-range map: the kernel prefetches these as page
+                # indices even though no seq iterates during precompile.
+                page_order_np = pcp_page_order(chunks, offs, pcp_size,
+                                               num_tokens // pcp_size,
+                                               num_tokens, block)
+            else:
+                chunk = num_tokens // (2 * pcp_size)
+                chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk],
+                                                   pcp_size)
             cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
                 chunks, offs, pcp_size, attn_seqs)
             pcp = self.runner.pcp_preprocessor.metadata_to_device(
@@ -415,6 +436,7 @@ class CompilationManager:
                 np.zeros(attn_seqs, dtype=np.int32),
                 kv_starts_np,
                 np.arange(num_tokens, dtype=np.int32),
+                page_order_np,
                 has_cached_kv=pcp_has_cached_kv,
                 num_reqs=pcp_num_reqs,
             )
@@ -708,10 +730,13 @@ class CompilationManager:
                 _cache_rungs = (False, True) if _pcp > 1 else (False, )
                 for _has_cached_kv in _cache_rungs:
                     for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
-                        # A bucket that cannot give every request one token
-                        # per chunk never carries that many requests.
-                        if (_pcp_reqs > 1
-                                and num_tokens < 2 * _pcp * _pcp_reqs):
+                        # A bucket that cannot give every request a chunk of
+                        # at least one KV page per rank can never carry that
+                        # many requests at runtime (chunks are page
+                        # multiples), so the variant is unreachable.
+                        if (_pcp_reqs > 1 and num_tokens <
+                                2 * _pcp * self.runner.block_size *
+                                _pcp_reqs):
                             continue
                         self._precompile_backbone_helper(
                             f"worker{self.runner.rank} backbone",
