@@ -22,13 +22,13 @@
   commands:
     - |
       echo "=== BUILD ATTEMPT: $(( $${BUILDKITE_RETRY_COUNT:-0} + 1 )) (Retry count: $${BUILDKITE_RETRY_COUNT:-0} / 3) ==="
-      if [ "$${BUILDKITE_RETRY_COUNT:-0}" -ge 3 ]; then
-        echo "🚨 Reached max retries (tried 3 retries) and STILL FAILING! Exiting with status 1."
-      else
-        echo "⚠️  Attempt failed. Buildkite will trigger retry #$(( $${BUILDKITE_RETRY_COUNT:-0} + 1 ))..."
+      if [ "$${BUILDKITE_RETRY_COUNT:-0}" -lt 3 ]; then
+        echo "🚨 Simulated failure on attempt $(( $${BUILDKITE_RETRY_COUNT:-0} + 1 )). Failing to trigger retry..."
+        exit 1
       fi
-      exit 1
-    # - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+      echo "✅ Reached retry count 3! Now running original Docker build..."
+      source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"
 
 steps:
   - group: "Build Docker Images"
