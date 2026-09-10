@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES: int = 64
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
     # Empty (default) = use the built-in tuned/heuristic sizes.
@@ -357,6 +358,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Candidates each tensor-parallel shard keeps for vocab-sharded sampling.
+    # Rows with 0 < top_k <= this value are sampled exactly; a batch with a
+    # larger top_k falls back to sampling over the full vocab. Raise it if
+    # your requests use a larger top_k; larger values only grow the merge.
+    "VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES":
+    lambda: int(os.getenv("VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES") or "64"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
     # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
     # built-in tuned/heuristic sizes. Lets operators retune the decode

@@ -235,6 +235,11 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", "8")
     assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 8
 
+    # Test VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES (default 64)
+    assert envs.VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES == 64
+    monkeypatch.setenv("VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES", "128")
+    assert envs.VOCAB_SHARDED_SAMPLING_NUM_CANDIDATES == 128
+
 
 def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     # Test case sensitive choices

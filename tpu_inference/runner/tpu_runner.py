@@ -63,7 +63,7 @@ from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap,
     _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
-    compute_prompt_logprobs, sample)
+    compute_prompt_logprobs, sample, vocab_sharded_sampling_allowed)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -2009,6 +2009,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         processed_bonus_logits = None
+        vocab_sharded = vocab_sharded_sampling_allowed(
+            tpu_sampling_metadata.logprobs, self.model_config.logprobs_mode)
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
@@ -2017,6 +2019,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.mesh,
                     logits,
                     tpu_sampling_metadata,
+                    vocab_sharded=vocab_sharded,
                 )
         else:
             if tpu_sampling_metadata.do_sampling:
@@ -2032,6 +2035,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh,
                 bonus_logits,
                 tpu_sampling_metadata,
+                vocab_sharded=vocab_sharded,
             )
             target_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.target_logits_indices, self.mesh,

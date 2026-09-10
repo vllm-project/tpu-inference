@@ -132,6 +132,9 @@ def _decode_core_impl(
     continue_decode_eos_check_interval: int = 1,
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
+    from tpu_inference.layers.jax.sample.sampling import \
+        vocab_sharded_sampling_allowed
+    vocab_sharded = vocab_sharded_sampling_allowed(has_logprobs, logprobs_mode)
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
@@ -166,8 +169,11 @@ def _decode_core_impl(
         )
         logits = compute_logits_fn(state, hidden_states, None)
         logits = logits.astype(jnp.float32)
-        next_tokens, processed_logits = sample_fn(step_rng, mesh, logits,
-                                                  sampling_metadata)
+        next_tokens, processed_logits = sample_fn(step_rng,
+                                                  mesh,
+                                                  logits,
+                                                  sampling_metadata,
+                                                  vocab_sharded=vocab_sharded)
         (new_active_mask, next_input_ids, new_positions, new_seq_lens,
          step_record_tokens, any_hit_eos) = _update_loop_state(
              next_tokens,
