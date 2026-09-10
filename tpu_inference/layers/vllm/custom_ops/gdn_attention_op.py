@@ -14,6 +14,7 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 # NOTE: we don't specify this in our requirements.txt but it should be coming
 # from upstream vLLM
@@ -84,6 +85,26 @@ def gdn_attention_core_tpu(
     j_b = jax_view(b)
     j_a = jax_view(a)
 
+    # Under PCP the runner lays the token buffer out in head-tail rank order
+    # (tpu_runner row_perm) so attention ranks get contiguous chunks.  The GDN
+    # scan is sequential over tokens, so restore token order here and permute
+    # the output back below.  Tokens are replicated across pcp in the GDN
+    # domain (DENSE_DATA sharding), so both permutes are local gathers.
+    pcp_size = get_mesh_shape_product(mesh, ShardingAxisName.PCP)
+    if pcp_size > 1:
+        two_p = 2 * pcp_size
+        pcp_chunk = j_mixed_qkv.shape[0] // two_p
+        row = np.array(
+            [c for r in range(pcp_size) for c in (r, two_p - 1 - r)])
+        inv = np.empty_like(row)
+        inv[row] = np.arange(two_p)
+        tok_order = (jnp.arange(two_p)[inv, None] * pcp_chunk +
+                     jnp.arange(pcp_chunk)[None, :]).reshape(-1)
+        rank_order = (jnp.arange(two_p)[row, None] * pcp_chunk +
+                      jnp.arange(pcp_chunk)[None, :]).reshape(-1)
+        j_b = j_b[tok_order]
+        j_a = j_a[tok_order]
+
     j_conv_weight = jax_view(layer_module.conv1d.weight)
     j_conv_bias = jax_view(layer_module.conv1d.bias
                            ) if layer_module.conv1d.bias is not None else None
@@ -95,13 +116,15 @@ def gdn_attention_core_tpu(
     # Use reorder_concatenated_tensor_for_sharding to reorder into correct layout
     key_dim = n_kq * d_k
     value_dim = n_v * d_v
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
-    dp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA)
+    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.DENSE_TENSOR)
+    dp_size = get_mesh_shape_product(mesh, ShardingAxisName.DENSE_DATA)
 
     j_mixed_qkv = reorder_concatenated_tensor_for_sharding(
         j_mixed_qkv, [key_dim, key_dim, value_dim], tp_size, -1)
     j_conv_weight = reorder_concatenated_tensor_for_sharding(
         j_conv_weight, [key_dim, key_dim, value_dim], tp_size, 0)
+    if pcp_size > 1:
+        j_mixed_qkv = j_mixed_qkv[tok_order]
 
     layer_idx = vllm_context.layer_name_to_kvcache_index[layer_name]
     conv_state, recurrent_state = vllm_context.kv_caches[layer_idx]
@@ -186,6 +209,8 @@ def gdn_attention_core_tpu(
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
      )
+    if pcp_size > 1:
+        j_output = j_output[rank_order]
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
         new_conv_state = jnp.concatenate(

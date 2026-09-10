@@ -20,6 +20,7 @@ import jax
 
 from tpu_inference.layers.common.quantization.configs import \
     QuantLinearConfig as CommonQuantLinearConfig
+from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 
@@ -185,15 +186,23 @@ class QuantLinearConfig(CommonQuantLinearConfig):
             output_sizes = layer.output_sizes
         else:
             output_sizes = [math.prod(self.out_features)]
-        super().__init__(enable_sp=enable_sp, output_sizes=output_sizes)
-
-        # Update weight_sharding and bias_sharding for 2D matmul compatibility
+        # 2D matmul view of the weight; JAX-native layers work on tokens
+        # split over ATTN_DATA.
         if self.batch_features:
-            self.weight_sharding = _to_partition_spec(
-                weight.get_metadata().get("out_sharding", ()))
+            weight_sharding = _to_partition_spec(weight.get_metadata().get(
+                "out_sharding", ()))
         else:
-            self.weight_sharding = jax.sharding.PartitionSpec(
+            weight_sharding = jax.sharding.PartitionSpec(
                 *(self.in_features_sharding + self.out_features_sharding))
+        in_axis, = self.in_features_sharding
+        out_axis, = self.out_features_sharding
+        super().__init__(enable_sp=enable_sp,
+                         output_sizes=output_sizes,
+                         weight_sharding=weight_sharding,
+                         input_sharding=jax.sharding.PartitionSpec(
+                             ShardingAxisName.ATTN_DATA, in_axis),
+                         output_sharding=jax.sharding.PartitionSpec(
+                             ShardingAxisName.ATTN_DATA, out_axis))
 
         self.bias_sharding = jax.sharding.PartitionSpec(
             *self.out_features_sharding)

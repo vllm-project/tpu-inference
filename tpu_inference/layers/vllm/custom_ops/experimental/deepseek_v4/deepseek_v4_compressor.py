@@ -177,7 +177,7 @@ class VllmDeepseekCompressor(DeepseekCompressor):
                        if separate_state else None)
 
         data_spec = P(ShardingAxisName.ATTN_DATA)
-        cache_spec = P(ShardingAxisName.BATCH)
+        cache_spec = P(ShardingAxisName.DENSE_DATA)
         in_specs = (
             data_spec,  # hidden_states     [num_tokens, hidden_size]
             P(),  # wkv_wgate         [hidden_size, 2 * coff * head_dim]

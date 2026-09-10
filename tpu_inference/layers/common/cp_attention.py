@@ -22,6 +22,7 @@ from jax.sharding import PartitionSpec as P
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.utils import replicate_kv_heads_for_tp
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -174,23 +175,13 @@ def dcp_forward(
     dcp_size = mesh.shape[dcp_axis]
 
     # GQA/MQA: replicate KV heads to match ATTN_HEAD sharding before shard_map.
-    tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
-    if tp_size > 1:
-        num_kv_heads = k.shape[1]
-        if num_kv_heads < tp_size:
-            if tp_size % num_kv_heads != 0:
-                raise ValueError(
-                    f"tp_size {tp_size} must be divisible by num_kv_heads {num_kv_heads}"
-                )
-            factor = tp_size // num_kv_heads
-            k = jnp.repeat(k, factor, axis=1)
-            v = jnp.repeat(v, factor, axis=1)
+    k, v = replicate_kv_heads_for_tp(mesh, k, v)
 
     cp_rank_global = jnp.arange(dcp_size, dtype=jnp.int32)
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+    kv_cache_spec = P(ShardingAxisName.DENSE_DATA, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD, None, None)
     print(f"page_size={kv_cache.shape[1]}")
 
@@ -291,8 +282,12 @@ def pcp_forward(
       2. current phase         local Q (head+tail) attends all-gathered current KV
       3. merge_attn_states     lse-weighted combine
     """
-    pcp_axis = ShardingAxisName.PREFILL_CONTEXT
+    pcp_axis = ShardingAxisName.PCP
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
+
+    # GQA/MQA: replicate KV heads to match ATTN_HEAD sharding, mirroring
+    # dcp_forward — tp may exceed the head count (e.g. NKV=2 at tp=4).
+    k, v = replicate_kv_heads_for_tp(mesh, k, v)
     two_p = 2 * pcp_size
     padded_q_len = q.shape[0]
     C = padded_q_len // two_p
@@ -306,7 +301,7 @@ def pcp_forward(
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+    kv_cache_spec = P(ShardingAxisName.DENSE_DATA, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD, None, None)
 
     common = dict(sm_scale=sm_scale,
