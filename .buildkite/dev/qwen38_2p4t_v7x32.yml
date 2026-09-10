@@ -193,10 +193,12 @@ steps:
         # EVAL_SUITE=gpqa buys back the ~55 min accuracy leg, because
         # QUANTIZE_BF16_LINEAR_PATTERNS below does change what the model
         # computes and it is the whole question this build is asking. GPQA at
-        # xhigh is settled at 0.899-0.904 across tc#962 and #2, so that is the
-        # number to regress against; GSM8K and MMLU stay off (MMLU is not
-        # reproducible across hosts anyway -- unsorted os.listdir plus unseeded
-        # truncation).
+        # xhigh is settled at 0.899-0.904 across tc#962 and #2 with everything
+        # in bf16, and #17 got 0.9141 with fp8 weights -- but #17's activations
+        # stayed bf16 (see the block size note below), so the bf16 band, not
+        # #17, is the floor this run has to clear. GSM8K and MMLU stay off
+        # (MMLU is not reproducible across hosts anyway -- unsorted os.listdir
+        # plus unseeded truncation).
         #
         # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made tc#960's
         # eval unscoreable. The runner sizes the attention pool against mamba's
@@ -269,20 +271,33 @@ steps:
         # needs. Nothing else is touched: conv1d carries no quant_config,
         # and mlp.gate / the shared experts / embed / lm_head stay bf16.
         #
-        # QUANTIZE_BF16_LINEAR_BLOCK_SIZE=128 makes the scale blockwise along
-        # the input axis -- one fp32 scale per 128 input features per output
-        # feature, instead of one per output feature -- and routes the matmul
-        # to the blockwise gmm kernel, which is the only one that consumes such
-        # a scale without dequantizing the weight back to bf16 first. It is the
-        # granularity the checkpoint's own experts use, and the reason to spend
-        # it here is that these are exactly the layers per-channel scaling
-        # handles worst: the GDN projections carry per-head structure along the
-        # input axis that one scale per column has to cover with a single
-        # max. The cost is 4 bytes per 128 weights, ~3% of the fp8 weight bytes
-        # (~68 MiB/chip of the 2.13 GiB recovered). Every selected layer
-        # divides: in=8192 for qkv_proj/in_proj_qkvz/in_proj_ba (64 blocks,
+        # QUANTIZE_BF16_LINEAR_BLOCK_SIZE=256 makes the scale blockwise along
+        # the input axis -- one fp32 scale per 256 input features per output
+        # feature, instead of one per output feature. The reason to spend it
+        # here is that these are exactly the layers per-channel scaling handles
+        # worst: the GDN projections carry per-head structure along the input
+        # axis that one scale per column has to cover with a single max.
+        #
+        # 256, not the checkpoint's own 128, because the block size is also
+        # what decides whether an fp8 matmul happens at all. gmm_v2 dequantizes
+        # the weight back to bf16 in VMEM whenever the quant block is narrower
+        # than the MXU column (gmm_v2.py:257-263), and v7x's mxu_column_size is
+        # 256 (jax _src/pallas/mosaic/tpu_info.py:294). Below that the whole
+        # kernel runs bf16 and the activation is never quantized either
+        # (gmm_v2.py:1334 gates lhs quantization on the dequantize-after path).
+        # Build #17 ran at 128 and so bought the memory back without ever
+        # issuing an fp8 matmul, which is why its perf was flat. Probed on this
+        # hardware: 64/128 -> bf16, 256/512/1024 -> fp8 MXU, which on v7x is
+        # exactly 2x bf16 flops. 256 is the smallest value that qualifies, so
+        # it keeps the finest scale granularity the kernel can actually use.
+        #
+        # The cost is 4 bytes per 256 weights, ~1.5% of the fp8 weight bytes
+        # (~34 MiB/chip of the 2.13 GiB recovered). Every selected layer
+        # divides: in=8192 for qkv_proj/in_proj_qkvz/in_proj_ba (32 blocks,
         # column-parallel so the block axis is not sharded) and in=16384 for
-        # o_proj/out_proj (128 blocks over 16 contracting shards = 8 each).
+        # o_proj/out_proj (64 blocks over 16 contracting shards = 4 each).
+        # Note this is the first run in which activations are quantized on
+        # these layers, so #17's GPQA is not a like-for-like accuracy baseline.
         #
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -298,7 +313,7 @@ steps:
           'VLLM_INCREMENTAL_FP8_LOADING=1' \
           'MOE_STAGE_WEIGHTS_ON_HOST=1' \
           'QUANTIZE_BF16_LINEAR_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
-          'QUANTIZE_BF16_LINEAR_BLOCK_SIZE=128' \
+          'QUANTIZE_BF16_LINEAR_BLOCK_SIZE=256' \
           'VLLM_XLA_CHECK_RECOMPILATION=0' \
           'SKIP_JAX_PRECOMPILE=0' \
           'RUNAI_STREAMER_CONCURRENCY=64' \
