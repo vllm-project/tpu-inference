@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -70,6 +71,8 @@ class TestGemma4ForConditionalGeneration:
             (`embed_tokens_per_layer.weight` shape `[V_ple, L*P]`), so
             truncating L breaks weight load with a shape mismatch.
         """
+        gc.collect()
+        jax.clear_caches()
         kv_cache_type = "auto"
         vllm_config = mock_vllm_config(model_name, kv_cache_type)
         if truncate_layers is not None:
@@ -153,6 +156,9 @@ class TestGemma4ForConditionalGeneration:
                 ),
             )
         assert jax_output is not None
+        del model
+        gc.collect()
+        jax.clear_caches()
 
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
