@@ -108,7 +108,12 @@ def gmm_wrapper(lhs,
                 group_offset,
                 fuse_act=None,
                 preferred_element_type=None):
-    gmm_res = gmm_v2(
+    try:
+        from qwix._src.interception import disable_interceptions
+        target_gmm = disable_interceptions(gmm_v2)
+    except Exception:
+        target_gmm = gmm_v2
+    gmm_res = target_gmm(
         lhs=lhs,
         rhs=rhs,
         rhs_scale=rhs_scale,
@@ -118,6 +123,7 @@ def gmm_wrapper(lhs,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
+        acc_dtype=jnp.float32,
     )
     return gmm_res
 
