@@ -738,6 +738,7 @@ class TPUWorker(WorkerBase):
         self.bind_raiden_sync(
             worker_index=init_info.get("worker_index", 0),
             parallelism=init_info.get("parallelism", 4),
+            job_name=init_info.get("job_name", "rollout"),
         )
 
     def start_weight_update(self, free_kv_cache: bool = True) -> None:
@@ -807,7 +808,8 @@ class TPUWorker(WorkerBase):
 
     def bind_raiden_sync(self,
                          worker_index: int = 0,
-                         parallelism: int = 4) -> dict:
+                         parallelism: int = 4,
+                         job_name: str = "rollout") -> dict:
         """Binds this worker's live weights to Raiden and returns wire-safe
         registration metadata (never the arrays)."""
         from tpu_inference.rl import \
@@ -816,12 +818,27 @@ class TPUWorker(WorkerBase):
         state = self.get_weights_state()
         if self._raiden_rl_weight_sync is None:
             self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
-                job_name="rollout",
+                job_name=job_name,
                 worker_index=worker_index,
                 parallelism=parallelism,
             )
+        else:
+            # Re-bind: the transport is reused, but the caller may have moved
+            # this worker to a different Raiden job (per-replica job names), and
+            # metadata_dict() would otherwise re-register under the stale one.
+            self._raiden_rl_weight_sync.job_name = job_name
+            self._raiden_rl_weight_sync.worker_index = worker_index
         self._raiden_rl_weight_sync.bind(state)
         return self._raiden_rl_weight_sync.metadata_dict()
+
+    def refresh_model_state_leaves(self) -> None:
+        """Re-points the runner's dispatch view at the freshly synced weights.
+
+        `model_fn` takes `state_leaves` as its first argument; it is derived
+        from `state` at load time and goes stale once the weights behind
+        `state` are replaced.
+        """
+        self.model_runner.refresh_state_leaves()
 
     def get_raiden_metadata(self) -> dict:
         """Re-fetches the current binding's wire-safe metadata without rebinding."""
