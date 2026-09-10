@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 import jax
@@ -34,6 +33,8 @@ from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.utils.config_utils import \
+    is_equal_or_regex_match
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 
@@ -209,18 +210,14 @@ def _load_weight_for_layer(
 def _prefix_matches(prefix: str, patterns: Sequence[str]) -> bool:
     """Match a layer prefix against one of the QUANTIZE_BF16_LINEAR_PATTERNS.
 
-    A bare pattern matches the whole prefix or a dotted suffix of it, so
-    `o_proj` selects every layer named that. A `re:`-prefixed pattern is a
-    regex that has to match the prefix in full, following the convention
-    compressed-tensors uses for its own ignore lists.
+    Patterns follow the same convention as the `ignore` /
+    `modules_to_not_convert` lists these names are usually copied from: a bare
+    pattern is the whole layer name, and a `re:`-prefixed one is a regex
+    anchored at the start. To select every layer with a given suffix, spell the
+    regex out -- `re:.*\\.o_proj`.
     """
-    for pattern in patterns:
-        if pattern.startswith("re:"):
-            if re.fullmatch(pattern[len("re:"):], prefix):
-                return True
-        elif prefix == pattern or prefix.endswith(f".{pattern}"):
-            return True
-    return False
+    return any(
+        is_equal_or_regex_match(prefix, pattern) for pattern in patterns)
 
 
 def should_quantize_bf16_linear(
@@ -358,6 +355,19 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         if not _tensor_is_in_cpu(layer.weight):
             # Already processed and sharded.
             return
+        weight, bias = self._load_linear_weights(layer)
+        self._store_linear_weights(
+            layer, self._build_linear_weights(layer, weight, bias))
+
+    def _load_linear_weights(
+            self,
+            layer: torch.nn.Module) -> tuple[jax.Array, jax.Array | None]:
+        """Move the layer's weight and bias onto the mesh, freeing the host copy.
+
+        How a weight is loaded does not depend on what is done to it afterwards,
+        so subclasses inherit this unchanged and override
+        `_build_linear_weights` instead.
+        """
         # Under Pathways, shard weights directly onto the TPU mesh to avoid
         # placing a full unsharded copy on a single device (OOM).
         loading_sharding = NamedSharding(
@@ -379,6 +389,15 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             delattr(layer, 'bias')
         else:
             bias = None
+        return weight, bias
+
+    def _build_linear_weights(self, layer: torch.nn.Module, weight: jax.Array,
+                              bias: jax.Array | None) -> LinearWeights:
+        """Put the loaded weight into the layout its matmul expects.
+
+        The one step that differs between an unquantized layer and one quantized
+        at load time; loading, sharding and assignment are common to both.
+        """
 
         @jax.jit
         def process_unquantized_linear_weights(
@@ -397,7 +416,17 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
                 reorder_size=self.linear_config.n_shards,
             )
 
-        weights = process_unquantized_linear_weights(weight, bias)
+        return process_unquantized_linear_weights(weight, bias)
+
+    def _store_linear_weights(self, layer: torch.nn.Module,
+                              weights: LinearWeights) -> None:
+        """Shard the processed weights and hang them off the layer.
+
+        A scale is stored only when `_build_linear_weights` produced one, which
+        is what lets the quantized and unquantized paths share this step --
+        `shard_linear_weights` and `process_linear_weights` both leave a `None`
+        field alone.
+        """
         weights = torch_view(
             shard_linear_weights(
                 weights,
@@ -407,11 +436,16 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             ))
         if self.linear_config.fuse_matmuls:
             layer.weight = Parameter(weights.weight, requires_grad=False)
-            if bias is not None:
+            if weights.weight_scale is not None:
+                layer.weight_scale = Parameter(weights.weight_scale,
+                                               requires_grad=False)
+            if weights.bias is not None:
                 layer.bias = Parameter(weights.bias, requires_grad=False)
         else:
             layer.weight = to_parameter_list(weights.weight)
-            if bias is not None:
+            if weights.weight_scale is not None:
+                layer.weight_scale = to_parameter_list(weights.weight_scale)
+            if weights.bias is not None:
                 layer.bias = to_parameter_list(weights.bias)
 
     def apply(self,
@@ -455,9 +489,10 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
 
     Selected by QUANTIZE_BF16_LINEAR_PATTERNS. The weight arrives in the
     checkpoint dtype and is loaded exactly as the unquantized path loads it, so
-    everything about weight loading and sharding is inherited; the only
-    difference is that it is quantized on its way to the device, and the matmul
-    then comes from the fp8 path rather than the unquantized one.
+    everything about weight loading and sharding is inherited -- the one step
+    that differs is `_build_linear_weights`, which quantizes the weight on its
+    way to the device. The matmul then comes from the fp8 path rather than the
+    unquantized one.
 
     The scale is per output channel by default: a single value per column of the
     [in, out] weight, which stays valid under both column-parallel sharding (the
@@ -512,30 +547,9 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
                 f"Use a block size that leaves a multiple of {in_shards} "
                 f"blocks.")
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if not _tensor_is_in_cpu(layer.weight):
-            # Already processed and sharded.
-            return
-        loading_sharding = NamedSharding(
-            self.linear_config.mesh,
-            PartitionSpec(*self.linear_config.weight_sharding[::-1]))
-        weight = _load_weight_for_layer(layer, "weight", loading_sharding)
-        weight = jnp.transpose(weight)
+    def _build_linear_weights(self, layer: torch.nn.Module, weight: jax.Array,
+                              bias: jax.Array | None) -> LinearWeights:
         self._check_block_size(layer, weight.shape[0])
-
-        # Free CPU memory immediately
-        layer.weight.untyped_storage().resize_(0)
-        delattr(layer, 'weight')
-        if layer.bias is not None and not layer.skip_bias_add:
-            if layer.return_bias:
-                logger.warning_once("Bias might return incorrect value.")
-            bias_sharding = NamedSharding(self.linear_config.mesh,
-                                          self.linear_config.bias_sharding)
-            bias = _load_weight_for_layer(layer, "bias", bias_sharding)
-            layer.bias.untyped_storage().resize_(0)
-            delattr(layer, 'bias')
-        else:
-            bias = None
 
         @jax.jit
         def quantize_linear_weights(
@@ -564,25 +578,7 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
                 enable_kernel=self.block_size is not None,
             )
 
-        weights = quantize_linear_weights(weight, bias)
-        weights = torch_view(
-            shard_linear_weights(
-                weights,
-                mesh=self.linear_config.mesh,
-                weight_p_spec=self.linear_config.weight_sharding,
-                bias_p_spec=self.linear_config.bias_sharding,
-            ))
-        if self.linear_config.fuse_matmuls:
-            layer.weight = Parameter(weights.weight, requires_grad=False)
-            layer.weight_scale = Parameter(weights.weight_scale,
-                                           requires_grad=False)
-            if bias is not None:
-                layer.bias = Parameter(weights.bias, requires_grad=False)
-        else:
-            layer.weight = to_parameter_list(weights.weight)
-            layer.weight_scale = to_parameter_list(weights.weight_scale)
-            if bias is not None:
-                layer.bias = to_parameter_list(weights.bias)
+        return quantize_linear_weights(weight, bias)
 
     def apply(self,
               layer: torch.nn.Module,

@@ -1050,8 +1050,22 @@ def test_quantize_bf16_linear_no_patterns_selects_nothing(monkeypatch):
                                            QWEN3_5_FUSED_MAPPING)
 
 
-def test_quantize_bf16_linear_bare_pattern_matches_suffix(monkeypatch):
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", "o_proj,down_proj")
+def test_quantize_bf16_linear_bare_pattern_is_the_whole_name(monkeypatch):
+    """Bare patterns are exact layer names, per `is_equal_or_regex_match`.
+
+    A suffix has to be spelled as a regex, so the bare form cannot quietly
+    select more layers than it names."""
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS",
+                       "model.layers.3.self_attn.o_proj,o_proj")
+    assert should_quantize_bf16_linear("model.layers.3.self_attn.o_proj",
+                                       QWEN3_5_FUSED_MAPPING)
+    assert not should_quantize_bf16_linear("model.layers.4.self_attn.o_proj",
+                                           QWEN3_5_FUSED_MAPPING)
+
+
+def test_quantize_bf16_linear_regex_pattern_matches_suffix(monkeypatch):
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS",
+                       r"re:.*\.o_proj$,re:.*\.down_proj$")
     assert should_quantize_bf16_linear("model.layers.3.self_attn.o_proj",
                                        QWEN3_5_FUSED_MAPPING)
     assert not should_quantize_bf16_linear("model.layers.3.self_attn.qkv_proj",
@@ -1060,8 +1074,12 @@ def test_quantize_bf16_linear_bare_pattern_matches_suffix(monkeypatch):
 
 def test_quantize_bf16_linear_partial_fused_shard_raises(monkeypatch):
     """One fused weight cannot be half fp8, so a half-selection is an error
-    rather than a silent choice either way."""
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", "in_proj_b")
+    rather than a silent choice either way.
+
+    The `$` is load-bearing: `re:` patterns are anchored at the start only, so
+    an unanchored `.*\\.in_proj_b` would match `in_proj_ba` itself and select the
+    fused weight outright instead of half of it."""
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", r"re:.*\.in_proj_b$")
     with pytest.raises(ValueError, match="some but not all shards"):
         should_quantize_bf16_linear("model.layers.0.linear_attn.in_proj_ba",
                                     QWEN3_5_FUSED_MAPPING)
@@ -1308,3 +1326,65 @@ def test_unselected_linear_stays_unquantized(monkeypatch, model):
         )
     assert isinstance(layer.quant_method, VllmUnquantizedLinearMethod)
     assert not isinstance(layer.quant_method, VllmQuantizedBf16LinearMethod)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+@pytest.mark.parametrize("bias", [False, True])
+def test_unquantized_linear_stores_no_scale(monkeypatch, model, fuse_matmuls,
+                                            bias):
+    """The shared store step hangs a scale off the layer only when the build
+    step produced one, so an unquantized layer keeps a bare bf16 weight."""
+    monkeypatch.delenv("QUANTIZE_BF16_LINEAR_PATTERNS", raising=False)
+    mesh = test_utils.get_spmd_mesh(1)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    with set_current_vllm_config(vllm_config):
+        layer = MergedColumnParallelLinear(
+            input_size=1024,
+            output_sizes=[512, 512],
+            bias=bias,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix="model.layers.0.mlp.shared_expert.gate_up_proj",
+        )
+        assert isinstance(layer.quant_method, VllmUnquantizedLinearMethod)
+        layer.quant_method.linear_config.fuse_matmuls = fuse_matmuls
+
+    layer.weight.data = torch.rand_like(layer.weight.data) / 10
+    if bias:
+        layer.bias.data = torch.rand_like(layer.bias.data) / 10
+    with torchax.default_env():
+        layer.quant_method.process_weights_after_loading(layer)
+
+    weights = [layer.weight] if fuse_matmuls else list(layer.weight)
+    assert all(w.dtype == dtype for w in weights)
+    assert getattr(layer, "weight_scale", None) is None
+    if bias:
+        biases = [layer.bias] if fuse_matmuls else list(layer.bias)
+        assert all(b.dtype == dtype for b in biases)
+    else:
+        assert layer.bias is None
+
+
+def test_quantized_bf16_only_overrides_the_build_step():
+    """Quantizing changes what the weight is turned into, not how it is loaded
+    or stored -- keep those three steps from drifting back into a copy."""
+    for name in ("process_weights_after_loading", "_load_linear_weights",
+                 "_store_linear_weights"):
+        inherited = getattr(VllmUnquantizedLinearMethod, name)
+        assert getattr(VllmQuantizedBf16LinearMethod, name) is inherited, (
+            f"{name} should be inherited, not reimplemented")
+    assert (VllmQuantizedBf16LinearMethod._build_linear_weights
+            is not VllmUnquantizedLinearMethod._build_linear_weights)
