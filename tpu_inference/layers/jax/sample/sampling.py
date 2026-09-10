@@ -34,11 +34,21 @@ if TYPE_CHECKING:
     from tpu_inference.runner.input_batch import CachedRequestState
 
 _SAMPLING_EPS = 1e-5
-# Candidate tensor shapes must be static inside the compiled sampler. Keep the
-# supported top-k and candidate capacity explicit; requests outside this fast
-# path continue through the general full-vocabulary implementation.
-_DISTRIBUTED_SAMPLING_SUPPORTED_TOP_K = 64
-_DISTRIBUTED_SAMPLING_CANDIDATES_PER_SHARD = 128
+
+
+def _distributed_sampling_max_top_k() -> int:
+    """Static top-k capacity used to shape the compiled candidate sampler."""
+    max_top_k = envs.DISTRIBUTED_SAMPLING_MAX_TOP_K
+    if max_top_k < 1:
+        raise ValueError("DISTRIBUTED_SAMPLING_MAX_TOP_K must be >= 1, got "
+                         f"{max_top_k}")
+    return max_top_k
+
+
+def _distributed_sampling_candidates_per_shard() -> int:
+    # Retaining twice the supported top-k reduces tie-overflow fallbacks while
+    # preserving the existing 128 candidates for the default max_top_k of 64.
+    return 2 * _distributed_sampling_max_top_k()
 
 
 @dataclass
@@ -157,24 +167,26 @@ def _apply_sampling_transforms_microbatched(
 def _merge_topk_candidates(
     candidate_values: jax.Array,
     candidate_ids: jax.Array,
+    top_k: jax.Array,
     top_p: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Applies exact threshold top-k and top-p to gathered candidates.
 
-    The production top-k retains every value tied with rank 64. A larger
-    per-shard candidate set lets this path retain those ties too. The result is
-    incomplete only when a shard's last retained value reaches the global
-    threshold, because that shard may have omitted more qualifying values.
+    The production top-k retains every value tied with the requested rank. A
+    larger per-shard candidate set lets this path retain those ties too. The
+    result is incomplete only when a shard's last retained value reaches the
+    global threshold, because that shard may have omitted more qualifying
+    values.
     """
-    if (candidate_values.shape[-1] % _DISTRIBUTED_SAMPLING_CANDIDATES_PER_SHARD
-            != 0):
+    candidates_per_shard = _distributed_sampling_candidates_per_shard()
+    if candidate_values.shape[-1] % candidates_per_shard != 0:
         raise ValueError("Candidate dimension must contain complete shards")
     global_topk, _ = lax.top_k(candidate_values,
-                               _DISTRIBUTED_SAMPLING_SUPPORTED_TOP_K)
-    threshold = global_topk[:, -1]
+                               _distributed_sampling_max_top_k())
+    threshold = jnp.take_along_axis(global_topk, top_k[:, None] - 1,
+                                    axis=-1)[:, 0]
     shard_candidates = candidate_values.reshape(
-        candidate_values.shape[0], -1,
-        _DISTRIBUTED_SAMPLING_CANDIDATES_PER_SHARD)
+        candidate_values.shape[0], -1, candidates_per_shard)
     shard_tails = shard_candidates[:, :, -1]
     incomplete = jnp.any(shard_tails >= threshold[:, None], axis=-1)
     topk_values = jnp.where(candidate_values >= threshold[:, None],
@@ -188,13 +200,15 @@ def _distributed_topk_sample(
     mesh: Mesh,
     logits: jax.Array,
     temperature: jax.Array,
+    top_k: jax.Array,
     top_p: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
-    """Samples from the exact global top-64 set using sharded candidates.
+    """Samples from the exact requested global top-k using sharded candidates.
 
-    Every TP shard contributes its local top-128. The global rank-64 value is
-    used as a threshold so all boundary ties are retained. Callers fall back
-    only if a shard may have omitted additional values at that threshold.
+    Every TP shard contributes a static number of local candidates. The
+    requested global top-k value is used as a dynamic threshold so all boundary
+    ties are retained. Callers fall back if a shard may have omitted additional
+    values at that threshold.
 
     Returns sampled global token IDs and a replicated scalar indicating that
     the gathered candidates may not contain the complete top-k tie group.
@@ -203,12 +217,14 @@ def _distributed_topk_sample(
     logits_spec = P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
     replicated = P()
 
-    def local_sample(local_rng, local_logits, local_temperature, local_top_p):
+    def local_sample(local_rng, local_logits, local_temperature, local_top_k,
+                     local_top_p):
+        candidates_per_shard = _distributed_sampling_candidates_per_shard()
         local_vocab_size = local_logits.shape[-1]
-        if local_vocab_size < _DISTRIBUTED_SAMPLING_CANDIDATES_PER_SHARD:
+        if local_vocab_size < candidates_per_shard:
             raise ValueError(
-                "Distributed top-k sampling requires at least 128 logits per "
-                "vocabulary shard")
+                "Distributed top-k sampling requires at least "
+                f"{candidates_per_shard} logits per vocabulary shard")
 
         microbatch_size = envs.SAMPLING_MICROBATCH_SIZE
         batch_size = local_logits.shape[0]
@@ -221,12 +237,14 @@ def _distributed_topk_sample(
                                          local_vocab_size)
         temperature_mb = local_temperature.reshape(num_microbatches,
                                                    microbatch_size)
+        top_k_mb = local_top_k.reshape(num_microbatches, microbatch_size)
         top_p_mb = local_top_p.reshape(num_microbatches, microbatch_size)
         rngs = jax.random.split(local_rng, num_microbatches)
         shard_index = lax.axis_index(ShardingAxisName.MLP_TENSOR)
 
         def sample_microbatch(inputs):
-            key, chunk_logits, chunk_temperature, chunk_top_p = inputs
+            (key, chunk_logits, chunk_temperature, chunk_top_k,
+             chunk_top_p) = inputs
             # Greedy rows do not consume the categorical result. A safe
             # positive temperature avoids reversing their candidate ordering.
             safe_temperature = jnp.where(
@@ -236,7 +254,7 @@ def _distributed_topk_sample(
             )
             scaled_logits = chunk_logits / safe_temperature[:, None]
             local_values, local_ids = lax.top_k(
-                scaled_logits, _DISTRIBUTED_SAMPLING_CANDIDATES_PER_SHARD)
+                scaled_logits, candidates_per_shard)
             local_ids = (local_ids + shard_index * local_vocab_size).astype(
                 jnp.int32)
 
@@ -252,9 +270,11 @@ def _distributed_topk_sample(
                 axis=-1,
                 tiled=True,
             )
+            safe_top_k = jnp.clip(chunk_top_k, 1,
+                                  _distributed_sampling_max_top_k())
             filtered_values, candidate_ids, incomplete = (
                 _merge_topk_candidates(candidate_values, candidate_ids,
-                                       chunk_top_p))
+                                       safe_top_k, chunk_top_p))
             incomplete = jnp.logical_and(incomplete, chunk_temperature
                                          >= _SAMPLING_EPS)
             sampled_positions = jax.random.categorical(key, filtered_values)
@@ -265,7 +285,7 @@ def _distributed_topk_sample(
 
         sampled_ids, incomplete_candidates = lax.map(
             sample_microbatch,
-            (rngs, logits_mb, temperature_mb, top_p_mb),
+            (rngs, logits_mb, temperature_mb, top_k_mb, top_p_mb),
         )
         return (sampled_ids.reshape(batch_size),
                 jnp.any(incomplete_candidates))
@@ -273,10 +293,10 @@ def _distributed_topk_sample(
     return jax.shard_map(
         local_sample,
         mesh=mesh,
-        in_specs=(replicated, logits_spec, data_spec, data_spec),
+        in_specs=(replicated, logits_spec, data_spec, data_spec, data_spec),
         out_specs=(data_spec, replicated),
         check_vma=False,
-    )(rng, logits, temperature, top_p)
+    )(rng, logits, temperature, top_k, top_p)
 
 
 @jax.jit(static_argnames=["mesh"])
@@ -320,14 +340,16 @@ def sample(
         use_distributed_candidates = (envs.USE_DISTRIBUTED_TOPK_SAMPLING
                                       and not tpu_sampling_metadata.logprobs)
         if use_distributed_candidates:
-            # Candidate shapes are compile-time constants, so this fast path
-            # currently specializes top-k=64. Greedy and padded rows do not
-            # consume a random sample and therefore need not request top-k=64.
+            # Candidate shapes use a trace-time maximum; each request's top-k
+            # remains dynamic. Greedy and padded rows do not consume a sample.
             supported = jnp.all(
                 jnp.logical_or(
                     is_greedy,
-                    tpu_sampling_metadata.top_k ==
-                    _DISTRIBUTED_SAMPLING_SUPPORTED_TOP_K,
+                    jnp.logical_and(
+                        tpu_sampling_metadata.top_k > 0,
+                        tpu_sampling_metadata.top_k <=
+                        _distributed_sampling_max_top_k(),
+                    ),
                 ))
 
             def sample_candidates(_):
@@ -337,6 +359,7 @@ def sample(
                         mesh,
                         logits,
                         tpu_sampling_metadata.temperature,
+                        tpu_sampling_metadata.top_k,
                         tpu_sampling_metadata.top_p,
                     ))
 

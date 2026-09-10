@@ -42,7 +42,7 @@ class TestSampling:
         top_p = jnp.array([0.95, 0.8], dtype=jnp.float32)
         metadata = TPUSupportedSamplingMetadata(
             temperature=temperature,
-            top_k=jnp.full((batch_size, ), 64, dtype=jnp.int32),
+            top_k=jnp.array([20, 64], dtype=jnp.int32),
             top_p=top_p,
             do_sampling=True,
             logprobs=False,
@@ -58,7 +58,7 @@ class TestSampling:
         candidate_values = local_values.reshape(batch_size, -1)
         candidate_ids = local_ids.reshape(batch_size, -1)
         filtered_values, filtered_ids, incomplete = (_merge_topk_candidates(
-            candidate_values, candidate_ids, top_p))
+            candidate_values, candidate_ids, metadata.top_k, top_p))
 
         actual = jnp.full_like(expected, -1e12)
         actual = actual.at[jnp.arange(batch_size)[:, None],
@@ -75,6 +75,7 @@ class TestSampling:
         filtered, _, incomplete = _merge_topk_candidates(
             candidate_values,
             candidate_ids,
+            jnp.array([64], dtype=jnp.int32),
             jnp.array([1.0], dtype=jnp.float32),
         )
         assert not bool(incomplete[0])
@@ -91,6 +92,7 @@ class TestSampling:
         _, _, incomplete = _merge_topk_candidates(
             candidate_values,
             candidate_ids,
+            jnp.array([64], dtype=jnp.int32),
             jnp.array([0.95], dtype=jnp.float32),
         )
         assert bool(incomplete[0])

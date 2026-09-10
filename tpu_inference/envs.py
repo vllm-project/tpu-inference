@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VERIFY_WEIGHTS: bool = False
     SAMPLING_MICROBATCH_SIZE: int = 0
     SAMPLING_KEEP_SHARDED_LOGITS: bool = False
+    DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     USE_DISTRIBUTED_TOPK_SAMPLING: bool = False
 
 
@@ -518,6 +519,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # an expensive all-gather across TP before sampling.
     "SAMPLING_KEEP_SHARDED_LOGITS":
     env_bool("SAMPLING_KEEP_SHARDED_LOGITS", default=False),
+    # Largest runtime top-k handled by distributed candidate sampling. This is
+    # read at trace time so candidate tensor shapes remain static.
+    "DISTRIBUTED_SAMPLING_MAX_TOP_K":
+    lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
     # Sample supported top-k requests from compact sharded candidates. The
     # sampler falls back to its general path for unsupported or incomplete
     # candidate sets.
