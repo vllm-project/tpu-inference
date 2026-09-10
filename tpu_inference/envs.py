@@ -88,7 +88,6 @@ if TYPE_CHECKING:
     SAMPLING_MICROBATCH_SIZE: int = 0
     SAMPLING_KEEP_SHARDED_LOGITS: bool = False
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
-    USE_DISTRIBUTED_TOPK_SAMPLING: bool = False
 
 
 def env_with_choices(
@@ -523,11 +522,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # read at trace time so candidate tensor shapes remain static.
     "DISTRIBUTED_SAMPLING_MAX_TOP_K":
     lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
-    # Sample supported top-k requests from compact sharded candidates. The
-    # sampler falls back to its general path for unsupported or incomplete
-    # candidate sets.
-    "USE_DISTRIBUTED_TOPK_SAMPLING":
-    env_bool("USE_DISTRIBUTED_TOPK_SAMPLING", default=False),
 }
 
 

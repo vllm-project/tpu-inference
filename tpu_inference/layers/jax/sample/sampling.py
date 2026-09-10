@@ -51,6 +51,22 @@ def _distributed_sampling_candidates_per_shard() -> int:
     return 2 * _distributed_sampling_max_top_k()
 
 
+def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
+    """Whether each vocab shard can provide the static candidate capacity."""
+    tensor_axes = ShardingAxisName.MLP_TENSOR
+    tensor_axes = tensor_axes if isinstance(tensor_axes, (tuple, list)) else (
+        tensor_axes, )
+    tensor_axes = tuple(axis for axis in tensor_axes
+                        if axis is not None and axis in mesh.axis_names)
+    if not tensor_axes:
+        return False
+    num_vocab_shards = 1
+    for axis in tensor_axes:
+        num_vocab_shards *= mesh.shape[axis]
+    local_vocab_size = vocab_size // num_vocab_shards
+    return local_vocab_size >= _distributed_sampling_candidates_per_shard()
+
+
 @dataclass
 class PromptLogprobsReqSnap:
     """Per-request state snapshotted at step N for use in get_output()."""
@@ -312,14 +328,6 @@ def sample(
         logits = logits + 0 * jnp.sum(
             tpu_sampling_metadata._cache_collision_dummy)
 
-    should_unshard_logits = not (envs.USE_DISTRIBUTED_TOPK_SAMPLING
-                                 or envs.SAMPLING_KEEP_SHARDED_LOGITS)
-    if tpu_sampling_metadata.do_sampling and should_unshard_logits:
-        # Unshard the logits explicitly to preserve the baseline execution path
-        # for models not enabling sharded sampling.
-        logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-
     greedy_tokens = jnp.argmax(logits, axis=-1)
     logits = logits.astype(jnp.float32)
     if not tpu_sampling_metadata.do_sampling:
@@ -329,16 +337,22 @@ def sample(
         is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
 
         def sample_full_vocab(_):
+            full_logits = logits
+            if not envs.SAMPLING_KEEP_SHARDED_LOGITS:
+                full_logits = jax.lax.with_sharding_constraint(
+                    full_logits,
+                    NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
             processed_logits = _apply_sampling_transforms_microbatched(
-                logits, tpu_sampling_metadata)
+                full_logits, tpu_sampling_metadata)
             sampled_tokens = jax.random.categorical(rng, processed_logits)
             tokens = jnp.where(is_greedy, greedy_tokens, sampled_tokens)
-            output_logits = jnp.where(is_greedy[:, None], logits,
+            output_logits = jnp.where(is_greedy[:, None], full_logits,
                                       processed_logits)
             return tokens, output_logits
 
-        use_distributed_candidates = (envs.USE_DISTRIBUTED_TOPK_SAMPLING
-                                      and not tpu_sampling_metadata.logprobs)
+        use_distributed_candidates = (
+            not tpu_sampling_metadata.logprobs
+            and _distributed_sampling_fits(mesh, logits.shape[-1]))
         if use_distributed_candidates:
             # Candidate shapes use a trace-time maximum; each request's top-k
             # remains dynamic. Greedy and padded rows do not consume a sample.

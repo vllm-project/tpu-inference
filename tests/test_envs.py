@@ -65,7 +65,6 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
     monkeypatch.setenv("SAMPLING_KEEP_SHARDED_LOGITS", "0")
-    monkeypatch.setenv("USE_DISTRIBUTED_TOPK_SAMPLING", "0")
     monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
@@ -118,11 +117,6 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("SAMPLING_KEEP_SHARDED_LOGITS", "1")
     assert envs.SAMPLING_KEEP_SHARDED_LOGITS is True
     monkeypatch.setenv("SAMPLING_KEEP_SHARDED_LOGITS", "0")
-
-    assert envs.USE_DISTRIBUTED_TOPK_SAMPLING is False
-    monkeypatch.setenv("USE_DISTRIBUTED_TOPK_SAMPLING", "1")
-    assert envs.USE_DISTRIBUTED_TOPK_SAMPLING is True
-    monkeypatch.setenv("USE_DISTRIBUTED_TOPK_SAMPLING", "0")
 
 
 def test_distributed_sampling_max_top_k(monkeypatch: pytest.MonkeyPatch):
