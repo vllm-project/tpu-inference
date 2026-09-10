@@ -931,6 +931,16 @@ class KVCacheManager:
 
                     slots.setdefault(slot_key, []).append(layer_name)
 
+        # Ensure slots are ordered by layer index for sequential decoders (e.g. MaxText)
+        def _get_layer_idx(name: str) -> int:
+            try:
+                return int(name.split('.')[-1])
+            except (ValueError, IndexError):
+                return 0
+
+        slots = dict(
+            sorted(slots.items(), key=lambda item: _get_layer_idx(item[1][0])))
+
         # Pass 2: Allocate one physical cache per unique slot and map layers
         for slot_key, layer_names in slots.items():
             first_layer_name = layer_names[0]
