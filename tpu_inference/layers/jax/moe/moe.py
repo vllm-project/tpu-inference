@@ -497,7 +497,7 @@ class JaxRoutedExperts(JaxModule):
         cnt = 0
         for param_name, torch_weight in weights:
             rel_name = param_name.split(self.prefix)[-1]
-            names = rel_name.split(".")
+            names = rel_name.strip(".").split(".")
             assert len(names) == 3, (
                 f"Expected .<expert_id>.<param_name>.weight, got {rel_name}")
             expert_id, param_type, _ = names
