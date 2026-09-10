@@ -353,10 +353,87 @@ def get_flax_model(
                                pooler=pooler,
                                is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
-    kv_cache_sharding = NamedSharding(
+    attn_kv_sharding = NamedSharding(
         mesh,
         PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                       ShardingAxisName.KV_HEAD))
+    gdn_conv_sharding = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
+                      ShardingAxisName.ATTN_HEAD))
+    gdn_ssm_sharding = NamedSharding(
+        mesh,
+        PartitionSpec(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
+                      None, None))
+    gdn_kv_sharding = (gdn_conv_sharding, gdn_ssm_sharding)
+
+    hf_cfg = vllm_config.model_config.hf_config
+    if isinstance(hf_cfg, dict):
+        text_cfg = hf_cfg.get("text_config", hf_cfg)
+        layer_types = text_cfg.get("layer_types", None)
+    else:
+        text_cfg = getattr(hf_cfg, "text_config", hf_cfg)
+        layer_types = getattr(text_cfg, "layer_types", None)
+        if layer_types is None and hasattr(hf_cfg, "to_dict"):
+            layer_types = hf_cfg.to_dict().get("text_config",
+                                               {}).get("layer_types", None)
+
+    additional_cfg = getattr(vllm_config, "additional_config", {}) or {}
+    maxtext_cfg = additional_cfg.get("maxtext_config", {})
+    model_name = maxtext_cfg.get("model_name", "") or getattr(
+        vllm_config.model_config, "model", "")
+
+    explicit_interval = getattr(
+        text_cfg, "full_attention_interval",
+        None) if not isinstance(text_cfg, dict) else text_cfg.get(
+            "full_attention_interval", None)
+
+    is_hybrid = ((layer_types is not None and any(lt == "linear_attention"
+                                                  for lt in layer_types))
+                 or explicit_interval is not None
+                 or getattr(vllm_config.model_config, "is_hybrid", False)
+                 or "qwen3_5" in model_name.lower()
+                 or "qwen3.5" in model_name.lower())
+
+    if is_hybrid:
+        if layer_types:
+            first_type = layer_types[0]
+            if first_type == "linear_attention":
+                mamba_count = sum(1 for lt in layer_types
+                                  if lt == "linear_attention")
+                attn_count = len(layer_types) - mamba_count
+                kv_cache_sharding = [gdn_kv_sharding] * mamba_count + [
+                    attn_kv_sharding
+                ] * attn_count
+            else:
+                attn_count = sum(1 for lt in layer_types
+                                 if lt != "linear_attention")
+                mamba_count = len(layer_types) - attn_count
+                kv_cache_sharding = [attn_kv_sharding] * attn_count + [
+                    gdn_kv_sharding
+                ] * mamba_count
+            logger.info(
+                f"Successfully configured heterogeneous KV cache sharding for {len(layer_types)} layers "
+                f"({mamba_count} GDN layers, {attn_count} Full Attn layers in physical slot order)."
+            )
+        else:
+            interval = 4 if explicit_interval is None else explicit_interval
+            num_layers = getattr(
+                text_cfg, "num_hidden_layers",
+                40) if not isinstance(text_cfg, dict) else text_cfg.get(
+                    "num_hidden_layers", 40)
+            attn_count = num_layers // interval
+            mamba_count = num_layers - attn_count
+            kv_cache_sharding = [gdn_kv_sharding] * mamba_count + [
+                attn_kv_sharding
+            ] * attn_count
+            logger.info(
+                f"Configured fallback KV cache sharding for hybrid model with interval={interval}, "
+                f"total_layers={num_layers} ({mamba_count} GDN, {attn_count} Full Attn in physical slot order)."
+            )
+    else:
+        kv_cache_sharding = attn_kv_sharding
+
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
