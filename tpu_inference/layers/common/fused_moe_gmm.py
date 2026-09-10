@@ -41,6 +41,19 @@ logger = init_logger(__name__)
 TARGET_SLOT_CHUNK_SIZE = 2048
 
 
+def _invert_permutation(permutation: jax.Array) -> jax.Array:
+    """Construct the exact inverse of a one-dimensional permutation.
+
+    Precondition: `permutation` must be a valid 1D permutation (bijection) of
+    integers in the range `[0, permutation.size - 1]`. For any permutation `p`,
+    the inverse permutation satisfies `inv_p[p[i]] = i`, which can be computed
+    directly with a single scatter update `inverse.at[permutation].set(positions)`.
+    """
+    inverse = jnp.zeros_like(permutation)
+    positions = jnp.arange(permutation.size, dtype=permutation.dtype)
+    return inverse.at[permutation].set(positions)
+
+
 def _override_token_indices_for_random_routing(
         topk_indices: jax.Array, global_num_experts: int) -> jax.Array:
     logger.warning(
@@ -683,7 +696,7 @@ def fused_moe_func(
         group_sizes_local = jax.nn.one_hot(topk_indices_flat,
                                            global_num_experts,
                                            dtype=jnp.int32).sum(axis=0)
-        topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)
+        topk_argsort_revert_indices = _invert_permutation(topk_argsort_indices)
 
         if use_ep:
             num_ep_shard = get_mesh_shape_product(mesh,
