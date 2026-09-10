@@ -241,21 +241,20 @@ class TestUnquantizedJaxMoe:
     def test_routed_expert_loader_uses_backend_layout(self, backend,
                                                       transpose):
         """Fused and GMM kernels consume different expert-weight layouts."""
-        layer = JaxRoutedExperts.__new__(JaxRoutedExperts)
-        layer.prefix = "experts"
-        layer.moe_backend = backend
-        for name, shape in (
-            ("kernel_gating_EDF", (2, 3, 4)),
-            ("kernel_up_proj_EDF", (2, 3, 4)),
-            ("kernel_down_proj_EFD", (2, 4, 3)),
-        ):
-            param = nnx.Param(jnp.zeros(shape))
-            param.set_metadata(_weights_to_load=[None, None])
-            setattr(layer, name, param)
+        layer = SimpleNamespace(
+            prefix="experts",
+            moe_backend=backend,
+            kernel_gating_EDF=nnx.Param(jnp.zeros((2, 3, 4))),
+            kernel_up_proj_EDF=nnx.Param(jnp.zeros((2, 3, 4))),
+            kernel_down_proj_EFD=nnx.Param(jnp.zeros((2, 4, 3))),
+        )
+        layer.kernel_gating_EDF.set_metadata(_weights_to_load=[None, None])
+        layer.kernel_up_proj_EDF.set_metadata(_weights_to_load=[None, None])
+        layer.kernel_down_proj_EFD.set_metadata(_weights_to_load=[None, None])
 
         checkpoint_weight = torch.arange(12).reshape(4, 3)
-        loaded = layer._load_weights(
-            [("experts.0.gate_proj.weight", checkpoint_weight)])
+        loaded = JaxRoutedExperts._load_weights(
+            layer, [("experts.0.gate_proj.weight", checkpoint_weight)])
 
         assert loaded == set()
         staged = layer.kernel_gating_EDF._weights_to_load[0]
