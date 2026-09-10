@@ -24,12 +24,20 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
     _merge_topk_candidates, compute_logprobs, compute_prompt_logprobs,
-    gather_logprobs, sample)
+    distributed_sampling_allowed, gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
 
 class TestSampling:
+
+    @staticmethod
+    def test_distributed_sampling_allowed():
+        assert distributed_sampling_allowed(False, "processed_logprobs")
+        assert distributed_sampling_allowed(True, "raw_logprobs")
+        assert distributed_sampling_allowed(True, "raw_logits")
+        assert not distributed_sampling_allowed(True, "processed_logprobs")
+        assert not distributed_sampling_allowed(True, "processed_logits")
 
     def test_distributed_candidates_match_full_vocab_filters(self):
         batch_size = 2

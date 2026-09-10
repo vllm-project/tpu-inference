@@ -67,6 +67,11 @@ def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
     return local_vocab_size >= _distributed_sampling_candidates_per_shard()
 
 
+def distributed_sampling_allowed(logprobs: bool, logprobs_mode) -> bool:
+    """Whether sampling can return raw logits for the requested logprob mode."""
+    return not (logprobs and str(logprobs_mode).startswith("processed"))
+
+
 @dataclass
 class PromptLogprobsReqSnap:
     """Per-request state snapshotted at step N for use in get_output()."""
@@ -315,12 +320,13 @@ def _distributed_topk_sample(
     )(rng, logits, temperature, top_k, top_p)
 
 
-@jax.jit(static_argnames=["mesh"])
+@jax.jit(static_argnames=["mesh", "allow_distributed_sampling"])
 def sample(
     rng: jax.Array,
     mesh: Mesh,
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+    allow_distributed_sampling: bool = True,
 ) -> jax.Array:
     # (B, vocab_size)
     if tpu_sampling_metadata._cache_collision_dummy is not None:
@@ -349,7 +355,7 @@ def sample(
             return tokens, output_logits
 
         use_distributed_candidates = (
-            not tpu_sampling_metadata.logprobs
+            allow_distributed_sampling
             and _distributed_sampling_fits(mesh, logits.shape[-1]))
         if use_distributed_candidates:
             # Candidate shapes use a trace-time maximum; each request's top-k
@@ -378,9 +384,9 @@ def sample(
                 def use_candidate_result(_):
                     tokens = jnp.where(is_greedy, greedy_tokens,
                                        sampled_tokens)
-                    # No caller consumes processed logits when logprobs=False.
-                    # Returning the input preserves the API without forcing a
-                    # full-vocabulary filtered-logits materialization.
+                    # Processed-logit modes disable this path. Returning the
+                    # raw input supports raw logprobs without materializing
+                    # full-vocabulary filtered logits.
                     return tokens, logits
 
                 return lax.cond(incomplete_candidates,

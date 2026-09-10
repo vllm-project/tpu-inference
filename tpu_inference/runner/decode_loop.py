@@ -132,6 +132,10 @@ def _decode_core_impl(
     continue_decode_eos_check_interval: int = 1,
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
+    from tpu_inference.layers.jax.sample.sampling import \
+        distributed_sampling_allowed
+    allow_distributed_sampling = distributed_sampling_allowed(
+        has_logprobs, logprobs_mode)
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
@@ -166,8 +170,12 @@ def _decode_core_impl(
         )
         logits = compute_logits_fn(state, hidden_states, None)
         logits = logits.astype(jnp.float32)
-        next_tokens, processed_logits = sample_fn(step_rng, mesh, logits,
-                                                  sampling_metadata)
+        next_tokens, processed_logits = sample_fn(
+            step_rng,
+            mesh,
+            logits,
+            sampling_metadata,
+            allow_distributed_sampling=allow_distributed_sampling)
         (new_active_mask, next_input_ids, new_positions, new_seq_lens,
          step_record_tokens, any_hit_eos) = _update_loop_state(
              next_tokens,
@@ -381,9 +389,10 @@ def continue_decode(
       model_fn: Stable model forward callable.
       compute_logits_fn: Stable logits callable.
       sample_fn: Stable sampling callable with signature
-        (rng, mesh, logits, sampling_metadata) -> (next_tokens, _). Must be a
-        stable object (not a per-call closure) so the jit cache persists;
-        per-call sampling data is threaded via `sampling_metadata`.
+        (rng, mesh, logits, sampling_metadata, allow_distributed_sampling=...)
+        -> (next_tokens, _). Must be a stable object (not a per-call closure)
+        so the jit cache persists; per-call sampling data is threaded via
+        `sampling_metadata`.
       init_state: Initial TpuSamplingState.
       kv_caches: KV caches. Donated into the fused loop and returned updated.
       max_decode_steps: Max steps to run (static loop bound).
