@@ -15,6 +15,10 @@
 .docker_build_template: &docker_build_template
   agents:
     queue: cpu_64_core
+  retry:
+    automatic:
+      - exit_status: "*"
+        limit: 3
   commands:
     - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
 
