@@ -86,7 +86,6 @@ if TYPE_CHECKING:
     TPU_MESH_SORT_BY_COORDS: bool = False
     VERIFY_WEIGHTS: bool = False
     SAMPLING_MICROBATCH_SIZE: int = 0
-    SAMPLING_KEEP_SHARDED_LOGITS: bool = False
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
 
 
@@ -514,10 +513,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Microbatch size for sampling block. Set to 0 to disable microbatching (disabled by default).
     "SAMPLING_MICROBATCH_SIZE":
     lambda: int(os.getenv("SAMPLING_MICROBATCH_SIZE", "0")),
-    # Keep vocabulary logits sharded across TP shards during sampling to avoid
-    # an expensive all-gather across TP before sampling.
-    "SAMPLING_KEEP_SHARDED_LOGITS":
-    env_bool("SAMPLING_KEEP_SHARDED_LOGITS", default=False),
     # Largest runtime top-k handled by distributed candidate sampling. This is
     # read at trace time so candidate tensor shapes remain static.
     "DISTRIBUTED_SAMPLING_MAX_TOP_K":

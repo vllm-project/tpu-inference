@@ -337,11 +337,9 @@ def sample(
         is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
 
         def sample_full_vocab(_):
-            full_logits = logits
-            if not envs.SAMPLING_KEEP_SHARDED_LOGITS:
-                full_logits = jax.lax.with_sharding_constraint(
-                    full_logits,
-                    NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+            full_logits = jax.lax.with_sharding_constraint(
+                logits,
+                NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
             processed_logits = _apply_sampling_transforms_microbatched(
                 full_logits, tpu_sampling_metadata)
             sampled_tokens = jax.random.categorical(rng, processed_logits)
