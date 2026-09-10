@@ -40,6 +40,11 @@ class Fp8LinearMethod:
     This class will be shared in both vLLM and jax path.
     """
 
+    # Whether the matmul also quantizes its activation (per-token dynamic,
+    # i.e. W8A8). Subclasses that quantize an otherwise-bf16 checkpoint at load
+    # time can turn this off to stay weight-only.
+    quantize_activation: bool = True
+
     def __init__(self, linear_config: QuantLinearConfig):
         self.linear_config = linear_config
 
@@ -53,7 +58,8 @@ class Fp8LinearMethod:
             weight_scale_jax,
             self.linear_config.weight_sharding,
             mesh=self.linear_config.mesh,
-            defer_all_reduce=self.linear_config.defer_all_reduce)
+            defer_all_reduce=self.linear_config.defer_all_reduce,
+            maybe_quantize_x=self.quantize_activation)
 
         if bias is not None:
             outs += bias
@@ -76,7 +82,8 @@ class Fp8LinearMethod:
                 weight_scale,
                 self.linear_config.weight_sharding,
                 mesh=mesh,
-                defer_all_reduce=self.linear_config.defer_all_reduce)
+                defer_all_reduce=self.linear_config.defer_all_reduce,
+                maybe_quantize_x=self.quantize_activation)
 
             if bias is not None:
                 out += bias[i]

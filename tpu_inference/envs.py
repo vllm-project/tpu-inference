@@ -32,6 +32,10 @@ if TYPE_CHECKING:
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    QUANTIZE_BF16_LINEAR_PATTERNS: list[str] = []
+    QUANTIZE_BF16_LINEAR_DTYPE: str = "float8_e4m3fn"
+    QUANTIZE_BF16_LINEAR_W8A8: bool = True
+    QUANTIZE_BF16_LINEAR_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
@@ -306,6 +310,37 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Specify dtype for quantized linear weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
+    # Quantize linear layers the checkpoint left unquantized, at load time.
+    # Comma-separated list of module patterns matched against the vLLM layer
+    # prefix: a bare name matches exactly or as a dotted suffix, and a "re:"
+    # prefix makes the rest a regex that must match the whole prefix. Patterns
+    # therefore cannot contain a comma. Checkpoint-level names are accepted for
+    # layers vLLM fuses (e.g. q_proj/k_proj/v_proj for qkv_proj); every shard of
+    # a fused layer has to be selected or none of it is. Empty (default) leaves
+    # every unquantized linear in its checkpoint dtype.
+    "QUANTIZE_BF16_LINEAR_PATTERNS":
+    env_str_list("QUANTIZE_BF16_LINEAR_PATTERNS"),
+    # Weight dtype for the layers QUANTIZE_BF16_LINEAR_PATTERNS selects.
+    "QUANTIZE_BF16_LINEAR_DTYPE":
+    lambda: os.getenv("QUANTIZE_BF16_LINEAR_DTYPE", "float8_e4m3fn"),
+    # Whether those layers also quantize their activations (per-token dynamic,
+    # i.e. W8A8). Set to 0 for weight-only fp8, which halves the weight memory
+    # just the same but keeps the matmul in the activation dtype -- slower, and
+    # the fallback if W8A8 costs too much accuracy.
+    "QUANTIZE_BF16_LINEAR_W8A8":
+    env_bool("QUANTIZE_BF16_LINEAR_W8A8", default=True),
+    # 1-D block size along the input (contracting) axis for those layers, so the
+    # scale becomes one value per [block of input features, output feature]
+    # instead of one per output feature. Smaller blocks track outliers better at
+    # the cost of a fp32 scale every `block_size` weights (128 costs ~3% of the
+    # fp8 weight bytes back). Must divide the layer's input size, and the block
+    # count must divide by the TP degree of a row-parallel layer's input axis.
+    # Unset (default) means per-output-channel. Setting it routes the matmul to
+    # the blockwise gmm kernel, since the XLA matmul can only honour a blockwise
+    # scale by dequantizing the whole weight back to bf16 first.
+    "QUANTIZE_BF16_LINEAR_BLOCK_SIZE":
+    lambda: int(block_size)
+    if (block_size := os.getenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE")) else None,
     # Specify dtype for quantized MoE weights
     "MOE_REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", ""),
