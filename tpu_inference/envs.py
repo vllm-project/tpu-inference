@@ -34,7 +34,6 @@ if TYPE_CHECKING:
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
     QUANTIZE_BF16_LINEAR_PATTERNS: list[str] = []
     QUANTIZE_BF16_LINEAR_DTYPE: str = "float8_e4m3fn"
-    QUANTIZE_BF16_LINEAR_W8A8: bool = True
     QUANTIZE_BF16_LINEAR_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
@@ -322,12 +321,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Weight dtype for the layers QUANTIZE_BF16_LINEAR_PATTERNS selects.
     "QUANTIZE_BF16_LINEAR_DTYPE":
     lambda: os.getenv("QUANTIZE_BF16_LINEAR_DTYPE", "float8_e4m3fn"),
-    # Whether those layers also quantize their activations (per-token dynamic,
-    # i.e. W8A8). Set to 0 for weight-only fp8, which halves the weight memory
-    # just the same but keeps the matmul in the activation dtype -- slower, and
-    # the fallback if W8A8 costs too much accuracy.
-    "QUANTIZE_BF16_LINEAR_W8A8":
-    env_bool("QUANTIZE_BF16_LINEAR_W8A8", default=True),
     # 1-D block size along the input (contracting) axis for those layers, so the
     # scale becomes one value per [block of input features, output feature]
     # instead of one per output feature. Smaller blocks track outliers better at

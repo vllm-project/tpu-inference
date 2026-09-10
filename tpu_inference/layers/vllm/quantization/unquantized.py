@@ -511,13 +511,11 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
     def __init__(self, linear_config: VllmQuantLinearConfig):
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
         self.weight_dtype = to_jax_dtype(envs.QUANTIZE_BF16_LINEAR_DTYPE)
-        self.quantize_activation = envs.QUANTIZE_BF16_LINEAR_W8A8
         self.block_size = envs.QUANTIZE_BF16_LINEAR_BLOCK_SIZE
         logger.info_once(
-            "Quantizing unquantized linear layers matching %s to %s (%s, %s).",
+            "Quantizing unquantized linear layers matching %s to %s (%s).",
             ", ".join(envs.QUANTIZE_BF16_LINEAR_PATTERNS),
             envs.QUANTIZE_BF16_LINEAR_DTYPE,
-            "W8A8" if self.quantize_activation else "weight-only",
             f"blocks of {self.block_size} input features"
             if self.block_size else "per output channel")
 

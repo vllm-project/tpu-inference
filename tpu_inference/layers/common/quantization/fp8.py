@@ -41,8 +41,9 @@ class Fp8LinearMethod:
     """
 
     # Whether the matmul also quantizes its activation (per-token dynamic,
-    # i.e. W8A8). Subclasses that quantize an otherwise-bf16 checkpoint at load
-    # time can turn this off to stay weight-only.
+    # i.e. W8A8). A request, not a guarantee: `xla_quantized_matmul` ignores it
+    # for a 2-D (blockwise) scale, because it has to dequantize the weight back
+    # to the activation dtype before it can multiply.
     quantize_activation: bool = True
 
     def __init__(self, linear_config: QuantLinearConfig):

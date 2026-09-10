@@ -1088,11 +1088,10 @@ def test_quantize_bf16_linear_partial_fused_shard_raises(monkeypatch):
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("fuse_matmuls", [False, True])
-@pytest.mark.parametrize("w8a8", [False, True])
 @pytest.mark.parametrize("block_size", [None, 128])
 def test_quantized_bf16_merged_column_parallel_linear(monkeypatch, model,
                                                       num_devices,
-                                                      fuse_matmuls, w8a8,
+                                                      fuse_matmuls,
                                                       block_size):
     """A bf16 checkpoint weight is quantized on its way to the device.
 
@@ -1101,7 +1100,6 @@ def test_quantized_bf16_merged_column_parallel_linear(monkeypatch, model,
     per-output-channel scale (or a blockwise one), and the result still tracks
     the bf16 matmul."""
     monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_W8A8", "1" if w8a8 else "0")
     if block_size is not None:
         monkeypatch.setenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE", str(block_size))
 
