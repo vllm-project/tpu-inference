@@ -12,17 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-site_name: vLLM TPU
+site_name: vLLM JAX-TPU
 site_url: !ENV READTHEDOCS_CANONICAL_URL
 repo_url: https://github.com/vllm-project/tpu-inference
 edit_uri: edit/main/docs/
 docs_dir: docs
+# Theme override templates live under docs/ but are not site content.
+exclude_docs: |
+  overrides/
 strict: true
 
 theme:
   name: material
-  logo: https://docs.vllm.ai/en/latest/assets/logos/vllm-logo-only-light.ico
-  favicon: https://docs.vllm.ai/en/latest/assets/logos/vllm-logo-only-light.ico
+  custom_dir: docs/overrides
+  # The header logo is a composite (vLLM + JAX) rendered by
+  # docs/overrides/partials/logo.html, so theme.logo is not set here.
+  favicon: assets/logos/vllm-logo-only-light.png
   palette:
     # Palette toggle for automatic mode
     - media: "(prefers-color-scheme)"
@@ -71,7 +76,7 @@ nav:
       - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md
     - 'Out-of-Tree Usage': getting_started/out-of-tree.md
   - 'Developers Guides':
-    - 'Contributing to vLLM TPU': developers_guide/contributing.md
+    - 'Contributing to vLLM JAX-TPU': developers_guide/contributing.md
     - 'Adding a New Model to CI': developers_guide/buildkite.md
     - 'JAX Model Development': developers_guide/jax_model_development.md
     - 'Torchax Model Development': developers_guide/torchax_model_development.md
