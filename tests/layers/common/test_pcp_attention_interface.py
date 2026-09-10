@@ -29,7 +29,8 @@ from tpu_inference.layers.common.attention_metadata import (AttentionMetadata,
 from tpu_inference.layers.common.cp_attention import pcp_forward
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
-from tpu_inference.runner.pcp_utils import pcp_seq_arrays, pcp_token_layout
+from tpu_inference.runner.pcp_utils import (pcp_page_order, pcp_seq_arrays,
+                                            pcp_token_layout)
 
 PAGE = 16  # per-rank block_size; the GLOBAL page_size dim is PAGE * pcp
 MAX_SEQ = 8
@@ -57,26 +58,16 @@ def _to_rank_order(x, pcp, C):
         x.reshape(2 * pcp, C, *x.shape[1:])[_row_perm(pcp)].reshape(x.shape))
 
 
-def _kv_token_order(pcp, C):
-    """Single-request `kv_token_order`: token t -> its slot in rank order."""
-    order = _inv_row(pcp)[:, None] * C + np.arange(C)[None, :]
-    return jnp.asarray(order.reshape(-1), jnp.int32)
-
-
-def _pcp_meta(pcp, C, num_current):
-    """The per-rank fused current-phase metadata, exactly as _prepare_inputs
-    builds it: cu = [0, C, C + tail_real] and q_pos_offsets = [head, tail]."""
-    two_p = 2 * pcp
-    cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
-    qpos = np.zeros((pcp, MAX_SEQ), np.int32)
-    for r in range(pcp):
-        tail_off = (two_p - 1 - r) * C
-        tail_real = int(np.clip(num_current - tail_off, 0, C))
-        cu[r, 1] = C  # seq 0 (head) is always fully real
-        cu[r, 2:] = C + tail_real  # seq 1 (tail) is clamped
-        qpos[r, 0] = r * C
-        qpos[r, 1] = tail_off
-    return jnp.asarray(cu), jnp.asarray(qpos)
+def _single_req_meta(pcp, C):
+    """cu_q_lens / q_pos_offsets / kv_new_starts / kv_page_order for ONE
+    request filling 2P*C rows, straight from the production helpers (a
+    single request is simply R = 1 of the general layout)."""
+    t_pad = 2 * pcp * C
+    cu_row, qpos, kv_new_starts = pcp_seq_arrays([C], [0], pcp, MAX_SEQ)
+    return (jnp.asarray(np.tile(cu_row, (pcp, 1))), jnp.asarray(qpos),
+            jnp.asarray(kv_new_starts),
+            jnp.asarray(
+                pcp_page_order([C], [0], pcp, t_pad // pcp, t_pad, PAGE)))
 
 
 class PcpAttentionInterfaceTest(jtu.JaxTestCase):
@@ -182,8 +173,9 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
     def _multi_layout(self, pcp, reqs, t_pad):
         """The layout `_prepare_inputs` builds for R live requests (the
         production helper), checked against the token bucket t_pad."""
-        C, off, acc = pcp_token_layout([r[0] for r in reqs], pcp)
+        C, off, acc = pcp_token_layout([r[0] for r in reqs], pcp, align=PAGE)
         assert t_pad % pcp == 0 and t_pad >= pcp * acc, (t_pad, pcp * acc)
+        assert (t_pad // pcp) % PAGE == 0, (t_pad, pcp, PAGE)
         return C, off, acc, t_pad // pcp
 
     def _slot(self, pcp, C, off, s_pad, i, t):
@@ -272,21 +264,19 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 sm_scale=SM_SCALE)
             exp.append(np.asarray(e[:n[i]]))
 
-        # Token buffers in rank order, plus the request-major K/V permutation.
+        # Token buffers in rank order, plus the per-page K/V unshuffle map.
         def empty(width):
             return np.zeros((t_pad, width, HD), np.float32)
 
         q_buf, k_buf, v_buf = empty(NQ), empty(NKV), empty(NKV)
-        kv_order = np.zeros(t_pad, np.int32)
+        page_order = pcp_page_order(C, off, pcp, s_pad, t_pad, PAGE)
         for i in range(R):
-            kv_base = pcp * off[i]
             for h in (0, 1):
                 for r in range(pcp):
                     c = r if h == 0 else two_p - 1 - r
                     for j in range(C[i]):
                         g = r * s_pad + off[i] + h * C[i] + j
                         t = c * C[i] + j
-                        kv_order[kv_base + t] = g
                         if t < n[i]:
                             q_buf[g] = np.asarray(cur[i][0][t], np.float32)
                             k_buf[g] = np.asarray(cur[i][1][t], np.float32)
@@ -316,7 +306,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 q_pos_offsets=jnp.asarray(qpos),
                 has_cached_kv=max(L) > 0,
                 kv_new_starts=jnp.asarray(kv_new_starts),
-                kv_token_order=jnp.asarray(kv_order),
+                kv_page_order=jnp.asarray(page_order),
                 num_reqs=num_reqs_bucket or R,
             ),
         )
@@ -343,7 +333,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         if jax.device_count() < pcp:
             self.skipTest(f"needs >= {pcp} devices")
         reqs = [(96, 0), (48, 64), (33, 32)]
-        out, _, exp, _, C, off, s_pad, _ = self._run_multi(pcp, reqs, 256)
+        out, _, exp, _, C, off, s_pad, _ = self._run_multi(pcp, reqs, 512)
         self._assert_multi_matches(out, exp, reqs, pcp, C, off, s_pad)
 
     @parameterized.product(pcp=[2, 4])
@@ -377,7 +367,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         if jax.device_count() < pcp:
             self.skipTest(f"needs >= {pcp} devices")
         reqs = [(96, 0), (48, 64), (33, 32)]
-        _, cache, _, cur, _, _, _, pps = self._run_multi(pcp, reqs, 256)
+        _, cache, _, cur, _, _, _, pps = self._run_multi(pcp, reqs, 512)
         for i, (ni, Li) in enumerate(reqs):
             ref = np.asarray(merge_kv(cur[i][1], cur[i][2]))
             for t in range(ni):
@@ -400,16 +390,17 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         pcp = 2
         if jax.device_count() < pcp:
             self.skipTest(f"needs >= {pcp} devices")
-        # C_0 = ceil(2500/4) = 625 -> 1250 rows: two tiles, boundary at 625.
-        # C_1 = ceil(700/4) = 175 -> 350 rows: one partial tile.
+        # C_0 = ceil(2500/4) -> 640 page-aligned -> 1280 rows: two tiles,
+        # boundary at 640. C_1 -> 176 -> 352 rows: one partial tile.
         reqs = [(2500, 64), (700, 32)]
-        out, _, exp, _, C, off, s_pad, _ = self._run_multi(pcp, reqs, 3200)
+        out, _, exp, _, C, off, s_pad, _ = self._run_multi(pcp, reqs, 3264)
         self._assert_multi_matches(out, exp, reqs, pcp, C, off, s_pad)
 
     def test_multirequest_nan_probe_headroom_bucket(self):
         """Shape from the 32k E2E run that produced NaN logits: a batch whose
-        layout needs P*S = 16388 rows and so lands in the headroom bucket
-        (16512) above max_num_batched_tokens, leaving 62 dead rows per rank.
+        layout needs P*S = 16448 rows (page-aligned chunks) and so lands in
+        the headroom bucket (16512) above max_num_batched_tokens, leaving
+        dead rows per rank.
         Every REAL row must be finite; report where NaN shows up otherwise."""
         pcp = 2
         if jax.device_count() < pcp:
@@ -506,7 +497,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         # Both fused seqs are the SAME request -> [T, T] / [P, P].
         kv_lens = pad1([kv_total, kv_total])
         kv_cache_lens = pad1([L, L])
-        cu_q_lens, q_pos_offsets = _pcp_meta(pcp, C, num_current)
+        cu_q_lens, q_pos_offsets, kv_new_starts, kv_page_order = (
+            _single_req_meta(pcp, C))
         distribution = jnp.array([0, 0, 2], jnp.int32)  # head + tail
 
         md = AttentionMetadata(
@@ -518,8 +510,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu_q_lens,
                 kv_cache_lens=kv_cache_lens,
                 q_pos_offsets=q_pos_offsets,
-                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
-                kv_token_order=_kv_token_order(pcp, C),
+                kv_new_starts=kv_new_starts,
+                kv_page_order=kv_page_order,
                 has_cached_kv=L > 0,
             ),
         )
@@ -674,7 +666,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         def pad1(xs):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
-        cu, qpos = _pcp_meta(pcp, C, num_current)
+        cu, qpos, kv_new_starts, kv_page_order = _single_req_meta(pcp, C)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
             seq_lens=pad1([kv_total, kv_total]),
@@ -684,8 +676,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu,
                 kv_cache_lens=pad1([L, L]),
                 q_pos_offsets=qpos,
-                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
-                kv_token_order=_kv_token_order(pcp, C),
+                kv_new_starts=kv_new_starts,
+                kv_page_order=kv_page_order,
                 has_cached_kv=True,
             ),
         )
@@ -742,7 +734,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         def pad1(xs):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
-        cu, qpos = _pcp_meta(pcp, C, num_current)
+        cu, qpos, kv_new_starts, kv_page_order = _single_req_meta(pcp, C)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
             seq_lens=pad1([kv_total, kv_total]),
@@ -752,8 +744,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 query_start_loc=cu,
                 kv_cache_lens=pad1([0, 0]),
                 q_pos_offsets=qpos,
-                kv_new_starts=jnp.zeros(MAX_SEQ, jnp.int32),
-                kv_token_order=_kv_token_order(pcp, C),
+                kv_new_starts=kv_new_starts,
+                kv_page_order=kv_page_order,
                 has_cached_kv=False,
             ),
         )

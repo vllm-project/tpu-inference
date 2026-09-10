@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import vllm.envs as vllm_envs
 from jax.sharding import NamedSharding, PartitionSpec
+from vllm.utils.math_utils import round_down
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
@@ -38,7 +39,8 @@ from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
-from tpu_inference.runner.pcp_utils import pcp_seq_arrays, pcp_token_layout
+from tpu_inference.runner.pcp_utils import (pcp_page_order, pcp_seq_arrays,
+                                            pcp_token_layout)
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -384,6 +386,13 @@ class CompilationManager:
         metadata_attn_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
         pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
+        # Only a bucket too small for even ONE page-multiple chunk per rank
+        # is unreachable. Every rung must still compile at every remaining
+        # bucket: the bucket and the rung are picked independently at
+        # runtime, so a small bucket can arrive with the top rung.
+        if (pcp_size > 1
+                and num_tokens < 2 * pcp_size * self.runner.block_size):
+            return
 
         # Keep existing pattern for complex array operations
         # Under PCP each request becomes two fused seqs, so the attention
@@ -404,9 +413,21 @@ class CompilationManager:
             # A well-formed dummy layout: request_distribution is all zeros,
             # so the kernel body does not run, but the traced program still
             # slices these arrays.
-            chunk = num_tokens // (2 * pcp_size * pcp_num_reqs)
+            block = self.runner.block_size
+            # Compilation keys on shapes and the static num_reqs rung only,
+            # so the dummy layout may hold fewer live requests than the rung
+            # (as many as the bucket fits; at least one, by the guard above).
+            live_reqs = min(pcp_num_reqs, num_tokens // (2 * pcp_size * block))
+            chunk = round_down(num_tokens // (2 * pcp_size * live_reqs), block)
             chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
-                                               pcp_num_reqs, pcp_size)
+                                               live_reqs,
+                                               pcp_size,
+                                               align=block)
+            # A real in-range map: the kernel prefetches these as page
+            # indices even though no seq iterates during precompile.
+            page_order_np = pcp_page_order(chunks, offs, pcp_size,
+                                           num_tokens // pcp_size, num_tokens,
+                                           block)
             cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
                 chunks, offs, pcp_size, attn_seqs)
             pcp = self.runner.pcp_preprocessor.metadata_to_device(
@@ -414,7 +435,7 @@ class CompilationManager:
                 qpos_np,
                 np.zeros(attn_seqs, dtype=np.int32),
                 kv_starts_np,
-                np.arange(num_tokens, dtype=np.int32),
+                page_order_np,
                 has_cached_kv=pcp_has_cached_kv,
                 num_reqs=pcp_num_reqs,
             )
@@ -708,11 +729,6 @@ class CompilationManager:
                 _cache_rungs = (False, True) if _pcp > 1 else (False, )
                 for _has_cached_kv in _cache_rungs:
                     for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
-                        # A bucket that cannot give every request one token
-                        # per chunk never carries that many requests.
-                        if (_pcp_reqs > 1
-                                and num_tokens < 2 * _pcp * _pcp_reqs):
-                            continue
                         self._precompile_backbone_helper(
                             f"worker{self.runner.rank} backbone",
                             input_ids=input_ids,

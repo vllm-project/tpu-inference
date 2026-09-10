@@ -1072,10 +1072,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if pcp_size > 1:
             _worst = pcp_max_buffer_tokens(
                 scheduler_config.max_num_batched_tokens,
-                scheduler_config.max_num_seqs, pcp_size)
-            # 128-aligned so T_pad % pcp_size == 0 for any power-of-two pcp.
+                scheduler_config.max_num_seqs,
+                pcp_size,
+                align=self.block_size)
+            # The page-order map needs each dp shard's T_pad / pcp to be a
+            # whole number of KV pages (128-alignment keeps the bucket
+            # TPU-friendly): align the per-dp value, then scale, so the
+            # invariant holds per shard for any dp_size.
             additional_sizes = list(additional_sizes) + [
-                common_utils.align_to(_worst * self.dp_size, 128)
+                common_utils.align_to(_worst,
+                                      max(128, pcp_size * self.block_size)) *
+                self.dp_size
             ]
         self.num_tokens_paddings = sorted(self.num_tokens_paddings +
                                           additional_sizes)
@@ -1154,7 +1161,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.pcp_preprocessor = None
         if pcp_size > 1:
             self.pcp_preprocessor = PCPPreprocessor(pcp_size, self.mesh,
-                                                    self.pcp_num_reqs_paddings)
+                                                    self.pcp_num_reqs_paddings,
+                                                    self.block_size)
 
         # Padding for logits. Without speculative decoding, each request has one position to select from.
         # With speculative decoding, each request has multiple positions to select from.
@@ -2461,7 +2469,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 max_num_scheduled_tokens_across_dp = max(
                     max_num_scheduled_tokens_across_dp,
                     pcp_buffer_tokens([int(c) for c in counts],
-                                      self.pcp_preprocessor.pcp_size))
+                                      self.pcp_preprocessor.pcp_size,
+                                      align=self.block_size))
 
         # Find maximum number of requests across DP ranks
         max_num_reqs_across_dp = max(
