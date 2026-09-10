@@ -353,16 +353,6 @@ def get_flax_model(
                                pooler=pooler,
                                is_draft_model=is_draft_model)
     vllm_config.model_config.dtype = original_dtype
-    # The kv-cache output sharding is left as None ("keep original sharding")
-    # so JAX propagates whatever each layer's attention kernel emitted. Every
-    # kernel wrapper (RPA in `attention_interface.py`, GDN in
-    # `gdn_attention.py`, MLA) pins its cache output via shard_map
-    # `out_specs`, which by construction matches the sharding the runner
-    # allocated the cache with in `kv_cache_manager.py`. Forcing a single
-    # attention-shaped spec here instead would silently reshard any leaf
-    # whose layout differs (e.g. the GDN ssm_state `[blocks, heads, dk, dv]`,
-    # which is heads-sharded), costing an all-to-all per layer per step.
-    # This mirrors the torchax path in `models/vllm/vllm_model_wrapper.py`.
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
@@ -387,7 +377,7 @@ def get_flax_model(
     _wrap_with_jit = functools.partial(
         jax.jit,
         out_shardings=(
-            None,  # kv_cache - keep original sharding
+            None,  # kv_cache
             hidden_states_sharding,
             hidden_states_sharding,  # aux hidden states
             None,  # expert ids
@@ -412,7 +402,7 @@ def get_flax_model(
 
     @jax.jit(
         out_shardings=(
-            None,  # kv_cache - keep original sharding
+            None,  # kv_cache
             hidden_states_sharding,
             hidden_states_sharding,  # residual
             None,  # expert ids
