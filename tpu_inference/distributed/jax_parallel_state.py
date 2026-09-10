@@ -17,6 +17,8 @@ from typing import Any, Optional
 import jax
 from jax.experimental import transfer
 
+from tpu_inference.distributed.utils import format_host_port
+
 BASE_JAX_PORT = 5000
 
 
@@ -64,15 +66,18 @@ def init_pp_distributed_environment(ip: str, rank: int, world_size: int,
 
     if need_pp:
         port_number = BASE_JAX_PORT + rank
-        server_address = f"{ip}:{port_number}"
+        server_address = format_host_port(ip, port_number)
         transfer_server = transfer.start_transfer_server(
-            device.client, server_address, [f"{ip}:0", f"{ip}:0"])
+            device.client, server_address,
+            [format_host_port(ip, 0),
+             format_host_port(ip, 0)])
         _PP.transfer_server = transfer_server
 
 
 def connect(prev_ip: str, prev_rank: int):
     prev_port_number = BASE_JAX_PORT + prev_rank
-    connection = _PP.transfer_server.connect(f'{prev_ip}:{prev_port_number}')
+    connection = _PP.transfer_server.connect(
+        format_host_port(prev_ip, prev_port_number))
     _PP.connection = connection
 
 

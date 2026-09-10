@@ -58,6 +58,17 @@ def get_host_ip() -> str:
     return get_ip()
 
 
+def format_host_port(host: str, port: int | str) -> str:
+    """Format host and port into a valid endpoint address string.
+
+    Encloses IPv6 addresses in square brackets if not already bracketed.
+    """
+    host_str = str(host)
+    if ":" in host_str and not host_str.startswith("["):
+        return f"[{host_str}]:{port}"
+    return f"{host_str}:{port}"
+
+
 def get_kv_transfer_port() -> str:
     port = os.getenv("TPU_KV_TRANSFER_PORT", "9100")
     return port
