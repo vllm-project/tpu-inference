@@ -324,17 +324,12 @@ def pcp_forward(
             # -inf result discarded by merge_attn_states.  Skip it outright.
             context_out = context_lse = None
         else:
-            # One cache-phase seq per request spanning its head+tail run
+            # One cache-phase seq per request, spanning its head+tail run
             # (no causal mask here, so the two need not be told apart):
-            # every array is the current-phase array with the head/tail
-            # duplication undone, and the seq count is half.  One seq of
-            # 2*C_i rows also rounds up to fewer query tiles than two seqs
-            # of C_i, and the ring re-streams the request's cache once per
-            # tile.  The ring runs in lock-step across ranks, so everything
-            # passed here is rank-invariant: distribution is replicated,
-            # cu_q_lens is the same on every rank because the runner gives
-            # both halves the full chunk length, and the block count comes
-            # from the replicated global cache length.  q_pos_offsets, the
+            # each array is the current-phase one with the head/tail
+            # duplication undone.  The ring runs in lock-step across ranks,
+            # so every operand must be rank-invariant -- cu_q_lens is (both
+            # halves carry the full chunk length), and q_pos_offsets, the
             # one per-rank array, is not passed.
             cu_cache = pcp_cu_q_lens_local[0][0::2]
             kv_lens_cache = kv_lens_local[0::2]
@@ -342,8 +337,8 @@ def pcp_forward(
             pps = page_indices_local.shape[0] // kv_lens_local.shape[0]
             page_indices_cache = page_indices_local.reshape(
                 -1, pps)[0::2].reshape(-1)
-            distribution_cache = jnp.zeros_like(
-                distribution_local).at[2].set(distribution_local[2] // 2)
+            distribution_cache = jnp.zeros_like(distribution_local).at[2].set(
+                distribution_local[2] // 2)
             context_out, _, context_lse = _rpa_cp_call(
                 q_local,
                 k_local,
@@ -364,10 +359,8 @@ def pcp_forward(
                 **common)
 
         # ---- Current phase ------------------------------------------------
-        # Local Q (head+tail chunks) attends the all-gathered current K/V.
-        # Every chunk is a page multiple, so the kernel unshuffles the
-        # rank-order buffer itself through the kv_page_order map during its
-        # KV fetch; no gather or reshape pass here.
+        # Local Q (head+tail chunks) attends the all-gathered current K/V;
+        # the kernel unshuffles the rank-order buffer via kv_page_order.
         k_curr = all_gather_tokens(k_local)
         v_curr = all_gather_tokens(v_local)
         # Each request's tail seq performs the fused strided KV write.

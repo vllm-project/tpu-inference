@@ -766,14 +766,12 @@ def _ragged_paged_attention_kernel_loop(
                 debug_print("[RPA debug] new_kv_len_start={}",
                             new_kv_len_start)
                 if kv_page_order_ref is not None:
-                    # PCP: the new-KV buffer is still in the rank order the
-                    # all_gather produced; kv_page_order maps each token-order
-                    # page to the page holding it there. Every zigzag chunk is
-                    # a whole number of pages, so a token-order page is
-                    # contiguous in the buffer and the run splits into at most
-                    # bkv_p + 1 page pieces (the first and last may be
-                    # partial), fetched like the cache pages above. The pieces
-                    # sum to bkv_sz_frm_new, so the single wait below still
+                    # PCP: the new-KV buffer is still in all_gather rank
+                    # order; kv_page_order maps each token-order page to the
+                    # page holding it there (contiguous, since every zigzag
+                    # chunk is a whole number of pages). At most bkv_p + 1
+                    # pieces, first and last possibly partial; they sum to
+                    # bkv_sz_frm_new, so the single wait below still
                     # accounts for every byte.
                     num_map_pages = kv_page_order_ref.shape[0]
                     first_page = new_kv_len_start // page_size
@@ -789,15 +787,13 @@ def _ragged_paged_attention_kernel_loop(
                             kv_hbm_ref.at[pl.ds(
                                 kv_page_order_ref[page_idx] * page_size +
                                 src_in_page, sz)],
-                            vmem_ref.at[pl.ds(bkv_sz_frm_cache + dst_off,
-                                              sz)],
+                            vmem_ref.at[pl.ds(bkv_sz_frm_cache + dst_off, sz)],
                             sem,
                             wait=False,
                         )
                 else:
                     _async_copy(
-                        kv_hbm_ref.at[pl.ds(new_kv_len_start,
-                                            bkv_sz_frm_new)],
+                        kv_hbm_ref.at[pl.ds(new_kv_len_start, bkv_sz_frm_new)],
                         vmem_ref.at[pl.ds(bkv_sz_frm_cache, bkv_sz_frm_new)],
                         sem,
                         wait,
@@ -2041,13 +2037,11 @@ def static_validate_inputs(
 
     if kv_page_order is not None:
         if kv_cache_lens is None or cp_group_size is None:
-            raise ValueError(
-                "PCP (kv_page_order) requires kv_cache_lens and "
-                "cp_group_size.")
+            raise ValueError("PCP (kv_page_order) requires kv_cache_lens and "
+                             "cp_group_size.")
         if kv_page_order.dtype != jnp.int32:
-            raise ValueError(
-                f"Expected int32 dtype for kv_page_order, got "
-                f"{kv_page_order.dtype}")
+            raise ValueError(f"Expected int32 dtype for kv_page_order, got "
+                             f"{kv_page_order.dtype}")
         if k.shape[0] % page_size != 0:
             raise ValueError(
                 f"PCP (kv_page_order) needs the new-KV buffer rows "
@@ -2287,9 +2281,9 @@ def ragged_paged_attention(
     pcp_ring_mesh_axis_names: all axis names of the mesh the ring runs on, in
       order. Defaults to a one-axis mesh.
     kv_new_starts: PCP only. Base offset of each sequence's current-KV block
-      inside the all-gathered new-KV buffer (`keys`/`values`). Needed when that
-      buffer, packed back to back in request order (a single request's block
-      starts at 0); leave None for the non-PCP paths.
+      inside the all-gathered new-KV buffer (`keys`/`values`), which packs the
+      requests back to back in request order (a single request's block starts
+      at 0); leave None for the non-PCP paths.
     kv_write_seq_mask: PCP only. Nonzero on the sequences that perform the fused
       strided KV-cache write. PCP fuses a request's head and tail chunk into one
       launch as two "sequences" that are really the same request (same

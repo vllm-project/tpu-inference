@@ -160,10 +160,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     from tpu_inference.layers.common.attention_metadata import (
         AttentionMetadata, PCPMetadata)
     from tpu_inference.layers.common.cp_attention import pcp_forward
-    from tpu_inference.runner.pcp_utils import pcp_page_order
     from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                       ShardingAxisName,
                                                       ShardingAxisNameBase)
+    from tpu_inference.runner.pcp_utils import pcp_page_order, pcp_seq_arrays
 
     # The N-D axis names carry `pcp`; select them regardless of
     # NEW_MODEL_DESIGN so the benchmark does not depend on the env.
@@ -277,7 +277,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                       for a in MESH_AXIS_NAMES)
         mesh = Mesh(
             np.array(jax.devices()[:pcp * tp]).reshape(shape), MESH_AXIS_NAMES)
-        two_p, C = 2 * pcp, chunk // (2 * pcp)
+        C = chunk // (2 * pcp)
         # KV_CONTEXT shards the page dim: a global page holds page*pcp tokens.
         gpage = page * pcp
         pages_per_seq = max(cdiv(max_ctx, gpage), 1)
@@ -307,25 +307,16 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
             (MAX_SEQ * pages_per_seq, ),
             jnp.int32).at[:2 * pages_per_seq].set(jnp.concatenate([pg, pg]))
         dist = jnp.array([0, 0, 2], jnp.int32)
-        # Full-length tails (rank-invariant cu), as the merged layout
-        # requires; the rows past the real tokens are padding.
-        pcp_cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
-        pcp_qp = np.zeros((pcp, MAX_SEQ), np.int32)
-        for r in range(pcp):
-            pcp_cu[r, 1] = C
-            pcp_cu[r, 2:] = 2 * C
-            pcp_qp[r, 0] = r * C
-            pcp_qp[r, 1] = (two_p - 1 - r) * C
+        # The production per-seq arrays for one request of 2P*C rows.
+        cu_row, qp_np, kvs_np = pcp_seq_arrays([C], [0], pcp, MAX_SEQ)
         pcp_spec = P(ShardingAxisName.PREFILL_CONTEXT, None)
-        pcp_cu = put(jnp.asarray(pcp_cu), pcp_spec)
-        pcp_qp = put(jnp.asarray(pcp_qp), pcp_spec)
-        # Single request: every seq's current-KV block starts at 0, and the
-        # kernel unshuffles the rank-order buffer through the per-page map.
+        pcp_cu = put(jnp.asarray(np.tile(cu_row, (pcp, 1))), pcp_spec)
+        pcp_qp = put(jnp.asarray(qp_np), pcp_spec)
         assert C % page == 0, (C, page)
-        kv_starts = put(jnp.zeros((MAX_SEQ, ), jnp.int32), P())
+        kv_starts = put(jnp.asarray(kvs_np), P())
         kv_pages = put(
-            jnp.asarray(pcp_page_order([C], [0], pcp, chunk // pcp, chunk,
-                                       page)), P())
+            jnp.asarray(
+                pcp_page_order([C], [0], pcp, chunk // pcp, chunk, page)), P())
         fns = {}
 
         def fn_for(has_cached_kv):

@@ -45,9 +45,7 @@ class PCPMetadata:
     kv_new_starts: jax.Array
     # (padded_num_tokens // page_size,) int32 — per-page map from token-order
     # pages of the all-gathered current K/V to the pages holding them in rank
-    # order (`pcp_page_order`).  Replicated (P()).  The kernel unshuffles
-    # through it during its KV fetch, for any request count (a single request
-    # is R = 1 of the general page-aligned zigzag pack).
+    # order (`pcp_page_order`).  Replicated (P()).
     kv_page_order: jax.Array
     # STATIC (meta field): whether any request in the batch has cached KV.
     # False elides the cache phase entirely.  REQUIRED: a default would
