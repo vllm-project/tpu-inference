@@ -194,10 +194,22 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self,
         kv_cache_config: KVCacheConfig,
         *args,
+        max_model_len: int,
+        max_in_flight_tokens: int,
+        enable_caching: bool,
         mamba_num_blocks: int | None = None,
         **kwargs,
     ):
-        super().__init__(kv_cache_config, *args, **kwargs)
+        super().__init__(kv_cache_config,
+                         *args,
+                         max_model_len=max_model_len,
+                         max_in_flight_tokens=max_in_flight_tokens,
+                         enable_caching=enable_caching,
+                         **kwargs)
+
+        self.max_model_len = max_model_len
+        self.max_in_flight_tokens = max_in_flight_tokens
+        self.enable_caching = enable_caching
 
         # Base __init__ initialized self.block_pool with kv_cache_config.num_blocks (Attention pool)
         self.attention_block_pool = self.block_pool
@@ -252,11 +264,9 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Re-bind Mamba managers to mamba_block_pool
         new_managers = list(self.single_type_managers)
         for i in self.mamba_group_ids:
-            old_mgr = self.single_type_managers[i]
             new_managers[i] = get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
-                max_in_flight_tokens=getattr(old_mgr, "max_in_flight_tokens",
-                                             128),
+                max_in_flight_tokens=self.max_in_flight_tokens,
                 max_model_len=self.max_model_len,
                 block_pool=self.mamba_block_pool,
                 enable_caching=self.enable_caching,
