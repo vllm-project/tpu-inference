@@ -12,18 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import logging
 import os
-import time
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
-from enum import Enum
 
 import yaml
-from absl import flags
 
-FLAGS = flags.FLAGS
+# isort: off
+from tools.kernel.tuner.v1.common.tuner_datatypes import (
+    RunConfig, TunableParams, TunerConfig, TuningCase, TuningKey, TuningStatus)
+# isort: on
+from tools.kernel.tuner.v1.common.utils import safe_remove_files
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -40,137 +39,226 @@ def _literal_representer(dumper, data):
 yaml.add_representer(LiteralString, _literal_representer)
 
 
-@dataclass
-class TuningKey:
-    # Specify the key for tuning case
-    pass
+def _embed_flag_in_bash_c(arg: str) -> str:
+    """Double-quote a '--name=value' arg so the inner shell of the generated
+    bash -c command keeps the value as one word."""
+    name, sep, value = arg.partition('=')
+    if not sep:
+        return arg  # boolean form '--name' / '--noname'
+    assert "'" not in value, (
+        f'{name} value must not contain single quotes when generating '
+        'Buildkite steps (it would terminate the bash -c quoting)')
+    escaped = (value.replace('\\', '\\\\').replace('"', '\\"').replace(
+        '$', '\\$').replace('`', '\\`'))
+    return f'{name}="{escaped}"'
 
 
-@dataclass
-class TunableParams:
-    # Specify the tiles for tuning case
-    pass
+class ProcessedCasesTracker:
+    """Tracks evaluated case IDs and their execution statuses to manage state and OOM early-pruning."""
 
+    def __init__(self, storage_manager, tuner_config: 'TunerConfig',
+                 run_config: 'RunConfig', begin_case_id: int,
+                 end_case_id: int):
 
-class TuningStatus(Enum):
-    SUCCESS = 'SUCCESS'
-    FAILED_OOM = 'FAILED_OOM'
-    UNKNOWN_ERROR = 'UNKNOWN_ERROR'
-    SKIPPED = 'SKIPPED'
+        processed_ids_status = storage_manager.get_already_processed_ids(
+            run_config.case_set_id, run_config.run_id, begin_case_id,
+            end_case_id)
+        self.processed_ids = set(
+            [item.case_id for item in processed_ids_status])
 
+        self.history: dict[TuningKey, list[tuple[TunableParams,
+                                                 TuningStatus]]] = {}
+        # TODO: refactor this to use the begin_case_id and end_case_id to limit the range of cases to read
+        all_cases_id_case_key_value = storage_manager.get_all_cases(
+            run_config.case_set_id)
+        processed_ids_status_dict = {
+            item.case_id: item.status
+            for item in processed_ids_status
+        }
+        for case_id, case_key_value in all_cases_id_case_key_value:
+            tuning_case = TuningCase.from_string(
+                case_key_value, tuner_config.tuning_key_class,
+                tuner_config.tunable_params_class)
+            if case_id not in processed_ids_status_dict:
+                continue
+            self.history.setdefault(tuning_case.tuning_key, []).append(
+                (tuning_case.tunable_params,
+                 TuningStatus(processed_ids_status_dict.get(case_id))))
 
-class TuningCase:
+    def __contains__(self, case_id: int) -> bool:
+        return case_id in self.processed_ids
 
-    def __init__(self, tuning_key: TuningKey, tunable_params: TunableParams):
-        self.tuning_key = tuning_key
-        self.tunable_params = tunable_params
+    def record(self, case_id: int, tuning_key: TuningKey,
+               tunable_params: TunableParams, status: TuningStatus) -> None:
+        """Records a case ID as processed and tracks its tuning status."""
+        self.processed_ids.add(case_id)
+        self.history.setdefault(tuning_key, []).append(
+            (tunable_params, status))
 
-    def __str__(self):
-        return json.dumps({
-            'tuning_key': asdict(self.tuning_key),
-            'tunable_params': asdict(self.tunable_params)
-        })
-
-    @classmethod
-    def from_string(cls, string, tuning_key_class, tunable_params_class):
-        data = json.loads(string)
-        tuning_key = tuning_key_class(**data['tuning_key'])
-        tunable_params = tunable_params_class(**data['tunable_params'])
-        case = TuningCase(tuning_key, tunable_params)
-        return case.tuning_key, case.tunable_params
-
-
-@dataclass
-class TunerConfig:
-    tuning_key_class: any = None
-    tunable_params_class: any = None
-    kernel_tuner_name: str = None
-
-
-@dataclass
-class RunConfig:
-    case_set_id: str = None
-    run_id: str = None
-    case_set_desc: str = None
-    tpu_version: str = None
-    tpu_cores: int = None
-    tpu_queue_multi: str = None
-    run_locally: bool = False
-    job_priority: int = -10
-    max_execution_minutes: int = 20
-    job_bucket_size: int = 100
+    def is_oom_expected(self, tuning_key: TuningKey,
+                        tunable_params: TunableParams) -> bool:
+        """Returns True if a smaller configuration for the same tuning key previously failed with OOM."""
+        for p, s in self.history.get(tuning_key, []):
+            if s == TuningStatus.FAILED_OOM and p <= tunable_params:
+                return True
+        return False
 
 
 class KernelTunerBase(ABC):
-    """
-    Base class for kernel tuner runner. The kernel tuner runner is responsible for generating the tuning cases, partitioning the cases into buckets, generating the Buildkite pipeline, and measuring the latency of the cases. The specific kernel tuner runner should inherit from this base class and implement the generate_cases, generate_inputs, and run methods.
-    Subclass should also define the TuningKey and TunableParams dataclasses according to the kernel's tuning space.
-    The tuning cases, tuning results, and other metadata will be persisted in local file or database using storage_management module, which is abstracted by the StorageManager class. The specific implementation of StorageManager can be LocalDbManager for local JSON-file-backed storage or SpannerDbManager for Google Spanner-backed storage.
-    The kernel tuner runner will be executed in a distributed manner, where each worker will claim a bucket of cases to process, run the kernel with the corresponding tuning key and tunable params, measure the latency, and save the results back to the storage manager. The Buildkite pipeline will be generated to orchestrate the distributed execution of the kernel tuner runner.
+    """Pure kernel definition base class.
 
-    Subclass should implement the following methods:
-    - generate_cases: Generate the tuning cases for the given case_set_id and desc passed through the config, and return a list of TuningCase objects representing the tuning cases.
-    - generate_inputs: Generate the kernel inputs for the given tuning key with caching, and return a dictionary of kernel inputs.
-    - run: Execute the kernel with the given tuning key and tunable params for a certain number of iterations, measure the latency, and return the tuning status, average latency, and total latency.
+    Subclasses define the kernel's tuning space and execution logic by
+    implementing ``generate_cases``, ``generate_inputs``, ``run``, and
+    optionally ``get_search_space``.
 
-    Subclass must call super().__init__(tuner_config=tuner_config, run_config=run_config) in the __init__ method to initialize the base class.
+    This class intentionally has **no** optimizer and **no** storage manager.
+    Those concerns are owned by the runner and worker processes respectively.
 
+    Args:
+        tuner_config: Static configuration for this kernel tuner.
+        run_config: Runtime configuration for the current tuning run.
+        lightweight: If True, skip expensive initialization (JAX device
+            setup, xprof directory, etc.).  Used by the worker process
+            which only needs config and search-space access.
     """
 
     def __init__(self,
                  *,
                  tuner_config: TunerConfig = None,
-                 run_config: RunConfig = None):
+                 run_config: RunConfig = None,
+                 lightweight: bool = False):
         assert tuner_config is not None, "tuner_config must be specified"
         assert run_config is not None, "run_config must be specified"
-        assert tuner_config.tuning_key_class is not None, "tuning_key_class must be specified"
-        assert tuner_config.tunable_params_class is not None, "tunable_params_class must be specified"
+        assert tuner_config.tuning_key_class is not None and issubclass(
+            tuner_config.tuning_key_class, TuningKey
+        ), (f"tuner_config.tuning_key_class ({tuner_config.tuning_key_class}) "
+            "must satisfy the TuningKey protocol (hashable/frozen).")
+        assert tuner_config.tunable_params_class is not None and issubclass(
+            tuner_config.tunable_params_class, TunableParams
+        ), (f"tuner_config.tunable_params_class ({tuner_config.tunable_params_class}) "
+            "must satisfy the TunableParams protocol (__hash__, __le__, __ge__)."
+            )
         assert tuner_config.kernel_tuner_name is not None, "kernel_tuner_name must be specified, which will be used as the identifier for this kernel tuner in the Buildkite pipeline generation and execution. It should match the key in the KERNEL_TUNER_REGISTRY in kernel_tuner_runner.py to ensure the correct kernel tuner is called during execution."
-        # lazy import the storage manager to avoid import spanner when running locally
-        if run_config.run_locally:
-            from tools.kernel.tuner.v1.storage_management.local_db_manager import \
-                LocalDbManager
-            self.storage_manager = LocalDbManager()
-        else:
-            from tools.kernel.tuner.v1.storage_management.spanner_database_manager import \
-                SpannerStorageManager
-            self.storage_manager = SpannerStorageManager()
+
+        self.lightweight = lightweight
         self._kernel_inputs_cache = {}
         self._tuning_key = None
         self.tuner_config = tuner_config
         self.run_config = run_config
+        if run_config.n_bayesian_trials is not None:
+            self.tuner_config.n_bayesian_trials = run_config.n_bayesian_trials
+        if run_config.min_cases_for_bayesian is not None:
+            self.tuner_config.min_cases_for_bayesian = run_config.min_cases_for_bayesian
+        self.use_bayesian_optimization = tuner_config.support_bayesian_optimization and run_config.use_bayesian_optimization
 
-    def _init_case_set(self) -> bool:
-        """Initialize the case set which will be used for tuning. The case set will be written to the storage manager. This will be called when the caseset_id is new.
+        if run_config.use_bayesian_optimization and not tuner_config.support_bayesian_optimization:
+            logger.info(
+                f'{tuner_config.kernel_tuner_name} does not support Bayesian Optimization, falls back to full sweep.'
+            )
 
-        Returns:
-            True if tuning cases were initialized so in _generate_tuning_jobs we don't need to regenerate them, False otherwise.
+        self.xprof_dir = os.path.join("/tmp/kernel_tuning",
+                                      self.tuner_config.kernel_tuner_name,
+                                      "xprof")
+        # Control number of iterations for measuring kernel latency.
+        self._measurement_iters = 5 if self.tuner_config.jit_kernel_pattern else 100
 
+    @property
+    def worker_id(self) -> str:
+        from tools.kernel.tuner.v1.utils import get_worker_id
+        return get_worker_id(self.run_config.worker_id)
+
+    @staticmethod
+    def init_case_set(storage_manager, run_config: RunConfig) -> bool:
+        """Initialize the case set in storage.
+
+        Returns True if a new case set was created (cases need to be
+        generated), False if the case set already exists.
         """
-        # check case_set_id exists in storage manager, if not exist, create a new case set with the given case_set_id and desc.
-        # if exist, check whether the desc is the same as the existing one, if not, raise an error.
-        if self.storage_manager.case_set_id_exists(
-                self.run_config.case_set_id):
-            existing_desc = self.storage_manager.get_case_set_desc(
-                self.run_config.case_set_id)
-            if existing_desc != self.run_config.case_set_desc:
+        if storage_manager.case_set_id_exists(run_config.case_set_id):
+            existing_desc = storage_manager.get_case_set_desc(
+                run_config.case_set_id)
+            if existing_desc != run_config.case_set_desc:
                 raise ValueError(
-                    f"CaseSetId {self.run_config.case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {self.run_config.case_set_desc}. If you intend to create new case set, please use a new case set id. Updating comment of an existing case set is not allowed. Please use a different CaseSetId or update the description to match the existing one."
+                    f"CaseSetId {run_config.case_set_id} already exists with a different description. Existing desc: {existing_desc}, new desc: {run_config.case_set_desc}. If you intend to create new case set, please use a new case set id. Updating comment of an existing case set is not allowed. Please use a different CaseSetId or update the description to match the existing one."
                 )
             else:
                 logger.info(
-                    f"CaseSetId {self.run_config.case_set_id} already exists with the same description. Proceeding with the existing case set."
+                    f"CaseSetId {run_config.case_set_id} already exists with the same description. Proceeding with the existing case set."
                 )
         else:
-            self.storage_manager.init_case_set(
-                self.run_config.case_set_id,
-                scan_space=0,
-                desc=self.run_config.case_set_desc)
+            storage_manager.init_case_set(run_config.case_set_id,
+                                          scan_space=0,
+                                          desc=run_config.case_set_desc)
             logger.info(
-                f"Initialized new CaseSet with ID: {self.run_config.case_set_id} and description: {self.run_config.case_set_desc}"
+                f"CaseSet with ID: {run_config.case_set_id} and description: {run_config.case_set_desc} initialized."
             )
             return True
         return False
+
+    def _resolve_kernel_pattern(self, tuning_key: TuningKey) -> str:
+        if callable(self.tuner_config.jit_kernel_pattern):
+            return self.tuner_config.jit_kernel_pattern(tuning_key)
+        else:
+            return self.tuner_config.jit_kernel_pattern
+
+    def generate_autotune_cases(self, storage_manager) -> list[TuningCase]:
+        """Generate autotune cases by reading from storage.
+
+        Args:
+            storage_manager: The storage manager to read autotune cases from.
+        """
+        tuning_set = []
+        # The case_set_id is constructed as {kernel_tuner_name}_{autotune_case_set_id} in the bootstrap_kernel_tuners.py
+        autotune_case_set_id = self.run_config.case_set_id.removeprefix(
+            f'{self.tuner_config.kernel_tuner_name}_')
+        autotune_cases = storage_manager.read_autotune_cases(
+            case_set_id=autotune_case_set_id,
+            kernel_tuner_name=self.tuner_config.kernel_tuner_name,
+            tpu=self.run_config.tpu_version)
+        bucket_by_key = []
+        for row in autotune_cases:
+            case_key_value = row['CaseKeyValue']
+            tuning_case = TuningCase.from_string(
+                case_key_value, self.tuner_config.tuning_key_class,
+                self.tuner_config.tunable_params_class)
+
+            start_case_id = len(tuning_set)
+            tuning_set.append(tuning_case)
+            tuning_key = tuning_case.tuning_key
+            search_space = self.get_search_space(tuning_key)
+            if not isinstance(search_space, dict):
+                raise ValueError(
+                    f"get_search_space should return a dictionary, but got {type(search_space)}"
+                )
+
+            def all_combinations(remain_keys, current_combination):
+                if not remain_keys:
+                    # tunable_params_list.append(TunableParams.from_dict(current_combination))
+                    if not current_combination:
+                        return
+                    yield self.tuner_config.tunable_params_class(
+                        **current_combination)
+                    return
+                key = remain_keys[0]
+                for value in search_space[key]:
+                    new_combination = current_combination.copy()
+                    new_combination[key] = value
+                    yield from all_combinations(remain_keys[1:],
+                                                new_combination)
+
+            for tunable_params in all_combinations(list(search_space.keys()),
+                                                   {}):
+                tuning_set.append(
+                    TuningCase(tuning_key, tunable_params, is_baseline=False))
+            end_case_id = len(tuning_set)
+            bucket_by_key.append(
+                (start_case_id,
+                 end_case_id))  # [Include start_case_id, Exclude end_case_id)
+
+        logger.info(
+            f"Retrieved {len(tuning_set)} autotune cases for CaseSetId: {self.run_config.case_set_id} from Spanner."
+        )
+        return tuning_set, bucket_by_key
 
     @abstractmethod
     def generate_cases(self) -> list[TuningCase]:
@@ -180,63 +268,40 @@ class KernelTunerBase(ABC):
         Returns: A list of TuningCase objects representing the tuning cases to be processed.
         """
         raise NotImplementedError(
-            "Specific kernel should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
+            "Specific kernel tuner should implement this to generate the cases for the given case_set_id and desc, and return a list of TuningCase objects representing the tuning cases."
         )
 
-    def _generate_tuning_jobs(self) -> list[tuple[int, int]]:
-        """Partitions the full case set into fixed-size work buckets.
+    def get_search_space(self, tuning_key: TuningKey) -> dict:
+        """Get the search space for the given kernel tuner with the specified tuning key. The search space is a dictionary where the keys are the tunable parameter names and the values are lists of possible values for each parameter.
 
-        Calls `generate_cases` to determine the total number of cases, then
-        splits them into contiguous ranges of at most `self.run_config.job_bucket_size` cases each.
-        Buckets are intended to be dispatched and executed in parallel; result
-        ordering is not guaranteed. Each bucket is identified by a half-open
-        interval [begin_case_id, end_case_id).
+        For example, for a kernel tuner that TunableParams has two tunable parameters 'tile_size' and 'unroll_factor', the search space could be represented as:
+        {
+            'tile_size': [16, 32, 64],
+            'unroll_factor': [1, 2, 4]
+        }
 
         Returns:
-            A list of [begin_case_id, end_case_id] pairs covering all cases.
+            A dictionary representing the search space for the kernel tuner.
         """
-        try:
-            if self._init_case_set():
-                start_time = time.perf_counter()
-                cases = self.generate_cases()
-                total_cases = len(cases)
-                for case_id, case_str in enumerate(map(str, cases)):
-                    self.storage_manager.add_tuner_case(
-                        self.run_config.case_set_id,
-                        case_id,
-                        case_str,
-                        tpu=self.run_config.tpu_queue_multi)
-                self.storage_manager.flush()
-                duration_sec = int(time.perf_counter() - start_time)
-                self.storage_manager.finish_case_set(
-                    self.run_config.case_set_id,
-                    total_cases,
-                    0,  # invalid case count, doesn't matter here
-                    duration_sec * 1.0)
-                logger.info(
-                    f"\nComplete Generate Tuning Cases for {self.run_config.case_set_id}, Valid Cases: {total_cases} | Duration: {duration_sec}s"
-                )
-            else:
-                # If the case set already exists, we assume the cases have been generated and we just need to generate the buckets for tuning jobs.
-                total_cases = self.storage_manager.get_total_cases_in_case_set(
-                    self.run_config.case_set_id)
-            buckets = [
-                (i, min(i + self.run_config.job_bucket_size, total_cases))
-                for i in range(0, total_cases, self.run_config.job_bucket_size)
-            ]
-            return buckets
-        except Exception as e:
-            logger.error(
-                f"Error initializing case set {self.run_config.case_set_id}: {e}"
-            )
-            raise e
+        return {}
 
-    def _build_step(self,
-                    case_id_start: int,
-                    case_id_end: int,
-                    parent_step_key: str = None) -> dict:
+    def _build_step(self, case_id_start: int, case_id_end: int,
+                    parent_step_key: str) -> dict:
         step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{case_id_start}_{case_id_end}'
-        parent_step_key = parent_step_key or 'generate_tuning_cases_and_yml'
+        yml_file_path = self.run_config.subbucket_yml_path(case_id_end)
+        safe_remove_files(yml_file_path)
+        from tools.kernel.tuner.v1.kernel_tuner_flags import \
+            get_present_flag_args
+        extra_flags = get_present_flag_args(
+            exclude_flags={
+                'run_locally',
+                'begin_case_id',
+                'end_case_id',
+                'worker_id',  # keep per-agent env resolution; don't stamp the generator's id
+            })
+        extra_flags_str = ''.join(f'  {_embed_flag_in_bash_c(a)}'
+                                  for a in extra_flags)
+
         return {
             "label":
             f"cs_id={self.run_config.case_set_id} rid={self.run_config.run_id} Bucket([{case_id_start}, {case_id_end}))",
@@ -252,36 +317,26 @@ class KernelTunerBase(ABC):
                 "TPU_VERSION": self.run_config.tpu_version
             },
             "commands": [
-                LiteralString(
-                    'rm -f /tmp/kernel_tuning/generated_pipeline.yml'),
+                # For a single step, it might generate subbucket job
+                LiteralString(f'rm -f {yml_file_path}'),
                 LiteralString(
                     '.buildkite/scripts/run_in_docker.sh bash -c \''
-                    'pip install --upgrade google-cloud-spanner && '
-                    'pip install --upgrade google-api-core && '
-                    'pip install --upgrade google-auth && '
-                    'pip install --upgrade absl-py && '
+                    'pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt && '
                     'python -m tools.kernel.tuner.v1.kernel_tuner_runner '
-                    f'--kernel_tuner_name={self.tuner_config.kernel_tuner_name} '
-                    f'  --case_set_id={self.run_config.case_set_id} --run_id={self.run_config.run_id} '
-                    f'  --tpu_version={self.run_config.tpu_version} '
-                    f'  --tpu_cores={self.run_config.tpu_cores} '
-                    f'  --case_set_desc=\"{self.run_config.case_set_desc}\" '
                     f'  --run_locally=False '
-                    f'  --tpu_queue_multi={self.run_config.tpu_queue_multi} '
-                    f'  --max_execution_minutes={self.run_config.max_execution_minutes} '
-                    f'  --job_priority={self.run_config.job_priority} '
+                    f'{extra_flags_str}'
                     f'  --begin_case_id={case_id_start} --end_case_id={case_id_end}\''
                 ),
                 LiteralString(
-                    f'if [ -f /tmp/kernel_tuning/generated_pipeline.yml ]; then '
-                    f'  buildkite-agent artifact upload /tmp/kernel_tuning/generated_pipeline.yml && '
+                    f'if [ -f {yml_file_path} ]; then '
+                    f'  buildkite-agent artifact upload {yml_file_path} && '
                     f'  echo \"Upload generated pipeline YAML to Buildkite artifacts with priority {self.run_config.job_priority}\" && '
                     f'  {{ '
                     f'      echo \"priority: {self.run_config.job_priority}\"; '
-                    f'      cat /tmp/kernel_tuning/generated_pipeline.yml; '
-                    f'  }} | buildkite-agent pipeline upload; '
+                    f'      cat {yml_file_path}; '
+                    f'  }} | buildkite-agent pipeline upload; rm -f {yml_file_path}'
                     f'  else '
-                    f'      echo \"File /tmp/kernel_tuning/generated_pipeline.yml does not exist. Exiting successfully.\"; '
+                    f'      echo \"File {yml_file_path} does not exist. It is either this bucket is completely processed or encounters an issue that requires a bucket level retry.\"; '
                     f'fi')
             ]
         }
@@ -297,37 +352,56 @@ class KernelTunerBase(ABC):
         """
         assert parent_step_key is not None, "parent_step_key must be specified for the sub-bucket pipeline generation to set the correct dependency in the Buildkite pipeline."
         assert start < end, f"Invalid sub-bucket range: start {start} should be less than end {end}."
-        output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
-        if os.path.exists(output_path):
-            # clean up the existing one
-            os.remove(output_path)
+        subbucket_yml_path = self.run_config.subbucket_yml_path(end)
+        safe_remove_files(subbucket_yml_path)
         step = self._build_step(start, end, parent_step_key=parent_step_key)
         pipeline = {"group": 'Kernel Sweeping Group', "steps": [step]}
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "w") as f:
+        os.makedirs(os.path.dirname(subbucket_yml_path), exist_ok=True)
+        with open(subbucket_yml_path, "w") as f:
             yaml.dump(pipeline, f, default_flow_style=False, sort_keys=False)
         logger.info(
-            f"Generated Buildkite pipeline YAML for sub-bucket [{start}, {end}) saved to {output_path} in Docker"
+            f"Generated Buildkite pipeline YAML for sub-bucket [{start}, {end}) saved to {subbucket_yml_path} in Docker"
         )
 
-    def generate_buildkite_pipeline(self) -> str:
-        """Generate the Buildkite pipeline for the given tuning jobs. Each tuning job will be represented as a Buildkite step that calls the measure_latency function with the corresponding case_id range.
+    def generate_buildkite_pipeline(self, buckets: list[tuple[int, int]],
+                                    storage_manager) -> str:
+        """Generate the Buildkite pipeline YAML for the given tuning buckets.
+
+        The Buildkite pipeline YAML will be generated in the format of:
+        steps:
+          - label: "Measure latency for cases [begin_case_id, end_case_id)"
+            command: "python -m tools.kernel.tuner.v1.kernel_tuner_runner\
+                      --case_set_id=CASE_SET_ID\
+                      --run_id=RUN_ID\
+                      --begin_case_id=BEGIN_CASE_ID\
+                      --end_case_id=END_CASE_ID\
+                      <OTHER FLAGS DEFINED IN kernel_tuner_flags.py>
+
+        Args:
+            buckets: List of (begin_case_id, end_case_id) tuples.
+            storage_manager: Storage manager for creating bucket records.
         """
         output_path = "/tmp/kernel_tuning/generated_pipeline.yml"
-        if os.path.exists(output_path):
-            # clean up the existing one
-            os.remove(output_path)
-        buckets = self._generate_tuning_jobs()
-        # The Buildkite pipeline YAML will be generated in the format of:
-        # steps:
-        #   - label: "Measure latency for cases [begin_case_id, end_case_id)"
-        #     command: "python -m tools.kernel.tuner.v1.kernel_tuner_runner --worker_id=WORKER_ID --case_set_id=CASE_SET_ID --run_id=RUN_ID --begin_case_id=BEGIN_CASE_ID --end_case_id=END_CASE_ID"
+        safe_remove_files(output_path)
         pipeline = {"steps": []}
 
-        for bucket_id, (case_id_start, case_id_end) in enumerate(buckets):
-            step = self._build_step(case_id_start, case_id_end)
+        for enum_bucket_id, (case_id_start, case_id_end) in enumerate(buckets):
+            step = self._build_step(case_id_start,
+                                    case_id_end,
+                                    parent_step_key=os.environ.get(
+                                        'BUILDKITE_STEP_KEY', None))
+            # In Bayesian mode each bucket covers exactly one TuningKey and its
+            # begin case_id is a stable unique identifier, so we use it as the
+            # bucket_id to keep generate_buildkite_pipeline and measure_latency
+            # consistent.  In sweep mode we continue using the enumerate index.
+            bucket_id = (case_id_start
+                         if self.use_bayesian_optimization else enum_bucket_id)
+            logger.info(
+                f"Adding Buildkite step for bucket {bucket_id}: cases [{case_id_start}, {case_id_end})"
+            )
             pipeline["steps"].append(step)
-            self.storage_manager.create_bucket_for_run(
+            # (TODO): Check (case_set_id, run_id) exists in the storage or not first
+            storage_manager.create_bucket_for_run(
                 self.run_config.case_set_id,
                 self.run_config.run_id,
                 bucket_id,
@@ -335,8 +409,14 @@ class KernelTunerBase(ABC):
                 case_id_end,
                 tpu=self.run_config.tpu_queue_multi)
 
+        if self.use_bayesian_optimization:
+            group_name = f'Bayesian Optimization Group[{self.tuner_config.kernel_tuner_name}]'
+        else:
+            group_name = f'Sweeping Group[{self.tuner_config.kernel_tuner_name}]'
         pipeline['steps'] = [{
-            'group': 'Kernel Sweeping Group',
+            'group': group_name,
+            'key':
+            f'{self.tuner_config.kernel_tuner_name}_{self.run_config.tpu_version}_tuning_group',
             'steps': pipeline['steps']
         }]
 
@@ -346,6 +426,9 @@ class KernelTunerBase(ABC):
         logger.info(
             f"Generated Buildkite pipeline YAML saved to {output_path} in Docker"
         )
+
+    # NOTE: _evaluate_single_case() has been moved to the optimizer layer.
+    # It now uses ExecutorProcessManager for subprocess-isolated run() calls.
 
     @abstractmethod
     def generate_inputs(self, tuning_key: TuningKey) -> dict:
@@ -370,8 +453,9 @@ class KernelTunerBase(ABC):
 
         Fetches inputs via `generate_inputs`, runs the kernel with the supplied
         tunable parameters for `iters` iterations, and returns timing results.
-        All exceptions must be caught internally; nothing should propagate to
-        the caller.
+        OOM exceptions must be caught internally and return FAILED_OOM.
+        Other exceptions must be logged and re-raised. These non OOM exception will be logged
+        and stop the program since we should not fail silently.
 
         A common implementation pattern is:
         ```
@@ -391,12 +475,18 @@ class KernelTunerBase(ABC):
                 end_time_ns = time.perf_counter_ns()
                 average_latency_ns = (end_time_ns - start_time_ns) // iters
                 return TuningStatus.SUCCESS, average_latency_ns, end_time_ns - start_time_ns
-            except OOMError as e:
-                logger.warning(f"OOM error when running kernel for tuning key {tuning_key} with tunable params {tunable_params}: {e}")
-                return TuningStatus.FAILED_OOM, 0, 0
-            except Exception as e:
-                logger.error(f"Unknown error when running kernel for tuning key {tuning_key} with tunable params {tunable_params}: {e}")
-                return TuningStatus.UNKNOWN_ERROR, 0, 0
+            except Exception as err:
+                if "RESOURCE_EXHAUSTED:" in str(err):
+                    logger.warning(
+                        f"Kernel run failed with OOM for {tuning_key=}, {tunable_params=}"
+                    )
+                    return TuningStatus.FAILED_OOM, float("inf"), float("inf")
+                logger.warning(
+                    f"Failed with {tuning_key=}, {tunable_params=}, got error: {err=}"
+                )
+                raise Exception(
+                    f"Kernel run failed with tuning key & tunable params:\nTuningKey=\n{tuning_key}, TunableParams=\n{tunable_params}, got error: {err=}"
+                )
         ```
 
         Args:
@@ -418,116 +508,21 @@ class KernelTunerBase(ABC):
             "Specific kernel should implement this to call the kernl with the inputs from generate_inputs"
         )
 
-    def measure_latency(self, begin_case_id: int, end_case_id: int):
-        """Measure the latency of cases in the caseset with case_id in [begin_case_id, end_case_id). The latency of each case will be persisted in local file or database using storage_management module.
-
-        Args:
-            begin_case_id: Start of the case_id range (inclusive) within the caseset to measure.
-            end_case_id: End of the case_id range (exclusive) within the caseset to measure.
-        """
-        bucket_id = begin_case_id // self.run_config.job_bucket_size
-        logger.info(
-            f"Worker [{FLAGS.worker_id}] Claimed CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}, Bucket {bucket_id} ({begin_case_id}-{end_case_id}) for processing."
-        )
-        self.storage_manager.mark_bucket_in_progress(
-            self.run_config.case_set_id, self.run_config.run_id, bucket_id)
-
-        processed_ids = self.storage_manager.get_already_processed_ids(
-            self.run_config.case_set_id, self.run_config.run_id, begin_case_id,
-            end_case_id)
-        all_configs = self.storage_manager.get_bucket_configs(
-            self.run_config.case_set_id, begin_case_id, end_case_id)
-
-        bucket_start_perf = time.perf_counter()
-        results_buffer = []
-        bucket_fully_processed = True
-        last_processed_case_id = begin_case_id - 1
-        for cid in range(begin_case_id, end_case_id):
-            time_elapsed_minutes = (time.perf_counter() -
-                                    bucket_start_perf) / 60
-            logger.info(
-                f"Worker [{FLAGS.worker_id}] Processing CaseId: {cid} in Bucket {bucket_id}, [{begin_case_id}-{end_case_id}) with elapsed time {time_elapsed_minutes:.2f} minutes."
-            )
-            if not self.run_config.run_locally and (
-                    time_elapsed_minutes
-                    > self.run_config.max_execution_minutes):
-                logger.warning(
-                    f"Worker [{FLAGS.worker_id}] has been processing bucket {bucket_id} for {time_elapsed_minutes:.2f} minutes, which exceeds the limit of {self.run_config.max_execution_minutes} minutes. Stopping processing more cases in this bucket to allow other jobs(like CICD jobs) in the queue to proceed."
-                )
-                parent_step_key = f'{self.tuner_config.kernel_tuner_name}_{self.run_config.case_set_id}_{self.run_config.run_id}_{begin_case_id}_{end_case_id}'
-                self.generate_buildkite_pipeline_subbucket(
-                    cid, end_case_id, parent_step_key=parent_step_key)
-                bucket_fully_processed = False
-                break
-            last_processed_case_id = cid
-            if cid in processed_ids:
-                continue
-            assert cid in all_configs, f"CaseId {cid} is missing in the configs retrieved from storage manager for CaseSetId {self.run_config.case_set_id}. This should not happen as the configs should have been generated and stored in the storage manager before."
-            _, _, case_key_value = all_configs[cid]
-            tuning_key, tunable_params = TuningCase.from_string(
-                case_key_value, self.tuner_config.tuning_key_class,
-                self.tuner_config.tunable_params_class)
-
-            begin_case_id_time = time.perf_counter_ns()
-            # status can be SUCCESS, FAILED_OOM, UNKNOWN_ERROR.
-            status, warmup_ns, _ = self.run(tuning_key,
-                                            tunable_params,
-                                            iters=1)
-            if status != TuningStatus.SUCCESS:
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, FLAGS.worker_id, 0, 0, 0,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
-                logger.warning(
-                    f"Case {cid} failed during warmup with status: {status}. Skipping to next case."
-                )
-                continue
-            warmup_us = int(warmup_ns // 1000)
-
-            status, average_latency_ns, _ = self.run(tuning_key,
-                                                     tunable_params,
-                                                     iters=10)
-            end_time = time.perf_counter_ns()
-            total_time = end_time - begin_case_id_time
-            if status != TuningStatus.SUCCESS:
-                results_buffer.append(
-                    (self.run_config.case_set_id, self.run_config.run_id, cid,
-                     status.value, FLAGS.worker_id, warmup_us, 0, 0,
-                     self.storage_manager.get_timestamp_sec(),
-                     self.run_config.tpu_queue_multi))
-                logger.warning(
-                    f"Case {cid} failed during main run with status: {status}. Total time spent: {total_time/1e9:.2f}s."
-                )
-                continue
-
-            average_latency_us = int(average_latency_ns // 1000)
-            total_time_us = int(total_time // 1000)
-            results_buffer.append(
-                (self.run_config.case_set_id, self.run_config.run_id, cid,
-                 status.value, FLAGS.worker_id, average_latency_us, warmup_us,
-                 total_time_us, self.storage_manager.get_timestamp_sec(),
-                 self.run_config.tpu_queue_multi))
-
-            if FLAGS.debug:
-                logger.info(
-                    f"Case {cid} completed with AvgLat={average_latency_us}us, Warmup={warmup_us}us, Total={total_time_us}us"
-                )
-
-            if len(results_buffer) >= 10:
-                self.storage_manager.save_results_batch(results_buffer)
-                results_buffer = []
-
-        self.storage_manager.save_results_batch(results_buffer)
-
-        bucket_total_time_us = int(
-            (time.perf_counter() - bucket_start_perf) * 1_000_000)
-        self.storage_manager.add_bucket_processed_time_us(
-            self.run_config.case_set_id, self.run_config.run_id, bucket_id,
-            bucket_total_time_us)
-        if bucket_fully_processed:
-            self.storage_manager.mark_bucket_completed(
-                self.run_config.case_set_id, self.run_config.run_id, bucket_id)
-        logger.info(
-            f"Worker [{FLAGS.worker_id}] Completed Bucket {bucket_id} [{begin_case_id}-{last_processed_case_id + 1}) for CaseSetId: {self.run_config.case_set_id}, RunId: {self.run_config.run_id}. Total time: {bucket_total_time_us/1e6:.2f}s."
-        )
+    def _cleanup_xprof_dir(self):
+        """Clean up the xprof directory to avoid interference from previous runs."""
+        if not os.path.isdir(self.xprof_dir):
+            return
+        try:
+            import shutil
+            for name in os.listdir(self.xprof_dir):
+                path = os.path.join(self.xprof_dir, name)
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(path)
+                    except FileNotFoundError:
+                        pass
+        except Exception as e:
+            logger.warning(
+                f"Failed to clean up xprof dir {self.xprof_dir}: {e}")

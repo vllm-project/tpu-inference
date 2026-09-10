@@ -28,12 +28,15 @@ from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         MambaSpec, MLAAttentionSpec,
-                                        SlidingWindowSpec)
+                                        SlidingWindowMLASpec,
+                                        SlidingWindowSpec,
+                                        UniformTypeKVCacheSpecs)
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
 from tpu_inference.runner.input_batch import CachedRequestState
-from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
+from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
+                                           get_attention_page_size_bytes)
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -101,7 +104,9 @@ class TestKVCacheManager:
         kv_cache_tensors = [
             KVCacheTensor(
                 size=num_blocks * page_size_bytes,
-                shared_by=layer_names,
+                layers=layer_names,
+                layer_stride=num_blocks * page_size_bytes,
+                block_stride=page_size_bytes,
             )
         ]
         return KVCacheConfig(
@@ -565,7 +570,9 @@ class TestKVCacheManager:
             kv_cache_tensors.append(
                 KVCacheTensor(
                     size=num_blocks * page_size_bytes,
-                    shared_by=[f'layer.{i}', f'layer.{i+10}'],
+                    layers=[f'layer.{i}', f'layer.{i+10}'],
+                    layer_stride=num_blocks * page_size_bytes,
+                    block_stride=page_size_bytes,
                 ))
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,
@@ -589,6 +596,143 @@ class TestKVCacheManager:
             assert self.runner.layer_name_to_kvcache_index[
                 f'layer.{i + 10}'] == i
 
+    def test_initialize_kv_cache_aliased_groups(self):
+        # In the new vLLM layout, multi-group models produce one KVCacheTensor
+        # per group, where all groups alias the backing memory from offset 0.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        sliding_window = 100
+        num_blocks = 100
+        kv_packing = 2  # bf16
+        sliding_window_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            sliding_window=sliding_window,
+        )
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        num_layers_per_group = 10
+        group_0_layers = [f'layer.{i}' for i in range(num_layers_per_group)]
+        group_1_layers = [
+            f'layer.{i + num_layers_per_group}'
+            for i in range(num_layers_per_group)
+        ]
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=group_0_layers,
+                             kv_cache_spec=full_attn_spec),
+            KVCacheGroupSpec(layer_names=group_1_layers,
+                             kv_cache_spec=sliding_window_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        tensor_size = num_layers_per_group * num_blocks * page_size_bytes
+        layer_stride = num_blocks * page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=tensor_size,
+                layers=group_0_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+            KVCacheTensor(
+                size=tensor_size,
+                layers=group_1_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # Groups alias from offset 0, so only 10 KV caches should be allocated.
+        assert len(self.runner.kv_caches) == num_layers_per_group
+        for i in range(num_layers_per_group):
+            assert self.runner.kv_caches[i].shape == (num_blocks, block_size,
+                                                      num_kv_heads * 2 //
+                                                      kv_packing, kv_packing,
+                                                      head_size)
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+            assert self.runner.layer_name_to_kvcache_index[
+                f'layer.{i + num_layers_per_group}'] == i
+
+    def test_initialize_kv_cache_aliased_groups_unequal_layers(self):
+        # When groups have unequal number of layers (e.g. Gemma 3 with 9 sliding
+        # window layers and 10 full attention layers), the shared layout slots
+        # must accommodate the maximum number of layers without dropping excess layers.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = 8
+        head_size = 128
+        sliding_window = 100
+        num_blocks = 100
+        sliding_window_spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            sliding_window=sliding_window,
+        )
+        full_attn_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+        )
+        group_0_layers = [f'layer.{i}' for i in range(9)]
+        group_1_layers = [f'layer.{i}' for i in range(9, 19)]  # 10 layers
+        kv_cache_groups = [
+            KVCacheGroupSpec(layer_names=group_0_layers,
+                             kv_cache_spec=sliding_window_spec),
+            KVCacheGroupSpec(layer_names=group_1_layers,
+                             kv_cache_spec=full_attn_spec),
+        ]
+        page_size_bytes = full_attn_spec.page_size_bytes
+        layer_stride = num_blocks * page_size_bytes
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=10 * num_blocks * page_size_bytes,
+                layers=group_0_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+            KVCacheTensor(
+                size=10 * num_blocks * page_size_bytes,
+                layers=group_1_layers,
+                layer_stride=layer_stride,
+                block_stride=page_size_bytes,
+                offset=0,
+            ),
+        ]
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=kv_cache_tensors,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        self.runner.initialize_kv_cache(kv_cache_config)
+
+        # 10 total caches should be allocated (9 from group 0 + 1 extra for the 10th layer of group 1)
+        assert len(self.runner.kv_caches) == 10
+        for i in range(9):
+            assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+            assert self.runner.layer_name_to_kvcache_index[
+                f'layer.{i + 9}'] == i
+        # The 10th layer of group 1 must have its own cache allocated at index 9
+        assert self.runner.layer_name_to_kvcache_index['layer.18'] == 9
+
     def test_initialize_kv_cache_capped_by_override(self):
         # create a kv cache config with 1 layer full attention.
         block_size = self.runner.vllm_config.cache_config.block_size
@@ -610,7 +754,9 @@ class TestKVCacheManager:
         kv_cache_tensors = [
             KVCacheTensor(
                 size=num_blocks * page_size_bytes,
-                shared_by=['layer.0'],
+                layers=['layer.0'],
+                layer_stride=num_blocks * page_size_bytes,
+                block_stride=page_size_bytes,
             )
         ]
         kv_cache_config = KVCacheConfig(
@@ -772,7 +918,9 @@ class TestKVCacheManager:
         kv_cache_tensors = [
             KVCacheTensor(
                 size=num_blocks * page_size_bytes,
-                shared_by=[f'layer.{i}'],
+                layers=[f'layer.{i}'],
+                layer_stride=num_blocks * page_size_bytes,
+                block_stride=page_size_bytes,
             ) for i in range(10)
         ]
         kv_cache_config = KVCacheConfig(
@@ -838,7 +986,9 @@ class TestKVCacheManager:
         kv_cache_tensors = [
             KVCacheTensor(
                 size=num_blocks * page_size_bytes,
-                shared_by=[f'layer.{i}'],
+                layers=[f'layer.{i}'],
+                layer_stride=num_blocks * page_size_bytes,
+                block_stride=page_size_bytes,
             ) for i in range(10)
         ]
         kv_cache_config = KVCacheConfig(
@@ -923,11 +1073,42 @@ class TestKVCacheManager:
             assert isinstance(mamba_states, tuple)
             assert len(mamba_states) == 2
 
-            expected_num_blocks = num_blocks // len(layer_names)
+            # Mamba layers get max_num_reqs + 1 blocks (not tensor_num_blocks)
+            # because mamba state is recurrent — one slot per active request.
+            expected_num_blocks = self.runner.max_num_reqs + 1
             assert mamba_states[0].shape == (expected_num_blocks, 4, 128)
             assert mamba_states[1].shape == (expected_num_blocks, 8, 64, 32)
 
             assert self.runner.layer_name_to_kvcache_index[f'layer.{i}'] == i
+
+    def test_reinitialize_kv_cache_reuses_mamba_allocators(self):
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        _get_mamba_cache_allocator.cache_clear()
+        try:
+            with patch('dataclasses.replace') as mock_replace:
+                mock_replaced_spec = MagicMock()
+                mock_replaced_spec.page_size_bytes = page_size_bytes
+                mock_replace.return_value = mock_replaced_spec
+
+                self.runner.initialize_kv_cache(kv_cache_config)
+                self.runner.delete_kv_cache()
+                self.runner.reinitialize_kv_cache()
+
+            cache_info = _get_mamba_cache_allocator.cache_info()
+            assert cache_info.misses == 2
+            assert cache_info.hits == 6
+        finally:
+            _get_mamba_cache_allocator.cache_clear()
 
     def test_initialize_kv_cache_no_duplicate_shared_layers(self):
         block_size = self.runner.vllm_config.cache_config.block_size
@@ -952,7 +1133,9 @@ class TestKVCacheManager:
         kv_cache_tensors = [
             KVCacheTensor(
                 size=num_blocks * page_size_bytes,
-                shared_by=layer_names,
+                layers=layer_names,
+                layer_stride=num_blocks * page_size_bytes,
+                block_stride=page_size_bytes,
             )
         ]
 
@@ -1229,7 +1412,7 @@ class TestKVCacheManager:
         assert manager._mamba_num_blocks is None
         assert self.runner.cache_config.num_gpu_blocks_override is None
 
-    def test_compact_mamba_override_respects_user_pinned_override(self):
+    def test_compact_mamba_override_respects_num_gpu_blocks_override(self):
         """When the user pins `num_gpu_blocks_override` explicitly,
         compact-mamba must not clobber it (their explicit choice wins)."""
         from tpu_inference.runner.kv_cache_manager import KVCacheManager
@@ -1252,6 +1435,221 @@ class TestKVCacheManager:
         # `initialize_kv_cache` allocates the uniform `num_blocks`.
         assert manager._mamba_num_blocks is None
         assert self.runner.cache_config.num_gpu_blocks_override == 999
+
+    def test_compact_mamba_override_in_align_mode_allocates_checkpoint_budget(
+            self):
+        """In align mode (prefix caching enabled), compact-mamba allocates
+        active slots (max_num_reqs + 1) plus a checkpoint budget (default
+        2x max_num_reqs) for Mamba, and sizes the Attention pool
+        from the remaining HBM."""
+        from tpu_inference.runner.kv_cache_manager import (
+            DEFAULT_MAMBA_CHECKPOINT_BUDGET_MULTIPLIER, KVCacheManager)
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        max_num_reqs = 256
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        expected_mamba = (257 +
+                          256 * DEFAULT_MAMBA_CHECKPOINT_BUDGET_MULTIPLIER)
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_mamba
+
+        avail_per_tensor = (304 * 2**30) // 15
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+
+    def test_compact_mamba_override_in_align_mode_custom_checkpoint_budget(
+            self):
+        """Custom custom_mamba_cache_size in additional_config is honored."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        max_num_reqs = 256
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.vllm_config.additional_config[
+            "custom_mamba_cache_size"] = 2000
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        expected_mamba = 257 + 2000
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_mamba
+
+        avail_per_tensor = (304 * 2**30) // 15
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert (
+            self.runner.cache_config.num_gpu_blocks_override == expected_attn)
+
+    def test_compact_mamba_override_in_align_mode_tight_hbm_clamps_gracefully(
+            self):
+        """In tight HBM where 50% budget <= active_mamba_blocks, checkpoint
+        budget shrinks to 0 (clamped to active_mamba_blocks) rather than
+        aborting compact sizing."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        # Set avail_per_tensor = 600 MiB (total avail = 600 * 15 = 9000 MiB across 4 devices)
+        avail_per_device = (600 * (2**20) * 15) // 4
+        attn_page = 2**20  # 1 MiB
+        unpadded_mamba = 2 * (2**20)  # 2 MiB
+        max_num_reqs = 64  # active_mamba_blocks = 65, default budget = 128 -> unclamped = 193
+        # mamba_slot_cost = 3 * 2 MiB = 6 MiB
+        # 50% HBM = 300 MiB -> max_mamba_blocks = 50 (< active_mamba_blocks=65)
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = None
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        # Clamped to active_mamba_blocks (65) rather than aborting to uniform layout
+        expected_mamba = 65
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_mamba
+
+        avail_per_tensor = 600 * (2**20)
+        expected_attn = (avail_per_tensor -
+                         3 * expected_mamba * unpadded_mamba) // attn_page
+        assert self.runner.cache_config.num_gpu_blocks_override == expected_attn
+
+    def test_compact_mamba_override_in_align_mode_user_pinned_fitting(self):
+        """In align mode, user-pinned `num_gpu_blocks_override` is respected
+        if total memory fits within available HBM."""
+        from tpu_inference.runner.kv_cache_manager import (
+            DEFAULT_MAMBA_CHECKPOINT_BUDGET_MULTIPLIER, KVCacheManager)
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 304 * (2**30) // 4
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        max_num_reqs = 256
+        pinned_attn = 5000
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = pinned_attn
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        expected_mamba = (257 +
+                          256 * DEFAULT_MAMBA_CHECKPOINT_BUDGET_MULTIPLIER)
+        assert manager._mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.mamba_num_blocks == expected_mamba
+        assert self.runner.cache_config.num_gpu_blocks_override == pinned_attn
+
+    def test_compact_mamba_override_in_align_mode_user_pinned_exceeding_hbm_raises(
+            self):
+        """In align mode, if user-pinned `num_gpu_blocks_override` and
+        `custom_mamba_cache_size` burst available HBM, raise ValueError."""
+        import pytest
+
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        avail_per_device = 10 * (2**30) // 4  # 10 GiB total HBM
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        max_num_reqs = 256
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = 100_000  # huge
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.vllm_config.additional_config[
+            "custom_mamba_cache_size"] = 1000
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            with pytest.raises(ValueError, match="exceeds available HBM"):
+                self._run_compact_mamba_override(manager,
+                                                 attn_page=attn_page,
+                                                 unpadded_mamba=unpadded_mamba)
+
+    def test_compact_mamba_override_in_align_mode_user_pinned_shrinks_default_mamba(
+            self):
+        """In align mode, if user-pinned `num_gpu_blocks_override` bursts HBM
+        with default Mamba budget, Mamba budget shrinks down to active slots."""
+        from tpu_inference.runner.kv_cache_manager import KVCacheManager
+        manager = KVCacheManager(self.runner)
+        manager.use_mla = False
+
+        max_num_reqs = 64
+        attn_page = 2**20
+        unpadded_mamba = 2 * (2**20)
+        avail_per_device = (15 * 1000 * (2**20)) // 4
+        pinned_attn = 500
+
+        self.runner.cache_config.gpu_memory_utilization = 1.0
+        self.runner.cache_config.num_gpu_blocks_override = pinned_attn
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.vllm_config.additional_config.pop(
+            "custom_mamba_cache_size", None)
+        self.runner.scheduler_config = MagicMock(max_num_seqs=max_num_reqs)
+        self.runner.max_num_reqs = max_num_reqs
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.hbm_usage_bytes",
+                return_value=[(0, avail_per_device)] * 4):
+            self._run_compact_mamba_override(manager,
+                                             attn_page=attn_page,
+                                             unpadded_mamba=unpadded_mamba)
+
+        # Mamba shrank to active slots (65)
+        assert manager._mamba_num_blocks == 65
+        assert self.runner.cache_config.mamba_num_blocks == 65
+        assert self.runner.cache_config.num_gpu_blocks_override == pinned_attn
 
     def test_get_kv_cache_spec_pure_attention_no_cache_config_updates(self):
         mock_attn = MagicMock(spec=MambaBase)
@@ -1311,7 +1709,9 @@ class TestKVCacheManager:
         kv_cache_tensors = [
             KVCacheTensor(
                 size=tensor_size,
-                shared_by=layer_names,
+                layers=layer_names,
+                layer_stride=tensor_size,
+                block_stride=attn_page_size,
             )
         ]
         kv_cache_config = KVCacheConfig(
@@ -1325,11 +1725,13 @@ class TestKVCacheManager:
         # Should duplicate the shared cache and allocate successfully with the appropriate num_blocks
         assert len(self.runner.kv_caches) == 2
 
-        # Check that num_blocks are set using unpadded mamba page size.
+        # Check that mamba num_blocks are capped at max_num_reqs + 1
+        # (recurrent state: one slot per active request).
         mamba_states = self.runner.kv_caches[0]
         assert len(mamba_states) == 2
-        assert mamba_states[0].shape[0] == num_blocks
-        assert mamba_states[1].shape[0] == num_blocks
+        expected_mamba_blocks = self.runner.max_num_reqs + 1
+        assert mamba_states[0].shape[0] == expected_mamba_blocks
+        assert mamba_states[1].shape[0] == expected_mamba_blocks
 
         attn_cache = self.runner.kv_caches[1]
         assert attn_cache.shape[0] == num_blocks
@@ -1416,8 +1818,12 @@ class TestKVCacheManager:
                              kv_cache_spec=mamba_spec),
         ]
         kv_cache_tensors = [
-            KVCacheTensor(size=tensor_size, shared_by=list(names))
-            for names in layer_names_per_tensor
+            KVCacheTensor(
+                size=tensor_size,
+                layers=list(names),
+                layer_stride=tensor_size,
+                block_stride=uniform_page_size,
+            ) for names in layer_names_per_tensor
         ]
         kv_cache_config = KVCacheConfig(
             num_blocks=num_blocks,
@@ -1425,12 +1831,13 @@ class TestKVCacheManager:
             kv_cache_groups=kv_cache_groups,
         )
 
+        self.runner.vllm_config.cache_config.mamba_cache_mode = "align"
         self.runner.initialize_kv_cache(kv_cache_config)
 
         # 10 tensors × 4 duplicated layers = 40 caches, one per layer.
         assert len(self.runner.kv_caches) == 40
 
-        # The whole point of the fix: every layer's physical cache holds
+        # When mamba_cache_mode == 'align', every layer's physical cache holds
         # exactly `kv_cache_config.num_blocks` slots so block ids from
         # vLLM's shared pool can never index out of range.
         for name in (attn_layer_names + mamba_a_names + mamba_b_names +
@@ -1441,9 +1848,418 @@ class TestKVCacheManager:
                 for state in cache:
                     assert state.shape[0] == num_blocks, (
                         f"layer {name} mamba state has "
-                        f"{state.shape[0]} blocks but vLLM pool has "
+                        f"{state.shape[0]} blocks but expected "
                         f"{num_blocks}")
             else:
                 assert cache.shape[0] == num_blocks, (
                     f"layer {name} attn cache has {cache.shape[0]} blocks "
                     f"but vLLM pool has {num_blocks}")
+
+    # --- DeepseekV4 packed KV cache (vLLM #48993 byte-offset overlay groups)
+
+    def _ds_v4_groups(self, num_swa_layers=5):
+        """DSv4-Flash-style cache groups: 2 CSA layers (0-1), each with a
+        main latent, an indexer k_cache and two compressor state caches, one
+        HCA layer (2) with its own latent and state cache, plus SWA-only
+        layers (3+); every layer has a swa_cache. Specs mirror what the TPU
+        DSv4 classes register (block_size 1024, byte-addressed uint8
+        latents, f32 compressor state)."""
+        main_spec = MLAAttentionSpec(block_size=1024,
+                                     num_kv_heads=1,
+                                     head_size=640,
+                                     dtype=torch.uint8,
+                                     tokens_per_state=4)
+        idx_spec = MLAAttentionSpec(block_size=1024,
+                                    num_kv_heads=1,
+                                    head_size=256,
+                                    dtype=torch.uint8,
+                                    tokens_per_state=4)
+        hca_spec = MLAAttentionSpec(block_size=1024,
+                                    num_kv_heads=1,
+                                    head_size=1024,
+                                    dtype=torch.uint8,
+                                    tokens_per_state=128)
+        swa_spec = SlidingWindowMLASpec(block_size=128,
+                                        num_kv_heads=1,
+                                        head_size=1024,
+                                        dtype=torch.uint8,
+                                        sliding_window=4096)
+        main_state_spec = SlidingWindowMLASpec(block_size=16,
+                                               num_kv_heads=1,
+                                               head_size=2048,
+                                               dtype=torch.float32,
+                                               sliding_window=8)
+        idx_state_spec = SlidingWindowMLASpec(block_size=16,
+                                              num_kv_heads=1,
+                                              head_size=512,
+                                              dtype=torch.float32,
+                                              sliding_window=8)
+        # HCA states are hosted on a CSA NoPE array (131072B page), so they are
+        # paged at 32 states/block -- a different (block_size, sliding_window)
+        # family than the CSA/indexer states, hence their own cache group.
+        hca_state_spec = SlidingWindowMLASpec(block_size=32,
+                                              num_kv_heads=1,
+                                              head_size=1024,
+                                              dtype=torch.float32,
+                                              sliding_window=128)
+
+        mla_specs, state_specs, hca_state_specs = {}, {}, {}
+        for i in range(2):
+            mla_specs[f"model.layers.{i}.attn"] = main_spec
+            mla_specs[f"model.layers.{i}.attn.indexer.k_cache"] = idx_spec
+            state_specs[
+                f"model.layers.{i}.attn.compressor.state_cache"] = main_state_spec
+            state_specs[f"model.layers.{i}.attn.indexer.compressor."
+                        "state_cache"] = idx_state_spec
+        mla_specs["model.layers.2.attn"] = hca_spec
+        hca_state_specs[
+            "model.layers.2.attn.compressor.state_cache"] = hca_state_spec
+        swa_names = [
+            f"model.layers.{i}.attn.swa_cache" for i in range(num_swa_layers)
+        ]
+        # vLLM splits the swa layers into two cache groups (layers[i::2]),
+        # like DSv4-Flash's 43 swa layers over 21 CSA layers.
+        swa_specs_0 = {name: swa_spec for name in swa_names[0::2]}
+        swa_specs_1 = {name: swa_spec for name in swa_names[1::2]}
+
+        groups = []
+        for block_size, specs in ((1024, mla_specs), (16, state_specs),
+                                  (32, hca_state_specs), (128, swa_specs_0),
+                                  (128, swa_specs_1)):
+            groups.append(
+                KVCacheGroupSpec(layer_names=list(specs),
+                                 kv_cache_spec=UniformTypeKVCacheSpecs(
+                                     block_size=block_size,
+                                     kv_cache_specs=specs)))
+        return groups
+
+    @staticmethod
+    def _ds_v4_page_bytes(groups):
+        return {
+            name: group.kv_cache_spec.kv_cache_specs[name].page_size_bytes
+            for group in groups
+            for name in group.layer_names
+        }
+
+    def _ds_v4_packed_tensors(self, groups, num_blocks):
+        """Mirror vLLM's `_get_packed_kv_cache_layout` (#48993): lay each
+        cache group out densely in one shared block slab and emit one
+        KVCacheTensor per distinct byte offset, shared by all layers (from
+        different groups) at that offset."""
+        page_bytes = self._ds_v4_page_bytes(groups)
+        layers_by_offset = {}
+        block_stride = 0
+        for group in groups:
+            offset = 0
+            for name in group.layer_names:
+                layers_by_offset.setdefault(offset, []).append(name)
+                offset += page_bytes[name]
+            block_stride = max(block_stride, offset)
+        return [
+            KVCacheTensor(size=block_stride * num_blocks,
+                          layers=layers_by_offset[offset],
+                          offset=offset,
+                          block_stride=block_stride,
+                          layer_stride=block_stride)
+            for offset in sorted(layers_by_offset)
+        ]
+
+    def _init_ds_v4(self, kv_cache_config):
+        self.runner.kv_cache_manager.use_mla = True
+        with patch('tpu_inference.runner.kv_cache_manager.is_ds_v4',
+                   return_value=True):
+            self.runner.initialize_kv_cache(kv_cache_config)
+
+    def _assert_ds_v4_overlays(self, num_blocks):
+        idx_map = self.runner.layer_name_to_kvcache_index
+        caches = self.runner.kv_caches
+
+        # 5 MLA arrays + 2 CSA rope companions + 1 standalone for the 3rd
+        # layer of the 3-layer swa group (there are only 2 CSA NoPE arrays).
+        assert len(caches) == 8
+        for cache in caches:
+            assert cache.shape[0] == num_blocks
+            assert cache.dtype == jnp.uint8
+
+        # Every MLA layer owns its own array, shaped for the kernel that
+        # reads it: CSA NoPE 512B/token (one 4x128 row) with a companion
+        # rope array at 128B/token, the indexer 256B/token, HCA raw bf16 at
+        # 1024B/token (two rows).
+        assert idx_map['model.layers.0.attn'] == 0
+        assert idx_map['model.layers.0.attn_rope'] == 1
+        assert idx_map['model.layers.0.attn.indexer.k_cache'] == 2
+        assert idx_map['model.layers.1.attn'] == 3
+        assert idx_map['model.layers.1.attn_rope'] == 4
+        assert idx_map['model.layers.1.attn.indexer.k_cache'] == 5
+        assert idx_map['model.layers.2.attn'] == 6
+        assert caches[0].shape == (num_blocks, 256, 4, 128)
+        assert caches[1].shape == (num_blocks, 64, 4, 128)
+        assert caches[2].shape == (num_blocks, 64, 4, 256)
+        assert caches[6].shape == (num_blocks, 16, 4, 128)
+
+        # CSA / indexer compressor state caches share their own compressed-KV
+        # layer's array (the compressor kernel writes state + compressed KV
+        # through one buffer there).
+        for i in range(2):
+            assert (idx_map[f'model.layers.{i}.attn.compressor.state_cache'] ==
+                    idx_map[f'model.layers.{i}.attn'])
+            assert (idx_map[f'model.layers.{i}.attn.indexer.compressor.'
+                            'state_cache'] ==
+                    idx_map[f'model.layers.{i}.attn.indexer.k_cache'])
+        # The HCA state cache goes on a CSA NoPE array instead of its own HCA
+        # array, whose page holds only 2 token states (vs 32) and would make
+        # the state block table 16x longer than SMEM can hold. Its cache group
+        # holds nothing else, so the first CSA NoPE array is free.
+        assert (idx_map['model.layers.2.attn.compressor.state_cache'] ==
+                idx_map['model.layers.0.attn'])
+        assert (idx_map['model.layers.2.attn.compressor.state_cache']
+                != idx_map['model.layers.2.attn'])
+
+        # swa_caches overlay the CSA NoPE arrays (never the indexer or HCA
+        # arrays), by position: distinct within one cache group (shared block
+        # table), reused across groups (disjoint block IDs).
+        csa_nope_indices = {
+            idx_map['model.layers.0.attn'],
+            idx_map['model.layers.1.attn'],
+        }
+        swa_groups = [[f'model.layers.{i}.attn.swa_cache' for i in (0, 2, 4)],
+                      [f'model.layers.{i}.attn.swa_cache' for i in (1, 3)]]
+        group_indices = []
+        for group_layers in swa_groups:
+            indices = [idx_map[name] for name in group_layers]
+            assert len(set(indices)) == len(indices)
+            for index in indices[:len(csa_nope_indices)]:
+                assert index in csa_nope_indices
+            group_indices.append(indices)
+        # Same position in different groups -> same array.
+        for position in range(min(len(indices) for indices in group_indices)):
+            assert len({indices[position] for indices in group_indices}) == 1
+        # The overflow swa layer got a standalone array with the CSA NoPE
+        # geometry (a swa page and a CSA NoPE page hold the same bytes).
+        assert idx_map['model.layers.4.attn.swa_cache'] == 7
+        assert caches[7].shape == caches[idx_map['model.layers.0.attn']].shape
+
+    def test_initialize_kv_cache_ds_v4_packed_overlay(self):
+        # New (post-#48993) packed layout: shared_by groups layers from
+        # different cache groups at the same byte offset.
+        num_blocks = 32
+        groups = self._ds_v4_groups()
+        tensors = self._ds_v4_packed_tensors(groups, num_blocks)
+
+        # The layout must produce the mixed offset group shape that crashed
+        # the old slot-based logic: one byte offset shared by layers from
+        # three or more different cache groups.
+        group_of = {
+            name: index
+            for index, group in enumerate(groups)
+            for name in group.layer_names
+        }
+        mixed = [
+            tensor for tensor in tensors
+            if len({group_of[name]
+                    for name in tensor.layers}) >= 3
+        ]
+        assert mixed, "test setup should produce a mixed offset group"
+
+        kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
+                                        kv_cache_tensors=tensors,
+                                        kv_cache_groups=groups)
+        self._init_ds_v4(kv_cache_config)
+        self._assert_ds_v4_overlays(num_blocks)
+
+    def test_initialize_kv_cache_ds_v4_legacy_slot_grouping(self):
+        # Pre-#48993 slot-based grouping (one page-size slot per tensor,
+        # main latents grouped with swa caches, indexer caches alone) must
+        # produce the same overlay plan.
+        num_blocks = 32
+        groups = self._ds_v4_groups()
+        page_bytes = self._ds_v4_page_bytes(groups)
+
+        buckets = {}
+        for group in groups:
+            slot_count = {}
+            for name in group.layer_names:
+                page_size = page_bytes[name]
+                slot = slot_count.get(page_size, 0)
+                slot_count[page_size] = slot + 1
+                bucket = buckets.setdefault(page_size, [])
+                if slot == len(bucket):
+                    bucket.append([])
+                bucket[slot].append(name)
+        block_stride = sum(page_size * len(slots)
+                           for page_size, slots in buckets.items())
+        tensors = [
+            KVCacheTensor(size=block_stride * num_blocks,
+                          layers=slot,
+                          block_stride=block_stride,
+                          layer_stride=block_stride)
+            for slots in buckets.values() for slot in slots
+        ]
+
+        kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
+                                        kv_cache_tensors=tensors,
+                                        kv_cache_groups=groups)
+        self._init_ds_v4(kv_cache_config)
+        self._assert_ds_v4_overlays(num_blocks)
+
+    def test_initialize_kv_cache_ds_v4_swa_overflow_shared_across_groups(self):
+        # Both swa cache groups overflow the 2 CSA NoPE arrays at position 2.
+        # The overflow layers live in *different* cache groups, so they never
+        # own the same block ID and must share one standalone array -- one
+        # array per overflow position, not per overflowing layer.
+        num_blocks = 32
+        groups = self._ds_v4_groups(num_swa_layers=6)
+        swa_groups = [
+            group.layer_names for group in groups
+            if any('swa_cache' in name for name in group.layer_names)
+        ]
+        assert [len(names) for names in swa_groups] == [3, 3]
+
+        tensors = self._ds_v4_packed_tensors(groups, num_blocks)
+        kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
+                                        kv_cache_tensors=tensors,
+                                        kv_cache_groups=groups)
+        self._init_ds_v4(kv_cache_config)
+
+        idx_map = self.runner.layer_name_to_kvcache_index
+        caches = self.runner.kv_caches
+        # 5 MLA arrays + 2 CSA rope companions + 1 shared overflow array (not
+        # 2: one per overflow position, shared by both groups).
+        assert len(caches) == 8
+        overflow = [idx_map[names[2]] for names in swa_groups]
+        assert overflow[0] == overflow[1] == 7
+        assert caches[7].shape == caches[idx_map['model.layers.0.attn']].shape
+        # The overlaid positions stay shared too, and stay distinct in-group.
+        for names in swa_groups:
+            indices = [idx_map[name] for name in names]
+            assert len(set(indices)) == len(indices)
+        assert ([idx_map[name] for name in swa_groups[0]
+                 ] == [idx_map[name] for name in swa_groups[1]])
+
+    def _ds_v4_hca_state_group(self, groups):
+        for group in groups:
+            names = group.layer_names
+            if any(
+                    name.endswith('.compressor.state_cache')
+                    and 'indexer' not in name and 'layers.2' in name
+                    for name in names):
+                return group
+        raise AssertionError('no HCA state group')
+
+    def test_initialize_kv_cache_ds_v4_hca_state_overflows_csa_arrays(self):
+        # 3 HCA state caches but only 2 CSA NoPE arrays to host them: the
+        # third falls through to the overflow pool, never to a CSA array a
+        # sibling state cache already took.
+        num_blocks = 32
+        groups = self._ds_v4_groups()
+        hca_group = self._ds_v4_hca_state_group(groups)
+        base_spec = hca_group.kv_cache_spec.kv_cache_specs[
+            'model.layers.2.attn.compressor.state_cache']
+        hca_specs = dict(hca_group.kv_cache_spec.kv_cache_specs)
+        mla_group = next(group for group in groups
+                         if 'model.layers.2.attn' in group.layer_names)
+        mla_specs = dict(mla_group.kv_cache_spec.kv_cache_specs)
+        hca_layer_spec = mla_specs['model.layers.2.attn']
+        for i in (3, 4):
+            mla_specs[f'model.layers.{i}.attn'] = hca_layer_spec
+            hca_specs[
+                f'model.layers.{i}.attn.compressor.state_cache'] = base_spec
+
+        rebuilt = []
+        for group in groups:
+            specs = group.kv_cache_spec.kv_cache_specs
+            if group is hca_group:
+                specs = hca_specs
+            elif group is mla_group:
+                specs = mla_specs
+            rebuilt.append(
+                KVCacheGroupSpec(layer_names=list(specs),
+                                 kv_cache_spec=UniformTypeKVCacheSpecs(
+                                     block_size=group.kv_cache_spec.block_size,
+                                     kv_cache_specs=specs)))
+
+        tensors = self._ds_v4_packed_tensors(rebuilt, num_blocks)
+        self._init_ds_v4(
+            KVCacheConfig(num_blocks=num_blocks,
+                          kv_cache_tensors=tensors,
+                          kv_cache_groups=rebuilt))
+
+        idx_map = self.runner.layer_name_to_kvcache_index
+        caches = self.runner.kv_caches
+        csa_nope = [
+            idx_map['model.layers.0.attn'], idx_map['model.layers.1.attn']
+        ]
+        state_indices = [
+            idx_map[f'model.layers.{i}.attn.compressor.state_cache']
+            for i in (2, 3, 4)
+        ]
+        # Distinct within the group (they share a block table), first two on
+        # the CSA NoPE arrays, the third on an array of the same shape from
+        # the overflow pool.
+        assert len(set(state_indices)) == 3
+        assert state_indices[:2] == csa_nope
+        assert state_indices[2] not in csa_nope
+        assert caches[state_indices[2]].shape == caches[csa_nope[0]].shape
+
+    def test_initialize_kv_cache_ds_v4_same_group_collision_raises(self):
+        # Layers of one cache group share a block table, so two of them on one
+        # array would write the same rows. The overlay maps the i-th HCA state
+        # onto the i-th CSA NoPE array, which is only safe because the HCA
+        # states are always their own cache group; if vLLM ever merges them
+        # with the CSA states (already on those arrays), fail loudly at
+        # startup rather than silently corrupt the cache.
+        num_blocks = 32
+        groups = self._ds_v4_groups()
+        hca_group = self._ds_v4_hca_state_group(groups)
+        state_group = next(group for group in groups
+                           if 'model.layers.0.attn.compressor.state_cache' in
+                           group.layer_names)
+        merged_specs = dict(state_group.kv_cache_spec.kv_cache_specs)
+        merged_specs.update(hca_group.kv_cache_spec.kv_cache_specs)
+
+        rebuilt = []
+        for group in groups:
+            if group is hca_group:
+                continue
+            specs = (merged_specs if group is state_group else
+                     group.kv_cache_spec.kv_cache_specs)
+            rebuilt.append(
+                KVCacheGroupSpec(layer_names=list(specs),
+                                 kv_cache_spec=UniformTypeKVCacheSpecs(
+                                     block_size=group.kv_cache_spec.block_size,
+                                     kv_cache_specs=specs)))
+
+        tensors = self._ds_v4_packed_tensors(rebuilt, num_blocks)
+        kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
+                                        kv_cache_tensors=tensors,
+                                        kv_cache_groups=rebuilt)
+
+        with pytest.raises(ValueError, match=r"\[kv-cache\].*same array"):
+            self._init_ds_v4(kv_cache_config)
+
+    def test_initialize_kv_cache_ds_v4_missing_k_cache_raises(self):
+        # A compressor state cache without its compressed-KV layer must fail
+        # with a self-contained error, not a bare assert.
+        num_blocks = 32
+        groups = self._ds_v4_groups()
+        kept_groups = []
+        for group in groups:
+            specs = {
+                name: spec
+                for name, spec in group.kv_cache_spec.kv_cache_specs.items()
+                if 'indexer.k_cache' not in name
+            }
+            if not specs:
+                continue
+            kept_groups.append(
+                KVCacheGroupSpec(layer_names=list(specs),
+                                 kv_cache_spec=UniformTypeKVCacheSpecs(
+                                     block_size=group.kv_cache_spec.block_size,
+                                     kv_cache_specs=specs)))
+        tensors = self._ds_v4_packed_tensors(kept_groups, num_blocks)
+        kv_cache_config = KVCacheConfig(num_blocks=num_blocks,
+                                        kv_cache_tensors=tensors,
+                                        kv_cache_groups=kept_groups)
+
+        with pytest.raises(ValueError, match=r"\[kv-cache\].*state_cache"):
+            self._init_ds_v4(kv_cache_config)

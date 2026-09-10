@@ -17,6 +17,7 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import jax
+import numpy as np
 import pytest
 import torch
 import torchax
@@ -29,7 +30,6 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
                                                MergedColumnParallelLinear,
@@ -40,10 +40,13 @@ from vllm.model_executor.model_loader import get_model as vllm_get_model
 from tests.layers.common import utils as test_utils
 from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization.configs import QuantLinearConfig
+from tpu_inference.layers.vllm.custom_ops.fused_moe import _all_reduce_over_tp
+from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
     VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
-    VllmUnquantizedLinearMethod, _load_weight_for_layer)
+    VllmUnquantizedLinearMethod, _host_numpy_view, _load_weight_for_layer,
+    _load_weight_on_host)
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
@@ -205,6 +208,85 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
         jax_output = j2t(jax_output.to(torch.float32)).to(dtype)
 
     torch.testing.assert_close(output, jax_output)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
+def test_row_parallel_linear_defer_all_reduce(model, num_devices):
+    """reduce_results=False routes through sharded_matmul: the layer returns
+    per-shard partial sums (the psum is actually skipped, which a plain einsum
+    under GSPMD cannot do) and the caller's single deferred all-reduce
+    (VllmMoERunner._all_reduce_over_tp) reconstructs the full result.
+
+    No bias: vLLM's RowParallelLinear rejects reduce_results=False with an
+    in-layer bias."""
+    mesh = test_utils.get_spmd_mesh(num_devices)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+
+    # Reference: fully reduced output.
+    with set_current_vllm_config(vllm_config):
+        row_linear = RowParallelLinear(
+            input_size=4096,
+            output_size=8192,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+        )
+
+    input_tensor = torch.rand(10, row_linear.input_size, dtype=dtype) / 10
+    input_tensor = input_tensor.to('cpu')
+
+    weight_data = torch.rand_like(row_linear.weight.data) / 10
+    row_linear.weight.data = weight_data
+    row_linear = row_linear.to('cpu')
+    row_linear.quant_method.process_weights_after_loading(row_linear)
+    expected = row_linear(input_tensor).to(dtype)
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        jax_row_linear = RowParallelLinear(
+            input_size=4096,
+            output_size=8192,
+            bias=False,
+            params_dtype=dtype,
+            reduce_results=False,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+    # What VllmRowParallelLinear.__init__ derives from reduce_results=False.
+    jax_row_linear.quant_method.linear_config.defer_all_reduce = True
+
+    jax_row_linear.weight.data = weight_data
+
+    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
+    jax_input_tensor.apply_jax_(jax.device_put,
+                                NamedSharding(mesh, P(None, None)))
+    with torchax.default_env():
+        assert isinstance(jax_row_linear.quant_method,
+                          VllmUnquantizedLinearMethod)
+        jax_row_linear.quant_method.process_weights_after_loading(
+            jax_row_linear)
+        deferred = jax_row_linear(jax_input_tensor)
+
+        if num_devices > 1:
+            # The psum was actually skipped: pre-reduction output is partial,
+            # not the full matmul.
+            partial = j2t(deferred.to(torch.float32)).to(dtype)
+            assert not torch.allclose(partial, expected)
+
+        reduced = _all_reduce_over_tp(deferred, mesh)
+        jax_output = j2t(reduced.to(torch.float32)).to(dtype)
+
+    torch.testing.assert_close(expected, jax_output)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -498,7 +580,7 @@ def test_fused_moe(use_ep, num_devices, num_tokens, intermediate_size,
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        vllm_fused_moe = FusedMoE(
+        vllm_fused_moe = FusedMoEFactory(
             num_experts=num_experts,
             top_k=topk,
             hidden_size=hidden_size,
@@ -621,7 +703,7 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
 
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
     with set_current_vllm_config(vllm_config):
-        vllm_fused_moe = FusedMoE(
+        vllm_fused_moe = FusedMoEFactory(
             num_experts=num_experts,
             top_k=topk,
             hidden_size=hidden_size,
@@ -683,7 +765,9 @@ def test_fused_moe_use_kernel(num_devices, num_tokens, intermediate_size,
 def _make_layer_with_weight(shape, dtype):
     """Create a simple torch.nn.Module with a 'weight' attribute."""
     layer = torch.nn.Module()
-    layer.weight = torch.randn(shape, dtype=dtype)
+    # `.to(dtype)` rather than `torch.randn(dtype=...)` so the fp8 formats,
+    # which randn cannot generate directly, work here too.
+    layer.weight = torch.randn(shape).to(dtype)
     return layer
 
 
@@ -698,7 +782,6 @@ def test_load_weight_for_layer_non_pathways(dtype):
     expected = t2j(layer.weight, use_dlpack=False)
     assert result.shape == expected.shape
     assert result.dtype == expected.dtype
-    import numpy as np
     np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
 
 
@@ -736,3 +819,188 @@ def test_load_weight_for_layer_pathways_dummy(_, dtype):
     assert result.dtype == to_jax_dtype(dtype)
     # The original tensor's storage should have been freed
     assert layer.weight.untyped_storage().size() == 0
+
+
+# --- host staging tests ---
+
+# The dtypes weights actually arrive in: one numpy can represent natively and
+# three it cannot, which travel as uint8 and are reinterpreted.
+STAGED_DTYPES = [
+    torch.float32,
+    torch.bfloat16,
+    torch.float8_e4m3fn,
+    torch.float8_e5m2,
+]
+
+# CI runs these on a single- or dual-chip host, so nothing below may assume a
+# mesh of a particular width: shapes are sized off the mesh so every spec here
+# splits evenly, and the one case that needs a sharding to *not* split says so.
+NUM_DEVICES = jax.local_device_count()
+STAGED_SHAPE = (8 * NUM_DEVICES, 16 * NUM_DEVICES)
+
+
+@pytest.mark.parametrize("dtype", STAGED_DTYPES)
+def test_host_numpy_view_preserves_shape_dtype_and_values(dtype):
+    """The numpy view sees the same weight t2j would produce."""
+    tensor = torch.randn(4, 8).to(dtype)
+    view = _host_numpy_view(tensor)
+    expected = t2j(tensor, use_dlpack=False)
+    assert view.shape == (4, 8)
+    assert view.dtype == expected.dtype
+    np.testing.assert_array_equal(view, np.asarray(expected))
+
+
+def test_host_numpy_view_is_zero_copy():
+    """The whole point is not to copy the weight on the way out."""
+    tensor = torch.randn(4, 8)
+    assert np.shares_memory(_host_numpy_view(tensor), tensor.numpy())
+
+
+def test_host_numpy_view_rejects_non_cpu_tensor():
+    """A tensor with no host storage to view has to fall back."""
+    assert _host_numpy_view(torch.empty(4, 8, device="meta")) is None
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_host_numpy_view_rejects_unbitcastable_layouts(dtype):
+    """torch can only reinterpret as uint8 on contiguous, non-scalar data."""
+    assert _host_numpy_view(torch.randn(4, 8).to(dtype).t()) is None
+    assert _host_numpy_view(torch.tensor(1.0, dtype=dtype)) is None
+    # A dtype numpy represents natively needs neither, so it still goes.
+    assert _host_numpy_view(torch.randn(4, 8).t()) is not None
+
+
+@pytest.mark.parametrize("dtype", STAGED_DTYPES)
+@pytest.mark.parametrize("spec", [P(None, None), P(None, "model"), P("model")])
+def test_load_weight_on_host_matches_device_staging(dtype, spec):
+    """Host staging returns the same array the t2j-then-put path would."""
+    tensor = torch.randn(*STAGED_SHAPE).to(dtype)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, spec)
+
+    result = _load_weight_on_host(tensor, sharding)
+
+    expected = jax.device_put(t2j(tensor, use_dlpack=False), sharding)
+    assert result is not None
+    assert result.dtype == expected.dtype
+    assert result.sharding == sharding
+    np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
+
+
+@patch("jax.block_until_ready")
+def test_load_weight_on_host_blocks_before_returning(mock_block):
+    """The staged copy is forced here, not left to whoever consumes the array.
+
+    The numpy view aliases torch storage that callers free the moment this
+    returns, so the transfer has to have landed before it does. Nothing
+    observable distinguishes that from a deferred copy: `device_put` from a
+    host buffer is synchronous on the CPU backend CI runs, so reading the
+    array back -- or even scribbling over the source buffer first -- passes
+    either way. Hence the assertion on the barrier itself.
+    """
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+
+    result = _load_weight_on_host(torch.randn(*STAGED_SHAPE),
+                                  NamedSharding(mesh, P(None, "model")))
+
+    mock_block.assert_called_once_with(result)
+
+
+@pytest.mark.skipif(NUM_DEVICES < 2,
+                    reason="a one-device mesh divides every shape")
+def test_load_weight_on_host_falls_back_when_sharding_does_not_divide():
+    """Block scales aren't always divisible along the axes their weight is."""
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, P("model", None))
+    # One row more than the mesh can hand out evenly.
+    rows = NUM_DEVICES + 1
+    assert _load_weight_on_host(torch.randn(rows, 8), sharding) is None
+
+
+@patch("tpu_inference.layers.vllm.quantization.unquantized.general_device_put",
+       side_effect=ValueError("cannot shard"))
+def test_load_weight_on_host_falls_back_when_the_put_is_refused(_):
+    """Whatever the put objects to, staging declines instead of raising.
+
+    Same contract as the test above, reached by making the put fail outright
+    rather than by handing it an indivisible shape, so single-chip runners --
+    where every shape divides -- still cover the fallback.
+    """
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, P("model", None))
+    assert _load_weight_on_host(torch.randn(*STAGED_SHAPE), sharding) is None
+
+
+@pytest.mark.parametrize("dtype", STAGED_DTYPES)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_load_weight_for_layer_stage_on_host(dtype):
+    """stage_on_host produces the same weight, already at `sharding`."""
+    layer = _make_layer_with_weight(STAGED_SHAPE, dtype)
+    expected = t2j(layer.weight, use_dlpack=False)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, P(None, "model"))
+
+    result = _load_weight_for_layer(layer,
+                                    "weight",
+                                    sharding,
+                                    stage_on_host=True)
+
+    assert result.dtype == expected.dtype
+    assert result.sharding == sharding
+    np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
+
+
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized._load_weight_on_host",
+    return_value=None)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_load_weight_for_layer_stage_on_host_falls_back_to_t2j(mock_on_host):
+    """An unstageable weight still loads, just through the slower path."""
+    layer = _make_layer_with_weight((3, 8), torch.float32)
+    expected = t2j(layer.weight, use_dlpack=False)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, P("model", None))
+
+    result = _load_weight_for_layer(layer,
+                                    "weight",
+                                    sharding,
+                                    stage_on_host=True)
+
+    mock_on_host.assert_called_once()
+    np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
+
+
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized._load_weight_on_host")
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_load_weight_for_layer_does_not_stage_on_host_by_default(mock_on_host):
+    """Callers that don't ask for host staging keep the old behaviour."""
+    layer = _make_layer_with_weight(STAGED_SHAPE, torch.bfloat16)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, P(None, "model"))
+
+    _load_weight_for_layer(layer, "weight", sharding)
+
+    mock_on_host.assert_not_called()
+
+
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized._load_weight_on_host")
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
+    return_value=False)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+def test_load_weight_for_layer_stage_on_host_ignored_under_pathways(
+        _, mock_on_host):
+    """Pathways does its own transfer; host staging must not intercept it."""
+    layer = _make_layer_with_weight(STAGED_SHAPE, torch.bfloat16)
+    mesh = test_utils.get_spmd_mesh(NUM_DEVICES)
+    sharding = NamedSharding(mesh, P(None, "model"))
+
+    result = _load_weight_for_layer(layer,
+                                    "weight",
+                                    sharding,
+                                    stage_on_host=True)
+
+    mock_on_host.assert_not_called()
+    assert result.shape == STAGED_SHAPE

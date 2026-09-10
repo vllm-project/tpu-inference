@@ -20,13 +20,13 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
   """
     barrier_sem = pltpu.get_barrier_semaphore()
     for neighbor in [left_neighbor, right_neighbor]:
-        pltpu.semaphore_signal(
+        pl.semaphore_signal(
             barrier_sem,
             inc=1,
             device_id=(neighbor, ),
             device_id_type=pl.DeviceIdType.MESH,
         )
-    pltpu.semaphore_wait(barrier_sem, 2)
+    pl.semaphore_wait(barrier_sem, 2)
     if double_barrier:
         # The double-barrier prevents a race condition where one neighbor can
         # re-enter the kernel again on a subsequent call and increment the
@@ -38,10 +38,10 @@ def local_barrier(left_neighbor, right_neighbor, double_barrier=True):
                            second_barrier=pltpu.SemaphoreType.REGULAR)
         def _(second_barrier):
             for neighbor in [left_neighbor, right_neighbor]:
-                pltpu.semaphore_signal(
+                pl.semaphore_signal(
                     second_barrier,
                     inc=1,
                     device_id=(neighbor, ),
                     device_id_type=pl.DeviceIdType.MESH,
                 )
-            pltpu.semaphore_wait(second_barrier, 2)
+            pl.semaphore_wait(second_barrier, 2)

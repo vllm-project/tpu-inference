@@ -19,7 +19,7 @@ import numpy as np
 from absl.testing import absltest, parameterized
 
 # Import the kernels
-from tpu_inference.kernels.experimental.deepseek_v4 import mla
+from tpu_inference.kernels.experimental.deepseek_v4.core_attention import mla
 
 
 def cdiv(a, b):
@@ -68,7 +68,6 @@ def ref_implementation(
     Array,  # float32[num_tokens, actual_num_q_heads, actual_lkv_dim]
     swa_l: jax.Array,  # float32[num_tokens, actual_num_q_heads]
     swa_m: jax.Array,  # float32[num_tokens, actual_num_q_heads]
-    topk_indices: jax.Array | None = None,
     *,
     sm_scale: float = 1.0,
     mask_value: float | None = DEFAULT_MASK_VALUE,
@@ -97,25 +96,6 @@ def ref_implementation(
 
     kv_c_cache = cache_kv[..., :lkv_dim].reshape(total_num_pages, page_size,
                                                  lkv_dim)
-
-    # Quantize and dequantize kv_c_cache to simulate the loss of quantization
-    fp8_part = kv_c_cache[..., :448]
-    bf16_part = kv_c_cache[..., 448:512]
-
-    fp8_blocked = fp8_part.reshape(total_num_pages, page_size, 7, 64)
-    fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
-    x_amax = jnp.max(jnp.abs(fp8_blocked), axis=-1, keepdims=True)
-    x_amax = jnp.clip(x_amax, 1e-4, None)
-    sf = jnp.power(2.0, jnp.ceil(jnp.log2(x_amax / fp8_max)))
-
-    fp8_quant = (fp8_blocked * (1.0 / sf)).astype(jnp.float8_e4m3fn)
-    scales_quant = sf.reshape(total_num_pages, page_size,
-                              7).astype(jnp.float8_e8m0fnu)
-
-    fp8_dequant = (fp8_quant.astype(jnp.bfloat16) *
-                   scales_quant[..., None].astype(jnp.bfloat16)).reshape(
-                       total_num_pages, page_size, 448)
-    kv_c_cache = jnp.concatenate([fp8_dequant, bf16_part], axis=-1)
 
     outputs = []
     for i in range(distribution[-1]):
@@ -155,18 +135,9 @@ def ref_implementation(
                           preferred_element_type=jnp.float32)
         attn *= sm_scale
 
-        # Causal/CSA mask
-        if topk_indices is not None:
-            topk_indices_i = topk_indices[q_start:q_end]
-            csa_mask = (
-                topk_indices_i[:, :, None] == jnp.arange(kv_len)[None,
-                                                                 None, :]).any(
-                                                                     axis=1)
-            mask = ~csa_mask[None, :, :]
-        else:
-            kv_lens_to_attend_i = kv_lens_to_attend[q_start:q_end]
-            kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
-            mask = kv_lens_to_attend_i[None, :, None] <= kv_span
+        kv_lens_to_attend_i = kv_lens_to_attend[q_start:q_end]
+        kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
+        mask = kv_lens_to_attend_i[None, :, None] <= kv_span
         attn = jnp.where(mask, mask_value, attn)
 
         m_2 = jnp.max(attn, axis=-1, keepdims=True)
@@ -177,7 +148,7 @@ def ref_implementation(
         l_1_scaled = l_1 * jnp.exp(m_1 - m)
         l_2 = jnp.sum(jnp.exp(attn - m), axis=-1, keepdims=True)
         l_sinks = jnp.exp(attention_sinks[..., None, None] - m)
-        L = l_1_scaled + l_2 + l_sinks
+        l_sum = l_1_scaled + l_2 + l_sinks
 
         p_2 = jnp.exp(attn - m)
         acc_2 = jnp.einsum("nqk,kl->qnl", p_2, v_i)
@@ -185,17 +156,14 @@ def ref_implementation(
         acc_1_scaled = swa_accumution_i * exp_m1_diff
         acc = acc_1_scaled + acc_2
 
-        out_i = (acc / jnp.transpose(L, (1, 0, 2))).astype(q_i.dtype)
+        out_i = (acc / jnp.transpose(l_sum, (1, 0, 2))).astype(q_i.dtype)
         outputs.append(out_i)
 
     return jnp.concatenate(outputs, axis=0)
 
 
 def generate_attention_sinks(rng, num_heads):
-    high = 500
-    low = 200
-    return jnp.array(
-        rng.random(size=(num_heads, ), dtype=np.float32) * (high - low) + low)
+    return jnp.array(rng.random(size=(num_heads, ), dtype=np.float32))
 
 
 def gen_random(rng, shape, dtype):
@@ -206,14 +174,23 @@ def gen_random_int(rng, shape, low, high):
     return jnp.array(rng.integers(low=low, high=high, size=shape))
 
 
+def create_cache(rng, total_pages, page_size, head_dim, kv_dtype):
+    cache_kv_base = (gen_random(
+        rng,
+        get_kv_cache_shape(total_pages, page_size, head_dim, kv_dtype),
+        jnp.float32,
+    )).astype(kv_dtype)
+
+    kernel_cache = cache_kv_base.reshape(total_pages, page_size, 4, 128)
+    kernel_cache = jax.lax.bitcast_convert_type(kernel_cache, jnp.uint8)
+    kernel_cache = kernel_cache.transpose(0, 1, 2, 4, 3)
+    kernel_cache = kernel_cache.reshape(total_pages, page_size * 2, 4, 128)
+    return cache_kv_base, kernel_cache
+
+
 class CorrectnessTest(parameterized.TestCase):
 
-    @parameterized.parameters(True, False)
-    def test_correctness(self, is_csa: bool = False):
-        if is_csa:
-            topk = 1024
-        else:
-            topk = None
+    def test_correctness(self):
         rng = np.random.default_rng(1234)
 
         print(f"JAX Backend: {jax.default_backend()}")
@@ -251,24 +228,10 @@ class CorrectnessTest(parameterized.TestCase):
 
         # Metadata
         kv_lens_to_attend = []
-        topk_indices = []
-
-        if is_csa:
-            for i in range(batch_size):
-                kv_len_i = int(kv_lens[i])
-                for _ in range(new_kv_lens[i]):
-                    perm = rng.permutation(kv_len_i)
-                    indices = list(perm[:topk])
-                    if len(indices) < topk:
-                        indices.extend([-1] * (topk - len(indices)))
-                    topk_indices.append(indices)
-            topk_indices = jnp.array(topk_indices, dtype=jnp.int32)
-        else:
-            for i in range(batch_size):
-                for _ in range(new_kv_lens[i]):
-                    kv_lens_to_attend.append(
-                        rng.integers(low=0, high=kv_lens[i]))
-            kv_lens_to_attend = jnp.array(kv_lens_to_attend, dtype=jnp.int32)
+        for i in range(batch_size):
+            for _ in range(new_kv_lens[i]):
+                kv_lens_to_attend.append(rng.integers(low=0, high=kv_lens[i]))
+        kv_lens_to_attend = jnp.array(kv_lens_to_attend, dtype=jnp.int32)
 
         pages_per_seq = cdiv(500, page_size)
         page_indices = jnp.arange(batch_size * pages_per_seq, dtype=jnp.int32)
@@ -276,114 +239,51 @@ class CorrectnessTest(parameterized.TestCase):
         # Cache setup
         total_pages = batch_size * pages_per_seq
 
-        cache_kv_base = (gen_random(
-            rng,
-            get_kv_cache_shape(total_pages, page_size, head_dim, kv_dtype),
-            jnp.float32,
-        ) * 40.0 - 20.0).astype(kv_dtype)
-
-        # Quantize cache_kv_base to create cache_kv_agent in DSV4 FP8 format.
-        kv_c_flat = cache_kv_base.reshape(total_pages, page_size, head_dim)
-        fp8_part = kv_c_flat[..., :448]
-        bf16_part = kv_c_flat[..., 448:512]
-
-        fp8_blocked = fp8_part.reshape(total_pages, page_size, 7, 64)
-        fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
-        x_amax = jnp.max(jnp.abs(fp8_blocked), axis=-1, keepdims=True)
-        x_amax = jnp.clip(x_amax, 1e-4, None)
-        sf = jnp.power(2.0, jnp.ceil(jnp.log2(x_amax / fp8_max)))
-
-        fp8_quant = (fp8_blocked * (1.0 / sf)).astype(jnp.float8_e4m3fn)
-        scales_quant = sf.reshape(total_pages, page_size,
-                                  7).astype(jnp.float8_e8m0fnu)
-
-        fp8_uint8 = jax.lax.bitcast_convert_type(
-            fp8_quant.reshape(total_pages, page_size, 448), jnp.uint8)
-        bf16_uint8 = jax.lax.bitcast_convert_type(
-            bf16_part, jnp.uint8).reshape(total_pages, page_size, 128)
-        scales_uint8 = jax.lax.bitcast_convert_type(scales_quant, jnp.uint8)
-        pad_uint8 = jnp.zeros((total_pages, page_size, 57), dtype=jnp.uint8)
-
-        flat_cache_agent = jnp.concatenate(
-            [fp8_uint8, bf16_uint8, scales_uint8, pad_uint8], axis=-1)
-        kernel_cache = flat_cache_agent.reshape(total_pages, page_size // 4, 4,
-                                                640)
+        cache_kv_base, kernel_cache = create_cache(rng, total_pages, page_size,
+                                                   head_dim, kv_dtype)
 
         distribution = jnp.array(
             [num_decode_seqs, num_decode_seqs, batch_size], dtype=jnp.int32)
 
         attention_sinks = generate_attention_sinks(rng, num_heads)
 
-        swa_accumution = jnp.ones_like(q) * 5000
-        swa_l = jnp.ones((total_tokens, num_heads), dtype=jnp.float32) * 200
-        swa_m = jnp.ones((total_tokens, num_heads), dtype=jnp.float32) * 500
+        swa_accumution = gen_random(rng, (total_tokens, num_heads, head_dim),
+                                    q_dtype)
+        swa_l = gen_random(rng, (total_tokens, num_heads), dtype=jnp.float32)
+        swa_m = gen_random(rng, (total_tokens, num_heads), dtype=jnp.float32)
 
         print("Running Baseline Reference...")
-        if is_csa:
-            out_base = ref_implementation(
-                q,
-                cache_kv_base,
-                kv_lens,
-                None,
-                page_indices,
-                cu_q_lens,
-                distribution,
-                attention_sinks,
-                swa_accumution,
-                swa_l,
-                swa_m,
-                topk_indices=topk_indices,
-                sm_scale=1.0,
-            )
-            out_agent = mla.mla_ragged_paged_attention(
-                q,
-                kernel_cache,
-                kv_lens,
-                None,
-                topk_indices,
-                page_indices,
-                cu_q_lens,
-                distribution,
-                attention_sinks,
-                swa_accumution,
-                swa_l,
-                swa_m,
-                sm_scale=1.0,
-                num_kv_pages_per_block=1,
-                num_queries_per_block=16,
-            )
-        else:
-            out_base = ref_implementation(
-                q,
-                cache_kv_base,
-                kv_lens,
-                kv_lens_to_attend,
-                page_indices,
-                cu_q_lens,
-                distribution,
-                attention_sinks,
-                swa_accumution,
-                swa_l,
-                swa_m,
-                sm_scale=1.0,
-            )
-            out_agent = mla.mla_ragged_paged_attention(
-                q,
-                kernel_cache,
-                kv_lens,
-                kv_lens_to_attend,
-                None,
-                page_indices,
-                cu_q_lens,
-                distribution,
-                attention_sinks,
-                swa_accumution,
-                swa_l,
-                swa_m,
-                sm_scale=1.0,
-                num_kv_pages_per_block=1,
-                num_queries_per_block=16,
-            )
+
+        out_base = ref_implementation(
+            q,
+            cache_kv_base,
+            kv_lens,
+            kv_lens_to_attend,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            attention_sinks,
+            swa_accumution,
+            swa_l,
+            swa_m,
+            sm_scale=1.0,
+        )
+        out_agent = mla.mla_ragged_paged_attention(
+            q,
+            kernel_cache,
+            kv_lens,
+            kv_lens_to_attend,
+            page_indices,
+            cu_q_lens,
+            distribution,
+            attention_sinks,
+            swa_accumution,
+            swa_l,
+            swa_m,
+            sm_scale=1.0,
+            num_kv_pages_per_block=1,
+            num_queries_per_block=16,
+        )
         out_base.block_until_ready()
         out_agent.block_until_ready()
 

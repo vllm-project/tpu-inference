@@ -174,12 +174,6 @@ def dummy_attention(kv_cache, q, k, v, *args, **kwargs):
     return kv_cache, q
 
 
-def dummy_dflash_concat_attention(q, *args, **kwargs):
-    """Dummy replacement for dflash_concat_attention."""
-    del args, kwargs
-    return q
-
-
 def _make_attention_metadata(query_start_loc: list[int]) -> AttentionMetadata:
     """Helper to construct dummy AttentionMetadata."""
     query_start_loc = np.asarray(query_start_loc, dtype=np.int32)
@@ -198,15 +192,10 @@ def _make_attention_metadata(query_start_loc: list[int]) -> AttentionMetadata:
 # ----- Component tests -----
 @pytest.mark.parametrize("dflash_impl", ["concat_dense", "additive_legacy"])
 @patch(
-    "tpu_inference.models.jax.qwen3_dflash.dflash_concat_attention",
-    side_effect=dummy_dflash_concat_attention,
-)
-@patch(
     "tpu_inference.models.jax.qwen3_dflash.attention",
     side_effect=dummy_attention,
 )
-def test_qwen3_dflash_attention(mock_attn, mock_concat, dflash_impl,
-                                hf_configs, mesh):
+def test_qwen3_dflash_attention(mock_attn, dflash_impl, hf_configs, mesh):
     """Verifies Qwen3DFlashAttention forward pass under different attention implementations."""
     draft_cfg, _ = hf_configs
     rng = nnx.Rngs(42)
@@ -241,28 +230,24 @@ def test_qwen3_dflash_attention(mock_attn, mock_concat, dflash_impl,
             hidden_states=hidden_states,
             target_hidden_states=target_hidden,
             attention_metadata=attention_metadata,
+            target_query_start_loc=attention_metadata.query_start_loc,
+            target_positions=attention_metadata.input_positions,
         )
 
     assert output.shape == (T, hidden_size)
     assert new_kv_cache.shape == (T, num_heads, max_kv_len, head_dim)
 
     if dflash_impl == "concat_dense":
-        mock_concat.assert_called_once()
-        mock_attn.assert_called_once()
+        assert mock_attn.call_count == 2
     else:
-        mock_concat.assert_not_called()
-        mock_attn.assert_called_once()
+        assert mock_attn.call_count == 1
 
 
-@patch(
-    "tpu_inference.models.jax.qwen3_dflash.dflash_concat_attention",
-    side_effect=dummy_dflash_concat_attention,
-)
 @patch(
     "tpu_inference.models.jax.qwen3_dflash.attention",
     side_effect=dummy_attention,
 )
-def test_qwen3_dflash_decoder_layer(mock_attn, mock_concat, hf_configs, mesh):
+def test_qwen3_dflash_decoder_layer(mock_attn, hf_configs, mesh):
     """Verifies Qwen3DFlashDecoderLayer integrates attention and MLP blocks."""
     draft_cfg, _ = hf_configs
     rng = nnx.Rngs(42)
@@ -292,26 +277,25 @@ def test_qwen3_dflash_decoder_layer(mock_attn, mock_concat, hf_configs, mesh):
     attention_metadata = _make_attention_metadata([0, T])
 
     with jax.set_mesh(mesh):
-        new_kv_cache, output = layer(
+        new_kv_cache, output, extra = layer(
             kv_cache=kv_cache,
             hidden_states=hidden_states,
             target_hidden_states=target_hidden,
             attention_metadata=attention_metadata,
+            target_query_start_loc=attention_metadata.query_start_loc,
+            target_positions=attention_metadata.input_positions,
         )
 
     assert output.shape == (T, hidden_size)
     assert new_kv_cache.shape == (T, num_heads, max_kv_len, head_dim)
+    assert mock_attn.call_count == 2
 
 
-@patch(
-    "tpu_inference.models.jax.qwen3_dflash.dflash_concat_attention",
-    side_effect=dummy_dflash_concat_attention,
-)
 @patch(
     "tpu_inference.models.jax.qwen3_dflash.attention",
     side_effect=dummy_attention,
 )
-def test_qwen3_dflash_for_causal_lm(mock_attn, mock_concat, hf_configs, mesh):
+def test_qwen3_dflash_for_causal_lm(mock_attn, hf_configs, mesh):
     """Validates full draft model's forward pass, logits calculation, and combined projection."""
     draft_cfg, target_cfg = hf_configs
     vllm_config = MockVllmConfig(draft_cfg, target_cfg)
@@ -348,17 +332,20 @@ def test_qwen3_dflash_for_causal_lm(mock_attn, mock_concat, hf_configs, mesh):
     ]
 
     with jax.set_mesh(mesh):
-        new_kv_caches, hidden_states, extra = model(
+        new_kv_caches, hidden_states, extra, _ = model(
             kv_caches=kv_caches,
             input_ids=input_ids,
             target_hidden_states=target_hidden,
             attention_metadata=attention_metadata,
+            target_query_start_loc=attention_metadata.query_start_loc,
+            target_positions=attention_metadata.input_positions,
         )
 
     assert len(new_kv_caches) == draft_cfg.num_hidden_layers
     assert hidden_states.shape == (T, hidden_size)
-    assert len(extra) == 1
+    assert len(extra) == 2
     assert extra[0].shape == (T, hidden_size)
+    assert mock_attn.call_count == 4
 
     # Test compute_logits
     logits = model.compute_logits(hidden_states)

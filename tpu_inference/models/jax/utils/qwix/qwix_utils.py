@@ -356,30 +356,16 @@ def apply_qwix_quantization(
 
         for i in range(num_hidden_layers):
             layer_type = layer_types[i]
-            is_sliding = layer_type == "sliding_attention"
 
-            # Determine head_dim
-            if not is_sliding:
-                head_dim_original = getattr(
-                    text_config, "global_head_dim",
-                    getattr(text_config, "head_dim", 0))
-            else:
-                head_dim_original = getattr(text_config, "head_dim", 0)
-            head_size_list.append(utils.get_padded_head_dim(head_dim_original))
-
-            # Determine num_kv_heads
-            should_use_global_kv_heads = ((not is_sliding) and getattr(
-                text_config, "attention_k_eq_v", False))
-            if should_use_global_kv_heads:
-                kv_heads = getattr(
-                    text_config, "num_global_key_value_heads",
-                    getattr(text_config, "num_key_value_heads", 0))
-                if not kv_heads:
-                    kv_heads = getattr(text_config, "num_key_value_heads", 0)
-            else:
-                kv_heads = getattr(text_config, "num_key_value_heads", 0)
+            # transformers >= 5.15 stores head_dim / num_kv_heads per layer;
+            # older versions use flat attributes split by layer_types (see
+            # utils.get_layer_kv_params).
+            head_dim_original, kv_heads = utils.get_layer_kv_params(
+                text_config, layer_type)
+            head_size_list.append(
+                utils.get_padded_head_dim(head_dim_original or 0))
             num_kv_heads_list.append(
-                utils.get_padded_num_heads(kv_heads, sharding_size))
+                utils.get_padded_num_heads(kv_heads or 0, sharding_size))
 
         head_size = tuple(head_size_list)
         num_kv_heads = tuple(num_kv_heads_list)

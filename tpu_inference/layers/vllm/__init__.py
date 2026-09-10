@@ -17,6 +17,10 @@ from tpu_inference.layers.vllm import ops as ops
 from tpu_inference.layers.vllm import quantization as quantization
 
 
-# NOTE: this empty function exists for an entry_points target for vllm plugin.
+# NOTE: this function is the entry_points target for the vllm general plugin.
 def register_layers():
-    pass
+    # Override vLLM's built-in model classes with TPU-specific implementations
+    # (e.g. DeepseekV4ForCausalLM). Done here because this is the plugin hook
+    # that vLLM invokes at startup, before any model is loaded.
+    from tpu_inference.models.vllm.experimental import register_models
+    register_models()

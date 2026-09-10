@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -36,6 +37,7 @@ class TestTPUModelRunnerMeshInit:
         config.sharding_config.device_indexes = None
         config.sharding_config.total_dp_size = 4
         config.sharding_config.decode_cp_size = 1
+        config.sharding_config.prefill_cp_size = 1
         return config
 
     @pytest.fixture
@@ -95,7 +97,7 @@ class TestTPUModelRunnerMeshInit:
         mock_vllm_config.sharding_config.device_indexes = [0, 1, 2, 3]
 
         with patch.dict(os.environ, {'NEW_MODEL_DESIGN': ''}), \
-             patch('jax.make_mesh') as mock_jax_mesh, \
+             patch('jax.sharding.Mesh') as mock_jax_mesh, \
              patch('tpu_inference.runner.tpu_runner.logger'):
 
             mock_mesh = Mock()
@@ -107,12 +109,10 @@ class TestTPUModelRunnerMeshInit:
             call_args = mock_jax_mesh.call_args
 
             # Verify mesh_shape
-            assert call_args[0][0] == (4, 8)
+            assert call_args[0][0].shape == (4, 8)
             # Verify axis_names
             assert call_args[0][1] == ("data", "model")
             # Verify devices
-            assert call_args[1]['devices'] == runner_instance.devices
-
             assert runner_instance.mesh == mock_mesh
 
     def test_init_mesh_new_model_single_slice(self, runner_instance,
@@ -134,15 +134,14 @@ class TestTPUModelRunnerMeshInit:
             mock_mesh_utils.create_device_mesh.assert_called_once()
             call_args = mock_mesh_utils.create_device_mesh.call_args
 
-            # Verify mesh_shape: (model_dp_size, attn_dp_size, attn_dp_expert_size, expert_size, tp_size, dcp_size)
-            assert call_args[0][0] == (4, 2, 1, 1, 8, 1)
+            # Verify mesh_shape: (model_dp_size, attn_dp_size, attn_dp_expert_size, expert_size, tp_size, dcp_size, pcp_size)
+            assert call_args[0][0] == (4, 2, 1, 1, 8, 1, 1)
             assert call_args[0][1] == runner_instance.devices
             assert call_args[1]['allow_split_physical_axes'] is True
 
             # Verify Mesh was created with correct axis names
-            mock_jax_mesh.assert_called_once_with(
-                mock_devices_array, ("data", "attn_dp", "attn_dp_expert",
-                                     "expert", "model", "dcp"))
+            mock_jax_mesh.assert_called_once_with(mock_devices_array,
+                                                  MESH_AXIS_NAMES)
 
             assert runner_instance.mesh == mock_mesh
 
@@ -166,18 +165,17 @@ class TestTPUModelRunnerMeshInit:
             mock_mesh_utils.create_hybrid_device_mesh.assert_called_once()
             call_args = mock_mesh_utils.create_hybrid_device_mesh.call_args
 
-            # Verify intra_node_shape: (dp_inner, attn_dp_size, attn_dp_expert_size, expert_size, tp_size, dcp_size)
+            # Verify intra_node_shape: (dp_inner, attn_dp_size, attn_dp_expert_size, expert_size, tp_size, dcp_size, pcp_size)
             # dp_inner = model_dp_size // num_slices = 4 // 2 = 2
-            assert call_args[1]['mesh_shape'] == (2, 2, 1, 1, 8, 1)
-            # Verify outer_node_shape: (num_slices, 1, 1, 1, 1)
-            assert call_args[1]['dcn_mesh_shape'] == (2, 1, 1, 1, 1, 1)
+            assert call_args[1]['mesh_shape'] == (2, 2, 1, 1, 8, 1, 1)
+            # Verify outer_node_shape: (num_slices, 1, 1, 1, 1, 1, 1)
+            assert call_args[1]['dcn_mesh_shape'] == (2, 1, 1, 1, 1, 1, 1)
             assert call_args[1]['devices'] == runner_instance.devices
             assert call_args[1]['allow_split_physical_axes'] is True
 
             # Verify Mesh was created with correct axis names
-            mock_jax_mesh.assert_called_once_with(
-                mock_devices_array, ("data", "attn_dp", "attn_dp_expert",
-                                     "expert", "model", "dcp"))
+            mock_jax_mesh.assert_called_once_with(mock_devices_array,
+                                                  MESH_AXIS_NAMES)
 
             assert runner_instance.mesh == mock_mesh
 

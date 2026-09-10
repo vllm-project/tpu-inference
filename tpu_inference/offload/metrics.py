@@ -56,6 +56,8 @@ class TPUKVCacheStats:
     host_memory_usage_bytes: int = 0
     staging_buffer_usage_blocks: int = 0
     staging_buffer_free_blocks: int = 0
+    evictions: int = 0
+    insertions: int = 0
 
 
 class TPUKVCacheMetrics:
@@ -76,6 +78,12 @@ class TPUKVCacheMetrics:
         self._lookup_requests: int = 0
         self._lookup_hits: int = 0
         self._lookup_miss: int = 0
+        self._interval_evictions: int = 0
+        self._cumulative_lookup_requests: int = 0
+        self._cumulative_lookup_hits: int = 0
+        self._cumulative_lookup_miss: int = 0
+        self._cumulative_evictions: int = 0
+        self._cumulative_insertions: int = 0
         self._d2h_operations: int = 0
         self._d2h_bytes: List[int] = []
         self._d2h_transfer_latencies: List[float] = []
@@ -106,14 +114,26 @@ class TPUKVCacheMetrics:
     def record_lookup_request(self):
         with self._instance_lock:
             self._lookup_requests += 1
+            self._cumulative_lookup_requests += 1
 
     def record_cache_hit(self, tokens: int):
         with self._instance_lock:
             self._lookup_hits += tokens
+            self._cumulative_lookup_hits += tokens
 
     def record_cache_miss(self, tokens: int):
         with self._instance_lock:
             self._lookup_miss += tokens
+            self._cumulative_lookup_miss += tokens
+
+    def record_eviction(self, count: int):
+        with self._instance_lock:
+            self._interval_evictions += count
+            self._cumulative_evictions += count
+
+    def record_insertion(self, count: int = 1):
+        with self._instance_lock:
+            self._cumulative_insertions += count
 
     def record_d2h_operation(self):
         with self._instance_lock:
@@ -163,6 +183,7 @@ class TPUKVCacheMetrics:
         self._lookup_requests = 0
         self._lookup_hits = 0
         self._lookup_miss = 0
+        self._interval_evictions = 0
         self._d2h_operations = 0
         self._d2h_bytes.clear()
         self._d2h_transfer_latencies.clear()
@@ -175,12 +196,35 @@ class TPUKVCacheMetrics:
         self._staging_buffer_usage_blocks = 0
         self._staging_buffer_free_blocks = 0
 
+    def get_cumulative_stats(self) -> TPUKVCacheStats:
+        with self._instance_lock:
+            stats = TPUKVCacheStats(
+                lookup_requests=self._cumulative_lookup_requests,
+                lookup_hits=self._cumulative_lookup_hits,
+                lookup_miss=self._cumulative_lookup_miss,
+                evictions=self._cumulative_evictions,
+                insertions=self._cumulative_insertions,
+                d2h_operations=self._d2h_operations,
+                d2h_bytes=list(self._d2h_bytes),
+                d2h_transfer_latencies=list(self._d2h_transfer_latencies),
+                d2h_transfer_bw=list(self._d2h_transfer_bw),
+                h2d_operations=self._h2d_operations,
+                h2d_bytes=list(self._h2d_bytes),
+                h2d_transfer_latencies=list(self._h2d_transfer_latencies),
+                h2d_transfer_bw=list(self._h2d_transfer_bw),
+                host_memory_usage_bytes=self._host_memory_usage_bytes,
+                staging_buffer_usage_blocks=self._staging_buffer_usage_blocks,
+                staging_buffer_free_blocks=self._staging_buffer_free_blocks,
+            )
+        return stats
+
     def get_stats_and_clear(self) -> TPUKVCacheStats:
         with self._instance_lock:
             stats = TPUKVCacheStats(
                 lookup_requests=self._lookup_requests,
                 lookup_hits=self._lookup_hits,
                 lookup_miss=self._lookup_miss,
+                evictions=self._interval_evictions,
                 d2h_operations=self._d2h_operations,
                 d2h_bytes=list(self._d2h_bytes),
                 d2h_transfer_latencies=list(self._d2h_transfer_latencies),
@@ -379,6 +423,9 @@ class TPUKVCacheStatsLogger:
     def log_worker(self):
         while not self.shutdown_event.is_set():
             stats = self.metrics.get_stats_and_clear()
+            logger.info(
+                f"Offload Metrics Snapshot: requests={stats.lookup_requests}, hits={stats.lookup_hits}, miss={stats.lookup_miss}, d2h={stats.d2h_operations}, h2d={stats.h2d_operations}"
+            )
             self.prometheus_logger.log_stats(stats)
             # wait returns True if the flag is set, False if timeout
             if self.shutdown_event.wait(self.log_interval):

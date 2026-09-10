@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import functools
 from typing import Any, Optional
 
 import jax
@@ -31,6 +32,8 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.compiler_options import \
+    get_step_fn_compiler_options
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
 from tpu_inference.models.jax.utils.multi_modal_utils import \
@@ -41,6 +44,8 @@ from tpu_inference.models.jax.utils.qwix.qwix_utils import (
     update_vllm_config_for_qwix_quantization)
 from tpu_inference.models.jax.utils.weight_utils import (BaseWeightLoader,
                                                          LoadableWithIterator)
+from tpu_inference.runner.mm_encoder_jit_manager import \
+    maybe_create_mm_encoder_jit_manager
 from tpu_inference.utils import to_jax_dtype, to_torch_dtype
 
 logger = init_logger(__name__)
@@ -71,6 +76,8 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     # would cause JAX init failure when using multi hosts with Ray.
 
     from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
+    from tpu_inference.models.jax.dflash import DFlashForCausalLM
+    from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM
     from tpu_inference.models.jax.gemma4_mm import \
         Gemma4ForConditionalGeneration
     from tpu_inference.models.jax.gemma4_mtp import Gemma4MTPForCausalLM
@@ -83,13 +90,11 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     from tpu_inference.models.jax.qwen2_5_vl import \
         Qwen2_5_VLForConditionalGeneration
     from tpu_inference.models.jax.qwen3 import Qwen3ForCausalLM
-    from tpu_inference.models.jax.qwen3_moe import Qwen3MoeForCausalLM
     _MODEL_REGISTRY["Llama4ForCausalLM"] = Llama4ForCausalLM
     _MODEL_REGISTRY["DeepseekV3ForCausalLM"] = DeepseekV3ForCausalLM
     _MODEL_REGISTRY["LlamaForCausalLM"] = LlamaForCausalLM
     _MODEL_REGISTRY["Llama4ForConditionalGeneration"] = LlamaGuard4ForCausalLM
     _MODEL_REGISTRY["Qwen3ForCausalLM"] = Qwen3ForCausalLM
-    _MODEL_REGISTRY["Qwen3MoeForCausalLM"] = Qwen3MoeForCausalLM
     _MODEL_REGISTRY[
         "Qwen2_5_VLForConditionalGeneration"] = Qwen2_5_VLForConditionalGeneration
     _MODEL_REGISTRY["Eagle3LlamaForCausalLM"] = EagleLlama3ForCausalLM
@@ -97,7 +102,10 @@ def _get_model_architecture(config: PretrainedConfig) -> nnx.Module:
     _MODEL_REGISTRY["Qwen2ForCausalLM"] = Qwen2ForCausalLM
     _MODEL_REGISTRY[
         "Gemma4ForConditionalGeneration"] = Gemma4ForConditionalGeneration
+    _MODEL_REGISTRY["Gemma4ForCausalLM"] = Gemma4ForCausalLM
     _MODEL_REGISTRY["Gemma4MTPModel"] = Gemma4MTPForCausalLM
+    _MODEL_REGISTRY["DFlashForCausalLM"] = DFlashForCausalLM
+    _MODEL_REGISTRY["DFlashDraftModel"] = DFlashForCausalLM
 
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -185,7 +193,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
 
-            model = nnx.eval_shape(abstract_model_fn)
+            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
             quantization_config = vllm_config.model_config.hf_config.quantization_config if hasattr(
                 vllm_config.model_config.hf_config,
                 "quantization_config") else {}
@@ -261,7 +269,7 @@ def _get_nnx_model(
                 mesh,
                 apply_to_abstract_model=True)
         with jax.set_mesh(mesh):
-            model = nnx.eval_shape(abstract_model_fn)
+            model = nnx.eval_shape(abstract_model_fn, graph_updates=False)
         # Although the created model can already work, we still need to jit
         # the model creation again, otherwise the model forward will have
         # non-trivial overhead in PjitFunction.
@@ -347,8 +355,8 @@ def get_flax_model(
     vllm_config.model_config.dtype = original_dtype
     kv_cache_sharding = NamedSharding(
         mesh,
-        PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                      ShardingAxisName.ATTN_HEAD))
+        PartitionSpec(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                      ShardingAxisName.KV_HEAD))
     hidden_states_sharding = NamedSharding(mesh,
                                            PartitionSpec(
                                                ShardingAxisName.ATTN_DATA,
@@ -365,7 +373,13 @@ def get_flax_model(
     # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
     _state_treedef = jax.tree_util.tree_structure(state)
 
-    @jax.jit(
+    def run_model_impl(state_leaves, *args):
+        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
+        model = nnx.merge(graphdef, state)
+        return model(*args)
+
+    _wrap_with_jit = functools.partial(
+        jax.jit,
         out_shardings=(
             kv_cache_sharding,
             hidden_states_sharding,
@@ -377,10 +391,18 @@ def get_flax_model(
             6, 9, 10
         ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
     )
-    def run_model(state_leaves, *args):
-        state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
-        model = nnx.merge(graphdef, state)
-        return model(*args)
+
+    # `continue_decode` calls the step fn from inside a `jax.lax.while_loop`
+    # body, where JAX forbids `compiler_options` on a nested jit. Build an
+    # options-free twin for that path; the loop jit in `runner/decode_loop.py`
+    # supplies the options for the whole fused program. Mirrors the torchax
+    # path in `models/vllm/vllm_model_wrapper.py`.
+    run_model_no_options = _wrap_with_jit(run_model_impl)
+
+    run_model = _wrap_with_jit(
+        run_model_impl,
+        compiler_options=get_step_fn_compiler_options(),
+    )
 
     @jax.jit(
         out_shardings=(
@@ -459,11 +481,43 @@ def get_flax_model(
     def wrapped_model_fn(*args, **kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
+        kwargs.pop("shared_attention_metadata", None)
         return jitted_model_fn(*args, **kwargs)
 
+    # Exposed as `step_fn_no_options` below for `continue_decode`. The draft
+    # model's jit already carries no compiler options, so it is its own twin.
+    jitted_model_fn_no_options = (run_draft_model
+                                  if is_draft_model else run_model_no_options)
+
+    def wrapped_model_fn_no_options(*args, **kwargs):
+        if not model_supports_spec_step:
+            kwargs.pop("spec_step_idx", None)
+        kwargs.pop("shared_attention_metadata", None)
+        return jitted_model_fn_no_options(*args, **kwargs)
+
     compute_logits_fn = run_compute_logits
-    embed_multimodal_fn = run_embed_multimodal
     embed_input_ids_fn = run_embed_input_ids
+
+    _mm_jit = maybe_create_mm_encoder_jit_manager(
+        vllm_config=vllm_config,
+        vllm_model=model,
+        vllm_runner=None,
+        params_and_buffers=None,
+    )
+    if _mm_jit is not None:
+        precompile_vision_encoder_fn = _mm_jit.precompile_vision_encoder
+
+        def embed_multimodal_fn(state_leaves, modality=None, **kwargs):
+            if modality is not None and _mm_jit.supports_modality(modality):
+                return _mm_jit.execute(kwargs)
+            return run_embed_multimodal(state_leaves,
+                                        modality=modality,
+                                        **kwargs)
+    else:
+        # TODO(kwang3939): implement SupportsEncoderCudaGraph for Qwen2.5-VL and enforce
+        # all JAX multimodal models to go through MMEncoderJITManager.
+        embed_multimodal_fn = run_embed_multimodal
+
     lora_manager, model = None, None
     combine_hidden_states_fn = combine_hidden_states
 
@@ -513,6 +567,12 @@ def get_flax_model(
         pooler_fn = _not_support
 
     state_leaves = tuple(jax.tree_util.tree_leaves(state))
+
+    # `runner/tpu_runner.py` and `runner/compilation_manager.py` read
+    # `self.model.step_fn_no_options`, where `self.model` is
+    # `ModelInterface.model`. The torchax path sets the same attribute in
+    # `models/vllm/vllm_model_wrapper.py`, so both paths define it.
+    jit_model.step_fn_no_options = wrapped_model_fn_no_options
 
     return ModelInterface(
         model_fn=wrapped_model_fn,
@@ -589,44 +649,54 @@ def get_model(
     is_draft_model: bool = False,
     shared_params: Optional[dict[str, jax.Array]] = None,
 ) -> ModelInterface:
-    if is_draft_model:
-        impl = envs.DRAFT_MODEL_IMPL_TYPE
-    else:
-        impl = envs.MODEL_IMPL_TYPE
-    logger.info(f"Loading model with MODEL_IMPL_TYPE={impl}")
-    if impl == "auto":
-        impl = resolve_model_architecture(vllm_config, is_draft_model)
-        logger.info(f"Resolved MODEL_IMPL_TYPE 'auto' to '{impl}'")
+    # Warning: Please DO NOT remove the below logging line.
+    # If you are making changes, inform/reach out to https://github.com/sethiay.
+    logger.info(
+        "Loading model with MODEL_IMPL_TYPE=%s",
+        envs.DRAFT_MODEL_IMPL_TYPE if is_draft_model else envs.MODEL_IMPL_TYPE)
+    impl = resolve_model_impl_type(vllm_config, is_draft_model)
 
     match impl:
         case "flax_nnx":
-            with jax.set_mesh(mesh):
-                arch = getattr(vllm_config.model_config.hf_config,
-                               "architectures", [None])[0]
-                if vllm_config.parallel_config.pipeline_parallel_size > 1 and arch in _PP_DISABLED_MODELS:
-                    logger.warning(
-                        "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
-                        arch)
-                    return get_vllm_model(vllm_config, rng, mesh,
-                                          is_draft_model, shared_params)
-                try:
-                    # Try to load the flax model first
+            arch = getattr(vllm_config.model_config.hf_config, "architectures",
+                           [None])[0]
+            if vllm_config.parallel_config.pipeline_parallel_size > 1 and arch in _PP_DISABLED_MODELS:
+                logger.warning(
+                    "PP is not fully supported on Jax flax_nnx %s models yet, fallback to vllm models.",
+                    arch)
+                return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
+                                      shared_params)
+            try:
+                # Try to load the flax model first
+                with jax.set_mesh(mesh):
                     return get_flax_model(vllm_config, rng, mesh,
                                           is_draft_model)
-                except UnsupportedArchitectureError as e:
-                    # Convert the error message to a string to check its contents
-                    error_msg = str(e)
+            except UnsupportedArchitectureError as e:
+                # Convert the error message to a string to check its contents
+                error_msg = str(e)
 
-                    logger.warning(error_msg)
+                logger.warning(error_msg)
 
-                    # Fall back to the vLLM model and updating the dtype accordingly
-                    return get_vllm_model(vllm_config, rng, mesh,
-                                          is_draft_model, shared_params)
+                # Fall back to the vLLM model and updating the dtype accordingly
+                return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
+                                      shared_params)
         case "vllm":
             return get_vllm_model(vllm_config, rng, mesh, is_draft_model,
                                   shared_params)
         case _:
             raise NotImplementedError(f"Unsupported MODEL_IMPL_TYPE: {impl}")
+
+
+def resolve_model_impl_type(vllm_config: VllmConfig,
+                            is_draft_model: bool = False) -> str:
+    """Effective model impl type ("flax_nnx" | "vllm"), resolving "auto"
+    from the model architecture."""
+    impl = (envs.DRAFT_MODEL_IMPL_TYPE
+            if is_draft_model else envs.MODEL_IMPL_TYPE)
+    if impl == "auto":
+        impl = resolve_model_architecture(vllm_config, is_draft_model)
+        logger.info("Resolved MODEL_IMPL_TYPE 'auto' to '%s'", impl)
+    return impl
 
 
 def resolve_model_architecture(vllm_config: VllmConfig,

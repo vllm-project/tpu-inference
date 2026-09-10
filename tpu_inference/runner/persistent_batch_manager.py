@@ -49,24 +49,43 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
-        # If total_num_scheduled_tokens == num_reqs, every request
-        # is scheduled for exactly 1 token (all decode). No reordering needed.
-        if scheduler_output.total_num_scheduled_tokens == num_reqs:
+        max_decode_tokens = self.input_batch.max_decode_tokens
+
+        if (max_decode_tokens == 1
+                and scheduler_output.total_num_scheduled_tokens == num_reqs):
             num_decode = num_reqs
             self.input_batch.request_distribution = [
                 num_decode, num_decode, num_reqs
             ]
             return swap_cnt
+
+        # Check if all scheduled requests match the decode threshold
+        all_decode = True
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            if scheduler_output.num_scheduled_tokens[
+                    req_id] > max_decode_tokens:
+                all_decode = False
+                break
+
+        if all_decode:
+            num_decode = num_reqs
+            self.input_batch.request_distribution = [
+                num_decode, num_decode, num_reqs
+            ]
+            return swap_cnt
+
         # Use two-pointer approach to reorder the decode requests to front.
         i, j = 0, num_reqs - 1
         while i < j:
             i_req_id = self.input_batch.req_ids[i]
             j_req_id = self.input_batch.req_ids[j]
 
-            if scheduler_output.num_scheduled_tokens[i_req_id] == 1:
+            if scheduler_output.num_scheduled_tokens[
+                    i_req_id] <= max_decode_tokens:
                 # i is a decode request, move to the next one.
                 i += 1
-            elif scheduler_output.num_scheduled_tokens[j_req_id] > 1:
+            elif scheduler_output.num_scheduled_tokens[
+                    j_req_id] > max_decode_tokens:
                 # j is a prefill request, move to the previous one.
                 j -= 1
             else:
@@ -77,7 +96,7 @@ class PersistentBatchManager:
                 swap_cnt += 1
 
         num_decode = i + int(scheduler_output.num_scheduled_tokens[
-            self.input_batch.req_ids[i]] == 1)
+            self.input_batch.req_ids[i]] <= max_decode_tokens)
 
         self.input_batch.request_distribution = [
             num_decode, num_decode, num_reqs
@@ -319,8 +338,10 @@ class PersistentBatchManager:
 
         batch_changed = len(unscheduled_req_ids) > 0 or len(req_ids_to_add) > 0
         # TODO(jevinjiang): I assume we do not need to set batch_changed to true if just swapping requests.
-        self._reorder_batch(scheduler_output)
-        if isinstance(self.input_batch, InputBatch):
+        swap_cnt = self._reorder_batch(scheduler_output)
+        if (isinstance(self.input_batch, InputBatch)
+                and self.input_batch.has_mamba_layers
+                and (batch_changed or swap_cnt > 0)):
             self.input_batch.assert_mamba_state_invariants(
                 self.requests, dp_rank_map)
         return batch_changed

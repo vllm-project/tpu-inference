@@ -69,9 +69,29 @@ steps:
     soft_fail: true
     agents:
       queue: "${TPU_QUEUE_SINGLE:-tpu_v6e_queue}"
+    env:
+      # Without this the torchax (MODEL_IMPL_TYPE=vllm) vision tower has no
+      # compiled route: MMEncoderJITManager is never created, so all 32 ViT
+      # blocks run op-by-op through the torchax dispatch for every image.
+      # The flag is inert for the JAX-native model, which does not implement
+      # vLLM's SupportsEncoderCudaGraph protocol.
+      COMPILATION_CONFIG: '{"cudagraph_mm_encoder": true}'
     commands:
       - |
-        .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          echo "Qwen2.5-VL-7B benchmarks are not supported on the vllm (torchax)" \
+               "path. Its vision tower has no compiled route there -- the model is" \
+               "not in vision_tower_jit's JITTABLE_ARCHS and vLLM's Qwen2_5_VL does" \
+               "not declare supports_encoder_cudagraph, so MMEncoderJitManager" \
+               "declines it -- and the encoder runs eager: 0.04 req/s on tpu7x" \
+               "(vs 2.03 req/s on the JAX path) and an HBM OOM inside the ViT" \
+               "attention on tpu6e. Recording as unverified until the torchax" \
+               "multimodal path gets a compiled vision tower."
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark" "unverified"
+        else
+          .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh
+        fi
+
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen2.5-VL-7B-Instruct"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"

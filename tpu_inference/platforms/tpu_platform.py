@@ -24,6 +24,59 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "empty_cache"):
                 raise e
 
     torch.accelerator.empty_cache = _patched_empty_cache
+
+# Monkeypatch torch.accelerator.get_memory_info to answer from the JAX devices.
+# torchax registers "jax" as a PrivateUse1 device, and torch.accelerator's memory
+# APIs resolve the device via torch._C._accelerator_getDeviceIndex(), which
+# raises "PyTorch is not linked with support for jax devices". vLLM model code
+# on the torchax path calls get_memory_info() to size work by free HBM (e.g.
+# Gemma4ForConditionalGeneration._process_image_input chunks the vision
+# encoder by it), and an unhandled raise there kills the EngineCore mid-request.
+# Delegate to TpuPlatform.mem_get_info() so the numbers stay SPMD-aggregated
+# across local devices, matching the global tensor dimensions the budget math
+# is expressed in.
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator,
+                                             "get_memory_info"):
+    _orig_get_memory_info = torch.accelerator.get_memory_info
+
+    def _patched_get_memory_info(*args, **kwargs) -> Tuple[int, int]:
+        try:
+            return _orig_get_memory_info(*args, **kwargs)
+        except RuntimeError as e:
+            if "jax" not in str(e):
+                raise
+            try:
+                return TpuPlatform.mem_get_info()
+            except AttributeError:
+                # Backend exposes no memory stats; callers that derive a budget
+                # from this take their minimum-work path instead of crashing.
+                # `logger` is resolved from module globals at call time, so it
+                # is defined by the time any caller reaches this branch.
+                logger.warning(
+                    "JAX backend exposes no memory stats; reporting 0 bytes "
+                    "free/total from torch.accelerator.get_memory_info(). "
+                    "Callers that size work by free HBM will fall back to "
+                    "their minimum-work path, which may hurt performance.")
+                return 0, 0
+
+    torch.accelerator.get_memory_info = _patched_get_memory_info
+
+# Monkeypatch torch.accelerator.synchronize to wait for JAX work to complete.
+# Similar to get_memory_info, torch.accelerator.synchronize() calls
+# torch._C._accelerator_getDeviceIndex() which raises "PyTorch is not linked with
+# support for jax devices".
+if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
+    _orig_synchronize = torch.accelerator.synchronize
+
+    def _patched_synchronize(*args, **kwargs):
+        try:
+            _orig_synchronize(*args, **kwargs)
+        except RuntimeError as e:
+            if "jax" not in str(e):
+                raise
+            jax.effects_barrier()
+
+    torch.accelerator.synchronize = _patched_synchronize
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -130,9 +183,11 @@ class TpuPlatform(Platform):
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM",
         "MOE_REQUANTIZE_BLOCK_SIZE",
         "MOE_REQUANTIZE_WEIGHT_DTYPE",
+        "MOE_STAGE_WEIGHTS_ON_HOST",
         "USE_JAX_PROFILER_SERVER",
         "JAX_PROFILER_SERVER_PORT",
         "ENABLE_RS_KERNEL",
+        "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
     ]
 
@@ -284,6 +339,62 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
+        # Hybrid (mamba/linear-attention) models cannot use prefix caching with
+        # speculative decoding because verify windows need consecutive state slots.
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "align"):
+            if vllm_config.speculative_config is not None:
+                logger.warning(
+                    "[tpu_platform] Disabling prefix caching: hybrid "
+                    "(mamba/linear-attention) models do not support cached "
+                    "prefixes with speculative decoding on TPU.")
+                cache_config.enable_prefix_caching = False
+                cache_config.mamba_cache_mode = "none"
+                if (getattr(cache_config, "mamba_block_size", None) is not None
+                        and
+                        not getattr(cache_config,
+                                    "user_specified_mamba_block_size", False)):
+                    cache_config.mamba_block_size = (
+                        vllm_config.model_config.max_model_len)
+            elif (cache_config.prefix_match_unit is not None and
+                  cache_config.prefix_match_unit < cache_config.block_size):
+                # Mamba prefix caching asks the worker to copy state between
+                # blocks when a request partially hits a cached block, which
+                # only arises when block hashes are finer than the block size
+                # (DCP, or an explicit --prefix-match-unit). Nothing on the TPU
+                # side performs those copies, and skipping them would resume a
+                # request from an unwritten block.
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
+            elif cache_config.enable_prefix_caching:
+                from tpu_inference.core.hybrid_coordinator import \
+                    install_hybrid_coordinator_hooks
+                install_hybrid_coordinator_hooks(vllm_config)
+
+        # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
+        # CPU processor and instead normalizes inside the vLLM model's vision
+        # tower (FusedInputNorm). JAX-native multimodal models consume the
+        # processor's pixel_values directly and have no device-side norm, so
+        # they would silently run the ViT on unnormalized pixels. Keep the
+        # normalization in the CPU processor for the JAX-native path.
+        mm_cfg = getattr(vllm_config.model_config, "multimodal_config", None) \
+            if vllm_config.model_config else None
+        if mm_cfg is not None and getattr(mm_cfg, "mm_device_do_normalize",
+                                          False):
+            from tpu_inference.models.common.model_loader import \
+                resolve_model_impl_type
+            impl = resolve_model_impl_type(vllm_config)
+            if impl != "vllm":
+                logger.warning(
+                    "[tpu_platform] Disabling mm_device_do_normalize: the "
+                    "JAX-native multimodal path normalizes images in the CPU "
+                    "processor; device-side FusedInputNorm only exists in the "
+                    "vLLM model implementation.")
+                mm_cfg.mm_device_do_normalize = False
+
         # For v0, the default block size is 16.
         if cache_config and not cache_config.user_specified_block_size:
             if vllm_config.model_config:
@@ -306,8 +417,6 @@ class TpuPlatform(Platform):
                             min_page_size,
                         )
                         cache_config.block_size = min_page_size  # type: ignore[assignment]
-            if envs.USE_BATCHED_RPA_KERNEL and cache_config.block_size < 256:
-                cache_config.block_size = 256
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
@@ -359,7 +468,7 @@ class TpuPlatform(Platform):
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is not None:
             allowed = ("TPUConnector", "TPUConnectorHMA",
-                       "TPUOffloadConnector")
+                       "TPUOffloadConnector", "RaidenOffloadConnector")
             if kv_transfer_config.kv_connector not in allowed:
                 raise ValueError(
                     f"Unsupported kv_connector "
@@ -369,7 +478,6 @@ class TpuPlatform(Platform):
         enable_continue_decode = vllm_config.additional_config.get(
             "enable_continue_decode", False)
         is_pooling_model = vllm_config.model_config.runner_type == "pooling"
-        async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         # Late initialization to avoid circular import.
         from tpu_inference.core.sched.dp_scheduler import \
@@ -384,9 +492,6 @@ class TpuPlatform(Platform):
             if is_pooling_model:
                 raise ValueError(
                     "continue_decode is not supported for pooling models")
-            if async_scheduling:
-                raise ValueError(
-                    "continue_decode is not supported with async scheduling")
 
             from tpu_inference.core.sched.utils import \
                 patch_vllm_scheduler_for_continue_decode
@@ -396,12 +501,35 @@ class TpuPlatform(Platform):
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
         # TODO: TPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
+        cache_config = vllm_config.cache_config
         logger.info(f"Using cache_config.block_size: "
-                    f"{vllm_config.cache_config.block_size} "
+                    f"{cache_config.block_size} "
                     f"instead of overriding with _align_hybrid_block_size() "
                     f"since we set mamba_page_size_padded in "
                     f"kv_cache_manager.py")
-        pass
+
+        # `_align_hybrid_block_size` is where upstream ties the mamba block
+        # size to the (now final) attention block size in align mode. Skipping
+        # that function leaves `mamba_block_size` at whatever it was when
+        # `MambaModelConfig` ran, which is the pre-TPU default rather than the
+        # block size we settled on. The two must agree: a mamba group whose
+        # block size divides the attention one drives `hash_block_size` below
+        # the block size, which turns on partial prefix-cache hits and their
+        # copy-on-write state copies (unimplemented on TPU).
+        if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+            if cache_config.mamba_block_size != cache_config.block_size:
+                logger.info(
+                    "Setting mamba_block_size to %d to match the attention "
+                    "block size (was %d) for mamba prefix caching.",
+                    cache_config.block_size, cache_config.mamba_block_size)
+                cache_config.mamba_block_size = cache_config.block_size
+            if (cache_config.prefix_match_unit is not None and
+                    cache_config.prefix_match_unit < cache_config.block_size):
+                raise NotImplementedError(
+                    "Prefix match unit smaller than the block size is not "
+                    "supported on TPU with mamba prefix caching because the "
+                    "TPU runner does not implement KV cache block copies; "
+                    "leave --prefix-match-unit unset.")
 
     @classmethod
     def is_pin_memory_available(cls):

@@ -16,6 +16,8 @@ import os
 from unittest.mock import MagicMock
 
 import pytest
+from vllm.config.parallel import ParallelConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
@@ -23,7 +25,7 @@ from vllm.v1.request import Request
 
 from tests.offload.utils import EOS_TOKEN_ID, TPURequestRunner
 from tpu_inference.offload.tpu_offload_connector import (
-    RequestTracker, TPUOffloadConnectorScheduler)
+    RequestTracker, TPUOffloadConnector, TPUOffloadConnectorScheduler)
 
 _DEFAULT_BLOCK_SIZE = 16
 
@@ -33,6 +35,8 @@ class MockVllmConfig:
     def __init__(self, block_size=_DEFAULT_BLOCK_SIZE):
         self.model_config = self.Model()
         self.cache_config = self.Cache(block_size)
+        self.parallel_config = self.Parallel()
+        self.kv_transfer_config = MagicMock()
 
     class Model:
         model = "test-model"
@@ -41,6 +45,12 @@ class MockVllmConfig:
 
         def __init__(self, block_size):
             self.block_size = block_size
+
+    class Parallel(ParallelConfig):
+
+        def __init__(self, pipeline_parallel_size=1, data_parallel_size=1):
+            self.pipeline_parallel_size = pipeline_parallel_size
+            self.data_parallel_size = data_parallel_size
 
 
 def create_request(
@@ -548,3 +558,86 @@ def test_tpu_offloading_connector_end_to_end(tpu_request_runner,
     runner.run(decoded_tokens=[EOS_TOKEN_ID],
                expected_stored_blocks=0,
                expected_loaded_blocks=1)
+
+
+class TestTPUOffloadConnectorValidation:
+
+    def test_invalid_parallel_config(self):
+        vllm_config = MockVllmConfig()
+        vllm_config.parallel_config = "not a ParallelConfig"
+        with pytest.raises(
+                AssertionError,
+                match="parallel_config must be an instance of ParallelConfig"):
+            TPUOffloadConnector(vllm_config, KVConnectorRole.SCHEDULER)
+
+    def test_unsupported_pipeline_parallel(self):
+        vllm_config = MockVllmConfig()
+        vllm_config.parallel_config = MockVllmConfig.Parallel(
+            pipeline_parallel_size=2)
+        with pytest.raises(ValueError,
+                           match="Pipeline Parallelism.*is not supported"):
+            TPUOffloadConnector(vllm_config, KVConnectorRole.SCHEDULER)
+
+    def test_unsupported_data_parallel(self):
+        vllm_config = MockVllmConfig()
+        vllm_config.parallel_config = MockVllmConfig.Parallel(
+            data_parallel_size=2)
+        with pytest.raises(ValueError,
+                           match="Data Parallelism.*is not supported"):
+            TPUOffloadConnector(vllm_config, KVConnectorRole.SCHEDULER)
+
+
+class TestTPUOffloadConnectorRayValidation:
+
+    def test_multihost_ray_not_initialized(self):
+        vllm_config = MockVllmConfig()
+        from unittest.mock import patch
+
+        mock_ray = MagicMock()
+        mock_ray.is_initialized.return_value = False
+
+        with patch("tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND", "ray"), \
+             patch.dict("sys.modules", {"ray": mock_ray}):
+            with pytest.raises(ValueError, match="Ray is not initialized"):
+                TPUOffloadConnectorScheduler(vllm_config)
+
+    def test_multihost_ray_success(self):
+        vllm_config = MockVllmConfig()
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        from unittest.mock import patch
+
+        mock_ray = MagicMock()
+        mock_ray.is_initialized.return_value = True
+        mock_ray.nodes.return_value = [
+            {
+                "Resources": {
+                    "TPU_DEVICE": 1
+                }
+            },
+            {
+                "Resources": {
+                    "TPU_DEVICE": 1
+                }
+            },
+        ]
+
+        with patch("tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND", "ray"), \
+             patch.dict("sys.modules", {"ray": mock_ray}), \
+             patch("vllm.platforms.current_platform.ray_device_key", "TPU_DEVICE"):
+
+            scheduler = TPUOffloadConnectorScheduler(vllm_config)
+            assert scheduler.num_tp_workers == 2
+
+    def test_multihost_unsupported_backend(self):
+        vllm_config = MockVllmConfig()
+        from unittest.mock import patch
+
+        with patch(
+                "tpu_inference.offload.tpu_offload_connector.envs.TPU_MULTIHOST_BACKEND",
+                "unsupported_backend"):
+            with pytest.raises(
+                    ValueError,
+                    match=
+                    "currently only supports Ray backend, but TPU_MULTIHOST_BACKEND is set to: unsupported_backend"
+            ):
+                TPUOffloadConnectorScheduler(vllm_config)

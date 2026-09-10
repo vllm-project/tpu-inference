@@ -98,11 +98,17 @@ class TestGemma4MTPForCausalLM:
         vllm_config.load_config.load_format = load_format
         vllm_config.load_config.num_layers_to_load_for_test = 4
         vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
 
         # For HF loader testing, we redirect the model to point to the real assistant draft checkpoint
         if load_format == "skip_layers_model_loader_for_test":
             vllm_config.model_config.model = "google/gemma-4-31B-it-assistant"
+            # The resolved revision belongs to the original repo; clear it so
+            # the redirected repo resolves its own.
+            vllm_config.model_config.revision = None
 
         # Construct Speculative Draft Config using solid, concrete Python classes to avoid MagicMock leakages
         vllm_config.speculative_config = MagicMock()
@@ -133,7 +139,7 @@ class TestGemma4MTPForCausalLM:
 
         vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
             model = Gemma4MTPForCausalLM(vllm_config, rng, mesh)
 
         # Load weights

@@ -48,6 +48,12 @@ def is_compatible(
     if sc_info.num_lanes % reduce_group_size != 0:
         return False
 
+    # The output block has (num_lanes // reduce_group_size) // packing rows;
+    # fall back to JAX when that is 0 (the kernel can't emit a zero-row block).
+    packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
+    if (sc_info.num_lanes // reduce_group_size) // packing < 1:
+        return False
+
     num_cores = 1 if single_sc else sc_info.num_cores
     num_subcores = sc_info.num_subcores
     row_wave_size = row_chunk_size * num_cores * num_subcores
@@ -193,8 +199,7 @@ def _sc_gather_reduce(
                 def _(col_base):
                     accs = []
                     for reduce_group in range(out_rows_per_step):
-                        acc = jnp.zeros((unpack_col_chunk, ),
-                                        dtype=jnp.float32)
+                        row_datas = []
                         for row_in_group in range(reduce_group_size):
                             row = reduce_group * reduce_group_size + row_in_group
                             row_data = gather_ref[
@@ -205,12 +210,9 @@ def _sc_gather_reduce(
                                 row_data = row_data[0]
                             else:
                                 assert packing == 2
-                                # For dtypes narrower than 32-bit, we end up gathering multiple
-                                # rows (since we had to bitcast to int32 before the gather).
-                                # This uses the remainder of the packing to choose the only row
-                                # we actually care about.
                                 row_data = jnp.where(
-                                    lax.rem(subchunk_idxs[row], 2) == 0,
+                                    lax.bitwise_and(subchunk_idxs[row],
+                                                    1) == 0,
                                     row_data[0],
                                     row_data[1],
                                 )
@@ -220,8 +222,19 @@ def _sc_gather_reduce(
                                     row_data = jnp.where(
                                         weights[row] == 0.0,
                                         jnp.zeros_like(row_data), row_data)
-                            acc += row_data
-                        accs.append(acc)
+                            row_datas.append(row_data)
+
+                        # Tree reduction to reduce critical path and stalls
+                        while len(row_datas) > 1:
+                            next_level = []
+                            for i in range(0, len(row_datas), 2):
+                                if i + 1 < len(row_datas):
+                                    next_level.append(row_datas[i] +
+                                                      row_datas[i + 1])
+                                else:
+                                    next_level.append(row_datas[i])
+                            row_datas = next_level
+                        accs.append(row_datas[0])
                     out = jnp.stack(accs, axis=0).astype(op.dtype)
                     out_ref[:, pl.ds(col_base, unpack_col_chunk)] = out
 
@@ -284,11 +297,21 @@ def dense_gather_reduce(
   """
     if is_compatible(x, indices, reduce_group_size):
         K = x.shape[-1]
-        col_chunk_size = min(2048, K)
+        # The kernel slices the operand along the hidden (column) dimension,
+        # which carries a 128-wide lane tile in the HBM layout
+        # (#tpu.tiled<(4, 128)>). A column chunk that is not a multiple of 128
+        # produces a tpu.memref_slice whose size along the tiled dimension is
+        # not tile-aligned, which Mosaic rejects at compile time with
+        # "Slice sizes along tiled dimensions must be aligned to tiles" (e.g.
+        # hidden_size=2880 -> chunk 1440, and 1440 % 128 = 32). Require the
+        # chunk to be a multiple of the 128 lane tile; when 128 does not divide
+        # hidden_size (as for gpt-oss's 2880) no valid chunk exists and we fall
+        # back to the JAX implementation below.
+        col_chunk_size = (min(2048, K) // 128) * 128
         while col_chunk_size > 0:
-            if K % col_chunk_size == 0 and col_chunk_size % 32 == 0:
+            if K % col_chunk_size == 0:
                 break
-            col_chunk_size -= 32
+            col_chunk_size -= 128
         if col_chunk_size > 0:
             # Pallas kernel expects 1D weights
             return _sc_gather_reduce(

@@ -23,7 +23,7 @@ from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
 from tpu_inference.kernels.ragged_paged_attention.v3.kernel import \
     ragged_paged_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -33,6 +33,24 @@ from tpu_inference.layers.jax.base import create_param
 from tpu_inference.layers.jax.rope_interface import apply_rope
 
 KVCache = Tuple[jax.Array, jax.Array]
+
+
+def _rpa_block_size_kwargs() -> dict[str, tuple[int, int, int, int]]:
+    """Optional RPA v3 block-size overrides from env, for the call site to
+    forward with ``**``.
+
+    Each ``RPA_V3_*_BLOCK_SIZES`` env var is a comma-separated 4-tuple
+    ``(bq_sz, bkv_sz, bq_csz, bkv_csz)``. A key is included only when its env
+    var is non-empty, so the default call forwards nothing and stays identical
+    to the stock invocation (and never passes a v3-only kwarg to a kernel whose
+    signature doesn't accept it).
+    """
+    env_to_kwarg = {
+        "d_block_sizes": envs.RPA_V3_DECODE_BLOCK_SIZES,
+        "p_block_sizes": envs.RPA_V3_PREFILL_BLOCK_SIZES,
+        "m_block_sizes": envs.RPA_V3_MIXED_BLOCK_SIZES,
+    }
+    return {k: tuple(v) for k, v in env_to_kwarg.items() if v}
 
 
 @dataclass(kw_only=True)
@@ -241,12 +259,20 @@ class Attention(nnx.Module):
         out_specs = (self.attn_o_tnh, kv_cache_spec)
 
         def _ragged_paged_attention(*args):
+            # Optional operator block-size overrides, read at the call site
+            # (outside the kernel, so the kernel stays self-contained) and
+            # forwarded only when set. Each env var is a comma-separated 4-tuple
+            # (bq_sz, bkv_sz, bq_csz, bkv_csz); an empty list (the default) is
+            # omitted entirely, so the stock call is unchanged and no v3-only
+            # kwarg is passed to a kernel that doesn't accept it.
+            block_size_kwargs = _rpa_block_size_kwargs()
             return ragged_paged_attention(
                 *args,
                 sm_scale=q_TNH.shape[-1]**-0.5,
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                **block_size_kwargs,
             )
 
         output_TNH, kv_cache = jax.jit(

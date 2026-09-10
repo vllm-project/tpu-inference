@@ -203,7 +203,8 @@ class DFlashTorchaxProposer:
         hidden_states: jax.Array,
         embed_weight: jax.Array,
     ) -> jax.Array:
-        draft_hidden = hidden_states[1:1 + self.num_speculative_tokens]
+        num_spec = min(self.num_speculative_tokens, hidden_states.shape[0] - 1)
+        draft_hidden = hidden_states[1:1 + num_spec]
         logits = self._compute_logits_fn(params, draft_hidden, embed_weight)
         return jnp.argmax(logits, axis=-1)
 

@@ -21,8 +21,6 @@ steps:
     key: "promote_lkg"
     agents:
       queue: "cpu"
-    secrets:
-      - GITHUB_PAT
     commands:
       - |
         VLLM_LKG_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")

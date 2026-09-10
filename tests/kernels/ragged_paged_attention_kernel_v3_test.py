@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -735,6 +737,69 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         mask = ~np.isnan(cache_before)
         np.testing.assert_array_equal(
             np.asarray(cache_after_1)[mask], cache_before[mask])
+
+
+class GetDefaultBlockSizesTest(parameterized.TestCase):
+    """Heuristic block sizes of get_default_block_sizes (device-free).
+
+    The kernel is self-contained: it never reads env/config. Block-size
+    overrides are supplied by the caller through ragged_paged_attention's
+    d_block_sizes / p_block_sizes / m_block_sizes arguments (the caller reads
+    the RPA_V3_*_BLOCK_SIZES env vars and passes them in). This test covers the
+    kernel's built-in heuristic; the caller-side env->arg plumbing is covered in
+    the attention-layer tests.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # get_default_block_sizes branches on the TPU version; pin it so the
+        # test runs on any host (including CPU CI).
+        self._patches = []
+        import tpu_inference.kernels.ragged_paged_attention.v3.kernel as k
+        self._k = k
+        p = mock.patch.object(k, "get_tpu_version", return_value=7)
+        p.start()
+        self._patches.append(p)
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        super().tearDown()
+
+    def _call(self, case):
+        return self._k.get_default_block_sizes(jnp.bfloat16,
+                                               jnp.bfloat16,
+                                               actual_num_q_heads=8,
+                                               actual_num_kv_heads=1,
+                                               head_dim=128,
+                                               page_size=16,
+                                               max_num_tokens=512,
+                                               max_num_seqs=256,
+                                               pages_per_seq=1024,
+                                               case=case)
+
+    def test_kernel_has_no_env_dependency(self):
+        # The kernel module must not import tpu_inference.envs (self-contained).
+        import inspect
+        src = inspect.getsource(self._k)
+        self.assertNotIn("import envs", src)
+        self.assertNotIn("RPA_V3_", src)
+
+    def test_decode_heuristic_sizes_fetch_and_compute_to_peak(self):
+        # v7 DECODE heuristic sizes both fetch and compute blocks to peak HBM.
+        bs = self._call(self._k.RpaCase.DECODE)
+        self.assertEqual(bs["bkv_sz"], bs["bkv_csz"])
+        self.assertEqual(bs["bq_sz"], 1)
+        self.assertEqual(bs["bq_csz"], 1)
+
+    def test_all_cases_return_four_aligned_blocks(self):
+        for case in (self._k.RpaCase.DECODE, self._k.RpaCase.PREFILL,
+                     self._k.RpaCase.MIXED):
+            bs = self._call(case)
+            self.assertEqual(set(bs), {"bq_sz", "bkv_sz", "bq_csz", "bkv_csz"})
+            # page_size=16 -> kv blocks must be 16-aligned.
+            self.assertEqual(bs["bkv_sz"] % 16, 0)
+            self.assertEqual(bs["bkv_csz"] % 16, 0)
 
 
 if __name__ == "__main__":

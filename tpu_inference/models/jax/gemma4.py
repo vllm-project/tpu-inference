@@ -22,20 +22,19 @@ from flax import nnx
 from jax.sharding import Mesh
 from transformers import Gemma4TextConfig
 from vllm.config import VllmConfig
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tpu_inference import utils
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.layers.common.attention_interface import attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.quantization import quantize_kv
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.embed import JaxEmbed
 from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear, JaxLmHead,
-                                             JaxMergedColumnParallelLinear,
-                                             JaxQKVParallelLinear)
-from tpu_inference.layers.jax.moe.moe import JaxMoE
+                                             JaxMergedColumnParallelLinear)
+from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import PPMissingLayer, make_layers
 from tpu_inference.layers.jax.rope_interface import (apply_rope,
@@ -46,7 +45,7 @@ from tpu_inference.models.common.kv_share import compute_kv_share_map
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
 from tpu_inference.models.jax.utils.weight_utils import (
-    LoadableWithIterator, StandardWeightLoader,
+    JaxAutoWeightsLoader, LoadableWithIterator, StandardWeightLoader,
     load_nnx_param_from_reshaped_torch)
 
 logger = init_logger(__name__)
@@ -161,15 +160,13 @@ class Gemma4Router(JaxModule):
         return router_logits
 
 
-class Gemma4MoE(JaxMoE):
+class Gemma4MoE(JaxRoutedExperts):
     """Mixture of Experts for Gemma4 using FusedMoE.
 
-    Wraps FusedMoE with custom routing. The router projection is
-    external (Gemma4Router) — this class only handles expert dispatch.
-
-    Gemma4 routing: softmax over ALL experts → top-k → renormalize.
-    per_expert_scale is folded into routing weights for mathematical
-    correctness with FusedMoE's fused kernel.
+    The router projection is external (Gemma4Router); this class only
+    handles expert dispatch.  use_ep and moe_backend are derived from
+    the vLLM parallel config by JaxRoutedExperts so the EP/TP backend
+    matches the torchax path automatically.
     """
 
     def __init__(
@@ -181,11 +178,7 @@ class Gemma4MoE(JaxMoE):
         quant_config,
         prefix: str = "",
     ) -> None:
-        noop_router = JaxModule()
-        noop_router.num_experts_per_tok = config.top_k_experts
-
-        # FusedMoE experts with custom Gemma4 routing
-        JaxMoE.__init__(
+        JaxRoutedExperts.__init__(
             self,
             dtype=dtype,
             num_local_experts=config.num_experts,
@@ -193,65 +186,45 @@ class Gemma4MoE(JaxMoE):
             intermediate_size_moe=config.moe_intermediate_size,
             hidden_act="gelu",
             rngs=rngs,
-            router=noop_router,
             mesh=mesh,
-            activation_ffw_td=(ShardingAxisName.MLP_DATA, None),
-            activation_ffw_ted=(ShardingAxisName.MLP_DATA, None, None),
-            edf_sharding=(None, None, None),
-            efd_sharding=(None, None, None),
-            apply_expert_weight_before_computation=False,
-            expert_axis_name=None,
-            # Disable EP for MVP, can enable later if needed
-            # TODO: Enable EP
-            num_expert_parallelism=1,
-            moe_backend=MoEBackend.GMM_TP,
-            scoring_func=
-            "softmax",  # vLLM implementation has a custom routing function, here we just use "softmax" for MVP
+            top_k=config.top_k_experts,
+            scoring_func="softmax",
             renormalize=True,
             enable_return_routed_experts=True,
-            num_experts_per_tok=config.top_k_experts,
             quant_config=quant_config,
             prefix=prefix)
 
     def load_weights(self, weights: Iterable):
         """Load weights for Gemma4 MoE layer.
 
-        Unlike other MoE, Gemma4 didn't provide per-expert weights, but already fuse projection weight in the checkpoint.
+        See https://github.com/vllm-project/vllm/blob/979f5511d78b317760d45df9290233c27793a0af/vllm/model_executor/models/gemma4.py#L1640-L1694
         """
-        loaded = set()
-        for name, tensor in weights:
-            if name.endswith("down_proj"):
-                load_nnx_param_from_reshaped_torch(self.kernel_down_proj_EFD,
-                                                   tensor,
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                loaded.add("kernel_down_proj_EFD")
-                self.kernel_down_proj_EFD._weights_to_load.clear()
-                # Other MoE models store expert weights in shape (D, F) and permute in *FusedMoEMethod.process_weights_after_loading.
-                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_down_proj_EFD.set_value(
-                    jnp.swapaxes(self.kernel_down_proj_EFD.get_value(), 1, 2))
-            elif name.endswith("gate_up_proj"):
-                F = tensor.shape[1] // 2
-                load_nnx_param_from_reshaped_torch(self.kernel_gating_EDF,
-                                                   tensor[:, :F, :],
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                load_nnx_param_from_reshaped_torch(self.kernel_up_proj_EDF,
-                                                   tensor[:, F:, :],
-                                                   permute_dims=(0, 2, 1),
-                                                   param_name=name)
-                loaded.add("kernel_up_proj_EDF")
-                self.kernel_up_proj_EDF._weights_to_load.clear()
-                loaded.add("kernel_gating_EDF")
-                self.kernel_gating_EDF._weights_to_load.clear()
-                # Other MoE models store expert weights in shape (F, D) and permute in *FusedMoEMethod.process_weights_after_loading.
-                # For compatibility, we permute here then expect another permute in process_weights_after_loading.
-                self.kernel_up_proj_EDF.set_value(
-                    jnp.swapaxes(self.kernel_up_proj_EDF.get_value(), 1, 2))
-                self.kernel_gating_EDF.set_value(
-                    jnp.swapaxes(self.kernel_gating_EDF.get_value(), 1, 2))
-        return loaded
+        weight_list = list(weights)
+
+        is_fused = any(
+            n.endswith("gate_up_proj") or n.endswith("down_proj")
+            for n, _ in weight_list)
+
+        if is_fused:
+            synthesized = []
+            for name, tensor in weight_list:
+                if name.endswith("down_proj"):
+                    for i, shard in enumerate(tensor):
+                        synthesized.append((f"{i}.down_proj.weight", shard))
+                elif name.endswith("gate_up_proj"):
+                    F = tensor.shape[1] // 2
+                    for i, shard in enumerate(tensor[:, :F, :]):
+                        synthesized.append((f"{i}.gate_proj.weight", shard))
+                    for i, shard in enumerate(tensor[:, F:, :]):
+                        synthesized.append((f"{i}.up_proj.weight", shard))
+            return super().load_weights(synthesized)
+
+        # Per-expert format: strip the "experts." prefix added during routing so
+        # downstream loaders see bare "N.proj.param" names as they expect.
+        _PREFIX = "experts."
+        stripped = ((name[len(_PREFIX):] if name.startswith(_PREFIX) else name,
+                     w) for name, w in weight_list)
+        return super().load_weights(stripped)
 
 
 class Gemma4Attention(JaxModule):
@@ -264,10 +237,12 @@ class Gemma4Attention(JaxModule):
                  mesh: Mesh,
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
+                 decode_query_size: int = 1,
                  prefix: str = ""):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.rms_norm_eps = config.rms_norm_eps
+        self.decode_query_size = decode_query_size
 
         # Assuming Gemma 4 also uses a custom scalar, not 1/sqrt(head_dim)
         self.scaling = 1.0
@@ -302,21 +277,16 @@ class Gemma4Attention(JaxModule):
             self.rope_scaling = getattr(config, "rope_scaling", None)
             self.rope_proportion = 0.25 if not self.is_sliding else 1.0
 
-        # Gemma4: use different num_kv_heads and head_dim in GLOBAL/LOCAL layers
-        if not self.is_sliding:
-            # GLOBAL layers
-            self.head_dim_original = config.global_head_dim
-        else:
-            # LOCAL layers
-            self.head_dim_original = config.head_dim
+        # Gemma4: use different num_kv_heads and head_dim in GLOBAL/LOCAL
+        # layers. transformers >= 5.15 stores both per layer; older versions
+        # use flat attributes split by layer_types (see
+        # utils.get_layer_kv_params).
+        self.head_dim_original, self.num_kv_heads = utils.get_layer_kv_params(
+            config, self.layer_type)
 
         # Determine if this full-attention layer uses k_eq_v
         use_k_eq_v = ((not self.is_sliding)
                       and getattr(config, "attention_k_eq_v", False))
-        if use_k_eq_v:
-            self.num_kv_heads = config.num_global_key_value_heads or config.num_key_value_heads
-        else:
-            self.num_kv_heads = config.num_key_value_heads
 
         self.head_dim = utils.get_padded_head_dim(self.head_dim_original)
 
@@ -340,23 +310,36 @@ class Gemma4Attention(JaxModule):
                            None) if _shard_kv_on_k else (None, None, "model")
         _kv_bias_spec = ("model", None) if _shard_kv_on_k else (None, "model")
 
+        self.q_proj = JaxEinsum(
+            "TD,DNH->TNH",
+            (self.hidden_size, self.num_heads, self.head_dim),
+            bias_shape=(self.num_heads,
+                        self.head_dim) if config.attention_bias else None,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, (None, "model", None)),
+            bias_init=nnx.with_partitioning(init_fn, ("model", None))
+            if config.attention_bias else None,
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".q_proj",
+        )
+        self.k_proj = JaxEinsum(
+            "TD,DKH->TKH",
+            (self.hidden_size, self.num_kv_heads, self.head_dim),
+            bias_shape=(self.num_kv_heads,
+                        self.head_dim) if config.attention_bias else None,
+            param_dtype=dtype,
+            kernel_init=nnx.with_partitioning(init_fn, _kv_kernel_spec),
+            bias_init=nnx.with_partitioning(init_fn, _kv_bias_spec)
+            if config.attention_bias else None,
+            rngs=rng,
+            quant_config=quant_config,
+            prefix=prefix + ".k_proj",
+        )
         if use_k_eq_v:  # TODO: Add QKV fusion logic for k == v case.
-            self.qkv_proj = None
-            self.q_proj = JaxEinsum(
-                "TD,DNH->TNH",
-                (self.hidden_size, self.num_heads, self.head_dim),
-                bias_shape=(self.num_heads,
-                            self.head_dim) if config.attention_bias else None,
-                param_dtype=dtype,
-                kernel_init=nnx.with_partitioning(init_fn,
-                                                  (None, "model", None)),
-                bias_init=nnx.with_partitioning(init_fn, ("model", None))
-                if config.attention_bias else None,
-                rngs=rng,
-                quant_config=quant_config,
-                prefix=prefix + ".q_proj",
-            )
-            self.k_proj = JaxEinsum(
+            self.v_proj = None
+        else:
+            self.v_proj = JaxEinsum(
                 "TD,DKH->TKH",
                 (self.hidden_size, self.num_kv_heads, self.head_dim),
                 bias_shape=(self.num_kv_heads,
@@ -367,24 +350,8 @@ class Gemma4Attention(JaxModule):
                 if config.attention_bias else None,
                 rngs=rng,
                 quant_config=quant_config,
-                prefix=prefix + ".k_proj",
+                prefix=prefix + ".v_proj",
             )
-            self.v_proj = None
-        else:
-            self.qkv_proj = JaxQKVParallelLinear(
-                hidden_size=self.hidden_size,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                use_bias=config.attention_bias,
-                dtype=dtype,
-                rngs=rng,
-                quant_config=quant_config,
-                prefix=prefix,
-            )
-            self.q_proj = None
-            self.k_proj = None
-            self.v_proj = None
 
         self.q_norm = JaxRmsNorm(
             self.head_dim,
@@ -459,13 +426,10 @@ class Gemma4Attention(JaxModule):
         attention_metadata: AttentionMetadata,
     ) -> Tuple[jax.Array, jax.Array]:
         md = attention_metadata
-        if self.qkv_proj is not None:
-            q, k, v = self.qkv_proj(x)
-        else:
-            k = self.k_proj(x)
-            v = k
-            # q: (T, N, H)
-            q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x) if self.v_proj is not None else k
+        # q: (T, N, H)
+        q = self.q_proj(x)
         # Q norm (always applied)
         q = self.q_norm(q)
 
@@ -527,6 +491,7 @@ class Gemma4Attention(JaxModule):
             k_scale=k_scale,
             v_scale=v_scale,
             update_kv_cache=not self.is_kv_shared_layer,
+            decode_query_size=self.decode_query_size,
         )
         # (T, D)
         o = self.o_proj(outputs)
@@ -543,6 +508,7 @@ class Gemma4DecoderLayer(JaxModule):
                  mesh: Mesh,
                  kv_cache_dtype: str,
                  quant_config: VllmQuantConfig,
+                 decode_query_size: int = 1,
                  prefix: str = ""):
         text_config: Gemma4TextConfig = config.hf_config.text_config
         rms_norm_eps = text_config.rms_norm_eps
@@ -579,6 +545,7 @@ class Gemma4DecoderLayer(JaxModule):
                                          mesh=mesh,
                                          kv_cache_dtype=kv_cache_dtype,
                                          quant_config=quant_config,
+                                         decode_query_size=decode_query_size,
                                          prefix=prefix + ".self_attn")
         self.post_attention_layernorm = JaxRmsNorm(
             hidden_size,
@@ -832,7 +799,7 @@ class Gemma4Model(JaxModule):
                 num_embeddings=self.vocab_size_per_layer_input,
                 features=L * P,
                 param_dtype=dtype,
-                embedding_init=nnx.with_partitioning(init_fn, (None, None)),
+                embedding_init=nnx.with_partitioning(init_fn, ("model", None)),
                 rngs=rng,
                 quant_config=vllm_config.quant_config,
                 prefix=prefix + ".embed_tokens_per_layer",
@@ -884,6 +851,10 @@ class Gemma4Model(JaxModule):
             self.per_layer_input_scale = 0.0
             self.per_layer_projection_scale = 0.0
 
+        spec_config = getattr(vllm_config, "speculative_config", None)
+        decode_query_size = (spec_config.num_speculative_tokens +
+                             1) if spec_config else 1
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,
             lambda layer_index: Gemma4DecoderLayer(
@@ -894,6 +865,7 @@ class Gemma4Model(JaxModule):
                 mesh=mesh,
                 kv_cache_dtype=vllm_config.cache_config.cache_dtype,
                 quant_config=vllm_config.quant_config,
+                decode_query_size=decode_query_size,
                 prefix=f"{prefix}.layers.{layer_index}",
             ))
 
@@ -1039,12 +1011,8 @@ class Gemma4Model(JaxModule):
 
 
 class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
+    # qkv_proj packing is removed in PR 3376 for performance gain
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
         "gate_up_proj": [
             "gate_proj",
             "up_proj",
@@ -1058,11 +1026,11 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         rng = nnx.Rngs(rng_key)
         self.mesh = mesh
 
-        self.model = Gemma4Model(
+        self.language_model = Gemma4Model(
             vllm_config=vllm_config,
             rng=rng,
             mesh=mesh,
-            prefix="model",
+            prefix="model.language_model",
         )
         model_config = vllm_config.model_config
 
@@ -1072,7 +1040,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
             None)
 
         if not model_config.hf_config.tie_word_embeddings:
-            if self.model.is_last_rank:
+            if self.language_model.is_last_rank:
                 vocab_size = model_config.get_vocab_size()
                 hidden_size = model_config.hf_config.text_config.hidden_size
                 self.lm_head = JaxLmHead(
@@ -1086,18 +1054,17 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
                 self.lm_head = PPMissingLayer()
 
     def load_weights(self, weights: Iterable[Tuple[str, Any]]):
-        allowed_layers = set(f"layers.{i}."
-                             for i in range(len(self.model.layers)))
-        stripped_weights = (
-            (clean_name, tensor) for name, tensor in weights
-            if (clean_name := name.replace("language_model.", "")).startswith((
-                "model.", "lm_head")) and
-            "vision" not in clean_name  # Exclude vision tower weights for now
+        # Strip "model." prefix so checkpoint names resolve against the Python
+        # attr path "language_model.*".  mapper.apply() runs before the loader's
+        # packed routing so params_dict lookups succeed.
+        mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
+        loader = JaxAutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head"]
+                           if not hasattr(self, 'lm_head') else []),
+            skip_substrs=["vision", "audio", "multi_modal"],
         )
-        return super().load_weights(
-            (name, tensor) for name, tensor in stripped_weights
-            if not ("layers." in name and not any(
-                layer_prefix in name for layer_prefix in allowed_layers)))
+        return loader.load_weights(mapper.apply(weights))
 
     def __call__(
         self,
@@ -1122,7 +1089,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         layer_name_to_kv_cache = dict(
             _layer_name_to_kv_cache) if _layer_name_to_kv_cache else None
         # Text-only causal LM has no multimodal tokens; pass None.
-        kv_caches, x, expert_indices = self.model(
+        kv_caches, x, expert_indices = self.language_model(
             kv_caches,
             input_ids,
             attention_metadata,
@@ -1140,7 +1107,7 @@ class Gemma4ForCausalLM(JaxModule, LoadableWithIterator):
         if hasattr(self, 'lm_head'):
             logits = self.lm_head(hidden_states)
         else:
-            logits = self.model.embed_tokens.decode(hidden_states)
+            logits = self.language_model.embed_tokens.decode(hidden_states)
 
         # Gemma4: Use Logit Soft-capping
         if self.final_logit_softcapping is not None:

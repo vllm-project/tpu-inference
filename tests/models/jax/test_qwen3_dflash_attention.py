@@ -62,6 +62,8 @@ def _build_stub_attention(impl: str) -> Qwen3DFlashAttention:
     _set("v_proj", lambda x: x)
     _set("o_proj", lambda x: x)
     _set("head_dim_original", 1)
+    _set("head_dim", 1)
+    _set("num_heads", 1)
     _set("rope_theta", 10000.0)
     _set("rope_scaling", None)
     _set("mesh", object())
@@ -89,6 +91,7 @@ def test_dflash_concat_attention_matches_concat_reference():
         v_ctx,
         v_noise,
         md,
+        md.query_start_loc,
         max_query_len=2,
         sm_scale=sm_scale,
     )
@@ -129,6 +132,7 @@ def test_dflash_concat_attention_repeats_kv_heads_for_gqa():
         v_ctx,
         v_noise,
         md,
+        md.query_start_loc,
         max_query_len=2,
         sm_scale=1.0,
     )
@@ -156,28 +160,7 @@ def test_qwen3_dflash_attention_concat_impl(monkeypatch):
     target_hidden_states = jnp.array([[[3.0]], [[4.0]]], dtype=jnp.float32)
     kv_cache = jnp.array([0.0], dtype=jnp.float32)
 
-    concat_calls = {}
-    cache_update_calls = {}
-
-    def fake_concat_attention(
-        q,
-        k_ctx,
-        k_noise,
-        v_ctx,
-        v_noise,
-        _md,
-        *,
-        max_query_len,
-        sm_scale,
-    ):
-        concat_calls["q"] = np.asarray(q)
-        concat_calls["k_ctx"] = np.asarray(k_ctx)
-        concat_calls["k_noise"] = np.asarray(k_noise)
-        concat_calls["v_ctx"] = np.asarray(v_ctx)
-        concat_calls["v_noise"] = np.asarray(v_noise)
-        concat_calls["max_query_len"] = max_query_len
-        concat_calls["sm_scale"] = sm_scale
-        return jnp.full_like(q, 7.0)
+    attention_calls = []
 
     def fake_attention(
         kv_cache,
@@ -189,16 +172,25 @@ def test_qwen3_dflash_attention_concat_impl(monkeypatch):
         _head_dim_original,
         **_kwargs,
     ):
-        cache_update_calls["q"] = np.asarray(q)
-        cache_update_calls["k"] = np.asarray(k)
-        cache_update_calls["v"] = np.asarray(v)
-        return kv_cache + 1.0, jnp.full_like(q, -5.0)
+        attention_calls.append({
+            "q":
+            np.asarray(q),
+            "k":
+            np.asarray(k),
+            "v":
+            np.asarray(v),
+            "update_kv_cache":
+            _kwargs.get("update_kv_cache", True),
+            "use_causal_mask":
+            _kwargs.get("use_causal_mask", True),
+        })
+        if len(attention_calls) == 1:
+            return kv_cache + 1.0, jnp.full_like(q, -5.0)
+        else:
+            return kv_cache + 2.0, jnp.full_like(q, 7.0)
 
     monkeypatch.setattr("tpu_inference.models.jax.qwen3_dflash.apply_rope",
                         lambda x, *_args, **_kwargs: x)
-    monkeypatch.setattr(
-        "tpu_inference.models.jax.qwen3_dflash.dflash_concat_attention",
-        fake_concat_attention)
     monkeypatch.setattr("tpu_inference.models.jax.qwen3_dflash.attention",
                         fake_attention)
 
@@ -208,19 +200,33 @@ def test_qwen3_dflash_attention_concat_impl(monkeypatch):
         hidden_states=hidden_states,
         target_hidden_states=target_hidden_states,
         attention_metadata=md,
+        target_query_start_loc=md.query_start_loc,
+        target_positions=jnp.array([1, 2], dtype=jnp.int32),
     )
 
     np.testing.assert_allclose(np.asarray(output), np.full((2, 1, 1), 7.0))
-    np.testing.assert_allclose(np.asarray(new_kv_cache), np.array([1.0]))
-    np.testing.assert_allclose(concat_calls["k_ctx"],
+    np.testing.assert_allclose(np.asarray(new_kv_cache), np.array([3.0]))
+    assert len(attention_calls) == 2
+
+    # Step 1 Target write assertions
+    np.testing.assert_allclose(attention_calls[0]["q"],
+                               np.zeros_like(hidden_states))
+    np.testing.assert_allclose(attention_calls[0]["k"],
                                np.asarray(target_hidden_states))
-    np.testing.assert_allclose(concat_calls["k_noise"],
+    np.testing.assert_allclose(attention_calls[0]["v"],
+                               np.asarray(target_hidden_states))
+    assert attention_calls[0]["update_kv_cache"] is True
+    assert attention_calls[0]["use_causal_mask"] is True
+
+    # Step 2 Noise attention assertions
+    np.testing.assert_allclose(attention_calls[1]["q"],
                                np.asarray(hidden_states))
-    np.testing.assert_allclose(cache_update_calls["k"],
+    np.testing.assert_allclose(attention_calls[1]["k"],
                                np.asarray(hidden_states))
-    np.testing.assert_allclose(cache_update_calls["v"],
+    np.testing.assert_allclose(attention_calls[1]["v"],
                                np.asarray(hidden_states))
-    assert concat_calls["max_query_len"] == 2
+    assert attention_calls[1]["update_kv_cache"] is True
+    assert attention_calls[1]["use_causal_mask"] is False
 
 
 def test_qwen3_dflash_attention_additive_legacy_impl(monkeypatch):
@@ -251,9 +257,6 @@ def test_qwen3_dflash_attention_additive_legacy_impl(monkeypatch):
 
     monkeypatch.setattr("tpu_inference.models.jax.qwen3_dflash.apply_rope",
                         lambda x, *_args, **_kwargs: x)
-    monkeypatch.setattr(
-        "tpu_inference.models.jax.qwen3_dflash.dflash_concat_attention",
-        fail_concat)
     monkeypatch.setattr("tpu_inference.models.jax.qwen3_dflash.attention",
                         fake_attention)
 
@@ -263,6 +266,8 @@ def test_qwen3_dflash_attention_additive_legacy_impl(monkeypatch):
         hidden_states=hidden_states,
         target_hidden_states=target_hidden_states,
         attention_metadata=md,
+        target_query_start_loc=md.query_start_loc,
+        target_positions=jnp.array([1, 2], dtype=jnp.int32),
     )
 
     expected_k = np.asarray(target_hidden_states + hidden_states)
@@ -288,4 +293,6 @@ def test_qwen3_dflash_attention_unknown_impl_raises(monkeypatch):
             hidden_states=hidden_states,
             target_hidden_states=target_hidden_states,
             attention_metadata=md,
+            target_query_start_loc=md.query_start_loc,
+            target_positions=jnp.array([1, 2], dtype=jnp.int32),
         )

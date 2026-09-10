@@ -192,6 +192,31 @@ class TestLlama4ForCausalLM:
                                                 attn_head_dim=128)
         mock_loader_instance.load_weights.assert_called_once_with(model)
 
+    def test_rope_scaling_handling(self, mock_vllm_config_llama4, rng, mesh):
+        """Tests that rope_scaling is parsed correctly with or without factor."""
+        with jax.set_mesh(mesh):
+            # Case 1: rope_scaling has 'factor'
+            mock_vllm_config_llama4.model_config.hf_config.text_config.rope_scaling = {
+                "factor": 16.0,
+                "rope_type": "llama3",
+            }
+            model = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
+            assert model.rope_scaling is not None
+            assert model.rope_scaling["scale_factor"] == 16.0
+            assert "factor" not in model.rope_scaling
+
+            # Case 2: rope_scaling does not have 'factor' (standard RoPE / default)
+            mock_vllm_config_llama4.model_config.hf_config.text_config.rope_scaling = {
+                "rope_type": "default",
+            }
+            model2 = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
+            assert model2.rope_scaling is None
+
+            # Case 3: rope_scaling is None
+            mock_vllm_config_llama4.model_config.hf_config.text_config.rope_scaling = None
+            model3 = Llama4ForCausalLM(mock_vllm_config_llama4, rng, mesh)
+            assert model3.rope_scaling is None
+
 
 class TestLlama4WeightLoader:
     """Tests for the Llama4WeightLoader class."""

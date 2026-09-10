@@ -222,11 +222,18 @@ def create_benchmark_steps(case_data: Dict[str, Any],
     child_steps = []
     mlcompass_select_tests = _get_mlcompass_select_tests()
     for agent in ci_queues:
+        # Determine TPU version from queue name
+        tpu_version = "tpu7x" if "v7x" in agent else "tpu6e"
+
         # Build the environment for this specific step
         step_env = {
-            **combined_env, "ci_queue": agent,
-            "USE_PREBUILT_IMAGE": "1"
+            **combined_env,
+            "ci_queue": agent,
+            "USE_PREBUILT_IMAGE": "1",
+            "TPU_VERSION": tpu_version,
         }
+
+        timeout_in_minutes = step_env.pop("BK_TIMEOUT_IN_MINUTES", None)
 
         step_env["TARGET_CASE_NAME"] = case_name
         # Include parent_dir in label for uniqueness
@@ -246,10 +253,14 @@ def create_benchmark_steps(case_data: Dict[str, Any],
         used_keys.add(step_safe_key)
 
         step = {
-            "label":
-            step_label,
-            "key":
-            step_safe_key,
+            "label": step_label,
+            "key": step_safe_key,
+        }
+
+        if timeout_in_minutes is not None:
+            step["timeout_in_minutes"] = timeout_in_minutes
+
+        step.update({
             "env":
             step_env,
             "agents": {
@@ -257,7 +268,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             },
             "command":
             f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
-        }
+        })
 
         # Add dependency on global case name validation if it was uploaded in bootstrap
         if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
@@ -296,6 +307,9 @@ def main():
     # Inject UPLOAD_DB environment variable if present in parent environment
     if "UPLOAD_DB" in os.environ:
         global_env["UPLOAD_DB"] = os.environ["UPLOAD_DB"]
+    # Global_env will be passed into docker container. This Extra_ENVS will be saved to DB when report the bm result.
+    if "EXTRA_ENVS" in os.environ:
+        global_env["EXTRA_ENVS"] = os.environ["EXTRA_ENVS"]
 
     all_steps = []
     used_keys = set()  # Track keys for this file

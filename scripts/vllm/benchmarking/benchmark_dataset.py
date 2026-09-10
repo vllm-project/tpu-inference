@@ -297,7 +297,11 @@ class MMLUDataset(BenchmarkDataset):
 
                 try:
                     prompt = tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True)
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        **kwargs.get("chat_template_kwargs",
+                                     {}))  # consider turning on thinking=False
                 except Exception as e:
                     logger.error(f"Could not apply chat template: {e}. "
                                  "Falling back to raw prompt. "
@@ -516,7 +520,10 @@ Express your final answer as the corresponding option 'A', 'B', 'C', or 'D'."""
 
                 try:
                     prompt = tokenizer.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True)
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        **kwargs.get("chat_template_kwargs", {}))
                 except Exception as e:
                     logger.error(f"Could not apply chat template: {e}. "
                                  "Falling back to raw prompt.")
@@ -824,7 +831,10 @@ class SonnetDataset(BenchmarkDataset):
         base_msg = [{"role": "user", "content": base_prompt}]
         base_fmt = tokenizer.apply_chat_template(base_msg,
                                                  add_generation_prompt=True,
-                                                 tokenize=False)
+                                                 tokenize=False,
+                                                 **kwargs.get(
+                                                     "chat_template_kwargs",
+                                                     {}))
         base_offset = len(tokenizer(base_fmt).input_ids)
         if input_len <= base_offset:
             raise ValueError(
@@ -844,7 +854,10 @@ class SonnetDataset(BenchmarkDataset):
             prompt = f"{base_prompt}{''.join(prefix_lines + extra_lines)}"
             msg = [{"role": "user", "content": prompt}]
             prompt_formatted = tokenizer.apply_chat_template(
-                msg, add_generation_prompt=True, tokenize=False)
+                msg,
+                add_generation_prompt=True,
+                tokenize=False,
+                **kwargs.get("chat_template_kwargs", {}))
             prompt_len = len(tokenizer(prompt_formatted).input_ids)
 
             if prompt_len <= input_len:

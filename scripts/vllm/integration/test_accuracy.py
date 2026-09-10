@@ -14,8 +14,8 @@ AsyncLLMEngine are working correctly.
 import os
 import threading
 
-import lm_eval
 import pytest
+from lm_eval_accuracy import evaluate_with_vllm
 from vllm.platforms import current_platform
 
 MODEL_NAMES = []
@@ -50,8 +50,7 @@ def run_test(model_name, expected_value, more_args=None):
               "fewshot_as_multiturn for lm_eval. Required for instruction-"
               "tuned BOS-sensitive models like gemma-4-it.")
 
-    results = lm_eval.simple_evaluate(
-        model="vllm",
+    results = evaluate_with_vllm(
         model_args=model_args,
         tasks="gsm8k",
         batch_size="auto",

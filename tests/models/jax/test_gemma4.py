@@ -60,6 +60,9 @@ class TestGemma4ForConditionalGeneration:
                 truncate_layers)
         vllm_config.load_config.load_format = load_format
         vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.prefill_context_parallel_size = 1
+        vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.parallel_config.enable_expert_parallel = False
 
         init_pp_distributed_environment(
@@ -79,10 +82,11 @@ class TestGemma4ForConditionalGeneration:
         seq_len = 2
         input = [[0.01 * i for i in range(model_dim)] for _ in range(seq_len)]
 
-        with jax.set_mesh(mesh):
+        with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
             model = Gemma4ForConditionalGeneration(vllm_config, rng, mesh)
-            start_layer_idx = model.model.start_layer
-            layer_0: Gemma4DecoderLayer = model.model.layers[start_layer_idx]
+            start_layer_idx = model.model.language_model.start_layer
+            layer_0: Gemma4DecoderLayer = model.model.language_model.layers[
+                start_layer_idx]
             num_key_value_heads = layer_0.self_attn.num_kv_heads
             qk_head_dim = layer_0.self_attn.head_dim_original
 
@@ -102,8 +106,8 @@ class TestGemma4ForConditionalGeneration:
             with set_current_vllm_config(vllm_config):
                 loader.load_weights(model, model_config)
 
-        layer_idx_in_model = model.model.start_layer
-        jax_layer_0 = model.model.layers[layer_idx_in_model]
+        layer_idx_in_model = model.model.language_model.start_layer
+        jax_layer_0 = model.model.language_model.layers[layer_idx_in_model]
 
         input_tensor_jax = jnp.array(input, dtype=jnp.bfloat16)
 
@@ -130,11 +134,13 @@ class TestGemma4ForConditionalGeneration:
     @pytest.mark.parametrize("model_name", [
         "google/gemma-4-31B-it",
         "google/gemma-4-26B-A4B-it",
+        "RedHatAI/gemma-4-31B-it-FP8-Dynamic",
+        "RedHatAI/gemma-4-26B-A4B-it-FP8-Dynamic",
     ])
     @pytest.mark.parametrize("pp_rank,pp_world_size", [(0, 1), (0, 4), (1, 4),
                                                        (3, 4)])
-    @pytest.mark.parametrize(
-        "load_format", ["skip_layers_model_loader_for_test", "jax_dummy"])
+    @pytest.mark.parametrize("load_format",
+                             ["skip_layers_model_loader_for_test"])
     def test_model_loading(
             self,
             model_name,

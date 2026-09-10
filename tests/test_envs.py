@@ -113,6 +113,21 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_BATCHED_RPA_KERNEL is True
 
 
+def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
+    """MOE_STAGE_WEIGHTS_ON_HOST is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_STAGE_WEIGHTS_ON_HOST", raising=False)
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "1")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "true")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is True
+
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
+    assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
     """Test that boolean env vars accept string values like 'True' and 'False'"""
 
@@ -190,6 +205,7 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NUM_SLICES", "1")
     monkeypatch.delenv("REQUANTIZE_BLOCK_SIZE", raising=False)
     monkeypatch.delenv("MOE_REQUANTIZE_BLOCK_SIZE", raising=False)
+    monkeypatch.delenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", raising=False)
 
     assert envs.PYTHON_TRACER_LEVEL == 1
     monkeypatch.setenv("PYTHON_TRACER_LEVEL", "3")
@@ -213,6 +229,11 @@ def test_integer_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.MOE_REQUANTIZE_BLOCK_SIZE is None
     monkeypatch.setenv("MOE_REQUANTIZE_BLOCK_SIZE", "512")
     assert envs.MOE_REQUANTIZE_BLOCK_SIZE == 512
+
+    # Test CONTINUE_DECODE_EOS_CHECK_INTERVAL (default 1 = stock every-step check)
+    assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 1
+    monkeypatch.setenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL", "8")
+    assert envs.CONTINUE_DECODE_EOS_CHECK_INTERVAL == 8
 
 
 def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):

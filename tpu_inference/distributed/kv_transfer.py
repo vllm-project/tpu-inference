@@ -65,7 +65,7 @@ def _start_chunked_copy_kernel(
     """Starts an asynchronous chunked copy."""
 
     pallas_out_shape = (
-        pltpu.HBM(dest_array.shape, dest_array.dtype),
+        jax.ShapeDtypeStruct(dest_array.shape, dest_array.dtype),
         pltpu.SemaphoreType.DMA(()),
     )
     in_specs = (
@@ -144,7 +144,7 @@ def _wait_for_chunked_copy_kernel(
 
     dest_array = pl.pallas_call(
         _wait_async_copy_kernel,
-        out_shape=pltpu.HBM(dest_array.shape, dest_array.dtype),
+        out_shape=jax.ShapeDtypeStruct(dest_array.shape, dest_array.dtype),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             grid=(1, ),
             num_scalar_prefetch=4,
@@ -395,7 +395,7 @@ def _get_copy_to_dest_fn(mesh, sharding_spec, out_sharding, dtype,
             ],
             out_specs=pl.BlockSpec(memory_space=memory_space),
             input_output_aliases={1: 0},
-            out_shape=memory_space(shape=dest.shape, dtype=dtype),
+            out_shape=jax.ShapeDtypeStruct(shape=dest.shape, dtype=dtype),
         )(src, dest)
 
     @functools.partial(jax.jit,

@@ -30,6 +30,7 @@ The `run_bm.sh` script is designed to be environment-aware. When running locally
 * **Dataset Handling (`GCS_BUCKET`)**: If `GCS_BUCKET` is *not* set, the script will skip downloading datasets from Google Cloud Storage. It will fallback to using local dataset files. Ensure your dataset exists locally unless the specific benchmark (`lm_eval`, etc.) does not require one.
 * **Log Uploads**: If `GCS_BUCKET` is *not* set, the script will silently skip uploading `bm_log.txt` and `vllm_log.txt` to GCS. Logs will remain in the local folder.
 * **Database Reporting (`GCP_DATABASE_ID`, etc.)**: If database-related variables (e.g., `GCP_PROJECT_ID`, `GCP_INSTANCE_ID`, `GCP_DATABASE_ID`) are *not* set, `report_result.sh` will skip inserting the benchmark results into the Spanner DB. Results will only be printed to stdout and saved in the local `.result` file.
+* **BigQuery Dual Write (`BQ_UPLOAD_ENABLED`, etc.)**: Whenever the Spanner write runs, `report_result.sh` also mirrors the result into BigQuery via [`report_bigquery.py`](scripts/report_bigquery.py), sharing the Spanner `RecordId` as `record_id` so the two rows can be joined. This exists so dashboards can migrate off Spanner without a flag day; Spanner stays the source of record. The write is best-effort — a failure logs a warning and never fails the build. Set `BQ_UPLOAD_ENABLED=false` to turn it off, `BQ_TABLE`/`BQ_PROJECT_ID` to retarget it. The default table `cloud-ullm-inference-ci-cd.llm_benchmark_analytics.benchmark_runs` is shared with `vllm-torchtpu`; rows are told apart by the `repository` column, so keep [`bq_utils.py`](scripts/bq_utils.py) in sync with that repo's copy.
 
 ***Note: The GCP-related environment variables used below point to the Staging DB and Bucket. When officially launched in the future, the settings will be changed to point to the Production DB and Bucket.***
 
@@ -41,7 +42,7 @@ The `run_bm.sh` script is designed to be environment-aware. When running locally
 ```
 
 ***There are two more modifications that need to be made here:***
-1. [`REMOTE_LOG_ROOT`](scripts/report_result.sh#L49) needs to be changed to use `$GSC_BUCKET` as the bucket for storing logs.
+1. [`REMOTE_LOG_ROOT`](scripts/report_result.sh#L49) needs to be changed to use `$GCS_BUCKET` as the bucket for storing logs.
 2. The migration file [`vllm_bm_20260410.ddl`](sql/vllm_bm_20260410.ddl) needs to be executed in `vllm-bm-runs` (Production Spanner DB).
 
 ## 3. Configuration Guide (JSON Cases)
@@ -56,15 +57,23 @@ The framework is driven by JSON configuration files. Each file defines one or mo
   * `EXPECTED_ETEL`: The target goal for End-to-End Latency (P99 in ms). The script adjusts the request rate via binary search to stay within this limit.
   * `EXPECTED_THROUGHPUT`: Target throughput. Evaluated in `report_result.sh` to flag performance regressions.
   * `INPUT_LEN`, `OUTPUT_LEN`, `PREFIX_LEN`: Metadata representing sequence lengths. Used primarily for database tagging.
+  * `IS_MULTI_HOST_BENCH`: (Boolean) Used to distinguish whether the case is a multihost benchmark.
+  * `BK_TIMEOUT_IN_MINUTES`: (Integer) Sets a timeout limit in minutes for the generated Buildkite YAML (e.g., 180).
 * `ci_queue`: Array of strings defining which Buildkite agent queues should pick up this case.
 * `server_command_options`: Controls the vLLM backend.
   * `command_type`: Must be `vllm_serve`.
   * `args`: Key-value pairs translated into CLI flags (e.g., `model`, `seed`, `max-model-len`).
+    * **`model` vs. `model-path` Resolution:** You can decouple a model's reporting name from its physical storage location by specifying both keys within `args`:
+      * **`model`**: Acts as the display name used *only* for metrics, logging, and database tracking (e.g., `"model": "deepseek-ai/DeepSeek-R1"`). *Note: If `model-path` is not provided, this value is passed normally as the `--model` flag.*
+      * **`model-path`**: The actual URI or local directory used to load the model weights. When this key is present, the script automatically overrides the execution command, passing this value as the `--model` CLI flag instead (e.g., `"model-path": "gs://tpu-commons-ci/deepseek/r1"`).
   * `env`: Server-command-specific environment variables.
 * `client_command_options`: Controls the workload generator.
   * `command_type`: Typically `vllm_bench_serve`. Can also be `lm_eval` for accuracy evaluations. When it is `lm_eval`, the dataset must be specified in the `args`, a specific shell script will be executed based on the dataset configuration, and `server_command_options` does not need to be set.
   * `args`: Client-side CLI flags (e.g., `num-prompts`, `request-rate`).
   * `env`: Client-command-specific environment variables.
+* `accuracy_command_options`: Used specifically for Accuracy benchmarks.
+  * `command_type`: Should be set to local_benchmark_serving to execute the built-in `vllm/benchmarking/benchmark_serving.py`.
+  * `args`: Key-value pairs for the accuracy benchmark arguments.
 
 ### Critical Considerations & Advanced Features
 
@@ -103,6 +112,18 @@ Additionally, the `case_name` defined in the JSON will be extracted and reported
 > * **For new cases:** You can define and modify the `case_name` freely during initial development. (Please make it similar to current cases name convention as possible)
 > * **For established cases:** If a case has been running for a long time and has historical data in the database, **strongly recommend NOT to modify its `case_name`**.
 > * **Data Migration:** If a name change is strictly necessary for an established case, you must coordinate and execute a data migration in the database to link the old records to the new name. Modifying the name without migration will cause the dashboard to treat it as a brand-new entity, breaking historical performance tracking.
+
+#### E. Multihost Benchmark Configurations
+When configuring a Multihost benchmark, you can use specific parameters to control the execution environment and model loading behavior. Note that current multihost benchmarks are all configured to use the `runai_streamer` format, which streams model weights directly from GCS.
+
+```json
+"server_command_options": {
+  "args": {
+    "model-path": "gs://tpu-commons-ci/deepseek/r1",
+    "load-format": "runai_streamer"
+  }
+}
+```
 
 ## 4. **Test Case File Hierarchy**
 

@@ -18,12 +18,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-try:
-    from google3.experimental.users.hwanginho.deepseek_v4.streamindex_topk.streamindex_topk import \
-        streamindex_topk
-except ImportError:
-    from tpu_inference.kernels.experimental.deepseek_v4.streamindex_topk import \
-        streamindex_topk
+from tpu_inference.kernels.experimental.deepseek_v4.indexer.streamindex_topk import \
+    streamindex_topk
 
 
 # =====================================================================
@@ -48,6 +44,15 @@ def quantize_fp8_ue8m0(x: jax.Array, block_size: int):
     q = (blocked * (1.0 / scale)).astype(jnp.float8_e4m3fn).reshape(x.shape)
     scale = jnp.squeeze(scale, -1).astype(jnp.float8_e8m0fnu)
     return q, scale
+
+
+def _verify_padding_at_end(actual_topk_np):
+    """Verifies that -1 is only at the end of the innermost dimension."""
+    is_minus_one = (actual_topk_np == -1).astype(np.int32)
+    violations = np.diff(is_minus_one, axis=-1) < 0
+    assert not np.any(
+        violations
+    ), "Padding (-1) is not at the end of the innermost dimension"
 
 
 # =====================================================================
@@ -123,9 +128,9 @@ def streamindex_topk_ref(
     " bq_sz, bkv_p, seq_lens_list, cu_q_lens_list",
     [
         # Small standard case
-        (2, 6, 16, 8, 4, 1, 64, 512, 2, 32, 2, [4, 6], [0, 3, 6]),
+        (2, 6, 64, 8, 4, 1, 64, 512, 2, 32, 2, [4, 6], [0, 3, 6]),
         # # Single token batch (Decode Phase)
-        (1, 1, 16, 4, 2, 1, 32, 512, 1, 16, 1, [10], [0, 1]),
+        (1, 1, 128, 4, 2, 1, 32, 512, 1, 16, 1, [10], [0, 1]),
         # Large batch, multiple tokens per sequence (Prefill Phase)
         (
             4,
@@ -142,15 +147,15 @@ def streamindex_topk_ref(
             [10, 20, 30, 40],
             [0, 5, 10, 15, 20],
         ),
-        # Odd chunk sizes
-        (2, 5, 8, 6, 4, 1, 16, 512, 1, 16, 3, [8, 12], [0, 2, 5]),
+        # Odd chunk sizes -> Aligned
+        (2, 5, 128, 6, 4, 1, 16, 512, 1, 16, 1, [8, 12], [0, 2, 5]),
         # Single head for KV but multiple heads for Queries (MQA/GQA pattern)
-        (2, 10, 16, 8, 8, 1, 64, 512, 2, 32, 4, [16, 24], [0, 4, 10]),
+        (2, 10, 32, 8, 8, 1, 64, 512, 2, 32, 4, [16, 24], [0, 4, 10]),
         # # High D, High K
-        (1, 8, 16, 4, 2, 1, 256, 512, 1, 32, 4, [60], [0, 8]),
+        (1, 8, 32, 4, 2, 1, 256, 512, 1, 32, 4, [60], [0, 8]),
         # Mixed batch: sequence 0 has 1 token (decode), sequence 1 has 5 tokens
         # (prefill)
-        (2, 6, 16, 8, 4, 1, 64, 512, 2, 32, 2, [4, 6], [0, 1, 6]),
+        (2, 6, 64, 8, 4, 1, 64, 512, 2, 32, 2, [4, 6], [0, 1, 6]),
     ],
 )
 def test_streamindex_topk_shape(
@@ -169,6 +174,9 @@ def test_streamindex_topk_shape(
     cu_q_lens_list,
 ):
     """Tests the shape and basic execution bounds of streamindex_topk."""
+    assert (page_size * bkv_p) % 128 == 0, (
+        f"bkv_sz ({page_size} * {bkv_p}) must be a multiple of 128 for TPU DMA"
+        " alignment.")
     _ = H_KV
     print(f"\n{'-'*60}")
     print(f"SHAPE TEST: B={B}, Tokens={num_tokens}, k={k}")
@@ -235,19 +243,19 @@ def test_streamindex_topk_shape(
     " block_table_list",
     [
         # 1. Single sequence, highly fragmented block table
-        (1, [4], [16], 8, 4, 1, 16, 1024, 2, 8, 2, [[2, 0]]),
+        (1, [4], [16], 64, 4, 1, 16, 1024, 2, 8, 2, [[2, 0]]),
         # 2. Batched Decode (T=1, B=2)
-        (2, [1, 1], [12, 16], 8, 4, 1, 16, 1024, 1, 8, 1, [[1, 3], [0, 2]]),
+        (2, [1, 1], [12, 16], 128, 4, 1, 16, 1024, 1, 8, 1, [[1, 3], [0, 2]]),
         # 3. High GQA (8 Query Heads, 2 KV Heads)
-        (1, [6], [20], 4, 8, 1, 16, 1024, 1, 8, 2, [[4, 1, 3, 0, 2]]),
+        (1, [6], [20], 64, 8, 1, 16, 1024, 1, 8, 2, [[4, 1, 3, 0, 2]]),
         # 4. Multi-Batch Prefill with variable query/sequence lengths
-        (2, [5, 3], [16, 16], 8, 4, 1, 16, 1024, 1, 8, 4, [[3, 1], [2, 4]]),
+        (2, [5, 3], [16, 16], 32, 4, 1, 16, 1024, 1, 8, 4, [[3, 1], [2, 4]]),
         # 5. Dummy sequences / Padding (B=3, but sequence 1 has 0 tokens)
         (
             3,
             [2, 0, 3],
             [16, 0, 8],
-            8,
+            64,
             4,
             1,
             16,
@@ -258,7 +266,7 @@ def test_streamindex_topk_shape(
             [[1, 2], [0, 0], [4, 3]],
         ),
         # 6. Mixed batch: sequence 0 has 1 token, sequence 1 has 5 tokens
-        (2, [1, 5], [12, 16], 8, 4, 1, 16, 1024, 2, 8, 2, [[1, 3], [2, 0]]),
+        (2, [1, 5], [12, 16], 64, 4, 1, 16, 1024, 2, 8, 2, [[1, 3], [2, 0]]),
     ],
 )
 def test_streamindex_topk_numerical_correctness(
@@ -276,6 +284,9 @@ def test_streamindex_topk_numerical_correctness(
     block_table_list,
 ):
     """Executes randomized input data against a naive NumPy ground truth."""
+    assert (page_size * bkv_p) % 128 == 0, (
+        f"bkv_sz ({page_size} * {bkv_p}) must be a multiple of 128 for TPU DMA"
+        " alignment.")
     print(f"\n{'='*60}")
     print(f"BATCHED NUMERICAL TEST (B={B})")
     print(f"{'='*60}")
@@ -381,6 +392,7 @@ def test_streamindex_topk_numerical_correctness(
     )
 
     actual_topk_np = np.array(actual_topk)
+    _verify_padding_at_end(actual_topk_np)
 
     print("\nACTUAL OUTPUT (JAX/XLA Kernel):")
     print(actual_topk_np)
@@ -405,7 +417,7 @@ def test_streamindex_topk_quantized():
 
     T_seq = 4
     S_seq = 512
-    page_size = 16
+    page_size = 128
     H_I = 2
     H_KV = 1
     D = 128
@@ -493,6 +505,7 @@ def test_streamindex_topk_quantized():
     )
 
     actual_topk_np = np.array(actual_topk)
+    _verify_padding_at_end(actual_topk_np)
 
     np.testing.assert_array_equal(
         np.sort(actual_topk_np, axis=-1),
@@ -503,7 +516,7 @@ def test_streamindex_topk_quantized():
 def main(argv):
     del argv
 
-    raise SystemExit(pytest.main([__file__, "-p", "no:cacheprovider"]))
+    raise SystemExit(pytest.main([__file__, "-s", "-p", "no:cacheprovider"]))
 
 
 if __name__ == "__main__":

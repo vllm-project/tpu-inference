@@ -32,6 +32,7 @@ def dflash_concat_attention(
     v_ctx: jax.Array,  # [T, K, H]
     v_noise: jax.Array,  # [T, K, H]
     attention_metadata: AttentionMetadata,
+    target_query_start_loc: jax.Array,
     *,
     max_query_len: int,
     sm_scale: float,
@@ -43,10 +44,13 @@ def dflash_concat_attention(
     """
     if max_query_len <= 0:
         raise ValueError(f"{max_query_len=} must be positive.")
-    if not (q.shape[0] == k_ctx.shape[0] == k_noise.shape[0] == v_ctx.shape[0]
-            == v_noise.shape[0]):
+    if not (q.shape[0] == k_noise.shape[0] == v_noise.shape[0]):
         raise ValueError(
-            "All DFlash attention streams must share the same token count.")
+            "Noise DFlash attention streams must share the same token count.")
+    if not (k_ctx.shape[0] == v_ctx.shape[0]):
+        raise ValueError(
+            "Context DFlash attention streams must share the same token count."
+        )
 
     num_tokens, num_heads, _ = q.shape
     num_kv_heads = k_ctx.shape[1]
@@ -94,9 +98,13 @@ def dflash_concat_attention(
         req_len = req_lens[i]
         req_len = jnp.clip(req_len, 0, max_query_len)
 
+        ctx_start = target_query_start_loc[i]
+        ctx_req_len = target_query_start_loc[i + 1] - target_query_start_loc[i]
+        ctx_req_len = jnp.clip(ctx_req_len, 0, max_query_len)
+
         q_blk = lax.dynamic_slice_in_dim(q, start, max_query_len, axis=0)
         k_ctx_blk = lax.dynamic_slice_in_dim(k_ctx,
-                                             start,
+                                             ctx_start,
                                              max_query_len,
                                              axis=0)
         k_noise_blk = lax.dynamic_slice_in_dim(k_noise,
@@ -104,7 +112,7 @@ def dflash_concat_attention(
                                                max_query_len,
                                                axis=0)
         v_ctx_blk = lax.dynamic_slice_in_dim(v_ctx,
-                                             start,
+                                             ctx_start,
                                              max_query_len,
                                              axis=0)
         v_noise_blk = lax.dynamic_slice_in_dim(v_noise,
@@ -118,8 +126,11 @@ def dflash_concat_attention(
 
         # Mask out padding positions for both Q and KV.
         q_valid = arange_q < req_len
-        kv_valid_len = jnp.maximum(2 * req_len, 1)
-        kv_valid = arange_kv < kv_valid_len
+        # Valid KV tokens: ctx_req_len context tokens + req_len noise tokens
+        # The first max_query_len tokens are context, the next max_query_len are noise.
+        kv_valid = (arange_kv
+                    < ctx_req_len) | ((arange_kv >= max_query_len) &
+                                      (arange_kv < max_query_len + req_len))
 
         logits = jnp.einsum("qnh,knh->nqk", q_blk.astype(jnp.float32),
                             k_blk.astype(jnp.float32))

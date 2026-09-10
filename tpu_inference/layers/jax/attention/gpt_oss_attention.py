@@ -171,6 +171,7 @@ class GptOssAttention(nnx.Module):
         v_scale: float | None = None,
     ) -> Tuple[KVCache, jax.Array]:
         """Performs scaled dot-product attention by calling the ragged_paged_attention kernel."""
+        sinks = jnp.asarray(sinks, jnp.float32)
         md = attention_metadata
         kv_cache_spec = P("data", None, "model")
 

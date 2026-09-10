@@ -35,23 +35,24 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
+    MOE_STAGE_WEIGHTS_ON_HOST: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
     LAYOUT_Q_PROJ_AS_NDH: bool = False
     USE_JAX_PROFILER_SERVER: bool = False
     JAX_PROFILER_SERVER_PORT: int = 9999
+    CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
+    USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    # Optional operator override for the RPA v3 kernel block sizes, one per
+    # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
+    # Empty (default) = use the built-in tuned/heuristic sizes.
+    RPA_V3_DECODE_BLOCK_SIZES: list[int] = []
+    RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
+    RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
     FORCE_MOE_RANDOM_ROUTING: bool = False
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
-    RAGGED_GATED_DELTA_RULE_IMPL: str = "chunked_jax_pd"
-    # SparseCore MoE gather kernel version used by fused_moe_gmm.
-    # "v2" (default) = ragged_gather_v2; "v1" = legacy ragged_gather.
-    RAGGED_GATHER_VERSION: str = "v2"
-    # SparseCore MoE gather-reduce (combine) kernel version used by
-    # fused_moe_gmm. "v2" (default) = ragged_gather_reduce_v2; "v1" = legacy
-    # ragged_gather_reduce.
-    RAGGED_GATHER_REDUCE_VERSION: str = "v2"
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
     TPU_OFFLOAD_SKIP_JAX_PRECOMPILE: bool = False
     TPU_OFFLOAD_DECODE_SAVE: bool = False
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
     MOE_APPROX_TOPK_RECALL_TARGET: float | None = None
     VLLM_TPU_PATCH_MM_EMBEDDINGS: bool = False
     ENABLE_RS_KERNEL: bool = False
+    USE_GMM_FUSED_RS_KERNEL: bool = False
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
@@ -74,6 +76,15 @@ if TYPE_CHECKING:
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
+    SLICE_ROPE_CACHE: bool = False
+    ROPE_CACHE_ROW_MAJOR: bool = False
+    HASH_TABLE_ROW_MAJOR: bool = False
+    MIN_TOKEN_BUCKET: int = 16
+    MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    VLLM_TPU_BUCKET_PADDING_GAP: int = 0
+    VLLM_INCREMENTAL_FP8_LOADING: bool = False
+    TPU_MESH_SORT_BY_COORDS: bool = False
+    VERIFY_WEIGHTS: bool = False
 
 
 def env_with_choices(
@@ -286,6 +297,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
     (block_size := os.getenv("REQUANTIZE_BLOCK_SIZE")) is not None else None,
+    # Specify requantization block size for compressed tensor NVFP4 weights
+    "REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE":
+    lambda: int(block_size)
+    if (block_size := os.getenv("REQUANTIZE_COMPRESSED_TENSOR_NVFP4_BLOCK_SIZE"
+                                )) is not None else None,
     # Specify dtype for quantized linear weights
     "REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
@@ -302,6 +318,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_REQUANTIZE_CLIP_PERCENTILE":
     lambda: float(pct)
     if (pct := os.getenv("MOE_REQUANTIZE_CLIP_PERCENTILE")) else None,
+    # Build each FP8 MoE expert weight directly at its expert sharding from
+    # host memory, instead of staging the whole tensor on one device and
+    # slicing it back apart. Much faster the wider the mesh gets, but opt-in
+    # for now: set to 1 to take it. Only VllmFp8MoEMethod (and the
+    # deepseek_v4_fp8 method built on it) honors this today; the other
+    # quantized MoE methods (nvfp4, compressed-tensors, mxfp4, awq) still
+    # stage the full tensor on device regardless.
+    "MOE_STAGE_WEIGHTS_ON_HOST":
+    env_bool("MOE_STAGE_WEIGHTS_ON_HOST", default=False),
     # By default, it only use max_reqs for attentions. But if set true, it
     # will precompile max_reqs to power-of-twos between min and max reqs,
     # and attention will have the num_reqs closer to actual num_reqs. This
@@ -322,8 +347,26 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("USE_JAX_PROFILER_SERVER"),
     "JAX_PROFILER_SERVER_PORT":
     lambda: int(os.getenv("JAX_PROFILER_SERVER_PORT") or "9999"),
+    # continue_decode: check the any-sequence-hit-EOS early exit every N steps
+    # instead of every step, amortizing the per-step dispatch. Sequences still
+    # stop at their own EOS (the <=N-1 extra tokens are masked like a normal
+    # stop), so the sampled distribution is unchanged. Default 1 = stock.
+    "CONTINUE_DECODE_EOS_CHECK_INTERVAL":
+    lambda: int(os.getenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL") or "1"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "USE_BATCHED_RPA_SEQ_ON_LANE":
+    env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    # Optional operator override for RPA v3 kernel block sizes, per case.
+    # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
+    # built-in tuned/heuristic sizes. Lets operators retune the decode
+    # KV-fetch/compute split (e.g. deeper double-buffering) without a rebuild.
+    "RPA_V3_DECODE_BLOCK_SIZES":
+    env_int_list("RPA_V3_DECODE_BLOCK_SIZES"),
+    "RPA_V3_PREFILL_BLOCK_SIZES":
+    env_int_list("RPA_V3_PREFILL_BLOCK_SIZES"),
+    "RPA_V3_MIXED_BLOCK_SIZES":
+    env_int_list("RPA_V3_MIXED_BLOCK_SIZES"),
     # Force random expert routing in MoE layers (for testing purposes only)
     "FORCE_MOE_RANDOM_ROUTING":
     env_bool("FORCE_MOE_RANDOM_ROUTING", default=False),
@@ -331,19 +374,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_str_list("JITTED_MM_MODULE_KEYS"),
     "REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES":
     env_str_list("REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES"),
-    "RAGGED_GATED_DELTA_RULE_IMPL":
-    env_with_choices(
-        "RAGGED_GATED_DELTA_RULE_IMPL",
-        "chunked_jax_pd",
-        [
-            "chunked_jax_pd", "chunked_kernel_pd",
-            "chunked_kernel_p_recurrent_kernel_d"
-        ],
-    ),
-    "RAGGED_GATHER_VERSION":
-    env_with_choices("RAGGED_GATHER_VERSION", "v2", ["v1", "v2"]),
-    "RAGGED_GATHER_REDUCE_VERSION":
-    env_with_choices("RAGGED_GATHER_REDUCE_VERSION", "v2", ["v1", "v2"]),
     "MOE_ALL_GATHER_ACTIVATION_DTYPE":
     lambda: os.getenv("MOE_ALL_GATHER_ACTIVATION_DTYPE", ""),
     # kv offload to dram: skip pre-compiling swap-related jax functions
@@ -394,6 +424,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable hierarchical reduce-scatter kernel for MoE
     "ENABLE_RS_KERNEL":
     env_bool("ENABLE_RS_KERNEL", default=False),
+    # Enable fused GMM reduce-scatter kernel for MoE
+    "USE_GMM_FUSED_RS_KERNEL":
+    env_bool("USE_GMM_FUSED_RS_KERNEL", default=False),
     # Number of worker threads for parallel XLA precompilation.
     "NUM_PRECOMPILE_WORKERS":
     lambda: int(os.getenv("NUM_PRECOMPILE_WORKERS") or "1"),
@@ -425,8 +458,56 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # use VMEM size as the threshold.
     "SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES":
     lambda: os.getenv("SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES", "auto"),
+    # Slice the rotary cos_sin_cache to max_model_len at load (saves HBM and a
+    # per-step layout copy of the full max_position_embeddings table). Applies
+    # to text / 1-D RoPE only; ignored for MRoPE models, whose (video)
+    # positions can exceed max_model_len.
+    "SLICE_ROPE_CACHE":
+    env_bool("SLICE_ROPE_CACHE", default=False),
+    # Set the rotary cos_sin_cache in the row-major TPU layout at
+    # load time. XLA picks the transposed layout {0,1} for narrow tables (the
+    # 64-wide DeepSeek rope cache) to avoid lane padding, and then has to copy
+    # the whole table back to {1,0} inside the step function on every forward
+    # pass. Trades 2x HBM for that buffer for the per-step copy.
+    "ROPE_CACHE_ROW_MAJOR":
+    env_bool("ROPE_CACHE_ROW_MAJOR", default=False),
+    # similar to ROPE_CACHE_ROW_MAJOR, but for the hash-MoE routing table
+    # (`*.routed_experts.hash_indices_table`, [vocab_size, num_experts_per_tok]).
+    "HASH_TABLE_ROW_MAJOR":
+    env_bool("HASH_TABLE_ROW_MAJOR", default=False),
     "MLA_TRANSPOSE_KV_CACHE":
     env_bool("MLA_TRANSPOSE_KV_CACHE", default=False),
+    # Minimum max num of batched tokens.
+    "MIN_TOKEN_BUCKET":
+    lambda: int(os.getenv("MIN_TOKEN_BUCKET") or "16"),
+    # Route padding tokens to expert 0 instead of picking other experts, to
+    # avoid activating unneeded experts and speed up the GMM kernel by not
+    # loading unnecessary weights. Only applies when DP attention size is 1
+    # (pure TP attention, e.g. TP8_EP), since under DP attention the padding
+    # is interleaved per rank and a single valid-token count cannot describe it.
+    "MOE_ROUTE_PADDING_TO_EXPERT0":
+    env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    # Gap between token-bucket padding sizes for TPU precompilation. When 0,
+    # buckets grow as powers of two; otherwise buckets increase by this gap
+    # once past the power-of-two ramp. Previously provided by vllm.envs, which
+    # removed it upstream as an orphaned var, so it now lives here.
+    "VLLM_TPU_BUCKET_PADDING_GAP":
+    lambda: int(os.getenv("VLLM_TPU_BUCKET_PADDING_GAP", "0")),
+    # Sort devices by coords and core_on_chip when constructing a tpu mesh.
+    # Currently, it only supports a single host set up.
+    "TPU_MESH_SORT_BY_COORDS":
+    env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Controls whether FP8 linear and MoE layers perform incremental weight
+    # loading, sharding, and immediate host RAM cleanup. When enabled, weights
+    # are sharded and transferred to TPU device memory layer-by-layer (or per
+    # MoE expert shard), freeing PyTorch CPU storage and trimming glibc malloc
+    # arenas after each layer. This prevents host CPU memory exhaustion (OOM)
+    # when initializing large FP8 models on smaller RAM TPUs such as TPU8i.
+    "VLLM_INCREMENTAL_FP8_LOADING":
+    env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
+    # RL weight sync: verify tensor checksums after each Raiden H2D transfer.
+    "VERIFY_WEIGHTS":
+    env_bool("VERIFY_WEIGHTS", default=False),
 }
 
 

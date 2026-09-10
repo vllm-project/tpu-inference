@@ -24,7 +24,8 @@ from jax.sharding import Mesh
 from torchax.interop import torch_view
 from vllm.v1.attention.backend import AttentionType
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.vllm.backends.flash_attn import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
@@ -97,8 +98,14 @@ def create_inputs(
         query_start_loc=query_start_loc,
         request_distribution=request_distribution,
     )
+    shared_metadata = SharedAttentionMetadata(
+        input_positions=positions,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution,
+    )
 
-    return q, k, v, kv_cache, metadata
+    return q, k, v, kv_cache, metadata, shared_metadata
 
 
 @pytest.fixture
@@ -172,6 +179,18 @@ class TestPallasAttentionBackendImpl:
                 attn_type=AttentionType.ENCODER,
             )
 
+    def test_init_with_encoder_only_attention_does_not_raise_error(self):
+        PallasAttentionBackendImpl(
+            num_heads=32,
+            head_size=128,
+            scale=0.088,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.ENCODER_ONLY,
+        )
+
     def test_forward(self, mesh):
         impl = PallasAttentionBackendImpl(
             num_heads=NUM_HEADS,
@@ -187,13 +206,63 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={'0': 0}):
+                layer_name_to_kvcache_index={'0': 0},
+                shared_attn_metadata=shared_metadata):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_kv_shared_layer_does_not_write_cache(self, mesh):
+        """KV-shared layers (kv_sharing_target_layer_name set, e.g. gemma-4
+        E2B/E4B cross-decoder) map to their target layer's cache index, so
+        writing would overwrite the target's entries with this layer's
+        discarded K/V. The write must only happen for non-shared layers."""
+        from tpu_inference.models.vllm.vllm_model_wrapper_context import \
+            get_vllm_model_wrapper_context
+
+        cache_after = {}
+        for shared in (False, True):
+            impl = PallasAttentionBackendImpl(
+                num_heads=NUM_HEADS,
+                head_size=HEAD_DIM,
+                scale=0.088,
+                num_kv_heads=NUM_KV_HEADS,
+                alibi_slopes=None,
+                sliding_window=None,
+                kv_cache_dtype="auto",
+                attn_type=AttentionType.DECODER,
+                kv_sharing_target_layer_name=("model.layers.0.self_attn.attn"
+                                              if shared else None),
+            )
+
+            layer = MagicMock()
+            layer.layer_name = "0"
+
+            query, key, value, kv_cache, metadata, shared_metadata = \
+                create_inputs(mesh)
+            cache_before = np.asarray(jax.device_get(kv_cache))
+
+            with torchax.default_env(), set_vllm_model_wrapper_context(
+                    kv_caches=[kv_cache],
+                    mesh=mesh,
+                    layer_name_to_kvcache_index={'0': 0},
+                    shared_attn_metadata=shared_metadata):
+                impl.forward(layer, query, key, value, torch.tensor([]),
+                             metadata)
+                ctx = get_vllm_model_wrapper_context()
+                cache_after[shared] = np.asarray(
+                    jax.device_get(ctx.kv_caches[0]))
+
+            if shared:
+                np.testing.assert_array_equal(cache_after[shared],
+                                              cache_before)
+
+        # Sanity: the non-shared layer with identical inputs DID write.
+        assert not np.array_equal(cache_after[True], cache_after[False])
 
     def test_forward_with_3d_qkv(self, mesh):
         impl = PallasAttentionBackendImpl(
@@ -210,12 +279,14 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={'0': 0}):
+                layer_name_to_kvcache_index={'0': 0},
+                shared_attn_metadata=shared_metadata):
             query = query.reshape(TOTAL_TOKENS, NUM_HEADS, HEAD_DIM)
             key = key.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
             value = value.reshape(TOTAL_TOKENS, NUM_KV_HEADS, HEAD_DIM)
@@ -240,13 +311,14 @@ class TestPallasAttentionBackendImpl:
         layer._k_scale_float = 1
         layer._v_scale_float = 1
 
-        query, key, value, kv_cache, metadata = create_inputs(
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
             mesh, kv_dtype=jnp.float8_e4m3fn)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={'0': 0}):
+                layer_name_to_kvcache_index={'0': 0},
+                shared_attn_metadata=shared_metadata):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
     def test_forward_with_w8a8(self, mesh):
@@ -267,13 +339,14 @@ class TestPallasAttentionBackendImpl:
         layer._k_scale_float = 1
         layer._v_scale_float = 1
 
-        query, key, value, kv_cache, metadata = create_inputs(
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
             mesh, kv_dtype=jnp.float8_e4m3fn)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={'0': 0}):
+                layer_name_to_kvcache_index={'0': 0},
+                shared_attn_metadata=shared_metadata):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
     def test_forward_with_vllm_kv_cache_raises_error(self, mesh):
@@ -291,12 +364,14 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
-                mesh=mesh), pytest.raises(RuntimeError,
-                                          match="should be empty but has"):
+                mesh=mesh,
+                shared_attn_metadata=shared_metadata), pytest.raises(
+                    RuntimeError, match="should be empty but has"):
             impl.forward(layer, query, key, value, torch.tensor([1]), metadata)
 
     def test_forward_with_output_scale_raises_error(self, mesh):
@@ -314,13 +389,15 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
         output_scale = torch.tensor([1.0])
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
-                mesh=mesh), pytest.raises(NotImplementedError,
-                                          match="fused output quantization"):
+                mesh=mesh,
+                shared_attn_metadata=shared_metadata), pytest.raises(
+                    NotImplementedError, match="fused output quantization"):
             impl.forward(layer,
                          query,
                          key,
@@ -344,13 +421,15 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata = create_inputs(mesh)
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
+            mesh)
         output_block_scale = torch.tensor([1.0])
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
-                mesh=mesh), pytest.raises(NotImplementedError,
-                                          match="fused output quantization"):
+                mesh=mesh,
+                shared_attn_metadata=shared_metadata), pytest.raises(
+                    NotImplementedError, match="fused output quantization"):
             impl.forward(layer,
                          query,
                          key,
@@ -377,13 +456,14 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata = create_inputs(
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
             mesh, head_dim=head_dim)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={'0': 0}):
+                layer_name_to_kvcache_index={'0': 0},
+                shared_attn_metadata=shared_metadata):
             assert impl.sinks is not None
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)
 
@@ -405,16 +485,49 @@ class TestPallasAttentionBackendImpl:
         layer = MagicMock()
         layer.layer_name = "0"
 
-        query, key, value, kv_cache, metadata = create_inputs(
+        query, key, value, kv_cache, metadata, shared_metadata = create_inputs(
             mesh, head_dim=head_dim)
 
         with torchax.default_env(), set_vllm_model_wrapper_context(
                 kv_caches=[kv_cache],
                 mesh=mesh,
-                layer_name_to_kvcache_index={'0': 0}
+                layer_name_to_kvcache_index={'0': 0},
+                shared_attn_metadata=shared_metadata
         ), pytest.raises(
                 NotImplementedError,
                 match=
                 "Attention sink support is only available when head_dim==64"):
             assert impl.sinks is not None
+            impl.forward(layer, query, key, value, torch.tensor([]), metadata)
+
+    def test_forward_encoder_only(self, mesh):
+        impl = PallasAttentionBackendImpl(
+            num_heads=NUM_HEADS,
+            head_size=HEAD_DIM,
+            scale=0.088,
+            num_kv_heads=NUM_HEADS,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.ENCODER_ONLY,
+        )
+
+        layer = MagicMock()
+        layer.layer_name = "0"
+
+        query, key, value, _, metadata, shared_metadata = create_inputs(
+            mesh, num_kv_heads=NUM_HEADS)
+        metadata.padded_num_reqs = MAX_NUM_SEQS
+
+        from vllm.config import VllmConfig
+        vllm_config = MagicMock(spec=VllmConfig)
+        vllm_config.model_config = MagicMock()
+        vllm_config.model_config.max_model_len = 128
+
+        with torchax.default_env(), set_vllm_model_wrapper_context(
+                kv_caches=[],
+                mesh=mesh,
+                layer_name_to_kvcache_index={'0': 0},
+                vllm_config=vllm_config,
+                shared_attn_metadata=shared_metadata):
             impl.forward(layer, query, key, value, torch.tensor([]), metadata)

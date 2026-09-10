@@ -1537,7 +1537,8 @@ def get_default_block_sizes(
                 bkv_sz = min(1024, max_kv)
                 bq_csz = min(512 // num_q_heads_per_kv_head, max_q)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
-        case 7:
+        # TODO(amandaliang): Update the default tiling for v8i.
+        case 7 | 8:
             if case == RpaCase.DECODE:
                 bq_sz = 1
                 bkv_sz = min(min_bkv_sz_to_peak, max_kv)

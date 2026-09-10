@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -35,7 +36,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 
-from tpu_inference.layers.common.moe import MoEBackend
+from tpu_inference.layers.common.moe import \
+    FusedMoEMethodBase as TpuFusedMoEMethodBase
 from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
@@ -56,19 +58,94 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
-from tpu_inference.utils import to_jax_dtype
+from tpu_inference.utils import _NUMPY_UNSUPPORTED_DTYPES, to_jax_dtype
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
 
 
+def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
+    """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
+
+    numpy has no scalar type for bf16 or the fp8 formats, so those travel as
+    uint8 and are reinterpreted with the ml_dtypes type JAX already uses for
+    them -- the same bit cast `tpu_inference.utils.t2j` does, and unlike the
+    torchax `t2j` this module falls back to, which widens them to float32 on
+    the host first. Reinterpreting scales the trailing dimension by the element
+    width on the way out and the numpy view undoes it exactly, but torch can
+    only do it on contiguous data.
+
+    Note that handing torch storage to numpy makes it non-resizable for good,
+    so `untyped_storage().resize_(0)` on the viewed tensor raises from here on.
+    The fp8 MoE callers free through `_free_torch_storage`, which falls back to
+    `set_()` and frees the buffer just the same, but a caller that resizes
+    unguarded cannot be given `stage_on_host`.
+    """
+    t = tensor.detach()
+    if t.device.type != "cpu":
+        return None
+
+    jax_dtype = _NUMPY_UNSUPPORTED_DTYPES.get(t.dtype)
+    if jax_dtype is None:
+        return t.numpy()
+    if not t.dim() or not t.is_contiguous():
+        return None
+    return t.view(torch.uint8).numpy().view(jax_dtype)
+
+
+def _load_weight_on_host(tensor: torch.Tensor,
+                         sharding: NamedSharding) -> Optional[jax.Array]:
+    """Build the sharded array straight from host memory, or None if we can't.
+
+    `t2j` builds the array with `jnp.array(...)`, which lands the whole
+    unsharded tensor on the default device; the caller's own
+    `general_device_put` then slices it back apart, one slice per addressable
+    device. On one host that is merely wasteful. Across hosts it is much worse,
+    because every host stages the entire tensor on its device 0 and keeps only
+    the shards it owns -- on a 32-device mesh 31/32 of that transfer is thrown
+    away, and the discarded fraction grows with the mesh.
+
+    Staging on the host instead lets every shard go straight to the device that
+    owns it. Measured on one host against a 17.2 GB expert weight: 5.08s ->
+    0.99s (3.4 -> 17.3 GB/s), with more to gain multi-host.
+
+    Returns None if the weight cannot be staged this way -- most often a shape
+    the requested sharding does not divide, since block scales are not always
+    divisible along the axes their weight is. Callers reshard afterwards
+    regardless, so falling back to unsharded staging is correct. It is not
+    merely slower, though: the fallback is torchax's `t2j`, which widens bf16
+    and fp8 to float32 before it copies, so a weight that declines staging
+    needs 2-4x its own size in host memory on the way through.
+    """
+    try:
+        np_view = _host_numpy_view(tensor)
+        if np_view is None:
+            return None
+        array = general_device_put(np_view, sharding)
+    except (ValueError, IndexError) as e:
+        logger.warning_once(
+            f"Host staging unavailable for {tuple(tensor.shape)}"
+            f" {tensor.dtype} at {sharding}: {e}")
+        return None
+    # np_view aliases the torch storage and callers free that storage as soon as
+    # this returns, so the asynchronous copy has to be forced here rather than
+    # left to whoever consumes the array.
+    jax.block_until_ready(array)
+    return array
+
+
 def _load_weight_for_layer(
     layer: torch.nn.Module,
     param_name: str,
     sharding: NamedSharding,
+    stage_on_host: bool = False,
 ) -> jax.Array:
     """Load a layer's weight parameter onto the TPU mesh.
+
+    Set `stage_on_host` when the caller's next step is to put the weight at
+    exactly `sharding` anyway -- it produces the same array without the detour
+    through a single device. See `_load_weight_on_host`.
     """
     tensor = getattr(layer, param_name)
 
@@ -100,6 +177,10 @@ def _load_weight_for_layer(
             tensor = new_param
 
     if not vllm_envs.VLLM_TPU_USING_PATHWAYS:
+        if stage_on_host:
+            array = _load_weight_on_host(tensor, sharding)
+            if array is not None:
+                return array
         return t2j(tensor, use_dlpack=False)
 
     if is_pathways_dummy_load():
@@ -206,50 +287,15 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             "VllmUnquantizedLinearMethod")
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
-        super().__init__(linear_config)
+        vllm_linear.UnquantizedLinearMethod.__init__(self)
+        common_unquantized.UnquantizedLinearMethod.__init__(
+            self, linear_config)
 
     def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
                               args, kwargs):
-        """Check if all weights are loaded for the layer. If so, process and shard the weights.
-
-        Note on Fused Weight Loading (e.g., Qwen3-VL / Qwen3-VL-MoE / Qwen2.5-VL Vision Encoder):
-        Historically, LLMs stored attention Q/K/V weights separately in HuggingFace checkpoints,
-        and vLLM loaded them per shard (passing shard_id in `args`).
-        However, newer multimodal models like Qwen3-VL / Qwen3-VL-MoE store vision attention weights
-        already fused on disk (e.g., `attn.qkv.weight`). In such cases, vLLM's weight loader is invoked
-        without a shard_id (`args` is empty), and vLLM internally slices and copies the fused weight.
-        To support TPU incremental sharding for these fused weights, we detect when `args` is empty
-        and immediately register all underlying shards ('q', 'k', 'v') as loaded to satisfy the sharding trigger.
-        """
-        if isinstance(layer, vllm_linear.QKVParallelLinear):
-            if len(args) == 1:
-                shard_id = args[0]
-                layer._loaded_weights.add((param_name, shard_id))
-            else:
-                # Fused weight loaded in one go (e.g., Qwen3-VL / Qwen3-VL-MoE vision encoder `attn.qkv.weight`).
-                # vLLM's QKVParallelLinear.weight_loader internally slices the weight into q, k, v.
-                # We register all 3 shards to immediately trigger process_weights_after_loading.
-                layer._loaded_weights.add((param_name, 'q'))
-                layer._loaded_weights.add((param_name, 'k'))
-                layer._loaded_weights.add((param_name, 'v'))
-        elif isinstance(layer, vllm_linear.MergedColumnParallelLinear):
-            if len(args) == 1:
-                shard_id = args[0]
-                layer._loaded_weights.add((param_name, shard_id))
-            else:
-                # Fused weight loaded in one go (e.g., MLP gate_up_proj fused on disk).
-                # Register all output partitions to immediately trigger process_weights_after_loading.
-                for i in range(len(layer.output_sizes)):
-                    layer._loaded_weights.add((param_name, i))
-        else:
-            # Keep track of loaded weights for other linear layers, e.g. ('weight', 'bias')
-            layer._loaded_weights.add(param_name)
-
-        if len(layer._loaded_weights) == self.linear_config.num_proj * len(
-                dict(layer.named_parameters(recurse=False))):
-            logger.debug(f"Start sharding weights for layer {type(layer)}")
-            self.process_weights_after_loading(layer)
-            logger.debug(f"Complete sharding weights for layer {type(layer)}")
+        """Check if all weights are loaded for the layer. If so, process and shard the weights."""
+        self.maybe_process_linear_weights(layer, param_name, args, kwargs,
+                                          self.linear_config.num_proj)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not _tensor_is_in_cpu(layer.weight):
@@ -355,15 +401,11 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         mesh: Mesh,
         ep_axis_name: str = "model",
     ):
-        super().__init__(moe)
+        UnquantizedFusedMoEMethod.__init__(self, moe)
         self.mesh = mesh
         self.moe_backend = select_moe_backend_from_fused_moe_config(self.moe)
 
-        self.extra_backend_kwargs = {}
-        if self.moe_backend == MoEBackend.FUSED_MOE:
-            # When fused moe kernle is used, we pass extra arguments like
-            # tuned block sizes to the kernel.
-            self.extra_backend_kwargs = dict(ep_axis_name=ep_axis_name, )
+        TpuFusedMoEMethodBase.__init__(self, self.moe_backend, ep_axis_name)
 
     @property
     def is_monolithic(self) -> bool:
