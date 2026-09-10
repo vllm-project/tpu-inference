@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import vllm.envs as vllm_envs
 from jax.sharding import NamedSharding, PartitionSpec
+from vllm.utils.math_utils import round_down
 
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
@@ -385,13 +386,12 @@ class CompilationManager:
         metadata_attn_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
         pcp_size = self.runner.vllm_config.sharding_config.prefill_cp_size
-        # A bucket that cannot give every request a chunk of at least one KV
-        # page per rank can never be picked at runtime (chunks are page
-        # multiples, and the runner's bucket sizing takes the layout's row
-        # count into account), so the variant is unreachable -- for a single
-        # request too.
-        if (pcp_size > 1 and num_tokens <
-                2 * pcp_size * self.runner.block_size * pcp_num_reqs):
+        # Only a bucket too small for even ONE page-multiple chunk per rank
+        # is unreachable. Every rung must still compile at every remaining
+        # bucket: the bucket and the rung are picked independently at
+        # runtime, so a small bucket can arrive with the top rung.
+        if (pcp_size > 1
+                and num_tokens < 2 * pcp_size * self.runner.block_size):
             return
 
         # Keep existing pattern for complex array operations
@@ -414,24 +414,20 @@ class CompilationManager:
             # so the kernel body does not run, but the traced program still
             # slices these arrays.
             block = self.runner.block_size
-            # Largest page-multiple chunk that fits every request.  Any
-            # request count (1 included) runs the same layout and needs the
-            # same arrays.
-            chunk = (num_tokens // (2 * pcp_size * pcp_num_reqs) // block *
-                     block)
-            assert chunk >= block, (
-                f"{num_tokens=} cannot hold {pcp_num_reqs} PCP requests "
-                "with page-multiple chunks; this bucket should have been "
-                "skipped")
+            # Compilation keys on shapes and the static num_reqs rung only,
+            # so the dummy layout may hold fewer live requests than the rung
+            # (as many as the bucket fits; at least one, by the guard above).
+            live_reqs = min(pcp_num_reqs, num_tokens // (2 * pcp_size * block))
+            chunk = round_down(num_tokens // (2 * pcp_size * live_reqs), block)
             chunks, offs, _ = pcp_token_layout([2 * pcp_size * chunk] *
-                                               pcp_num_reqs,
+                                               live_reqs,
                                                pcp_size,
                                                align=block)
             # A real in-range map: the kernel prefetches these as page
             # indices even though no seq iterates during precompile.
             page_order_np = pcp_page_order(chunks, offs, pcp_size,
-                                           num_tokens // pcp_size,
-                                           num_tokens, block)
+                                           num_tokens // pcp_size, num_tokens,
+                                           block)
             cu_row, qpos_np, kv_starts_np = pcp_seq_arrays(
                 chunks, offs, pcp_size, attn_seqs)
             pcp = self.runner.pcp_preprocessor.metadata_to_device(
@@ -733,8 +729,6 @@ class CompilationManager:
                 _cache_rungs = (False, True) if _pcp > 1 else (False, )
                 for _has_cached_kv in _cache_rungs:
                     for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
-                        # Unreachable-bucket variants are skipped inside
-                        # _precompile_backbone_helper.
                         self._precompile_backbone_helper(
                             f"worker{self.runner.rank} backbone",
                             input_ids=input_ids,

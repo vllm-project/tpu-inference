@@ -58,29 +58,16 @@ def _to_rank_order(x, pcp, C):
         x.reshape(2 * pcp, C, *x.shape[1:])[_row_perm(pcp)].reshape(x.shape))
 
 
-def _pcp_meta(pcp, C, num_current):
-    """The per-rank fused current-phase metadata, exactly as _prepare_inputs
-    builds it: cu = [0, C, 2C] (both halves full length -- rank-invariant, as
-    the merged path requires) and q_pos_offsets = [head, tail]."""
-    del num_current  # tails are full length; padding rows are simply unused
-    two_p = 2 * pcp
-    cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
-    qpos = np.zeros((pcp, MAX_SEQ), np.int32)
-    for r in range(pcp):
-        cu[r, 1] = C
-        cu[r, 2:] = 2 * C
-        qpos[r, 0] = r * C
-        qpos[r, 1] = (two_p - 1 - r) * C
-    return jnp.asarray(cu), jnp.asarray(qpos)
-
-
-def _single_req_extras(pcp, C):
-    """kv_new_starts / kv_page_order for ONE request filling 2P*C rows, as
-    the merged path requires for any request count."""
+def _single_req_meta(pcp, C):
+    """cu_q_lens / q_pos_offsets / kv_new_starts / kv_page_order for ONE
+    request filling 2P*C rows, straight from the production helpers (a
+    single request is simply R = 1 of the general layout)."""
     t_pad = 2 * pcp * C
-    return (jnp.zeros(MAX_SEQ, jnp.int32),
-            jnp.asarray(pcp_page_order([C], [0], pcp, t_pad // pcp, t_pad,
-                                       PAGE)))
+    cu_row, qpos, kv_new_starts = pcp_seq_arrays([C], [0], pcp, MAX_SEQ)
+    return (jnp.asarray(np.tile(cu_row, (pcp, 1))), jnp.asarray(qpos),
+            jnp.asarray(kv_new_starts),
+            jnp.asarray(
+                pcp_page_order([C], [0], pcp, t_pad // pcp, t_pad, PAGE)))
 
 
 class PcpAttentionInterfaceTest(jtu.JaxTestCase):
@@ -277,8 +264,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
                 sm_scale=SM_SCALE)
             exp.append(np.asarray(e[:n[i]]))
 
-        # Token buffers in rank order, plus the per-page K/V unshuffle map
-        # (the production helper) for the kernel's in-fetch reorder.
+        # Token buffers in rank order, plus the per-page K/V unshuffle map.
         def empty(width):
             return np.zeros((t_pad, width, HD), np.float32)
 
@@ -511,8 +497,8 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         # Both fused seqs are the SAME request -> [T, T] / [P, P].
         kv_lens = pad1([kv_total, kv_total])
         kv_cache_lens = pad1([L, L])
-        cu_q_lens, q_pos_offsets = _pcp_meta(pcp, C, num_current)
-        kv_new_starts, kv_page_order = _single_req_extras(pcp, C)
+        cu_q_lens, q_pos_offsets, kv_new_starts, kv_page_order = (
+            _single_req_meta(pcp, C))
         distribution = jnp.array([0, 0, 2], jnp.int32)  # head + tail
 
         md = AttentionMetadata(
@@ -680,8 +666,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         def pad1(xs):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
-        cu, qpos = _pcp_meta(pcp, C, num_current)
-        kv_new_starts, kv_page_order = _single_req_extras(pcp, C)
+        cu, qpos, kv_new_starts, kv_page_order = _single_req_meta(pcp, C)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
             seq_lens=pad1([kv_total, kv_total]),
@@ -749,8 +734,7 @@ class PcpAttentionInterfaceTest(jtu.JaxTestCase):
         def pad1(xs):
             return jnp.pad(jnp.array(xs, jnp.int32), (0, MAX_SEQ - len(xs)))
 
-        cu, qpos = _pcp_meta(pcp, C, num_current)
-        kv_new_starts, kv_page_order = _single_req_extras(pcp, C)
+        cu, qpos, kv_new_starts, kv_page_order = _single_req_meta(pcp, C)
         md = AttentionMetadata(
             input_positions=jnp.zeros(1, jnp.int32),
             seq_lens=pad1([kv_total, kv_total]),

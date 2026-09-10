@@ -1075,14 +1075,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 scheduler_config.max_num_seqs,
                 pcp_size,
                 align=self.block_size)
-            # The bucket must keep every zigzag chunk -- T_pad / (2 * pcp)
-            # in the single-request case -- a whole number of KV pages for
-            # the page-order map, and 128-alignment keeps it TPU-friendly;
-            # power-of-two buckets satisfy both on their own.
+            # The page-order map needs each dp shard's T_pad / pcp to be a
+            # whole number of KV pages (128-alignment keeps the bucket
+            # TPU-friendly): align the per-dp value, then scale, so the
+            # invariant holds per shard for any dp_size.
             additional_sizes = list(additional_sizes) + [
-                common_utils.align_to(
-                    _worst * self.dp_size,
-                    2 * pcp_size * max(128, self.block_size))
+                common_utils.align_to(_worst,
+                                      max(128, pcp_size * self.block_size)) *
+                self.dp_size
             ]
         self.num_tokens_paddings = sorted(self.num_tokens_paddings +
                                           additional_sizes)

@@ -426,7 +426,7 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         n = [r[0] for r in reqs]
         L = [r[1] for r in reqs]
         R = len(reqs)
-        C = [cdiv(cdiv(ni, two_p), align) * align for ni in n]
+        C = [align_to(cdiv(ni, two_p), align) for ni in n]
         W = [2 * ci for ci in C]
         off = [sum(W[:i]) for i in range(R)]
         S = sum(W)  # live tokens per rank
@@ -487,12 +487,22 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             q += [r * lay["C"][i], (lay["two_p"] - 1 - r) * lay["C"][i]]
         return self._pad1(q)
 
-    def _rank_order_kv(self, lay, P, kv_buf_k, kv_buf_v):
+    def _kv_operands(self, lay, page_order, kv_buf_k, kv_buf_v, dtype):
+        """The kernel's K/V operands: with `page_order` (the production
+        path), the rank-order all_gather buffer plus the kv_page_order map
+        the kernel unshuffles it through; without, the pre-gathered
+        token-order buffer and no map."""
+        if not page_order:
+            return jnp.array(kv_buf_k, dtype), jnp.array(kv_buf_v, dtype), None
+        ro_k, ro_v, order = self._rank_order_kv(lay, kv_buf_k, kv_buf_v)
+        return jnp.array(ro_k, dtype), jnp.array(ro_v, dtype), order
+
+    def _rank_order_kv(self, lay, kv_buf_k, kv_buf_v):
         """The token-order new-KV buffers scattered into the rank-order layout
         the all_gather produces (t_pad = P * S rows), plus the per-page map the
-        kernel unshuffles them through. This is the production configuration;
-        the token-order variant feeds the kernel a pre-gathered buffer."""
+        kernel unshuffles them through."""
         two_p, C, off, S = lay["two_p"], lay["C"], lay["off"], lay["S"]
+        P = two_p // 2
         t_pad = P * S
         ro_k = np.zeros((t_pad, *kv_buf_k.shape[1:]), kv_buf_k.dtype)
         ro_v = np.zeros_like(ro_k)
@@ -528,7 +538,9 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         nq, nkv, hd = 8, 2, 128
         # Ragged lengths, mixed cache state, incl. a first-chunk request (L=0).
         reqs = [(70, 0), (33, 48), (16, 96)]
-        lay = self._multireq_layout(P, reqs, align=self.PAGE if page_order else 1)
+        lay = self._multireq_layout(P,
+                                    reqs,
+                                    align=self.PAGE if page_order else 1)
         R = lay["R"]
         c = self._cfg(dtype)
         rng = np.random.default_rng(7)
@@ -545,13 +557,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             kv_buf_v[s:s + lay["n"][i]] = vi
             per_req_kv.append(
                 merge_kv(jnp.array(ki, dtype), jnp.array(vi, dtype)))
-        if page_order:
-            ro_k, ro_v, order = self._rank_order_kv(lay, P, kv_buf_k,
-                                                    kv_buf_v)
-            k, v = jnp.array(ro_k, dtype), jnp.array(ro_v, dtype)
-        else:
-            order = None
-            k, v = jnp.array(kv_buf_k, dtype), jnp.array(kv_buf_v, dtype)
+        k, v, order = self._kv_operands(lay, page_order, kv_buf_k, kv_buf_v,
+                                        dtype)
         q = self._rand(rng, (lay["S"], nq, hd), dtype)
 
         # Pre-fill the entire cache so any stray write shows up. Keep it on the
@@ -626,7 +633,9 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         self.PAGE = 16
         nq, nkv, hd = 8, 2, 128
         reqs = [(70, 0), (33, 48), (16, 96)]
-        lay = self._multireq_layout(P, reqs, align=self.PAGE if page_order else 1)
+        lay = self._multireq_layout(P,
+                                    reqs,
+                                    align=self.PAGE if page_order else 1)
         R, C, off, two_p = lay["R"], lay["C"], lay["off"], lay["two_p"]
         rng = np.random.default_rng(11)
 
@@ -655,13 +664,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                                               self._padcu([0, ni]),
                                               jnp.array([0, 0, 1], jnp.int32))
             exp.append(e[:ni])
-        if page_order:
-            ro_k, ro_v, order = self._rank_order_kv(lay, P, kv_buf_k,
-                                                    kv_buf_v)
-            k, v = jnp.array(ro_k, dtype), jnp.array(ro_v, dtype)
-        else:
-            order = None
-            k, v = jnp.array(kv_buf_k, dtype), jnp.array(kv_buf_v, dtype)
+        k, v, order = self._kv_operands(lay, page_order, kv_buf_k, kv_buf_v,
+                                        dtype)
 
         checked = 0
         for r in range(P):

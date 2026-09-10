@@ -17,7 +17,7 @@ import jax
 import numpy as np
 import pytest
 from jax.sharding import Mesh
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2, round_up
 
 from tpu_inference.runner.pcp_utils import (PCPPreprocessor, pcp_batch_layout,
                                             pcp_buffer_tokens,
@@ -55,13 +55,16 @@ def _layout(counts, pcp):
 
 @pytest.mark.parametrize("pcp,counts", LAYOUTS)
 def test_token_layout(pcp, counts):
-    chunk, off, s_live = pcp_token_layout(counts, pcp)
+    chunk, off, s_live = pcp_token_layout(counts, pcp, align=1)
     assert chunk == [cdiv(n, 2 * pcp) for n in counts]
     assert off == list(np.cumsum([0] + [2 * c for c in chunk])[:-1])
     assert s_live == sum(2 * c for c in chunk)
-    assert pcp_buffer_tokens(counts, pcp) == pcp * s_live
-    assert pcp_buffer_tokens(counts, pcp) <= pcp_max_buffer_tokens(
-        sum(counts), len(counts), pcp)
+    assert pcp_buffer_tokens(counts, pcp, align=1) == pcp * s_live
+    assert pcp_buffer_tokens(counts, pcp,
+                             align=1) <= pcp_max_buffer_tokens(sum(counts),
+                                                               len(counts),
+                                                               pcp,
+                                                               align=1)
 
 
 @pytest.mark.parametrize("pcp,counts", LAYOUTS)
@@ -73,7 +76,7 @@ def test_batch_layout(pcp, counts):
 
 def test_batch_layout_rejects_short_buffer():
     with pytest.raises(AssertionError):
-        pcp_batch_layout([100, 100], 64, 2)
+        pcp_batch_layout([100, 100], 64, 2, align=1)
 
 
 @pytest.mark.parametrize("pcp,counts", LAYOUTS)
@@ -167,8 +170,6 @@ def test_prepare_inputs(pcp, counts):
         np.asarray(md.kv_cache_lens)[:n_seqs], np.repeat(computed, 2))
     assert md.has_cached_kv == (max(computed) > 0)
     assert md.num_reqs == (1 if n_reqs == 1 else 8)
-    # The kernel unshuffles the all-gathered K/V through the per-page map,
-    # for any request count.
     assert np.array_equal(
         np.asarray(md.kv_page_order),
         pcp_page_order(chunk, off, pcp, t_pad // pcp, t_pad, PAGE))
@@ -214,13 +215,6 @@ def _per_token_order(chunk, off, pcp, s_pad):
     return order
 
 
-@pytest.mark.parametrize("pcp,ns", [(1, [1]), (2, [1, 2]), (4, [3]),
-                                    (8, [5, 7, 2])])
-def test_align_one_matches_tight_layout(pcp, ns):
-    tight = pcp_token_layout(ns, pcp)
-    assert tight == pcp_token_layout(ns, pcp, align=1)
-
-
 @pytest.mark.parametrize("pcp", [2, 4, 8])
 @pytest.mark.parametrize("align", [16, 128])
 def test_aligned_chunks_and_offsets(pcp, align):
@@ -246,9 +240,7 @@ def test_padding_bound_per_request():
 
 def _check_page_order(ns, pcp, page):
     C, off, s_live = pcp_token_layout(ns, pcp, align=page)
-    # Bucket: the next multiple of 2 * pcp * page covering the live rows.
-    q = 2 * pcp * page
-    t_pad = (pcp * s_live + q - 1) // q * q
+    t_pad = round_up(pcp * s_live, 2 * pcp * page)
     s_pad = t_pad // pcp
     got = pcp_page_order(C, off, pcp, s_pad, t_pad, page)
     assert got.shape == (t_pad // page, )
@@ -274,16 +266,9 @@ def test_page_order_matches_per_token_map(pcp, page):
 
 @pytest.mark.parametrize("pcp", [2, 4])
 def test_page_order_single_request_is_r1_of_general(pcp):
-    # One request must produce the same map whether it is "the single
-    # request" or the first of a batch: R = 1 is not a special case.
-    page = 16
-    (c, ), (o, ), s_live = pcp_token_layout([1000], pcp, align=page)
-    t_pad = pcp * s_live
-    one = pcp_page_order([c], [o], pcp, s_live, t_pad, page)
-    live = 2 * pcp * c // page
-    want = _per_token_order([c], [o], pcp, s_live)
-    for p in range(live):
-        assert one[p] * page == want[p * page]
+    # A single request is simply R = 1 of the general layout; the full
+    # contiguity/map checker must pass on it unchanged.
+    _check_page_order([1000], pcp, 16)
 
 
 def test_page_order_rejects_unaligned_chunk():
