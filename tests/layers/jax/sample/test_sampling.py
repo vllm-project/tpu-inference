@@ -23,8 +23,9 @@ from vllm.v1.outputs import LogprobsTensors
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _merge_topk_candidates, compute_logprobs, compute_prompt_logprobs,
-    distributed_sampling_allowed, gather_logprobs, sample)
+    _can_sample_distributed, _merge_topk_candidates, compute_logprobs,
+    compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
+    sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -38,6 +39,25 @@ class TestSampling:
         assert distributed_sampling_allowed(True, "raw_logits")
         assert not distributed_sampling_allowed(True, "processed_logprobs")
         assert not distributed_sampling_allowed(True, "processed_logits")
+
+    def test_distributed_sampling_requires_positive_top_p(self):
+        metadata = TPUSupportedSamplingMetadata(
+            temperature=jnp.array([0.7, 0.7], dtype=jnp.float32),
+            top_k=jnp.array([20, 20], dtype=jnp.int32),
+            top_p=jnp.array([0.9, 0.0], dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+        )
+        assert not bool(_can_sample_distributed(metadata))
+
+        greedy_metadata = TPUSupportedSamplingMetadata(
+            temperature=jnp.array([0.7, 0.0], dtype=jnp.float32),
+            top_k=metadata.top_k,
+            top_p=metadata.top_p,
+            do_sampling=True,
+            logprobs=False,
+        )
+        assert bool(_can_sample_distributed(greedy_metadata))
 
     def test_distributed_candidates_match_full_vocab_filters(self):
         batch_size = 2

@@ -72,6 +72,17 @@ def distributed_sampling_allowed(logprobs: bool, logprobs_mode) -> bool:
     return not (logprobs and str(logprobs_mode).startswith("processed"))
 
 
+def _can_sample_distributed(
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata) -> jax.Array:
+    """Whether every row is supported by distributed candidate sampling."""
+    is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+    supported = ((tpu_sampling_metadata.top_k > 0) &
+                 (tpu_sampling_metadata.top_k <=
+                  _distributed_sampling_max_top_k()) &
+                 (tpu_sampling_metadata.top_p > 0.0))
+    return jnp.all(is_greedy | supported)
+
+
 @dataclass
 class PromptLogprobsReqSnap:
     """Per-request state snapshotted at step N for use in get_output()."""
@@ -260,6 +271,10 @@ def _distributed_topk_sample(
                                                    microbatch_size)
         top_k_mb = local_top_k.reshape(num_microbatches, microbatch_size)
         top_p_mb = local_top_p.reshape(num_microbatches, microbatch_size)
+        data_axis = ShardingAxisName.MLP_DATA
+        if data_axis in mesh.axis_names and mesh.shape[data_axis] > 1:
+            local_rng = jax.random.fold_in(local_rng,
+                                           lax.axis_index(data_axis))
         rngs = jax.random.split(local_rng, num_microbatches)
         shard_index = lax.axis_index(ShardingAxisName.MLP_TENSOR)
 
@@ -360,15 +375,7 @@ def sample(
         if use_distributed_candidates:
             # Candidate shapes use a trace-time maximum; each request's top-k
             # remains dynamic. Greedy and padded rows do not consume a sample.
-            supported = jnp.all(
-                jnp.logical_or(
-                    is_greedy,
-                    jnp.logical_and(
-                        tpu_sampling_metadata.top_k > 0,
-                        tpu_sampling_metadata.top_k <=
-                        _distributed_sampling_max_top_k(),
-                    ),
-                ))
+            supported = _can_sample_distributed(tpu_sampling_metadata)
 
             def sample_candidates(_):
                 sampled_tokens, incomplete_candidates = (
