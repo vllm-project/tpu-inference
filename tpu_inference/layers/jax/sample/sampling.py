@@ -151,51 +151,6 @@ def _apply_sampling_transforms(
     return logits
 
 
-def _apply_sampling_transforms_microbatched(
-    logits: jax.Array,
-    tpu_sampling_metadata: TPUSupportedSamplingMetadata,
-) -> jax.Array:
-    """Apply sampling transforms in sequential, scratchpad-sized chunks.
-
-    The top-k and top-p implementations repeatedly reduce over the complete
-    vocabulary. Processing large request batches at once can push their working
-    set out of fast TPU memory. Keep the existing path for small or non-divisible
-    batches, and split larger divisible batches into fixed-size chunks.
-    """
-    batch_size = logits.shape[0]
-    microbatch_size = envs.SAMPLING_MICROBATCH_SIZE
-    if (microbatch_size <= 0 or batch_size <= microbatch_size
-            or batch_size % microbatch_size != 0):
-        return _apply_sampling_transforms(logits, tpu_sampling_metadata)
-
-    num_microbatches = batch_size // microbatch_size
-    microbatch_logits = logits.reshape(
-        (num_microbatches, microbatch_size, logits.shape[-1]))
-    microbatch_temperature = tpu_sampling_metadata.temperature.reshape(
-        (num_microbatches, microbatch_size))
-    microbatch_top_k = tpu_sampling_metadata.top_k.reshape(
-        (num_microbatches, microbatch_size))
-    microbatch_top_p = tpu_sampling_metadata.top_p.reshape(
-        (num_microbatches, microbatch_size))
-
-    def transform_microbatch(inputs):
-        chunk_logits, temperature, top_k, top_p = inputs
-        chunk_metadata = TPUSupportedSamplingMetadata(
-            temperature=temperature,
-            top_k=top_k,
-            top_p=top_p,
-            do_sampling=True,
-        )
-        return _apply_sampling_transforms(chunk_logits, chunk_metadata)
-
-    processed_logits = jax.lax.map(
-        transform_microbatch,
-        (microbatch_logits, microbatch_temperature, microbatch_top_k,
-         microbatch_top_p),
-    )
-    return processed_logits.reshape(logits.shape)
-
-
 def _merge_topk_candidates(
     candidate_values: jax.Array,
     candidate_ids: jax.Array,
@@ -258,73 +213,50 @@ def _distributed_topk_sample(
                 "Distributed top-k sampling requires at least "
                 f"{candidates_per_shard} logits per vocabulary shard")
 
-        microbatch_size = envs.SAMPLING_MICROBATCH_SIZE
-        batch_size = local_logits.shape[0]
-        if (microbatch_size <= 0 or batch_size <= microbatch_size
-                or batch_size % microbatch_size != 0):
-            microbatch_size = batch_size
-        num_microbatches = batch_size // microbatch_size
-
-        logits_mb = local_logits.reshape(num_microbatches, microbatch_size,
-                                         local_vocab_size)
-        temperature_mb = local_temperature.reshape(num_microbatches,
-                                                   microbatch_size)
-        top_k_mb = local_top_k.reshape(num_microbatches, microbatch_size)
-        top_p_mb = local_top_p.reshape(num_microbatches, microbatch_size)
         data_axis = ShardingAxisName.MLP_DATA
         if data_axis in mesh.axis_names and mesh.shape[data_axis] > 1:
             local_rng = jax.random.fold_in(local_rng,
                                            lax.axis_index(data_axis))
-        rngs = jax.random.split(local_rng, num_microbatches)
+        # Preserve the candidate sampler's existing key derivation.
+        sample_rng = jax.random.split(local_rng, 1)[0]
         shard_index = lax.axis_index(ShardingAxisName.MLP_TENSOR)
 
-        def sample_microbatch(inputs):
-            (key, chunk_logits, chunk_temperature, chunk_top_k,
-             chunk_top_p) = inputs
-            # Greedy rows do not consume the categorical result. A safe
-            # positive temperature avoids reversing their candidate ordering.
-            safe_temperature = jnp.where(
-                chunk_temperature < _SAMPLING_EPS,
-                jnp.ones_like(chunk_temperature),
-                chunk_temperature,
-            )
-            scaled_logits = chunk_logits / safe_temperature[:, None]
-            local_values, local_ids = lax.top_k(
-                scaled_logits, candidates_per_shard)
-            local_ids = (local_ids + shard_index * local_vocab_size).astype(
-                jnp.int32)
-
-            candidate_values = lax.all_gather(
-                local_values,
-                ShardingAxisName.MLP_TENSOR,
-                axis=-1,
-                tiled=True,
-            )
-            candidate_ids = lax.all_gather(
-                local_ids,
-                ShardingAxisName.MLP_TENSOR,
-                axis=-1,
-                tiled=True,
-            )
-            safe_top_k = jnp.clip(chunk_top_k, 1,
-                                  _distributed_sampling_max_top_k())
-            filtered_values, candidate_ids, incomplete = (
-                _merge_topk_candidates(candidate_values, candidate_ids,
-                                       safe_top_k, chunk_top_p))
-            incomplete = jnp.logical_and(incomplete, chunk_temperature
-                                         >= _SAMPLING_EPS)
-            sampled_positions = jax.random.categorical(key, filtered_values)
-            sampled_ids = jnp.take_along_axis(candidate_ids,
-                                              sampled_positions[:, None],
-                                              axis=-1)[:, 0]
-            return sampled_ids, incomplete
-
-        sampled_ids, incomplete_candidates = lax.map(
-            sample_microbatch,
-            (rngs, logits_mb, temperature_mb, top_k_mb, top_p_mb),
+        # Greedy rows do not consume the categorical result. A safe positive
+        # temperature avoids reversing their candidate ordering.
+        safe_temperature = jnp.where(
+            local_temperature < _SAMPLING_EPS,
+            jnp.ones_like(local_temperature),
+            local_temperature,
         )
-        return (sampled_ids.reshape(batch_size),
-                jnp.any(incomplete_candidates))
+        scaled_logits = local_logits / safe_temperature[:, None]
+        local_values, local_ids = lax.top_k(scaled_logits,
+                                            candidates_per_shard)
+        local_ids = (local_ids + shard_index * local_vocab_size).astype(
+            jnp.int32)
+
+        candidate_values = lax.all_gather(
+            local_values,
+            ShardingAxisName.MLP_TENSOR,
+            axis=-1,
+            tiled=True,
+        )
+        candidate_ids = lax.all_gather(
+            local_ids,
+            ShardingAxisName.MLP_TENSOR,
+            axis=-1,
+            tiled=True,
+        )
+        safe_top_k = jnp.clip(local_top_k, 1,
+                              _distributed_sampling_max_top_k())
+        filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
+            candidate_values, candidate_ids, safe_top_k, local_top_p)
+        incomplete = jnp.logical_and(incomplete,
+                                     local_temperature >= _SAMPLING_EPS)
+        sampled_positions = jax.random.categorical(sample_rng, filtered_values)
+        sampled_ids = jnp.take_along_axis(candidate_ids,
+                                          sampled_positions[:, None],
+                                          axis=-1)[:, 0]
+        return sampled_ids, jnp.any(incomplete)
 
     return jax.shard_map(
         local_sample,
@@ -361,7 +293,7 @@ def sample(
             full_logits = jax.lax.with_sharding_constraint(
                 logits,
                 NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-            processed_logits = _apply_sampling_transforms_microbatched(
+            processed_logits = _apply_sampling_transforms(
                 full_logits, tpu_sampling_metadata)
             sampled_tokens = jax.random.categorical(rng, processed_logits)
             tokens = jnp.where(is_greedy, greedy_tokens, sampled_tokens)
