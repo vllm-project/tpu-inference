@@ -46,7 +46,7 @@ notify:
     if: build.state == "failed"
 EOF
 else
-    # Manual run (rehearsals, forced TOKAMAX_VERSION): tell whoever started it,
+    # Manual run (rehearsals, forced TOKAMAX_VERSION_OVERRIDE): tell whoever
     # not the oncall.
     cat <<EOF > "${NOTIFY_FILE}"
 notify:
@@ -84,17 +84,17 @@ set_jax_envs() {
     esac
 }
 
-CURRENT_VERSION="$(sed -n 's/^tokamax==\(.*\)$/\1/p' "${REQUIREMENTS_FILE}")"
-if [[ -z "${CURRENT_VERSION}" ]]; then
+TOKAMAX_CURRENT_VERSION="$(sed -n 's/^tokamax==\(.*\)$/\1/p' "${REQUIREMENTS_FILE}")"
+if [[ -z "${TOKAMAX_CURRENT_VERSION}" ]]; then
     echo "ERROR: no 'tokamax==' pin found in ${REQUIREMENTS_FILE}." >&2
     exit 1
 fi
 
-# TOKAMAX_VERSION can be set in the build env from the Buildkite UI.
-NEW_VERSION="${TOKAMAX_VERSION:-}"
-if [[ -z "${NEW_VERSION}" ]]; then
+# TOKAMAX_VERSION_OVERRIDE can be set in the build env from the Buildkite UI.
+TOKAMAX_CANDIDATE_VERSION="${TOKAMAX_VERSION_OVERRIDE:-}"
+if [[ -z "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
     echo "--- :package: Resolving the newest tokamax nightly from PyPI"
-    NEW_VERSION="$(python3 - <<'PYEOF'
+    TOKAMAX_CANDIDATE_VERSION="$(python3 - <<'PYEOF'
 import json
 import re
 import sys
@@ -127,22 +127,22 @@ PYEOF
 )"
 fi
 
-echo "Pinned tokamax version   : ${CURRENT_VERSION}"
-echo "Candidate tokamax version: ${NEW_VERSION}"
+echo "Pinned tokamax version   : ${TOKAMAX_CURRENT_VERSION}"
+echo "Candidate tokamax version: ${TOKAMAX_CANDIDATE_VERSION}"
 
-if [[ "${CURRENT_VERSION}" == "${NEW_VERSION}" ]]; then
-    echo "Already on ${NEW_VERSION}. Nothing to bump; skipping the test run."
+if [[ "${TOKAMAX_CURRENT_VERSION}" == "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
+    echo "Already on ${TOKAMAX_CANDIDATE_VERSION}. Nothing to bump; skipping the test run."
     buildkite-agent annotate \
-        ":white_check_mark: tokamax already pinned to \`${NEW_VERSION}\` - no bump needed." \
+        ":white_check_mark: tokamax already pinned to \`${TOKAMAX_CANDIDATE_VERSION}\` - no bump needed." \
         --style "success"
     exit 0
 fi
 
-buildkite-agent meta-data set "TOKAMAX_VERSION" "${NEW_VERSION}"
-buildkite-agent meta-data set "TOKAMAX_PREVIOUS_VERSION" "${CURRENT_VERSION}"
+buildkite-agent meta-data set "TOKAMAX_CANDIDATE_VERSION" "${TOKAMAX_CANDIDATE_VERSION}"
+buildkite-agent meta-data set "TOKAMAX_CURRENT_VERSION" "${TOKAMAX_CURRENT_VERSION}"
 # buildkite-agent annotate posts a markdown banner at the top of the build page
 buildkite-agent annotate \
-    ":arrow_up: Validating tokamax bump \`${CURRENT_VERSION}\` :arrow_right: \`${NEW_VERSION}\`. main is bumped only if every step below passes." \
+    ":arrow_up: Validating tokamax bump \`${TOKAMAX_CURRENT_VERSION}\` :arrow_right: \`${TOKAMAX_CANDIDATE_VERSION}\`. main is bumped only if every step below passes." \
     --style "info"
 
 VLLM_COMMIT_HASH="$(get_vllm_commit_hash)"

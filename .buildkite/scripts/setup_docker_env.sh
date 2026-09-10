@@ -208,9 +208,9 @@ setup_environment() {
   # Non-empty only in the tokamax integration pipeline, which validates a
   # candidate nightly that is not yet pinned in requirements.txt. Every other
   # pipeline leaves this empty and is unaffected by the two blocks below.
-  local TOKAMAX_VERSION=""
+  local TOKAMAX_CANDIDATE_VERSION=""
   if [ -n "${BUILDKITE:-}" ]; then
-    TOKAMAX_VERSION=$(buildkite-agent meta-data get "TOKAMAX_VERSION" --default "")
+    TOKAMAX_CANDIDATE_VERSION=$(buildkite-agent meta-data get "TOKAMAX_CANDIDATE_VERSION" --default "")
   fi
  
   # Include the vLLM commit in the cache tag so an image is uniquely identified
@@ -235,8 +235,8 @@ setup_environment() {
     exit 1
   fi
 
-  if [[ -n "${TOKAMAX_VERSION}" ]]; then
-    CACHE_TAG="${CACHE_TAG}-tkmx${TOKAMAX_VERSION//[^a-zA-Z0-9]/}"
+  if [[ -n "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
+    CACHE_TAG="${CACHE_TAG}-tkmx${TOKAMAX_CANDIDATE_VERSION//[^a-zA-Z0-9]/}"
   fi
 
   # ==========================================
@@ -247,7 +247,7 @@ setup_environment() {
     # -q: the layer-by-layer pull progress is several hundred lines per job.
     docker pull -q "${CI_IMAGE_REPO}:${CACHE_TAG}"
     verify_image_vllm "${CI_IMAGE_REPO}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
-    verify_image_tokamax "${CI_IMAGE_REPO}:${CACHE_TAG}" "${TOKAMAX_VERSION}"
+    verify_image_tokamax "${CI_IMAGE_REPO}:${CACHE_TAG}" "${TOKAMAX_CANDIDATE_VERSION}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:${TPU_INFERENCE_HASH}"
     docker tag "${CI_IMAGE_REPO}:${CACHE_TAG}" "${IMAGE_NAME}:latest"
     # Export the computed CI cache image name so calling scripts can use it.
@@ -255,9 +255,9 @@ setup_environment() {
     return 0
   fi
 
-  if [[ -n "${TOKAMAX_VERSION}" ]]; then
-    echo "[tokamax] Pinning the build context to tokamax==${TOKAMAX_VERSION}"
-    sed -i "s/^tokamax==.*$/tokamax==${TOKAMAX_VERSION}/" requirements.txt
+  if [[ -n "${TOKAMAX_CANDIDATE_VERSION}" ]]; then
+    echo "[tokamax] Pinning the build context to tokamax==${TOKAMAX_CANDIDATE_VERSION}"
+    sed -i "s/^tokamax==.*$/tokamax==${TOKAMAX_CANDIDATE_VERSION}/" requirements.txt
     grep -n '^tokamax==' requirements.txt
   fi
 
@@ -274,7 +274,7 @@ setup_environment() {
   # Fail fast if the freshly built image does not contain the expected vLLM
   # commit (guards against a mis-set VLLM_COMMIT_HASH build-arg).
   verify_image_vllm "${IMAGE_NAME}:${CACHE_TAG}" "${VLLM_COMMIT_HASH}"
-  verify_image_tokamax "${IMAGE_NAME}:${CACHE_TAG}" "${TOKAMAX_VERSION}"
+  verify_image_tokamax "${IMAGE_NAME}:${CACHE_TAG}" "${TOKAMAX_CANDIDATE_VERSION}"
 
   # ==========================================
   # Push to CI Image Registry (Executed by dedicate CPU builder)

@@ -26,7 +26,7 @@ steps:
       queue: "cpu"
     commands:
       - |
-        TOKAMAX_VERSION=$(buildkite-agent meta-data get "TOKAMAX_VERSION")
-        TOKAMAX_PREVIOUS_VERSION=$(buildkite-agent meta-data get "TOKAMAX_PREVIOUS_VERSION" --default "unknown")
-        bash .buildkite/scripts/update_tokamax_pin.sh "$$TOKAMAX_VERSION"
-        buildkite-agent annotate ":white_check_mark: tokamax bumped: $$TOKAMAX_PREVIOUS_VERSION -> $$TOKAMAX_VERSION" --style "success"
+        TOKAMAX_CANDIDATE_VERSION=$(buildkite-agent meta-data get "TOKAMAX_CANDIDATE_VERSION")
+        TOKAMAX_CURRENT_VERSION=$(buildkite-agent meta-data get "TOKAMAX_CURRENT_VERSION" --default "unknown")
+        bash .buildkite/scripts/update_tokamax_pin.sh "$$TOKAMAX_CANDIDATE_VERSION"
+        buildkite-agent annotate ":white_check_mark: tokamax bumped: $$TOKAMAX_CURRENT_VERSION -> $$TOKAMAX_CANDIDATE_VERSION" --style "success"
