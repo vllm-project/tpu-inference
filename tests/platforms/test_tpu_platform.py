@@ -306,6 +306,33 @@ class TestTpuPlatform:
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
     )
+    def test_check_and_update_config_rejects_mamba_cache_mode_all(
+            self, mock_update, mock_sharding, vllm_config):
+        """'all' keeps a state per block of the sequence, not per request.
+
+        The TPU pool is sized for resident state only, so accepting 'all'
+        would hand out block ids past the end of each layer's array -- which
+        JAX clips silently instead of raising. Fail at config time instead.
+        """
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "all"
+        vllm_config.speculative_config = None
+
+        with pytest.raises(NotImplementedError,
+                           match="'all' is not supported on TPU"):
+            TpuPlatform.check_and_update_config(vllm_config)
+
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
     def test_check_and_update_config_hybrid_prefix_match_unit_raises(
             self, mock_update, mock_sharding, vllm_config):
         vllm_config.parallel_config.pipeline_parallel_size = 1
