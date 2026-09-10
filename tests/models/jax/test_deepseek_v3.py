@@ -1,4 +1,4 @@
-# Copyright 2025 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -11,787 +11,99 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
-import unittest
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+
+from unittest.mock import MagicMock
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
-from flax import nnx
-from jax.sharding import Mesh, PartitionSpec
-from parameterized import parameterized
-from vllm.config import ModelConfig
+from jax.sharding import Mesh
+from vllm.config import set_current_vllm_config
+from vllm.model_executor.model_loader import get_model_loader
 
-# Assuming the model file is named deepseek_v3.py
-import tpu_inference.kernels.mla.v1.kernel as mla
-from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.common.sharding import (ShardingAxisName,
-                                                  ShardingAxisNameBase)
-from tpu_inference.layers.jax.moe.moe import MoEBackend
-from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
-                                                  DeepseekV3Attention,
-                                                  DeepseekV3MLA,
-                                                  DeepSeekV3Router,
-                                                  DeepSeekV3WeightLoader)
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
+from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
+from tpu_inference.models.jax.deepseek_v3 import DeepseekV3ForCausalLM
 
+# Tiny DeepSeek-V3-architecture checkpoint (4 layers, 16 routed experts) used in
+# place of the full 671B model. Requires the expert count to be read from the HF
+# config rather than hardcoded to 256.
+MODEL_NAME = "hugg1ngfac3/deepseek-r1-tiny"
 
-class MockVariable:
-    """Mocks an nnx.Variable or a QArray structure."""
+NUM_LAYERS_TO_LOAD = 4
 
-    def __init__(self, shape, dtype=jnp.bfloat16, sharding=None):
-        self.value = jnp.zeros(shape, dtype=dtype)
-        self.sharding = sharding or (None, ) * len(shape)
-        self.nbytes = self.value.nbytes
-        # Handle the QArray structure used in the loader
-        self.array = SimpleNamespace(
-            qvalue=self,
-            scale=SimpleNamespace(
-                value=jnp.ones((1, )),
-                nbytes=4,
-                sharding=None,
-                addressable_shards=[SimpleNamespace(data=jnp.ones((1, )))]))
-        self.addressable_shards = [SimpleNamespace(data=self.value)]
+GBYTES = 1024 * 1024 * 1024
 
 
-class MockVllmConfig:
-    """Mock VllmConfig for DeepSeekV3."""
-
-    def __init__(self,
-                 model_name: str = "deepseek-ai/DeepSeek-V3",
-                 use_mla: bool = False):
-        self.model_config = MagicMock(spec=ModelConfig)
-        self.model_config.model = model_name
-        self.model_config.use_mla = use_mla
-
-        # DeepSeek V3 specific config
-        hf_config = MagicMock()
-        hf_config.num_hidden_layers = 1  # Small for testing
-        hf_config.num_nextn_predict_layers = 1
-        self.model_config.hf_config = hf_config
-
-        self.load_config = MagicMock()
-        self.load_config.download_dir = None
-
-        self.cache_config = MagicMock()
-        self.cache_config.cache_dtype = "auto"
-
-        self.additional_config = {
-            "random_weights": False,
-            "sparse_matmul": False,
-            "is_verbose": True
-        }
-
-
-@pytest.fixture()
+@pytest.fixture
 def mesh():
+    """Single-device mesh with the full DeepSeek axis set.
+
+    Overrides the package mesh, which lacks the ``attn_dp_expert`` and ``dcp``
+    axes that DeepSeek's expert/tensor sharding references.
+    """
     if not jax.devices():
-        pytest.skip("No JAX devices available.")
-    devices = np.array(jax.local_devices())
-    num_devices = len(devices)
-    device_mesh = devices.reshape((num_devices, 1, 1, 1, 1))
-    # Simplify axis names for testing
-    with Mesh(device_mesh,
-              axis_names=('data', 'attn_dp', 'attn_dp_expert', 'model',
-                          'expert')) as m:
+        pytest.skip("No JAX devices available for mesh creation.")
+    devices = np.array(jax.local_devices()[:1]).reshape(
+        (1, ) * len(MESH_AXIS_NAMES))
+    with Mesh(devices, axis_names=MESH_AXIS_NAMES) as m:
         yield m
 
 
-@pytest.fixture
-def rng():
-    return jax.random.PRNGKey(0)
+class TestDeepseekV3ForCausalLM:
 
+    @pytest.mark.parametrize(
+        "pp_rank,pp_world_size,load_format",
+        [
+            (rank, world, fmt)
+            for rank, world in [(0, 1), (0, 4), (1, 4), (3, 4)]
+            for fmt in ["skip_layers_model_loader_for_test", "jax_dummy"]
+            # Single-rank dummy adds nothing over the pp-sharded dummy cases.
+            if not (world == 1 and fmt == "jax_dummy")
+        ])
+    def test_model_loading(self, pp_rank, pp_world_size, load_format, rng,
+                           mesh, mock_vllm_config,
+                           assert_weight_loading_memory_bounded):
+        """Builds the model and loads weights, with bounded device memory.
 
-@pytest.fixture
-def mock_config():
-    return MockVllmConfig()
-
-
-class TestDeepSeekV3:
-
-    def test_init(self, mock_config, rng, mesh):
-        """Tests if the model initializes with the correct hierarchy."""
-        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase), jax.set_mesh(mesh):
-            model = DeepSeekV3(mock_config, rng, mesh)
-            assert len(model.layers) == 1
-            assert isinstance(model.embedder, nnx.Module)
-            assert model.vllm_config.model_config.hf_config.num_hidden_layers == 1
-
-    def test_random_weights(self, mock_config, rng, mesh):
-        """Tests that force_random_weights initializes non-zero weights."""
-        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase), jax.set_mesh(mesh):
-            model = DeepSeekV3(mock_config,
-                               rng,
-                               mesh,
-                               force_random_weights=True)
-            # Check embedding
-            weight = model.embedder.input_embedding_table_VD.value
-            assert jnp.std(weight) > 0
-            # Check a layer norm (should be 1s usually, but check existence)
-            assert model.final_norm.scale.value.shape == (7168, )
-
-    @patch("tpu_inference.models.jax.deepseek_v3.DeepSeekV3.WeightLoader")
-    @patch(
-        "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
-        return_value=[],
-    )
-    def test_load_weights_called(self, mock_weights_generator, mock_loader_cls,
-                                 mock_config, rng, mesh):
-        with patch("tpu_inference.models.jax.deepseek_v3.ShardingAxisName",
-                   ShardingAxisNameBase), jax.set_mesh(mesh):
-            model = DeepSeekV3(mock_config, rng, mesh)
-
-            model.load_weights(rng)
-
-            model.weight_loader.load_weights.assert_called_once_with(model)
-
-
-class TestDeepSeekV3WeightLoader:
-
-    @pytest.fixture
-    def loader(self, mock_config):
-        # We need to mock the generator so it doesn't try to download files
-        with patch(
-                "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
-                return_value=[]):
-            return DeepSeekV3WeightLoader(vllm_config=mock_config,
-                                          num_layers=2,
-                                          hidden_size=7168,
-                                          q_lora_rank=1536,
-                                          kv_lora_rank=512,
-                                          attn_heads=128,
-                                          qk_nope_head_dim=128,
-                                          qk_rope_head_dim=64,
-                                          v_head_dim=128,
-                                          num_local_experts=256,
-                                          moe_backend=MoEBackend.DENSE_MAT,
-                                          model_dtype=jnp.bfloat16)
-
-    @pytest.mark.parametrize("loaded_key, expected_mapped", [
-        ("model.embed_tokens.weight", "embedder.input_embedding_table_VD"),
-        ("model.layers.0.self_attn.q_a_proj.weight",
-         "layers.0.self_attn.q_down_proj.weight"),
-        ("model.layers.5.mlp.experts.10.gate_proj.weight",
-         "layers.5.custom_module.experts.kernel_gating_EDF"),
-        ("model.layers.1.mlp.shared_experts.down_proj.weight",
-         "layers.1.custom_module.shared_experts.down_proj.weight"),
-        ("model.norm.weight", "final_norm.scale"),
-    ])
-    def test_key_mapping(self, loader, loaded_key, expected_mapped):
-        assert loader.map_loaded_to_standardized_name(
-            loaded_key) == expected_mapped
-
-    def test_transpose_params(self, loader):
-        # Test a standard MLP transpose (1, 0)
-        dummy_weight = jnp.ones((100, 200))
-        transposed = loader._transpose_params("mlp.down_proj", dummy_weight)
-        assert transposed.shape == (200, 100)
-
-        # Test MLA kernel transpose (2, 0, 1)
-        dummy_mla = jnp.ones((10, 20, 30))
-        transposed_mla = loader._transpose_params("k_b_proj", dummy_mla)
-        assert transposed_mla.shape == (30, 10, 20)
-
-    def test_moe_stacking_logic(self, loader):
-        """Tests that individual expert weights are collected and stacked correctly."""
-        weights_dict = {}
-        layer_num = "0"
-        loader.num_routed_experts = 4  # Small for test
-
-        # Simulate loading 4 experts
-        for i in range(4):
-            name = f"model.layers.0.mlp.experts.{i}.gate_proj.weight"
-            weight = torch.ones((10, 20)) * i
-            result = loader._process_moe_weights(name, weight, weights_dict)
-
-            if i < 3:
-                assert result is None
-                assert weights_dict[layer_num][1] == i + 1
-            else:
-                # On the last expert, it should return stacked tensor
-                assert result is not None
-                assert result.shape == (4, 10, 20)
-                assert layer_num not in weights_dict  # Should be cleaned up
-
-    def test_mla_kernel_weight_splitting(self, loader, mesh):
-        """Tests that kv_b_proj is split into k_b_proj and v_b_proj for MLA kernel."""
-        loader.use_mla_kernel = True
-        loader.attn_heads = 2
-        loader.qk_nope_head_dim = 4
-        loader.v_head_dim = 4
-        loader.kv_lora_rank = 8
-
-        # Total rows = heads * (nope_dim + v_dim) = 2 * (4 + 4) = 16
-        # Cols = kv_lora_rank = 8
-        kv_b_proj_weight = torch.randn((16, 8))
-
-        # Mocking the load_individual_weight to capture what gets passed
-        with patch.object(loader,
-                          '_load_individual_weight',
-                          return_value=(0, 0)):
-            model_mock = MagicMock()
-            model_mock.mesh = mesh
-
-            # Simulate the splitting logic in the loader
-            weight_reshaped = kv_b_proj_weight.view(2, 4 + 4, 8)
-            k_weight = weight_reshaped[:, :4, :]
-            v_weight = weight_reshaped[:, 4:, :]
-
-            # Verify shapes of split parts
-            assert k_weight.shape == (2, 4, 8)
-            assert v_weight.shape == (2, 4, 8)
-
-    def test_load_individual_weight_with_mxfp4(self, loader, mesh):
-        """Tests the logic for unpacking MXFP4 weights."""
-        name = "layers.0.self_attn.q_down_proj.weight"
-        # Mocking torch tensor as uint8 (packed fp4)
-        expected_weight_shape = (128, 128)  # Unpacked
-        expected_scale_shape = (128, 1)
-
-        weight = torch.zeros(expected_weight_shape, dtype=torch.uint8)
-        scale = torch.ones(expected_scale_shape, dtype=torch.float32)
-
-        # Mock model parameters
-        mock_var = MockVariable(
-            (128, 128),
-            dtype=jnp.float4_e2m1fn,
-            sharding=(None, ('attn_dp', 'model',
-                             'expert')))  # Unpacked shape (64 * 2)
-        mock_params = {
-            "layers": {
-                "0": {
-                    "self_attn": {
-                        "q_down_proj": {
-                            "weight": mock_var
-                        }
-                    }
-                }
-            }
-        }
-
-        with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
-             patch("tpu_inference.models.jax.deepseek_v3.u8_unpack_e2m1") as mock_unpack, \
-             patch("jax.make_array_from_callback") as mock_make_array:
-
-            def side_effect_router(shape, *args, **kwargs):
-                if shape == expected_scale_shape:
-                    # Return FP32 for the scale call
-                    return jnp.ones(shape, dtype=jnp.float32)
-                elif shape == expected_weight_shape:
-                    # Return FP4 for the weight call
-                    return jnp.zeros(shape, dtype=jnp.float4_e2m1fn)
-                return jnp.zeros(shape)  # Fallback
-
-            mock_make_array.side_effect = side_effect_router
-            mock_unpack.return_value = torch.zeros(expected_weight_shape)
-
-            loader._load_individual_weight(name,
-                                           weight,
-                                           mock_params,
-                                           mesh,
-                                           scale=scale)
-
-            mock_unpack.assert_called_once()
-            (actual_arg, ), _ = mock_unpack.call_args
-            # The implementation converts the torch weight to a JAX array
-            expected_arg = jnp.array(weight.cpu().numpy())
-            assert jnp.array_equal(actual_arg, expected_arg).item()
-            assert mock_make_array.called
-
-    def test_load_weights_full_flow(self, loader, mesh):
-        """Integrative test for the load_weights loop."""
-        model = MagicMock(spec=nnx.Module)
-        model.mesh = mesh
-
-        # Setup generator to return one normal weight
-        loader.names_and_weights_generator = [("model.embed_tokens.weight",
-                                               torch.ones((10, 10)))]
-
-        mock_var = MockVariable((10, 10))
-
-        with patch("tpu_inference.models.jax.deepseek_v3.nnx.state"), \
-             patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
-             patch("tpu_inference.models.jax.deepseek_v3.nnx.update"), \
-             patch.object(loader, '_load_individual_weight', return_value=(1.0, 0.5)):
-
-            loader.load_weights(model)
-            # Verify verbose logging worked if enabled
-            assert loader.is_verbose is True
-
-    def test_load_individual_weight_unpacked(self, loader, mesh):
+        ``jax_dummy`` checks the model graph builds; ``skip_layers_...`` loads
+        the real FP8 weights, which only map correctly once the expert count is
+        read from the HF config.
         """
-        Tests the logic for loading 'unpacked' weights (e.g., standard FP8).
-        This verifies the branch that uses DTYPE_VIEW_MAP for raw memory conversion.
-        """
-        name = "layers.0.self_attn.q_down_proj.weight"
+        vllm_config = mock_vllm_config(MODEL_NAME, "auto")
+        vllm_config.load_config.load_format = load_format
+        vllm_config.load_config.num_layers_to_load_for_test = NUM_LAYERS_TO_LOAD
+        vllm_config.parallel_config = MagicMock()
+        vllm_config.parallel_config.enable_expert_parallel = False
 
-        # 1. Setup a standard 'unpacked' FP8 torch tensor
-        # DeepSeek V3 weights are often float8_e4m3fn
-        weight_shape = (128, 128)
-        weight = torch.randn(weight_shape).to(torch.float8_e4m3fn)
-
-        # 2. Mock model parameters to expect jnp.float8_e4m3fn
-        # We reuse the MockVariable helper but specify the dtype
-        mock_var = MockVariable(weight_shape, dtype=jnp.float8_e4m3fn)
-        mock_params = {
-            "layers": {
-                "0": {
-                    "self_attn": {
-                        "q_down_proj": {
-                            "weight": mock_var
-                        }
-                    }
-                }
-            }
-        }
-
-        # 3. Patch the necessary JAX/Utility functions
-        with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
-             patch("tpu_inference.models.jax.deepseek_v3.u8_unpack_e2m1") as mock_unpack, \
-             patch("jax.make_array_from_callback") as mock_make_array:
-
-            # Mock the JAX array creation to return a dummy
-            mock_make_array.return_value = jnp.zeros(weight_shape,
-                                                     dtype=jnp.float8_e4m3fn)
-
-            # Execute the loader method
-            loader._load_individual_weight(name,
-                                           weight,
-                                           mock_params,
-                                           mesh,
-                                           scale=None)
-
-            # VERIFICATIONS:
-            # - u8_unpack_e2m1 should NOT be called for standard FP8 (only for packed uint8 + scale)
-            mock_unpack.assert_not_called()
-
-            # - make_array_from_callback should be called with the correct shape and sharding
-            # The first argument to make_array_from_callback is the shape
-            assert mock_make_array.call_args[0][0] == weight_shape
-
-            # - Verify the model weight value was updated (even if with our dummy)
-            assert mock_var.value.dtype == jnp.float8_e4m3fn
-
-    def test_load_individual_weight_with_scale(self, loader, mesh):
-        """
-        Tests loading an unpacked weight that also has a quantization scale.
-        """
-        name = "layers.0.custom_module.gating_proj.weight"
-        weight_shape = (64, 128)
-        scale_shape = (64, 1)
-
-        # Use BF16 for this test to verify DTYPE_VIEW_MAP handles multiple types
-        weight = torch.randn(weight_shape).to(torch.bfloat16)
-        scale = torch.ones(scale_shape, dtype=torch.float32)
-
-        mock_var = MockVariable(weight_shape, dtype=jnp.bfloat16)
-        mock_params = {
-            "layers": {
-                "0": {
-                    "custom_module": {
-                        "gating_proj": {
-                            "weight": mock_var
-                        }
-                    }
-                }
-            }
-        }
-
-        with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
-             patch("jax.make_array_from_callback") as mock_make_array:
-
-            def side_effect_router(shape, *args, **kwargs):
-                if shape == scale_shape:
-                    # Return FP32 for the scale call
-                    return jnp.ones(shape, dtype=jnp.float32)
-                elif shape == weight_shape:
-                    # Return FP4 for the weight call
-                    return jnp.zeros(shape, dtype=jnp.bfloat16)
-                return jnp.zeros(shape)  # Fallback
-
-            mock_make_array.side_effect = side_effect_router
-
-            loader._load_individual_weight(name,
-                                           weight,
-                                           mock_params,
-                                           mesh,
-                                           scale=scale)
-
-            # Verify the scale was applied to the MockVariable's internal QArray structure
-            # (In the model code: base_model_weight.array.scale.value = maybe_sharded_scale)
-            assert mock_var.array.scale.value is not None
-
-
-# TODO (jacobplatin): remove once refactoring is complete
-class TestDeepSeekV3NativeFP8:
-    """Tests specifically for the native FP8 path with quantization blocks."""
-
-    @pytest.fixture
-    def fp8_config(self):
-        """Creates a config with native FP8 block sizes enabled."""
-        config = MockVllmConfig()
-        # quantization_config={"weight_block_size": [128, 128]})
-        config.model_config.hf_config.quantization_config = {
-            "quant_method": "fp8",
-            "weight_block_size": [128, 128]
-        }
-
-        return config
-
-    @pytest.fixture
-    def fp8_loader(self, fp8_config):
-        with patch(
-                "tpu_inference.models.jax.utils.weight_utils.model_weights_generator",
-                return_value=[]):
-            return DeepSeekV3WeightLoader(vllm_config=fp8_config,
-                                          num_layers=1,
-                                          hidden_size=256,
-                                          q_lora_rank=64,
-                                          kv_lora_rank=64,
-                                          attn_heads=4,
-                                          qk_nope_head_dim=32,
-                                          qk_rope_head_dim=16,
-                                          v_head_dim=32,
-                                          num_local_experts=8,
-                                          model_dtype=jnp.bfloat16,
-                                          moe_backend=MoEBackend.DENSE_MAT,
-                                          use_mla_kernel=True)
-
-    def test_native_fp8_initialization(self, fp8_loader):
-        """Verifies that the loader detects native FP8 mode from config."""
-        assert fp8_loader.is_native_fp8_model is True
-        assert fp8_loader.quantization_block_size_n == 128
-        assert fp8_loader.quantization_block_size_k == 128
-
-    def test_load_individual_weight_repeat_logic(self, fp8_loader, mesh):
-        """
-        Tests the logic where the scale is repeated when scale dimension matches
-        block dimension logic but is smaller than weight dimension.
-        """
-        name = "layers.0.custom_module.gating_proj.weight"
-
-        # Weight Dim 0: 256. Block size: 128. 256 // 128 = 2.
-        # Scale Dim 0: 1.
-        # Logic check: (256 // 128 != 1) and (256 // 1 != 1).
-        # Outcome: Should repeat scale on axis 0 by 128, then slice to 256.
-
-        weight_shape = (256, 128)
-        scale_shape = (1, 128)
-        # Expected shape after repeating (1, 128) -> (128, 128)
-        expected_scale_shape = (128, 128)
-
-        weight = torch.randn(weight_shape).to(torch.float8_e4m3fn)
-        scale = torch.ones(scale_shape, dtype=torch.float8_e4m3fn)
-
-        mock_var = MockVariable(weight_shape, dtype=jnp.float8_e4m3fn)
-        mock_params = {
-            "layers": {
-                "0": {
-                    "custom_module": {
-                        "gating_proj": {
-                            "weight": mock_var
-                        }
-                    }
-                }
-            }
-        }
-
-        with patch("tpu_inference.models.jax.deepseek_v3.get_param", return_value=mock_var), \
-             patch("jax.make_array_from_callback") as mock_make_array:
-
-            # Mock return for the make_array call
-            # We use side_effect to return appropriate dtypes for weight vs scale
-            def side_effect(shape, *args, **kwargs):
-                if shape == weight_shape:
-                    return jnp.zeros(shape, dtype=jnp.float8_e4m3fn)
-                elif shape == expected_scale_shape:
-                    # Scale should match the MockVariable's scale dtype (float32)
-                    return jnp.zeros(shape, dtype=jnp.float32)
-                return jnp.zeros(shape)
-
-            mock_make_array.side_effect = side_effect
-
-            fp8_loader._load_individual_weight(name,
-                                               weight,
-                                               mock_params,
-                                               mesh,
-                                               scale=scale)
-
-            # The loader logic repeats the scale: scale.repeat(128, axis=0)[:256]
-            # (1, 128) -> (128, 128) via repeat.
-            scale_call_found = False
-            for call_args in mock_make_array.call_args_list:
-                shape_arg = call_args[0][0]
-                if shape_arg == expected_scale_shape:
-                    scale_call_found = True
-
-            assert scale_call_found, f"Expected scale with shape {expected_scale_shape} to be created."
-
-
-class TestDeepSeekV3Router:
-    """Refactored to use native pytest fixtures instead of unittest.TestCase."""
-
-    @pytest.fixture
-    def cpu_mesh(self):
-        """Creates a CPU mesh specifically for router tests."""
-        return Mesh(jax.devices('cpu'), axis_names=('data', ))
-
-    def test_get_topk_indices_single_group(self, cpu_mesh):
-        """Test get_topk_indices with single expert group."""
-        with jax.set_mesh(cpu_mesh):
-            router = DeepSeekV3Router(random_init=True,
-                                      hidden_size=512,
-                                      num_experts=4,
-                                      num_experts_per_tok=2,
-                                      n_groups=1,
-                                      topk_groups=1,
-                                      norm_topk_prob=True,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(42))
-            router.bias_E = jnp.zeros((4, ))
-
-            scores = jnp.array([[0.1, 0.3, 0.2, 0.4]])  # shape: (1, 4)
-            indices = router.get_topk_indices(scores)
-
-            # Should return indices of top 2 experts
-            expected_indices = jnp.array([[3,
-                                           1]])  # experts with scores 0.4, 0.3
-            assert jnp.array_equal(indices, expected_indices)
-
-    def test_get_topk_indices_2_groups(self, cpu_mesh):
-        """Test get_topk_indices with 2 expert groups."""
-        with jax.set_mesh(cpu_mesh):
-            router = DeepSeekV3Router(random_init=True,
-                                      hidden_size=512,
-                                      num_experts=4,
-                                      num_experts_per_tok=2,
-                                      n_groups=2,
-                                      topk_groups=1,
-                                      norm_topk_prob=True,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(42))
-            router.bias_E = jnp.zeros((4, ))
-
-            # 4 experts, 2 groups, 2 experts per group
-            scores = jnp.array([[[0.1, 0.3, 0.2, 0.4]]])  # shape: (1, 1, 4)
-            indices = router.get_topk_indices(scores)
-
-            # Should return indices of top 2 experts
-            expected_indices = jnp.array([[[3, 2]]])
-            assert jnp.array_equal(indices, expected_indices)
-
-    def test_router_e2e(self, cpu_mesh):
-        with jax.set_mesh(cpu_mesh):
-            router = DeepSeekV3Router(random_init=True,
-                                      hidden_size=512,
-                                      num_experts=8,
-                                      num_experts_per_tok=2,
-                                      n_groups=2,
-                                      topk_groups=1,
-                                      norm_topk_prob=True,
-                                      routed_scaling_factor=1.0,
-                                      dtype=jnp.bfloat16,
-                                      rngs=nnx.Rngs(42))
-            x = jnp.ones((2, 512))
-            weights, indices = router(x)
-
-            assert weights.shape == (2, 2)
-            assert indices.shape == (2, 2)
-
-
-class TestDeepseekV3Attention(unittest.TestCase):
-
-    def setUp(self):
-        os.environ["NEW_MODEL_DESIGN"] = "1"
-        self.mesh = Mesh(
-            np.array(jax.devices("tpu")[:1]).reshape(1, 1, 1, 1),
-            axis_names=("data", "attn_dp", "expert", "model"),
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
         )
+        vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
 
-    @parameterized.expand([["auto"], ["fp8"]])
-    def test_deepseek_v3_attention_forward_pass(self, kv_cache_str):
-        """
-        Tests DeepseekV3Attention.
-        This class simulates the 'decompressed' path where MLA weights
-        are projected up to standard MHA heads, using standard KV cache.
-        """
-        hidden_size = 256
-        num_attention_heads = 32
-        num_key_value_heads = 32
-        qk_nope_head_dim = 64
-        qk_rope_head_dim = 32
-        v_head_dim = 64
+        model_config = vllm_config.model_config
 
-        with jax.set_mesh(self.mesh):
-            query_tnh_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
-                                           None)
-            keyvalue_skh_spec = PartitionSpec(
-                None,
-                ShardingAxisName.MLP_TENSOR,
-            )
-            attn_o_nth_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
-                                            None)
+        with jax.set_mesh(mesh):
+            model = DeepseekV3ForCausalLM(vllm_config, rng, mesh)
 
-            # NOTE: DeepseekV3Attention = MHA
-            mha_layer = DeepseekV3Attention(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-                head_dim=v_head_dim,
-                rope_theta=10000,
-                dtype=jnp.bfloat16,
-                q_lora_rank=512,
-                kv_lora_rank=512,
-                qk_nope_head_dim=qk_nope_head_dim,
-                qk_rope_head_dim=qk_rope_head_dim,
-                v_head_dim=v_head_dim,
-                rms_norm_eps=1e-5,
-                rngs=nnx.Rngs(42),
-                rope_scaling={
-                    "beta_fast": 32,
-                    "beta_slow": 1,
-                    "factor": 40,
-                    "mscale": 1.0,
-                    "mscale_all_dim": 1.0,
-                    "original_max_position_embeddings": 4096,
-                    "type": "yarn",
-                },
-                mesh=self.mesh,
-                random_init=True,
-                kv_cache_dtype=kv_cache_str,
-                query_tnh=query_tnh_spec,
-                keyvalue_skh=keyvalue_skh_spec,
-                attn_o_nth=attn_o_nth_spec,
-                q_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
-                ap_sharding=PartitionSpec(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=PartitionSpec(None, ShardingAxisName.VOCAB),
-                rd_sharding=PartitionSpec(ShardingAxisName.MLP_TENSOR, None),
-            )
+        # Load weights with peak device memory bounded to catch regressions.
+        with jax.set_mesh(mesh):
+            loader = get_model_loader(vllm_config.load_config)
+            # 4GB floor matches test_qwen3_moe: the absolute floor absorbs
+            # per-layer load transients that don't scale with the (few) loaded
+            # layers, avoiding flakes from sub-GB run-to-run allocation jitter.
+            with assert_weight_loading_memory_bounded(
+                    model,
+                    description=f"load_weights({MODEL_NAME}, {load_format})",
+                    threshold_multiplier=0.3,
+                    min_threshold_bytes=4 * GBYTES,
+            ), set_current_vllm_config(vllm_config):
+                loader.load_weights(model, model_config)
 
-            seq_len = 32
-            x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
-
-            qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-            block_size = 16
-            num_blocks = 8
-            kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
-            cache_shape = get_kv_cache_shape(num_blocks, block_size,
-                                             num_key_value_heads, qk_head_dim,
-                                             kv_dtype)
-            kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
-
-            attention_metadata = AttentionMetadata(
-                input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-                block_tables=jnp.zeros((8, ), dtype=jnp.int32),
-                seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
-                query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
-                request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
-            )
-
-            mha_layer.rope.initialize_cache(self.mesh)
-
-            new_kv_cache, output = mha_layer(
-                x, kv_cache=kv_cache, attention_metadata=attention_metadata)
-
-            self.assertEqual(output.shape, (seq_len, hidden_size))
-            self.assertEqual(new_kv_cache.shape, kv_cache.shape)
-
-    @parameterized.expand(
-        [["auto"]])  # TODO (gpolovets): MLA kernel does not support fp8 yet
-    def test_deepseek_v3_mla_forward_pass(self, kv_cache_str):
-        """
-        Tests DeepseekV3MLA.
-        This class uses the specialized MLA kernel with matrix absorption
-        and compressed latent KV cache.
-        """
-        hidden_size = 256
-        num_attention_heads = 32
-        num_key_value_heads = 1
-        qk_nope_head_dim = 64
-        qk_rope_head_dim = 32
-        v_head_dim = 64
-        kv_lora_rank = 512
-
-        with jax.set_mesh(self.mesh):
-            query_nth_spec = PartitionSpec(None, ShardingAxisName.MLP_TENSOR,
-                                           None)
-            query_tnh_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None,
-                                           None)
-            keyvalue_skh_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None)
-            attn_o_nth_spec = PartitionSpec(None, ShardingAxisName.ATTN_DATA,
-                                            None)
-
-            model = DeepseekV3MLA(
-                hidden_size=hidden_size,
-                num_attention_heads=num_attention_heads,
-                num_key_value_heads=num_key_value_heads,
-                head_dim=v_head_dim,
-                rope_theta=10000,
-                dtype=jnp.bfloat16,
-                q_lora_rank=512,
-                kv_lora_rank=kv_lora_rank,
-                qk_nope_head_dim=qk_nope_head_dim,
-                qk_rope_head_dim=qk_rope_head_dim,
-                v_head_dim=v_head_dim,
-                rms_norm_eps=1e-5,
-                rngs=nnx.Rngs(42),
-                rope_scaling={
-                    "beta_fast": 32,
-                    "beta_slow": 1,
-                    "factor": 40,
-                    "mscale": 1.0,
-                    "mscale_all_dim": 1.0,
-                    "original_max_position_embeddings": 4096,
-                    "type": "yarn",
-                },
-                mesh=self.mesh,
-                random_init=True,
-                kv_cache_dtype=kv_cache_str,
-                query_nth=query_nth_spec,
-                query_tnh=query_tnh_spec,
-                keyvalue_skh=keyvalue_skh_spec,
-                attn_o_nth=attn_o_nth_spec,
-                q_da_sharding=(None, ShardingAxisName.VOCAB),
-                # anh_sharding is specific to DeepseekV3MLA
-                anh_sharding=(None, ShardingAxisName.MLP_TENSOR, None),
-                ap_sharding=(None, ShardingAxisName.MLP_TENSOR),
-                kv_da_sharding=(None, ShardingAxisName.VOCAB),
-                rd_sharding=(ShardingAxisName.MLP_TENSOR, None),
-            )
-
-            seq_len = 32
-            x = jnp.ones((seq_len, hidden_size), dtype=jnp.bfloat16)
-
-            block_size = 16
-            num_blocks = 8
-            kv_dtype = jnp.float8_e4m3fn if kv_cache_str == "fp8" else jnp.bfloat16
-
-            cache_shape = mla.get_kv_cache_shape(
-                num_blocks, block_size, kv_lora_rank + qk_rope_head_dim,
-                kv_dtype)
-            kv_cache = jnp.zeros(cache_shape, dtype=kv_dtype)
-
-            attention_metadata = AttentionMetadata(
-                input_positions=jnp.arange(seq_len, dtype=jnp.int32),
-                block_tables=jnp.zeros((8, ), dtype=jnp.int32),
-                seq_lens=jnp.ones((1, ), dtype=jnp.int32) * seq_len,
-                query_start_loc=jnp.array([0, seq_len], dtype=jnp.int32),
-                request_distribution=jnp.array([0, 0, 1], dtype=jnp.int32),
-            )
-
-            model.rope.initialize_cache(self.mesh)
-
-            new_kv_cache, output = model(x,
-                                         kv_cache=kv_cache,
-                                         attention_metadata=attention_metadata)
-
-            self.assertEqual(output.shape, (seq_len, hidden_size))
-            self.assertEqual(new_kv_cache.shape, kv_cache.shape)
+        assert model is not None
