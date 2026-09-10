@@ -30,9 +30,3 @@ steps:
         TOKAMAX_PREVIOUS_VERSION=$(buildkite-agent meta-data get "TOKAMAX_PREVIOUS_VERSION" --default "unknown")
         bash .buildkite/scripts/update_tokamax_pin.sh "$$TOKAMAX_VERSION"
         buildkite-agent annotate ":white_check_mark: tokamax bumped: $$TOKAMAX_PREVIOUS_VERSION -> $$TOKAMAX_VERSION" --style "success"
-
-notify:
-  - email: "ullm-test-notifications-external@google.com"
-    if: build.state == "failed" && build.source == "schedule"
-  - slack: "vllm#tpu-ci-notifications"
-    if: build.state == "failed" && build.source == "schedule"

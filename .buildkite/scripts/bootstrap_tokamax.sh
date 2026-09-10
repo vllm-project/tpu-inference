@@ -30,6 +30,33 @@ JOB_PRIORITY="${PRIORITY_INTEGRATION}"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "${JOB_PRIORITY}"
 
+# Attach failure notifications before anything can fail. Uploading this first is
+# what guarantees a notification even when the resolve below dies (PyPI
+# unreachable, no tokamax== pin, no installable nightly). Mirrors
+# bootstrap.sh:243-269.
+ONCALL_EMAIL="ullm-test-notifications-external@google.com"
+NOTIFY_FILE="generated_notification.yml"
+if [[ "${BUILDKITE_SOURCE:-}" == "schedule" ]]; then
+    # Scheduled run: this is the unattended daily bump, so page the oncall.
+    cat <<EOF > "${NOTIFY_FILE}"
+notify:
+  - email: "${ONCALL_EMAIL}"
+    if: build.state == "failed"
+  - slack: "vllm#tpu-ci-notifications"
+    if: build.state == "failed"
+EOF
+else
+    # Manual run (rehearsals, forced TOKAMAX_VERSION): tell whoever started it,
+    # not the oncall.
+    cat <<EOF > "${NOTIFY_FILE}"
+notify:
+  - email: "${BUILDKITE_BUILD_CREATOR_EMAIL:-}"
+    if: build.state == "failed"
+EOF
+fi
+upload_with_priority "${NOTIFY_FILE}" "${JOB_PRIORITY}"
+rm "${NOTIFY_FILE}"
+
 # Handles the environment state for different TPU generations.
 set_jax_envs() {
     case $1 in
