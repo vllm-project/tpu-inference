@@ -16,7 +16,8 @@ from collections import namedtuple
 
 import pytest
 
-from tpu_inference.distributed.utils import get_device_topology_order_id
+from tpu_inference.distributed.utils import (format_host_port,
+                                             get_device_topology_order_id)
 
 # Mock TpuDevice object to simulate the real one.
 TpuDevice = namedtuple('TpuDevice',
@@ -118,3 +119,21 @@ def test_get_device_topology_order_id_not_in_global():
     ]
     with pytest.raises(ValueError, match="do not exist in the global device:"):
         get_device_topology_order_id(local_devices, global_devices)
+
+
+def test_format_host_port():
+    """Tests that format_host_port correctly formats IPv4, hostnames, and IPv6 addresses."""
+    # IPv4 tests
+    assert format_host_port("127.0.0.1", 8080) == "127.0.0.1:8080"
+    assert format_host_port("10.0.0.1", "9100") == "10.0.0.1:9100"
+    assert format_host_port("localhost", 5000) == "localhost:5000"
+
+    # IPv6 tests
+    assert format_host_port("2001:db8::1", 9100) == "[2001:db8::1]:9100"
+    assert format_host_port("::1", 0) == "[::1]:0"
+    assert format_host_port("fd99:0:0:2a::ac6",
+                            "9100") == "[fd99:0:0:2a::ac6]:9100"
+
+    # Already bracketed IPv6 tests
+    assert format_host_port("[2001:db8::1]", 9100) == "[2001:db8::1]:9100"
+    assert format_host_port("[::1]", 0) == "[::1]:0"
