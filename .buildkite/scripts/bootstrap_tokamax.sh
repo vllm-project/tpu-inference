@@ -46,8 +46,7 @@ notify:
     if: build.state == "failed"
 EOF
 else
-    # Manual run (rehearsals, forced TOKAMAX_VERSION_OVERRIDE): tell whoever
-    # not the oncall.
+    # Manual run (rehearsals, forced TOKAMAX_VERSION_OVERRIDE).
     cat <<EOF > "${NOTIFY_FILE}"
 notify:
   - email: "${BUILDKITE_BUILD_CREATOR_EMAIL:-}"
