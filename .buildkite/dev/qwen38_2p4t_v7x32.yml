@@ -190,9 +190,13 @@ steps:
         # step regardless of batch size, so 5x the prompts costs well under 5x
         # the time.
         #
-        # EVAL_SUITE=none skips the ~55 min accuracy leg. Nothing here changes
-        # what the model computes, and GPQA at xhigh is already settled at
-        # 0.899-0.904 across tc#962 and #2.
+        # EVAL_SUITE=gpqa buys back the ~55 min accuracy leg, because
+        # QUANTIZE_BF16_LINEAR_PATTERNS below does change what the model
+        # computes and it is the whole question this build is asking. GPQA at
+        # xhigh is settled at 0.899-0.904 across tc#962 and #2, so that is the
+        # number to regress against; GSM8K and MMLU stay off (MMLU is not
+        # reproducible across hosts anyway -- unsorted os.listdir plus unseeded
+        # truncation).
         #
         # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made tc#960's
         # eval unscoreable. The runner sizes the attention pool against mamba's
@@ -251,6 +255,35 @@ steps:
         # to be set explicitly here -- without it this model silently goes back
         # to a 3.5-hour load and blows the health-wait budget.
         #
+        # QUANTIZE_BF16_LINEAR_PATTERNS quantizes at load time what the
+        # checkpoint left in bf16. Qwen3.8-2.4T-A95B-FP8 quantizes only its 512
+        # routed experts; its `modules_to_not_convert` has 978 entries covering
+        # everything else, so all 92 layers' attention and gated-delta-net
+        # projections arrive bf16 and are replicated x2 (they shard on
+        # ATTN_HEAD, which excludes attn_dp). That is 4.27 GiB/chip, of which
+        # fp8 gives back 2.13 -- 82% of it in the 69 linear-attention layers,
+        # not the 23 full-attention ones. Names here are the checkpoint's, not
+        # vLLM's: q/k/v_proj reach the fused qkv_proj, in_proj_qkv+in_proj_z
+        # reach in_proj_qkvz, and in_proj_b+in_proj_a reach in_proj_ba.
+        # `$$` is Buildkite's escape for a literal `$`, which the regex anchor
+        # needs. Nothing else is touched: conv1d carries no quant_config,
+        # and mlp.gate / the shared experts / embed / lm_head stay bf16.
+        #
+        # QUANTIZE_BF16_LINEAR_BLOCK_SIZE=128 makes the scale blockwise along
+        # the input axis -- one fp32 scale per 128 input features per output
+        # feature, instead of one per output feature -- and routes the matmul
+        # to the blockwise gmm kernel, which is the only one that consumes such
+        # a scale without dequantizing the weight back to bf16 first. It is the
+        # granularity the checkpoint's own experts use, and the reason to spend
+        # it here is that these are exactly the layers per-channel scaling
+        # handles worst: the GDN projections carry per-head structure along the
+        # input axis that one scale per column has to cover with a single
+        # max. The cost is 4 bytes per 128 weights, ~3% of the fp8 weight bytes
+        # (~68 MiB/chip of the 2.13 GiB recovered). Every selected layer
+        # divides: in=8192 for qkv_proj/in_proj_qkvz/in_proj_ba (64 blocks,
+        # column-parallel so the block axis is not sharded) and in=16384 for
+        # o_proj/out_proj (128 blocks over 16 contracting shards = 8 each).
+        #
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
         # USE_BATCHED_RPA_KERNEL in particular is read at import time by
@@ -264,6 +297,8 @@ steps:
           'USE_MOE_EP_KERNEL=0' \
           'VLLM_INCREMENTAL_FP8_LOADING=1' \
           'MOE_STAGE_WEIGHTS_ON_HOST=1' \
+          'QUANTIZE_BF16_LINEAR_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
+          'QUANTIZE_BF16_LINEAR_BLOCK_SIZE=128' \
           'VLLM_XLA_CHECK_RECOMPILATION=0' \
           'SKIP_JAX_PRECOMPILE=0' \
           'RUNAI_STREAMER_CONCURRENCY=64' \
@@ -287,7 +322,7 @@ steps:
           'MAX_CONCURRENCY=8' \
           'BENCH_SWEEP=8:128 160:640' \
           'NUM_WARMUPS=32' \
-          'EVAL_SUITE=none' \
+          'EVAL_SUITE=gpqa' \
           'EVAL_REASONING_EFFORT=xhigh' \
           'GPQA_OUTPUT_LEN=32768' \
           'GPQA_CONCURRENCY=32' \
