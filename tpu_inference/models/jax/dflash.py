@@ -43,6 +43,22 @@ init_fn = nnx.initializers.uniform()
 _FA_VMEM_LIMIT = 128 * 1024 * 1024
 
 
+def get_dflash_config_value(config: Any,
+                            name: str,
+                            default: Any = None) -> Any:
+    """Read DFlash fields from either nested or top-level draft configs."""
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    if name in dflash_config:
+        return dflash_config[name]
+    return getattr(config, name, default)
+
+
+def get_dflash_sliding_window(config: Any) -> Optional[int]:
+    if not getattr(config, "use_sliding_window", False):
+        return None
+    return getattr(config, "sliding_window", None)
+
+
 class DFlashAttention(nnx.Module):
     """DFlash cross+self attention with on-device KV cache.
 
@@ -68,6 +84,7 @@ class DFlashAttention(nnx.Module):
         self.rope_theta = getattr(config, "rope_theta", 1000000.0)
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
+        self.sliding_window = get_dflash_sliding_window(config)
 
         self.head_dim_original = getattr(config, "head_dim",
                                          self.hidden_size // self.num_heads)
@@ -180,6 +197,7 @@ class DFlashAttention(nnx.Module):
             mesh=self.mesh,
             head_dim_original=self.head_dim_original,
             sm_scale=self.head_dim_original**-0.5,
+            attention_chunk_size=self.sliding_window,
             use_causal_mask=True,
             update_kv_cache=True,
         )
@@ -198,6 +216,7 @@ class DFlashAttention(nnx.Module):
             mesh=self.mesh,
             head_dim_original=self.head_dim_original,
             sm_scale=self.head_dim_original**-0.5,
+            attention_chunk_size=self.sliding_window,
             use_causal_mask=False,  # Noise tokens attend to all KV tokens
             update_kv_cache=True,
         )
@@ -351,8 +370,8 @@ class DFlashModel(nnx.Module):
             ) for _ in range(hf_config.num_hidden_layers)
         ])
 
-        dflash_config = getattr(hf_config, "dflash_config", {})
-        target_layer_ids = dflash_config.get("target_layer_ids", None)
+        target_layer_ids = get_dflash_config_value(hf_config,
+                                                   "target_layer_ids")
         num_target_layers = getattr(hf_config, "num_target_layers", None)
         if target_layer_ids is not None:
             num_context_features = len(target_layer_ids)
@@ -450,8 +469,9 @@ class DFlashForCausalLM(nnx.Module):
         hf_config = spec_config.draft_model_config.hf_config
         self.hf_config = hf_config
         self.block_size = getattr(hf_config, "block_size", 8)
-        dflash_config = getattr(hf_config, "dflash_config", {})
-        self.mask_token_id = dflash_config.get("mask_token_id", 0)
+        dflash_config = getattr(hf_config, "dflash_config", {}) or {}
+        self.mask_token_id = get_dflash_config_value(hf_config,
+                                                     "mask_token_id", 0)
 
         self._position_scheme = dflash_config.get("position_scheme",
                                                   "incremental")
@@ -555,10 +575,14 @@ class DFlashForCausalLM(nnx.Module):
             "model.fc": "model.fc.kernel",
             "fc.weight": "model.fc.kernel",
             "model.fc.weight": "model.fc.kernel",
+            "encoder.fc": "model.fc.kernel",
+            "encoder.fc.weight": "model.fc.kernel",
             "hidden_norm": "model.hidden_norm.scale",
             "model.hidden_norm": "model.hidden_norm.scale",
             "hidden_norm.weight": "model.hidden_norm.scale",
             "model.hidden_norm.weight": "model.hidden_norm.scale",
+            "encoder.output_norm_enc": "model.hidden_norm.scale",
+            "encoder.output_norm_enc.weight": "model.hidden_norm.scale",
             "norm": "model.norm.scale",
             "model.norm": "model.norm.scale",
             "norm.weight": "model.norm.scale",
