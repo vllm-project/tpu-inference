@@ -41,6 +41,8 @@ from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compresse
     VllmCompressedTensorsW8A8Fp8
 from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_w8a8_int8 import \
     VllmCompressedTensorsW8A8Int8
+from tpu_inference.layers.vllm.quantization.compressed_tensors.schemes.compressed_tensors_wna16 import \
+    VllmCompressedTensorsWNA16
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.layers.vllm.quantization.unquantized import \
     VllmUnquantizedConfig
@@ -137,6 +139,13 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
             return VllmCompressedTensorsW8A8Fp8(
                 weight_quant=weight_quant,
                 is_static_input_scheme=is_static_input_scheme,
+                linear_config=linear_config,
+            )
+        # Weight-only schemes have no input quantization; check them before
+        # the w8a8 predicates, which assume input_quant is present.
+        if self._is_wNa16_group_channel(weight_quant, input_quant):
+            return VllmCompressedTensorsWNA16(
+                weight_quant=weight_quant,
                 linear_config=linear_config,
             )
         if self._is_dynamic_token_w8a8(weight_quant, input_quant):
