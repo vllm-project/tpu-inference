@@ -68,21 +68,12 @@ spec:
       - benchmark
   # Long enough for the launcher's last log poll after the client exits.
   ttlSecondsAfterFinished: 300
-  # One role at a time, in the order below, each waiting for the previous to be
-  # ready. The two engines want the same weights, and the Hugging Face cache
-  # they populate is a gcsfuse mount: the lock file HF takes around a download
-  # is a real lock on a local disk, which is what makes this safe on bare metal,
-  # and an ordinary object here. Started together, the two raced in the model
-  # directory and one of them read a file whose inode had been replaced
-  # underneath it - OSError: [Errno 116] Stale file handle, out of
-  # AutoTokenizer.from_pretrained, before either engine reached the chips.
-  #
-  # Serialising costs one cold load: prefill fetches, decode finds everything
-  # cached. It also means the client is created only once both engines answer
-  # /health, so its own wait loop below returns on the first attempt and stays
-  # as the thing that fails the run if an engine dies after being ready.
-  startupPolicy:
-    startupPolicyOrder: InOrder
+  # Ordering is per role, on dependsOn below, rather than the JobSet-wide
+  # startupPolicy: InOrder that expresses the same sequence. InOrder creates
+  # every Job up front and suspends the ones whose turn has not come, so a run
+  # that stalls shows three Jobs of which two are Suspended and the state of the
+  # slice is a thing to infer. dependsOn creates a role when its dependency is
+  # met, so what exists is what is running.
   replicatedJobs:
     # ---------------------------------------------------------
     # PREFILL ENGINE
@@ -174,7 +165,7 @@ spec:
                     port: 8000
                   periodSeconds: 30
                   failureThreshold: 120
-                # What startupPolicy waits on: a pod counts as ready only once
+                # What dependsOn waits on: a pod counts as ready only once
                 # the server answers, so "ready" means the weights are loaded
                 # and cached rather than that the container has started. Only
                 # consulted after the startup probe passes, so its lack of a
@@ -303,6 +294,24 @@ spec:
     # holds the KV cache for the whole generation rather than one prefill, so it
     # is given the memory the prefill engine leaves spare.
     - name: decode
+      # Not started beside prefill, because the two want the same weights and
+      # the Hugging Face cache they populate is a gcsfuse mount: the lock file
+      # HF takes around a download is a real lock on a local disk, which is what
+      # makes this safe on bare metal, and an ordinary object here. Started
+      # together, the two raced in the model directory and one of them read a
+      # file whose inode had been replaced underneath it - OSError: [Errno 116]
+      # Stale file handle, out of AutoTokenizer.from_pretrained, before either
+      # engine reached the chips.
+      #
+      # Ready, not Complete: an engine serves until told to stop, so Complete
+      # never arrives. It costs one cold load - prefill fetches, decode finds
+      # everything cached - and also prefill's compile, which is the larger
+      # half and is not what the cache needs protecting from. Splitting the
+      # cache per role would recover it and cost a second copy of a 480B model
+      # in the bucket and a second download of it over the wire.
+      dependsOn:
+        - name: prefill
+          status: Ready
       replicas: 1
       template:
         spec:
@@ -466,6 +475,18 @@ spec:
     # tokenizer and writes JSON. It lands on the worker's system pool, and the
     # queues charge nothing for it because only google.com/tpu is under quota.
     - name: benchmark
+      # Both engines, not just decode, even though decode already waits on
+      # prefill: what this role needs is that both answer /health, and reading
+      # that off a chain is how a later reordering breaks it silently. Ready
+      # here means the pod passes its readinessProbe, which is that same
+      # /health - so the client's own wait loop below returns on the first
+      # attempt and stays as the thing that fails the run if an engine dies
+      # after being ready.
+      dependsOn:
+        - name: prefill
+          status: Ready
+        - name: decode
+          status: Ready
       replicas: 1
       template:
         spec:
