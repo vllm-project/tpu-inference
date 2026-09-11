@@ -403,16 +403,17 @@ def sharded_splash_attention(
         ))
 
 
-def _rpa_block_size_kwargs() -> dict[str, tuple[int, int, int, int]]:
+def rpa_block_size_kwargs() -> dict[str, tuple[int, int, int, int]]:
     """Optional RPA v3 block-size overrides from env, for the call site to
     forward with ``**``.
 
-    The kernel is self-contained and never reads env, so the caller must supply
-    these; layers/jax/attention/attention.py does the same. Without it the
-    RPA_V3_*_BLOCK_SIZES vars are silently ignored on this path and the kernel
-    falls back to get_default_block_sizes(). Each var is a comma-separated
-    4-tuple ``(bq_sz, bkv_sz, bq_csz, bkv_csz)``; a key is included only when
-    its var is non-empty, so the default call is unchanged.
+    The kernel is self-contained and never reads env, so every call site must
+    supply these (the vLLM-model path in layers/jax/attention/attention.py and
+    the MaxText path below). Without it the RPA_V3_*_BLOCK_SIZES vars are
+    silently ignored and the kernel falls back to get_default_block_sizes().
+    Each var is a comma-separated 4-tuple ``(bq_sz, bkv_sz, bq_csz, bkv_csz)``;
+    a key is included only when its var is non-empty, so the default call is
+    unchanged.
     """
     env_to_kwarg = {
         "d_block_sizes": envs.RPA_V3_DECODE_BLOCK_SIZES,
@@ -515,7 +516,7 @@ def sharded_ragged_paged_attention(
             else:
                 # RPA_V3_*_BLOCK_SIZES are v3-kernel knobs; the experimental
                 # batched kernel takes its own BlockSizes configs instead.
-                kwargs.update(_rpa_block_size_kwargs())
+                kwargs.update(rpa_block_size_kwargs())
         return func(*args, **kwargs)
 
     return jax.shard_map(
