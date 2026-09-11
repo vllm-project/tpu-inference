@@ -1,0 +1,86 @@
+# Periodic promotion of published cache entries into the golden PVC.
+#
+# This is the other half of the loop. Test Pods publish new entries to GCS;
+# without this, those entries are never seen again, because every job clones
+# the golden PVC rather than reading GCS. The POC's one-shot
+# populate-golden-cache-job.yaml does the same copy manually and has to be
+# re-run by a human.
+#
+# Two deliberate differences from that one-shot Job:
+#
+#   * It is a CronJob, so the golden tracks published entries on its own.
+#   * The GCS namespace is configuration rather than a literal, and it is
+#     asserted below. The one-shot Job hardcodes jax0.11.0_tputpu6e; when JAX
+#     is bumped that silently refreshes a prefix nobody writes to any more, and
+#     the golden quietly goes stale while every job still looks warm.
+#
+# The golden PVC is ReadWriteOnce. This CronJob must not run while a test Pod
+# holds a clone in progress on another node; concurrencyPolicy: Forbid covers
+# overlap with itself, and the schedule should sit in a quiet window.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: golden-jax-cache-refresh
+  namespace: buildkite
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          serviceAccountName: buildkite-cache-refresh
+          restartPolicy: Never
+          containers:
+            - name: refresh
+              image: google/cloud-sdk:slim
+              env:
+                # Must track the JAX version in the test image. kube_jax_cache.sh
+                # prints the namespace it resolved at runtime on every job, so a
+                # mismatch is visible in build logs rather than only in a
+                # slowdown.
+                - name: JAX_CACHE_NAMESPACE
+                  value: "REPLACE_WITH_IMAGE_JAX_NAMESPACE"
+                - name: CACHE_BASE
+                  value: "gs://ullm-ci-cache/jax_cache"
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 4Gi
+                limits:
+                  memory: 8Gi
+              command:
+                - /bin/sh
+                - -ceu
+                - |
+                  target=/cache/tpu_jax_cache
+                  mkdir -p "$target"
+
+                  # Refuse to refresh into a tree that already has an extra
+                  # namespace directory: JAX would ignore every entry under it
+                  # and the golden would look populated while missing entirely.
+                  if ls -d "$target"/jax*_tpu* >/dev/null 2>&1; then
+                    echo "golden has a nested namespace directory; refusing" >&2
+                    exit 1
+                  fi
+
+                  echo "refreshing $target from $CACHE_BASE/$JAX_CACHE_NAMESPACE"
+                  # --no-clobber only: entries are content-addressed, so an
+                  # existing local file is already correct. Never pass
+                  # --delete-unmatched-destination-objects here; that would
+                  # erase entries published since the last refresh.
+                  gcloud storage rsync -r --no-clobber \
+                    "$CACHE_BASE/$JAX_CACHE_NAMESPACE" "$target"
+
+                  echo "golden entries: $(find "$target" -type f | wc -l)"
+              volumeMounts:
+                - name: golden-cache-vol
+                  mountPath: /cache/tpu_jax_cache
+          volumes:
+            - name: golden-cache-vol
+              persistentVolumeClaim:
+                claimName: golden-jax-cache-pvc
