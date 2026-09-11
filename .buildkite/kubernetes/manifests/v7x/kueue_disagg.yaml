@@ -572,13 +572,25 @@ spec:
                       fi
                     }
 
-                    # --append-result, so one file holds every concurrency for
-                    # an input shape - which is the shape the old lane's
-                    # 1024_8192.json and 8192_1024.json had, and what the result
-                    # parser reads.
+                    # Two names per sweep. A cell writes its own file, named for
+                    # the cell, and is then appended to the file for the whole
+                    # input shape - 1024_8192.json and 8192_1024.json, which is
+                    # what the result parser reads and what the old lane
+                    # produced.
+                    #
+                    # The per-cell name is what makes the sweep readable while
+                    # it runs. Publishing has to happen per cell, because a
+                    # sweep that runs out its deadline must still yield the
+                    # cells that finished; publishing the accumulating file that
+                    # often means every upload but the last is superseded, and
+                    # the artifact list becomes seven copies of one name with no
+                    # way to tell from the outside which concurrency any of them
+                    # reached. A cell uploaded under its own name is written
+                    # once and never replaced. c<C>_i<I>_o<O> is the convention
+                    # the bare-metal lane already publishes under.
                     run_sweep() {
                       local input_len=$$1 output_len=$$2 num_prompts=$$3
-                      local path="/tmp/benchmark_results/$${input_len}_$${output_len}.json"
+                      local combined="/tmp/benchmark_results/$${input_len}_$${output_len}.json"
 
                       for concurrency in 1 4 16 32 64 128 256; do
                         # Fewer prompts at low concurrency: at c=1 the sweep is
@@ -590,6 +602,8 @@ spec:
                         elif [ "$$concurrency" -eq 4 ]; then
                           effective=64
                         fi
+
+                        local cell="/tmp/benchmark_results/pd_disagg_c$${concurrency}_i$${input_len}_o$${output_len}.json"
 
                         echo "Starting benchmark cell: c=$$concurrency, i=$$input_len, o=$$output_len, n=$$effective"
                         vllm bench serve \
@@ -606,11 +620,15 @@ spec:
                           --request-rate=inf \
                           --metric-percentiles 90,99 \
                           --append-result \
-                          --result-file="$$path"
+                          --result-file="$$cell"
 
-                        # Per cell rather than at the end, so a sweep that runs
-                        # out its deadline still yields the cells that finished.
-                        publish_result "$$path"
+                        publish_result "$$cell"
+
+                        # One JSON object per line, so the shape's file is the
+                        # cells concatenated. Built here rather than by pointing
+                        # --append-result at it, because a cell has to be a file
+                        # of its own to be published as one.
+                        cat "$$cell" >> "$$combined"
                         sleep 30
                       done
                     }
