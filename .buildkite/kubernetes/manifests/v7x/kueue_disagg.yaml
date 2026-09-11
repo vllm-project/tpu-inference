@@ -182,15 +182,22 @@ spec:
                 # that, because the engine's host-memory ceiling is the node's
                 # and pinning a number here only invites an OOM kill when a
                 # model grows.
+                #
+                # ephemeral-storage well under the node's 43.8Gi allocatable,
+                # which a 100Gi boot disk leaves after GKE's reservations and
+                # is shared with the two gcsfuse sidecars. Nothing large is
+                # written to the container filesystem - weights and the
+                # compilation cache are both PVC mounts and core dumps are off
+                # - so the request only has to cover logs and scratch.
                 resources:
                   limits:
                     google.com/tpu: "4"
-                    ephemeral-storage: "40Gi"
+                    ephemeral-storage: "20Gi"
                   requests:
                     google.com/tpu: "4"
                     cpu: "180"
                     memory: "700Gi"
-                    ephemeral-storage: "40Gi"
+                    ephemeral-storage: "20Gi"
                 volumeMounts:
                 - name: dshm
                   mountPath: /dev/shm
@@ -303,15 +310,22 @@ spec:
                   value: "/cache/jax/vllm"
                 ports:
                 - containerPort: 8000
+                #
+                # ephemeral-storage well under the node's 43.8Gi allocatable,
+                # which a 100Gi boot disk leaves after GKE's reservations and
+                # is shared with the two gcsfuse sidecars. Nothing large is
+                # written to the container filesystem - weights and the
+                # compilation cache are both PVC mounts and core dumps are off
+                # - so the request only has to cover logs and scratch.
                 resources:
                   limits:
                     google.com/tpu: "4"
-                    ephemeral-storage: "40Gi"
+                    ephemeral-storage: "20Gi"
                   requests:
                     google.com/tpu: "4"
                     cpu: "180"
                     memory: "700Gi"
-                    ephemeral-storage: "40Gi"
+                    ephemeral-storage: "20Gi"
                 volumeMounts:
                 - name: dshm
                   mountPath: /dev/shm
