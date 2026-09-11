@@ -1,0 +1,496 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# 1P1D disaggregated serving on the Kueue fleet: the same benchmark the three
+# manifests beside this one run on tpu-v7x-cluster-c, as one workload admitted
+# against fleet quota instead of three objects a script applies to a cluster it
+# holds outright.
+#
+# What differs from single_prefill.yaml / single_decode.yaml / proxy1p1d.yaml is
+# only what the fleet owns:
+#
+#   - name, namespace, queue and the image come from the launcher, so this file
+#     states none of them. ${WORKLOAD_NAME} and ${IMAGE} are substituted before
+#     submission; a literal dollar is written $$.
+#   - the Deployments and their Services are gone. JobSet publishes a hostname
+#     per pod, unique to a run, where a selector on `app: vllm-prefill` is not:
+#     two builds overlapping would have sent half of one run's traffic into the
+#     other's engines. It also makes the run finish - a Deployment serves until
+#     something deletes it, and the script that did the deleting was the same
+#     one that could crash and leave the chips held.
+#   - no PersistentVolumeClaims. Those were 500Gi of per-run Hyperdisk holding a
+#     Hugging Face cache that was cold every night; the fleet has a shared model
+#     bucket, so the weights are fetched once for everyone.
+#   - no privileged containers and no init containers. vm.max_map_count is a
+#     property of the TPU node pools now, and PodSecurity `baseline` on the
+#     workload namespace would refuse the container that used to set it.
+#
+# Both engines ask for the same shape, because a workload is admitted against
+# one queue and a queue is one shape. The client asks for no accelerator and
+# rides along: the queues put google.com/tpu alone under quota. Together the two
+# engines are eight chips, which is the whole v7x reservation, so this workload
+# runs alone whatever else is queued.
+#
+# The proxy is a process in the client pod rather than a pod of its own. It is
+# an asyncio HTTP forwarder that the client talks to over localhost, and as a
+# third role it would be a third scheduling decision and another way for the run
+# to be half-up.
+#
+# Both engine containers and the client are named `workload`. That is the name
+# the launcher forwards step environment into and reads logs from, so naming all
+# three gets HF_TOKEN to the engines and the engines' output into the Buildkite
+# log.
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+spec:
+  # Each pod gets a DNS name of its own - <jobset>-<role>-<job>-<pod> under a
+  # headless service named for the JobSet - which is how the client finds the
+  # engines without a Service to select them.
+  network:
+    enableDNSHostnames: true
+  # The engines serve until told to stop, so the client finishing is what
+  # finishes the run; JobSet then tears the engines down.
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - benchmark
+  # Long enough for the launcher's last log poll after the client exits.
+  ttlSecondsAfterFinished: 300
+  replicatedJobs:
+    # ---------------------------------------------------------
+    # PREFILL ENGINE
+    # ---------------------------------------------------------
+    - name: prefill
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          # Six hours, not the fleet's three-hour default: the old lane gave the
+          # servers alone a two-hour startup budget, and the sweep is fourteen
+          # cells over two input shapes after that.
+          activeDeadlineSeconds: 21600
+          # Indexed because enableDNSHostnames requires it: the pod index is
+          # half of the hostname.
+          completionMode: Indexed
+          backoffLimit: 0
+          template:
+            metadata:
+              annotations:
+                # Without this GKE does not inject the sidecar and the cache
+                # claims below never mount.
+                gke-gcsfuse/volumes: "true"
+                gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
+                # Unthrottled sidecar: parallel checkpoint downloads are
+                # CPU-bound, and this is a 480B model.
+                gke-gcsfuse/cpu-limit: "0"
+                gke-gcsfuse/memory-limit: "0"
+                # A benchmark holds one node for hours with nothing else on it,
+                # which is exactly what OPTIMIZE_UTILIZATION consolidates away.
+                cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+            spec:
+              restartPolicy: Never
+              serviceAccountName: tpu-workload
+              nodeSelector:
+                cloud.google.com/gke-tpu-topology: 2x2x1
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+              tolerations:
+                - key: "google.com/tpu"
+                  operator: "Equal"
+                  value: "present"
+                  effect: "NoSchedule"
+              containers:
+              - name: workload
+                image: ${IMAGE}
+                command: [ "/bin/bash", "-c", "--" ]
+                args:
+                  - |
+                    set -e
+                    # Worker core dumps are several GiB each and overflow the
+                    # ephemeral-storage limit; the backtrace in the log is the
+                    # useful artifact.
+                    ulimit -c 0
+                    # What the connector advertises to its peer. It would find
+                    # the pod IP off the default interface anyway; stated so
+                    # that a node with a second interface cannot change which.
+                    export VLLM_HOST_IP="$${POD_IP}"
+                    exec vllm serve \
+                      --seed=42 \
+                      --model=Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
+                      --max-model-len=10240 \
+                      --max-num-batched-tokens=8192 \
+                      --max-num-seqs=512 \
+                      --no-enable-prefix-caching \
+                      --tensor-parallel-size=8 \
+                      --kv-cache-dtype=fp8 \
+                      --gpu-memory-utilization=0.70 \
+                      --async-scheduling \
+                      --enable-expert-parallel \
+                      --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_producer"}'
+                env:
+                - name: POD_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                # HF_TOKEN is not here: the step reads it from Secret Manager
+                # and the launcher forwards it, so no copy of it sits in the
+                # namespace between runs - where the old lane created a
+                # hf-token-secret in the cluster on every run and left it.
+                - name: HF_HOME
+                  value: /cache/hf
+                - name: VLLM_LOGGING_LEVEL
+                  value: "DEBUG"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: JAX_PLATFORMS
+                  value: "tpu,cpu"
+                - name: TPU_BACKEND_TYPE
+                  value: jax
+                - name: PJRT_DEVICE
+                  value: TPU
+                - name: USE_MOE_EP_KERNEL
+                  value: "0"
+                - name: MODEL_IMPL_TYPE
+                  value: "vllm"
+                - name: USE_BATCHED_RPA_KERNEL
+                  value: "0"
+                # Both compile caches on the fleet's compilation bucket, so a
+                # cold compile of this model is paid once rather than once per
+                # run. VLLM_CACHE_ROOT defaults under $$HOME and would otherwise
+                # land on the node's boot disk, which it does not fit on.
+                - name: VLLM_XLA_CACHE_PATH
+                  value: "/cache/jax/xla"
+                - name: VLLM_CACHE_ROOT
+                  value: "/cache/jax/vllm"
+                ports:
+                - containerPort: 8000
+                # Nothing else can land on this node - it holds all four chips
+                # and the pool is tainted - so cpu and memory are stated only as
+                # much as the scheduler needs to place the pod. Unlimited above
+                # that, because the engine's host-memory ceiling is the node's
+                # and pinning a number here only invites an OOM kill when a
+                # model grows.
+                resources:
+                  limits:
+                    google.com/tpu: "4"
+                    ephemeral-storage: "40Gi"
+                  requests:
+                    google.com/tpu: "4"
+                    cpu: "180"
+                    memory: "700Gi"
+                    ephemeral-storage: "40Gi"
+                volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: jax-cache
+                  mountPath: /cache/jax
+                - name: hf-cache
+                  mountPath: /cache/hf/hub
+              volumes:
+              # Backing store for the gcsfuse file cache, in RAM. The launcher
+              # sets sizeLimit from the machine type.
+              - name: gke-gcsfuse-cache
+                emptyDir:
+                  medium: Memory
+              - name: dshm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 16Gi
+              # Claims, not inline CSI volumes: the buckets are regional, so the
+              # name differs per cluster and only a claim resolves in whichever
+              # cluster the workload was dispatched to.
+              - name: jax-cache
+                persistentVolumeClaim:
+                  claimName: jax-cache
+              - name: hf-cache
+                persistentVolumeClaim:
+                  claimName: hf-cache
+
+    # ---------------------------------------------------------
+    # DECODE ENGINE
+    # ---------------------------------------------------------
+    # Identical to prefill but for the two flags that make it the consumer: it
+    # holds the KV cache for the whole generation rather than one prefill, so it
+    # is given the memory the prefill engine leaves spare.
+    - name: decode
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          activeDeadlineSeconds: 21600
+          completionMode: Indexed
+          backoffLimit: 0
+          template:
+            metadata:
+              annotations:
+                gke-gcsfuse/volumes: "true"
+                gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
+                gke-gcsfuse/cpu-limit: "0"
+                gke-gcsfuse/memory-limit: "0"
+                cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+            spec:
+              restartPolicy: Never
+              serviceAccountName: tpu-workload
+              nodeSelector:
+                cloud.google.com/gke-tpu-topology: 2x2x1
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+              tolerations:
+                - key: "google.com/tpu"
+                  operator: "Equal"
+                  value: "present"
+                  effect: "NoSchedule"
+              containers:
+              - name: workload
+                image: ${IMAGE}
+                command: [ "/bin/bash", "-c", "--" ]
+                args:
+                  - |
+                    set -e
+                    ulimit -c 0
+                    export VLLM_HOST_IP="$${POD_IP}"
+                    exec vllm serve \
+                      --seed=42 \
+                      --model=Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 \
+                      --max-model-len=10240 \
+                      --max-num-batched-tokens=8192 \
+                      --max-num-seqs=512 \
+                      --no-enable-prefix-caching \
+                      --tensor-parallel-size=8 \
+                      --kv-cache-dtype=fp8 \
+                      --gpu-memory-utilization=0.90 \
+                      --async-scheduling \
+                      --enable-expert-parallel \
+                      --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_consumer"}'
+                env:
+                - name: POD_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                - name: HF_HOME
+                  value: /cache/hf
+                - name: VLLM_LOGGING_LEVEL
+                  value: "DEBUG"
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: JAX_PLATFORMS
+                  value: "tpu,cpu"
+                - name: TPU_BACKEND_TYPE
+                  value: jax
+                - name: PJRT_DEVICE
+                  value: TPU
+                - name: USE_MOE_EP_KERNEL
+                  value: "0"
+                - name: MODEL_IMPL_TYPE
+                  value: "vllm"
+                - name: USE_BATCHED_RPA_KERNEL
+                  value: "0"
+                - name: VLLM_XLA_CACHE_PATH
+                  value: "/cache/jax/xla"
+                - name: VLLM_CACHE_ROOT
+                  value: "/cache/jax/vllm"
+                ports:
+                - containerPort: 8000
+                resources:
+                  limits:
+                    google.com/tpu: "4"
+                    ephemeral-storage: "40Gi"
+                  requests:
+                    google.com/tpu: "4"
+                    cpu: "180"
+                    memory: "700Gi"
+                    ephemeral-storage: "40Gi"
+                volumeMounts:
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: jax-cache
+                  mountPath: /cache/jax
+                - name: hf-cache
+                  mountPath: /cache/hf/hub
+              volumes:
+              - name: gke-gcsfuse-cache
+                emptyDir:
+                  medium: Memory
+              - name: dshm
+                emptyDir:
+                  medium: Memory
+                  sizeLimit: 16Gi
+              - name: jax-cache
+                persistentVolumeClaim:
+                  claimName: jax-cache
+              - name: hf-cache
+                persistentVolumeClaim:
+                  claimName: hf-cache
+
+    # ---------------------------------------------------------
+    # PROXY & BENCHMARK CLIENT
+    # ---------------------------------------------------------
+    # No accelerator and no cache mounts: this is an HTTP client that reads a
+    # tokenizer and writes JSON. It lands on the worker's system pool, and the
+    # queues charge nothing for it because only google.com/tpu is under quota.
+    - name: benchmark
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          activeDeadlineSeconds: 21600
+          completionMode: Indexed
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              serviceAccountName: tpu-workload
+              containers:
+              - name: workload
+                image: ${IMAGE}
+                env:
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                command: ["/bin/bash", "-c"]
+                args:
+                  - |
+                    set -e
+
+                    # JobSet's per-pod DNS, substituted by the launcher: unique
+                    # to this run, where a Service selector would be shared with
+                    # any other build running at the same time.
+                    prefill_host=${WORKLOAD_NAME}-prefill-0-0.${WORKLOAD_NAME}
+                    decode_host=${WORKLOAD_NAME}-decode-0-0.${WORKLOAD_NAME}
+
+                    echo "Starting proxy server..."
+                    python3 examples/disagg/toy_proxy_server.py \
+                      --host 0.0.0.0 \
+                      --port 10000 \
+                      --prefiller-host "$$prefill_host" \
+                      --prefiller-port 8000 \
+                      --decoder-host "$$decode_host" \
+                      --decoder-port 8000 &
+
+                    echo "Waiting for prefill ($$prefill_host) and decode ($$decode_host) servers..."
+                    # Bounded wait, where the old lane's was open-ended against
+                    # a two-hour clock it read from $$SECONDS: a server whose
+                    # engine dies during startup can leave its API process, and
+                    # so /health, answering forever.
+                    health_tries=0
+                    until curl -s "http://$$prefill_host:8000/health" && curl -s "http://$$decode_host:8000/health"; do
+                      health_tries=$$((health_tries+1))
+                      if [ "$$health_tries" -gt 1080 ]; then
+                        echo "ERROR: servers not healthy after 3h; failing the benchmark."
+                        exit 1
+                      fi
+                      echo "Waiting for prefill and decode health checks..."
+                      sleep 10
+                    done
+
+                    echo "Both prefill and decode servers are HEALTHY!"
+
+                    mkdir -p /tmp/benchmark_results
+                    model="Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+                    publish_failed=0
+
+                    # A result is published from here, by the pod that measured
+                    # it. Nothing can read it afterwards: this pod is deleted
+                    # the moment the JobSet finishes, so anything that is to
+                    # outlive the run has to leave while it is still alive - and
+                    # where the old lane could kubectl cp the file out, there is
+                    # no kubectl and no second cluster to cp to.
+                    publish_result() {
+                      local path=$$1
+                      [ -f "$$path" ] || return 0
+                      local name
+                      name=$$(basename "$$path")
+
+                      (cd "$$(dirname "$$path")" && buildkite-agent artifact upload "$$name") \
+                        || { echo "WARNING: could not upload $$name"; publish_failed=1; }
+
+                      # A sweep whose requests failed describes a broken serving
+                      # path, not a measurement. Stop rather than spend the
+                      # remaining hours measuring the same breakage. Single-line
+                      # JSON with one top-level "failed", so a grep is enough.
+                      if grep -q -E '"failed": *[1-9]' "$$path"; then
+                        echo "ERROR: $$name recorded failed requests: $$(grep -oE '"(completed|failed)": *[0-9]+' "$$path" | tr '\n' ' ')"
+                        exit 1
+                      fi
+                    }
+
+                    # --append-result, so one file holds every concurrency for
+                    # an input shape - which is the shape the old lane's
+                    # 1024_8192.json and 8192_1024.json had, and what the result
+                    # parser reads.
+                    run_sweep() {
+                      local input_len=$$1 output_len=$$2 num_prompts=$$3
+                      local path="/tmp/benchmark_results/$${input_len}_$${output_len}.json"
+
+                      for concurrency in 1 4 16 32 64 128 256; do
+                        # Fewer prompts at low concurrency: at c=1 the sweep is
+                        # serial, and 256 requests of 8192 output tokens each
+                        # would be most of the run.
+                        local effective=$$num_prompts
+                        if [ "$$concurrency" -eq 1 ]; then
+                          effective=32
+                        elif [ "$$concurrency" -eq 4 ]; then
+                          effective=64
+                        fi
+
+                        echo "Starting benchmark cell: c=$$concurrency, i=$$input_len, o=$$output_len, n=$$effective"
+                        vllm bench serve \
+                          --model="$$model" \
+                          --dataset-name=random \
+                          --num-warmups 10 \
+                          --random-input-len="$$input_len" \
+                          --random-output-len="$$output_len" \
+                          --num-prompts="$$effective" \
+                          --ignore-eos \
+                          --host=localhost \
+                          --port=10000 \
+                          --max-concurrency="$$concurrency" \
+                          --request-rate=inf \
+                          --metric-percentiles 90,99 \
+                          --append-result \
+                          --result-file="$$path"
+
+                        # Per cell rather than at the end, so a sweep that runs
+                        # out its deadline still yields the cells that finished.
+                        publish_result "$$path"
+                        sleep 30
+                      done
+                    }
+
+                    run_sweep 1024 8192 256
+                    run_sweep 8192 1024 256
+
+                    echo "Benchmark complete! Results saved in /tmp/benchmark_results."
+
+                    # Everything once more, to pick up any file whose upload
+                    # failed on the first attempt. Buildkite keys an artifact by
+                    # path and the step takes the newest, so a repeat costs a
+                    # second upload and nothing else.
+                    (cd /tmp/benchmark_results && buildkite-agent artifact upload "*.json") \
+                      || echo "WARNING: final result upload failed"
+
+                    if [ "$$publish_failed" -ne 0 ]; then
+                      echo "ERROR: the benchmark completed but at least one result was not published."
+                      exit 1
+                    fi
+                resources:
+                  requests:
+                    cpu: "6"
+                    memory: "16Gi"
+                    ephemeral-storage: "20Gi"
+                  limits:
+                    cpu: "14"
+                    memory: "48Gi"
+                    ephemeral-storage: "20Gi"
