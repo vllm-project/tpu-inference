@@ -52,7 +52,15 @@ waitForServerReady() {
             exit 1
         fi
 
-        if grep -Eq "$error_regex" "$LOG_FILE"; then
+        # Warnings are not fatal, even when they quote an exception. JAX reports
+        # a cache entry it could not write as
+        #   UserWarning: Error writing persistent compilation cache entry for
+        #   'jit_sample': OSError: [Errno 116] Stale file handle
+        # which matches "OSError:" above and killed a healthy server. Anchoring
+        # the patterns instead would not work: engine output is prefixed, so a
+        # real traceback arrives as "(EngineCore pid=375) OSError: ...", never
+        # at the start of a line.
+        if grep -E "$error_regex" "$LOG_FILE" | grep -qv "Warning:"; then
             echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
             # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1
