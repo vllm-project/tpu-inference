@@ -154,14 +154,31 @@ spec:
                       --async-scheduling \
                       --enable-expert-parallel \
                       --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_producer"}'
+                # A bound on bring-up. A readiness probe cannot supply one: it
+                # never restarts anything, it only holds the pod out of ready,
+                # so an engine that will never answer looks exactly like one
+                # that is still loading and the JobSet sits until its deadline.
+                # That is not hypothetical - a topology misconfiguration parked
+                # this pod in TPU init for the better part of an hour, and the
+                # only place it said so was a libtpu log file inside the
+                # container. A startup probe makes the same silence fatal: the
+                # kubelet kills the container, the pod fails with a reason, and
+                # the step's log is the engine's own output.
+                #
+                # An hour, which is generous for the honest worst case - a cold
+                # compile with nothing in the fleet's XLA cache - and still
+                # turns a hang from the JobSet's whole deadline into an hour.
+                startupProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  periodSeconds: 30
+                  failureThreshold: 120
                 # What startupPolicy waits on: a pod counts as ready only once
                 # the server answers, so "ready" means the weights are loaded
-                # and cached rather than that the container has started. No
-                # failureThreshold worth setting - a readiness probe never
-                # restarts anything, it only holds the pod out of ready - and
-                # no livenessProbe, because a cold load here is measured in
-                # tens of minutes and restarting an engine mid-load would only
-                # start it again.
+                # and cached rather than that the container has started. Only
+                # consulted after the startup probe passes, so its lack of a
+                # failureThreshold costs nothing.
                 readinessProbe:
                   httpGet:
                     path: /health
@@ -335,6 +352,15 @@ spec:
                       --async-scheduling \
                       --enable-expert-parallel \
                       --kv-transfer-config '{"kv_connector":"TPUConnector","kv_connector_module_path":"tpu_inference.distributed.tpu_connector","kv_role":"kv_consumer"}'
+                # As on prefill: the bound on bring-up, so an engine that will
+                # never answer fails with a reason instead of holding its chips
+                # until the JobSet's deadline.
+                startupProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  periodSeconds: 30
+                  failureThreshold: 120
                 readinessProbe:
                   httpGet:
                     path: /health
