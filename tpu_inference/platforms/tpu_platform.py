@@ -339,6 +339,13 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "all"):
+            raise NotImplementedError(
+                "mamba_cache_mode 'all' is not supported on TPU; the mamba "
+                "pool is sized for resident state only. Use 'align' (the "
+                "default when prefix caching is enabled) or 'none'.")
+
         # Hybrid (mamba/linear-attention) models cannot use prefix caching with
         # speculative decoding because verify windows need consecutive state slots.
         if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
@@ -369,6 +376,10 @@ class TpuPlatform(Platform):
                     "supported on TPU with mamba prefix caching because the "
                     "TPU runner does not implement KV cache block copies; "
                     "leave --prefix-match-unit unset.")
+            elif cache_config.enable_prefix_caching:
+                from tpu_inference.core.hybrid_coordinator import \
+                    install_hybrid_coordinator_hooks
+                install_hybrid_coordinator_hooks(vllm_config)
 
         # vLLM's mm_device_do_normalize skips do_rescale/do_normalize in the
         # CPU processor and instead normalizes inside the vLLM model's vision
