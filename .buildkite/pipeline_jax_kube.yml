@@ -163,6 +163,12 @@ steps:
   # `artifact_paths`. On bare metal the agent runs on the TPU VM and shares a
   # filesystem with the test; here it does not, so the test uploads its own
   # result with the buildkite-agent CLI the CI image ships.
+  #
+  # COVERAGE_FILE names it outright instead of copying `.coverage` out of the
+  # working directory afterwards. Where coverage writes by default is wherever
+  # the process happens to be standing when it exits, which a test that chdirs
+  # can move; the copy then fails and the run reports no coverage at all rather
+  # than a bad number.
   - label: ":kubernetes: JAX unit tests part1"
     key: "tpu6e_test_7_1"
     env:
@@ -172,6 +178,7 @@ steps:
     commands:
       - |
         .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c '
+          export COVERAGE_FILE=/tmp/.coverage.part1.tpu6e
           python3 -m pytest -s -v -x \
             /workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
             /workspace/tpu_inference/tests/layers/vllm/test_awq.py \
@@ -180,7 +187,7 @@ steps:
             /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py \
             --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report=
           rc=$$?
-          cp .coverage .coverage.part1.tpu6e && buildkite-agent artifact upload .coverage.part1.tpu6e
+          (cd /tmp && buildkite-agent artifact upload .coverage.part1.tpu6e)
           exit $$rc
         '
 
@@ -193,6 +200,7 @@ steps:
     commands:
       - |
         .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c '
+          export COVERAGE_FILE=/tmp/.coverage.part2.tpu6e
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
             --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
             --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py \
@@ -213,7 +221,7 @@ steps:
             --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py \
             --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report=
           rc=$$?
-          cp .coverage .coverage.part2.tpu6e && buildkite-agent artifact upload .coverage.part2.tpu6e
+          (cd /tmp && buildkite-agent artifact upload .coverage.part2.tpu6e)
           exit $$rc
         '
 
