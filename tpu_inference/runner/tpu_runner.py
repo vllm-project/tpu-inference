@@ -1290,6 +1290,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
 
+    def refresh_state_leaves(self) -> None:
+        """Re-derives the dispatch view of the weights from `state`.
+
+        `model_fn` and friends take `state_leaves` as their first argument,
+        which for the vllm-impl path aliases `state` outright. Any code that
+        rebinds `state` -- a LoRA load, a Raiden weight sync -- must call this,
+        or dispatch keeps running against the previous arrays.
+        """
+        self.state_leaves = (tuple(jax.tree_util.tree_leaves(self.state)) if
+                             isinstance(self.state, nnx.State) else self.state)
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         runner_type = self.model_config.runner_type
         if runner_type == "generate":
