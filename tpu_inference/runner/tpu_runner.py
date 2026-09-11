@@ -1062,12 +1062,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
-        self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(envs.MIN_TOKEN_BUCKET,
-                               next_power_of_2(self.dp_size * kv_packing)),
-            max_token_size=scheduler_config.max_num_batched_tokens *
-            self.dp_size,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         # PCP rounds every request's chunk size up independently, so the token
         # buffer the layout needs can exceed max_num_batched_tokens by up to
         # 2 * pcp_size * max_num_seqs; add a bucket with exactly that headroom.
@@ -1078,8 +1072,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             additional_sizes = list(additional_sizes) + [
                 common_utils.align_to(_worst * self.dp_size, 128)
             ]
-        self.num_tokens_paddings = sorted(self.num_tokens_paddings +
-                                          additional_sizes)
+        # Never pad a step past the scheduler's own token budget: a full
+        # chunked-prefill step must not jump to the next exponential bucket
+        # (which can be ~2x the budget and, on some shapes, compiles into a
+        # program that returns wrong last-position logits). The budget joins
+        # the bucket list through the same merge as `compilation_sizes` (and
+        # the PCP headroom bucket above), and unreachable generated buckets
+        # above it are dropped.
+        self.num_tokens_paddings = runner_utils.build_token_paddings(
+            min_token_size=max(envs.MIN_TOKEN_BUCKET,
+                               next_power_of_2(self.dp_size * kv_packing)),
+            max_token_size=scheduler_config.max_num_batched_tokens *
+            self.dp_size,
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP,
+            additional_sizes=additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
