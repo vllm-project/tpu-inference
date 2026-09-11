@@ -16,7 +16,7 @@ import time
 
 os.environ["VLLM_USE_V1"] = "0"
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -393,12 +393,12 @@ class RLVllmSampler:
         """Wire-safe registration metadata for each worker's current Raiden binding."""
         return await self._call_worker_method("get_raiden_metadata")
 
-    async def raiden_h2d(self) -> list[dict]:
+    async def raiden_h2d(self, uuid: Optional[int] = None) -> list[dict]:
         """Blocks each worker until its just-landed transfer is visible on-device.
 
         Returns each worker's checksums dict (empty unless VERIFY_WEIGHTS=true).
         """
-        return await self._call_worker_method("raiden_h2d")
+        return await self._call_worker_method("raiden_h2d", uuid=uuid)
 
     async def raiden_metrics(self) -> list[dict]:
         return await self._call_worker_method("raiden_metrics")

@@ -844,13 +844,13 @@ class TPUWorker(WorkerBase):
         """Re-fetches the current binding's wire-safe metadata without rebinding."""
         return self._require_raiden_sync("get_raiden_metadata").metadata_dict()
 
-    def raiden_h2d(self) -> dict:
+    def raiden_h2d(self, uuid: Optional[int] = None) -> dict:
         """Blocks until the transfer that just landed is visible on-device.
 
         Returns tensor checksums when `VERIFY_WEIGHTS=true`.
         """
         sync = self._require_raiden_sync("raiden_h2d")
-        sync.h2d()
+        sync.h2d(uuid=uuid)
         if envs.VERIFY_WEIGHTS:
             return sync.checksums()
         return {}

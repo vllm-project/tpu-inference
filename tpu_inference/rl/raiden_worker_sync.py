@@ -76,12 +76,13 @@ def extract_weight_state(state: Any, model: Any) -> Any:
                 pass
         return state
     if model is not None:
-        from flax import nnx
         if maxtext:
             inner = getattr(model, "model", None)
             if inner is not None:
+                from flax import nnx
                 return {"base": nnx.state(inner, nnx.Param)}
             return None
+        from flax import nnx
         return nnx.state(model, nnx.Param)
     return None
 
@@ -244,10 +245,15 @@ class RaidenWorkerSync:
             raise RuntimeError(f"{self.job_name}: bind() must run before {op}")
         return self._sync
 
-    def h2d(self) -> None:
+    def h2d(self, uuid: Optional[int] = None) -> None:
         # h2d() is async; block so a checksum/read right after sees the
         # transferred data.
-        self._require_sync("h2d()").h2d()
+        sync = self._require_sync("h2d()")
+        if hasattr(sync, "wait_for_transfer_completion"):
+            sync.wait_for_transfer_completion(uuid)
+            jax.block_until_ready(self.arrays)
+            return
+        sync.h2d()
         jax.block_until_ready(self.arrays)
         # `block_until_ready` only orders JAX computations. Raiden's H2D is
         # documented as asynchronous and writes these buffers via DMA outside
