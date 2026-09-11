@@ -25,10 +25,20 @@ if [[ -z "$NEW_VERSION" ]]; then
     exit 1
 fi
 
-# Configuration. TARGET_BRANCH is overridable so the flow can be rehearsed
-# against a scratch branch without writing to main.
 TARGET_BRANCH="${TARGET_BRANCH:-main}"
 REQUIREMENTS_FILE="requirements.txt"
+
+# BUILDKITE_PULL_REQUEST is an environment var Buildkite sets on every
+# job. It holds the PR number as a string when the build came from a PR.
+if [[ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+    echo "Refusing to promote from a pull-request build (PR #${BUILDKITE_PULL_REQUEST})." >&2
+    exit 1
+fi
+if [[ "${BUILDKITE_BRANCH:-}" != "${TARGET_BRANCH}" ]]; then
+    echo "Refusing to promote: build ran on '${BUILDKITE_BRANCH}' but would push to" >&2
+    echo "'${TARGET_BRANCH}'. Only promote to the branch that was actually tested." >&2
+    exit 1
+fi
 
 # Configure credentials
 git config user.name "vllm-ci-bot[bot]"
