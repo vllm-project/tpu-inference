@@ -54,8 +54,8 @@ def _distributed_sampling_candidates_per_shard() -> int:
 def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
     """Whether each vocab shard can provide the static candidate capacity."""
     tensor_axes = ShardingAxisName.MLP_TENSOR
-    tensor_axes = tensor_axes if isinstance(tensor_axes, (tuple, list)) else (
-        tensor_axes, )
+    tensor_axes = tensor_axes if isinstance(tensor_axes,
+                                            (tuple, list)) else (tensor_axes, )
     tensor_axes = tuple(axis for axis in tensor_axes
                         if axis is not None and axis in mesh.axis_names)
     if not tensor_axes:
@@ -76,10 +76,10 @@ def _can_sample_distributed(
         tpu_sampling_metadata: TPUSupportedSamplingMetadata) -> jax.Array:
     """Whether every row is supported by distributed candidate sampling."""
     is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
-    supported = ((tpu_sampling_metadata.top_k > 0) &
-                 (tpu_sampling_metadata.top_k <=
-                  _distributed_sampling_max_top_k()) &
-                 (tpu_sampling_metadata.top_p > 0.0))
+    supported = (
+        (tpu_sampling_metadata.top_k > 0) &
+        (tpu_sampling_metadata.top_k <= _distributed_sampling_max_top_k()) &
+        (tpu_sampling_metadata.top_p > 0.0))
     return jnp.all(is_greedy | supported)
 
 
@@ -172,8 +172,8 @@ def _merge_topk_candidates(
                                _distributed_sampling_max_top_k())
     threshold = jnp.take_along_axis(global_topk, top_k[:, None] - 1,
                                     axis=-1)[:, 0]
-    shard_candidates = candidate_values.reshape(
-        candidate_values.shape[0], -1, candidates_per_shard)
+    shard_candidates = candidate_values.reshape(candidate_values.shape[0], -1,
+                                                candidates_per_shard)
     shard_tails = shard_candidates[:, :, -1]
     incomplete = jnp.any(shard_tails >= threshold[:, None], axis=-1)
     topk_values = jnp.where(candidate_values >= threshold[:, None],
@@ -250,8 +250,8 @@ def _distributed_topk_sample(
                               _distributed_sampling_max_top_k())
         filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
             candidate_values, candidate_ids, safe_top_k, local_top_p)
-        incomplete = jnp.logical_and(incomplete,
-                                     local_temperature >= _SAMPLING_EPS)
+        incomplete = jnp.logical_and(incomplete, local_temperature
+                                     >= _SAMPLING_EPS)
         sampled_positions = jax.random.categorical(sample_rng, filtered_values)
         sampled_ids = jnp.take_along_axis(candidate_ids,
                                           sampled_positions[:, None],
@@ -291,8 +291,8 @@ def sample(
 
         def sample_full_vocab(_):
             full_logits = jax.lax.with_sharding_constraint(
-                logits,
-                NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+                logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA,
+                                              None)))
             processed_logits = _apply_sampling_transforms(
                 full_logits, tpu_sampling_metadata)
             sampled_tokens = jax.random.categorical(rng, processed_logits)
@@ -301,9 +301,9 @@ def sample(
                                       processed_logits)
             return tokens, output_logits
 
-        use_distributed_candidates = (
-            allow_distributed_sampling
-            and _distributed_sampling_fits(mesh, logits.shape[-1]))
+        use_distributed_candidates = (allow_distributed_sampling
+                                      and _distributed_sampling_fits(
+                                          mesh, logits.shape[-1]))
         if use_distributed_candidates:
             # Candidate shapes use a trace-time maximum; each request's top-k
             # remains dynamic. Greedy and padded rows do not consume a sample.
