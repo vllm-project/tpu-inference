@@ -59,6 +59,37 @@ def get_mamba_num_blocks() -> int | None:
     """Get the registered Mamba block pool capacity."""
     return _GLOBAL_MAMBA_NUM_BLOCKS
 
+def derive_mamba_num_blocks(vllm_config: Any, divisor: int = 8) -> int:
+    """Deterministically derive the compact Mamba block pool capacity from VllmConfig.
+
+    This matches the sizing formula in KVCacheManager without requiring
+    worker-side runtime registration to have completed first.
+    """
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+
+    # Check explicit user override
+    if "mamba_num_blocks" in additional_config:
+        val = int(additional_config["mamba_num_blocks"])
+        return max(((val + divisor - 1) // divisor) * divisor, divisor)
+
+    max_num_reqs = getattr(scheduler_config, "max_num_seqs", 128)
+    num_spec = 0
+    if getattr(vllm_config, "speculative_config", None) is not None:
+        num_spec = getattr(vllm_config.speculative_config, "num_speculative_tokens", 0)
+
+    # active slots: 1 per concurrent request + 1 per speculative token + null block
+    active_slots = max_num_reqs * (num_spec + 1) + 1
+
+    # checkpoint budget for prefix caching in align mode
+    checkpoint_budget = additional_config.get("mamba_cache_checkpoint_budget")
+    if checkpoint_budget is None:
+        checkpoint_budget = max_num_reqs * 8
+    checkpoint_budget = int(checkpoint_budget)
+
+    total_slots = active_slots + checkpoint_budget
+    return max(((total_slots + divisor - 1) // divisor) * divisor, divisor)
+
 
 def is_mamba_spec(spec: Any) -> bool:
     """Check if a KV cache spec represents a Mamba layer."""
@@ -286,9 +317,10 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if mamba_num_blocks is None:
             mamba_num_blocks = get_mamba_num_blocks()
         if mamba_num_blocks is None:
-            raise ValueError(
-                "[TPUHybridKVCacheCoordinator] mamba_num_blocks must be registered "
-                "via set_mamba_num_blocks().")
+            mamba_num_blocks = derive_mamba_num_blocks(self.vllm_config)
+            logger.info(
+                "[TPUHybridKVCacheCoordinator] mamba_num_blocks was not registered via "
+                "set_mamba_num_blocks; derived %d from VllmConfig.", mamba_num_blocks)
         self.mamba_num_blocks = int(mamba_num_blocks)
 
         logger.info(

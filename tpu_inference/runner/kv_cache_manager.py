@@ -408,6 +408,19 @@ class KVCacheManager:
         min_mamba_blocks = round_up(max_num_reqs * min_blocks_per_req + 1)
         mamba_num_blocks = round_up(max_num_reqs * mamba_blocks_per_req + 1)
 
+        # Cross-check against the shared helper that the scheduler processes use.
+        # They must agree exactly: in align mode the scheduler's mamba block-id space
+        # is derived directly from VllmConfig. Prefer the shared helper so there is one source of truth.
+        from tpu_inference.core.hybrid_coordinator import derive_mamba_num_blocks
+        derived_mamba = derive_mamba_num_blocks(self.runner.vllm_config, divisor)
+        if is_align_mode and derived_mamba != mamba_num_blocks:
+            logger.warning(
+                "Compact-mamba sizing: local formula gave %d but the shared "
+                "helper gave %d; using the shared value so the scheduler's "
+                "block-id space matches the allocated arrays.",
+                mamba_num_blocks, derived_mamba)
+            mamba_num_blocks = derived_mamba
+
         if pinned_attn_blocks is not None:
             # The attention pool size is the user's explicit choice
             spare = avail - pinned_attn_blocks * attn_bytes_per_block

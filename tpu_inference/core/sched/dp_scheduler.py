@@ -162,12 +162,16 @@ def _scheduler_worker_process(
     cache_config = getattr(vllm_config, "cache_config", None)
     if getattr(cache_config, "mamba_cache_mode", "none") == "align":
         from tpu_inference.core.hybrid_coordinator import (
-            install_hybrid_coordinator_hooks, set_mamba_num_blocks)
+            derive_mamba_num_blocks, install_hybrid_coordinator_hooks,
+            set_mamba_num_blocks)
         install_hybrid_coordinator_hooks(vllm_config)
         mamba_num_blocks = getattr(kv_cache_config, "mamba_num_blocks", None)
-        if mamba_num_blocks is not None:
-            set_mamba_num_blocks(mamba_num_blocks)
-            cache_config.mamba_num_blocks = mamba_num_blocks
+        if mamba_num_blocks is None:
+            derived = derive_mamba_num_blocks(vllm_config)
+            dp_size = getattr(vllm_config.parallel_config, "data_parallel_size", 1)
+            mamba_num_blocks = derived // dp_size if dp_size > 1 else derived
+        set_mamba_num_blocks(mamba_num_blocks)
+        cache_config.mamba_num_blocks = mamba_num_blocks
 
     # Initialize the scheduler in this process
     import inspect
@@ -599,12 +603,22 @@ class DPScheduler(SchedulerInterface):
         # vllm_config.cache_config. Symmetrically partition across DP ranks.
         mamba_num_blocks = getattr(self.vllm_config.cache_config,
                                    "mamba_num_blocks", None)
+        if mamba_num_blocks is None:
+            from tpu_inference.core.hybrid_coordinator import derive_mamba_num_blocks
+            mamba_num_blocks = derive_mamba_num_blocks(self.vllm_config)
+            logger.info(
+                "[DPScheduler] mamba_num_blocks was not set on cache_config; "
+                "derived %d from VllmConfig (%d per rank for dp_size=%d).",
+                mamba_num_blocks, mamba_num_blocks // self.dp_size, self.dp_size)
+
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)
             rank_kv_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
-            if mamba_num_blocks is not None:
-                rank_kv_config.mamba_num_blocks = mamba_num_blocks // self.dp_size
+            rank_kv_config.mamba_num_blocks = mamba_num_blocks // self.dp_size
+            assert rank_kv_config.mamba_num_blocks > 0, (
+                f"mamba_num_blocks={mamba_num_blocks} is smaller than "
+                f"dp_size={self.dp_size}")
             self.per_rank_kv_cache_configs.append(rank_kv_config)
 
     def _send_command(self,
