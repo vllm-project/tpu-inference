@@ -31,6 +31,7 @@ from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
     ragged_gather_v2 as ragged_gather
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sort import can_pack_int32, packed_argsort
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -674,7 +675,14 @@ def fused_moe_func(
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]
         topk_indices_flat = topk_indices_local.flatten()
-        topk_argsort_indices = jnp.argsort(topk_indices_flat)
+        max_expert_id = global_num_experts - 1
+        if can_pack_int32(n=topk_indices_flat.shape[0], max_key=max_expert_id):
+            # Sort by the packed [key | index] rather than argsorting, when
+            # the two widths together fit in an int32.
+            topk_argsort_indices = packed_argsort(topk_indices_flat,
+                                                  max_key=max_expert_id)
+        else:
+            topk_argsort_indices = jnp.argsort(topk_indices_flat)
         token_indices = jnp.arange(num_tokens_local,
                                    dtype=jnp.int32).repeat(topk)
         token_indices_sorted = token_indices[topk_argsort_indices]
