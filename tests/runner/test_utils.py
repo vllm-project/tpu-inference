@@ -16,7 +16,8 @@ from jax._src.pallas.utils import next_power_of_2
 from tpu_inference.runner.utils import (
     MAX_TRACED_REQUEST_IDS, PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR,
     AggregatedStatsLogger, ForbidCompile, InferencePhase, LatencyTracker,
-    PhasedBasedProfiler, determine_phase_from_batch_composition_stats,
+    PhasedBasedProfiler, build_token_paddings,
+    determine_phase_from_batch_composition_stats,
     extract_request_ids_for_tracing, get_batch_composition_stats,
     get_padded_num_reqs_with_upper_limit, get_padded_token_len,
     get_req_paddings, get_token_paddings)
@@ -99,6 +100,32 @@ def test_get_paddings():
     actual_paddings = get_token_paddings(min_token_size, max_token_size,
                                          padding_gap)
     assert actual_paddings == expected_paddings
+
+
+def test_build_token_paddings_caps_at_budget():
+    # Budget 16640 with the exponential gap: the stock list ends ..., 16384,
+    # 32768; the runner list ends at the budget itself.
+    assert build_token_paddings(
+        256, 16640, 0) == [256, 512, 1024, 2048, 4096, 8192, 16384, 16640]
+    # A budget that is already a bucket yields the stock list.
+    assert build_token_paddings(16, 512, 0) == get_token_paddings(16, 512, 0)
+    # Bucketed gap: the last bucket is the budget, not the overshoot.
+    assert build_token_paddings(16, 317,
+                                64) == [16, 32, 64, 128, 192, 256, 320]
+    # The budget is rounded up to a multiple of min_token_size.
+    assert build_token_paddings(32, 16640 * 16, 0)[-1] == 266240
+
+
+def test_build_token_paddings_keeps_compilation_sizes():
+    # User-supplied sizes are merged as given (even above the budget) and
+    # deduplicated against the generated buckets.
+    assert build_token_paddings(256,
+                                16640,
+                                0,
+                                additional_sizes=[4096, 12288, 32768]) == [
+                                    256, 512, 1024, 2048, 4096, 8192, 12288,
+                                    16384, 16640, 32768
+                                ]
 
 
 def _tracing_batch(num_reqs):

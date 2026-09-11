@@ -14,7 +14,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -223,6 +223,33 @@ def get_token_paddings(min_token_size: int, max_token_size: int,
             paddings.append(num)
     logger.info(f"Prepared token paddings: {paddings}")
     return paddings
+
+
+def build_token_paddings(
+    min_token_size: int,
+    max_token_size: int,
+    padding_gap: int,
+    additional_sizes: Sequence[int] = ()) -> list[int]:
+    """Token buckets for the runner: never pad a step past the budget.
+
+    `get_token_paddings` grows buckets until one covers `max_token_size`, so
+    a budget that is not itself a bucket (e.g. 16640 with the default
+    exponential gap) lands a full chunked-prefill step on the next bucket,
+    up to ~2x the scheduler's own limit (16640 -> 32768 tokens per rank).
+    The scheduler never schedules more than the budget, so buckets above it
+    are unreachable: they only cost a compile each and size the runner's
+    preallocated token buffers.
+
+    This returns the generated buckets capped at the budget (rounded up to a
+    multiple of `min_token_size`), the budget itself, and any user-supplied
+    `compilation_sizes`, which are kept as given even when above the budget.
+    A budget that is already a bucket yields the stock list.
+    """
+    budget = -(-max_token_size // min_token_size) * min_token_size
+    generated = get_token_paddings(min_token_size, max_token_size, padding_gap)
+    sizes = {p for p in generated if p <= budget} | {budget}
+    sizes.update(int(x) for x in additional_sizes)
+    return sorted(sizes)
 
 
 def get_padded_token_len(paddings: list[int], x: int) -> int:
