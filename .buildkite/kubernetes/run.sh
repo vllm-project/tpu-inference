@@ -63,8 +63,16 @@ export WORKLOAD_IMAGE
 # tpu_inference depends on: it rejects MODEL_IMPL_TYPE="" where it wants the
 # variable absent.
 FORWARD=(
-  # Secrets and identity
-  HF_TOKEN GITHUB_CI_BOT_TOKEN
+  # Secrets and identity. HF_TOKEN and BUILDKITE_ANALYTICS_TOKEN are unset on a
+  # kube agent, and naming an unset variable is how the launcher is asked for
+  # it: both are in its env_secrets registry, so it reads them from Secret
+  # Manager and puts them in the pod. On bare metal an agent env hook exports
+  # them instead, which is why run_in_docker.sh can pass them by value.
+  #
+  # BUILDKITE_ANALYTICS_TOKEN has to reach the pod rather than the agent
+  # because the Test Engine collector runs inside the workload. Without it a
+  # suite still passes and reports nothing.
+  HF_TOKEN GITHUB_CI_BOT_TOKEN BUILDKITE_ANALYTICS_TOKEN
   # Model and backend selection
   TPU_VERSION MODEL_IMPL_TYPE TPU_BACKEND_TYPE NEW_MODEL_DESIGN
   QUANTIZATION USE_PREBUILT_IMAGE SKIP_ACCURACY_TESTS BVT_ONLY
@@ -82,10 +90,9 @@ FORWARD=(
   GPU_MEMORY_UTILIZATION GCS_BUCKET HOST_NAME
 )
 
-# Every BUILDKITE_* the agent set, enumerated rather than listed. A list of a
-# hundred names maintained by hand drifts, and the way it fails is silent: a
-# missing BUILDKITE_ANALYTICS_TOKEN means Test Engine receives nothing and
-# every step still passes.
+# Every BUILDKITE_* the agent set, enumerated rather than listed. There are
+# around a hundred, most of them build metadata a test may read, and a
+# hand-maintained list of them drifts.
 #
 # What the sweep carries that matters:
 #
