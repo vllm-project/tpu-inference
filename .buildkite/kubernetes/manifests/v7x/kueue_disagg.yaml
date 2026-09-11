@@ -194,6 +194,32 @@ spec:
                   value: "vllm"
                 - name: USE_BATCHED_RPA_KERNEL
                   value: "0"
+                # Declared empty so that JobSet's TPU webhook leaves them
+                # alone: it injects a MegaScale topology when a JobSet has more
+                # than one TPU-requesting replicatedJob, and prefill and decode
+                # are two. libtpu then reads num_slices=2 and blocks in
+                # "MegaScale Topology Discovery ... Missing hosts" forever,
+                # each engine waiting for the other's DCN handshake. They are
+                # two independent single-host engines that exchange KV over the
+                # connector, not two slices of one program. A webhook only adds
+                # a variable the container has not already named, so naming
+                # them here is the opt-out.
+                - name: MEGASCALE_NUM_SLICES
+                  value: ""
+                - name: MEGASCALE_SLICE_ID
+                  value: ""
+                - name: MEGASCALE_COORDINATOR_ADDRESS
+                  value: ""
+                - name: MEGASCALE_PORT
+                  value: ""
+                - name: TPU_WORKER_ID
+                  value: "0"
+                - name: TPU_WORKER_HOSTNAMES
+                  value: ""
+                - name: TPU_PROCESS_ADDRESSES
+                  value: ""
+                - name: TPU_PROCESS_PORT
+                  value: ""
                 # Both compile caches on the fleet's compilation bucket, so a
                 # cold compile of this model is paid once rather than once per
                 # run. VLLM_CACHE_ROOT defaults under $$HOME and would otherwise
@@ -337,6 +363,32 @@ spec:
                   value: "vllm"
                 - name: USE_BATCHED_RPA_KERNEL
                   value: "0"
+                # Declared empty so that JobSet's TPU webhook leaves them
+                # alone: it injects a MegaScale topology when a JobSet has more
+                # than one TPU-requesting replicatedJob, and prefill and decode
+                # are two. libtpu then reads num_slices=2 and blocks in
+                # "MegaScale Topology Discovery ... Missing hosts" forever,
+                # each engine waiting for the other's DCN handshake. They are
+                # two independent single-host engines that exchange KV over the
+                # connector, not two slices of one program. A webhook only adds
+                # a variable the container has not already named, so naming
+                # them here is the opt-out.
+                - name: MEGASCALE_NUM_SLICES
+                  value: ""
+                - name: MEGASCALE_SLICE_ID
+                  value: ""
+                - name: MEGASCALE_COORDINATOR_ADDRESS
+                  value: ""
+                - name: MEGASCALE_PORT
+                  value: ""
+                - name: TPU_WORKER_ID
+                  value: "0"
+                - name: TPU_WORKER_HOSTNAMES
+                  value: ""
+                - name: TPU_PROCESS_ADDRESSES
+                  value: ""
+                - name: TPU_PROCESS_PORT
+                  value: ""
                 - name: VLLM_XLA_CACHE_PATH
                   value: "/cache/jax/xla"
                 - name: VLLM_CACHE_ROOT
