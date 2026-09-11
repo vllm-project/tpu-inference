@@ -1,0 +1,480 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# pipeline_jax.yml on the Kueue fleet.
+#
+# A pipeline of its own rather than a branch inside pipeline_jax.yml. The two
+# run the same tests on different hardware from different pools, and while the
+# fleet is being brought up a failure here must not read as a regression in the
+# repo - so this one is non-blocking and pipeline_jax.yml is untouched.
+#
+# Every v6e step of pipeline_jax.yml is here, with keys kept identical so the
+# two files read side by side. What is absent is what the fleet cannot run:
+# steps gated on tpu7x want eight v7x chips on one host, and the largest v7x
+# shape the fleet has node pools for is four. Steps gated on NIGHTLY stay
+# gated, on the same expressions.
+#
+# pipeline_jax.yml's notification step is also absent. It exists to raise a
+# failing nightly with the team, and this lane is non-blocking: until it is
+# trusted, a failure here is a question about the fleet rather than something
+# to page anyone about.
+#
+# Each step names a shape and a command; chips, topology, Kueue queue, caches
+# and deadlines all come from the cluster-side profile registry in ci-infra, so
+# nothing about placement is repeated here.
+#
+# There is deliberately no pipeline-level `env:` block. A name set at that
+# level wins over one passed to `bk build create --env`, so anything defaulted
+# here could not be overridden per build. What needs a default gets one in
+# run.sh instead, which leaves it free for a build that wants to vary it.
+
+# No `retry:` for preemption anywhere below. The agent runs in a CPU pod
+# outside the Kueue workload, so an eviction pauses the step's log rather than
+# losing the agent, and the launcher resubmits within the workload's own
+# deadline.
+#
+# soft_fail matches pipeline_jax.yml: one failing test should not hide the
+# rest. One timeout for every step, covering waiting as well as running,
+# because Buildkite adds no queue time of its own - the agent pod starts at
+# once and then waits inside the step. A hung test is bounded separately by the
+# workload's activeDeadlineSeconds, which queueing cannot consume.
+.tpu_step: &tpu_step
+  depends_on: "build_docker_kube"
+  soft_fail: true
+  timeout_in_minutes: 480
+  agents:
+    queue: "kube"
+  plugins:
+    - kubernetes:
+        podTemplate: tpu-launcher
+        # Blobless. A step clones this repo only to read run.sh and, for the
+        # disagg steps, a shell script the workload runs; the tree the tests
+        # need is already in the image. A full clone was most of the time
+        # before the pod started. Blobs are still fetched on demand, so the
+        # working tree stays complete.
+        checkout:
+          cloneFlags: -v --filter=blob:none
+          fetchFlags: -v --prune --filter=blob:none
+
+steps:
+  # The same builder pipeline_build.yml uses: a CPU agent, not a TPU one, and
+  # not through the launcher - a docker build is not a TPU workload. It pushes
+  # to the fleet's Artifact Registry and publishes the exact tag, which is what
+  # run.sh reads back.
+  #
+  # Skipped when the build names its own image. A pinned WORKLOAD_IMAGE means
+  # nothing reads the metadata this step publishes, so building one costs the
+  # better part of an hour for nothing; Buildkite treats a skipped dependency
+  # as satisfied, so the TPU steps still run.
+  - label: ":docker: Build and push CI image"
+    key: "build_docker_kube"
+    timeout_in_minutes: 90
+    agents:
+      queue: "cpu_64_core"
+    env:
+      TPU_VERSION: "tpu6e"
+    commands:
+      - |
+        if [[ -n "$${CI_IMAGE:-}" ]]; then
+          buildkite-agent meta-data set ci-image "$$CI_IMAGE"
+          exit 0
+        fi
+        # setup_docker_env.sh refuses to build without this: the image tag
+        # includes the vLLM commit, and omitting it lets pipelines overwrite
+        # each other's image for the same tpu-inference commit. bootstrap.sh
+        # sets it for the pipelines it uploads; this one is uploaded directly.
+        source .buildkite/scripts/configs/pipeline_config.sh
+        VLLM_COMMIT_HASH="$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
+        buildkite-agent meta-data set "VLLM_COMMIT_HASH" "$$VLLM_COMMIT_HASH"
+        source .buildkite/scripts/setup_docker_env.sh
+        setup_environment "vllm-tpu" "false" "true"
+        buildkite-agent meta-data set ci-image "$$EXPORTED_CI_CACHE_IMAGE"
+
+  # ------------------------------------------------------------ single chip ---
+  # Fourteen of these against a two-chip nominal quota, so most are borrowing
+  # and are the first reclaimed when an eight-chip step arrives.
+
+  - label: ":kubernetes: E2E MLPerf tests for JAX models"
+    key: "tpu6e_test_0"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: E2E MLPerf tests for JAX models with quantization"
+    key: "tpu6e_test_1"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      QUANTIZATION: "True"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: E2E MLPerf tests for JAX new models"
+    key: "tpu6e_test_2"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      NEW_MODEL_DESIGN: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on single chip"
+    key: "tpu6e_test_3"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+      MODEL_IMPL_TYPE: "vllm"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: E2E speculative decoding test"
+    key: "tpu6e_test_6"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        # Per-push runs the BVT smoke subset; nightly runs the full matrix. The
+        # conftest collection gate narrows to @pytest.mark.bvt cases only when
+        # BVT_ONLY=1.
+        if [ "$${NIGHTLY:-0}" = "1" ]; then export BVT_ONLY=; else export BVT_ONLY=1; fi
+        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py
+
+  # The coverage file is uploaded from inside the pod rather than collected by
+  # `artifact_paths`. On bare metal the agent runs on the TPU VM and shares a
+  # filesystem with the test; here it does not, so the test uploads its own
+  # result with the buildkite-agent CLI the CI image ships.
+  - label: ":kubernetes: JAX unit tests part1"
+    key: "tpu6e_test_7_1"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c '
+          python3 -m pytest -s -v -x \
+            /workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_awq.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py \
+            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report=
+          rc=$$?
+          cp .coverage .coverage.part1.tpu6e && buildkite-agent artifact upload .coverage.part1.tpu6e
+          exit $$rc
+        '
+
+  - label: ":kubernetes: JAX unit tests part2"
+    key: "tpu6e_test_7_2"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c '
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py \
+            --ignore=/workspace/tpu_inference/tests/kernels \
+            --ignore=/workspace/tpu_inference/tests/lora \
+            --ignore=/workspace/tpu_inference/tests/e2e \
+            --ignore=/workspace/tpu_inference/tpu_inference/mock \
+            --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py \
+            --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_multi_request_accuracy_test.py \
+            --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py \
+            --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py \
+            --ignore=/workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py \
+            --ignore=/workspace/tpu_inference/tests/runner/test_async_logprobs.py \
+            --ignore=/workspace/tpu_inference/tests/runner/test_processed_logprobs.py \
+            --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py \
+            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report=
+          rc=$$?
+          cp .coverage .coverage.part2.tpu6e && buildkite-agent artifact upload .coverage.part2.tpu6e
+          exit $$rc
+        '
+
+  # No chips, so no launcher: this downloads what the two steps above uploaded
+  # and reports on it. It still runs on the kube queue, which is where this
+  # pipeline's CPU work goes.
+  - label: ":kubernetes: JAX unit tests combine and report"
+    key: "tpu6e_test_7_3"
+    depends_on:
+      - "tpu6e_test_7_1"
+      - "tpu6e_test_7_2"
+    soft_fail: true
+    agents:
+      queue: "kube"
+    commands:
+      - |
+        # pip, not the pex pipeline_jax.yml uses. pex 2.1.151 declares
+        # python <3.13 and this image is past that, so it cannot bootstrap an
+        # interpreter. pex is there to avoid installing into a long-lived VM's
+        # interpreter; a pod is thrown away after the step, so the reason does
+        # not apply.
+        pip install --quiet --break-system-packages coverage \
+          || pip install --quiet coverage
+        python3 -m coverage --version
+      - buildkite-agent artifact download ".coverage.part*" .
+      - |
+        # Maps the container's path back onto the checkout, so the report
+        # attributes coverage to files that exist here.
+        printf '[paths]\nsource =\n    .\n    /workspace/tpu_inference/\n' > .coveragerc
+      - |
+        set -o pipefail
+        files=$$(ls .coverage.part* 2>/dev/null)
+        if [ -z "$$files" ]; then
+          echo "no coverage files were uploaded; nothing to combine" >&2
+          exit 1
+        fi
+        echo "combining: $$files"
+        # shellcheck disable=SC2086
+        python3 -m coverage combine $$files
+        python3 -m coverage report --fail-under=68
+        EXIT_CODE=$$?
+        rm -f .coverage.part* .coveragerc .coverage
+        exit $$EXIT_CODE
+
+  - label: ":kubernetes: JAX unit tests - kernels"
+    key: "tpu6e_test_8"
+    # Nightly, or opted into by name, which is what lets a kernel change run
+    # these without a full nightly. bootstrap.sh sets RUN_KERNEL_TESTS from the
+    # diff; a build that wants them can pass it directly.
+    if: build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_TESTS") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
+          --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
+          --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
+          --ignore=/workspace/tpu_inference/tests/kernels/collectives \
+          --ignore=/workspace/tpu_inference/tests/kernels/spmm_v1_test.py
+
+  - label: ":kubernetes: lora e2e tests single chip - test_lora"
+    key: "tpu6e_test_10_1"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      MODEL_IMPL_TYPE: "vllm"
+      TPU_BACKEND_TYPE: "jax"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
+
+  - label: ":kubernetes: lora e2e tests single chip - test_lora_adapter"
+    key: "tpu6e_test_10_2"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      MODEL_IMPL_TYPE: "vllm"
+      TPU_BACKEND_TYPE: "jax"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_adapter.py
+
+  - label: ":kubernetes: lora unit tests on single chip"
+    key: "tpu6e_test_15"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c \
+          'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+
+  - label: ":kubernetes: Runai Model Streamer JAX UniProcExecutor"
+    key: "tpu6e_test_27"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
+
+  - label: ":kubernetes: Runai Model Streamer Torchax UniProcExecutor"
+    key: "tpu6e_test_28"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
+
+  - label: ":kubernetes: Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "tpu6e_test_33"
+    env:
+      TPU_VERSION: "tpu6e"
+      TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
+      TENSOR_PARALLEL_SIZE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: "0.72"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  # ------------------------------------------------------------- eight chip ---
+  # Only one of these fits at a time, so they serialise and each one squeezes
+  # the single-chip steps down to their nominal two chips.
+
+  - label: ":kubernetes: E2E MLperf tests for Llama4 models"
+    key: "tpu6e_test_4"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      NEW_MODEL_DESIGN: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: JAX unit tests - collective kernels"
+    key: "tpu6e_test_9"
+    if: build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_COLLECTIVES_TESTS") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+
+  - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on multiple chips"
+    key: "tpu6e_test_11"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      TPU_VERSION: "tpu6e"
+      MODEL_IMPL_TYPE: "vllm"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: lora e2e tests multi chips"
+    key: "tpu6e_test_13"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+      TEST_LORA_TP: "True"
+      VLLM_LOG_LEVEL: "INFO"
+      MODEL_IMPL_TYPE: "vllm"
+      TPU_BACKEND_TYPE: "jax"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
+
+  - label: ":kubernetes: lora unit tests on multi chips"
+    key: "tpu6e_test_16"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+      VLLM_LOG_LEVEL: "INFO"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py
+
+  # pipeline_jax.yml's tpu6e_test_25, which on bare metal is eight docker
+  # containers on one 8-chip VM. "Multi-host" there means eight TPU processes,
+  # not eight machines: every container uses --network host and addresses the
+  # others as 127.0.0.1, so a pod holding all 8 chips is the same environment
+  # with the container boundaries removed. run_disagg_multi_host_pod.sh is that
+  # script with `docker run` replaced by a background process, which is needed
+  # because the pod has no docker daemon and PodSecurity `baseline` rejects the
+  # --privileged the docker script asks for.
+  #
+  # Not a JobSet: that is for a slice spanning several nodes, and this needs one
+  # ct6e-standard-8t.
+  - label: ":kubernetes: E2E test for Multihost DCN-based P/D disaggregation"
+    key: "tpu6e_test_25"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "1024"
+      NUM_PROMPTS: "100"
+      RANDOM_SEED: "10"
+      MAX_CONCURRENCY: "10"
+      TEST_MODE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/examples/disagg/run_disagg_multi_host_pod.sh
+
+  - label: ":kubernetes: Runai Model Streamer Torchax RayDistributedExecutor"
+    key: "tpu6e_test_29"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
+
+  - label: ":kubernetes: E2E test for Single Host DCN-based P/D disaggregation"
+    key: "tpu6e_test_34"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: "512"
+      OUTPUT_LEN: "128"
+      NUM_PROMPTS: "200"
+      REQUEST_RATE: "4"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/examples/disagg/run_disagg_single_host.sh
+
+  - label: ":kubernetes: E2E test for MPMD data parallelism"
+    key: "tpu6e_test_35"
+    env:
+      TPU_VERSION: "tpu6e"
+      USE_PREBUILT_IMAGE: "1"
+      NEW_MODEL_DESIGN: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash -c '
+          set -eu
+          MODEL=meta-llama/Llama-3.1-8B-Instruct
+          TPU_MULTIPROCESS_DP=1 \
+            VLLM_ENGINE_READY_TIMEOUT_S=60000 \
+            MODEL_IMPL_TYPE=flax_nnx \
+            vllm serve $$MODEL \
+              --port 8000 \
+              --data-parallel-size 4 \
+              --tensor-parallel-size 1 \
+              --max-model-len 1024 \
+              --no-enable-prefix-caching \
+              --gpu-memory-utilization 0.9 &
+          trap "kill %1 2>/dev/null || true" EXIT
+          for _ in $$(seq 1 180); do
+            curl -fs localhost:8000/health > /dev/null && break || sleep 10
+          done
+          curl -fsS http://localhost:8000/v1/completions \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"model\": \"$$MODEL\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}"
+        '
