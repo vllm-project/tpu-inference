@@ -567,6 +567,53 @@ class TPUWorker(WorkerBase):
                              f"{-total_hbm_avail_gb}GiB. Please consider "
                              f"increasing --gpu-memory-utilization from "
                              f"{gpu_memory_utilization} to a larger value.")
+
+        # Cross-host KV-cache-shape determinism (multi-host / plain-SPMD):
+        # each host measures its OWN live HBM (utils.hbm_usage_bytes does NO
+        # cross-host reduction), so total_hbm_avail can differ per host due to
+        # topology-correlated resident runtime/allocator buffers. That budget
+        # flows into kv_cache_manager.initialize_kv_cache()
+        # num_blocks = size // page_bytes, which becomes the paged-KV-cache
+        # leading dim fed as a traced sharded array into the RPA jax.shard_map.
+        # Divergent per-host num_blocks => divergent StableHLO body shape =>
+        # divergent jit(run_model) XLA cache key => the launch-group validator
+        # ("different launch id in the launch group") halts the mesh. Observed
+        # as a clean z-slab split (e.g. 1850 vs 1861 num_kv_pages across 16
+        # hosts). Min-synchronize the budget across ALL hosts so every host
+        # allocates the SAME num_blocks => identical RPA KV shard shape => ONE
+        # cache key. Mirrors vLLM's min-across-workers KV budget; numerically
+        # inert (only lowers total KV capacity to the min-host budget; touches
+        # no weights/logits/optimizer state).
+        try:
+            from jax.experimental import multihost_utils as _mhu
+
+            if jax.process_count() > 1:
+                # int32-overflow safe: JAX runs x64 OFF by default, so a plain
+                # process_allgather of an int64 ~5.6e11-byte scalar truncates to
+                # int32 -> garbage/negative min -> the sync would silently no-op.
+                # Gather in MiB (~5e5, well within int32), min, then scale back.
+                # floor is monotone: min(floor(B_i/M)) == floor(min(B_i)/M), so
+                # no inter-host one-page difference can survive the round-trip.
+                _MIB = 1024 * 1024
+                _local_mib = int(total_hbm_avail) // _MIB
+                _gathered = _mhu.process_allgather(
+                    jax.numpy.asarray(_local_mib, dtype=jax.numpy.int32))
+                _synced_mib = int(jax.numpy.min(_gathered))
+                _synced = _synced_mib * _MIB
+                if _synced > 0 and _synced != total_hbm_avail:
+                    logger.info(
+                        "Cross-host KV-budget min-sync across "
+                        f"{jax.process_count()} hosts: "
+                        f"local total_hbm_avail={total_hbm_avail} -> "
+                        f"synced={_synced} "
+                        f"(delta={total_hbm_avail - _synced} bytes)")
+                if _synced > 0:
+                    total_hbm_avail = _synced
+        except Exception as _e:  # pragma: no cover - defensive
+            logger.warning(
+                "Cross-host KV-budget min-sync skipped (falling back to "
+                f"per-host budget; KV shard shapes may diverge): {_e}")
+
         return total_hbm_avail
 
     def execute_model(
