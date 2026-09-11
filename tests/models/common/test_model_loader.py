@@ -352,7 +352,9 @@ def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
         allocated = jax.tree.map(lambda c: c.sharding, kv_caches)
         cache_index = tuple((f"layer.{i}", i) for i in range(num_layers))
 
-        def step(caches, num_tokens):
+        def step(caches, num_tokens, with_options=True):
+            step_fn = (model.model_fn
+                       if with_options else model.model.step_fn_no_options)
             num_reqs = min(num_tokens, 8)
             attention_metadata = AttentionMetadata(
                 input_positions=jnp.zeros((num_tokens, ), dtype=jnp.int32),
@@ -363,7 +365,7 @@ def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
                 request_distribution=jnp.array([0, 0, num_reqs],
                                                dtype=jnp.int32),
             )
-            return model.model_fn(
+            return step_fn(
                 model.state_leaves,
                 caches,
                 jnp.ones((num_tokens, ), dtype=jnp.int32),
@@ -396,6 +398,13 @@ def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
         with ForbidCompile():
             for num_tokens in buckets:
                 kv_caches = step(kv_caches, num_tokens)
+
+        # The eagle3 drafter and the `continue_decode` loop both call the step
+        # fn from inside an outer jit, where `kv_caches` arrives as tracers
+        # with no queryable sharding. That must still work.
+        traced_step = jax.jit(
+            lambda caches: step(caches, buckets[0], with_options=False))
+        traced_step(kv_caches)
 
 
 def test_get_flax_model_with_pooling(vllm_config, mesh, rng):

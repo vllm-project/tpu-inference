@@ -373,24 +373,12 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    # The kv-cache entry of `out_shardings` is pinned to the sharding the
-    # runner actually allocated each cache with, read off the `kv_caches`
-    # argument of the first call (see `_get_step_fn`). It can be neither a
-    # single attention-shaped spec nor left unspecified:
-    #
-    #   * A single spec is applied as a pytree prefix, so it would also land
-    #     on the mamba/GDN state leaves that `runner/kv_cache_manager.py`
-    #     allocates with a different layout (e.g. ssm_state
-    #     `[blocks, heads, dk, dv]` is heads-sharded), silently reshuffling
-    #     them and costing an all-to-all per layer per step.
-    #   * Unspecified (`None`) leaves the output sharding to XLA. The runner
-    #     feeds the result straight back in as the next step's `kv_caches`,
-    #     so whenever XLA's choice differs from the allocated sharding the
-    #     jit cache key changes and the step recompiles -- which the runner's
-    #     `ForbidCompile` guard turns into a hard error mid-run.
-    #
-    # Echoing the input sharding satisfies both: every leaf keeps the layout
-    # its kernel emitted, and the cache key is a fixed point across steps.
+    def _kv_cache_out_shardings(kv_caches):
+        leaves = jax.tree.leaves(kv_caches)
+        if any(isinstance(leaf, jax.core.Tracer) for leaf in leaves):
+            return None
+        return jax.tree.map(lambda c: c.sharding, kv_caches)
+
     def _wrap_with_jit(fn, kv_cache_shardings, **jit_kwargs):
         return jax.jit(
             fn,
@@ -408,15 +396,14 @@ def get_flax_model(
         )
 
     # `continue_decode` calls the step fn from inside a `jax.lax.while_loop`
-    # body, where JAX forbids `compiler_options` on a nested jit, so the
-    # options-free twin is built alongside the regular one; the loop jit in
-    # `runner/decode_loop.py` supplies the options for the whole fused
-    # program. Both are built on first use, keyed by the kv-cache shardings
-    # so a reallocation with a new layout rebuilds rather than reshards.
+    # body, where JAX forbids `compiler_options` on a nested jit. Build an
+    # options-free twin for that path; the loop jit in `runner/decode_loop.py`
+    # supplies the options for the whole fused program. Mirrors the torchax
+    # path in `models/vllm/vllm_model_wrapper.py`.
     _step_fns: Dict[Tuple[bool, Any], Any] = {}
 
     def _get_step_fn(kv_caches, with_options: bool):
-        shardings = jax.tree.map(lambda c: c.sharding, kv_caches)
+        shardings = _kv_cache_out_shardings(kv_caches)
         key = (with_options, tuple(jax.tree.leaves(shardings)))
         fn = _step_fns.get(key)
         if fn is None:
@@ -430,7 +417,7 @@ def get_flax_model(
     _draft_step_fns: Dict[Any, Any] = {}
 
     def _get_draft_step_fn(kv_caches):
-        shardings = jax.tree.map(lambda c: c.sharding, kv_caches)
+        shardings = _kv_cache_out_shardings(kv_caches)
         key = tuple(jax.tree.leaves(shardings))
         fn = _draft_step_fns.get(key)
         if fn is None:
@@ -506,15 +493,12 @@ def get_flax_model(
     precompile_vision_encoder_fn = getattr(model, "precompile_vision_encoder",
                                            None)
     # `graphdef` and the state treedef are captured in each closure; the
-    # runner passes pre-flattened `state_leaves` as the first positional arg,
-    # and `kv_caches` as the second -- the latter is what the step fns are
-    # keyed on, so it must stay positional.
+    # runner passes pre-flattened `state_leaves` as the first positional arg.
     model_supports_spec_step = supports_kw(model_class.__call__,
                                            "spec_step_idx")
 
     def _resolve_step_fn(kv_caches, with_options: bool):
         if is_draft_model:
-            # The draft jit carries no compiler options, so it is its own twin.
             return _get_draft_step_fn(kv_caches)
         return _get_step_fn(kv_caches, with_options)
 
