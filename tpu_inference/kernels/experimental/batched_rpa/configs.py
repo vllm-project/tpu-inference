@@ -94,9 +94,14 @@ class CPConfig:
     ring_axis_name: str | None = None
     # All axis names of the mesh the ring runs on, in order.
     ring_mesh_axis_names: tuple[str, ...] | None = None
-    # PCP current phase: a request's head and tail chunks
-    # share one new kv; only the last sequence writes it back.
-    write_last_seq_only: bool = False
+    # PCP current phase: a request's head and tail chunks share one new kv,
+    # so a per-seq mask (extra_refs[2]) picks the one that writes it back --
+    # each request's tail. Unset, every sequence writes.
+    write_seq_mask: bool = False
+    # PCP current phase: the new kv buffer is still in all_gather rank order,
+    # so a per-page map (extra_refs[3]) sends each token-order page to the
+    # page holding it. Unset, the buffer is already in token order.
+    kv_page_order: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -124,6 +129,7 @@ class ServingConfigs:
     @property
     def max_decode_bkv_p_new(self) -> int:
         return 1 + pl.cdiv(self.decode_query_size - 1, self.page_size)
+
     @property
     def writes_kv_cache(self) -> bool:
         return self.attention_scope != AttentionScope.CACHE_ONLY
@@ -221,6 +227,11 @@ class RpaConfigs:
         return (self.serve.cp is not None
                 and self.serve.cp.ring_axis_name is not None
                 and self.serve.attention_scope == AttentionScope.CACHE_ONLY)
+
+    @property
+    def new_kv_page_indirect(self) -> bool:
+        """New kv reached page by page through cp.kv_page_order's map."""
+        return self.serve.cp is not None and self.serve.cp.kv_page_order
 
     @property
     def max_steps_ub(self) -> int:

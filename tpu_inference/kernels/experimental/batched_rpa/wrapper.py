@@ -275,6 +275,17 @@ def calculate_block_sizes(
 
         return batch_size * num_muls
 
+    def start_bkv_sz() -> int:
+        """First (and growth-step) kv block size for the linear searches.
+
+        One MXU column, except that a sequence can be shorter than one --
+        a CP shard of a small-page cache, say. Blocks are whole pages, and
+        never zero: a search that starts past max_seq_len takes no step and
+        would roll back to nothing.
+        """
+        max_seq_len = serve_cfgs.pages_per_seq * serve_cfgs.page_size
+        return max(serve_cfgs.page_size, min(mxu_column_size, max_seq_len))
+
     def find_best_block_sizes(
             max_batch_size: int,
             max_n_buffer: int,
@@ -285,7 +296,7 @@ def calculate_block_sizes(
         # costs. Therefore, we conservatively only use 80% of the VMEM budget.
         capped_vmem_limit_bytes = vmem_limit_bytes * 0.8
 
-        bkv_sz = bkv_stride = mxu_column_size
+        bkv_sz = bkv_stride = start_bkv_sz()
         if fixed_bq_sz is None:
             bq_sz = bq_stride = bkv_sz
         else:
@@ -421,7 +432,7 @@ def calculate_block_sizes(
         """
         cap = vmem_limit_bytes * 0.55
         bq_sz = fixed_bq_sz
-        bkv_sz = bkv_stride = mxu_column_size
+        bkv_sz = bkv_stride = start_bkv_sz()
         batch_size = max_batch_size
         n_buffer = max_n_buffer
         while (batch_size > 1
@@ -564,7 +575,6 @@ def calculate_block_sizes(
         "cp_group_size",
         "attention_scope",
         "return_lse",
-        "write_last_seq_only",
         "pcp_ring_axis_name",
         "pcp_ring_mesh_axis_names",
     ),
@@ -609,7 +619,9 @@ def ragged_paged_attention(
     global_kv_cache_lens: jax.Array | None = None,
     global_new_kv_lens: jax.Array | None = None,
     q_pos_offsets: jax.Array | None = None,
-    write_last_seq_only: bool = False,
+    kv_new_starts: jax.Array | None = None,
+    kv_write_seq_mask: jax.Array | None = None,
+    kv_page_order: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array] | tuple[jax.Array, jax.Array, jax.Array]:
     """Perform batched ragged paged attention.
 
@@ -673,9 +685,19 @@ def ragged_paged_attention(
         the sequence's own query length at cu_q_lens[i].
       q_pos_offsets: [max_num_seqs]. Position of each sequence's first query
         relative to the cache end (PCP head/tail chunks). Defaults to 0.
-      write_last_seq_only: Only the last sequence writes new kv back, and
-        visits every new kv block it owns (PCP: one write of the chunk per
-        rank).
+      kv_new_starts: [max_num_seqs]. Base offset of each sequence's new kv
+        inside keys/values. Defaults to 0 when global_new_kv_lens is given
+        (a single request's chunks all start at 0), else cu_q_lens[i].
+      kv_write_seq_mask: [max_num_seqs]. Nonzero on the sequences that write
+        the new kv back; each writer visits every new kv block it owns. PCP
+        fuses a request's head and tail chunk into one launch as two
+        sequences that would write the same kv, so the mask picks one per
+        request (its tail). Defaults to every sequence writing.
+      kv_page_order: [total_new_tokens // page_size]. Entry j is the page of
+        keys/values holding token-order page j, letting the kernel fetch new
+        kv straight from the rank-order all_gather result. Requires every
+        chunk to be a whole number of pages. Defaults to a buffer that is
+        already in token order.
 
     Returns:
       out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
@@ -723,13 +745,32 @@ def ragged_paged_attention(
         soft_cap=soft_cap,
         mask_value=mask_value,
     )
+    for name, arr in [("kv_new_starts", kv_new_starts),
+                      ("kv_write_seq_mask", kv_write_seq_mask)]:
+        if arr is not None and arr.shape != (max_num_seqs, ):
+            raise ValueError(f"Expected {name}.shape to be ({max_num_seqs},), "
+                             f"got {arr.shape}")
+    if kv_page_order is not None:
+        if cp_group_size is None:
+            raise ValueError(
+                "kv_page_order is PCP only (needs cp_group_size).")
+        if keys.shape[0] % page_size != 0:
+            raise ValueError(
+                f"kv_page_order needs the new kv buffer rows {keys.shape[0]} "
+                f"to be a multiple of {page_size=}.")
+        if kv_page_order.shape != (keys.shape[0] // page_size, ):
+            raise ValueError(
+                f"Expected kv_page_order.shape to be "
+                f"({keys.shape[0] // page_size},), got {kv_page_order.shape}")
+
     cp_cfg = None
     if cp_group_size is not None:
         cp_cfg = configs.CPConfig(
             group_size=cp_group_size,
             ring_axis_name=pcp_ring_axis_name,
             ring_mesh_axis_names=pcp_ring_mesh_axis_names,
-            write_last_seq_only=write_last_seq_only,
+            write_seq_mask=kv_write_seq_mask is not None,
+            kv_page_order=kv_page_order is not None,
         )
     serve_cfgs = configs.ServingConfigs(
         num_seqs=max_num_seqs,
@@ -798,6 +839,8 @@ def ragged_paged_attention(
     else:
         new_lens = global_new_kv_lens
         new_kv_starts = jnp.zeros_like(q_lens)
+    if kv_new_starts is not None:
+        new_kv_starts = kv_new_starts
 
     if attention_scope == configs.AttentionScope.CACHE_ONLY:
         if cp_group_size is not None:
@@ -873,7 +916,14 @@ def ragged_paged_attention(
             kernel_kv_cache_lens = global_kv_cache_lens
         elif cp_group_size is not None:
             computer_cls = schedule_cp.CPMetadataComputer
+            # extra_refs[2:] hold whichever of the two optional PCP arrays
+            # were passed, mask first; CPConfig records which, so the
+            # computer can recover their indices.
             extra_scalars = (cp_rank_scalar, new_kv_starts)
+            if kv_write_seq_mask is not None:
+                extra_scalars += (kv_write_seq_mask, )
+            if kv_page_order is not None:
+                extra_scalars += (kv_page_order, )
         else:
             computer_cls = schedule.BaseMetadataComputer
             extra_scalars = ()

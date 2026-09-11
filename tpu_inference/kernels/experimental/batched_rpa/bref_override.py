@@ -251,15 +251,25 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
                 src_off = page_indices_ref[p_idx] * self.cfgs.serve.page_size
                 dma_list_cache.append((src_off, dst_off, sz, b))
 
-            # Contiguous fetch for new KV
-            dma_entry_0 = schedule_ref.dma_kv_new[block_idx, b, 0]
-            src_new_off = dma_entry_0.fetch_hbm[...]
-            dst_vmem_off = dma_entry_0.fetch_vmem[...]
-            total_new_sz = 0
-            for i in range(self.cfgs.bkv_p_new):
-                dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
-                total_new_sz += dma_entry.fetch_val
-            dma_list_new.append((src_new_off, dst_vmem_off, total_new_sz, b))
+            if self.cfgs.new_kv_page_indirect:
+                # The new kv buffer is in all_gather rank order, so the
+                # slots' pages are not contiguous in it: fetch one per slot.
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    dma_list_new.append(
+                        (dma_entry.fetch_hbm[...], dma_entry.fetch_vmem[...],
+                         dma_entry.fetch_val, b))
+            else:
+                # Contiguous fetch for new KV
+                dma_entry_0 = schedule_ref.dma_kv_new[block_idx, b, 0]
+                src_new_off = dma_entry_0.fetch_hbm[...]
+                dst_vmem_off = dma_entry_0.fetch_vmem[...]
+                total_new_sz = 0
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    total_new_sz += dma_entry.fetch_val
+                dma_list_new.append(
+                    (src_new_off, dst_vmem_off, total_new_sz, b))
 
         for i in range(len(dma_list_cache)):
             src_off, dst_off, sz, b = dma_list_cache[i]

@@ -102,12 +102,36 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
     def new_kv_starts_ref(self):
         return self.extra_refs[1]
 
-    def compute(self, *args, distribution_ref, **kwargs):
-        # The sequence that writes the new kv under write_last_seq_only.
-        self.wb_seq = distribution_ref[2] - 1
-        return super().compute(*args,
-                               distribution_ref=distribution_ref,
-                               **kwargs)
+    @property
+    def write_seq_mask_ref(self):
+        return self.extra_refs[2]
+
+    @property
+    def kv_page_order_ref(self):
+        # Follows the mask when that was passed too (see the wrapper).
+        return self.extra_refs[3 if self.cfgs.serve.cp.write_seq_mask else 2]
+
+    def writes_new_kv(self, s_idx):
+        """Whether sequence s_idx writes its new kv back."""
+        if not self.cfgs.serve.cp.write_seq_mask:
+            return True
+        return self.write_seq_mask_ref[s_idx] != 0
+
+    def map_new_kv_page(self, token_idx):
+        """Token offset in the new kv buffer -> offset in the buffer as passed.
+
+        With kv_page_order the buffer is still in all_gather rank order, so
+        each token-order page is fetched from the page holding it there.
+        """
+        if not self.cfgs.serve.cp.kv_page_order:
+            return token_idx
+        cfgs = self.cfgs
+        num_map_pages = self.kv_page_order_ref.shape[0]
+        page = jnp.minimum(token_idx >> cfgs.serve.page_size_log2,
+                           num_map_pages - 1)
+        offset = token_idx & cfgs.serve.page_size_mask
+        mapped = self.kv_page_order_ref[page] << cfgs.serve.page_size_log2
+        return mapped | offset
 
     def decode_k(self, k_idx):
         """(k block, HBM fetch gate) of a schedule k_idx; None = always fetch."""
@@ -131,10 +155,10 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
         if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
             start_k_idx = jnp.maximum(start_k_idx, kv_cache_len // cfgs.bkv_sz)
 
-        if cfgs.serve.cp.write_last_seq_only:
-            # The writing sequence must visit every new kv block it owns, not
+        if cfgs.serve.cp.write_seq_mask:
+            # A writing sequence must visit every new kv block it owns, not
             # only the causal range of its own queries.
-            end_k_idx = jnp.where(s_idx == self.wb_seq, num_k, end_k_idx)
+            end_k_idx = jnp.where(self.writes_new_kv(s_idx), num_k, end_k_idx)
         return start_k_idx, end_k_idx
 
     @jax.named_scope("seq_loop_cp")
@@ -158,7 +182,7 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
         k_len = kv_cache_len + kv_new_len
 
         num_q = pl.cdiv(q_len, self.cfgs.bq_sz)
-        if self.cfgs.serve.cp.write_last_seq_only:
+        if self.cfgs.serve.cp.write_seq_mask:
             # A sequence with no queries (a PCP tail chunk on a short step,
             # e.g. decode) must still run one q block so its k loop writes the
             # new kv it owns.
@@ -309,13 +333,13 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
         new_sz = jnp.minimum(cfgs.bkv_sz - bkv_sz_cache, kv_left_frm_new)
 
         # Writeback logic: each new k block is written back by the first q block
-        # that attends to it (q positions start at q_offset). With
-        # write_last_seq_only, only the last sequence writes.
+        # that attends to it (q positions start at q_offset). With a write
+        # mask, only the marked sequences write.
         q_wb = jnp.maximum(0, (kv_len_start - q_offset)) // cfgs.bq_sz
 
         writes = (new_sz > 0) & (q_idx == q_wb)
-        if cfgs.serve.cp.write_last_seq_only:
-            writes = writes & (s_idx == self.wb_seq)
+        if cfgs.serve.cp.write_seq_mask:
+            writes = writes & self.writes_new_kv(s_idx)
         do_writeback = jnp.where(writes, 1, 0)
         sched.do_writeback[step, target_lane] = do_writeback
         src_hbm = new_kv_start + (kv_new_len - kv_left_frm_new)
@@ -345,7 +369,7 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
                 wb_val = jnp.where(
                     (dma_sz > 0) & (p_idx % cp_group_size == self.rank), 1, 0)
 
-                dma_entry.fetch_hbm[...] = new_page_start
+                dma_entry.fetch_hbm[...] = self.map_new_kv_page(new_page_start)
                 dma_entry.fetch_vmem[...] = fetch_vmem
                 dma_entry.wb_hbm[...] = dst_hbm
                 dma_entry.wb_vmem[...] = slot_start
@@ -363,7 +387,8 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
                 wb_val = jnp.where(p_idx % cp_group_size == self.rank, dma_sz,
                                    jnp.int32(0))
 
-                dma_entry.fetch_hbm[...] = src_hbm
+                new_src = src_hbm + (dst_vmem - bkv_sz_cache)
+                dma_entry.fetch_hbm[...] = self.map_new_kv_page(new_src)
                 dma_entry.fetch_vmem[...] = dst_vmem
                 dma_entry.wb_hbm[...] = dst_hbm
                 dma_entry.set_flags(dma_sz, wb_val)
