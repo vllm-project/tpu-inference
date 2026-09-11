@@ -11,8 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import functools
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import jax
 import numpy as np
@@ -362,7 +361,7 @@ def get_flax_model(
     # https://flax.readthedocs.io/en/latest/guides/performance.html
     graphdef, state = nnx.split(jit_model)
 
-    # Capture the nnx.State treedef once. `run_model` accepts a flat tuple
+    # Capture the nnx.State treedef once. The step fn accepts a flat tuple
     # of array leaves at dispatch time and reconstructs the state via this
     # treedef. The runner does the flatten of `state` once at init, which
     # avoids the per-call `nnx.Variable` pytree traversal that otherwise
@@ -374,43 +373,82 @@ def get_flax_model(
         model = nnx.merge(graphdef, state)
         return model(*args)
 
-    _wrap_with_jit = functools.partial(
-        jax.jit,
-        out_shardings=(
-            None,  # kv_cache
-            hidden_states_sharding,
-            hidden_states_sharding,  # aux hidden states
-            None,  # expert ids
-        ),
-        donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
-        static_argnums=(
-            6, 9, 10
-        ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
-    )
+    # The kv-cache entry of `out_shardings` is pinned to the sharding the
+    # runner actually allocated each cache with, read off the `kv_caches`
+    # argument of the first call (see `_get_step_fn`). It can be neither a
+    # single attention-shaped spec nor left unspecified:
+    #
+    #   * A single spec is applied as a pytree prefix, so it would also land
+    #     on the mamba/GDN state leaves that `runner/kv_cache_manager.py`
+    #     allocates with a different layout (e.g. ssm_state
+    #     `[blocks, heads, dk, dv]` is heads-sharded), silently reshuffling
+    #     them and costing an all-to-all per layer per step.
+    #   * Unspecified (`None`) leaves the output sharding to XLA. The runner
+    #     feeds the result straight back in as the next step's `kv_caches`,
+    #     so whenever XLA's choice differs from the allocated sharding the
+    #     jit cache key changes and the step recompiles -- which the runner's
+    #     `ForbidCompile` guard turns into a hard error mid-run.
+    #
+    # Echoing the input sharding satisfies both: every leaf keeps the layout
+    # its kernel emitted, and the cache key is a fixed point across steps.
+    def _wrap_with_jit(fn, kv_cache_shardings, **jit_kwargs):
+        return jax.jit(
+            fn,
+            out_shardings=(
+                kv_cache_shardings,
+                hidden_states_sharding,
+                hidden_states_sharding,  # aux hidden states
+                None,  # expert ids
+            ),
+            donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
+            static_argnums=(
+                6, 9, 10
+            ),  # 6 is layer_name_to_kvcache_index, 9 is is_first_rank, 10 is is_last_rank
+            **jit_kwargs,
+        )
 
     # `continue_decode` calls the step fn from inside a `jax.lax.while_loop`
-    # body, where JAX forbids `compiler_options` on a nested jit. Build an
-    # options-free twin for that path; the loop jit in `runner/decode_loop.py`
-    # supplies the options for the whole fused program. Mirrors the torchax
-    # path in `models/vllm/vllm_model_wrapper.py`.
-    run_model_no_options = _wrap_with_jit(run_model_impl)
+    # body, where JAX forbids `compiler_options` on a nested jit, so the
+    # options-free twin is built alongside the regular one; the loop jit in
+    # `runner/decode_loop.py` supplies the options for the whole fused
+    # program. Both are built on first use, keyed by the kv-cache shardings
+    # so a reallocation with a new layout rebuilds rather than reshards.
+    _step_fns: Dict[Tuple[bool, Any], Any] = {}
 
-    run_model = _wrap_with_jit(
-        run_model_impl,
-        compiler_options=get_step_fn_compiler_options(),
-    )
+    def _get_step_fn(kv_caches, with_options: bool):
+        shardings = jax.tree.map(lambda c: c.sharding, kv_caches)
+        key = (with_options, tuple(jax.tree.leaves(shardings)))
+        fn = _step_fns.get(key)
+        if fn is None:
+            options = ({
+                "compiler_options": get_step_fn_compiler_options()
+            } if with_options else {})
+            fn = _wrap_with_jit(run_model_impl, shardings, **options)
+            _step_fns[key] = fn
+        return fn
 
-    @jax.jit(
-        out_shardings=(
-            None,  # kv_cache
-            hidden_states_sharding,
-            hidden_states_sharding,  # residual
-            None,  # expert ids
-        ),
-        donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
-        static_argnums=(5, ),  # 5 is layer_name_to_kvcache_index
-    )
-    def run_draft_model(state_leaves, *args):
+    _draft_step_fns: Dict[Any, Any] = {}
+
+    def _get_draft_step_fn(kv_caches):
+        shardings = jax.tree.map(lambda c: c.sharding, kv_caches)
+        key = tuple(jax.tree.leaves(shardings))
+        fn = _draft_step_fns.get(key)
+        if fn is None:
+            fn = jax.jit(
+                run_draft_model_impl,
+                out_shardings=(
+                    shardings,
+                    hidden_states_sharding,
+                    hidden_states_sharding,  # residual
+                    None,  # expert ids
+                ),
+                donate_argnums=1,  # 0 is state_leaves, 1 is kv_cache
+                static_argnums=(5, ),  # 5 is layer_name_to_kvcache_index
+            )
+            _draft_step_fns[key] = fn
+        return fn
+
+    def run_draft_model_impl(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
         return model(*args)
@@ -468,28 +506,30 @@ def get_flax_model(
     precompile_vision_encoder_fn = getattr(model, "precompile_vision_encoder",
                                            None)
     # `graphdef` and the state treedef are captured in each closure; the
-    # runner passes pre-flattened `state_leaves` as the first positional arg.
-    jitted_model_fn = run_draft_model if is_draft_model else run_model
-
+    # runner passes pre-flattened `state_leaves` as the first positional arg,
+    # and `kv_caches` as the second -- the latter is what the step fns are
+    # keyed on, so it must stay positional.
     model_supports_spec_step = supports_kw(model_class.__call__,
                                            "spec_step_idx")
+
+    def _resolve_step_fn(kv_caches, with_options: bool):
+        if is_draft_model:
+            # The draft jit carries no compiler options, so it is its own twin.
+            return _get_draft_step_fn(kv_caches)
+        return _get_step_fn(kv_caches, with_options)
 
     def wrapped_model_fn(*args, **kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
         kwargs.pop("shared_attention_metadata", None)
-        return jitted_model_fn(*args, **kwargs)
+        return _resolve_step_fn(args[1], True)(*args, **kwargs)
 
-    # Exposed as `step_fn_no_options` below for `continue_decode`. The draft
-    # model's jit already carries no compiler options, so it is its own twin.
-    jitted_model_fn_no_options = (run_draft_model
-                                  if is_draft_model else run_model_no_options)
-
+    # Exposed as `step_fn_no_options` below for `continue_decode`.
     def wrapped_model_fn_no_options(*args, **kwargs):
         if not model_supports_spec_step:
             kwargs.pop("spec_step_idx", None)
         kwargs.pop("shared_attention_metadata", None)
-        return jitted_model_fn_no_options(*args, **kwargs)
+        return _resolve_step_fn(args[1], False)(*args, **kwargs)
 
     compute_logits_fn = run_compute_logits
     embed_input_ids_fn = run_embed_input_ids
