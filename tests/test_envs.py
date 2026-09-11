@@ -113,6 +113,13 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_BATCHED_RPA_KERNEL is True
 
 
+def test_distributed_sampling_max_top_k(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", raising=False)
+    assert envs.DISTRIBUTED_SAMPLING_MAX_TOP_K == 64
+    monkeypatch.setenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "32")
+    assert envs.DISTRIBUTED_SAMPLING_MAX_TOP_K == 32
+
+
 def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
     """MOE_STAGE_WEIGHTS_ON_HOST is opt-in: off unless it is asked for."""
     monkeypatch.delenv("MOE_STAGE_WEIGHTS_ON_HOST", raising=False)

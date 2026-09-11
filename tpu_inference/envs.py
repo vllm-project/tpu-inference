@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
     VERIFY_WEIGHTS: bool = False
+    DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     RAIDEN_H2D_SETTLE: bool = True
 
 
@@ -509,6 +510,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # RL weight sync: verify tensor checksums after each Raiden H2D transfer.
     "VERIFY_WEIGHTS":
     env_bool("VERIFY_WEIGHTS", default=False),
+    # Largest runtime top-k handled by distributed candidate sampling. This is
+    # read at trace time so candidate tensor shapes remain static.
+    "DISTRIBUTED_SAMPLING_MAX_TOP_K":
+    lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
     # RL weight sync: wait for the async Raiden H2D DMA to settle before
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":

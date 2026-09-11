@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
+from jax import lax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
+from tpu_inference import envs
 from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
@@ -32,6 +34,53 @@ if TYPE_CHECKING:
     from tpu_inference.runner.input_batch import CachedRequestState
 
 _SAMPLING_EPS = 1e-5
+
+
+def _distributed_sampling_max_top_k() -> int:
+    """Static top-k capacity used to shape the compiled candidate sampler."""
+    max_top_k = envs.DISTRIBUTED_SAMPLING_MAX_TOP_K
+    if max_top_k < 1:
+        raise ValueError("DISTRIBUTED_SAMPLING_MAX_TOP_K must be >= 1, got "
+                         f"{max_top_k}")
+    return max_top_k
+
+
+def _distributed_sampling_candidates_per_shard() -> int:
+    # Retaining twice the supported top-k reduces tie-overflow fallbacks while
+    # preserving the existing 128 candidates for the default max_top_k of 64.
+    return 2 * _distributed_sampling_max_top_k()
+
+
+def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
+    """Whether each vocab shard can provide the static candidate capacity."""
+    tensor_axes = ShardingAxisName.MLP_TENSOR
+    tensor_axes = tensor_axes if isinstance(tensor_axes,
+                                            (tuple, list)) else (tensor_axes, )
+    tensor_axes = tuple(axis for axis in tensor_axes
+                        if axis is not None and axis in mesh.axis_names)
+    if not tensor_axes:
+        return False
+    num_vocab_shards = 1
+    for axis in tensor_axes:
+        num_vocab_shards *= mesh.shape[axis]
+    local_vocab_size = vocab_size // num_vocab_shards
+    return local_vocab_size >= _distributed_sampling_candidates_per_shard()
+
+
+def distributed_sampling_allowed(logprobs: bool, logprobs_mode) -> bool:
+    """Whether sampling can return raw logits for the requested logprob mode."""
+    return not (logprobs and str(logprobs_mode).startswith("processed"))
+
+
+def _can_sample_distributed(
+        tpu_sampling_metadata: TPUSupportedSamplingMetadata) -> jax.Array:
+    """Whether every row is supported by distributed candidate sampling."""
+    is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+    supported = (
+        (tpu_sampling_metadata.top_k > 0) &
+        (tpu_sampling_metadata.top_k <= _distributed_sampling_max_top_k()) &
+        (tpu_sampling_metadata.top_p > 0.0))
+    return jnp.all(is_greedy | supported)
 
 
 @dataclass
@@ -102,12 +151,129 @@ def _apply_sampling_transforms(
     return logits
 
 
-@jax.jit(static_argnames=["mesh"])
+def _merge_topk_candidates(
+    candidate_values: jax.Array,
+    candidate_ids: jax.Array,
+    top_k: jax.Array,
+    top_p: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Applies exact threshold top-k and top-p to gathered candidates.
+
+    The production top-k retains every value tied with the requested rank. A
+    larger per-shard candidate set lets this path retain those ties too. The
+    result is incomplete only when a shard's last retained value reaches the
+    global threshold, because that shard may have omitted more qualifying
+    values.
+    """
+    candidates_per_shard = _distributed_sampling_candidates_per_shard()
+    if candidate_values.shape[-1] % candidates_per_shard != 0:
+        raise ValueError("Candidate dimension must contain complete shards")
+    global_topk, _ = lax.top_k(candidate_values,
+                               _distributed_sampling_max_top_k())
+    threshold = jnp.take_along_axis(global_topk, top_k[:, None] - 1,
+                                    axis=-1)[:, 0]
+    shard_candidates = candidate_values.reshape(candidate_values.shape[0], -1,
+                                                candidates_per_shard)
+    shard_tails = shard_candidates[:, :, -1]
+    incomplete = jnp.any(shard_tails >= threshold[:, None], axis=-1)
+    topk_values = jnp.where(candidate_values >= threshold[:, None],
+                            candidate_values, -1e12)
+    filtered_values = topp_mask(topk_values, top_p, replace_val=-1e12)
+    return filtered_values, candidate_ids, incomplete
+
+
+def _distributed_topk_sample(
+    rng: jax.Array,
+    mesh: Mesh,
+    logits: jax.Array,
+    temperature: jax.Array,
+    top_k: jax.Array,
+    top_p: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Samples from the exact requested global top-k using sharded candidates.
+
+    Every TP shard contributes a static number of local candidates. The
+    requested global top-k value is used as a dynamic threshold so all boundary
+    ties are retained. Callers fall back if a shard may have omitted additional
+    values at that threshold.
+
+    Returns sampled global token IDs and a replicated scalar indicating that
+    the gathered candidates may not contain the complete top-k tie group.
+    """
+    data_spec = P(ShardingAxisName.MLP_DATA)
+    logits_spec = P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
+    replicated = P()
+
+    def local_sample(local_rng, local_logits, local_temperature, local_top_k,
+                     local_top_p):
+        candidates_per_shard = _distributed_sampling_candidates_per_shard()
+        local_vocab_size = local_logits.shape[-1]
+        if local_vocab_size < candidates_per_shard:
+            raise ValueError(
+                "Distributed top-k sampling requires at least "
+                f"{candidates_per_shard} logits per vocabulary shard")
+
+        data_axis = ShardingAxisName.MLP_DATA
+        if data_axis in mesh.axis_names and mesh.shape[data_axis] > 1:
+            local_rng = jax.random.fold_in(local_rng,
+                                           lax.axis_index(data_axis))
+        # Preserve the candidate sampler's existing key derivation.
+        sample_rng = jax.random.split(local_rng, 1)[0]
+        shard_index = lax.axis_index(ShardingAxisName.MLP_TENSOR)
+
+        # Greedy rows do not consume the categorical result. A safe positive
+        # temperature avoids reversing their candidate ordering.
+        safe_temperature = jnp.where(
+            local_temperature < _SAMPLING_EPS,
+            jnp.ones_like(local_temperature),
+            local_temperature,
+        )
+        scaled_logits = local_logits / safe_temperature[:, None]
+        local_values, local_ids = lax.top_k(scaled_logits,
+                                            candidates_per_shard)
+        local_ids = (local_ids + shard_index * local_vocab_size).astype(
+            jnp.int32)
+
+        candidate_values = lax.all_gather(
+            local_values,
+            ShardingAxisName.MLP_TENSOR,
+            axis=-1,
+            tiled=True,
+        )
+        candidate_ids = lax.all_gather(
+            local_ids,
+            ShardingAxisName.MLP_TENSOR,
+            axis=-1,
+            tiled=True,
+        )
+        safe_top_k = jnp.clip(local_top_k, 1,
+                              _distributed_sampling_max_top_k())
+        filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
+            candidate_values, candidate_ids, safe_top_k, local_top_p)
+        incomplete = jnp.logical_and(incomplete, local_temperature
+                                     >= _SAMPLING_EPS)
+        sampled_positions = jax.random.categorical(sample_rng, filtered_values)
+        sampled_ids = jnp.take_along_axis(candidate_ids,
+                                          sampled_positions[:, None],
+                                          axis=-1)[:, 0]
+        return sampled_ids, jnp.any(incomplete)
+
+    return jax.shard_map(
+        local_sample,
+        mesh=mesh,
+        in_specs=(replicated, logits_spec, data_spec, data_spec, data_spec),
+        out_specs=(data_spec, replicated),
+        check_vma=False,
+    )(rng, logits, temperature, top_k, top_p)
+
+
+@jax.jit(static_argnames=["mesh", "allow_distributed_sampling"])
 def sample(
     rng: jax.Array,
     mesh: Mesh,
     logits: jax.Array,
     tpu_sampling_metadata: TPUSupportedSamplingMetadata,
+    allow_distributed_sampling: bool = True,
 ) -> jax.Array:
     # (B, vocab_size)
     if tpu_sampling_metadata._cache_collision_dummy is not None:
@@ -115,29 +281,66 @@ def sample(
         logits = logits + 0 * jnp.sum(
             tpu_sampling_metadata._cache_collision_dummy)
 
-    if tpu_sampling_metadata.do_sampling:
-        # Unshard the logits explicity to avoid latency increase.
-        # TODO(gxd3): revisit if the 2nd dimension of the logits can be sharded
-        # instead of being replicated.
-        logits = jax.lax.with_sharding_constraint(
-            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
-
     greedy_tokens = jnp.argmax(logits, axis=-1)
     logits = logits.astype(jnp.float32)
     if not tpu_sampling_metadata.do_sampling:
         ret_tokens = greedy_tokens
         ret_logits = logits
     else:
-        processed_logits = _apply_sampling_transforms(logits,
-                                                      tpu_sampling_metadata)
-        # (batch_size,)
-        next_tokens = jax.random.categorical(rng, processed_logits)
-        # Note: avoid using the sample result when temperature < _SAMPLING_EPS
-        # If temperature < 0, logits /= temperatures will flip the result, causing error.
         is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
-        ret_tokens = jnp.where(is_greedy, greedy_tokens, next_tokens)
-        ret_logits = jnp.where(jnp.expand_dims(is_greedy, axis=-1), logits,
-                               processed_logits)
+
+        def sample_full_vocab(_):
+            full_logits = jax.lax.with_sharding_constraint(
+                logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA,
+                                              None)))
+            processed_logits = _apply_sampling_transforms(
+                full_logits, tpu_sampling_metadata)
+            sampled_tokens = jax.random.categorical(rng, processed_logits)
+            tokens = jnp.where(is_greedy, greedy_tokens, sampled_tokens)
+            output_logits = jnp.where(is_greedy[:, None], full_logits,
+                                      processed_logits)
+            return tokens, output_logits
+
+        use_distributed_candidates = (allow_distributed_sampling
+                                      and _distributed_sampling_fits(
+                                          mesh, logits.shape[-1]))
+        if use_distributed_candidates:
+            # Candidate shapes use a trace-time maximum; each request's top-k
+            # remains dynamic. Greedy and padded rows do not consume a sample.
+            supported = _can_sample_distributed(tpu_sampling_metadata)
+
+            def sample_candidates(_):
+                sampled_tokens, incomplete_candidates = (
+                    _distributed_topk_sample(
+                        rng,
+                        mesh,
+                        logits,
+                        tpu_sampling_metadata.temperature,
+                        tpu_sampling_metadata.top_k,
+                        tpu_sampling_metadata.top_p,
+                    ))
+
+                def use_candidate_result(_):
+                    tokens = jnp.where(is_greedy, greedy_tokens,
+                                       sampled_tokens)
+                    # Processed-logit modes disable this path. Returning the
+                    # raw input supports raw logprobs without materializing
+                    # full-vocabulary filtered logits.
+                    return tokens, logits
+
+                return lax.cond(incomplete_candidates,
+                                sample_full_vocab,
+                                use_candidate_result,
+                                operand=None)
+
+            ret_tokens, ret_logits = lax.cond(
+                supported,
+                sample_candidates,
+                sample_full_vocab,
+                operand=None,
+            )
+        else:
+            ret_tokens, ret_logits = sample_full_vocab(None)
     # Replicate the result so that in multi-controller jax setup
     # (i.e. Ray based multi-host setup), we won't hit error like
     # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
