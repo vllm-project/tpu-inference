@@ -521,14 +521,20 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
 
     def _check_block_size(self, layer: torch.nn.Module,
                           in_features: int) -> None:
-        """Reject block sizes this layer's shape or sharding cannot support.
+        """Reject block sizes this layer cannot use.
 
-        Both failures would otherwise surface far from their cause -- as a
-        reshape error inside the jit, or as an indivisible-sharding error when
-        the scale is placed -- so name the env var while we still can.
+        Non-positive, or a size this layer's shape or sharding cannot support.
+        All three would otherwise surface far from their cause -- a modulo by
+        zero, a reshape error inside the jit, or an indivisible-sharding error
+        when the scale is placed -- so name the env var while we still can.
         """
         if self.block_size is None:
             return
+        if self.block_size <= 0:
+            raise ValueError(
+                f"QUANTIZE_BF16_LINEAR_BLOCK_SIZE={self.block_size} is not a "
+                f"positive number of input features. Unset it to scale per "
+                f"output channel.")
         name = type(layer).__name__
         if in_features % self.block_size:
             raise ValueError(
@@ -572,7 +578,9 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
                 output_sizes=self.linear_config.output_sizes,
                 reorder_size=self.linear_config.n_shards,
                 # A blockwise scale is only usable by the gmm kernel, which
-                # wants it shaped [1, n_blocks, 1, out].
+                # wants it shaped [1, n_blocks, 1, out]. VllmFp8LinearMethod
+                # requires that same pairing of its kernel and block-size
+                # flags, so derive it here instead of taking a second flag.
                 enable_kernel=self.block_size is not None,
             )
 

@@ -1259,6 +1259,9 @@ def test_quantized_bf16_row_parallel_linear(monkeypatch, model, num_devices,
         # 1024 / 512 = 2 blocks, which 8 shards of the contracting axis cannot
         # divide.
         (512, 1024, "cannot shard"),
+        # 0 is a value, not "off" -- it would otherwise reach a modulo by zero.
+        (0, 1024, "positive"),
+        (-128, 1024, "positive"),
     ])
 def test_quantized_bf16_block_size_rejected(monkeypatch, model, block_size,
                                             input_size, match):
