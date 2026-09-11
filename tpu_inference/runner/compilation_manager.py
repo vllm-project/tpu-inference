@@ -55,6 +55,15 @@ logger = init_logger(__name__)
 BLOCK_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
 
 
+def _describe_signature(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the scalars that identify a precompilation variant."""
+    return {
+        k: v
+        for k, v in kwargs.items()
+        if v is None or isinstance(v, (int, float, bool, str))
+    }
+
+
 class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
@@ -133,7 +142,7 @@ class CompilationManager:
                          aot: bool = True,
                          compile_only: bool = False,
                          **kwargs) -> None:
-        log_name = f"{name} --> {kwargs}"
+        log_name = f"{name} --> {_describe_signature(kwargs)}"
         logger.info(f"Precompile {log_name}")
         # Unwrap functools.partial so the underlying jit's static_argnums are
         # respected.
