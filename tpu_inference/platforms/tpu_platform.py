@@ -339,6 +339,13 @@ class TpuPlatform(Platform):
         cls._initialize_sharding_config(vllm_config)
 
         cache_config = vllm_config.cache_config
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "all"):
+            raise NotImplementedError(
+                "mamba_cache_mode 'all' is not supported on TPU; the mamba "
+                "pool is sized for resident state only. Use 'align' (the "
+                "default when prefix caching is enabled) or 'none'.")
+
         # Hybrid (mamba/linear-attention) models cannot use prefix caching with
         # speculative decoding because verify windows need consecutive state slots.
         if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")

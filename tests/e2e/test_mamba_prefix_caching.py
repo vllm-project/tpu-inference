@@ -58,7 +58,7 @@ QUESTIONS = [
 def _generate(mode: str,
               out_path: str,
               dp_size: int = 1,
-              budget: int | None = None) -> None:
+              multiplier: int | None = None) -> None:
     """Generate the prompt set in this process and dump the result.
 
     Only called in the child process (see `__main__` below), so vllm is
@@ -74,8 +74,8 @@ def _generate(mode: str,
                 "enable_dp_attention": True
             }
         }
-    if budget is not None:
-        additional_config["custom_mamba_cache_size"] = budget
+    if multiplier is not None:
+        additional_config["custom_mamba_cache_multiplier"] = multiplier
 
     llm = LLM(
         model=MODEL_NAME,
@@ -116,7 +116,9 @@ def _generate(mode: str,
             }, f)
 
 
-def _run_case(mode: str, dp_size: int = 1, budget: int | None = None) -> dict:
+def _run_case(mode: str,
+              dp_size: int = 1,
+              multiplier: int | None = None) -> dict:
     """Run one engine in a subprocess and return its result."""
     with tempfile.TemporaryDirectory() as tmp:
         out_path = os.path.join(tmp, f"{mode}_dp{dp_size}.json")
@@ -125,8 +127,8 @@ def _run_case(mode: str, dp_size: int = 1, budget: int | None = None) -> dict:
                    SKIP_JAX_PRECOMPILE="1",
                    VLLM_XLA_CHECK_RECOMPILATION="0")
         cmd = [sys.executable, __file__, mode, out_path, str(dp_size)]
-        if budget is not None:
-            cmd.append(str(budget))
+        if multiplier is not None:
+            cmd.append(str(multiplier))
         proc = subprocess.run(cmd,
                               env=env,
                               capture_output=True,
@@ -154,15 +156,16 @@ def _run_case(mode: str, dp_size: int = 1, budget: int | None = None) -> dict:
         return data
 
 
-def _verify_mamba_prefix_caching(dp_size: int = 1, budget: int | None = None):
+def _verify_mamba_prefix_caching(dp_size: int = 1,
+                                 multiplier: int | None = None):
     """Verify greedy output consistency with prefix caching on vs off."""
-    baseline = _run_case("off", dp_size=dp_size, budget=budget)
-    cached = _run_case("on", dp_size=dp_size, budget=budget)
+    baseline = _run_case("off", dp_size=dp_size, multiplier=multiplier)
+    cached = _run_case("on", dp_size=dp_size, multiplier=multiplier)
 
     queries = cached["metrics"].get("vllm:prefix_cache_queries", 0)
     hits = cached["metrics"].get("vllm:prefix_cache_hits", 0)
     print(
-        f"  prefix cache (dp={dp_size}, budget={budget}): {hits:.0f}/{queries:.0f} tokens hit "
+        f"  prefix cache (dp={dp_size}, multiplier={multiplier}): {hits:.0f}/{queries:.0f} tokens hit "
         f"({hits / queries if queries else 0:.1%})")
 
     assert hits > 0, (
@@ -181,9 +184,11 @@ def _verify_mamba_prefix_caching(dp_size: int = 1, budget: int | None = None):
             assert attn_blocks > mamba_blocks, (
                 f"Attention pool ({attn_blocks}) must be larger than compact Mamba pool ({mamba_blocks})"
             )
-            if budget is not None:
-                # With spec budget, mamba pool should be close to active + budget
-                assert mamba_blocks <= 8 * 2 + budget + 8
+            if multiplier is not None:
+                # `custom_mamba_cache_multiplier` blocks per request in the
+                # batch, plus the null block (less, if the joint HBM budget
+                # forced a re-split).
+                assert mamba_blocks <= multiplier * 8 + 1
 
     mismatched = [
         i for i, (
@@ -197,7 +202,7 @@ def _verify_mamba_prefix_caching(dp_size: int = 1, budget: int | None = None):
 
     assert not mismatched, (
         f"{len(mismatched)}/{len(QUESTIONS)} prompts changed when prefix "
-        f"caching was enabled (dp={dp_size}, budget={budget}); linear-attention "
+        f"caching was enabled (dp={dp_size}, multiplier={multiplier}); linear-attention "
         f"state is not being reused correctly")
 
 
@@ -212,13 +217,14 @@ def test_mamba_prefix_caching_dp_matches_baseline():
 
 
 def test_mamba_prefix_caching_with_tight_checkpoint_budget():
-    """Verify that under a tight checkpoint budget, eviction triggers in Mamba,
-    the coordinator reconciles min(L_attn, L_mamba), and generation remains bit-exact."""
-    _verify_mamba_prefix_caching(dp_size=1, budget=16)
+    """Verify that with only the resident blocks per request (2 instead of the
+    default 8), eviction triggers in Mamba, the coordinator reconciles
+    min(L_attn, L_mamba), and generation remains bit-exact."""
+    _verify_mamba_prefix_caching(dp_size=1, multiplier=2)
 
 
 if __name__ == "__main__":
     # Child entry point for `_run_case`.
     dp = int(sys.argv[3]) if len(sys.argv) > 3 else 1
-    budget = int(sys.argv[4]) if len(sys.argv) > 4 else None
-    _generate(sys.argv[1], sys.argv[2], dp, budget=budget)
+    multiplier = int(sys.argv[4]) if len(sys.argv) > 4 else None
+    _generate(sys.argv[1], sys.argv[2], dp, multiplier=multiplier)

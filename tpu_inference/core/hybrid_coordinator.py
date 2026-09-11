@@ -3,7 +3,6 @@
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from vllm.logger import init_logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
                                                KVCacheCoordinator)
@@ -15,6 +14,8 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager, get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
+
+from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -73,6 +74,69 @@ def is_mamba_group(group: Any) -> bool:
     """Check if a KV cache group contains Mamba layers."""
     spec = getattr(group, "kv_cache_spec", group)
     return is_mamba_spec(spec)
+
+
+class MambaBlockPool(BlockPool):
+    """The decoupled mamba pool, shared by every mamba kv-cache group.
+
+    When there is more than one mamba group the coordinator mirrors them onto
+    this pool's ids (see MirrorMambaBlockPool), and `primary_group_id` is the
+    group those shared cache entries are keyed to.
+    """
+
+    def __init__(self, *args, primary_group_id: int | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # When mamba groups are mirrored, every group's cache entry is keyed
+        # to this one group id
+        self.primary_group_id = primary_group_id
+        # A one-slot buffer holding the block the
+        # primary mamba group most recently pulled off the free queue
+        self._last_allocation: list[KVCacheBlock] = []
+
+    def replay_last_allocation(self, num_blocks: int) -> list[KVCacheBlock]:
+        """Hand a mirrored group the ids the primary group just allocated."""
+        if num_blocks != len(self._last_allocation):
+            raise AssertionError(
+                f"Mirrored mamba group asked for {num_blocks} blocks but the "
+                f"primary group just allocated {len(self._last_allocation)}. "
+                f"The groups are no longer in lockstep; mirroring would alias "
+                f"unrelated state.")
+        for block in self._last_allocation:
+            block.ref_cnt += 1
+        return list(self._last_allocation)
+
+    def _canonical_group_ids(self, kv_cache_group_ids: list[int]) -> list[int]:
+        if self.primary_group_id is None:
+            return kv_cache_group_ids
+        return [self.primary_group_id] * len(kv_cache_group_ids)
+
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+        blocks = super().get_new_blocks(num_blocks)
+        self._last_allocation = list(blocks)
+        return blocks
+
+    def get_cached_block(self, block_hash: BlockHash,
+                         kv_cache_group_ids: list[int]):
+        return super().get_cached_block(
+            block_hash, self._canonical_group_ids(kv_cache_group_ids))
+
+
+class MirrorMambaBlockPool:
+    """A secondary mamba group's view of the primary group's block pool.
+    """
+
+    def __init__(self, primary: MambaBlockPool):
+        self._primary = primary
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._primary, name)
+
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+        return self._primary.replay_last_allocation(num_blocks)
+
+    def cache_full_blocks(self, *args, **kwargs) -> None:
+        # The primary group cached these blocks under the shared key already
+        return None
 
 
 class TPUDualBlockPool(BlockPool):
@@ -234,16 +298,30 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             self.mamba_num_blocks,
             sorted(self.mamba_group_ids),
         )
+        self.mirror_mamba_groups = len(self.mamba_group_ids) > 1
+        self.primary_mamba_group_id = min(self.mamba_group_ids)
 
         # Allocate dedicated Mamba block pool
-        self.mamba_block_pool = BlockPool(
+        self.mamba_block_pool = MambaBlockPool(
             num_gpu_blocks=self.mamba_num_blocks,
             enable_caching=self.enable_caching,
             hash_block_size=self.hash_block_size,
             enable_kv_cache_events=self.attention_block_pool.
             enable_kv_cache_events,
             metrics_collector=self.attention_block_pool.metrics_collector,
+            primary_group_id=(self.primary_mamba_group_id
+                              if self.mirror_mamba_groups else None),
         )
+        self._mirror_pool = (MirrorMambaBlockPool(self.mamba_block_pool)
+                             if self.mirror_mamba_groups else None)
+        if self.mirror_mamba_groups:
+            logger.info(
+                "[TPUHybridKVCacheCoordinator] Mirroring %d mamba groups onto "
+                "group %d's block ids: the %d-block pool now holds %d "
+                "checkpoints instead of %d.", len(self.mamba_group_ids),
+                self.primary_mamba_group_id, self.mamba_num_blocks,
+                self.mamba_num_blocks,
+                self.mamba_num_blocks // len(self.mamba_group_ids))
 
         # Unify null_block instance across both pools so TPUDualBlockPool,
         # attention pool, and Mamba managers share the exact same null block.
@@ -253,12 +331,15 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         new_managers = list(self.single_type_managers)
         for i in self.mamba_group_ids:
             old_mgr = self.single_type_managers[i]
+            pool = self.mamba_block_pool
+            if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
+                pool = self._mirror_pool
             new_managers[i] = get_manager_for_kv_cache_spec(
                 kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
                 max_in_flight_tokens=getattr(old_mgr, "max_in_flight_tokens",
                                              128),
                 max_model_len=self.max_model_len,
-                block_pool=self.mamba_block_pool,
+                block_pool=pool,
                 enable_caching=self.enable_caching,
                 kv_cache_group_id=i,
                 dcp_world_size=getattr(self, "dcp_world_size", 1),
@@ -270,10 +351,11 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         self.single_type_managers = tuple(new_managers)
 
         for i in self.mamba_group_ids:
-            assert self.single_type_managers[
-                i].block_pool is self.mamba_block_pool, (
-                    f"Manager {i} block_pool was not re-bound to mamba_block_pool!"
-                )
+            expected = self.mamba_block_pool
+            if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
+                expected = self._mirror_pool
+            assert self.single_type_managers[i].block_pool is expected, (
+                f"Manager {i} block_pool was not re-bound to the mamba pool!")
         for i in self.attention_group_ids:
             assert self.single_type_managers[
                 i].block_pool is self.attention_block_pool, (
@@ -329,6 +411,10 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 )
 
             if is_mamba:
+                # Mirrored groups reuse the primary's ids
+                if (self.mirror_mamba_groups
+                        and i != self.primary_mamba_group_id):
+                    continue
                 mamba_blocks_needed += needed
             else:
                 attn_blocks_needed += needed
