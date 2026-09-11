@@ -1,0 +1,71 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# P/D disaggregation on the Kueue fleet, beside the nightly that runs the same
+# benchmark on tpu-v7x-cluster-c. A pipeline of its own rather than a change to
+# that one: the two measure the same thing on the same reservation, so they must
+# not run at once, and keeping them separate is what lets this one be triggered
+# by hand while the nightly keeps the schedule.
+#
+# No schedule here on purpose. The nightly is the lane that has to produce a
+# number every day; this one runs when someone wants to see the fleet work.
+#
+# soft_fail while the lane is being brought up, so a fleet problem does not read
+# as a regression in the repo.
+
+env:
+  # Rebuilt by the first step and named by tag rather than by commit: the base
+  # is upstream's nightly, so what is being measured moves on upstream's clock
+  # and not on this repository's. Nothing in this image comes from the checkout.
+  WORKLOAD_IMAGE: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/disagg-benchmark:kube"
+
+steps:
+  - label: ":docker: Build Disagg Benchmark Image"
+    key: "build_kube_disagg_image"
+    agents:
+      queue: cpu_64_core
+    commands:
+      - gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      # --pull, because the tag it is built from is republished daily and a
+      # cached copy on this agent would silently measure an older nightly.
+      - docker build --pull -f .buildkite/kubernetes/benchmark.Dockerfile -t "$WORKLOAD_IMAGE" .buildkite/kubernetes
+      - docker push "$WORKLOAD_IMAGE"
+
+  - label: ":kubernetes: :tpu: Kube P/D Disaggregated Benchmark"
+    key: "kube_pd_disagg_benchmark"
+    depends_on: "build_kube_disagg_image"
+    # Six hours for the workload and the rest for it to reach the chips: both
+    # engines together are the whole v7x reservation, so this waits out whatever
+    # else is on the fleet before it starts.
+    timeout_in_minutes: 660
+    soft_fail: true
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      # The launcher owns everything that follows from the hardware - the queue,
+      # the namespace, the workload name, the cache volumes - so the step passes
+      # a manifest and the names of the variables to forward into it. HF_TOKEN
+      # is not one the step has: the launcher reads it from Secret Manager, and
+      # naming it here is what asks for it.
+      - >-
+        /opt/launcher/launch
+        --manifest .buildkite/kubernetes/manifests/v7x/kueue_disagg.yaml
+        --env HF_TOKEN
+        --env BUILDKITE_COMMIT
+        --env BUILDKITE_AGENT_ACCESS_TOKEN
+        --env BUILDKITE_JOB_ID
+        --env BUILDKITE_BUILD_ID
