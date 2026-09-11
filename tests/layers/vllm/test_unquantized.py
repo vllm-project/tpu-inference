@@ -65,6 +65,12 @@ QWEN3_5_FUSED_MAPPING = {
 QWEN3_5_ATTN_PATTERNS = (
     r"re:.*self_attn\..*,"
     r"re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$")
+# A blockwise scale sends the matmul through gmm_v2, which tiles the token axis
+# by min(sublane size, batch) -- 8 on v6e, 16 on v7x -- and rejects a batch that
+# does not divide the tile. The 10 the unquantized tests use only survives where
+# the sublane size exceeds it, so the quantized tests take a multiple of 8. The
+# runner pads to such a size in production anyway.
+QUANTIZED_NUM_TOKENS = 16
 
 
 @pytest.fixture(autouse=True)
@@ -1125,8 +1131,9 @@ def test_quantized_bf16_merged_column_parallel_linear(monkeypatch, model,
             return_bias=False,
         )
 
-    input_tensor = (torch.rand(10, ref_linear.input_size, dtype=dtype) /
-                    10).to('cpu')
+    input_tensor = (
+        torch.rand(QUANTIZED_NUM_TOKENS, ref_linear.input_size, dtype=dtype) /
+        10).to('cpu')
     weight_data = torch.rand_like(ref_linear.weight.data) / 10
     ref_linear.weight.data = weight_data
     ref_linear = ref_linear.to('cpu')
@@ -1209,8 +1216,9 @@ def test_quantized_bf16_row_parallel_linear(monkeypatch, model, num_devices,
             return_bias=False,
         )
 
-    input_tensor = (torch.rand(10, ref_linear.input_size, dtype=dtype) /
-                    10).to('cpu')
+    input_tensor = (
+        torch.rand(QUANTIZED_NUM_TOKENS, ref_linear.input_size, dtype=dtype) /
+        10).to('cpu')
     weight_data = torch.rand_like(ref_linear.weight.data) / 10
     ref_linear.weight.data = weight_data
     ref_linear = ref_linear.to('cpu')
