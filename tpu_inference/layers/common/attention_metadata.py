@@ -14,10 +14,37 @@
 
 import functools
 from dataclasses import dataclass
+from enum import Enum
 
 import jax
 import numpy as np
 from vllm.utils.math_utils import cdiv
+
+
+class AttentionMaskKind(str, Enum):
+    CAUSAL = "causal"
+    BIDIRECTIONAL = "bidirectional"
+
+
+@dataclass(frozen=True)
+class AttentionMaskSpec:
+    kind: AttentionMaskKind = AttentionMaskKind.CAUSAL
+
+    @property
+    def use_causal_mask(self) -> bool:
+        return self.kind is AttentionMaskKind.CAUSAL
+
+
+CAUSAL_ATTENTION_MASK = AttentionMaskSpec()
+
+
+def resolve_use_causal_mask(
+    attention_metadata: "AttentionMetadata",
+    override: bool | None = None,
+) -> bool:
+    if override is not None:
+        return override
+    return attention_metadata.attention_mask_spec.use_causal_mask
 
 
 @functools.partial(
@@ -68,7 +95,11 @@ class PCPMetadata:
         "mamba_state_indices",
         "pcp",
     ],
-    meta_fields=["padded_num_reqs", "pcp_cache_pages"],
+    meta_fields=[
+        "padded_num_reqs",
+        "pcp_cache_pages",
+        "attention_mask_spec",
+    ],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -104,6 +135,8 @@ class AttentionMetadata(object):
 
     # PCP only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
+
+    attention_mask_spec: AttentionMaskSpec = CAUSAL_ATTENTION_MASK
 
 
 @functools.partial(
