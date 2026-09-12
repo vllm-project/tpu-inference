@@ -45,10 +45,11 @@ steps:
   - label: ":kubernetes: :tpu: Kube P/D Disaggregated Benchmark"
     key: "kube_pd_disagg_benchmark"
     depends_on: "build_kube_disagg_image"
-    # Six hours for the workload and the rest for it to reach the chips: both
-    # engines together are the whole v7x reservation, so this waits out whatever
-    # else is on the fleet before it starts.
-    timeout_in_minutes: 660
+    # Eleven hours for the workload and the rest for it to reach the chips:
+    # both engines together are the whole v7x reservation, so this waits out
+    # everything else on the fleet before it starts, and a day is what the
+    # launcher allows that wait to be.
+    timeout_in_minutes: 1440
     soft_fail: true
     agents:
       queue: "kube"

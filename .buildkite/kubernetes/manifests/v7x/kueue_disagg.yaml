@@ -84,10 +84,13 @@ spec:
         spec:
           parallelism: 1
           completions: 1
-          # Six hours, not the fleet's three-hour default: the old lane gave the
-          # servers alone a two-hour startup budget, and the sweep is fourteen
-          # cells over two input shapes after that.
-          activeDeadlineSeconds: 21600
+          # Eleven hours, not the fleet's three-hour default: the old lane gave
+          # the servers alone a two-hour startup budget, and the sweep is
+          # fourteen cells over two input shapes after that. Six was not
+          # enough - the first shape's seven cells took four and a half of it
+          # once concurrency reached 256, and the deadline landed partway
+          # through the second shape.
+          activeDeadlineSeconds: 39600
           # Indexed because enableDNSHostnames requires it: the pod index is
           # half of the hostname.
           completionMode: Indexed
@@ -317,7 +320,7 @@ spec:
         spec:
           parallelism: 1
           completions: 1
-          activeDeadlineSeconds: 21600
+          activeDeadlineSeconds: 39600
           completionMode: Indexed
           backoffLimit: 0
           template:
@@ -492,7 +495,7 @@ spec:
         spec:
           parallelism: 1
           completions: 1
-          activeDeadlineSeconds: 21600
+          activeDeadlineSeconds: 39600
           completionMode: Indexed
           backoffLimit: 0
           template:
