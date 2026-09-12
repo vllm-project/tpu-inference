@@ -46,6 +46,40 @@ def quantize_fp8_ue8m0(x: jax.Array, block_size: int):
     return q, scale
 
 
+def quantize_fp8_fp32_scale(x: jax.Array, block_size: int):
+    """Current vLLM V3.2/GLM cache quantization and scale storage."""
+    fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
+    *lead, dim = x.shape
+    blocked = x.reshape(*lead, dim // block_size, block_size)
+    amax = jnp.clip(jnp.max(jnp.abs(blocked), axis=-1, keepdims=True), 1e-4,
+                    None)
+    scale = jnp.exp2(jnp.ceil(jnp.log2(amax / fp8_max)))
+    q = (blocked / scale).astype(jnp.float8_e4m3fn).reshape(x.shape)
+    return q, jnp.squeeze(scale, -1).astype(jnp.float32)
+
+
+def pack_v32_indexer_cache(float32_kv, page_size, *, packing=32):
+    """Pack ``[pages, page, 1, 128]`` as TPU-native V3.2 records."""
+    num_pages, _, num_kv_heads, head_dim = float32_kv.shape
+    assert num_kv_heads == 1
+    assert head_dim == 128
+    cache = np.zeros((num_pages, page_size // packing, packing, 256),
+                     dtype=np.uint8)
+    dequantized = np.zeros_like(float32_kv)
+    for page in range(num_pages):
+        for offset in range(page_size):
+            q, scale = quantize_fp8_fp32_scale(
+                jnp.asarray(float32_kv[page, offset, 0]), head_dim)
+            q_bytes = np.asarray(_to_byte_lane(q))
+            scale_bytes = np.asarray(_to_byte_lane(scale)).reshape(-1)
+            record = np.concatenate([q_bytes, scale_bytes])
+            cache[page, offset // packing,
+                  offset % packing, :record.size] = record
+            dequantized[page, offset,
+                        0] = np.asarray(q).astype(np.float32) * float(scale[0])
+    return cache, dequantized
+
+
 def _verify_padding_at_end(actual_topk_np):
     """Verifies that -1 is only at the end of the innermost dimension."""
     is_minus_one = (actual_topk_np == -1).astype(np.int32)
@@ -511,6 +545,87 @@ def test_streamindex_topk_quantized():
         np.sort(actual_topk_np, axis=-1),
         np.sort(expected_topk, axis=-1),
     )
+
+
+def test_streamindex_v32_fp32_scale_numerical():
+    """Current FP8+FP32-scale records match exact dequantized DSA math."""
+    rng = np.random.default_rng(7)
+    page_size = 128
+    seq_len = 257
+    num_pages = 3
+    num_heads = 4
+    head_dim = 128
+    topk = 64
+
+    q_source = rng.normal(size=(1, num_heads, head_dim)).astype(np.float32)
+    q_quant, q_scale_groups = quantize_fp8_fp32_scale(jnp.asarray(q_source),
+                                                      head_dim)
+    q_scale = q_scale_groups[..., 0]
+    raw_weights = rng.uniform(-1.0, 1.0,
+                              size=(1, num_heads)).astype(np.float32)
+    kernel_weights = raw_weights * np.asarray(q_scale)
+    float32_kv = rng.normal(size=(num_pages, page_size, 1,
+                                  head_dim)).astype(np.float32)
+    cache, dequantized_kv = pack_v32_indexer_cache(float32_kv, page_size)
+
+    q_dequantized = np.asarray(q_quant).astype(
+        np.float32) * np.asarray(q_scale)[..., None]
+    keys = dequantized_kv.reshape(-1, head_dim)[:seq_len]
+    per_head = np.einsum("hd,sd->hs", q_dequantized[0], keys)
+    scores = (np.maximum(per_head, 0.0) * raw_weights[0, :, None]).sum(0)
+    expected = np.argsort(-scores, kind="stable")[:topk]
+
+    actual = streamindex_topk(
+        q=q_quant,
+        indexer_weights=jnp.asarray(kernel_weights),
+        cache_kv=jnp.asarray(cache),
+        seq_lens=jnp.asarray([seq_len], dtype=jnp.int32),
+        page_indices=jnp.arange(num_pages, dtype=jnp.int32),
+        cu_q_lens=jnp.asarray([0, 1], dtype=jnp.int32),
+        distribution=jnp.asarray([1, 1, 1], dtype=jnp.int32),
+        k=topk,
+        compression_ratio=1,
+        scale_storage="float32",
+        exact_topk=True,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=1,
+        decode_req_batch_size=1,
+    )
+    np.testing.assert_array_equal(np.asarray(actual)[0], expected)
+
+
+@pytest.mark.parametrize("seq_len", [2047, 2048, 2049])
+def test_streamindex_v32_exact_topk_boundary_ties(seq_len):
+    """Exact ties preserve low-index order and ``-1`` only pads the tail."""
+    page_size = 128
+    max_seq_len = 2049
+    num_pages = (max_seq_len + page_size - 1) // page_size
+    topk = 2048
+    float32_kv = np.ones((num_pages, page_size, 1, 128), dtype=np.float32)
+    cache, _ = pack_v32_indexer_cache(float32_kv, page_size)
+    q = jnp.zeros((1, 4, 128), dtype=jnp.float8_e4m3fn)
+
+    actual = streamindex_topk(
+        q=q,
+        indexer_weights=jnp.ones((1, 4), dtype=jnp.float32),
+        cache_kv=jnp.asarray(cache),
+        seq_lens=jnp.asarray([seq_len], dtype=jnp.int32),
+        page_indices=jnp.arange(num_pages, dtype=jnp.int32),
+        cu_q_lens=jnp.asarray([0, 1], dtype=jnp.int32),
+        distribution=jnp.asarray([1, 1, 1], dtype=jnp.int32),
+        k=topk,
+        compression_ratio=1,
+        scale_storage="float32",
+        exact_topk=True,
+        num_kv_pages_per_block=1,
+        num_queries_per_block=1,
+        decode_req_batch_size=1,
+    )
+    n_valid = min(seq_len, topk)
+    expected = np.full(topk, -1, dtype=np.int32)
+    expected[:n_valid] = np.arange(n_valid, dtype=np.int32)
+    np.testing.assert_array_equal(np.asarray(actual)[0], expected)
+    _verify_padding_at_end(np.asarray(actual))
 
 
 def main(argv):
