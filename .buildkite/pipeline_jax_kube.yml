@@ -161,8 +161,9 @@ steps:
 
   # The coverage file is uploaded from inside the pod rather than collected by
   # `artifact_paths`. On bare metal the agent runs on the TPU VM and shares a
-  # filesystem with the test; here it does not, so the test uploads its own
-  # result with the buildkite-agent CLI the CI image ships.
+  # filesystem with the test; a pod shares nothing with it, so the test uploads
+  # its own result, with the buildkite-agent binary docker/Dockerfile installs
+  # and the access token run.sh forwards into the pod.
   #
   # COVERAGE_FILE names it outright instead of copying `.coverage` out of the
   # working directory afterwards. Where coverage writes by default is wherever
