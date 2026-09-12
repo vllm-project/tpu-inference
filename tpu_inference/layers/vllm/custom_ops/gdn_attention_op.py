@@ -141,8 +141,15 @@ def gdn_attention_core_tpu(
         write_col = jnp.maximum(seq_lens_sliced - 1, 0) // mamba_block_size
 
         batch_idx = jnp.arange(seq_lens_sliced.shape[0])
-        read_state_indices_sliced = block_tables_sliced[batch_idx, read_col]
-        state_indices_sliced = block_tables_sliced[batch_idx, write_col]
+        # GUARDRAIL: `conv_state.shape[0]` is the global row count; the array is
+        # sharded on dim 0 over ATTN_DATA so each chip only holds `global // dp_size`
+        # rows. The GDN kernel DMAs these ids into HBM without any bounds check.
+        # Clamping ensures out-of-range block ids never emit illegal DMAs that halt the core.
+        local_rows = max(conv_state.shape[0] // dp_size, 1)
+        read_state_indices_sliced = jnp.clip(
+            block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
+        state_indices_sliced = jnp.clip(
+            block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
     else:
         # Index mamba state by the per-request slot id from
         # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`

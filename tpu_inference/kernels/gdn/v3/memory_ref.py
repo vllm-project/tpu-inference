@@ -378,6 +378,9 @@ class StateBufferedRef(BaseBufferedRef):
             # Resume from the checkpoint of the last accepted token.
             state_idx += self.metadata_ref.s_idx_to_read_offset[s_idx]
 
+            # The kernel is compiled with disable_bounds_checks=True; clamp to prevent illegal DMA descriptor
+            state_idx = jnp.clip(state_idx, 0, src_ref.shape[0] - 1)
+
             pltpu.make_async_copy(
                 src_ref.at[pl.ds(state_idx, dma_size)],
                 vmem_ref.at[idx, pl.ds(0, dma_size)],
@@ -428,6 +431,10 @@ class StateBufferedRef(BaseBufferedRef):
             # many tokens but keep only the final state.
             num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
             dma_size = jnp.where(is_last_tile, num_ckpts, 0)
+
+            # Clamp state_idx so bad index cannot produce an illegal DMA descriptor
+            state_idx = jnp.clip(state_idx, 0,
+                                 dst_ref.shape[0] - self.cfg.window_size)
 
             pltpu.make_async_copy(
                 vmem_ref.at[idx, pl.ds(0, dma_size)],

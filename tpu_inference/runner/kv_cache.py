@@ -123,7 +123,10 @@ def _get_mamba_cache_allocator(
 
     @partial(jax.jit, out_shardings=sharding)
     def _allocate() -> jax.Array:
-        return jnp.empty(
+        # `jnp.empty` leaves unwritten mamba slots full of uninitialized memory, which
+        # propagates NaNs/denormals into the GDN recurrence whenever a slot
+        # is read before it is written. Attention KV already uses zeros.
+        return jnp.zeros(
             shape=cache_shape,
             dtype=cache_dtype,
         )
