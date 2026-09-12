@@ -66,6 +66,7 @@ steps:
         /opt/launcher/launch
         --manifest .buildkite/kubernetes/manifests/v7x/kueue_disagg.yaml
         --env HF_TOKEN
+        --env DISAGG_CONCURRENCIES
         --env BUILDKITE_COMMIT
         --env BUILDKITE_AGENT_ACCESS_TOKEN
         --env BUILDKITE_JOB_ID

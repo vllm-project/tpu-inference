@@ -595,7 +595,20 @@ spec:
                       local input_len=$$1 output_len=$$2 num_prompts=$$3
                       local combined="/tmp/benchmark_results/$${input_len}_$${output_len}.json"
 
-                      for concurrency in 1 4 16 32 64 128 256; do
+                      # A cell serves a fixed number of prompts, so what sets
+                      # its wall clock is how much of the engine the
+                      # concurrency keeps busy, not the number itself: measured
+                      # on this shape, c=1 takes 83 minutes and c=256 takes 22.
+                      # The four cells here are the ones that still trace the
+                      # curve - throughput rises 0.09, 0.13, 0.21 and flattens
+                      # at 0.24 - for about a third of the time the full list
+                      # costs, which is what keeps a benchmark holding the
+                      # entire v7x reservation to part of a day.
+                      #
+                      # Overridable, because c=1 is the single-stream latency
+                      # baseline and a run that wants it should not need a
+                      # commit: set DISAGG_CONCURRENCIES on the build.
+                      for concurrency in $${DISAGG_CONCURRENCIES:-16 32 64 256}; do
                         # Fewer prompts at low concurrency: at c=1 the sweep is
                         # serial, and 256 requests of 8192 output tokens each
                         # would be most of the run.
