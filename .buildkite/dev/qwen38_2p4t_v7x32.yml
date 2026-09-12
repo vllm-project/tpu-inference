@@ -10,11 +10,14 @@
 # mounts it read-only and points MODEL_PATH at it; otherwise the run streams
 # from object storage as before.
 #
-# One server, three legs: a smoke test and a perf benchmark
-# (qwen38_2p4t_client.sh), then GPQA/GSM8K/MMLU (qwen38_2p4t_eval.sh). Loading
-# and precompiling costs ~55 min, so everything that needs this model runs
-# against the one instance. BENCH_SWEEP selects the perf legs and EVAL_SUITE the
-# accuracy ones; either can be narrowed to isolate a variable.
+# One server, several legs: a smoke test and a perf benchmark
+# (qwen38_2p4t_client.sh), then GPQA/GSM8K/MMLU through either accuracy
+# harness -- qwen38_2p4t_eval.sh for this repo's benchmark_serving.py fork, or
+# qwen38_2p4t_eval_std.sh for stock lm-evaluation-harness. Loading and
+# precompiling costs ~55 min, so everything that needs this model runs against
+# the one instance. BENCH_SWEEP selects the perf legs, EVAL_SUITE the fork's
+# accuracy ones and STD_EVAL_SUITE lm_eval's; any of the three can be narrowed
+# to isolate a variable, and set to "none" to skip that harness entirely.
 #
 # Each perf leg is bracketed by a /metrics scrape, because the client-visible
 # TTFT is `queue_time + prefill_time` fused and cannot attribute a slow first
@@ -190,16 +193,45 @@ steps:
         # step regardless of batch size, so 5x the prompts costs well under 5x
         # the time.
         #
-        # EVAL_SUITE=gpqa buys back the ~55 min accuracy leg, because
-        # QUANTIZE_BF16_LINEAR_PATTERNS below does change what the model
-        # computes and it is the whole question this build is asking. GPQA at
-        # xhigh is settled at 0.899-0.904 across tc#962 and #2 with everything
-        # in bf16. That band is the floor. Neither fp8 run so far is a usable
-        # comparison: #17's 0.9141 never ran an fp8 matmul, and #18's 0.0 was a
-        # kernel bug at block 256, not a property of fp8 (see the block size
-        # note below). GSM8K and MMLU stay off
-        # (MMLU is not reproducible across hosts anyway -- unsorted os.listdir
-        # plus unseeded truncation).
+        # This build establishes the standard-harness accuracy baseline, so it
+        # is the mirror image of #17-#19: no load-time quantization at all, and
+        # the whole accuracy budget spent on lm_eval rather than on the perf
+        # sweep. QUANTIZE_BF16_LINEAR_PATTERNS is absent below -- deliberately,
+        # see the note there -- so this is the stock checkpoint exactly as
+        # build #12 ran it.
+        #
+        # EVAL_SUITE=none, STD_EVAL_SUITE=gpqa,gsm8k,mmlu: the accuracy leg is
+        # qwen38_2p4t_eval_std.sh, not qwen38_2p4t_eval.sh. Our numbers so far
+        # (GPQA 0.899-0.904 at xhigh across tc#962 and #2) come from this repo's
+        # fork of benchmark_serving.py and are comparable to our own runs and to
+        # nothing else. The point of this build is a set of numbers that can sit
+        # next to a GPU run of the same checkpoint, which means stock lm_eval
+        # task definitions: gpqa_diamond_cot_zeroshot, gsm8k 5-shot, and the
+        # full 14042-question mmlu rather than the fork's 1000-question subset.
+        # Running the whole of MMLU also sidesteps the fork's reproducibility
+        # defect -- unsorted os.listdir plus unseeded truncation -- by not
+        # truncating.
+        #
+        # BENCH_SWEEP is cut to one short leg for the same reason: #12 already
+        # measured this exact configuration's perf, so re-measuring it costs
+        # ~40 min of a 480 min build that MMLU needs. The leg is kept rather
+        # than dropped because BENCH_SWEEP has no "off" -- an empty value falls
+        # back to MAX_CONCURRENCY:NUM_PROMPTS -- and because a perf leg that
+        # completes is the cheapest proof the server is healthy before three
+        # hours of evals are queued against it.
+        #
+        # The three *_TIMEOUT_S below are caps, not estimates, and they are
+        # sized so that the worst case still fits inside the job rather than so
+        # that each leg gets what it might want. Two ceilings bound them:
+        # timeout_in_minutes 660 and VLLM_ENGINE_READY_TIMEOUT_S 36000 (600
+        # min), which covers serve for the whole job. Load plus precompile plus
+        # the short perf leg is ~90 min, so the evals get 480: 10800 + 7200 +
+        # 10800 = 480 exactly, and the expected case is far below it.
+        # Measured on the fork harness at the same concurrency, GPQA at xhigh is
+        # ~3300s (#17 3312, #19 3325, #2 3241) -- tc#960's 24935s was the KV
+        # pool defect, not the workload -- and low-effort GSM8K was 765s. MMLU
+        # here is loglikelihood, so its 56168 requests are prefill plus one
+        # token each rather than generations. Expect ~4.5h total, not 9.5.
         #
         # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made tc#960's
         # eval unscoreable. The runner sizes the attention pool against mamba's
@@ -258,65 +290,29 @@ steps:
         # to be set explicitly here -- without it this model silently goes back
         # to a 3.5-hour load and blows the health-wait budget.
         #
-        # QUANTIZE_BF16_LINEAR_PATTERNS quantizes at load time what the
-        # checkpoint left in bf16. Qwen3.8-2.4T-A95B-FP8 quantizes only its 512
-        # routed experts; its `modules_to_not_convert` has 978 entries covering
-        # everything else, so all 92 layers' attention and gated-delta-net
-        # projections arrive bf16 and are replicated x2 (they shard on
-        # ATTN_HEAD, which excludes attn_dp). That is 4.27 GiB/chip, of which
-        # fp8 gives back 2.13 -- 82% of it in the 69 linear-attention layers,
-        # not the 23 full-attention ones. Names here are the checkpoint's, not
-        # vLLM's: q/k/v_proj reach the fused qkv_proj, in_proj_qkv+in_proj_z
-        # reach in_proj_qkvz, and in_proj_b+in_proj_a reach in_proj_ba.
-        # `$$` is Buildkite's escape for a literal `$`, which the regex anchor
-        # needs. Nothing else is touched: conv1d carries no quant_config,
-        # and mlp.gate / the shared experts / embed / lm_head stay bf16.
+        # QUANTIZE_BF16_LINEAR_PATTERNS and QUANTIZE_BF16_LINEAR_BLOCK_SIZE are
+        # deliberately NOT set. Every run from #17 on has carried them, and the
+        # accuracy each produced is only interpretable against a number measured
+        # on the same harness with them off. We do not have that number: the
+        # 0.899-0.904 GPQA band those runs are compared to came from this repo's
+        # benchmark_serving.py fork, which is a different prompt, a different
+        # extractor and a different subset from anything a GPU run reports.
         #
-        # QUANTIZE_BF16_LINEAR_BLOCK_SIZE=512 makes the scale blockwise along
-        # the input axis -- one fp32 scale per 512 input features per output
-        # feature, instead of one per output feature. The reason to spend it
-        # here is that these are exactly the layers per-channel scaling handles
-        # worst: the GDN projections carry per-head structure along the input
-        # axis that one scale per column has to cover with a single max.
+        # So this build is the control. The model is the stock checkpoint --
+        # 512 routed experts in block-wise fp8 as shipped, all 92 layers'
+        # attention and gated-delta-net projections left in the bf16 the
+        # checkpoint stores them in (4.27 GiB/chip, replicated x2 because they
+        # shard on ATTN_HEAD, which excludes attn_dp). Nothing is requantized at
+        # load time and no gmm_v2 block-size constraint is in play, which is the
+        # point: whatever the three lm_eval legs report is attributable to the
+        # model and the serving stack, not to a quantization decision.
         #
-        # The block size also decides whether an fp8 matmul happens at all, and
-        # whether it is *correct*. Two separate gmm_v2 constraints:
-        #
-        #   1. Below the MXU column width the kernel dequantizes the weight
-        #      back to bf16 in VMEM (gmm_v2.py:257-263) and never quantizes the
-        #      activation either (:1334 gates lhs quantization on the
-        #      dequantize-after path). v7x's mxu_column_size is 256
-        #      (jax _src/pallas/mosaic/tpu_info.py:294). Build #17 ran at 128
-        #      and so bought the memory back without ever issuing an fp8
-        #      matmul, which is why its perf was flat.
-        #   2. At exactly 256 the kernel applies the WRONG scale to half the
-        #      contracting dimension. The k-loop strides by the *lhs* quant
-        #      block, hardcoded to 512 (:1364), while the rhs scale is indexed
-        #      by the *rhs* block: `b_id = start_k // rhs_qbs` (:629). With
-        #      rhs_qbs=256 and a stride of 512, b_id walks 0,2,4,... so every
-        #      odd scale block is skipped and its neighbour's scale is used
-        #      instead. Measured on v7x at these exact shapes: 0.73 relative
-        #      error vs an fp32 reference, at both M=8 and M=512. That is what
-        #      destroyed build #18 (GPQA 0.0, 95% of responses unterminated) --
-        #      not fp8, and not the granularity change.
-        #
-        # So the usable window is block >= 512. Sweep at K=2048 (rel err vs
-        # fp32, activations quantized): 128 -> 1.7e-3 (but no fp8 matmul),
-        # 256 -> 8.7e-1 (broken), 512 -> 2.7e-2, 1024 -> 2.7e-2. 512 is the
-        # smallest correct value that reaches the fp8 MXU, which on v7x is
-        # exactly 2x bf16 flops, so it keeps the finest usable granularity.
-        #
-        # The cost is 4 bytes per 512 weights, ~0.75% of the fp8 weight bytes
-        # (~17 MiB/chip of the 2.13 GiB recovered), half of #18's. Every
-        # selected layer divides: in=8192 for qkv_proj/in_proj_qkvz/in_proj_ba
-        # (16 blocks, column-parallel so the block axis is not sharded) and
-        # in=16384 for o_proj/out_proj (32 blocks over 16 contracting shards
-        # = 2 each).
-        #
-        # This is the first run with a numerically correct fp8 matmul on these
-        # layers, so neither #17 (no fp8) nor #18 (broken fp8) is an accuracy
-        # baseline. Regress GPQA against the bf16 band, 0.899-0.904. Perf
-        # should land at or above #18's 188.18 / 770.25.
+        # Everything the removed knobs encoded -- the 2.13 GiB/chip fp8 recovers,
+        # the mxu_column_size=256 floor below which no fp8 matmul is issued, and
+        # the block-256 rhs-scale bug that produced #18's GPQA 0.0 -- is recorded
+        # in todo_gmm_v2_block_straddling and in the #19 build notes. Restoring
+        # them is a one-line change; measuring against this baseline is the
+        # reason to bother.
         #
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -331,8 +327,6 @@ steps:
           'USE_MOE_EP_KERNEL=0' \
           'VLLM_INCREMENTAL_FP8_LOADING=1' \
           'MOE_STAGE_WEIGHTS_ON_HOST=1' \
-          'QUANTIZE_BF16_LINEAR_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
-          'QUANTIZE_BF16_LINEAR_BLOCK_SIZE=512' \
           'VLLM_XLA_CHECK_RECOMPILATION=0' \
           'SKIP_JAX_PRECOMPILE=0' \
           'RUNAI_STREAMER_CONCURRENCY=64' \
@@ -352,15 +346,23 @@ steps:
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=128' \
+          'NUM_PROMPTS=32' \
           'MAX_CONCURRENCY=8' \
-          'BENCH_SWEEP=8:128 160:640' \
+          'BENCH_SWEEP=8:32' \
           'NUM_WARMUPS=32' \
-          'EVAL_SUITE=gpqa' \
-          'EVAL_REASONING_EFFORT=xhigh' \
-          'GPQA_OUTPUT_LEN=32768' \
+          'EVAL_SUITE=none' \
+          'STD_EVAL_SUITE=gpqa,gsm8k,mmlu' \
+          'GPQA_REASONING_EFFORT=xhigh' \
+          'GPQA_MAX_GEN_TOKS=32768' \
           'GPQA_CONCURRENCY=32' \
-          'GPQA_TIMEOUT_S=28800' \
+          'GPQA_TIMEOUT_S=10800' \
+          'GSM8K_REASONING_EFFORT=low' \
+          'GSM8K_CONCURRENCY=64' \
+          'GSM8K_MAX_TOKENS=1024' \
+          'GSM8K_TIMEOUT_S=7200' \
+          'MMLU_BATCH_SIZE=8' \
+          'MMLU_CONCURRENCY=8' \
+          'MMLU_TIMEOUT_S=10800' \
           'BENCH_REQUEST_TIMEOUT_S=7200' \
           "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
           "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
@@ -369,10 +371,14 @@ steps:
         echo "--- effective MULTIHOST_ENV_VARS"; printf '%s\n' "$$MULTIHOST_ENV_VARS"
         echo "--- effective MULTIHOST_DOCKER_ARGS: $$MULTIHOST_DOCKER_ARGS"
 
-        # Two client legs against one server: perf first, then accuracy. `&&`,
-        # not `;` -- if the perf leg cannot get a completion out of the server
-        # there is nothing for the evals to score, and the eval leg records its
-        # own per-dataset failures internally rather than aborting on the first.
+        # Three client legs against one server: perf, then each accuracy
+        # harness. `&&`, not `;` -- if the perf leg cannot get a completion out
+        # of the server there is nothing for the evals to score, and each eval
+        # leg records its own per-dataset failures internally rather than
+        # aborting on the first. The fork-based leg stays in the chain even
+        # though EVAL_SUITE=none makes it a no-op here: it exits 0 immediately,
+        # and leaving it wired up means flipping one variable brings the old
+        # harness back for a side-by-side without editing the command.
         #
         # The run's exit status is stashed instead of propagated so the artifact
         # upload below still happens; without that, a failure here means no
@@ -381,7 +387,7 @@ steps:
         set +e
         .buildkite/scripts/run_multihost.sh \
           "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_serve.sh" \
-          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval.sh"
+          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval_std.sh"
         echo $$? > "$$PWD/dev_artifacts/.run_rc"
         set -e
       - sudo -n chown -R "$$(id -u):$$(id -g)" dev_artifacts 2>/dev/null || sudo -n chmod -R a+rX dev_artifacts || true
