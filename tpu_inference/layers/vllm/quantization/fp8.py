@@ -55,8 +55,9 @@ from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
 from tpu_inference.layers.vllm.quantization.unquantized import (
-    VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod,
-    _load_weight_for_layer)
+    VllmQuantizedBf16LinearMethod, VllmUnquantizedFusedMoEMethod,
+    VllmUnquantizedLinearMethod, _load_weight_for_layer,
+    should_quantize_bf16_linear)
 from tpu_inference.logger import init_logger
 
 P = PartitionSpec
@@ -114,6 +115,9 @@ class VllmFp8Config(vllm_fp8.Fp8Config, VllmQuantConfig):
                         ignored_layers=self.ignored_layers,
                         fused_mapping=self.packed_modules_mapping,
                 ):
+                    if should_quantize_bf16_linear(
+                            prefix, self.packed_modules_mapping):
+                        return VllmQuantizedBf16LinearMethod(linear_config)
                     return VllmUnquantizedLinearMethod(linear_config)
                 return VllmFp8LinearMethod(self, linear_config)
             case RoutedExperts():

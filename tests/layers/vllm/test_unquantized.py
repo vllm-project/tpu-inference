@@ -44,12 +44,33 @@ from tpu_inference.layers.vllm.custom_ops.fused_moe import _all_reduce_over_tp
 from tpu_inference.layers.vllm.interface.moe import FusedMoEFactory
 from tpu_inference.layers.vllm.quantization import get_tpu_quantization_config
 from tpu_inference.layers.vllm.quantization.unquantized import (
-    VllmUnquantizedConfig, VllmUnquantizedFusedMoEMethod,
-    VllmUnquantizedLinearMethod, _host_numpy_view, _load_weight_for_layer,
-    _load_weight_on_host)
+    VllmQuantizedBf16LinearMethod, VllmUnquantizedConfig,
+    VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod,
+    _host_numpy_view, _load_weight_for_layer, _load_weight_on_host,
+    should_quantize_bf16_linear)
 
 P = PartitionSpec
 MODELS = ["Qwen/Qwen2-1.5B-Instruct"]
+
+# Qwen3.5's packed_modules_mapping, inlined so these tests don't depend on the
+# model definition.
+QWEN3_5_FUSED_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+    "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+    "in_proj_ba": ["in_proj_b", "in_proj_a"],
+}
+# Every attention and gated-delta-net projection, named the way the checkpoint
+# names them rather than the way vLLM fuses them.
+QWEN3_5_ATTN_PATTERNS = (
+    r"re:.*self_attn\..*,"
+    r"re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$")
+# A blockwise scale sends the matmul through gmm_v2, which tiles the token axis
+# by min(sublane size, batch) -- 8 on v6e, 16 on v7x -- and rejects a batch that
+# does not divide the tile. The 10 the unquantized tests use only survives where
+# the sublane size exceeds it, so the quantized tests take a multiple of 8. The
+# runner pads to such a size in production anyway.
+QUANTIZED_NUM_TOKENS = 16
 
 
 @pytest.fixture(autouse=True)
@@ -1004,3 +1025,375 @@ def test_load_weight_for_layer_stage_on_host_ignored_under_pathways(
 
     mock_on_host.assert_not_called()
     assert result.shape == STAGED_SHAPE
+
+
+@pytest.mark.parametrize(("prefix", "expected"), [
+    ("model.layers.3.self_attn.qkv_proj", True),
+    ("model.layers.3.self_attn.o_proj", True),
+    ("model.layers.0.linear_attn.in_proj_qkvz", True),
+    ("model.layers.0.linear_attn.in_proj_ba", True),
+    ("model.layers.0.linear_attn.out_proj", True),
+    ("model.layers.0.linear_attn.conv1d", False),
+    ("model.layers.0.mlp.gate", False),
+    ("model.layers.0.mlp.shared_expert.gate_up_proj", False),
+    ("model.layers.0.mlp.shared_expert_gate", False),
+    ("lm_head", False),
+])
+def test_quantize_bf16_linear_pattern_match(monkeypatch, prefix, expected):
+    """Checkpoint-level names have to reach the modules vLLM actually builds.
+
+    Nothing in the checkpoint is called `qkv_proj`, `in_proj_qkvz` or
+    `in_proj_ba`, so selecting those depends on expanding them back into the
+    shards they fuse."""
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    assert should_quantize_bf16_linear(prefix,
+                                       QWEN3_5_FUSED_MAPPING) is expected
+
+
+def test_quantize_bf16_linear_no_patterns_selects_nothing(monkeypatch):
+    monkeypatch.delenv("QUANTIZE_BF16_LINEAR_PATTERNS", raising=False)
+    assert not should_quantize_bf16_linear("model.layers.3.self_attn.qkv_proj",
+                                           QWEN3_5_FUSED_MAPPING)
+
+
+def test_quantize_bf16_linear_bare_pattern_is_the_whole_name(monkeypatch):
+    """Bare patterns are exact layer names, per `is_equal_or_regex_match`.
+
+    A suffix has to be spelled as a regex, so the bare form cannot quietly
+    select more layers than it names."""
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS",
+                       "model.layers.3.self_attn.o_proj,o_proj")
+    assert should_quantize_bf16_linear("model.layers.3.self_attn.o_proj",
+                                       QWEN3_5_FUSED_MAPPING)
+    assert not should_quantize_bf16_linear("model.layers.4.self_attn.o_proj",
+                                           QWEN3_5_FUSED_MAPPING)
+
+
+def test_quantize_bf16_linear_regex_pattern_matches_suffix(monkeypatch):
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS",
+                       r"re:.*\.o_proj$,re:.*\.down_proj$")
+    assert should_quantize_bf16_linear("model.layers.3.self_attn.o_proj",
+                                       QWEN3_5_FUSED_MAPPING)
+    assert not should_quantize_bf16_linear("model.layers.3.self_attn.qkv_proj",
+                                           QWEN3_5_FUSED_MAPPING)
+
+
+def test_quantize_bf16_linear_partial_fused_shard_raises(monkeypatch):
+    """One fused weight cannot be half fp8, so a half-selection is an error
+    rather than a silent choice either way.
+
+    The `$` is load-bearing: `re:` patterns are anchored at the start only, so
+    an unanchored `.*\\.in_proj_b` would match `in_proj_ba` itself and select the
+    fused weight outright instead of half of it."""
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", r"re:.*\.in_proj_b$")
+    with pytest.raises(ValueError, match="some but not all shards"):
+        should_quantize_bf16_linear("model.layers.0.linear_attn.in_proj_ba",
+                                    QWEN3_5_FUSED_MAPPING)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+@pytest.mark.parametrize("block_size", [None, 128])
+def test_quantized_bf16_merged_column_parallel_linear(monkeypatch, model,
+                                                      num_devices,
+                                                      fuse_matmuls,
+                                                      block_size):
+    """A bf16 checkpoint weight is quantized on its way to the device.
+
+    The layer keeps loading and sharding exactly as the unquantized one does;
+    what changes is that the parameter that lands on the device is fp8 with a
+    per-output-channel scale (or a blockwise one), and the result still tracks
+    the bf16 matmul."""
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    if block_size is not None:
+        monkeypatch.setenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE", str(block_size))
+
+    mesh = test_utils.get_spmd_mesh(num_devices)
+    dtype = torch.bfloat16
+    prefix = "model.layers.0.linear_attn.in_proj_qkvz"
+    output_sizes = [512, 512]
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+
+    with set_current_vllm_config(vllm_config):
+        ref_linear = MergedColumnParallelLinear(
+            input_size=1024,
+            output_sizes=output_sizes,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+        )
+
+    input_tensor = (
+        torch.rand(QUANTIZED_NUM_TOKENS, ref_linear.input_size, dtype=dtype) /
+        10).to('cpu')
+    weight_data = torch.rand_like(ref_linear.weight.data) / 10
+    ref_linear.weight.data = weight_data
+    ref_linear = ref_linear.to('cpu')
+    ref_linear.quant_method.process_weights_after_loading(ref_linear)
+    expected = ref_linear(input_tensor).to(torch.float32)
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    quant_config.packed_modules_mapping = QWEN3_5_FUSED_MAPPING
+    with set_current_vllm_config(vllm_config):
+        jax_linear = MergedColumnParallelLinear(
+            input_size=1024,
+            output_sizes=output_sizes,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+        assert isinstance(jax_linear.quant_method,
+                          VllmQuantizedBf16LinearMethod)
+        jax_linear.quant_method.linear_config.fuse_matmuls = fuse_matmuls
+
+    jax_linear.weight.data = weight_data
+    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
+    jax_input_tensor.apply_jax_(jax.device_put,
+                                NamedSharding(mesh, P(None, None)))
+    with torchax.default_env():
+        jax_linear.quant_method.process_weights_after_loading(jax_linear)
+
+        weights = ([jax_linear.weight]
+                   if fuse_matmuls else list(jax_linear.weight))
+        scales = ([jax_linear.weight_scale]
+                  if fuse_matmuls else list(jax_linear.weight_scale))
+        for weight, scale in zip(weights, scales):
+            assert weight.dtype == torch.float8_e4m3fn
+            if block_size is None:
+                # One scale per output feature, not per tensor.
+                assert scale.shape == (weight.shape[-1], )
+            else:
+                # The kernel layout: [1, n_blocks, 1, out].
+                n_blocks = jax_linear.input_size // block_size
+                assert scale.shape == (1, n_blocks, 1, weight.shape[-1])
+        assert sum(w.shape[-1] for w in weights) == sum(output_sizes)
+
+        jax_output = j2t(jax_linear(jax_input_tensor).to(torch.float32))
+
+    torch.testing.assert_close(expected, jax_output, rtol=0.03, atol=0.03)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
+@pytest.mark.parametrize("block_size", [None, 128])
+def test_quantized_bf16_row_parallel_linear(monkeypatch, model, num_devices,
+                                            block_size):
+    """Row-parallel shards the contracting axis, so the per-output-channel
+    scale is replicated and the psum still sums like-scaled partial products.
+    A blockwise scale shards along that axis with the weight instead."""
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    if block_size is not None:
+        monkeypatch.setenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE", str(block_size))
+
+    mesh = test_utils.get_spmd_mesh(num_devices)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+
+    with set_current_vllm_config(vllm_config):
+        ref_linear = RowParallelLinear(
+            input_size=1024,
+            output_size=512,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+        )
+
+    input_tensor = (
+        torch.rand(QUANTIZED_NUM_TOKENS, ref_linear.input_size, dtype=dtype) /
+        10).to('cpu')
+    weight_data = torch.rand_like(ref_linear.weight.data) / 10
+    ref_linear.weight.data = weight_data
+    ref_linear = ref_linear.to('cpu')
+    ref_linear.quant_method.process_weights_after_loading(ref_linear)
+    expected = ref_linear(input_tensor).to(torch.float32)
+
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    quant_config.packed_modules_mapping = QWEN3_5_FUSED_MAPPING
+    with set_current_vllm_config(vllm_config):
+        jax_linear = RowParallelLinear(
+            input_size=1024,
+            output_size=512,
+            bias=False,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix="model.layers.0.linear_attn.out_proj",
+        )
+        assert isinstance(jax_linear.quant_method,
+                          VllmQuantizedBf16LinearMethod)
+
+    jax_linear.weight.data = weight_data
+    jax_input_tensor = torch_view(t2j(input_tensor, use_dlpack=False))
+    jax_input_tensor.apply_jax_(jax.device_put,
+                                NamedSharding(mesh, P(None, None)))
+    with torchax.default_env():
+        jax_linear.quant_method.process_weights_after_loading(jax_linear)
+        assert jax_linear.weight.dtype == torch.float8_e4m3fn
+        if block_size is None:
+            assert jax_linear.weight_scale.shape == (512, )
+        else:
+            assert jax_linear.weight_scale.shape == (1, 1024 // block_size, 1,
+                                                     512)
+        jax_output = j2t(jax_linear(jax_input_tensor).to(torch.float32))
+
+    torch.testing.assert_close(expected, jax_output, rtol=0.03, atol=0.03)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    "block_size, input_size, match",
+    [
+        # 1024 input features do not split into blocks of 384.
+        (384, 1024, "does not divide"),
+        # 1024 / 512 = 2 blocks, which 8 shards of the contracting axis cannot
+        # divide.
+        (512, 1024, "cannot shard"),
+        # 0 is a value, not "off" -- it would otherwise reach a modulo by zero.
+        (0, 1024, "positive"),
+        (-128, 1024, "positive"),
+    ])
+def test_quantized_bf16_block_size_rejected(monkeypatch, model, block_size,
+                                            input_size, match):
+    """A block size the shape or the sharding cannot support is refused at load
+    time, naming the env var rather than failing deep inside the jit."""
+    if jax.local_device_count() < 8:
+        pytest.skip("needs 8 devices to shard the contracting axis 8 ways")
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE", str(block_size))
+
+    mesh = test_utils.get_spmd_mesh(8)
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = torch.bfloat16
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    quant_config.packed_modules_mapping = QWEN3_5_FUSED_MAPPING
+
+    with set_current_vllm_config(vllm_config):
+        jax_linear = RowParallelLinear(
+            input_size=input_size,
+            output_size=512,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix="model.layers.0.linear_attn.out_proj",
+        )
+    jax_linear.weight.data = torch.rand_like(jax_linear.weight.data) / 10
+    with torchax.default_env(), pytest.raises(ValueError, match=match):
+        jax_linear.quant_method.process_weights_after_loading(jax_linear)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_unselected_linear_stays_unquantized(monkeypatch, model):
+    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    mesh = test_utils.get_spmd_mesh(1)
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = torch.bfloat16
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    quant_config.packed_modules_mapping = QWEN3_5_FUSED_MAPPING
+
+    with set_current_vllm_config(vllm_config):
+        layer = MergedColumnParallelLinear(
+            input_size=1024,
+            output_sizes=[512, 512],
+            bias=False,
+            params_dtype=torch.bfloat16,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix="model.layers.0.mlp.shared_expert.gate_up_proj",
+        )
+    assert isinstance(layer.quant_method, VllmUnquantizedLinearMethod)
+    assert not isinstance(layer.quant_method, VllmQuantizedBf16LinearMethod)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("fuse_matmuls", [False, True])
+@pytest.mark.parametrize("bias", [False, True])
+def test_unquantized_linear_stores_no_scale(monkeypatch, model, fuse_matmuls,
+                                            bias):
+    """The shared store step hangs a scale off the layer only when the build
+    step produced one, so an unquantized layer keeps a bare bf16 weight."""
+    monkeypatch.delenv("QUANTIZE_BF16_LINEAR_PATTERNS", raising=False)
+    mesh = test_utils.get_spmd_mesh(1)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+
+    with set_current_vllm_config(vllm_config):
+        layer = MergedColumnParallelLinear(
+            input_size=1024,
+            output_sizes=[512, 512],
+            bias=bias,
+            params_dtype=dtype,
+            return_bias=False,
+            quant_config=quant_config,
+            prefix="model.layers.0.mlp.shared_expert.gate_up_proj",
+        )
+        assert isinstance(layer.quant_method, VllmUnquantizedLinearMethod)
+        layer.quant_method.linear_config.fuse_matmuls = fuse_matmuls
+
+    layer.weight.data = torch.rand_like(layer.weight.data) / 10
+    if bias:
+        layer.bias.data = torch.rand_like(layer.bias.data) / 10
+    with torchax.default_env():
+        layer.quant_method.process_weights_after_loading(layer)
+
+    weights = [layer.weight] if fuse_matmuls else list(layer.weight)
+    assert all(w.dtype == dtype for w in weights)
+    assert getattr(layer, "weight_scale", None) is None
+    if bias:
+        biases = [layer.bias] if fuse_matmuls else list(layer.bias)
+        assert all(b.dtype == dtype for b in biases)
+    else:
+        assert layer.bias is None
+
+
+def test_quantized_bf16_only_overrides_the_build_step():
+    """Quantizing changes what the weight is turned into, not how it is loaded
+    or stored -- keep those three steps from drifting back into a copy."""
+    for name in ("process_weights_after_loading", "_load_linear_weights",
+                 "_store_linear_weights"):
+        inherited = getattr(VllmUnquantizedLinearMethod, name)
+        assert getattr(VllmQuantizedBf16LinearMethod, name) is inherited, (
+            f"{name} should be inherited, not reimplemented")
+    assert (VllmQuantizedBf16LinearMethod._build_linear_weights
+            is not VllmUnquantizedLinearMethod._build_linear_weights)
