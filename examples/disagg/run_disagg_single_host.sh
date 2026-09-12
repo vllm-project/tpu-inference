@@ -223,9 +223,12 @@ done
 
 echo "starting proxy server"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-# Start proxy server
+# Start proxy server. 127.0.0.1 rather than localhost, which uvicorn resolves
+# to ::1 first: a container with no IPv6 loopback cannot bind that and the
+# proxy exits before serving anything. Everything that talks to it shares the
+# network namespace, so naming the v4 loopback costs nothing.
 python $SCRIPT_DIR/toy_proxy_server.py \
---host localhost \
+--host 127.0.0.1 \
 --port 8000 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
 --prefiller-ports ${PREFILL_PORTS[@]} \
