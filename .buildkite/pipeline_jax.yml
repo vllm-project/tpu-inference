@@ -104,6 +104,15 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part1"
         key: ${TPU_VERSION:-tpu6e}_test_7_1
         soft_fail: true
+        # Retry only on infrastructure-level failures (agent lost / preemption /
+        # timeout), NOT on pytest exit 1 (a deterministic test failure), so a real
+        # failure still surfaces without re-running the suite. -1 = agent lost.
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+            - exit_status: 255
+              limit: 2
         artifact_paths: ".coverage.part1.${TPU_VERSION:-tpu6e}"
         env:
           USE_PREBUILT_IMAGE: "1"
@@ -119,6 +128,16 @@ steps:
       - label: "${TPU_VERSION:-tpu6e} JAX unit tests part2"
         key: ${TPU_VERSION:-tpu6e}_test_7_2
         soft_fail: true
+        # Retry only on infrastructure-level failures (agent lost / preemption /
+        # timeout), NOT on pytest exit 1 (a deterministic test failure). part2 is
+        # a large (~1h20m) sweep, so re-running on a real failure would be costly
+        # and pointless; re-running on a lost agent recovers a transient blip.
+        retry:
+          automatic:
+            - exit_status: -1
+              limit: 2
+            - exit_status: 255
+              limit: 2
         artifact_paths: ".coverage.part2.${TPU_VERSION:-tpu6e}"
         env:
           USE_PREBUILT_IMAGE: "1"
