@@ -11,7 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import dataclasses
 import functools
 
@@ -30,8 +29,6 @@ from tpu_inference.kernels.experimental.batched_rpa import (bref_override,
                                                             utils)
 
 # yapf: enable
-
-# Define inner kernel.
 
 
 def strided_load_bkv(
@@ -97,7 +94,7 @@ def calculate_and_store_out(
         o_u32_vref = o_vref.at[b_idx].bitcast(jnp.uint32)
         out_ref = o_u32_vref.reshape(-1, cfgs.aligned_q_head_dim)
         pad_width = [[0, 0] for _ in range(out.ndim)]
-        pad_width[-1][-1] = cfgs.aligned_q_head_dim - cfgs.aligned_kv_head_dim
+        pad_width[-1][-1] = cfgs.aligned_q_head_dim - cfgs.compute_kv_head_dim
         out = jnp.pad(out, pad_width, constant_values=0)
         out = pltpu.bitcast(out, out_ref.dtype).reshape(out_ref.shape)
         utils.strided_store(out_ref, 0, out_ref.shape[0], 1, out)
@@ -132,6 +129,70 @@ def calculate_and_store_out(
                          l_val)
 
 
+def get_scale_factors(
+    k: jax.Array,
+    v: jax.Array,
+    *,
+    cfgs: configs.RpaConfigs,
+):
+    if not cfgs.serve.per_token_scale:
+        return k, v, cfgs.serve.scale_k, cfgs.serve.scale_v
+
+    b = k.shape[0]
+    num_heads = k.shape[1]
+    # Number of scale channels in VMEM is determined by the scale factor bitwidth
+    # and the VMEM kv bitwidth (k.dtype). However, we cannot use the
+    # scale_channels configs.py member variable because of the case of unpacking
+    # uint8_t to fp4_e2m1fn.
+    if cfgs.serve.per_token_scale_dtype is None:
+        scale_channels = 0
+    else:
+        scale_bits = jax.dtypes.itemsize_bits(cfgs.serve.per_token_scale_dtype)
+        kv_bits = jax.dtypes.itemsize_bits(k.dtype)
+        scale_channels = max(1, scale_bits // kv_bits)
+
+    # Extract multi-channel scale factor slices from the trailing sublanes
+    k_scale_slice = k[:, :, cfgs.model.head_dim:cfgs.model.head_dim +
+                      scale_channels, :]
+    v_scale_slice = v[:, :, cfgs.model.head_dim:cfgs.model.head_dim +
+                      scale_channels, :]
+
+    # If there are multiple scale channels, pltpu.bitcast operates on the
+    # second to last dimension, which is the head dimension, which is the same
+    # as the scale_channels dimension, so this works out of the box.
+    if scale_channels > 1:
+        k_scale = pltpu.bitcast(k_scale_slice,
+                                cfgs.serve.per_token_scale_dtype)
+        v_scale = pltpu.bitcast(v_scale_slice,
+                                cfgs.serve.per_token_scale_dtype)
+
+    # If there is only one scale channel, just change dtype to the scale dtype.
+    else:
+        k_scale = k_scale_slice.astype(cfgs.serve.per_token_scale_dtype)
+        v_scale = v_scale_slice.astype(cfgs.serve.per_token_scale_dtype)
+
+    # In QK multiplication, we always scale after the qk matmul, so we can
+    # unify per-token and per-tensor scaling by broadcasting the scale factor
+    # to the head dimension outside of the flash attention kernel.
+    k_scale = k_scale.reshape(b, num_heads, cfgs.bkv_sz)
+    # To match the accumulation dtype of qk.
+    k_scale = k_scale.astype(jnp.float32)
+    # Add a new dimension for the head dimension.
+    k_scale = k_scale[:, :, jnp.newaxis, :]
+
+    # In PV multiplication, we scale the p rather than the pv for per-token
+    # scaling (as it is mathematically necessary to scale before the matmul for
+    # per-token scaling) so we can NOT unify per-token and per-tensor scaling,
+    # so we broadcast the scale factor along the head dimension inside the
+    # flash attention kernel itself and do not do so here.
+    v_scale = v_scale.reshape(b, num_heads, cfgs.bkv_sz)
+
+    k = k[:, :, :cfgs.compute_kv_head_dim, :]
+    v = v[:, :, :cfgs.compute_kv_head_dim, :]
+
+    return k, v, k_scale, v_scale
+
+
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class StepMetadata:
@@ -140,8 +201,6 @@ class StepMetadata:
     causal_offset: list[jax.Array]
     bkv_sz_frm_cache: list[jax.Array]
     new_kv_len_start: list[jax.Array]
-    q_sz: list[jax.Array]
-    is_valid: list[jax.Array]
     local_k_start: list[jax.Array] | None = None
     local_k_end: list[jax.Array] | None = None
 
@@ -160,8 +219,6 @@ def fetch_step_metadata(
     causal_offset_list = []
     bkv_sz_frm_cache_list = []
     new_kv_len_start_list = []
-    q_sz_list = []
-    is_valid_list = []
     local_k_start_list = ([] if cfgs.serve.attention_scope
                           == configs.AttentionScope.NEW_TOKENS_ONLY else None)
     local_k_end_list = ([] if cfgs.serve.attention_scope
@@ -177,7 +234,6 @@ def fetch_step_metadata(
         kv_new_len_val = jnp.where(is_valid, kv_new_lens_ref[s_idx], 0)
         q_offset = jnp.where(is_valid, q_offsets_ref[s_idx], 0)
         q_end = jnp.where(is_valid, cu_q_lens_ref[s_idx + 1], 0)
-        q_sz = jnp.where(is_valid, schedule_ref.dma_q[step, b_idx, 1], 0)
 
         total_kv_len = kv_cache_len_val + kv_new_len_val
 
@@ -185,8 +241,6 @@ def fetch_step_metadata(
         q_base = q_idx * cfgs.bq_sz + q_offset
         causal_offset = k_id - q_base
         causal_offset_list.append(causal_offset)
-        q_sz_list.append(q_sz)
-        is_valid_list.append(is_valid)
 
         if local_k_start_list is not None:
             local_k_start_list.append(q_offset - k_id)
@@ -207,8 +261,6 @@ def fetch_step_metadata(
         causal_offset=causal_offset_list,
         bkv_sz_frm_cache=bkv_sz_frm_cache_list,
         new_kv_len_start=new_kv_len_start_list,
-        q_sz=q_sz_list,
-        is_valid=is_valid_list,
         local_k_start=local_k_start_list,
         local_k_end=local_k_end_list,
     )
@@ -254,15 +306,9 @@ def generate_mask(
             mask_b = jnp.logical_and(mask_b, kv_iota
                                      < step_meta.local_k_end[b_idx])
 
-        valid_q = jnp.logical_and(
-            step_meta.is_valid[b_idx],
-            (bq_start + q_iota) < step_meta.q_sz[b_idx],
-        )
-        mask_b = jnp.logical_and(mask_b, valid_q)
-
         masks.append(mask_b)
 
-    return jnp.stack(masks, axis=0)
+    return masks
 
 
 def rpa_body(
@@ -315,8 +361,7 @@ def rpa_body(
         cfgs.bq_sz * cfgs.aligned_num_q_heads_per_kv_head,
         cfgs.aligned_q_head_dim,
     )
-    if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:
-        q = q[..., :cfgs.aligned_kv_head_dim]
+    q = q[..., :cfgs.compute_kv_head_dim]
 
     # We want to load k, v from (batch, bkv_sz, bkv_stride, kv_packing, d)
     # where bkv_stride ~= num_kv_heads * 2 // kv_packing
@@ -356,24 +401,27 @@ def rpa_body(
                 v_head_ref = v_slice.reshape(target_shape)
                 pack_dim = cfgs.aligned_kv_head_dim // cfgs.serve.packing_kv
 
-                k_head_loaded = utils.strided_load(k_head_ref,
-                                                   0,
-                                                   pack_dim,
-                                                   1,
-                                                   dtype=cfgs.serve.dtype_kv)
-                v_head_loaded = utils.strided_load(v_head_ref,
-                                                   0,
-                                                   pack_dim,
-                                                   1,
-                                                   dtype=cfgs.serve.dtype_kv)
+                # Load as uint32 to avoid dtype conversion during strided load
+                k_head_u32 = utils.strided_load(k_head_ref, 0, pack_dim, 1)
+                v_head_u32 = utils.strided_load(v_head_ref, 0, pack_dim, 1)
 
-                k_head = k_head_loaded[:, :cfgs.bkv_sz]
-                v_head = v_head_loaded[:, :cfgs.bkv_sz]
-
-                ks.append(k_head.reshape(cfgs.aligned_kv_head_dim,
-                                         cfgs.bkv_sz))
-                vs.append(v_head.reshape(cfgs.aligned_kv_head_dim,
-                                         cfgs.bkv_sz))
+                if cfgs.serve.dtype_kv == jnp.uint8:
+                    fp4 = jnp.float4_e2m1fn
+                    k_head = pltpu.bitcast(k_head_u32, fp4)[:, :cfgs.bkv_sz]
+                    v_head = pltpu.bitcast(v_head_u32, fp4)[:, :cfgs.bkv_sz]
+                    ks.append(k_head)
+                    vs.append(v_head)
+                else:
+                    k_head_loaded = pltpu.bitcast(k_head_u32,
+                                                  cfgs.serve.dtype_kv)
+                    v_head_loaded = pltpu.bitcast(v_head_u32,
+                                                  cfgs.serve.dtype_kv)
+                    k_head = k_head_loaded[:, :cfgs.bkv_sz]
+                    v_head = v_head_loaded[:, :cfgs.bkv_sz]
+                    ks.append(
+                        k_head.reshape(cfgs.aligned_kv_head_dim, cfgs.bkv_sz))
+                    vs.append(
+                        v_head.reshape(cfgs.aligned_kv_head_dim, cfgs.bkv_sz))
             k_b.append(jnp.stack(ks, axis=0))
             v_b.append(jnp.stack(vs, axis=0))
     else:
@@ -403,6 +451,8 @@ def rpa_body(
     k = jnp.stack(k_b, axis=0)
     v = jnp.stack(v_b, axis=0)
 
+    k, v, k_scale, v_scale = get_scale_factors(k, v, cfgs=cfgs)
+
     # Step 3: Perform compute.
     m_val = m_scratch_ref[...]
     l_val = l_scratch_ref[...]
@@ -431,17 +481,18 @@ def rpa_body(
             cfgs=cfgs,
         )
 
-        p, alpha_list, m_next, l_next, m_carry = (
-            flash_attention.flash_attention_qk_softmax(
-                step,
-                q[:, :, q_slice],
-                k,
-                m_val[:, q_slice],
-                l_val[:, q_slice],
-                schedule_ref.is_last_k,
-                custom_mask=custom_mask,
-                cfgs=cfgs,
-            ))
+        p, alpha_list, m_next, l_next, m_carry = flash_attention.flash_attention_qk_softmax(
+            step,
+            q[:, :, q_slice],
+            k,
+            m_val[:, q_slice],
+            l_val[:, q_slice],
+            schedule_ref.is_last_k,
+            custom_mask=custom_mask,
+            cfgs=cfgs,
+            bq_start=bq_start,
+            k_scale=k_scale,
+        )
         m_scratch_ref[:, q_slice] = m_carry
         l_scratch_ref[:, q_slice] = l_next[-1]
         if cfgs.serve.return_lse:
@@ -455,6 +506,7 @@ def rpa_body(
                 prev_alpha_list,
                 acc_val[:, prev_q_slice],
                 cfgs=cfgs,
+                v_scale=v_scale,
             )
             acc_scratch_ref[:, prev_q_slice] = o_next[-1]
             acc_new_list.append(o_next)
@@ -470,6 +522,7 @@ def rpa_body(
         prev_alpha_list,
         acc_val[:, prev_q_slice],
         cfgs=cfgs,
+        v_scale=v_scale,
     )
     acc_scratch_ref[:, prev_q_slice] = o_next[-1]
     acc_new_list.append(o_next)
@@ -612,35 +665,35 @@ def rpa_kernel(
 ) -> tuple[jax.Array, jax.Array, jax.Array | None]:
     """Perform batched ragged paged attention with scheduler data.
 
-    Args:
-      cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
-        length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
-        b=cu_q_lens[i+1] represents q/k/v of sequence i.
-      q_offsets: [max_num_seqs]. Token offset for queries in each sequence.
-      kv_cache_lens: [max_num_seqs]. Existing kv cache length of each sequence.
-      kv_new_lens: [max_num_seqs]. New kv length of each sequence.
-      page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
-        sequence.
-      schedule_hbm: Output of scheduler kernel. It informs which: 1. seqs 2. q
-        block 3. kv block that should be processed at a given step.
-      q_hbm: [max_num_tokens, num_q_heads_per_kv_heads, cdiv(num_kv_heads,
-        q_packing), q_packing, head_dim]. Output of q projection that has been
-        pre-processed to align with existing kv cache data layout.
-      new_kv_hbm: [max_num_tokens, cdiv(num_kv_heads * 2, kv_packing), kv_packing,
-        head_dim]. Output of k & v projection that has been pre-processed to align
-        with existing kv cache data layout.
-      kv_cache_hbm: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
-        kv_packing, head_dim]. Stores existing kv cache data where k & vs are
-        concatenated along num kv heads dim.
-      lse_hbm: pre-allocated buffer for LSE output. None when return_lse=False.
-      cfgs: Configuration of the kernel.
+  Args:
+    cu_q_lens: [max_num_seqs + 1]. Cumulative sum of each sequence's query
+      length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
+      b=cu_q_lens[i+1] represents q/k/v of sequence i.
+    q_offsets: [max_num_seqs]. Token offset for queries in each sequence.
+    kv_cache_lens: [max_num_seqs]. Existing kv cache length of each sequence.
+    kv_new_lens: [max_num_seqs]. New kv length of each sequence.
+    page_indices: [max_num_seqs * pages_per_seqs]. kv cache page table of each
+      sequence.
+    schedule_hbm: Output of scheduler kernel. It informs which: 1. seqs 2. q
+      block 3. kv block that should be processed at a given step.
+    q_hbm: [max_num_tokens, num_q_heads_per_kv_heads, cdiv(num_kv_heads,
+      q_packing), q_packing, head_dim]. Output of q projection that has been
+      pre-processed to align with existing kv cache data layout.
+    new_kv_hbm: [max_num_tokens, cdiv(num_kv_heads * 2, kv_packing), kv_packing,
+      head_dim]. Output of k & v projection that has been pre-processed to align
+      with existing kv cache data layout.
+    kv_cache_hbm: [num_pages, page_size, cdiv(num_kv_heads * 2, kv_packing),
+      kv_packing, head_dim]. Stores existing kv cache data where k & vs are
+      concatenated along num kv heads dim.
+    lse_hbm: pre-allocated buffer for LSE output. None when return_lse=False.
+    cfgs: Configuration of the kernel.
 
-    Returns:
-      out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
-      new_kv_cache: [num_pages, page_size, num_kv_heads // kv_packing, kv_packing,
-        head_dim]. Result of new kv cache.
-      lse_out: [max_num_tokens, num_q_heads] LSE values, or None.
-    """
+  Returns:
+    out: [max_num_tokens, num_q_heads, head_dim]. Output of self attention.
+    new_kv_cache: [num_pages, page_size, num_kv_heads // kv_packing, kv_packing,
+      head_dim]. Result of new kv cache.
+    lse_out: [max_num_tokens, num_q_heads] LSE values, or None.
+  """
     return_lse = cfgs.serve.return_lse
 
     def ragged_paged_attention_pipeline(
@@ -692,6 +745,14 @@ def rpa_kernel(
             ),
         )
         def _run(final_allocs, schedule_ref, dma_sem, scratches):
+            # Initialize Q to zeros to prevent NaN pollution.
+            #
+            # When a query block is partially filled, tail slots in uninitialized VMEM
+            # may contain residual NaNs. In our implementation, invalid Q rows bypass
+            # invalid row masking and produce NaNs in p_rowsum and later pollute
+            # l_scratch and acc_scratch. Once l_scratch / acc_scratch becomes NaN,
+            # subsequent iterations cannot recover (0 * NaN = NaN).
+
             # Initialize KV cache to zeros.
             # When perfomring p * v, we perform causal masking on lhs (p) by zeroing
             # out columns that should not be processed for a given row. Even if we
@@ -703,21 +764,16 @@ def rpa_kernel(
             # not NaNs, there will be no numeric concerns.
 
             scratches[0][...] = jnp.full_like(scratches[0], -jnp.inf)
-            scratches[1][...] = jnp.zeros_like(scratches[1])
-            scratches[2][...] = jnp.zeros_like(scratches[2])
 
             num_lanes = pltpu.get_tpu_info().num_lanes
-            # Clean up Q and KV buffers to avoid NaNs.
-            # q_alloc = final_allocs[0]
-            # q_ref_flat = q_alloc.window_ref.bitcast(jnp.uint32).reshape(
-            #     -1, num_lanes
-            # )
-            # q_ref_flat[...] = jnp.zeros_like(q_ref_flat)
+            q_ref_flat = final_allocs[0].window_ref.bitcast(
+                jnp.uint32).reshape(-1, num_lanes)
+            kv_ref_flat = final_allocs[1].window_ref.bitcast(
+                jnp.uint32).reshape(-1, num_lanes)
 
-            kv_alloc = final_allocs[1]
-            kv_ref_flat = kv_alloc.window_ref.bitcast(jnp.uint32).reshape(
-                -1, num_lanes)
-            kv_ref_flat[...] = jnp.zeros_like(kv_ref_flat)
+            # Explicitly zero out scratches and Q/KV buffers.
+            for ref in (scratches[1], scratches[2], q_ref_flat, kv_ref_flat):
+                ref[...] = jnp.zeros_like(ref)
 
             def execute_schedule_chunk(start_step, num_steps):
                 # All reads are aligned to 128 and some extra steps are copied in the
@@ -729,7 +785,7 @@ def rpa_kernel(
                 flat_smem = jax.tree_util.tree_leaves(schedule_ref)
                 dma_list = []
                 for h, s in zip(flat_hbm, flat_smem):
-                    if h.memory_space == pltpu.HBM:
+                    if jax.typeof(h).memory_space == pltpu.HBM:
                         element_size = s.shape[0] // cfgs.max_steps_ub
                         read_size = element_size * (num_steps + prefix_steps)
                         read_size = utils.align_to(read_size, 1024)

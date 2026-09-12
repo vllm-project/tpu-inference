@@ -11,9 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import dataclasses
 import functools
+from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from typing import Any
 
 import jax
@@ -28,11 +29,11 @@ from tpu_inference.kernels.experimental.batched_rpa import configs, utils
 class FieldOffset:
     """A Python descriptor that generates the `.at[pos + offset]` lazy lookup.
 
-    This is necessary because JAX does not support dynamically slicing a
-    range (e.g. `data.at[pos:pos+4]`) using traced indices inside a loop,
-    but it natively supports retrieving/updating single dynamically-indexed
-    elements (e.g. `data.at[pos+1]`).
-    """
+  This is necessary because JAX does not support dynamically slicing a
+  range (e.g. `data.at[pos:pos+4]`) using traced indices inside a loop,
+  but it natively supports retrieving/updating single dynamically-indexed
+  elements (e.g. `data.at[pos+1]`).
+  """
 
     def __init__(self, offset: int | None = None, is_abstract: bool = False):
         if offset is None:
@@ -657,12 +658,23 @@ class BaseMetadataComputer:
                 dma_entry.wb_hbm[...] = dst_hbm
                 dma_entry.set_flags(dma_sz, dma_sz)
 
-        if cfgs.block.bq_sz == 1:
-            # Decode path
-            assert cfgs.bkv_p_new == 1
-            slot_start = (bkv_sz_cache //
-                          cfgs.serve.page_size) * cfgs.serve.page_size
-            fill_dma_kv_new(0, bkv_sz_cache, new_sz, slot_start)
+        if cfgs.bkv_p_new < cfgs.bkv_p:
+            # General decode path for any bkv_p_new
+            curr_vmem = bkv_sz_cache
+            curr_rem = new_sz
+
+            for i in range(cfgs.bkv_p_new):
+                slot_start = (curr_vmem //
+                              cfgs.serve.page_size) * cfgs.serve.page_size
+                slot_end = slot_start + cfgs.serve.page_size
+
+                dma_sz = jnp.minimum(curr_rem, slot_end - curr_vmem)
+                dma_sz = jnp.where(curr_rem > 0, dma_sz, 0)
+
+                fill_dma_kv_new(i, curr_vmem, dma_sz, slot_start)
+
+                curr_vmem += dma_sz
+                curr_rem = jnp.maximum(0, curr_rem - dma_sz)
         else:
             iters = max(cfgs.bkv_p, cfgs.bkv_p_new)
             for i in range(iters):
@@ -817,35 +829,35 @@ def rpa_metadata_schedule_kernel(
 ):
     """Generates the HBM-to-VMEM DMA schedule.
 
-    This kernel:
-    1. Iterates through each (potentially ragged) sequence
-    2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
-    3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
-      to ensure balanced execution across the batch dimension.
-    4. Encodes DMA offsets:
-      - dma_q: HBM start index and size for Query blocks.
-      - dma_kv_cache: Paged indices for existing KV tokens.
-      - dma_kv_new: offsets for new tokens being added to the cache.
-      - do_writeback: boolean flag indicating if a block should be flushed to
-        HBM (ie does this block contain new tokens to add to KV cache).
+  This kernel:
+  1. Iterates through each (potentially ragged) sequence
+  2. Breaks Queries (Q) and Key-Values (KV) into blocks (bq_sz, bkv_sz).
+  3. Assigns tasks to 'lanes' (TPU batch items) based on current lane occupancy
+    to ensure balanced execution across the batch dimension.
+  4. Encodes DMA offsets:
+    - dma_q: HBM start index and size for Query blocks.
+    - dma_kv_cache: Paged indices for existing KV tokens.
+    - dma_kv_new: offsets for new tokens being added to the cache.
+    - do_writeback: boolean flag indicating if a block should be flushed to
+      HBM (ie does this block contain new tokens to add to KV cache).
 
-    Args:
-      cu_q_lens_ref: [max_num_seqs + 1]. Cumulative sum of each sequence's query
-        length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
-        b=cu_q_lens[i+1] represents q/k/v of sequence i.
-      q_offsets_ref: [max_num_seqs]. Starting Q index for each sequence.
-      kv_cache_lens_ref: [max_num_seqs]. Existing kv cache length of each
-        sequence.
-      kv_new_lens_ref: [max_num_seqs]. New kv length of each sequence.
-      distribution_ref: [3]. Cumulative sum of number of decode, prefill, and
-        mixed
-      extra_scalars_ref: Additional scalar refs for custom metadata computers.
-      schedule_hbm_ref: HBM memory that will store output of the kernel.
-      schedule_ref: Scratch memory where schedule results gets written.
-      dma_sem: Semaphore used for writing scheduler output to HBM.
-      cfgs: Configuration of the kernel.
-      computer_cls: Metadata computer class to use for schedule generation.
-    """
+  Args:
+    cu_q_lens_ref: [max_num_seqs + 1]. Cumulative sum of each sequence's query
+      length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
+      b=cu_q_lens[i+1] represents q/k/v of sequence i.
+    q_offsets_ref: [max_num_seqs]. Starting Q index for each sequence.
+    kv_cache_lens_ref: [max_num_seqs]. Existing kv cache length of each
+      sequence.
+    kv_new_lens_ref: [max_num_seqs]. New kv length of each sequence.
+    distribution_ref: [3]. Cumulative sum of number of decode, prefill, and
+      mixed
+    extra_scalars_ref: Additional scalar refs for custom metadata computers.
+    schedule_hbm_ref: HBM memory that will store output of the kernel.
+    schedule_ref: Scratch memory where schedule results gets written.
+    dma_sem: Semaphore used for writing scheduler output to HBM.
+    cfgs: Configuration of the kernel.
+    computer_cls: Metadata computer class to use for schedule generation.
+  """
     # Step 1: Compute and fill scheduler metadata.
     computer = computer_cls(
         schedule=schedule_ref,

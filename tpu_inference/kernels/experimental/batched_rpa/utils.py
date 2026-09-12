@@ -27,8 +27,8 @@ def align_to(a, b):
 def cp_local_cache_len(global_kv_cache_len, cp_group_size, cp_rank, page_size):
     """Number of cache tokens owned by this CP rank.
 
-    Currently only support cp_kv_cache_interleave_size = page_size
-    """
+  Currently only support cp_kv_cache_interleave_size = page_size
+  """
     super_page = cp_group_size * page_size
     full_tokens = (global_kv_cache_len // super_page) * page_size
     rem_tokens = jnp.maximum(
@@ -54,6 +54,10 @@ def broadcast_minor(src, shape):
 
 def get_dtype_packing(dtype):
     return 32 // jax.dtypes.itemsize_bits(dtype)
+
+
+def get_dtype_bits(dtype):
+    return jax.dtypes.itemsize_bits(dtype)
 
 
 def strided_load(ref, start_row, num_rows, step, *, dtype=None):
