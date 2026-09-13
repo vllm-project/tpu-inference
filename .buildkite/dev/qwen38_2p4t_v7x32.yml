@@ -193,12 +193,41 @@ steps:
         # step regardless of batch size, so 5x the prompts costs well under 5x
         # the time.
         #
-        # This build establishes the standard-harness accuracy baseline, so it
-        # is the mirror image of #17-#19: no load-time quantization at all, and
-        # the whole accuracy budget spent on lm_eval rather than on the perf
-        # sweep. QUANTIZE_BF16_LINEAR_PATTERNS is absent below -- deliberately,
-        # see the note there -- so this is the stock checkpoint exactly as
-        # build #12 ran it.
+        # This build finishes the standard-harness accuracy baseline that #20
+        # started, so it is the mirror image of #17-#19: no load-time
+        # quantization at all, and the whole accuracy budget spent on lm_eval
+        # rather than on the perf sweep. QUANTIZE_BF16_LINEAR_PATTERNS is absent
+        # below -- deliberately, see the note there -- so this is the stock
+        # checkpoint exactly as build #12 and #20 ran it.
+        #
+        # #20 left two things unfinished, and this build changes exactly those.
+        #
+        # 1. GPQA_SAMPLING=spec. #20 ran greedy (temperature=0), as every run
+        #    before it did. 21 of 198 generations then ran to the 32768-token
+        #    wall and scored 0.143, pulling 0.881 down to 0.803; the 177 that
+        #    finished averaged only 8120 output tokens, so this is a runaway
+        #    tail, not a long-thinking model. Greedy is off-spec for Qwen3.8 --
+        #    the card asks for temperature=1.0, top_p=0.95, top_k=20, min_p=0.0
+        #    and names "endless repetition" as what greedy costs you. This is
+        #    the single-variable test of that. Everything else about the leg is
+        #    #20's, and lm_eval pins seed=1234 per request so the run is still
+        #    reproducible. Qwen publishes no GPQA prompt or eval config, so the
+        #    fork's "Answer with only the letter in parentheses" system prompt
+        #    is not the sanctioned alternative and is deliberately not adopted:
+        #    it would forfeit the comparability to a stock GPU run that is the
+        #    entire point of this harness.
+        #
+        # 2. MMLU should actually run. In #20 the leg died before it started --
+        #    lm_eval scores multiple_choice by loglikelihood, which reaches
+        #    vLLM as prompt_logprobs, and compute_and_gather_prompt_logprobs
+        #    returned arrays still sharded over the token axis. device_get on
+        #    one of those under Ray multihost raises "Fetching value for
+        #    jax.Array that spans non-addressable devices" and takes the engine
+        #    with it. They are now replicated before the host copy, the same
+        #    thing sample() has always done to next_tokens. If that fix is
+        #    wrong the failure mode is unchanged -- the engine dies on the
+        #    probe -- and MMLU stays last precisely so GPQA and GSM8K are
+        #    already recorded when it does.
         #
         # EVAL_SUITE=none, STD_EVAL_SUITE=gpqa,gsm8k,mmlu: the accuracy leg is
         # qwen38_2p4t_eval_std.sh, not qwen38_2p4t_eval.sh. Our numbers so far
@@ -353,6 +382,7 @@ steps:
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gpqa,gsm8k,mmlu' \
           'GPQA_REASONING_EFFORT=xhigh' \
+          'GPQA_SAMPLING=spec' \
           'GPQA_MAX_GEN_TOKS=32768' \
           'GPQA_CONCURRENCY=32' \
           'GPQA_TIMEOUT_S=10800' \
