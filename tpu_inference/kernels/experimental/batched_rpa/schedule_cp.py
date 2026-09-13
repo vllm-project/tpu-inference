@@ -96,11 +96,11 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
     @property
     def rank(self):
         return self.extra_refs[0][0] if self.extra_refs else 0
-
+    
     @jax.named_scope("k_loop_cp")
     def k_loop(
         self,
-        k_idx,
+        global_k_idx,
         carry: schedule.LoopCarry,
         *,
         s_idx,
@@ -108,31 +108,44 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
         q_end,
         q_src,
         q_sz_task,
-        kv_cache_len,
+        global_kv_cache_len,
         kv_new_len,
         end_k_idx,
+        update_kv_cache,
     ) -> schedule.LoopCarry:
+
         cfgs = self.cfgs
+        cp_group_size = cfgs.serve.cp_group_size
+
+        rank_k_idx = global_k_idx // cp_group_size
         sched = self.schedule
         count = carry.count
         step, target_lane = divmod(count, cfgs.batch_size)
 
+        kv_len_start = global_k_idx * cfgs.bkv_sz
+        kv_p_start = global_k_idx * cfgs.bkv_p
+        k_len = global_kv_cache_len + kv_new_len
+        kv_left = k_len - kv_len_start
+        kv_left_frm_cache = jnp.maximum(global_kv_cache_len - kv_len_start, 0)
+        p_offset = s_idx * cfgs.serve.pages_per_seq + kv_p_start
+
+        if cfgs.serve.is_sharding_kv_cache and kv_left_frm_cache>0 and global_k_idx % cp_group_size != self.rank:
+            # This rank does not need to compute this portion of the kv cache 
+            return carry
+
+        
+        
+
         sched.s_idx[step, target_lane] = s_idx
         sched.q_idx[step, target_lane] = q_idx
-        sched.k_idx[step, target_lane] = k_idx
-
-        is_last_k = jnp.where(k_idx == end_k_idx - 1, 1, 0)
+        sched.k_idx[step, target_lane] = rank_k_idx
+    
+        is_last_k = jnp.where(global_k_idx == end_k_idx - 1, 1, 0)
         sched.is_last_k[step, target_lane] = is_last_k
 
         sched.dma_q[step, target_lane, 0] = q_src
         sched.dma_q[step, target_lane, 1] = q_sz_task
 
-        kv_len_start = k_idx * cfgs.bkv_sz
-        kv_p_start = k_idx * cfgs.bkv_p
-        k_len = kv_cache_len + kv_new_len
-        kv_left = k_len - kv_len_start
-        kv_left_frm_cache = jnp.maximum(kv_cache_len - kv_len_start, 0)
-        p_offset = s_idx * cfgs.serve.pages_per_seq + kv_p_start
 
         cp_group_size = cfgs.serve.cp_group_size
         assert cp_group_size is not None
@@ -144,23 +157,25 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
 
             if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
                 if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
-                    p_idx = kv_p_start + i
-                    local_page_i = jnp.minimum(
-                        p_idx // cp_group_size,
-                        cfgs.serve.pages_per_seq - 1,
-                    )
-                    src_hbm_cp = s_idx * cfgs.serve.pages_per_seq + local_page_i
-                    dma_valid = jnp.where(
-                        (dma_sz > 0) & (p_idx % cp_group_size == self.rank),
-                        1,
-                        0,
-                    )
-                    sched.dma_kv_cache[step, target_lane, i, 0] = src_hbm_cp
-                else:  # CACHE_ONLY
-                    src_hbm = jnp.minimum(p_offset + i,
-                                          cfgs.serve.num_page_indices - 1)
-                    dma_valid = jnp.where(dma_sz > 0, 1, 0)
-                    sched.dma_kv_cache[step, target_lane, i, 0] = src_hbm
+                    pass
+                    # TODO: no need to perform DMA for cache tokens right?
+                    # p_idx = kv_p_start + i
+                    # local_page_i = jnp.minimum(
+                    #     p_idx // cp_group_size,
+                    #     cfgs.serve.pages_per_seq - 1,
+                    # )
+                    # src_hbm_cp = s_idx * cfgs.serve.pages_per_seq + local_page_i
+                    # dma_valid = jnp.where(
+                    #     (dma_sz > 0) & (p_idx % cp_group_size == self.rank),
+                    #     1,
+                    #     0,
+                    # )
+                    # sched.dma_kv_cache[step, target_lane, i, 0] = src_hbm_cp
+                local_page_i = p_offset + i // cp_group_size
+                src_hbm = jnp.minimum(local_page_i,
+                                        cfgs.serve.num_page_indices - 1)
+                dma_valid = jnp.where(dma_sz > 0, 1, 0)
+                sched.dma_kv_cache[step, target_lane, i, 0] = src_hbm
                 sched.dma_kv_cache[step, target_lane, i, 1] = dst_vmem
                 sched.dma_kv_cache[step, target_lane, i, 2] = dma_valid
             else:
@@ -168,20 +183,28 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
                                       cfgs.serve.num_page_indices - 1)
                 sched.dma_kv_cache[step, target_lane, i, 0] = src_hbm
                 sched.dma_kv_cache[step, target_lane, i, 1] = dst_vmem
-                if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
-                    sched.dma_kv_cache[step, target_lane, i, 2] = 0
-                else:
-                    sched.dma_kv_cache[step, target_lane, i, 2] = dma_sz
+                sched.dma_kv_cache[step, target_lane, i, 2] = dma_sz
 
+        
+        if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+            sched.dma_kv_cache[step, target_lane, i, 2] = 0
+        if cfgs.ring_attention_axis_names is not None and global_k_idx %  cp_group_size != self.rank:
+            # Only prefetch owned paged from HBM, prefetch other pages via ring ICI
+            sched.dma_kv_cache[step, target_lane, i, 2] = 0
+            
+        if cfgs.serve.attention_scope == configs.AttentionScope.CACHE_ONLY:
+            return self.advance_carry(carry)
+
+        
         kv_left_frm_new = kv_left - kv_left_frm_cache
         bkv_sz_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
         new_sz = jnp.minimum(cfgs.bkv_sz - bkv_sz_cache, kv_left_frm_new)
 
         # Writeback logic: each new k block is written back by the first q block
         # that attends to it.
-        q_wb = jnp.maximum(0, (kv_len_start - kv_cache_len)) // cfgs.bq_sz
+        q_wb = jnp.maximum(0, (kv_len_start - global_kv_cache_len)) // cfgs.bq_sz
 
-        do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb), 1, 0)
+        do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb) & update_kv_cache, 1, 0)
         sched.do_writeback[step, target_lane] = do_writeback
         src_hbm = q_end - kv_left_frm_new
 
@@ -197,8 +220,11 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
                     0,
                 )
                 fetch_val = jnp.where(i < num_pages_to_fetch, 1, 0)
-                new_page_start = (hbm_token_idx_base -
-                                  new_tok_offset) + i * cfgs.serve.page_size
+                if new_kv_page_indices: 
+                    new_page_start = new_kv_page_indices[i]
+                else: 
+                    new_page_start = (hbm_token_idx_base -
+                                    new_tok_offset) + i * cfgs.serve.page_size
                 fetch_vmem = (cache_pages + i) * cfgs.serve.page_size
                 p_idx = jnp.minimum(
                     (kv_len_start + slot_start) >> cfgs.serve.page_size_log2,
@@ -226,7 +252,8 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
                            cfgs.serve.page_size_log2) | p_off
                 wb_val = jnp.where(p_idx % cp_group_size == self.rank, dma_sz,
                                    jnp.int32(0))
-
+                if new_kv_page_indices: 
+                    src_hbm = ? 
                 dma_entry.fetch_hbm[...] = src_hbm
                 dma_entry.fetch_vmem[...] = dst_vmem
                 dma_entry.wb_hbm[...] = dst_hbm

@@ -139,6 +139,10 @@ class ServingConfigs:
             return max(1, scale_bits // kv_bits)
         return 0
 
+    @property
+    def is_sharding_kv_cache(self) -> bool:
+        return self.cp_group_size is not None and self.attention_scope == configs.AttentionScope.CACHE_ONLY and self.pcp_ring_axis_name is None
+
 
 class RpaCase(enum.StrEnum):
     """Represents the different cases for Ragged Paged Attention.

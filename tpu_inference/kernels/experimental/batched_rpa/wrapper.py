@@ -492,9 +492,9 @@ def calculate_block_sizes(
 )
 def ragged_paged_attention(
     queries: jax.Array,
-    keys: jax.Array,
-    values: jax.Array,
-    kv_cache: jax.Array,
+    keys: jax.Array | None,
+    values: jax.Array | None,
+    kv_cache: jax.Array | None,
     kv_lens: jax.Array,
     page_indices: jax.Array,
     cu_q_lens: jax.Array,
@@ -518,7 +518,12 @@ def ragged_paged_attention(
     debug_mode: bool = False,
     out_dtype: jnp.dtype | None = None,
     use_causal_mask: bool = True,
-    update_kv_cache: bool = True,
+    update_kv_cache: jax.Array | bool = None, #New
+    new_kv_page_indices: jax.Array | None = None, #New
+    q_positions: jax.Array | None = None, #New
+    kv_cache_lens: jax.Array | None = None, #New
+    pcp_ring_axis_name: str | None = None, #New
+    pcp_ring_mesh_axis_names: tuple[str, ...] | None = None, #New
     kv_layout: configs.KVLayout = configs.KVLayout.HEAD_ALONG_SUBLANE,
     decode_query_size: int = 1,
     cp_group_size: int | None = None,
@@ -695,26 +700,44 @@ def ragged_paged_attention(
 
     # Compute per-sequence length parameters for the kernel.
     q_lens = cu_q_lens[1:] - cu_q_lens[:-1]
-    global_kv_cache_lens = kv_lens - q_lens
+
+    if kv_cache_lens is None:
+        global_kv_cache_lens = kv_lens - q_lens
+    else: 
+        global_kv_cache_lens = kv_cache_lens
+
+    if q_positions is None:
+        q_positions = global_kv_cache_lens
 
     if attention_scope == configs.AttentionScope.CACHE_ONLY:
-        if cp_group_size is not None:
-            rank = cp_rank[0] if cp_rank is not None else 0
-            kv_cache_lens = utils.cp_local_cache_len(global_kv_cache_lens,
-                                                     cp_group_size, rank,
-                                                     page_size)
-        else:
-            kv_cache_lens = global_kv_cache_lens
         kv_new_lens = jnp.zeros_like(q_lens)
-        q_offsets = kv_cache_lens
-    elif attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
-        kv_cache_lens = global_kv_cache_lens
-        kv_new_lens = q_lens
-        q_offsets = global_kv_cache_lens
-    else:  # FULL
-        kv_cache_lens = global_kv_cache_lens
-        kv_new_lens = q_lens
-        q_offsets = global_kv_cache_lens
+    else:
+        kv_new_lens = kv_lens -  global_kv_cache_lens
+
+    if update_kv_cache is None: 
+        if attention_scope == configs.AttentionScope.CACHE_ONLY:
+            update_kv_cache = jnp.zeros_like(q_lens, dtype=bool)
+        else:
+            update_kv_cache = jnp.ones_like(q_lens, dtype=bool)
+    
+    # if attention_scope == configs.AttentionScope.CACHE_ONLY:
+    #     if cp_group_size is not None:
+    #         rank = cp_rank[0]
+    #         kv_cache_lens = utils.cp_local_cache_len(global_kv_cache_lens,
+    #                                                  cp_group_size, rank,
+    #                                                  page_size)
+    #     else:
+    #         kv_cache_lens = global_kv_cache_lens
+    #     kv_new_lens = jnp.zeros_like(q_lens)
+    #     q_offsets = kv_cache_lens
+    # elif attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
+    #     kv_cache_lens = global_kv_cache_lens
+    #     kv_new_lens = q_lens
+    #     q_offsets = global_kv_cache_lens
+    # else:  # FULL
+    #     kv_cache_lens = global_kv_cache_lens
+    #     kv_new_lens = q_lens
+    #     q_offsets = global_kv_cache_lens
 
     def run_rpa_kernel(
         mode: configs.RpaCase,
@@ -740,6 +763,7 @@ def ragged_paged_attention(
             v=values,
             kv_cache=kv_cache,
             kv_lens=kv_lens,
+            # kv_cache_lens=kv_cache_lens, TODO
             page_indices=page_indices,
             cu_q_lens=cu_q_lens,
             distribution=distribution,
@@ -754,17 +778,18 @@ def ragged_paged_attention(
 
         schedule_hbm = schedule.generate_rpa_metadata(
             cu_q_lens,
-            q_offsets,
+            q_positions,
             kv_cache_lens,
             kv_new_lens,
             distribution,
+            update_kv_cache,
             cfgs=cfgs,
             computer_cls=computer_cls,
             extra_scalars=extra_scalars,
         )
         result = kernel.rpa_kernel(
             cu_q_lens,
-            q_offsets,
+            q_positions,
             kv_cache_lens,
             kv_new_lens,
             page_indices,

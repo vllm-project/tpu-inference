@@ -209,7 +209,7 @@ def fetch_step_metadata(
     step: jax.Array,
     schedule_ref: schedule.RpaSchedule,
     cu_q_lens_ref: jax.Ref,
-    q_offsets_ref: jax.Ref,
+    q_positions_ref: jax.Ref,
     kv_cache_lens_ref: jax.Ref,
     kv_new_lens_ref: jax.Ref,
     *,
@@ -229,30 +229,32 @@ def fetch_step_metadata(
         is_valid = s_idx != -1
         q_idx = schedule_ref.q_idx[step, b_idx]
         k_idx = schedule_ref.k_idx[step, b_idx]
-        k_id = jnp.where(is_valid, k_idx * cfgs.bkv_sz, 0)
+        global_k_idx = k_idx * cfgs.cp_group_size + cp_rank
+
+        k_id = jnp.where(is_valid, global_k_idx * cfgs.bkv_sz, 0)
         kv_cache_len_val = jnp.where(is_valid, kv_cache_lens_ref[s_idx], 0)
         kv_new_len_val = jnp.where(is_valid, kv_new_lens_ref[s_idx], 0)
-        q_offset = jnp.where(is_valid, q_offsets_ref[s_idx], 0)
+        q_position= jnp.where(is_valid, q_positions_ref[s_idx], 0)
         q_end = jnp.where(is_valid, cu_q_lens_ref[s_idx + 1], 0)
 
         total_kv_len = kv_cache_len_val + kv_new_len_val
 
         # Causal base offset: K_base - Q_base
-        q_base = q_idx * cfgs.bq_sz + q_offset
-        causal_offset = k_id - q_base
+        q_base = q_idx * cfgs.bq_sz + q_position
+        causal_offset = global_k_idx - q_base
         causal_offset_list.append(causal_offset)
 
         if local_k_start_list is not None:
-            local_k_start_list.append(q_offset - k_id)
+            local_k_start_list.append(q_position- global_k_idx)
         if local_k_end_list is not None:
-            local_k_end_list.append(kv_cache_len_val - k_id)
+            local_k_end_list.append(kv_cache_len_val - global_k_idx)
 
         # Stitching metadata
-        kv_left = jnp.maximum(total_kv_len - k_id, 0)
-        kv_left_frm_cache = jnp.maximum(kv_cache_len_val - k_id, 0)
+        kv_left = jnp.maximum(total_kv_len - global_k_idx, 0)
+        kv_left_frm_cache = jnp.maximum(kv_cache_len_val - global_k_idx, 0)
         kv_left_frm_new = jnp.maximum(kv_left - kv_left_frm_cache, 0)
         bkv_sz_frm_cache = jnp.minimum(kv_left_frm_cache, cfgs.bkv_sz)
-        new_kv_len_start = q_end - kv_left_frm_new
+        new_kv_len_start = kv_new_len_val - kv_left_frm_new
 
         bkv_sz_frm_cache_list.append(bkv_sz_frm_cache)
         new_kv_len_start_list.append(new_kv_len_start)
@@ -310,6 +312,100 @@ def generate_mask(
 
     return masks
 
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class RingSems:
+    """The ring's semaphores, passed through the pipeline as one pytree."""
+
+    dma_sems: jax.Ref  # [2] send/recv
+    sync_sem: jax.Ref  # per-step handshake (see the module docstring)
+
+
+class RingAttentionHooks:
+    """Per-step ring state and the per-lane rotation protocol."""
+
+    def __init__(self, cfgs, sems: RingSems, *, step, chunk_id, kv_window_ref):
+        self.cfgs = cfgs
+        self.sems = sems
+        assert cfgs.serve.cp is not None
+        self.size = cfgs.serve.cp.group_size
+        assert cfgs.serve.cp.ring_axis_name is not None
+        self.my_id = lax.axis_index(cfgs.serve.cp.ring_axis_name)
+        self.next_id = self._device_id(lax.rem(self.my_id + 1, self.size))
+        self.prev_id = self._device_id(
+            lax.rem(self.my_id + self.size - 1, self.size))
+        self.step_local = step
+        self.step_global = chunk_id * cfgs.max_steps_ub + step
+        self.kv_window = kv_window_ref
+        self._pending_sends = []
+
+    def _device_id(self, rank):
+        if self.cfgs.serve.cp.ring_mesh_axis_names is None:
+            return (rank, )
+        return tuple(
+            rank if name ==
+            self.cfgs.serve.cp.ring_axis_name else lax.axis_index(name)
+            for name in self.cfgs.serve.cp.ring_mesh_axis_names)
+
+    def send_kv(self, schedule_ref):
+
+        # Per-step handshake
+        pl.semaphore_signal(
+            self.sems.sync_sem,
+            1,
+            device_id=self.prev_id,
+            device_id_type=pl.DeviceIdType.MESH,
+        )
+        pl.semaphore_wait(self.sems.sync_sem, 1)
+
+        n_buffer = self.cfgs.n_buffer
+        slot = lax.rem(self.step_local, n_buffer)
+        next_step = self.step_local + 1
+        next_slot = jnp.where(next_step < self.cfgs.max_steps_ub,
+                              lax.rem(next_step, n_buffer), 0)
+
+        # TODO:is it helpful to assume that bs = 1 when using ring attention?
+        for b_idx in range(self.cfgs.batch_size):
+            valid_b = schedule_ref.s_id[b_idx] != -1
+            round_b = schedule_ref.k_id[b_idx] % self.size
+            sends_b = jnp.logical_and(valid_b, round_b != self.size - 1)
+            receives_b = jnp.logical_and(valid_b, round_b > 0)
+
+            lane_ref = self.kv_window.at[slot, b_idx]
+            if b_idx + 1 < self.cfgs.batch_size:
+                dst_ref = self.kv_window.at[slot, b_idx + 1]
+            else:
+                # TODO: is this needed?
+                dst_ref = self.kv_window.at[next_slot, 0]
+            remote_op = pltpu.make_async_remote_copy(
+                src_ref=lane_ref,
+                dst_ref=dst_ref,
+                send_sem=self.sems.dma_sems.at[0],
+                recv_sem=self.sems.dma_sems.at[1],
+                device_id=self.next_id,
+                device_id_type=pl.DeviceIdType.MESH,
+            )
+
+            @pl.when(receives_b)
+            def wait_ring_recv():
+                remote_op.wait_recv()
+
+            @pl.when(sends_b)
+            def start_rotate():
+                remote_op.start()
+
+            self._pending_sends.append((sends_b, remote_op))
+
+    def wait_send_kv(self):
+        """the ring send needs to finish before this kv hbm slot is released"""
+        for sends_b, remote_op in self._pending_sends:
+
+            @pl.when(sends_b)
+            def wait_ring_send():
+                remote_op.wait_send()
+
+        self._pending_sends = []
+    
 
 def rpa_body(
     # Inputs.
@@ -326,11 +422,12 @@ def rpa_body(
     *,
     # Passed refs
     cu_q_lens_ref: jax.Ref,
-    q_offsets_ref: jax.Ref,
+    q_positions_ref: jax.Ref,
     kv_cache_lens_ref: jax.Ref,
     kv_new_lens_ref: jax.Ref,
     # Configs.
     cfgs: configs.RpaConfigs,
+    ring_attention: RingAttentionHooks,
 ):
     step = pl.program_id(0)
 
@@ -339,11 +436,14 @@ def rpa_body(
         step,
         schedule_ref,
         cu_q_lens_ref,
-        q_offsets_ref,
+        q_positions_ref,
         kv_cache_lens_ref,
         kv_new_lens_ref,
         cfgs=cfgs,
     )
+
+    # Optional, ring prefetch kv 
+    ring_attention.send_kv(schedule_ref)
 
     # Step 2: Fetch inputs.
     q_p = cfgs.aligned_num_q_heads_per_kv_head // cfgs.serve.packing_q
@@ -543,6 +643,9 @@ def rpa_body(
         cfgs=cfgs,
     )
 
+    #Optional 
+    ring_attention.wait_send_kv()
+
 
 # Define main kernel.
 
@@ -699,7 +802,7 @@ def rpa_kernel(
     def ragged_paged_attention_pipeline(
         # Scalar prefetch.
         cu_q_lens_ref: jax.Ref,
-        q_offsets_ref: jax.Ref,
+        q_positions_ref: jax.Ref,
         kv_cache_lens_ref: jax.Ref,
         kv_new_lens_ref: jax.Ref,
         page_indices_ref: jax.Ref,
@@ -807,7 +910,7 @@ def rpa_kernel(
                         rpa_body,
                         cfgs=cfgs,
                         cu_q_lens_ref=cu_q_lens_ref,
-                        q_offsets_ref=q_offsets_ref,
+                        q_positions_ref=q_positions_ref,
                         kv_cache_lens_ref=kv_cache_lens_ref,
                         kv_new_lens_ref=kv_new_lens_ref,
                     ),
