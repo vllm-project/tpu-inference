@@ -297,6 +297,20 @@ def _decode_core_impl(
      kv_caches, token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
      lp_ranks_buffer, _) = _unpack(final_carry)
 
+    if has_logprobs:
+        # The caller device_get()s these; replicate so a multi-host fetch is
+        # legal (see replicate_logprobs_for_host). Done once on the stacked
+        # buffers rather than per step inside body_fn.
+        from tpu_inference.layers.jax.sample.sampling import \
+            replicate_logprobs_for_host
+        replicated = replicate_logprobs_for_host(
+            LogprobsTensors(logprob_token_ids=lp_ids_buffer,
+                            logprobs=lp_val_buffer,
+                            selected_token_ranks=lp_ranks_buffer), mesh)
+        lp_ids_buffer = replicated.logprob_token_ids
+        lp_val_buffer = replicated.logprobs
+        lp_ranks_buffer = replicated.selected_token_ranks
+
     return (step_idx_final, current_tokens, active_mask, positions, seq_lens,
             kv_caches, token_buffer, expert_buffer, lp_ids_buffer,
             lp_val_buffer, lp_ranks_buffer)

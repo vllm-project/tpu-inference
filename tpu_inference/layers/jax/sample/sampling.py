@@ -151,15 +151,49 @@ def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+def replicate_logprobs_for_host(tensors: LogprobsTensors,
+                                mesh: Mesh) -> LogprobsTensors:
+    """Constrain logprobs tensors to a replicated sharding.
+
+    Every logprobs tensor is eventually device_get()'d on the host, and these
+    inherit the token-axis sharding of the logits they came from. In a Ray
+    multi-host setup that sharding spans devices this process cannot address,
+    and the fetch raises
+      Fetching value for `jax.Array` that spans non-addressable
+      (non process local) devices is not possible
+    jax.Array._value special-cases a fully replicated array and reads the local
+    shard, so replicating first is what makes the fetch legal -- the same reason
+    sample() replicates next_tokens. The arrays are (num_tokens,
+    max_logprobs + 1), so the all-gather is cheap.
+
+    Call this inside a jit; it is a sharding constraint, not a collective op.
+    """
+    replicated = NamedSharding(mesh, P())
+    return LogprobsTensors(
+        logprob_token_ids=jax.lax.with_sharding_constraint(
+            tensors.logprob_token_ids, replicated),
+        logprobs=jax.lax.with_sharding_constraint(tensors.logprobs,
+                                                  replicated),
+        selected_token_ranks=jax.lax.with_sharding_constraint(
+            tensors.selected_token_ranks, replicated),
+    )
+
+
+@jax.jit(static_argnames=("max_logprobs", "mesh"))
 def compute_and_gather_logprobs(
     logits: jax.Array,
     next_tokens: jax.Array,
     max_logprobs: int,
+    mesh: Optional[Mesh] = None,
 ) -> LogprobsTensors:
-    """Compute logprobs from logits and gather the requested top-k."""
+    """Compute logprobs from logits and gather the requested top-k.
+
+    Pass `mesh` whenever the result will be fetched to the host; see
+    replicate_logprobs_for_host.
+    """
     logprobs = compute_logprobs(logits)
-    return gather_logprobs(logprobs, next_tokens, max_logprobs)
+    out = gather_logprobs(logprobs, next_tokens, max_logprobs)
+    return out if mesh is None else replicate_logprobs_for_host(out, mesh)
 
 
 @jax.jit(static_argnames=("max_logprobs", "mesh"))
@@ -171,24 +205,10 @@ def compute_and_gather_prompt_logprobs(
 ) -> LogprobsTensors:
     """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
     prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
-    out = compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
-    if mesh is None:
-        return out
-    # These get device_get()'d in _get_prompt_logprobs_dict. They inherit the
-    # token-axis sharding of `logits`, so in a Ray multi-host setup they span
-    # devices this process cannot address and the fetch raises
-    #   Fetching value for `jax.Array` that spans non-addressable
-    #   (non process local) devices is not possible
-    # Replicate them first, for the same reason sample() does it to next_tokens.
-    # The arrays are (num_tokens, max_logprobs + 1), so this is cheap.
-    replicated = NamedSharding(mesh, P())
-    return LogprobsTensors(
-        logprob_token_ids=jax.lax.with_sharding_constraint(
-            out.logprob_token_ids, replicated),
-        logprobs=jax.lax.with_sharding_constraint(out.logprobs, replicated),
-        selected_token_ranks=jax.lax.with_sharding_constraint(
-            out.selected_token_ranks, replicated),
-    )
+    # These get device_get()'d in _get_prompt_logprobs_dict, so hand the mesh
+    # through and let the inner call replicate them.
+    return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs,
+                                       mesh)
 
 
 def compute_prompt_logprobs(
