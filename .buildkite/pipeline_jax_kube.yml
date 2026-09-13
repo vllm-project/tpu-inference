@@ -106,6 +106,36 @@ steps:
         setup_environment "vllm-tpu" "false" "true"
         buildkite-agent meta-data set ci-image "$$EXPORTED_CI_CACHE_IMAGE"
 
+  # Image Streaming converts an image once per digest, and this image has a new
+  # digest every build, so the first TPU pod to schedule pays for the rest: 80
+  # to 120 seconds on measured builds against 12 to 45 once converted. This runs
+  # the same image on a node that holds no chips, which pays it somewhere the
+  # tests are not waiting.
+  #
+  # Nothing depends on it, deliberately. The TPU steps spend one to four minutes
+  # creating nodes before their containers start, which is the window this has
+  # to finish in, so gating them on it would add its own startup to the serial
+  # path to save them the same thing. Losing the race costs the build nothing -
+  # the conversion happens either way - which is also why it soft-fails: a
+  # prewarm that cannot run is slower, not broken.
+  - label: ":fire: Prewarm image on ct6e"
+    key: "prewarm_kube"
+    depends_on: "build_docker_kube"
+    soft_fail: true
+    timeout_in_minutes: 30
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+          checkout:
+            cloneFlags: -v --depth 1 --filter=blob:none
+            fetchFlags: -v --prune --depth 1 --filter=blob:none
+    commands:
+      # The shape names the region to warm, not hardware to hold - the pod it
+      # submits asks for no chips.
+      - .buildkite/kubernetes/run.sh --prewarm ct6e-standard-1t/1x1
+
   # ------------------------------------------------------------ single chip ---
   # Fourteen of these against a two-chip nominal quota, so most are borrowing
   # and are the first reclaimed when an eight-chip step arrives.

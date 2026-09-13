@@ -16,6 +16,7 @@
 # The Kubernetes counterpart of scripts/run_in_docker.sh.
 #
 #   .buildkite/kubernetes/run.sh <machine-type>/<topology> <command> [args...]
+#   .buildkite/kubernetes/run.sh --prewarm <machine-type>/<topology>
 #
 # run_in_docker.sh picks an image, mounts the caches and forwards a long -e list
 # into a container on a long-lived VM. Here the pod is the container, the
@@ -29,8 +30,19 @@
 # variable, and the launcher should not have to know either to schedule a pod.
 set -euo pipefail
 
-if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <machine-type>/<topology> <command> [args...]" >&2
+# Prewarm runs the build's image on a chip-less node in the region the shape
+# names, so the per-digest image conversion is done before a test waits on it.
+# Here rather than in a script of its own because everything above the launcher
+# call is the same - the same shape token, the same image lookup - and the two
+# drifting apart would mean prewarming an image no step then runs.
+prewarm=""
+if [[ "${1:-}" == "--prewarm" ]]; then
+  prewarm=1
+  shift
+fi
+
+if [[ $# -lt 2 && -z "$prewarm" ]] || [[ $# -lt 1 ]]; then
+  echo "usage: $0 [--prewarm] <machine-type>/<topology> [command [args...]]" >&2
   exit 2
 fi
 
@@ -51,6 +63,15 @@ fi
 # recomputing it from commit hashes in every step, which is how they drift.
 WORKLOAD_IMAGE="${WORKLOAD_IMAGE:-$(buildkite-agent meta-data get ci-image 2>/dev/null || true)}"
 export WORKLOAD_IMAGE
+
+# Nothing below this point applies to a prewarm: it runs no command, so there is
+# no environment for it to carry and no compilation cache for it to name.
+if [[ -n "$prewarm" ]]; then
+  exec /opt/launcher/launch \
+    --machine-type "$machine_type" \
+    --topology "$topology" \
+    --prewarm
+fi
 
 # Names a step sets that no convention would find. The Hugging Face and Test
 # Engine tokens are here too, unset: the launcher holds a grant on both and
