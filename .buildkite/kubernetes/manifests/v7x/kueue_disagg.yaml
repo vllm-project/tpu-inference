@@ -502,6 +502,14 @@ spec:
             spec:
               restartPolicy: Never
               serviceAccountName: tpu-workload
+              # This role holds no chips: it is the proxy and the HTTP client
+              # driving the two engines, and on a TPU node it would spend four
+              # chips on a Python process. The class provisions a node sized to
+              # the requests below and takes it away afterwards, so the cores
+              # exist while a benchmark runs and the cluster's shared system
+              # pool does not have to be built large enough to hold one.
+              nodeSelector:
+                cloud.google.com/compute-class: worker-cpu
               containers:
               - name: workload
                 image: ${IMAGE}
