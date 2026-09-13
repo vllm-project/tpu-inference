@@ -93,10 +93,20 @@ GSM8K_EFFORT="${GSM8K_REASONING_EFFORT:-low}"
 # fixed server build. top_k/min_p are not OpenAI fields but vLLM accepts them on
 # ChatCompletionRequest, and _create_payload splats unrecognised gen_kwargs
 # straight into the body.
-GPQA_SAMPLING="${GPQA_SAMPLING:-spec}"
+#
+# "auto" is the default because #22 showed the spec set is not safe to assume:
+# every one of its 198 requests came back 500 InternalServerError in under two
+# seconds with an EMPTY message, the leg died in 12s, and the same server then
+# ran GSM8K to completion at temperature=0. An empty message means the server
+# raised something create_error_response could not classify (it ends up in the
+# catch-all at error_response.py:82 and reports str(exc), which is "" for a bare
+# assert), and nothing is logged unless VLLM_SERVER_DEV_MODE is on. So the field
+# that breaks it cannot be read off the log -- it has to be bisected against the
+# live server, which is what the probe below does.
+GPQA_SAMPLING="${GPQA_SAMPLING:-auto}"
 case "${GPQA_SAMPLING}" in
-  spec|greedy) ;;
-  *) echo "[std-eval] GPQA_SAMPLING must be spec or greedy, got '${GPQA_SAMPLING}'" >&2
+  auto|spec|greedy) ;;
+  *) echo "[std-eval] GPQA_SAMPLING must be auto, spec or greedy, got '${GPQA_SAMPLING}'" >&2
      exit 2 ;;
 esac
 
@@ -212,6 +222,127 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+# GPQA sampling probe.
+#
+# Sends one throwaway chat request per cumulative prefix of the card's sampling
+# set and reports which ones the server accepts. The payload is otherwise
+# byte-identical to what lm_eval will send (same seed, same stop, same
+# max_tokens, same chat_template_kwargs), because the whole point is to find
+# which single field turns a working request into a 500.
+#
+# Acceptance is "the server did not reject it", not "it answered": a rejection
+# comes back in milliseconds, whereas an accepted request at max_tokens=32768
+# takes minutes on a thinking model. So the probes run concurrently with a short
+# timeout and a read timeout counts as accepted. The cost is a handful of
+# abandoned generations, against a leg that runs for hours.
+#
+# GPQA_SAMPLING=spec or =greedy forces the set and the probe is informational.
+# =auto takes the longest accepted prefix, and falls back to greedy if even
+# temperature=1.0 alone is refused.
+# ---------------------------------------------------------------------------
+GPQA_GEN_JSON="${ART}/gpqa_sampling.json"
+
+probe_gpqa_sampling() {
+  python3 - "${PORT}" "${MODEL}" "${GPQA_SAMPLING}" "${GPQA_MAX_GEN}" \
+           "${GPQA_EFFORT}" "${GPQA_GEN_JSON}" <<'PY'
+import json, sys, urllib.error, urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+port, model, mode, max_gen, effort, out_path = sys.argv[1:7]
+url = f"http://127.0.0.1:{port}/v1/chat/completions"
+TIMEOUT_S = 40
+
+# Cumulative prefixes of the Qwen3.8 card's Best Practices set.
+SPEC = [("temperature", 1.0), ("top_p", 0.95), ("top_k", 20), ("min_p", 0.0)]
+GREEDY = {"do_sample": False, "temperature": 0.0}
+
+
+def probe(extra):
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": "What is 1+1?"}],
+        "max_tokens": int(max_gen),
+        "stop": ["</s>"],
+        "seed": 1234,          # lm_eval pins this in every payload
+    }
+    if effort:
+        body["chat_template_kwargs"] = {"reasoning_effort": effort}
+    body.update(extra)
+    req = urllib.request.Request(url, json.dumps(body).encode(),
+                                 {"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+            return True, f"{r.status} (answered)"
+    except urllib.error.HTTPError as e:
+        return False, f"{e.code} {e.read().decode(errors='replace')[:160]!r}"
+    except Exception as e:
+        # A read timeout means the server took the request and is generating.
+        if "timed out" in str(e).lower() or e.__class__.__name__ == "timeout":
+            return True, f"accepted (no reply within {TIMEOUT_S}s)"
+        return False, f"{type(e).__name__}: {e}"
+
+
+# do_sample is deliberately absent from the probe bodies: _create_payload pops
+# it, so it never reaches the wire in the real run and sending it here would
+# make the probe test a payload lm_eval does not produce.
+cases = [("greedy", {"temperature": 0.0})]
+for i in range(1, len(SPEC) + 1):
+    cases.append(("+".join(k for k, _ in SPEC[:i]), dict(SPEC[:i])))
+
+with ThreadPoolExecutor(max_workers=len(cases)) as pool:
+    results = list(pool.map(lambda c: probe(c[1]), cases))
+
+ok = {}
+for (label, extra), (accepted, detail) in zip(cases, results):
+    print(f"[std-eval] gpqa sampling probe  {label:<32} "
+          f"{'OK  ' if accepted else 'FAIL'}  {detail}")
+    ok[label] = accepted
+
+spec_labels = ["+".join(k for k, _ in SPEC[:i]) for i in range(1, len(SPEC) + 1)]
+best = None
+for label in spec_labels:          # cumulative, so stop at the first refusal
+    if not ok[label]:
+        break
+    best = label
+full = spec_labels[-1]
+
+if mode == "greedy":
+    chosen, gen = "greedy", dict(GREEDY)
+elif mode == "spec":
+    chosen, gen = full, dict(SPEC, do_sample=True)
+elif best is None:
+    chosen, gen = "greedy", dict(GREEDY)
+else:
+    n = spec_labels.index(best) + 1
+    chosen, gen = best, dict(dict(SPEC[:n]), do_sample=True)
+
+if chosen != full:
+    print(f"[std-eval] WARNING: GPQA sampling is {chosen}, not the card's "
+          f"{full}.")
+    if mode == "auto":
+        refused = next((l for l in spec_labels if not ok[l]), None)
+        print(f"[std-eval] WARNING: the server refused {refused}; the field it "
+              f"cannot take is {refused.rsplit('+', 1)[-1] if refused else '?'}.")
+    print("[std-eval] WARNING: greedy is off-spec for this model and #20 lost "
+          "21/198 generations to the token wall under it.")
+json.dump({"label": chosen, "gen": gen}, open(out_path, "w"))
+print(f"[std-eval] gpqa sampling resolved to {chosen}: "
+      + ", ".join(f"{k}={v}" for k, v in gen.items()))
+PY
+}
+
+if wants gpqa && server_up; then
+  echo "--- gpqa: probing chat/completions for the card's sampling set"
+  probe_gpqa_sampling || {
+    echo "[std-eval] WARNING: sampling probe failed; falling back to greedy"
+    printf '{"label": "greedy", "gen": {"do_sample": false, "temperature": 0.0}}\n' \
+      > "${GPQA_GEN_JSON}"; }
+else
+  printf '{"label": "greedy", "gen": {"do_sample": false, "temperature": 0.0}}\n' \
+    > "${GPQA_GEN_JSON}"
+fi
+
+# ---------------------------------------------------------------------------
 # Task staging.
 #
 # Both overrides are `include:` of the stock yaml plus the keys that change.
@@ -225,11 +356,11 @@ fi
 # ---------------------------------------------------------------------------
 stage_tasks() {
   python3 - "${TASK_DIR}" "${GPQA_PATH}" "${GPQA_EFFORT}" "${GPQA_MAX_GEN}" \
-           "${GSM8K_EFFORT}" "${GPQA_SAMPLING}" <<'PY'
-import os, sys, yaml, lm_eval.tasks
+           "${GSM8K_EFFORT}" "${GPQA_GEN_JSON}" <<'PY'
+import json, os, sys, yaml, lm_eval.tasks
 
 (task_dir, gpqa_csv, gpqa_effort, gpqa_max_gen, gsm8k_effort,
- gpqa_sampling) = sys.argv[1:7]
+ gpqa_gen_json) = sys.argv[1:7]
 root = os.path.dirname(lm_eval.tasks.__file__)
 os.makedirs(task_dir, exist_ok=True)
 
@@ -239,14 +370,12 @@ for p in (gpqa_stock, gsm8k_stock):
     if not os.path.isfile(p):
         raise SystemExit(f"stock task yaml not found: {p}")
 
+# Whatever the probe settled on. do_sample is dropped by _create_payload before
+# the request is built, so it is documentation only either way.
+resolved = json.load(open(gpqa_gen_json))
+gpqa_sampling = resolved["label"]
 gpqa_gen = {"until": ["</s>"], "max_gen_toks": int(gpqa_max_gen)}
-if gpqa_sampling == "greedy":
-    gpqa_gen.update({"do_sample": False, "temperature": 0.0})
-else:
-    # Qwen3.8 card, Best Practices. do_sample is dropped by _create_payload
-    # before the request is built, so it is documentation only either way.
-    gpqa_gen.update({"do_sample": True, "temperature": 1.0, "top_p": 0.95,
-                     "top_k": 20, "min_p": 0.0})
+gpqa_gen.update(resolved["gen"])
 if gpqa_effort:
     gpqa_gen["chat_template_kwargs"] = {"reasoning_effort": gpqa_effort}
 gpqa = {
