@@ -23,6 +23,7 @@ from vllm.v1.outputs import LogprobsTensors
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (PromptLogprobsAsyncData,
                                                       PromptLogprobsReqSnap,
+                                                      compute_and_gather_prompt_logprobs,
                                                       compute_logprobs,
                                                       compute_prompt_logprobs,
                                                       gather_logprobs, sample)
@@ -292,3 +293,44 @@ class TestComputePromptLogprobs:
         assert snap.start_idx == 0
         assert snap.num_logits == 2
         assert snap.is_last_chunk is False
+
+    def test_prompt_logprobs_are_replicated_when_mesh_is_given(self):
+        """The tensors must be fetchable from a single process.
+
+        _get_prompt_logprobs_dict jax.device_get()s all three of them. Without
+        a replication constraint they keep the token-axis sharding of
+        full_logits, and under Ray multihost the fetch raises "Fetching value
+        for `jax.Array` that spans non-addressable (non process local)
+        devices", which kills the engine rather than failing the request. Build
+        #20 lost its whole MMLU leg to exactly that.
+        """
+        from jax.sharding import NamedSharding
+        from jax.sharding import PartitionSpec as P
+
+        devices = jax.devices()
+        if len(devices) < 2:
+            import pytest
+            pytest.skip("needs >= 2 devices to have anything to shard over")
+
+        mesh = Mesh(np.array(devices).reshape(len(devices), 1),
+                    ("data", "model"))
+        num_tokens, vocab = 8, 32
+        sharded = NamedSharding(mesh, P("data", "model"))
+        logits = jax.device_put(
+            jnp.arange(num_tokens * vocab,
+                       dtype=jnp.float32).reshape(num_tokens, vocab) % 7,
+            sharded)
+        input_ids = jax.device_put(jnp.arange(num_tokens, dtype=jnp.int32),
+                                   NamedSharding(mesh, P()))
+
+        without = compute_and_gather_prompt_logprobs(logits, input_ids, 1)
+        assert not without.logprobs.sharding.is_fully_replicated, (
+            "test is vacuous if the unconstrained output is already replicated")
+
+        out = compute_and_gather_prompt_logprobs(logits, input_ids, 1, mesh)
+        for name in ("logprob_token_ids", "logprobs", "selected_token_ranks"):
+            arr = getattr(out, name)
+            assert arr.sharding.is_fully_replicated, f"{name} is not replicated"
+            # Replication must not change what the values are.
+            np.testing.assert_array_equal(np.asarray(arr),
+                                          np.asarray(getattr(without, name)))

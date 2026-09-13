@@ -2089,6 +2089,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp,
                 self.dp_size,
                 max_logprobs=self.model_config.max_logprobs,
+                mesh=self.mesh,
             )
 
         num_reqs = self.input_batch.num_reqs

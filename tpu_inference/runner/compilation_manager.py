@@ -1134,6 +1134,7 @@ class CompilationManager:
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,
+                self.runner.mesh,
                 compile_only=True,
                 num_tokens=num_tokens,
             )
