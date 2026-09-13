@@ -311,7 +311,9 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         # CURRENT Phase
         # head and tail are treated as independent requests.
         cu_q_lens_current_phase = [0] + [ padded_request_lengths // (2*pcp) for x in padded_request_lengths]
+        # new kv pages in order. eg. if pcp =4, and each request only had 4 pages of new kv. [[0, 6, 7, 1], [2,8,9,3], [4, 10, 11, 5]]
         new_kv_page_indices = [[]]
+
         update_kv_current_phase= [[True, False] for _ in range(num_requests)]
         kv_lens_current_phase=  kv_lens_cache_phase.repeat(1)
         kv_new_lens_current_phase = input_lengths.repeat(1)
