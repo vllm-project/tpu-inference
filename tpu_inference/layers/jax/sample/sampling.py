@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
@@ -199,21 +200,51 @@ def compute_and_gather_logprobs(
 @jax.jit(static_argnames=("max_logprobs", "mesh"))
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
-    input_ids: jax.Array,
+    prompt_target_ids: jax.Array,
     max_logprobs: int,
     mesh: Optional[Mesh] = None,
 ) -> LogprobsTensors:
-    """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
-    prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
+    """Compute logprobs from full logits and gather the requested top-k for prompt tokens.
+
+    `prompt_target_ids[i]` must already be the token that follows row `i` of
+    `logits` in its own request's prompt; see `_build_prompt_target_ids`. It is
+    deliberately not derived here by rolling the packed input ids, because the
+    last row of a non-final prefill chunk would then target the next request's
+    first token instead of the next token of its own prompt.
+    """
     # These get device_get()'d in _get_prompt_logprobs_dict, so hand the mesh
     # through and let the inner call replicate them.
     return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs,
                                        mesh)
 
 
+def _build_prompt_target_ids(
+    total_padded_tokens: int,
+    req_snaps: List[PromptLogprobsReqSnap],
+    mesh: Optional[Mesh],
+) -> jax.Array:
+    """Build the next-token target for every row of the packed logits buffer.
+
+    Rows that no request claims (padding, and requests that did not ask for
+    prompt logprobs) stay 0; their gathered values are never read back.
+    """
+    targets = np.zeros((total_padded_tokens, ), dtype=np.int32)
+    for snap in req_snaps:
+        if snap.num_logits <= 0:
+            continue
+        s = snap.start_idx + 1
+        o = snap.req_offset
+        targets[o:o + snap.num_logits] = np.asarray(
+            snap.req_state.prompt_token_ids[s:s + snap.num_logits],
+            dtype=np.int32)
+    if mesh is None:
+        return jnp.asarray(targets)
+    # P() matches what compilation_manager precompiles this argument with.
+    return jax.device_put(targets, NamedSharding(mesh, P()))
+
+
 def compute_prompt_logprobs(
     full_logits: Optional[jax.Array],
-    input_ids: Optional[jax.Array],
     num_prompt_logprobs: Dict[str, int],
     requests: Dict[str, "CachedRequestState"],
     scheduler_output: "VllmSchedulerOutput",
@@ -226,16 +257,8 @@ def compute_prompt_logprobs(
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
     the snapshotted state needed to safely slice them in get_output().
     """
-    if (not num_prompt_logprobs or full_logits is None or input_ids is None):
+    if not num_prompt_logprobs or full_logits is None:
         return None
-
-    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
-    # start async transfer to host (overlaps with next step's execute_model).
-    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
-    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
-    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
-        full_logits, input_ids, max_logprobs, mesh)
-    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     # Snapshot all mutable per-request state before update_states(N+1) runs.
     padded_tokens_per_dp = full_logits.shape[0] // dp_size
@@ -269,6 +292,16 @@ def compute_prompt_logprobs(
                             num_k=num_k,
                         ))
                 local_token_offset += num_scheduled
+
+    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
+    # start async transfer to host (overlaps with next step's execute_model).
+    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
+    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
+    prompt_target_ids = _build_prompt_target_ids(full_logits.shape[0],
+                                                 req_snaps, mesh)
+    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
+        full_logits, prompt_target_ids, max_logprobs, mesh)
+    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     return PromptLogprobsAsyncData(tensors=prompt_lp_tensors,
                                    req_snaps=req_snaps)

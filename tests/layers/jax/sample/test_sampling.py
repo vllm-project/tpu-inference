@@ -255,7 +255,6 @@ class TestComputePromptLogprobs:
             [0.0, 0.0, 1.0],
         ],
                                 dtype=jnp.float32)
-        input_ids = jnp.array([0, 1, 2], dtype=jnp.int32)
 
         num_prompt_logprobs = {"req1": 2}
 
@@ -263,6 +262,7 @@ class TestComputePromptLogprobs:
         mock_req_state = MagicMock()
         mock_req_state.num_computed_tokens = 0
         mock_req_state.num_prompt_tokens = 3
+        mock_req_state.prompt_token_ids = [0, 1, 2]
         requests = {"req1": mock_req_state}
 
         mock_scheduler_output = MagicMock()
@@ -273,7 +273,6 @@ class TestComputePromptLogprobs:
 
         res = compute_prompt_logprobs(
             full_logits=full_logits,
-            input_ids=input_ids,
             num_prompt_logprobs=num_prompt_logprobs,
             requests=requests,
             scheduler_output=mock_scheduler_output,
@@ -292,6 +291,46 @@ class TestComputePromptLogprobs:
         assert snap.start_idx == 0
         assert snap.num_logits == 2
         assert snap.is_last_chunk is False
+
+    def test_prompt_targets_do_not_leak_across_a_chunk_boundary(self):
+        """The last row of a non-final chunk must target its own prompt.
+
+        The packed buffer puts req2's first token right after req1's last
+        scheduled token, so deriving the targets with jnp.roll(-1) hands req1's
+        boundary row req2's token. The frontend then looks that token up in the
+        top-k it got back and raises KeyError(<token id>), which surfaces as a
+        500 on every prompt longer than max_num_batched_tokens. Whole MMLU
+        subjects failed this way in build #23.
+        """
+        from unittest.mock import MagicMock
+
+        from tpu_inference.layers.jax.sample.sampling import \
+            _build_prompt_target_ids
+
+        def _snap(req_id, prompt_token_ids, req_offset, num_logits):
+            req_state = MagicMock()
+            req_state.prompt_token_ids = prompt_token_ids
+            return PromptLogprobsReqSnap(req_id=req_id,
+                                         req_state=req_state,
+                                         req_offset=req_offset,
+                                         start_idx=0,
+                                         num_logits=num_logits,
+                                         is_last_chunk=num_logits < 3,
+                                         num_k=1)
+
+        # req1 is chunked: 3 of its 6 prompt tokens are scheduled, so all three
+        # rows produce logprobs. req2 fits whole, so its final row is dropped.
+        snaps = [
+            _snap("req1", [10, 11, 12, 13, 14, 15], req_offset=0,
+                  num_logits=3),
+            _snap("req2", [20, 21, 22], req_offset=3, num_logits=2),
+        ]
+        targets = np.asarray(_build_prompt_target_ids(8, snaps, mesh=None))
+
+        assert targets.tolist() == [11, 12, 13, 21, 22, 0, 0, 0]
+        # What roll would have produced at req1's boundary row, for contrast.
+        packed = jnp.array([10, 11, 12, 20, 21, 22, 0, 0], dtype=jnp.int32)
+        assert int(jnp.roll(packed, -1)[2]) == 20 != targets[2]
 
     @pytest.mark.parametrize(
         "fn", [compute_and_gather_logprobs, compute_and_gather_prompt_logprobs])

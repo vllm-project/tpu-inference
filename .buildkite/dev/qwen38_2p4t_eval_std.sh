@@ -33,7 +33,8 @@
 #   gpqa   generation_kwargs gains chat_template_kwargs {reasoning_effort},
 #          max_gen_toks, and the sampling set selected by GPQA_SAMPLING (default
 #          the model card's temperature=1.0/top_p=0.95/top_k=20, replacing
-#          stock's temperature=0). Nothing else in the task changes.
+#          stock's temperature=0), plus seed=null to override the 1234 lm_eval
+#          pins -- see the GPQA_SAMPLING block. Nothing else in the task changes.
 #   gsm8k  generation_kwargs gains chat_template_kwargs {reasoning_effort}.
 #          Skipped entirely, leaving the stock task, when the effort is "".
 #   mmlu   unchanged. It is loglikelihood, so there is no generation to think
@@ -88,21 +89,29 @@ GSM8K_EFFORT="${GSM8K_REASONING_EFFORT:-low}"
 # stock harness is currently measuring, and sampling is the one thing we are
 # doing that Qwen explicitly advises against.
 #
-# lm_eval's local-chat-completions pins seed=1234 in every payload
-# (openai_completions.py:206), so temperature>0 is still reproducible against a
-# fixed server build. top_k/min_p are not OpenAI fields but vLLM accepts them on
+# top_k/min_p are not OpenAI fields but vLLM accepts them on
 # ChatCompletionRequest, and _create_payload splats unrecognised gen_kwargs
 # straight into the body.
 #
-# "auto" is the default because #22 showed the spec set is not safe to assume:
-# every one of its 198 requests came back 500 InternalServerError in under two
-# seconds with an EMPTY message, the leg died in 12s, and the same server then
-# ran GSM8K to completion at temperature=0. An empty message means the server
-# raised something create_error_response could not classify (it ends up in the
-# catch-all at error_response.py:82 and reports str(exc), which is "" for a bare
-# assert), and nothing is logged unless VLLM_SERVER_DEV_MODE is on. So the field
-# that breaks it cannot be read off the log -- it has to be bisected against the
-# live server, which is what the probe below does.
+# #22 ran the spec set and every one of its 198 requests came back 500
+# InternalServerError in under two seconds with an EMPTY message, while the same
+# server then ran GSM8K to completion at temperature=0. The cause, reproduced on
+# a local v7x-8 after #23: lm_eval pins seed=1234 in every payload
+# (openai_completions.py:206), tpu_platform.validate_request rejects any request
+# whose sampling_type is RANDOM_SEED -- which is exactly "seed set AND
+# temperature > 0" -- with ValueError("JAX does not support per-request seed."),
+# and async_llm.py:744 re-raises it as a bare EngineGenerateError, discarding
+# both type and message. Hence 500-with-empty-body rather than the 400 the
+# ValueError would have produced.
+#
+# The fix needs no engine change: _create_payload splats **gen_kwargs AFTER
+# "seed": seed, so `seed: null` in the staged task's generation_kwargs wins. The
+# probe below sends seed=null for the same reason, plus one deliberately-failing
+# seed=1234 case so the log keeps the evidence. Cost: an on-spec GPQA run is
+# avg@1 and reproducible only to the engine-level --seed, not per request.
+#
+# "auto" is still the default, because the probe is what proves the above is the
+# only thing wrong with the spec set on the build under test.
 GPQA_SAMPLING="${GPQA_SAMPLING:-auto}"
 case "${GPQA_SAMPLING}" in
   auto|spec|greedy) ;;
@@ -257,13 +266,19 @@ SPEC = [("temperature", 1.0), ("top_p", 0.95), ("top_k", 20), ("min_p", 0.0)]
 GREEDY = {"do_sample": False, "temperature": 0.0}
 
 
-def probe(extra):
+def probe(extra, seed=None):
     body = {
         "model": model,
         "messages": [{"role": "user", "content": "What is 1+1?"}],
         "max_tokens": int(max_gen),
         "stop": ["</s>"],
-        "seed": 1234,          # lm_eval pins this in every payload
+        # lm_eval pins seed=1234 in every payload, but _create_payload splats
+        # **gen_kwargs after it, so the staged task's `seed: null` wins and this
+        # is what actually goes on the wire. It has to: tpu_platform
+        # .validate_request refuses any temperature>0 request carrying a seed
+        # ("JAX does not support per-request seed."), and async_llm.py launders
+        # that ValueError into an empty-bodied 500. Last case below shows it.
+        "seed": seed,
     }
     if effort:
         body["chat_template_kwargs"] = {"reasoning_effort": effort}
@@ -285,15 +300,19 @@ def probe(extra):
 # do_sample is deliberately absent from the probe bodies: _create_payload pops
 # it, so it never reaches the wire in the real run and sending it here would
 # make the probe test a payload lm_eval does not produce.
-cases = [("greedy", {"temperature": 0.0})]
+cases = [("greedy", {"temperature": 0.0}, None)]
 for i in range(1, len(SPEC) + 1):
-    cases.append(("+".join(k for k, _ in SPEC[:i]), dict(SPEC[:i])))
+    cases.append(("+".join(k for k, _ in SPEC[:i]), dict(SPEC[:i]), None))
+# Informational: the known-bad combination, so the log records why seed is
+# nulled out rather than leaving a future reader to rediscover it.
+cases.append(("temperature+seed=1234 (expected FAIL)", {"temperature": 1.0},
+              1234))
 
 with ThreadPoolExecutor(max_workers=len(cases)) as pool:
-    results = list(pool.map(lambda c: probe(c[1]), cases))
+    results = list(pool.map(lambda c: probe(c[1], c[2]), cases))
 
 ok = {}
-for (label, extra), (accepted, detail) in zip(cases, results):
+for (label, extra, _seed), (accepted, detail) in zip(cases, results):
     print(f"[std-eval] gpqa sampling probe  {label:<32} "
           f"{'OK  ' if accepted else 'FAIL'}  {detail}")
     ok[label] = accepted
@@ -306,15 +325,18 @@ for label in spec_labels:          # cumulative, so stop at the first refusal
     best = label
 full = spec_labels[-1]
 
+# seed=None rides along with every sampled set: it is the field that has to
+# reach the staged yaml to beat lm_eval's pinned 1234. Greedy does not need it
+# (SamplingType.RANDOM_SEED requires temperature > 0), so leave that path alone.
 if mode == "greedy":
     chosen, gen = "greedy", dict(GREEDY)
 elif mode == "spec":
-    chosen, gen = full, dict(SPEC, do_sample=True)
+    chosen, gen = full, dict(SPEC, do_sample=True, seed=None)
 elif best is None:
     chosen, gen = "greedy", dict(GREEDY)
 else:
     n = spec_labels.index(best) + 1
-    chosen, gen = best, dict(dict(SPEC[:n]), do_sample=True)
+    chosen, gen = best, dict(dict(SPEC[:n]), do_sample=True, seed=None)
 
 if chosen != full:
     print(f"[std-eval] WARNING: GPQA sampling is {chosen}, not the card's "

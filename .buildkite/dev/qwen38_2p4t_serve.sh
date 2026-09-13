@@ -285,6 +285,65 @@ ulimit -n 65536 2>/dev/null || true
 echo "[streamer] concurrency=${RUNAI_STREAMER_CONCURRENCY} memory_limit=${RUNAI_STREAMER_MEMORY_LIMIT} nofile=$(ulimit -n)"
 free -g || true
 
+# ---------------------------------------------------------------------------
+# Name the exception behind a 500.
+#
+# Builds #22 and #23 both lost a leg to a 500 whose body was
+# {"error":{"message":"", ...}} or {"error":{"message":"14072", ...}}, with
+# nothing in the server log but the uvicorn access line. That is not a gap in
+# capture, it is the design: the generic handler
+# (entrypoints/serve/exception_handling/handlers/exception.py) calls
+# logger.error *without* exc_info, and only under --log-error-stack, which by
+# itself still prints no traceback and no exception type.
+#
+# The one place that does name the type is a logger.debug in
+# create_error_response: "create_error_response called with %s: %s"
+# (type(exc).__name__, exc). So instead of guessing, turn DEBUG on for that one
+# logger. VLLM_LOGGING_CONFIG_PATH *replaces* DEFAULT_LOGGING_CONFIG rather than
+# merging, so the block below restates the default and adds one logger entry.
+#
+# The handler has to sit at DEBUG while the `vllm` logger stays at INFO:
+# propagation bypasses ancestor logger levels but not handler levels, so this
+# emits DEBUG records from the error_response module only, and nothing else
+# gets noisier. A healthy run produces no 500s and therefore no extra lines.
+#
+# SERVE_DEBUG_ERRORS=0 turns it off; VLLM_LOGGING_CONFIG_PATH set by the caller
+# wins outright.
+# ---------------------------------------------------------------------------
+if [ "${SERVE_DEBUG_ERRORS:-1}" = "1" ] && [ -z "${VLLM_LOGGING_CONFIG_PATH:-}" ]; then
+  VLLM_LOGGING_CONFIG_PATH=/tmp/vllm_logging_debug_errors.json
+  cat > "${VLLM_LOGGING_CONFIG_PATH}" <<'JSON'
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "vllm": {
+      "class": "vllm.logging_utils.NewLineFormatter",
+      "datefmt": "%m-%d %H:%M:%S",
+      "format": "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
+    }
+  },
+  "handlers": {
+    "vllm": {
+      "class": "logging.StreamHandler",
+      "formatter": "vllm",
+      "level": "DEBUG",
+      "stream": "ext://sys.stdout"
+    }
+  },
+  "loggers": {
+    "vllm": {"handlers": ["vllm"], "level": "INFO", "propagate": false},
+    "vllm.entrypoints.serve.exception_handling.error_response": {
+      "level": "DEBUG", "propagate": true
+    }
+  }
+}
+JSON
+  export VLLM_LOGGING_CONFIG_PATH
+  echo "[serve] error-response DEBUG logging on (${VLLM_LOGGING_CONFIG_PATH});" \
+       "any 500 will be preceded by 'create_error_response called with <Type>: <msg>'"
+fi
+
 # --additional-config: attn_dp_size=2 is passed explicitly rather than left to
 # the auto-heuristic in ShardingConfigManager.from_vllm_config. With
 # USE_BATCHED_RPA_SEQ_ON_LANE the heuristic divides tp by num_kv_heads*2 = 8 and
