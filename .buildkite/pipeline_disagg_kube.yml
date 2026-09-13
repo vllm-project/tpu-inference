@@ -20,9 +20,6 @@
 #
 # No schedule here on purpose. The nightly is the lane that has to produce a
 # number every day; this one runs when someone wants to see the fleet work.
-#
-# soft_fail while the lane is being brought up, so a fleet problem does not read
-# as a regression in the repo.
 
 env:
   # Rebuilt by the first step and named by tag rather than by commit: the base
@@ -50,7 +47,6 @@ steps:
     # everything else on the fleet before it starts, and a day is what the
     # launcher allows that wait to be.
     timeout_in_minutes: 1440
-    soft_fail: true
     agents:
       queue: "kube"
     plugins:
