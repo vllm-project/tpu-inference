@@ -52,7 +52,20 @@ waitForServerReady() {
             exit 1
         fi
 
-        if grep -Eq "$error_regex" "$LOG_FILE"; then
+        # A line that announces itself as a warning is not a fatal error, even
+        # when it quotes the name of one. JAX logs a failed compilation-cache
+        # write as "UserWarning: ... OSError: [Errno 116] Stale file handle" and
+        # goes on to compile: the cache is a shared gcsfuse mount, and when two
+        # pods write the same content-addressed key at once, Cloud Storage keeps
+        # the first and fails the second's precondition. The loser's write was a
+        # duplicate, so losing it costs nothing - but matching the OSError it
+        # quotes killed a run whose server was healthy.
+        #
+        # Assigned rather than tested through a pipe: with no match the pipeline
+        # exits nonzero, which under the callers' `set -e` would end the run.
+        local fatal_lines
+        fatal_lines=$(grep -E "$error_regex" "$LOG_FILE" | grep -v "Warning:" || true)
+        if [[ -n "$fatal_lines" ]]; then
             echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
             # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1
