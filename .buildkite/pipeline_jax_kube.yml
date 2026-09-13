@@ -62,9 +62,12 @@
         # this repo to read run.sh and, for the disagg steps, a shell script
         # the workload runs; the tree the tests need is already in the image,
         # and nothing on this path reads history. Blobless alone still walks
-        # every tree the repo has ever had, which is tens of thousands of
-        # objects and most of the time before the pod starts. The working tree
-        # stays complete either way.
+        # every tree the repo has ever had, which depth 1 cuts from tens of
+        # thousands of objects to a couple of hundred. That buys bandwidth and
+        # a steadier checkout rather than wall clock - startup here is
+        # dominated by image pull and pod scheduling, and checkout swings more
+        # between builds than these flags move it. The working tree stays
+        # complete either way.
         checkout:
           cloneFlags: -v --depth 1 --filter=blob:none
           fetchFlags: -v --prune --depth 1 --filter=blob:none
