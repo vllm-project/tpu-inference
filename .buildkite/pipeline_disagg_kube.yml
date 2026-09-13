@@ -55,7 +55,9 @@ steps:
           # One commit, and no blobs until something opens them. This step
           # reads the manifest under .buildkite/kubernetes and nothing else,
           # and the tree the benchmark runs is baked into the workload image.
-          # A full clone of this repo is minutes before the pod starts.
+          # A full clone fetches every blob in the repo's history to read one
+          # file; these flags fetch a couple of hundred objects instead. The
+          # working tree stays complete either way.
           checkout:
             cloneFlags: -v --depth 1 --filter=blob:none
             fetchFlags: -v --prune --depth 1 --filter=blob:none
