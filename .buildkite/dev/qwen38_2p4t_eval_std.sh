@@ -30,8 +30,10 @@
 #   gpqa   dataset_path Idavidrein/gpqa -> the staged gpqa_diamond.csv. The HF
 #          dataset is gated; the staged file is the verbatim diamond CSV from
 #          that repo, same columns, so process_docs is untouched.
-#   gpqa   generation_kwargs gains chat_template_kwargs {reasoning_effort} and
-#          max_gen_toks. Nothing else in the task changes.
+#   gpqa   generation_kwargs gains chat_template_kwargs {reasoning_effort},
+#          max_gen_toks, and the sampling set selected by GPQA_SAMPLING (default
+#          the model card's temperature=1.0/top_p=0.95/top_k=20, replacing
+#          stock's temperature=0). Nothing else in the task changes.
 #   gsm8k  generation_kwargs gains chat_template_kwargs {reasoning_effort}.
 #          Skipped entirely, leaving the stock task, when the effort is "".
 #   mmlu   unchanged. It is loglikelihood, so there is no generation to think
@@ -73,6 +75,30 @@ wants() { [[ ",${STD_SUITE}," == *",$1,"* ]]; }
 # which for GSM8K is exact parity with the GPU command above.
 GPQA_EFFORT="${GPQA_REASONING_EFFORT:-xhigh}"
 GSM8K_EFFORT="${GSM8K_REASONING_EFFORT:-low}"
+
+# GPQA sampling. "spec" is the Qwen3.8 model card's Best Practices set
+# (temperature=1.0, top_p=0.95, top_k=20, min_p=0.0); "greedy" is temperature=0,
+# which is what #20 and every fork run before it used.
+#
+# Greedy is off-spec for this model and the card names "endless repetition" as
+# the failure it causes, pointing at presence_penalty as the remedy. #20 is
+# consistent with that: 21/198 generations ran to the 32768-token wall and
+# scored 0.143, dragging 0.881 down to 0.803, while the 177 that finished
+# averaged only 8120 tokens. So the runaway tail, not the model, is what the
+# stock harness is currently measuring, and sampling is the one thing we are
+# doing that Qwen explicitly advises against.
+#
+# lm_eval's local-chat-completions pins seed=1234 in every payload
+# (openai_completions.py:206), so temperature>0 is still reproducible against a
+# fixed server build. top_k/min_p are not OpenAI fields but vLLM accepts them on
+# ChatCompletionRequest, and _create_payload splats unrecognised gen_kwargs
+# straight into the body.
+GPQA_SAMPLING="${GPQA_SAMPLING:-spec}"
+case "${GPQA_SAMPLING}" in
+  spec|greedy) ;;
+  *) echo "[std-eval] GPQA_SAMPLING must be spec or greedy, got '${GPQA_SAMPLING}'" >&2
+     exit 2 ;;
+esac
 
 # Concurrency is the number of requests actually in flight, and it has to stay
 # under MAX_NUM_SEQS (80 on this deployment). Build tc#952 died from getting
@@ -198,10 +224,12 @@ fi
 # restates the stock until/do_sample/temperature verbatim alongside its addition.
 # ---------------------------------------------------------------------------
 stage_tasks() {
-  python3 - "${TASK_DIR}" "${GPQA_PATH}" "${GPQA_EFFORT}" "${GPQA_MAX_GEN}" "${GSM8K_EFFORT}" <<'PY'
+  python3 - "${TASK_DIR}" "${GPQA_PATH}" "${GPQA_EFFORT}" "${GPQA_MAX_GEN}" \
+           "${GSM8K_EFFORT}" "${GPQA_SAMPLING}" <<'PY'
 import os, sys, yaml, lm_eval.tasks
 
-task_dir, gpqa_csv, gpqa_effort, gpqa_max_gen, gsm8k_effort = sys.argv[1:6]
+(task_dir, gpqa_csv, gpqa_effort, gpqa_max_gen, gsm8k_effort,
+ gpqa_sampling) = sys.argv[1:7]
 root = os.path.dirname(lm_eval.tasks.__file__)
 os.makedirs(task_dir, exist_ok=True)
 
@@ -211,8 +239,14 @@ for p in (gpqa_stock, gsm8k_stock):
     if not os.path.isfile(p):
         raise SystemExit(f"stock task yaml not found: {p}")
 
-gpqa_gen = {"until": ["</s>"], "do_sample": False, "temperature": 0.0,
-            "max_gen_toks": int(gpqa_max_gen)}
+gpqa_gen = {"until": ["</s>"], "max_gen_toks": int(gpqa_max_gen)}
+if gpqa_sampling == "greedy":
+    gpqa_gen.update({"do_sample": False, "temperature": 0.0})
+else:
+    # Qwen3.8 card, Best Practices. do_sample is dropped by _create_payload
+    # before the request is built, so it is documentation only either way.
+    gpqa_gen.update({"do_sample": True, "temperature": 1.0, "top_p": 0.95,
+                     "top_k": 20, "min_p": 0.0})
 if gpqa_effort:
     gpqa_gen["chat_template_kwargs"] = {"reasoning_effort": gpqa_effort}
 gpqa = {
@@ -233,7 +267,11 @@ gpqa = {
 with open(os.path.join(task_dir, "gpqa_diamond_cot_zeroshot_std.yaml"), "w") as fh:
     yaml.safe_dump(gpqa, fh, sort_keys=False)
 print("[std-eval] staged gpqa_diamond_cot_zeroshot_std ->", gpqa_csv,
-      f"(reasoning_effort={gpqa_effort or 'model default'}, max_gen_toks={gpqa_max_gen})")
+      f"(reasoning_effort={gpqa_effort or 'model default'}, max_gen_toks={gpqa_max_gen},"
+      f" sampling={gpqa_sampling}: "
+      + ", ".join(f"{k}={gpqa_gen[k]}" for k in
+                  ("temperature", "top_p", "top_k", "min_p") if k in gpqa_gen)
+      + ")")
 
 if gsm8k_effort:
     gsm8k = {
@@ -323,7 +361,16 @@ if len(parts) > 8:
            if isinstance(v, (int, float)) and k not in SKIP and "_stderr," not in k]
     parts = agg or parts[:8] + [f"(+{len(parts) - 8} more, see results json)"]
 
-inv = tot = 0
+# Per filter, not pooled. lm_eval writes one samples row per (doc, filter), so
+# a two-filter task like gpqa contributes 396 rows for 198 questions. Pooling
+# them mixes a filter that extracts nothing (strict-match, 197/198 invalid) with
+# one that extracts everything, and #20 duly reported 0.4975 -- a number that
+# describes neither filter. Truncation is counted separately because on a
+# reasoning model it is the usual reason a score is low, and it is invisible in
+# unparsed_rate: a generation cut off mid-<think> still contains some "(X)" for
+# flexible-extract to find, so it scores wrong rather than unparsed.
+from collections import defaultdict
+inv = defaultdict(int); tot = defaultdict(int); trunc = defaultdict(int)
 for sf in glob.glob(os.path.join(out, "**", "samples_*.jsonl"), recursive=True):
     for line in open(sf, errors="replace"):
         try:
@@ -333,11 +380,20 @@ for sf in glob.glob(os.path.join(out, "**", "samples_*.jsonl"), recursive=True):
         fr = d.get("filtered_resps")
         if not fr:
             continue
-        tot += 1
+        f = d.get("filter", "none")
+        tot[f] += 1
         if any(isinstance(x, str) and "invalid" in x for x in fr):
-            inv += 1
-if tot:
-    parts.append(f"unparsed_rate={inv / tot:.4f}")
+            inv[f] += 1
+        # Qwen3.8's template pre-fills the opening <think>, so the completion
+        # carries the closing tag and never the opening one. Missing </think>
+        # means the generation ran out of budget mid-thought.
+        r = (d.get("resps") or [[""]])[0]
+        r = r[0] if isinstance(r, list) else r
+        if isinstance(r, str) and "<think" not in r and "</think>" not in r:
+            trunc[f] += 1
+for f in sorted(tot):
+    parts.append(f"unparsed_rate[{f}]={inv[f] / tot[f]:.4f}")
+    parts.append(f"truncated[{f}]={trunc[f] / tot[f]:.4f}({trunc[f]}/{tot[f]})")
 print(" ".join(parts))
 PY
 }
