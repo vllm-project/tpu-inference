@@ -131,6 +131,30 @@ GPQA_MAX_GEN="${GPQA_MAX_GEN_TOKS:-32768}"
 GPQA_TIMEOUT="${GPQA_TIMEOUT_S:-10800}"
 GPQA_LIMIT="${GPQA_LIMIT:-0}"           # 0 = all 198
 
+# GPQA system prompt. Empty by default, which is what "standard lm_eval" means:
+# the stock gpqa_cot_zeroshot task has no `description` and lm_eval sends no
+# system turn, so the model gets only the question. Set this and lm_eval
+# prepends Message("system", <text>) to the conversation
+# (api/task.py:968-979 -- maybe_delimit(system_instruction, description), and
+# with no description the message is exactly this string).
+#
+# The value the fork-based script used is
+#   Answer with only the letter in parentheses, e.g. (A).
+# passed as --chat-template-system-prompt (visible in #19's Namespace dump).
+# Those runs reported far less truncation than #20/#23/#24 do at 19-24/198, and
+# the system prompt is the obvious candidate: it tells a reasoning model to stop
+# early, which is exactly what a runaway generation is failing to do.
+#
+# Two honest caveats on calling any result here a reproduction of the fork:
+#   - the fork applied the chat template CLIENT-side and posted to
+#     /v1/completions; lm_eval posts to /v1/chat/completions and lets the server
+#     template. Same intended text, different code path.
+#   - the fork's Namespace shows temperature=None, and its request builder is
+#     not in this checkout, so whether those runs were greedy is unverified.
+# So this isolates the system prompt WITHIN lm_eval, against #20/#23 (greedy,
+# no system prompt). It does not reproduce the fork end to end.
+GPQA_SYSTEM_PROMPT="${GPQA_SYSTEM_PROMPT:-}"
+
 GSM8K_CONC="${GSM8K_CONCURRENCY:-64}"   # batch_size forced to 1 by chat completions
 GSM8K_MAX_TOKENS="${GSM8K_MAX_TOKENS:-1024}"  # the GPU run's value; see below
 GSM8K_TIMEOUT="${GSM8K_TIMEOUT_S:-7200}"
@@ -624,6 +648,16 @@ if wants gpqa; then
     --output_path "${ART}/eval_std_gpqa"
   )
   [ "${GPQA_LIMIT}" != "0" ] && GPQA_ARGS+=(--limit "${GPQA_LIMIT}")
+  if [ -n "${GPQA_SYSTEM_PROMPT}" ]; then
+    GPQA_ARGS+=(--system_instruction "${GPQA_SYSTEM_PROMPT}")
+    echo "[std-eval] gpqa system prompt (NON-STANDARD, deviates from stock lm_eval):"
+    echo "[std-eval]   ${GPQA_SYSTEM_PROMPT}"
+  else
+    echo "[std-eval] gpqa system prompt: none (stock lm_eval)"
+  fi
+  # Artifact, so an archived build says which prompt produced its number
+  # without needing the pipeline file it was launched from.
+  printf '%s' "${GPQA_SYSTEM_PROMPT}" > "${ART}/gpqa_system_prompt.txt"
   run_leg gpqa "${GPQA_TASK}" local-chat-completions "${GPQA_TIMEOUT}" "${GPQA_ARGS[@]}"
 fi
 

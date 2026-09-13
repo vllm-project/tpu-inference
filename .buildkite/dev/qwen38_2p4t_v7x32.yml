@@ -193,84 +193,66 @@ steps:
         # step regardless of batch size, so 5x the prompts costs well under 5x
         # the time.
         #
-        # This build finishes the standard-harness accuracy baseline that #20
-        # started, so it is the mirror image of #17-#19: no load-time
-        # quantization at all, and the whole accuracy budget spent on lm_eval
-        # rather than on the perf sweep. QUANTIZE_BF16_LINEAR_PATTERNS is absent
-        # below -- deliberately, see the note there -- so this is the stock
-        # checkpoint exactly as build #12 and #20 ran it.
+        # #24 completed the standard-harness baseline -- GPQA 0.7778 on-spec,
+        # GSM8K 0.9780, MMLU 0.8942, all three legs recording for the first
+        # time. This build is a single-variable follow-up to one loose end of
+        # it, so the config is #24's exactly: no load-time quantization,
+        # QUANTIZE_BF16_LINEAR_PATTERNS still absent below, the stock
+        # checkpoint as #12/#20/#23/#24 ran it.
         #
-        # #20 left two things unfinished. #22 attempted both and landed
-        # neither: GSM8K came back clean at 0.9788 (3/1319 truncated), GPQA
-        # failed in 12s and MMLU never started. This build retries exactly
-        # those two, each with the specific defect #22 exposed now fixed.
+        # The variable is the GPQA system prompt, and only that.
         #
-        # 1. GPQA sampling, now GPQA_SAMPLING=auto rather than =spec. #20 ran
-        #    greedy (temperature=0), as every run before it did. 21 of 198
-        #    generations then ran to the 32768-token wall and scored 0.143,
-        #    pulling 0.881 down to 0.803; the 177 that finished averaged only
-        #    8120 output tokens, so this is a runaway tail, not a
-        #    long-thinking model. Greedy is off-spec for Qwen3.8 -- the card
-        #    asks for temperature=1.0, top_p=0.95, top_k=20, min_p=0.0 and
-        #    names "endless repetition" as what greedy costs you.
+        # Every stock-lm_eval GPQA run so far has lost 19-24 of 198
+        # generations to the 32768-token wall, and a truncated generation
+        # scores *wrong* rather than unscored (group_select: -1 takes the last
+        # "(X)" anywhere in the text). The fork-based runs #17-#19 reported far
+        # less of that at a comparable 0.899-0.904, and the one setting they
+        # carried that lm_eval does not is a system prompt:
         #
-        #    #22 sent that set and every GPQA request came back 500 with an
-        #    empty message. Empty is diagnostic: vLLM's error ladder gives 400
-        #    for ValueError/TypeError/validation and a fixed string for
-        #    GenerationError, so an empty body is the catch-all branch
-        #    stringifying an exception whose str() is "" -- a bare assert.
-        #    Nothing logs its type, the request body itself is accepted by the
-        #    pydantic layer offline, and my three commits are the only
-        #    functional delta from the passing #20. Rather than spend another
-        #    ~2h run guessing which field it is, the eval script now probes
-        #    the live server with the cumulative prefixes of the card's set
-        #    (temperature, +top_p, +top_k, +min_p) before staging the task,
-        #    names the first field the server refuses, and runs GPQA with the
-        #    longest prefix that was accepted. So this build gets a GPQA
-        #    number either way, and gets the culprit named in the log.
-        #    GPQA_SAMPLING=spec or =greedy still force the set outright.
+        #    Answer with only the letter in parentheses, e.g. (A).
         #
-        #    lm_eval pins seed=1234 per request, so the run is reproducible
-        #    but a single sample: at temperature=1.0 this is avg@1, not a
-        #    deterministic score. Qwen publishes no GPQA prompt or eval
-        #    config, so the fork's "Answer with only the letter in
-        #    parentheses" system prompt is not the sanctioned alternative and
-        #    is deliberately not adopted -- it would forfeit the comparability
-        #    to a stock GPU run that is the entire point of this harness.
+        # (qwen38_2p4t_eval.sh:93, and visible verbatim in #19's Namespace
+        # dump as --chat-template-system-prompt). It tells a reasoning model to
+        # stop early, which is exactly what a runaway generation fails to do.
+        # GPQA_SYSTEM_PROMPT below hands it to lm_eval as --system_instruction;
+        # the stock gpqa_cot_zeroshot task has no `description`, so the
+        # conversation gets exactly that one system turn and nothing else
+        # changes. Verified offline against a recording server.
         #
-        # 2. MMLU should actually run. lm_eval scores multiple_choice by
-        #    loglikelihood, which reaches vLLM as prompt_logprobs, and the
-        #    logprobs tensors came back still sharded over the token axis.
-        #    device_get on one of those under Ray multihost raises "Fetching
-        #    value for jax.Array that spans non-addressable devices" and takes
-        #    the engine with it -- #20 and #22 both died on the probe request.
-        #    The #22 fix covered only compute_and_gather_prompt_logprobs; the
-        #    probe carries logprobs=1 as well as prompt_logprobs=1, so the
-        #    sampled path hit the identical defect first. All three
-        #    fetch-bound producers now replicate before the host copy
-        #    (sampled, prompt, and the fused decode loop's stacked buffers),
-        #    the same thing sample() has always done to next_tokens. This is
-        #    a sharding constraint inside the existing jit, and the precompile
-        #    signatures were updated in lockstep, so it adds no recompile.
-        #    If it is still wrong the failure mode is unchanged -- the engine
-        #    dies on the probe -- and MMLU stays last precisely so GPQA and
-        #    GSM8K are already recorded when it does.
+        # GPQA_SAMPLING=greedy, not auto. #20 (21 truncated) and #23 (19) are
+        # both greedy with no system prompt, so greedy here isolates the prompt
+        # against two existing controls; #24's on-spec run would confound it.
+        # Note that greedy also makes lm_eval's pinned seed=1234 inert --
+        # SamplingType is GREEDY, not RANDOM_SEED, so the 500s #22/#23 hit do
+        # not arise (see the seed: null note in qwen38_2p4t_eval_std.sh).
         #
-        # EVAL_SUITE=none, STD_EVAL_SUITE=gpqa,gsm8k,mmlu: the accuracy leg is
-        # qwen38_2p4t_eval_std.sh, not qwen38_2p4t_eval.sh. Our numbers so far
+        # This deliberately breaks the "stock lm_eval, comparable to a GPU run"
+        # property that #20-#24 exist to provide. That is the point of running
+        # it as a separate build rather than folding it into the baseline: #24
+        # stays THE baseline, and this measures what one house modification is
+        # worth on top of it. Read the truncation count first -- GPQA's
+        # run-to-run noise floor on this deployment is ~+-0.035 (two greedy
+        # runs flipped 19/198 answers with no change of setting), so the
+        # accuracy delta alone cannot carry a conclusion, but the truncation
+        # count moved consistently across #20/#23/#24 and can.
+        #
+        # STD_EVAL_SUITE=gpqa: GSM8K and MMLU are settled and unaffected by a
+        # GPQA-only knob, and dropping them takes ~28 min off the run.
+        #
+        # EVAL_SUITE=none, STD_EVAL_SUITE=gpqa: the accuracy leg is
+        # qwen38_2p4t_eval_std.sh, not qwen38_2p4t_eval.sh. Our older numbers
         # (GPQA 0.899-0.904 at xhigh across tc#962 and #2) come from this repo's
         # fork of benchmark_serving.py and are comparable to our own runs and to
-        # nothing else. The point of this build is a set of numbers that can sit
-        # next to a GPU run of the same checkpoint, which means stock lm_eval
-        # task definitions: gpqa_diamond_cot_zeroshot, gsm8k 5-shot, and the
-        # full 14042-question mmlu rather than the fork's 1000-question subset.
-        # Running the whole of MMLU also sidesteps the fork's reproducibility
-        # defect -- unsorted os.listdir plus unseeded truncation -- by not
-        # truncating.
+        # nothing else; #20-#24 replaced them with stock lm_eval task
+        # definitions -- gpqa_diamond_cot_zeroshot, gsm8k 5-shot, and the full
+        # 14042-question mmlu rather than the fork's 1000-question subset --
+        # which can sit next to a GPU run of the same checkpoint. Only the GPQA
+        # leg runs here, with the one deviation described above; the gsm8k and
+        # mmlu numbers stand from #24 and a GPQA system prompt cannot move them.
         #
         # BENCH_SWEEP is cut to one short leg for the same reason: #12 already
         # measured this exact configuration's perf, so re-measuring it costs
-        # ~40 min of a 480 min build that MMLU needs. The leg is kept rather
+        # ~40 min of a 480 min build. The leg is kept rather
         # than dropped because BENCH_SWEEP has no "off" -- an empty value falls
         # back to MAX_CONCURRENCY:NUM_PROMPTS -- and because a perf leg that
         # completes is the cheapest proof the server is healthy before three
@@ -407,9 +389,10 @@ steps:
           'BENCH_SWEEP=8:32' \
           'NUM_WARMUPS=32' \
           'EVAL_SUITE=none' \
-          'STD_EVAL_SUITE=gpqa,gsm8k,mmlu' \
+          'STD_EVAL_SUITE=gpqa' \
           'GPQA_REASONING_EFFORT=xhigh' \
-          'GPQA_SAMPLING=auto' \
+          'GPQA_SAMPLING=greedy' \
+          'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
           'GPQA_MAX_GEN_TOKS=32768' \
           'GPQA_CONCURRENCY=32' \
           'GPQA_TIMEOUT_S=10800' \
