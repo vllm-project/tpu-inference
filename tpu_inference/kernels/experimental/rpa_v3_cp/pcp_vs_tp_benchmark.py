@@ -270,6 +270,61 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
 
         return measure
 
+
+    def make_multi_req_pcp(pcp, tp): 
+        num_requests = 3 
+        block_size = 256
+        input_lengths = [1024, 4095, 2048]
+        kv_cache_lens = [4095, 8192, 4096]
+        requests = [jnp.arange(length, jnp.int32) for length in input_lengths]
+        # pad each pcp chunk to be a multiple of block size 
+        padded_request_lengths = [cdiv(length, 2*pcp*block_size) for length in input_lengths]
+        padded_requests = [jnp.pad(request, (0, padded_length))
+                         for request, padded_length in zip(requests, padded_request_lengths)]                        
+        reshaped_tokens = [ x.reshape(-1, block_size) for x in padded_requests]
+
+
+        head_tail_arranged_tokens = [[[] for _ in range(pcp)] for _ in range(num_requests)]
+        q_positions_current_phase = [[[] for _ in range(pcp)] for _ in range(num_requests)]
+        for i in range(num_requests):
+            blocks =  reshaped_tokens[i].shape[0] //2
+            for j in range(blocks):
+                rank = j % pcp
+                head_tail_arranged_tokens[i][rank].append(reshaped_tokens[i][j]) # hail
+                head_tail_arranged_tokens[i][rank].append(reshaped_tokens[i][blocks - j -1]) # tail
+                q_positions_current_phase[i][rank].append(j*block_size)
+                q_positions_current_phase[i][rank].append((blocks - j -1)*block_size)
+
+        head_tail_arranged_tokens_concated = [ [jnp.concatenate(x) for x in y] for y in head_tail_arranged_tokens]
+        head_tail_arranged_tokens_concated = [ [jnp.concatenate(x) for x in y] for y in q_positions_current_phase]
+
+        # now each request is a contigous sequence 
+        # CACHE phase
+        # head and tail are treated the same request
+        cu_q_lens_cache_phase = [0] + [ padded_request_lengths // pcp for x in padded_request_lengths]
+        cu_q_lens_cache_phase = jnp.cumsum(jnp.array(cu_q_lens_cache_phase))
+        q_positions = kv_cache_lens
+        page_indices = [[...]]
+        kv_lens_cache_phase = kv_cache_lens + input_lengths
+        kv_new_lens_cache_phase = input_lengths 
+
+        # CURRENT Phase
+        # head and tail are treated as independent requests.
+        cu_q_lens_current_phase = [0] + [ padded_request_lengths // (2*pcp) for x in padded_request_lengths]
+        new_kv_page_indices = [[]]
+        update_kv_current_phase= [[True, False] for _ in range(num_requests)]
+        kv_lens_current_phase=  kv_lens_cache_phase.repeat(1)
+        kv_new_lens_current_phase = input_lengths.repeat(1)
+
+        # forward with batched rpa. 
+        
+
+
+
+        
+
+
+
     def make_pcp(pcp, tp):
         """rpa_v3_cp through cp_attention.pcp_forward on a (pcp, model) mesh."""
         shape = tuple(pcp if a == "pcp" else tp if a == "model" else 1
