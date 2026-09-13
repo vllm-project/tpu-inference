@@ -52,6 +52,13 @@ steps:
     plugins:
       - kubernetes:
           podTemplate: tpu-launcher
+          # One commit, and no blobs until something opens them. This step
+          # reads the manifest under .buildkite/kubernetes and nothing else,
+          # and the tree the benchmark runs is baked into the workload image.
+          # A full clone of this repo is minutes before the pod starts.
+          checkout:
+            cloneFlags: -v --depth 1 --filter=blob:none
+            fetchFlags: -v --prune --depth 1 --filter=blob:none
     commands:
       # The launcher owns everything that follows from the hardware - the queue,
       # the namespace, the workload name, the cache volumes - so the step passes
