@@ -144,9 +144,22 @@ def _ladder(max_ctx):
 # --------------------------------------------------------------------------
 # Worker: one variant, one process (jax is imported here only).
 # --------------------------------------------------------------------------
-def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
-                 warmup, iters, collectives, profile_dir, profile_contexts, n,
-                 num_reqs=1, check_chunks=0):
+def _run_variant(mp,
+                 variant,
+                 chunk,
+                 max_ctx,
+                 kv_dtype_name,
+                 page,
+                 slack,
+                 warmup,
+                 iters,
+                 collectives,
+                 profile_dir,
+                 profile_contexts,
+                 n,
+                 num_reqs=1,
+                 check_chunks=0,
+                 kv_layout_name="head_along_sublane"):
     # Raiden's engine extension must be loaded before jaxlib's XLA copy or the
     # two collide in static initializers and the process segfaults.
     # `tpu_inference.__init__` tries to do this, but by then its own
@@ -157,13 +170,14 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     except ImportError:
         pass
     import tpu_inference  # noqa: F401  isort: skip
-
     import jax
     import jax.numpy as jnp
     import numpy as np
     from jax.sharding import Mesh, NamedSharding
     from jax.sharding import PartitionSpec as P
 
+    from tpu_inference.kernels.experimental.batched_rpa import \
+        configs as batched_rpa_configs
     from tpu_inference.kernels.experimental.batched_rpa import \
         wrapper as batched_rpa
     from tpu_inference.kernels.experimental.rpa_v3_cp import \
@@ -185,6 +199,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
     # The N-D axis names carry `pcp`; select them regardless of
     # NEW_MODEL_DESIGN so the benchmark does not depend on the env.
     sharding_mod.ShardingAxisName._cls = ShardingAxisNameBase
+
+    seq_along_lane = kv_layout_name == "seq_along_lane"
+    kv_layout = (batched_rpa_configs.KVLayout.SEQ_ALONG_LANE if seq_along_lane
+                 else batched_rpa_configs.KVLayout.HEAD_ALONG_SUBLANE)
 
     NQ, NKV, HD = mp.num_q_heads, mp.num_kv_heads, mp.head_dim
     dtype = jnp.bfloat16
@@ -338,10 +356,24 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         # Each rank holds `page` tokens of every global page (KV_CONTEXT shards
         # the page dim over pcp) and its own KV heads (KV_HEAD shards the
         # packed planes over tp); the per-rank layout is the CP kernel's own.
-        per_rank = kv_cache_shape_fn(npages, page, NKV // tp, HD, kv_dtype)
-        cache_shape = (npages, gpage, per_rank[2] * tp) + tuple(per_rank[3:])
-        cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                       ShardingAxisName.KV_HEAD, None, None)
+        if seq_along_lane and not batched:
+            raise NotImplementedError(
+                "SEQ_ALONG_LANE is only wired up for the batched kernel")
+        layout_kw = {"kv_layout": kv_layout} if batched else {}
+        per_rank = kv_cache_shape_fn(npages, page, NKV // tp, HD, kv_dtype,
+                                     **layout_kw)
+        if seq_along_lane:
+            # (pages, kv_heads*2, head_dim//packing, packing, page): the
+            # sequence is the lane dim, so KV_CONTEXT shards the last axis.
+            cache_shape = (npages, per_rank[1] * tp, per_rank[2], per_rank[3],
+                           gpage)
+            cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_HEAD,
+                           None, None, ShardingAxisName.KV_CONTEXT)
+        else:
+            cache_shape = (npages, gpage, per_rank[2] * tp) + tuple(
+                per_rank[3:])
+            cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                           ShardingAxisName.KV_HEAD, None, None)
 
         def put(x, s):
             return jax.device_put(x, NamedSharding(mesh, s))
@@ -379,7 +411,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         pcp_spec = P(ShardingAxisName.PREFILL_CONTEXT, None)
         pcp_cu = put(jnp.asarray(pcp_cu), pcp_spec)
         pcp_qp = put(jnp.asarray(pcp_qp), pcp_spec)
-        chunk_sizes = {} if not batched else {"pcp_chunk_sizes": (C, ) * num_reqs}
+        chunk_sizes = ({} if not batched else {
+            "pcp_chunk_sizes": (C, ) * num_reqs,
+            "kv_layout": kv_layout,
+        })
         fns = {}
 
         def fn_for(cache_pages, with_collectives=True):
@@ -389,7 +424,13 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
             if key not in fns:
 
                 @functools.partial(jax.jit, donate_argnums=(0, ))
-                def fn(cache, q, k, v, kvl, kvcl, _cp=cache_pages,
+                def fn(cache,
+                       q,
+                       k,
+                       v,
+                       kvl,
+                       kvcl,
+                       _cp=cache_pages,
                        _co=with_collectives):
                     md = AttentionMetadata(
                         input_positions=jnp.zeros(1, jnp.int32),
@@ -551,8 +592,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         return {
             "check": "OK" if worst < 0.05 else "MISMATCH",
             "worst_rel": round(worst, 5),
-            **{k: round(v, 5)
-               for k, v in rel.items()},
+            **{
+                k: round(v, 5)
+                for k, v in rel.items()
+            },
         }
 
     ladder = _ladder(max_ctx)
@@ -707,6 +750,10 @@ def main():
                     help="instead of timing, run NCHUNK chunks of prefill "
                     "and compare every request against a dense fp32 "
                     "reference (default 2 chunks)")
+    ap.add_argument("--kv-layout",
+                    default="head_along_sublane",
+                    choices=["head_along_sublane", "seq_along_lane"],
+                    help="KV cache layout (batched kernel only)")
     ap.add_argument("--worker",
                     nargs=3,
                     metavar=("MODEL", "NUM_DEVICES", "VARIANT"),
@@ -718,12 +765,22 @@ def main():
         model, n, variant = args.worker
         try:
             res = _run_variant(
-                MODEL_CONFIGS[model], variant, args.chunk_size,
-                args.max_context, args.kv_dtype, args.page_size,
-                args.cache_slack, args.warmup, args.iters,
-                not args.no_collectives, args.profile_dir,
-                [int(c) for c in args.profile_contexts.split(",")], int(n),
-                num_reqs=args.requests, check_chunks=args.check)
+                MODEL_CONFIGS[model],
+                variant,
+                args.chunk_size,
+                args.max_context,
+                args.kv_dtype,
+                args.page_size,
+                args.cache_slack,
+                args.warmup,
+                args.iters,
+                not args.no_collectives,
+                args.profile_dir,
+                [int(c) for c in args.profile_contexts.split(",")],
+                int(n),
+                num_reqs=args.requests,
+                check_chunks=args.check,
+                kv_layout_name=args.kv_layout)
         except NotImplementedError:
             # The kernel does not support this head config (e.g. batched RPA
             # needs a sublane-aligned head group to return LSE); report it
@@ -757,13 +814,13 @@ def main():
                         str(args.cache_slack), "--warmup",
                         str(args.warmup), "--iters",
                         str(args.iters), "--requests",
-                        str(args.requests)
+                        str(args.requests), "--kv-layout", args.kv_layout
                     ] + (["--check", str(args.check)] if args.check else
                          []) + (["--no-collectives"]
-                         if args.no_collectives else []) + ([
-                             "--profile-dir", args.profile_dir,
-                             "--profile-contexts", args.profile_contexts
-                         ] if args.profile_dir else [])
+                                if args.no_collectives else []) + ([
+                                    "--profile-dir", args.profile_dir,
+                                    "--profile-contexts", args.profile_contexts
+                                ] if args.profile_dir else [])
                     t0 = time.time()
                     for attempt in range(args.retries + 1):
                         if attempt:
@@ -798,11 +855,12 @@ def main():
                         f"{r.get('worst_rel', float('nan')):.5f}",
                     ])
                 title = (f"{model}: {n} devices, {args.requests} request(s), "
-                         f"CH={_human(args.chunk_size)}, KV {args.kv_dtype} "
-                         f"-- {args.check}-chunk prefill vs dense fp32 "
-                         f"reference")
-                tables.append(title + "\n\n" + _box_table(
-                    ["Layout", "Result", "Worst rel err"], rows))
+                         f"CH={_human(args.chunk_size)}, KV {args.kv_dtype}, "
+                         f"{args.kv_layout} -- {args.check}-chunk prefill vs "
+                         f"dense fp32 reference")
+                tables.append(
+                    title + "\n\n" +
+                    _box_table(["Layout", "Result", "Worst rel err"], rows))
                 print("\n" + tables[-1] + "\n", flush=True)
                 continue
             base = results[variants[0]]
