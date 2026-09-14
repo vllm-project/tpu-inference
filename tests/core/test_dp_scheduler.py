@@ -166,6 +166,27 @@ class TestDPScheduler:
             assert rank_config.num_blocks == 50
             assert getattr(rank_config, "mamba_num_blocks", None) is None
 
+    def test_init_derives_mamba_num_blocks_in_align_mode(
+        self,
+        mock_vllm_config,
+        mock_kv_cache_config,
+        mock_structured_output_manager,
+    ):
+        """In align mode a missing cache_config.mamba_num_blocks (the runner's
+        value never reached this process) is derived from VllmConfig and
+        partitioned per rank instead of being left unset."""
+        mock_vllm_config.cache_config.mamba_cache_mode = "align"
+        mock_vllm_config.speculative_config = None
+        mock_vllm_config.additional_config = {}
+        scheduler = self._create_scheduler(
+            mock_vllm_config,
+            mock_kv_cache_config,
+            mock_structured_output_manager,
+        )
+        # dp_size=2, max_num_seqs=8, 8 blocks/request: 129 -> 130 -> 65/rank.
+        for rank_config in scheduler.per_rank_kv_cache_configs:
+            assert rank_config.mamba_num_blocks == 65
+
     def test_init_with_prefix_caching_enabled(
         self,
         mock_vllm_config,
