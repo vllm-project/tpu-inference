@@ -636,36 +636,36 @@ class TestHybridCoordinatorHooks:
                                           vllm_config) is None
         assert hc_mod.get_mamba_num_blocks() is None
 
-    def test_engine_core_hook_runs_after_kv_init(self):
+    def test_executor_mixin_publishes_after_workers_allocate(self):
         import tpu_inference.core.hybrid_coordinator as hc_mod
         from tpu_inference.core.hybrid_coordinator import \
-            _install_engine_core_hook
+            MambaPoolSyncExecutorMixin
 
         cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
                                                 mamba_num_blocks=None)
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.mamba_num_blocks = None
         calls = []
 
-        class FakeEngineCore:
+        class FakeBaseExecutor:
 
-            def _initialize_kv_caches(self, vllm_config):
-                calls.append(vllm_config)
-                return cfg
+            def __init__(self, vllm_config):
+                self.vllm_config = vllm_config
+
+            def initialize_from_config(self, kv_cache_configs):
+                calls.append(("workers_allocated", kv_cache_configs))
 
             def collective_rpc(self, method):
                 assert method == "get_mamba_num_blocks"
-                return [640]
+                assert calls, "RPC must run after the workers allocated"
+                return [640, 640]
 
-        _install_engine_core_hook(FakeEngineCore)
-        hooked = FakeEngineCore._initialize_kv_caches
-        assert getattr(hooked, "_tpu_mamba_hook", False)
-        # Installing twice must not wrap the wrapper.
-        _install_engine_core_hook(FakeEngineCore)
-        assert FakeEngineCore._initialize_kv_caches is hooked
+        class FakeExecutor(MambaPoolSyncExecutorMixin, FakeBaseExecutor):
+            pass
 
         hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
-        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
-        assert FakeEngineCore()._initialize_kv_caches(vllm_config) is cfg
-        assert calls == [vllm_config]
+        FakeExecutor(vllm_config).initialize_from_config([cfg])
+        assert calls == [("workers_allocated", [cfg])]
         assert cfg.mamba_num_blocks == 640
         assert vllm_config.cache_config.mamba_num_blocks == 640
         assert hc_mod.get_mamba_num_blocks() == 640
@@ -681,6 +681,23 @@ class TestHybridCoordinatorHooks:
         cfg.mamba_num_blocks = 72
         coord = tpu_get_kv_cache_coordinator(cfg, **_COORD_KWARGS)
         assert coord.mamba_num_blocks == 72
+
+    def test_maybe_install_hooks_gated_on_align_prefix_caching(self):
+        from unittest.mock import patch
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        with patch.object(hc_mod, "install_hybrid_coordinator_hooks") as inst:
+            hc_mod.maybe_install_hybrid_coordinator_hooks(vllm_config)
+            inst.assert_called_once_with(vllm_config)
+
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        with patch.object(hc_mod, "install_hybrid_coordinator_hooks") as inst:
+            hc_mod.maybe_install_hybrid_coordinator_hooks(vllm_config)
+            inst.assert_not_called()
 
     def test_tpu_get_kv_cache_coordinator_raises_if_missing(self):
         import pytest
