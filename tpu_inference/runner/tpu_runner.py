@@ -63,7 +63,7 @@ from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap,
     _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
-    compute_prompt_logprobs, sample)
+    compute_prompt_logprobs, distributed_sampling_allowed, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -1062,12 +1062,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
-        self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(envs.MIN_TOKEN_BUCKET,
-                               next_power_of_2(self.dp_size * kv_packing)),
-            max_token_size=scheduler_config.max_num_batched_tokens *
-            self.dp_size,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         # PCP rounds every request's chunk size up independently, so the token
         # buffer the layout needs can exceed max_num_batched_tokens by up to
         # 2 * pcp_size * max_num_seqs; add a bucket with exactly that headroom.
@@ -1078,8 +1072,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             additional_sizes = list(additional_sizes) + [
                 common_utils.align_to(_worst * self.dp_size, 128)
             ]
-        self.num_tokens_paddings = sorted(self.num_tokens_paddings +
-                                          additional_sizes)
+        # Never pad a step past the scheduler's own token budget: a full
+        # chunked-prefill step must not jump to the next exponential bucket
+        # (which can be ~2x the budget and, on some shapes, compiles into a
+        # program that returns wrong last-position logits). The budget joins
+        # the bucket list through the same merge as `compilation_sizes` (and
+        # the PCP headroom bucket above), and unreachable generated buckets
+        # above it are dropped.
+        self.num_tokens_paddings = runner_utils.build_token_paddings(
+            min_token_size=max(envs.MIN_TOKEN_BUCKET,
+                               next_power_of_2(self.dp_size * kv_packing)),
+            max_token_size=scheduler_config.max_num_batched_tokens *
+            self.dp_size,
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP,
+            additional_sizes=additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
@@ -2046,6 +2052,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         processed_bonus_logits = None
+        allow_distributed_sampling = distributed_sampling_allowed(
+            tpu_sampling_metadata.logprobs, self.model_config.logprobs_mode)
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
@@ -2054,6 +2062,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.mesh,
                     logits,
                     tpu_sampling_metadata,
+                    allow_distributed_sampling=allow_distributed_sampling,
                 )
         else:
             if tpu_sampling_metadata.do_sampling:
@@ -2069,6 +2078,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh,
                 bonus_logits,
                 tpu_sampling_metadata,
+                allow_distributed_sampling=allow_distributed_sampling,
             )
             target_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.target_logits_indices, self.mesh,

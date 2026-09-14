@@ -32,7 +32,8 @@ from tpu_inference.layers.common.attention_metadata import (
     SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
-    compute_and_gather_logprobs, compute_and_gather_prompt_logprobs, sample)
+    compute_and_gather_logprobs, compute_and_gather_prompt_logprobs,
+    distributed_sampling_allowed, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -53,6 +54,15 @@ logger = init_logger(__name__)
 
 # Constants for block bucketing in disaggregated utilities
 BLOCK_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
+
+
+def _describe_signature(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the scalars that identify a precompilation variant."""
+    return {
+        k: v
+        for k, v in kwargs.items()
+        if v is None or isinstance(v, (int, float, bool, str))
+    }
 
 
 class CompilationManager:
@@ -133,7 +143,7 @@ class CompilationManager:
                          aot: bool = True,
                          compile_only: bool = False,
                          **kwargs) -> None:
-        log_name = f"{name} --> {kwargs}"
+        log_name = f"{name} --> {_describe_signature(kwargs)}"
         logger.info(f"Precompile {log_name}")
         # Unwrap functools.partial so the underlying jit's static_argnums are
         # respected.
@@ -1020,6 +1030,8 @@ class CompilationManager:
                         _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=logprobs)
+                    allow_distributed_sampling = distributed_sampling_allowed(
+                        logprobs, self.runner.model_config.logprobs_mode)
                     self._run_compilation(
                         f"worker{self.runner.rank} sample",
                         sample,
@@ -1027,10 +1039,15 @@ class CompilationManager:
                         self.runner.mesh,
                         logits,
                         sampling_metadata,
+                        call_kwargs={
+                            "allow_distributed_sampling":
+                            allow_distributed_sampling
+                        },
                         compile_only=False,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
                         logprobs=logprobs,
+                        allow_distributed_sampling=allow_distributed_sampling,
                     )
 
         self._sampling_precompiled = True
