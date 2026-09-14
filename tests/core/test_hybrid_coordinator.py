@@ -48,6 +48,28 @@ def _make_mock_hybrid_kv_cache_config(
     return cfg
 
 
+def _make_mock_vllm_config(dp_size: int, max_num_seqs: int) -> MagicMock:
+    vllm_config = MagicMock()
+    vllm_config.sharding_config.total_dp_size = dp_size
+    vllm_config.scheduler_config.max_num_seqs = max_num_seqs
+    vllm_config.speculative_config = None
+    vllm_config.additional_config = {}
+    return vllm_config
+
+
+_COORD_KWARGS = dict(
+    max_model_len=1024,
+    max_in_flight_tokens=128,
+    use_eagle=False,
+    enable_caching=True,
+    enable_kv_cache_events=False,
+    dcp_world_size=1,
+    pcp_world_size=1,
+    scheduler_block_size=16,
+    hash_block_size=16,
+)
+
+
 class TestTPUDualBlockPool:
 
     def test_routing_free_and_touch_to_origin_pools(self):
@@ -538,6 +560,128 @@ class TestHybridCoordinatorHooks:
         assert isinstance(coord, TPUHybridKVCacheCoordinator)
         assert coord.mamba_num_blocks == 64
 
+    def test_derive_mamba_num_blocks_matches_runner_sizing(self):
+        """The scheduler-side fallback reproduces the runner's formula:
+        `dp_size * max_num_seqs` requests, `custom_mamba_cache_multiplier`
+        (default 8) blocks each, plus the null block, rounded up to the DP
+        shard count."""
+        from tpu_inference.core.hybrid_coordinator import (
+            DEFAULT_MAMBA_CACHE_MULTIPLIER, derive_mamba_num_blocks,
+            mamba_blocks_per_request)
+
+        vllm_config = _make_mock_vllm_config(dp_size=2, max_num_seqs=8)
+        assert mamba_blocks_per_request(
+            vllm_config,
+            is_align_mode=True) == (2, DEFAULT_MAMBA_CACHE_MULTIPLIER)
+        assert mamba_blocks_per_request(vllm_config,
+                                        is_align_mode=False) == (1, 1)
+        # 2 * 8 * 8 + 1 = 129, rounded up to a multiple of dp_size=2.
+        assert derive_mamba_num_blocks(vllm_config) == 130
+
+        vllm_config.additional_config = {"custom_mamba_cache_multiplier": 3}
+        assert derive_mamba_num_blocks(vllm_config) == 2 * 8 * 3 + 2
+
+        vllm_config.speculative_config = MagicMock(num_speculative_tokens=4)
+        # Resident minimum (4 + 1 + 1 = 6) beats the multiplier of 3.
+        assert derive_mamba_num_blocks(vllm_config) == 2 * 8 * 6 + 2
+
+    def test_tpu_get_kv_cache_coordinator_derives_from_hook_config(self):
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import (
+            TPUHybridKVCacheCoordinator, install_hybrid_coordinator_hooks,
+            tpu_get_kv_cache_coordinator)
+
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        install_hybrid_coordinator_hooks(
+            _make_mock_vllm_config(dp_size=2, max_num_seqs=8))
+        try:
+            cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                    mamba_num_blocks=None)
+            coord = tpu_get_kv_cache_coordinator(cfg, **_COORD_KWARGS)
+            assert isinstance(coord, TPUHybridKVCacheCoordinator)
+            assert coord.mamba_num_blocks == 130
+        finally:
+            hc_mod._VLLM_CONFIG = None
+
+    def test_propagate_mamba_num_blocks_publishes_worker_value(self):
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            propagate_mamba_num_blocks
+
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                mamba_num_blocks=None)
+        vllm_config = _make_mock_vllm_config(dp_size=2, max_num_seqs=8)
+        vllm_config.cache_config.mamba_num_blocks = None
+        engine_core = MagicMock()
+        engine_core.collective_rpc.return_value = [1160, 1160]
+
+        assert propagate_mamba_num_blocks(engine_core, cfg,
+                                          vllm_config) == 1160
+        engine_core.collective_rpc.assert_called_once_with(
+            "get_mamba_num_blocks")
+        assert vllm_config.cache_config.mamba_num_blocks == 1160
+        assert cfg.mamba_num_blocks == 1160
+        assert hc_mod.get_mamba_num_blocks() == 1160
+
+        # Disagreeing workers cannot be reconciled.
+        engine_core.collective_rpc.return_value = [1160, 1024]
+        with pytest.raises(ValueError, match="disagree"):
+            propagate_mamba_num_blocks(engine_core, cfg, vllm_config)
+
+        # Nothing reported: leave the fallback to the caller.
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        engine_core.collective_rpc.return_value = [None, None]
+        assert propagate_mamba_num_blocks(engine_core, cfg,
+                                          vllm_config) is None
+        assert hc_mod.get_mamba_num_blocks() is None
+
+    def test_engine_core_hook_runs_after_kv_init(self):
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            _install_engine_core_hook
+
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                mamba_num_blocks=None)
+        calls = []
+
+        class FakeEngineCore:
+
+            def _initialize_kv_caches(self, vllm_config):
+                calls.append(vllm_config)
+                return cfg
+
+            def collective_rpc(self, method):
+                assert method == "get_mamba_num_blocks"
+                return [640]
+
+        _install_engine_core_hook(FakeEngineCore)
+        hooked = FakeEngineCore._initialize_kv_caches
+        assert getattr(hooked, "_tpu_mamba_hook", False)
+        # Installing twice must not wrap the wrapper.
+        _install_engine_core_hook(FakeEngineCore)
+        assert FakeEngineCore._initialize_kv_caches is hooked
+
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        assert FakeEngineCore()._initialize_kv_caches(vllm_config) is cfg
+        assert calls == [vllm_config]
+        assert cfg.mamba_num_blocks == 640
+        assert vllm_config.cache_config.mamba_num_blocks == 640
+        assert hc_mod.get_mamba_num_blocks() == 640
+
+    def test_tpu_get_kv_cache_coordinator_resolves_from_kv_cache_config(self):
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            tpu_get_kv_cache_coordinator
+
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                mamba_num_blocks=None)
+        cfg.mamba_num_blocks = 72
+        coord = tpu_get_kv_cache_coordinator(cfg, **_COORD_KWARGS)
+        assert coord.mamba_num_blocks == 72
+
     def test_tpu_get_kv_cache_coordinator_raises_if_missing(self):
         import pytest
 
@@ -545,6 +689,7 @@ class TestHybridCoordinatorHooks:
         from tpu_inference.core.hybrid_coordinator import \
             tpu_get_kv_cache_coordinator
         hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        hc_mod._VLLM_CONFIG = None
 
         cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
                                                 mamba_num_blocks=None)

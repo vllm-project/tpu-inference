@@ -698,6 +698,11 @@ class TPUWorker(WorkerBase):
         # and the vLLM side should be updated to handle the translation.
         return self.model_runner.get_kv_cache_spec()
 
+    def get_mamba_num_blocks(self) -> int | None:
+        """Rows in the mamba state pool this worker allocated (None without
+        mamba layers). Read by the engine core over `collective_rpc`."""
+        return self.model_runner.kv_cache_manager.actual_mamba_num_blocks
+
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""
         # NOTE: we are not using it right now.

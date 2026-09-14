@@ -13,13 +13,13 @@
 # limitations under the License.
 
 import functools
-import os
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference import envs
 from tpu_inference.kernels.gdn.v3 import (compute_conv1d, compute_gdn, config,
                                           memory_ref, metadata, vmem_ldst)
 
@@ -541,11 +541,7 @@ def fused_conv1d_gdn(
             scratch_shapes=cfg.get_scratch_shape_dict(),
             input_output_aliases=input_output_aliases,
             compiler_params=pltpu.CompilerParams(
-                # TPU_GDN_DISABLE_BOUNDS_CHECKS=0 restores the readable
-                # "BoundsCheck N [deref of ...] for %X = dma.hbm_to_vmem"
-                # diagnostic instead of a bare E0200 core halt.
-                disable_bounds_checks=os.environ.get(
-                    "TPU_GDN_DISABLE_BOUNDS_CHECKS", "1") != "0",
+                disable_bounds_checks=envs.TPU_GDN_DISABLE_BOUNDS_CHECKS,
                 vmem_limit_bytes=cfg.get_vmem_limit_bytes(),
             ),
             name=cfg.get_kernel_name(),

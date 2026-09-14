@@ -378,7 +378,9 @@ class StateBufferedRef(BaseBufferedRef):
             # Resume from the checkpoint of the last accepted token.
             state_idx += self.metadata_ref.s_idx_to_read_offset[s_idx]
 
-            # The kernel is compiled with disable_bounds_checks=True; clamp to prevent illegal DMA descriptor
+            # Bounds checks are disabled for this kernel (see wrapper.py), so
+            # an out-of-range slot would issue an illegal DMA and halt the
+            # core. Clamp so the DMA (1 row) always stays inside the shard.
             state_idx = jnp.clip(state_idx, 0, src_ref.shape[0] - 1)
 
             pltpu.make_async_copy(
@@ -432,7 +434,8 @@ class StateBufferedRef(BaseBufferedRef):
             num_ckpts = jnp.minimum(r_size, self.cfg.window_size)
             dma_size = jnp.where(is_last_tile, num_ckpts, 0)
 
-            # Clamp state_idx so bad index cannot produce an illegal DMA descriptor
+            # Same clamp as `copy_in`; this DMA writes up to `window_size`
+            # rows, so the bound is `window_size` below the shard end.
             state_idx = jnp.clip(state_idx, 0,
                                  dst_ref.shape[0] - self.cfg.window_size)
 
