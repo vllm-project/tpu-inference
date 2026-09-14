@@ -1,0 +1,42 @@
+# DAPO/GRPO RL rollout config for TPU v7x — the 299s STRICT-BF16 recipe.
+# Rollout engine: vLLM-on-TPU (tpu-inference). Model: Qwen3-0.6B. Mesh: DP16 x TP4 (64 chips, 4x4x4).
+# Only the throughput-relevant keys are shown; wire into your MaxText/tunix RL launcher.
+
+model_name: "qwen3-0.6b"
+weight_dtype: "bfloat16"          # STRICT-BF16 headline
+
+# --- rollout mesh: DP16 x TP4 = 64 sampler devices. TP4 is host-local on 4-chip hosts. ---
+rollout_data_parallelism: 16
+rollout_tensor_parallelism: 4
+
+# --- generation lengths. cap = max_target_length - max_prefill_predict_length. ---
+max_prefill_predict_length: 16384
+max_target_length: 24576          # 299s headline: 16384 prompt + 8192 response
+# max_target_length: 22528        # 245s recipe-candidate: 16384 prompt + 6144 response (reward-owner gate)
+
+# --- vLLM-on-TPU rollout knobs ---
+async_scheduling: true            # REQUIRED by continue_decode (async DP scheduler)
+hbm_utilization_vllm: 0.6         # KV cache is ~57GB/chip at 0.6; peak use ~38% (over-provisioned)
+kv_cache_buffer: 256
+max_num_seqs: 256
+
+# --- THE LEVER: on-device fused multi-step decode (needs a libtpu with v15 RPA/continue_decode kernels) ---
+vllm_additional_config:
+  enable_continue_decode: true    # ~80k tok/s rollout; the -40% lever
+  max_decode_steps: 128           # decode iters fused per host dispatch
+
+# --- RL: DAPO/GRPO (KL off) ---
+rl:
+  num_generations: 8
+  grpo_beta: 0.0
+  grpo_epsilon: 0.2
+  epsilon_high: 0.28
+  loss_algo: "grpo"
+  use_agentic_rollout: false
+  off_policy_steps: 0             # synchronous on-policy
+
+batch_size: 256                   # 256 prompts x 8 generations = 2048 rollouts
+
+# Env levers (set at launch, NOT in yaml):
+#   GRR_RPA_DECODE_BLOCKS=1,16384,1,4096   # RPA-v3 fetch/compute split (PR #3102)
+#   GRR_CD_EOS_CHECK_INTERVAL=8            # continue_decode EOS-check cadence (saturated at 8)
