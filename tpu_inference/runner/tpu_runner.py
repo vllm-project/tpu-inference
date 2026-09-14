@@ -1057,14 +1057,32 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
+        min_token_size = max(envs.MIN_TOKEN_BUCKET,
+                             next_power_of_2(self.dp_size * kv_packing))
+        # PCP cuts a request's padded tokens into 2*P chunks, and the kernel
+        # addresses the gathered current KV by page, so every chunk has to be a
+        # whole number of pages (a page is one KV block). Quantising the token
+        # buckets to 2 * P * block_size makes the smallest bucket exactly one
+        # page per chunk, so the constraint holds by construction.
+        pcp_size = self.vllm_config.sharding_config.prefill_cp_size
+        pcp_quantum = 2 * pcp_size * self.block_size * self.dp_size
+        if pcp_size > 1:
+            min_token_size = max(min_token_size,
+                                 next_power_of_2(pcp_quantum))
         self.num_tokens_paddings = runner_utils.get_token_paddings(
-            min_token_size=max(envs.MIN_TOKEN_BUCKET,
-                               next_power_of_2(self.dp_size * kv_packing)),
+            min_token_size=min_token_size,
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         self.num_tokens_paddings = sorted(self.num_tokens_paddings +
                                           additional_sizes)
+        if pcp_size > 1:
+            # `additional_sizes` and a non-zero padding gap can both land off
+            # the quantum, so snap every bucket up to it.
+            self.num_tokens_paddings = sorted({
+                cdiv(p, pcp_quantum) * pcp_quantum
+                for p in self.num_tokens_paddings
+            })
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]

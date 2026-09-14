@@ -14,6 +14,7 @@
 
 import functools
 import math
+import os
 from typing import Any, Callable, Optional, Tuple
 
 import jax
@@ -36,7 +37,9 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
-from tpu_inference.layers.common.cp_attention import dcp_forward, pcp_forward
+from tpu_inference.layers.common.cp_attention import (dcp_forward,
+                                                       pcp_forward,
+                                                       pcp_forward_batched)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -558,7 +561,12 @@ def attention(
             v_scale=v_scale,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
-        return pcp_forward(
+        # PCP_BATCHED_RPA=1 routes the same two-phase decomposition through the
+        # batched RPA kernel (in-kernel ring) instead of rpa_v3_cp.
+        forward = (pcp_forward_batched
+                   if os.environ.get('PCP_BATCHED_RPA') == '1' else
+                   pcp_forward)
+        return forward(
             mesh,
             q,
             k,

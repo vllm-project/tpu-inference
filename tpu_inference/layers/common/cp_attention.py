@@ -452,6 +452,17 @@ def pcp_forward_batched(
                          own `q_positions`) attends the all-gathered current KV
                          and writes it back striped over the pcp ranks.
       3. merge_attn_states
+
+    Multiple requests are supported: request i is split into its own `two_p`
+    chunks of `pcp_chunk_sizes[i]` tokens and owns virtual sequences 2i (head)
+    and 2i+1 (tail). A rank's local Q holds them in request order.
+
+    `query_start_loc` defines that layout, so every piece must occupy its full
+    `pcp_chunk_sizes[i]` stride even when only part of it is real -- a short
+    piece would otherwise shift every later request. Only the final piece may
+    be truncated, since nothing follows it. Padded query slots produce
+    discarded output; they never reach the KV cache, whose write extent comes
+    from `seq_lens - kv_cache_lens`.
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)

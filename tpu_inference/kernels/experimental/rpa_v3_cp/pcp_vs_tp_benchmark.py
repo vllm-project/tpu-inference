@@ -145,7 +145,8 @@ def _ladder(max_ctx):
 # Worker: one variant, one process (jax is imported here only).
 # --------------------------------------------------------------------------
 def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
-                 warmup, iters, collectives, profile_dir, profile_contexts, n):
+                 warmup, iters, collectives, profile_dir, profile_contexts, n,
+                 num_reqs=1, check_chunks=0):
     # Raiden's engine extension must be loaded before jaxlib's XLA copy or the
     # two collide in static initializers and the process segfaults.
     # `tpu_inference.__init__` tries to do this, but by then its own
@@ -287,13 +288,23 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
 
         return measure
 
-    def make_pcp(pcp, tp, batched=False):
+    def make_pcp(pcp, tp, batched=False, num_reqs=1):
         """PCP through cp_attention on a (pcp, model) mesh.
 
         `batched` picks the batched RPA kernel (`pcp_forward_batched`) over
         rpa_v3_cp (`pcp_forward`). Both see the same inputs and the same cache
         layout; they differ in how the cache phase combines the per-rank
         partials (out-of-kernel LSE merge vs the in-kernel ring).
+
+        With `num_reqs` > 1 the step's tokens are split evenly into that many
+        requests, each cut into its own `2P` chunks so every request keeps its
+        own head-tail balance. Request i owns virtual sequences 2i (head) and
+        2i+1 (tail), and a rank holds them in request order. Only the batched
+        kernel takes more than one request.
+
+        Returns (measure, check): `measure(ctx)` times one chunk step at that
+        context, `check(nchunk)` runs a chunked prefill and compares every
+        request's output against a dense causal fp32 reference.
         """
         forward = pcp_forward_batched if batched else pcp_forward
         kv_cache_shape_fn = (batched_rpa.get_kv_cache_shape
@@ -302,11 +313,28 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                       for a in MESH_AXIS_NAMES)
         mesh = Mesh(
             np.array(jax.devices()[:pcp * tp]).reshape(shape), MESH_AXIS_NAMES)
-        two_p, C = 2 * pcp, chunk // (2 * pcp)
+        two_p = 2 * pcp
+        if num_reqs > 1 and not batched:
+            raise NotImplementedError(
+                "multi-request PCP is only wired up for the batched kernel")
+        if chunk % (num_reqs * two_p):
+            raise NotImplementedError(
+                f"chunk {chunk} does not split into {num_reqs} requests of "
+                f"{two_p} chunks")
+        # Per-request padded chunk piece, and tokens per request per step.
+        C = chunk // (num_reqs * two_p)
+        req_chunk = two_p * C
         # KV_CONTEXT shards the page dim: a global page holds page*pcp tokens.
         gpage = page * pcp
-        pages_per_seq = max(cdiv(max_ctx, gpage), 1)
-        npages = pages_per_seq * slack
+        if batched and C % page:
+            raise NotImplementedError(
+                f"PCP chunk size {C} must be a multiple of the page size "
+                f"{page}")
+        max_seq = max(MAX_SEQ, 2 * num_reqs)
+        # Each request carries its own context and its own cache pages.
+        req_max_ctx = max(max_ctx // num_reqs, req_chunk)
+        pages_per_seq = max(cdiv(req_max_ctx, gpage), 1)
+        npages = pages_per_seq * slack * num_reqs
         # Each rank holds `page` tokens of every global page (KV_CONTEXT shards
         # the page dim over pcp) and its own KV heads (KV_HEAD shards the
         # packed planes over tp); the per-rank layout is the CP kernel's own.
@@ -320,38 +348,49 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
 
         q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD,
                    None)
-        q = put(rand((chunk, NQ, HD)), q_spec)
         kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
+        q = put(rand((chunk, NQ, HD)), q_spec)
         k = put(rand((chunk, NKV, HD)).astype(kv_dtype), kv_spec)
         v = put(rand((chunk, NKV, HD)).astype(kv_dtype), kv_spec)
-        # Head and tail chunks of the request are two "sequences" of the same
-        # request; both index the same pages.
-        pg = jnp.arange(pages_per_seq, dtype=jnp.int32)
-        pi = jnp.zeros(
-            (MAX_SEQ * pages_per_seq, ),
-            jnp.int32).at[:2 * pages_per_seq].set(jnp.concatenate([pg, pg]))
-        dist = jnp.array([0, 0, 2], jnp.int32)
-        pcp_cu = np.zeros((pcp, MAX_SEQ + 1), np.int32)
-        pcp_qp = np.zeros((pcp, MAX_SEQ), np.int32)
+        # Virtual sequences 2i and 2i+1 are the head and tail of request i, so
+        # they index the same pages.
+        _pi = np.zeros((max_seq, pages_per_seq), np.int32)
+        for i in range(num_reqs):
+            _pi[2 * i] = _pi[2 * i + 1] = np.arange(i * pages_per_seq,
+                                                    (i + 1) * pages_per_seq)
+        pi = jnp.asarray(_pi.reshape(-1))
+        dist = jnp.array([0, 0, 2 * num_reqs], jnp.int32)
+        pcp_cu = np.zeros((pcp, max_seq + 1), np.int32)
+        pcp_qp = np.zeros((pcp, max_seq), np.int32)
         for r in range(pcp):
-            toff = (two_p - 1 - r) * C
-            treal = int(np.clip(chunk - toff, 0, C))
-            pcp_cu[r, 1] = C
-            pcp_cu[r, 2:] = C + treal
-            pcp_qp[r, 0] = r * C
-            pcp_qp[r, 1] = toff
+            run = 0
+            for i in range(num_reqs):
+                toff = (two_p - 1 - r) * C
+                treal = int(np.clip(req_chunk - toff, 0, C))
+                # cu_q_lens defines the layout, so a piece occupies its full
+                # stride; only the last one may be short, since nothing
+                # follows it.
+                run += C
+                pcp_cu[r, 2 * i + 1] = run
+                run += treal if i == num_reqs - 1 else C
+                pcp_cu[r, 2 * i + 2:] = run
+                pcp_qp[r, 2 * i] = r * C
+                pcp_qp[r, 2 * i + 1] = toff
         pcp_spec = P(ShardingAxisName.PREFILL_CONTEXT, None)
         pcp_cu = put(jnp.asarray(pcp_cu), pcp_spec)
         pcp_qp = put(jnp.asarray(pcp_qp), pcp_spec)
+        chunk_sizes = {} if not batched else {"pcp_chunk_sizes": (C, ) * num_reqs}
         fns = {}
 
-        def fn_for(cache_pages):
+        def fn_for(cache_pages, with_collectives=True):
             # `cache_pages` is static metadata (one program per bucket), as in
             # the runner.
-            if cache_pages not in fns:
+            key = (cache_pages, with_collectives)
+            if key not in fns:
 
                 @functools.partial(jax.jit, donate_argnums=(0, ))
-                def fn(cache, q, k, v, kvl, kvcl, _cp=cache_pages):
+                def fn(cache, q, k, v, kvl, kvcl, _cp=cache_pages,
+                       _co=with_collectives):
                     md = AttentionMetadata(
                         input_positions=jnp.zeros(1, jnp.int32),
                         seq_lens=kvl,
@@ -370,48 +409,151 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                          md,
                                          sm_scale=sm_scale,
                                          update_kv_cache=True,
-                                         use_causal_mask=True)
-                    # Heads are sharded over the model axis; all-reduce there.
-                    out = jax.shard_map(functools.partial(
-                        layer_collectives,
-                        axis=ShardingAxisName.ATTN_HEAD,
-                        gather_axis=ShardingAxisName.PREFILL_CONTEXT),
-                                        mesh=mesh,
-                                        in_specs=q_spec,
-                                        out_specs=q_spec,
-                                        check_vma=False)(out)
+                                         use_causal_mask=True,
+                                         **chunk_sizes)
+                    if _co:
+                        # Heads are sharded over the model axis; all-reduce.
+                        out = jax.shard_map(functools.partial(
+                            layer_collectives,
+                            axis=ShardingAxisName.ATTN_HEAD,
+                            gather_axis=ShardingAxisName.PREFILL_CONTEXT),
+                                            mesh=mesh,
+                                            in_specs=q_spec,
+                                            out_specs=q_spec,
+                                            check_vma=False)(out)
                     return out, cache
 
-                fns[cache_pages] = fn
-            return fns[cache_pages]
+                fns[key] = fn
+            return fns[key]
 
-        def cache_pages_for(ctx):
+        def cache_pages_for(computed):
             # Mirror the runner: live page count rounded up to a power of two.
-            computed = ctx - chunk
             if computed <= 0:
                 return 0
             live = cdiv(computed, gpage)
             return min(1 << max(live - 1, 0).bit_length(), npages)
 
+        def seq_lens_for(req_ctx):
+            """kv_lens / kv_cache_lens over the 2R virtual sequences."""
+            kvl = np.zeros((max_seq, ), np.int32)
+            kvcl = np.zeros((max_seq, ), np.int32)
+            for i in range(num_reqs):
+                kvl[2 * i:2 * i + 2] = req_ctx
+                kvcl[2 * i:2 * i + 2] = max(req_ctx - req_chunk, 0)
+            return jnp.asarray(kvl), jnp.asarray(kvcl)
+
         def measure(ctx):
-            kvl = jnp.zeros((MAX_SEQ, ), jnp.int32).at[:2].set(ctx)
-            kvcl = jnp.zeros((MAX_SEQ, ),
-                             jnp.int32).at[:2].set(max(ctx - chunk, 0))
+            req_ctx = max(ctx // num_reqs, req_chunk)
+            kvl, kvcl = seq_lens_for(req_ctx)
             cache = jax.device_put(jnp.zeros(cache_shape, kv_dtype),
                                    NamedSharding(mesh, cache_spec))
-            return bench_cache(fn_for(cache_pages_for(ctx)), cache, q, k, v,
-                               kvl, kvcl)
+            return bench_cache(fn_for(cache_pages_for(req_ctx - req_chunk)),
+                               cache, q, k, v, kvl, kvcl)
 
-        return measure
+        # ---- correctness ---------------------------------------------------
+        def to_rank_order(per_req):
+            """[req][req_chunk, ...] token order -> the sharded rank order."""
+            blocks = []
+            for r in range(pcp):
+                for x in per_req:
+                    xc = np.asarray(x).reshape(two_p, C, *x.shape[1:])
+                    blocks.append(xc[r])
+                    blocks.append(xc[two_p - 1 - r])
+            return np.concatenate(blocks, 0)
 
+        def from_rank_order(y, i):
+            """Pull request i's tokens back out, in its own token order."""
+            local = 2 * C * num_reqs
+            chunks = [None] * two_p
+            for r in range(pcp):
+                base = r * local + 2 * C * i
+                chunks[r] = y[base:base + C]
+                chunks[two_p - 1 - r] = y[base + C:base + 2 * C]
+            return np.concatenate(chunks, 0)
+
+        def check(nchunk=2):
+            crng = np.random.default_rng(0)
+
+            def cr(shape, dt):
+                x = crng.standard_normal(shape, np.float32) * 0.5
+                return jnp.asarray(x).astype(dt)
+
+            qs = [[cr((req_chunk, NQ, HD), dtype) for _ in range(nchunk)]
+                  for _ in range(num_reqs)]
+            ks = [[cr((req_chunk, NKV, HD), kv_dtype) for _ in range(nchunk)]
+                  for _ in range(num_reqs)]
+            vs = [[cr((req_chunk, NKV, HD), kv_dtype) for _ in range(nchunk)]
+                  for _ in range(num_reqs)]
+
+            def reference(i, j):
+                qq = np.asarray(qs[i][j], np.float32)
+                kk = np.concatenate(
+                    [np.asarray(x, np.float32) for x in ks[i][:j + 1]])
+                vv = np.concatenate(
+                    [np.asarray(x, np.float32) for x in vs[i][:j + 1]])
+                g = NQ // NKV
+                out = np.zeros_like(qq)
+                pos_q = j * req_chunk + np.arange(req_chunk)[:, None]
+                keep = np.arange(kk.shape[0])[None, :] <= pos_q
+                for h in range(NQ):
+                    s = (qq[:, h] @ kk[:, h // g].T) * sm_scale
+                    s = np.where(keep, s, -np.inf)
+                    s = s - s.max(-1, keepdims=True)
+                    p = np.exp(s)
+                    out[:, h] = (p / p.sum(-1, keepdims=True)) @ vv[:, h // g]
+                return out
+
+            cache = jax.device_put(jnp.zeros(cache_shape, kv_dtype),
+                                   NamedSharding(mesh, cache_spec))
+            worst = {}
+            for j in range(nchunk):
+                req_ctx = (j + 1) * req_chunk
+                kvl, kvcl = seq_lens_for(req_ctx)
+                fn = fn_for(cache_pages_for(j * req_chunk),
+                            with_collectives=False)
+                out, cache = fn(
+                    cache,
+                    put(jnp.asarray(to_rank_order([x[j] for x in qs])),
+                        q_spec),
+                    put(jnp.asarray(to_rank_order([x[j] for x in ks])),
+                        kv_spec),
+                    put(jnp.asarray(to_rank_order([x[j] for x in vs])),
+                        kv_spec), kvl, kvcl)
+                out = np.asarray(jax.block_until_ready(out), np.float32)
+                for i in range(num_reqs):
+                    ref = reference(i, j)
+                    err = np.abs(from_rank_order(out, i) - ref).max()
+                    rel = float(err / max(np.abs(ref).max(), 1e-6))
+                    worst[f"req{i}_chunk{j}"] = rel
+            return worst
+
+        return measure, check
+
+    check = None
     if variant.startswith("bpcp"):
         pcp, tp = (int(x) for x in variant[4:].split("xtp"))
-        measure = make_pcp(pcp, tp, batched=True)
+        measure, check = make_pcp(pcp, tp, batched=True, num_reqs=num_reqs)
     elif variant.startswith("pcp"):
         pcp, tp = (int(x) for x in variant[3:].split("xtp"))
-        measure = make_pcp(pcp, tp)
+        measure, check = make_pcp(pcp, tp, num_reqs=num_reqs)
     else:
+        if num_reqs > 1:
+            raise NotImplementedError("multi-request is a PCP-only layout")
         measure = make_tp(int(variant[2:]))
+
+    if check_chunks:
+        if check is None:
+            # TP has no PCP layout to verify; the PCP checks carry their own
+            # dense reference, so there is nothing to compare it against.
+            raise NotImplementedError("correctness check is PCP-only")
+        rel = check(check_chunks)
+        worst = max(rel.values())
+        return {
+            "check": "OK" if worst < 0.05 else "MISMATCH",
+            "worst_rel": round(worst, 5),
+            **{k: round(v, 5)
+               for k, v in rel.items()},
+        }
 
     ladder = _ladder(max_ctx)
     needed = sorted({b for m in ladder for b in _boundaries(m, chunk)})
@@ -550,6 +692,21 @@ def main():
                     "was held by another process), 60s apart")
     ap.add_argument("--warmup", type=int, default=2)
     ap.add_argument("--iters", type=int, default=10)
+    ap.add_argument("--requests",
+                    type=int,
+                    default=1,
+                    help="split each step's tokens into this many PCP "
+                    "requests (batched kernel only); each is cut into its "
+                    "own 2P chunks")
+    ap.add_argument("--check",
+                    type=int,
+                    default=0,
+                    nargs="?",
+                    const=2,
+                    metavar="NCHUNK",
+                    help="instead of timing, run NCHUNK chunks of prefill "
+                    "and compare every request against a dense fp32 "
+                    "reference (default 2 chunks)")
     ap.add_argument("--worker",
                     nargs=3,
                     metavar=("MODEL", "NUM_DEVICES", "VARIANT"),
@@ -565,7 +722,8 @@ def main():
                 args.max_context, args.kv_dtype, args.page_size,
                 args.cache_slack, args.warmup, args.iters,
                 not args.no_collectives, args.profile_dir,
-                [int(c) for c in args.profile_contexts.split(",")], int(n))
+                [int(c) for c in args.profile_contexts.split(",")], int(n),
+                num_reqs=args.requests, check_chunks=args.check)
         except NotImplementedError:
             # The kernel does not support this head config (e.g. batched RPA
             # needs a sublane-aligned head group to return LSE); report it
@@ -598,8 +756,10 @@ def main():
                         str(args.page_size), "--cache-slack",
                         str(args.cache_slack), "--warmup",
                         str(args.warmup), "--iters",
-                        str(args.iters)
-                    ] + (["--no-collectives"]
+                        str(args.iters), "--requests",
+                        str(args.requests)
+                    ] + (["--check", str(args.check)] if args.check else
+                         []) + (["--no-collectives"]
                          if args.no_collectives else []) + ([
                              "--profile-dir", args.profile_dir,
                              "--profile-contexts", args.profile_contexts
@@ -623,6 +783,28 @@ def main():
                         f"({time.time() - t0:.0f}s, {attempt + 1} attempt"
                         f"{'s' if attempt else ''})",
                         flush=True)
+            if args.check:
+                # Correctness mode: one row per layout, worst relative error
+                # over every request and chunk.
+                rows = []
+                for v in variants:
+                    r = results.get(v) or {"check": "FAILED"}
+                    if "error" in r:
+                        rows.append([v, r["error"], "-"])
+                        continue
+                    rows.append([
+                        v,
+                        r.get("check", "FAILED"),
+                        f"{r.get('worst_rel', float('nan')):.5f}",
+                    ])
+                title = (f"{model}: {n} devices, {args.requests} request(s), "
+                         f"CH={_human(args.chunk_size)}, KV {args.kv_dtype} "
+                         f"-- {args.check}-chunk prefill vs dense fp32 "
+                         f"reference")
+                tables.append(title + "\n\n" + _box_table(
+                    ["Layout", "Result", "Worst rel err"], rows))
+                print("\n" + tables[-1] + "\n", flush=True)
+                continue
             base = results[variants[0]]
             rows = []
             for ctx in _ladder(args.max_context):
