@@ -1,0 +1,59 @@
+mode: disaggregated
+
+model:
+  name: "meta-llama/Llama-3.1-70B-Instruct"
+  maxModelLen: 4096
+  safetensorsLoadStrategy: prefetch
+
+disaggregated:
+  kvConnector: "TPUConnector"
+  prefill:
+    topology: "2x2x4"
+    placementPolicy: "tpu7x-32-2x2x4-placement-policy"
+    port: 8400
+    resources:
+      tpu: 4
+      cpu: "32"
+      memory: "200Gi"
+  decode:
+    topology: "2x2x4"
+    placementPolicy: "tpu7x-32-2x2x4-placement-policy"
+    replicas: 1
+    port: 9400
+    resources:
+      tpu: 4
+      cpu: "32"
+      memory: "200Gi"
+  proxy:
+    port: 8000
+    resources:
+      cpu: "8"
+      memory: 16Gi
+
+storage:
+  type: "gcs-cache"
+  bucketName: "<your-hf-cache-bucket>"
+  cacheSubpath: "hf-cache"
+  ramCacheLimit: "160Gi"
+  gcsFuse:
+    memoryLimit: "180Gi"
+    cpuLimit: "8"
+
+benchmark:
+  requestRate: 20.0
+  stages:
+    - inputLen: 128
+      outputLen: 128
+      numPrompts: 100
+    - inputLen: 512
+      outputLen: 256
+      numPrompts: 100
+    - inputLen: 1024
+      outputLen: 512
+      numPrompts: 100
+    - inputLen: 2048
+      outputLen: 512
+      numPrompts: 100
+    - inputLen: 3072
+      outputLen: 512
+      numPrompts: 100

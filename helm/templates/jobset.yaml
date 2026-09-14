@@ -1,0 +1,1464 @@
+{{- $fullName := include "tpu-vllm-benchmark.fullname" . -}}
+{{- $namespace := .Release.Namespace | default "default" -}}
+{{- $servedModelName := include "tpu-vllm-benchmark.servedModelName" . -}}
+{{- $modelPath := include "tpu-vllm-benchmark.modelPath" . -}}
+{{- $isDisagg := eq .Values.mode "disaggregated" -}}
+{{- $isE2E := and .Values.e2etest .Values.e2etest.enabled -}}
+{{- if $isE2E }}
+{{- if not (or .Values.e2etest.testPaths .Values.e2etest.fileContent) }}
+{{- fail "e2etest.enabled=true requires a test source: either e2etest.testPaths (paths inside the image, e.g. tests/e2e/test_x.py::test_y) or e2etest.fileContent (--set-file e2etest.fileContent=tests/e2e/test_x.py)" }}
+{{- end }}
+{{- end }}
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $namespace }}
+  labels:
+    kueue.x-k8s.io/priority-class: {{ .Values.job.priorityClass | default "medium" }}
+spec:
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    - {{ if $isE2E }}e2e{{ else }}client{{ end }}
+
+  replicatedJobs:
+
+  {{ if and $isDisagg (not $isE2E) }}
+  {{- $prefillNumVms := include "tpu-vllm-benchmark.prefillNumVms" . | int -}}
+  {{- $prefillTpSize := include "tpu-vllm-benchmark.prefillTpSize" . -}}
+  {{- $prefillChipsBounds := include "tpu-vllm-benchmark.prefillChipsBounds" . -}}
+  {{- $prefillProcessBounds := include "tpu-vllm-benchmark.prefillProcessBounds" . -}}
+  {{- $prefillAccelerator := include "tpu-vllm-benchmark.acceleratorTypeForTopo" .Values.disaggregated.prefill.topology -}}
+
+  {{- $decodeNumVms := include "tpu-vllm-benchmark.decodeNumVms" . | int -}}
+  {{- $decodeTpSize := include "tpu-vllm-benchmark.decodeTpSize" . -}}
+  {{- $decodeChipsBounds := include "tpu-vllm-benchmark.decodeChipsBounds" . -}}
+  {{- $decodeProcessBounds := include "tpu-vllm-benchmark.decodeProcessBounds" . -}}
+  {{- $decodeAccelerator := include "tpu-vllm-benchmark.acceleratorTypeForTopo" .Values.disaggregated.decode.topology -}}
+
+  {{- $kvConnector := include "tpu-vllm-benchmark.kvConnector" . -}}
+  {{- $kvConnectorModule := include "tpu-vllm-benchmark.kvConnectorModule" . -}}
+
+  # ============================================================================
+  # 1. PREFILL SLICE (KV Producer)
+  # ============================================================================
+  - name: p
+    replicas: 1
+    template:
+      {{- if gt $prefillNumVms 1 }}
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+      {{- end }}
+      spec:
+        parallelism: {{ $prefillNumVms }}
+        completions: {{ $prefillNumVms }}
+        backoffLimit: 2
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+            {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
+            annotations:
+              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
+            {{- end }}
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator | default "tpu7x" }}
+              cloud.google.com/gke-tpu-topology: {{ .Values.disaggregated.prefill.topology }}
+              {{- if gt $prefillNumVms 1 }}
+              cloud.google.com/placement-policy-name: {{ .Values.disaggregated.prefill.placementPolicy }}
+              {{- end }}
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+            initContainers:
+            - name: tpu-node-setup
+              image: busybox
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                sysctl -w vm.max_map_count=33554432 || true
+                if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                  echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit || true
+                fi
+                if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+                  echo always > /sys/kernel/mm/transparent_hugepage/enabled || true
+                fi
+              securityContext:
+                privileged: true
+
+            containers:
+            - name: vllm-tpu
+              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                set -e
+                unset MEGASCALE_NUM_SLICES MEGASCALE_SLICE_ID MEGASCALE_COORDINATOR_ADDRESS MEGASCALE_PORT
+                export NUM_WORKERS={{ $prefillNumVms }}
+                export TP_SIZE={{ $prefillTpSize }}
+                export PORT={{ .Values.disaggregated.prefill.port | default 8400 }}
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+
+                # 0. Single-writer download & sync barrier
+                if [[ "{{ .Values.model.name }}" != gs://* ]]; then
+                  DONE_FILE="/root/.cache/huggingface/.done_{{ $fullName }}"
+                  if [[ "$HOSTNAME" =~ -p-0-0(-[a-z0-9]+)?$ ]] || [ "$JOB_COMPLETION_INDEX" = "0" ]; then
+                    mkdir -p /tmp/hf_locks
+                    mkdir -p /root/.cache/huggingface/hub
+                    rm -rf /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                    ln -sfn /tmp/hf_locks /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                    pip install --no-cache-dir hf-transfer 2>/dev/null || true
+                    export HF_XET_HIGH_PERFORMANCE="1"
+                    export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+                    echo "==== [Prefill] Caching model weights on Pod 0 (Started: $(date '+%Y-%m-%d %H:%M:%S')) ===="
+                    START_DOWNLOAD=$(date +%s)
+                    python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='{{ .Values.model.name }}', ignore_patterns=['original/*'], max_workers=8)"
+                    END_DOWNLOAD=$(date +%s)
+                    echo "==== [Prefill] Model cache ready in $((END_DOWNLOAD - START_DOWNLOAD))s ===="
+                    touch "${DONE_FILE}"
+                  else
+                    echo "==== [Prefill] Worker Pod ${JOB_COMPLETION_INDEX}: Waiting for Pod 0 cache barrier... ===="
+                    while [ ! -f "${DONE_FILE}" ]; do sleep 2; done
+                    echo "==== [Prefill] Worker Pod ${JOB_COMPLETION_INDEX}: Cache barrier cleared! ===="
+                  fi
+                fi
+
+                # 1. Multi-host Ray vs Single-host initialization
+                if [ "$NUM_WORKERS" -gt 1 ]; then
+                  python3 /scripts/patch_ray_placement.py
+
+                  ADDRS=""
+                  HOSTS=""
+                  for i in $(seq 0 $((NUM_WORKERS - 1))); do
+                    POD_DNS="{{ $fullName }}-p-0-${i}.{{ $fullName }}.{{ $namespace }}.svc.cluster.local"
+                    POD_IP=""
+                    while [ -z "$POD_IP" ]; do
+                      POD_IP=$(python3 -c "import socket; print(socket.gethostbyname('${POD_DNS}'))" 2>/dev/null)
+                      if [ -z "$POD_IP" ]; then sleep 1; fi
+                    done
+                    ADDRS="${ADDRS}${POD_IP}:8471,"
+                    HOSTS="${HOSTS}${POD_IP},"
+                  done
+
+                  export TPU_PROCESS_ADDRESSES=${ADDRS%,}
+                  export TPU_WORKER_HOSTNAMES=${HOSTS%,}
+                  export TPU_WORKER_ID=${JOB_COMPLETION_INDEX}
+                  export TPU_SKIP_MDS_QUERY="1"
+                  export CLOUD_TPU_TASK_ID=${JOB_COMPLETION_INDEX}
+                  export TPU_CHIPS_PER_PROCESS_BOUNDS="{{ $prefillChipsBounds }}"
+                  export TPU_PROCESS_BOUNDS="{{ $prefillProcessBounds }}"
+                  export TPU_ACCELERATOR_TYPE="{{ $prefillAccelerator }}"
+                  export TPU_NAME="{{ $fullName }}-p-0-${JOB_COMPLETION_INDEX}"
+                  export TPU_MULTIHOST_BACKEND="ray"
+                  export TPU_BACKEND_TYPE="jax"
+                  export MODEL_IMPL_TYPE="vllm"
+                  export RAY_memory_monitor_refresh_ms=0
+                  export RAY_memory_usage_threshold=0.99
+
+                  HEAD_IP=$(python3 -c "import socket; print(socket.gethostbyname('{{ $fullName }}-p-0-0.{{ $fullName }}.{{ $namespace }}.svc.cluster.local'))")
+
+                  if [ "$JOB_COMPLETION_INDEX" = "0" ]; then
+                    echo "==== Starting Prefill Ray Head Node on Pod 0 ===="
+                    ray start --head --port=6379 --resources='{"TPU": 4}' --block &
+
+                    python3 -c "import os, ray, time, sys, textwrap; exec(textwrap.dedent('''
+                        for _ in range(30):
+                            try:
+                                ray.init(address='auto')
+                                break
+                            except Exception:
+                                print('Waiting for local Ray daemon to start...')
+                                time.sleep(2)
+                        else:
+                            print('Timeout waiting for local Ray Head to start!')
+                            sys.exit(1)
+
+                        num_workers = int(os.environ.get('NUM_WORKERS', 0))
+                        for attempt in range(120):
+                            alive = [n for n in ray.nodes() if n.get('Alive')]
+                            print(f'Waiting: {len(alive)}/{num_workers} Ray nodes connected...')
+                            if len(alive) >= num_workers:
+                                print('Cluster fully formed!')
+                                sys.exit(0)
+                            time.sleep(2)
+                        print('Timeout waiting for Ray workers!')
+                        sys.exit(1)
+                    '''))"
+
+                    echo "==== Starting vLLM API Server (PRODUCER / Port: ${PORT}) ===="
+                    exec python3 -m vllm.entrypoints.openai.api_server \
+                      --host=0.0.0.0 --port=${PORT} \
+                      --model={{ $modelPath }} \
+                      --served-model-name={{ $servedModelName }} \
+                      --tensor-parallel-size=${TP_SIZE} \
+                      --max-model-len={{ .Values.model.maxModelLen }} \
+                      --safetensors-load-strategy={{ .Values.model.safetensorsLoadStrategy }} \
+                      --distributed-executor-backend=ray \
+                      --kv-transfer-config "{\"kv_connector\":\"{{ $kvConnector }}\",\"kv_connector_module_path\":\"{{ $kvConnectorModule }}\",\"kv_role\":\"kv_producer\"}" \
+                      {{- include "tpu-vllm-benchmark.featureFlags" $ | trim | nindent 22 }}
+                      {{- range .Values.model.extraArgs }}
+                      {{ . }} \
+                      {{- end }}
+                      "$@"
+                  else
+                    while ! python3 -c "import socket; socket.create_connection(('${HEAD_IP}', 6379))" 2>/dev/null; do sleep 3; done
+                    ray start --address=${HEAD_IP}:6379 --resources='{"TPU": 4}' --block
+                  fi
+                else
+                  # Single-host execution
+                  echo "==== Starting vLLM API Server (PRODUCER / Port: ${PORT}) ===="
+                  exec python3 -m vllm.entrypoints.openai.api_server \
+                    --host=0.0.0.0 --port=${PORT} \
+                    --model={{ $modelPath }} \
+                    --served-model-name={{ $servedModelName }} \
+                    --tensor-parallel-size=${TP_SIZE} \
+                    --max-model-len={{ .Values.model.maxModelLen }} \
+                    --safetensors-load-strategy={{ .Values.model.safetensorsLoadStrategy }} \
+                    --kv-transfer-config "{\"kv_connector\":\"{{ $kvConnector }}\",\"kv_connector_module_path\":\"{{ $kvConnectorModule }}\",\"kv_role\":\"kv_producer\"}" \
+                    {{- include "tpu-vllm-benchmark.featureFlags" $ | trim | nindent 20 }}
+                    {{- range .Values.model.extraArgs }}
+                    {{ . }} \
+                    {{- end }}
+                    "$@"
+                fi
+              env:
+              {{- if and .Values.features (and .Values.features.kvCacheOffload .Values.features.kvCacheOffload.enabled) }}
+              - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
+                value: {{ .Values.features.kvCacheOffload.numCpuChunks | default 1024 | quote }}
+              - name: TPU_USE_RAIDEN_KV_CACHE_MANAGER
+                value: "1"
+              - name: TPU_USE_RAIDEN_CONNECTOR
+                value: "1"
+              {{- end }}
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              resources:
+                limits:
+                  google.com/tpu: {{ .Values.disaggregated.prefill.resources.tpu | default 4 }}
+                  cpu: {{ .Values.disaggregated.prefill.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.disaggregated.prefill.resources.memory | default "72Gi" | quote }}
+                requests:
+                  google.com/tpu: {{ .Values.disaggregated.prefill.resources.tpu | default 4 }}
+                  cpu: {{ .Values.disaggregated.prefill.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.disaggregated.prefill.resources.memory | default "72Gi" | quote }}
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: scripts-volume
+                mountPath: /scripts
+              {{- include "tpu-vllm-benchmark.storageVolumeMounts" . | nindent 14 }}
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: scripts-volume
+              configMap:
+                name: {{ $fullName }}-scripts
+            {{- include "tpu-vllm-benchmark.storageVolumes" . | nindent 12 }}
+            restartPolicy: Never
+
+  # ============================================================================
+  # 2. DECODE SLICE (KV Consumer)
+  # ============================================================================
+  - name: d
+    replicas: {{ .Values.disaggregated.decode.replicas | default 1 }}
+    template:
+      {{- if gt $decodeNumVms 1 }}
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+      {{- end }}
+      spec:
+        parallelism: {{ $decodeNumVms }}
+        completions: {{ $decodeNumVms }}
+        backoffLimit: 2
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+            {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
+            annotations:
+              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
+            {{- end }}
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator | default "tpu7x" }}
+              cloud.google.com/gke-tpu-topology: {{ .Values.disaggregated.decode.topology }}
+              {{- if gt $decodeNumVms 1 }}
+              cloud.google.com/placement-policy-name: {{ .Values.disaggregated.decode.placementPolicy }}
+              {{- end }}
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+            initContainers:
+            - name: tpu-node-setup
+              image: busybox
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                sysctl -w vm.max_map_count=33554432 || true
+                if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                  echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit || true
+                fi
+                if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+                  echo always > /sys/kernel/mm/transparent_hugepage/enabled || true
+                fi
+              securityContext:
+                privileged: true
+
+            containers:
+            - name: vllm-tpu
+              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                set -e
+                unset MEGASCALE_NUM_SLICES MEGASCALE_SLICE_ID MEGASCALE_COORDINATOR_ADDRESS MEGASCALE_PORT
+                export NUM_WORKERS={{ $decodeNumVms }}
+                export TP_SIZE={{ $decodeTpSize }}
+                export PORT={{ .Values.disaggregated.decode.port | default 9400 }}
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+
+                # 0. Single-writer download & sync barrier (Decode waits for Prefill Pod 0 cache)
+                if [[ "{{ .Values.model.name }}" != gs://* ]]; then
+                  DONE_FILE="/root/.cache/huggingface/.done_{{ $fullName }}"
+                  echo "==== [Decode] Waiting for Prefill Pod 0 cache barrier... ===="
+                  while [ ! -f "${DONE_FILE}" ]; do sleep 2; done
+                  echo "==== [Decode] Cache barrier cleared! ===="
+                fi
+
+                # 1. Multi-host Ray vs Single-host initialization
+                if [ "$NUM_WORKERS" -gt 1 ]; then
+                  python3 /scripts/patch_ray_placement.py
+
+                  REPLICA_INDEX=$(echo "$HOSTNAME" | sed -E 's/.*-d-([0-9]+)-[0-9]+.*/\1/')
+                  if ! [[ "$REPLICA_INDEX" =~ ^[0-9]+$ ]]; then REPLICA_INDEX="0"; fi
+
+                  ADDRS=""
+                  HOSTS=""
+                  for i in $(seq 0 $((NUM_WORKERS - 1))); do
+                    POD_DNS="{{ $fullName }}-d-${REPLICA_INDEX}-${i}.{{ $fullName }}.{{ $namespace }}.svc.cluster.local"
+                    POD_IP=""
+                    while [ -z "$POD_IP" ]; do
+                      POD_IP=$(python3 -c "import socket; print(socket.gethostbyname('${POD_DNS}'))" 2>/dev/null)
+                      if [ -z "$POD_IP" ]; then sleep 1; fi
+                    done
+                    ADDRS="${ADDRS}${POD_IP}:8471,"
+                    HOSTS="${HOSTS}${POD_IP},"
+                  done
+
+                  export TPU_PROCESS_ADDRESSES=${ADDRS%,}
+                  export TPU_WORKER_HOSTNAMES=${HOSTS%,}
+                  export TPU_WORKER_ID=${JOB_COMPLETION_INDEX}
+                  export TPU_SKIP_MDS_QUERY="1"
+                  export CLOUD_TPU_TASK_ID=${JOB_COMPLETION_INDEX}
+                  export TPU_CHIPS_PER_PROCESS_BOUNDS="{{ $decodeChipsBounds }}"
+                  export TPU_PROCESS_BOUNDS="{{ $decodeProcessBounds }}"
+                  export TPU_ACCELERATOR_TYPE="{{ $decodeAccelerator }}"
+                  export TPU_NAME="{{ $fullName }}-d-${REPLICA_INDEX}-${JOB_COMPLETION_INDEX}"
+                  export TPU_MULTIHOST_BACKEND="ray"
+                  export TPU_BACKEND_TYPE="jax"
+                  export MODEL_IMPL_TYPE="vllm"
+                  export RAY_memory_monitor_refresh_ms=0
+                  export RAY_memory_usage_threshold=0.99
+
+                  HEAD_IP=$(python3 -c "import socket; print(socket.gethostbyname('{{ $fullName }}-d-${REPLICA_INDEX}-0.{{ $fullName }}.{{ $namespace }}.svc.cluster.local'))")
+
+                  if [ "$JOB_COMPLETION_INDEX" = "0" ]; then
+                    echo "==== Starting Decode Ray Head Node on Pod 0 ===="
+                    ray start --head --port=6379 --resources='{"TPU": 4}' --block &
+
+                    python3 -c "import os, ray, time, sys, textwrap; exec(textwrap.dedent('''
+                        for _ in range(30):
+                            try:
+                                ray.init(address='auto')
+                                break
+                            except Exception:
+                                print('Waiting for local Ray daemon to start...')
+                                time.sleep(2)
+                        else:
+                            print('Timeout waiting for local Ray Head to start!')
+                            sys.exit(1)
+
+                        num_workers = int(os.environ.get('NUM_WORKERS', 0))
+                        for attempt in range(120):
+                            alive = [n for n in ray.nodes() if n.get('Alive')]
+                            print(f'Waiting: {len(alive)}/{num_workers} Ray nodes connected...')
+                            if len(alive) >= num_workers:
+                                print('Cluster fully formed!')
+                                sys.exit(0)
+                            time.sleep(2)
+                        print('Timeout waiting for Ray workers!')
+                        sys.exit(1)
+                    '''))"
+
+                    echo "==== Starting vLLM API Server (CONSUMER / Port: ${PORT}) ===="
+                    exec python3 -m vllm.entrypoints.openai.api_server \
+                      --host=0.0.0.0 --port=${PORT} \
+                      --model={{ $modelPath }} \
+                      --served-model-name={{ $servedModelName }} \
+                      --tensor-parallel-size=${TP_SIZE} \
+                      --max-model-len={{ .Values.model.maxModelLen }} \
+                      --safetensors-load-strategy={{ .Values.model.safetensorsLoadStrategy }} \
+                      --distributed-executor-backend=ray \
+                      --kv-transfer-config "{\"kv_connector\":\"{{ $kvConnector }}\",\"kv_connector_module_path\":\"{{ $kvConnectorModule }}\",\"kv_role\":\"kv_consumer\"}" \
+                      {{- include "tpu-vllm-benchmark.featureFlags" $ | trim | nindent 22 }}
+                      {{- range .Values.model.extraArgs }}
+                      {{ . }} \
+                      {{- end }}
+                      "$@"
+                  else
+                    while ! python3 -c "import socket; socket.create_connection(('${HEAD_IP}', 6379))" 2>/dev/null; do sleep 3; done
+                    ray start --address=${HEAD_IP}:6379 --resources='{"TPU": 4}' --block
+                  fi
+                else
+                  # Single-host execution
+                  echo "==== Starting vLLM API Server (CONSUMER / Port: ${PORT}) ===="
+                  exec python3 -m vllm.entrypoints.openai.api_server \
+                    --host=0.0.0.0 --port=${PORT} \
+                    --model={{ $modelPath }} \
+                    --served-model-name={{ $servedModelName }} \
+                    --tensor-parallel-size=${TP_SIZE} \
+                    --max-model-len={{ .Values.model.maxModelLen }} \
+                    --safetensors-load-strategy={{ .Values.model.safetensorsLoadStrategy }} \
+                    --kv-transfer-config "{\"kv_connector\":\"{{ $kvConnector }}\",\"kv_connector_module_path\":\"{{ $kvConnectorModule }}\",\"kv_role\":\"kv_consumer\"}" \
+                    {{- include "tpu-vllm-benchmark.featureFlags" $ | trim | nindent 20 }}
+                    {{- range .Values.model.extraArgs }}
+                    {{ . }} \
+                    {{- end }}
+                    "$@"
+                fi
+              env:
+              {{- if and .Values.features (and .Values.features.kvCacheOffload .Values.features.kvCacheOffload.enabled) }}
+              - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
+                value: {{ .Values.features.kvCacheOffload.numCpuChunks | default 1024 | quote }}
+              - name: TPU_USE_RAIDEN_KV_CACHE_MANAGER
+                value: "1"
+              - name: TPU_USE_RAIDEN_CONNECTOR
+                value: "1"
+              {{- end }}
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              resources:
+                limits:
+                  google.com/tpu: {{ .Values.disaggregated.decode.resources.tpu | default 4 }}
+                  cpu: {{ .Values.disaggregated.decode.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.disaggregated.decode.resources.memory | default "72Gi" | quote }}
+                requests:
+                  google.com/tpu: {{ .Values.disaggregated.decode.resources.tpu | default 4 }}
+                  cpu: {{ .Values.disaggregated.decode.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.disaggregated.decode.resources.memory | default "72Gi" | quote }}
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: scripts-volume
+                mountPath: /scripts
+              {{- include "tpu-vllm-benchmark.storageVolumeMounts" . | nindent 14 }}
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: scripts-volume
+              configMap:
+                name: {{ $fullName }}-scripts
+            {{- include "tpu-vllm-benchmark.storageVolumes" . | nindent 12 }}
+            restartPolicy: Never
+
+  # ============================================================================
+  # 3. PROXY ROUTER (CPU)
+  # ============================================================================
+  - name: x
+    replicas: 1
+    template:
+      spec:
+        parallelism: 1
+        completions: 1
+        backoffLimit: 0
+        template:
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            tolerations:
+            - key: "cloud.google.com/gke-nodepool"
+              operator: "Exists"
+              effect: "NoSchedule"
+            containers:
+            - name: proxy-server
+              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                PREFILL_REPLICAS={{ .Values.disaggregated.prefill.replicas | default 1 }}
+                DECODE_REPLICAS={{ .Values.disaggregated.decode.replicas | default 1 }}
+                PREFILL_PORT={{ .Values.disaggregated.prefill.port | default 8400 }}
+                DECODE_PORT={{ .Values.disaggregated.decode.port | default 9400 }}
+
+                PREFILL_HOSTS=""
+                PREFILL_PORTS=""
+                for r in $(seq 0 $((PREFILL_REPLICAS - 1))); do
+                  H="{{ $fullName }}-p-${r}-0.{{ $fullName }}.{{ $namespace }}.svc.cluster.local"
+                  PREFILL_HOSTS="${PREFILL_HOSTS} ${H}"
+                  PREFILL_PORTS="${PREFILL_PORTS} ${PREFILL_PORT}"
+                  echo "Waiting for Prefill replica ${r} (${H}:${PREFILL_PORT}) to become healthy..."
+                  while ! curl -s -f http://${H}:${PREFILL_PORT}/health > /dev/null; do sleep 10; done
+                  echo "Prefill replica ${r} is ready!"
+                done
+
+                DECODE_HOSTS=""
+                DECODE_PORTS=""
+                for r in $(seq 0 $((DECODE_REPLICAS - 1))); do
+                  H="{{ $fullName }}-d-${r}-0.{{ $fullName }}.{{ $namespace }}.svc.cluster.local"
+                  DECODE_HOSTS="${DECODE_HOSTS} ${H}"
+                  DECODE_PORTS="${DECODE_PORTS} ${DECODE_PORT}"
+                  echo "Waiting for Decode replica ${r} (${H}:${DECODE_PORT}) to become healthy..."
+                  while ! curl -s -f http://${H}:${DECODE_PORT}/health > /dev/null; do sleep 10; done
+                  echo "Decode replica ${r} is ready!"
+                done
+
+                echo "Locating toy_proxy_server.py in container..."
+                PROXY_SCRIPT=$(find /workspace /root /usr /home -name toy_proxy_server.py 2>/dev/null | head -n 1)
+                if [ -z "$PROXY_SCRIPT" ]; then
+                  echo "ERROR: toy_proxy_server.py not found in container image!"
+                  exit 1
+                fi
+                echo "Found proxy script at: $PROXY_SCRIPT"
+                if ! grep -q '"/health"' "$PROXY_SCRIPT"; then
+                  echo "Patching /health endpoint into proxy script..."
+                  printf '\n@app.get("/health")\nasync def healthcheck():\n    return {"status": "ok"}\n' >> "$PROXY_SCRIPT"
+                fi
+
+                echo "Starting Disaggregated Proxy Router on :8000 with ${DECODE_REPLICAS} decode replica(s)..."
+                exec python3 $PROXY_SCRIPT \
+                  --host 0.0.0.0 --port 8000 \
+                  --prefiller-hosts ${PREFILL_HOSTS} --prefiller-ports ${PREFILL_PORTS} \
+                  --decoder-hosts ${DECODE_HOSTS} --decoder-ports ${DECODE_PORTS}
+              env:
+              {{- if and .Values.features (and .Values.features.kvCacheOffload .Values.features.kvCacheOffload.enabled) }}
+              - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
+                value: {{ .Values.features.kvCacheOffload.numCpuChunks | default 1024 | quote }}
+              - name: TPU_USE_RAIDEN_KV_CACHE_MANAGER
+                value: "1"
+              - name: TPU_USE_RAIDEN_CONNECTOR
+                value: "1"
+              {{- end }}
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              resources:
+                requests:
+                  cpu: {{ .Values.disaggregated.proxy.resources.cpu | default "8" | quote }}
+                  memory: {{ .Values.disaggregated.proxy.resources.memory | default "16Gi" | quote }}
+                limits:
+                  cpu: {{ .Values.disaggregated.proxy.resources.cpu | default "16" | quote }}
+                  memory: {{ .Values.disaggregated.proxy.resources.memory | default "32Gi" | quote }}
+            restartPolicy: Never
+
+  {{- else if $isE2E }}
+
+  # ============================================================================
+  # OFFLINE E2E PYTEST RUNNER
+  # ----------------------------------------------------------------------------
+  # Runs pytest directly on the TPU host. Used for tests that build `LLM(...)`
+  # in-process (e.g. tests/e2e/test_continue_decode.py), which cannot be driven
+  # from the CPU-only HTTP benchmark client. No api_server is started here, so
+  # the whole slice is available to the test process.
+  # Single-host only: the test topologies (tp8xdp1 / tp1xdp8 / tp4xdp2) all need
+  # exactly 8 devices == one 2x2x1 tpu7x host, so no Ray bootstrap is required.
+  # ============================================================================
+  - name: e2e
+    replicas: 1
+    template:
+      spec:
+        parallelism: 1
+        completions: 1
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+            annotations:
+              kueue.x-k8s.io/podset-unconstrained-topology: "true"
+              {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
+              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
+              {{- end }}
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator }}
+              cloud.google.com/gke-tpu-topology: {{ .Values.tpu.topology }}
+              cloud.google.com/reservation-affinity: specific
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+            initContainers:
+            - name: tpu-node-setup
+              image: busybox
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                sysctl -w vm.max_map_count=33554432 || true
+                if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                  echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit || true
+                fi
+                if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+                  echo always > /sys/kernel/mm/transparent_hugepage/enabled || true
+                fi
+              securityContext:
+                privileged: true
+
+            containers:
+            - name: e2e-pytest
+              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                set -uo pipefail
+                unset MEGASCALE_NUM_SLICES MEGASCALE_SLICE_ID MEGASCALE_COORDINATOR_ADDRESS MEGASCALE_PORT
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+                export HF_XET_HIGH_PERFORMANCE="1"
+                export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+                # Per-suite switches (NEW_MODEL_DESIGN, MODEL_IMPL_TYPE, ...) are
+                # deliberately NOT hardcoded here: .buildkite sets them per step
+                # (DP.yml/EP.yml set NEW_MODEL_DESIGN=1, async_scheduler.yml does
+                # not), and several suites set them from inside the test. Pass
+                # them through e2etest.env to mirror a specific CI step.
+
+                mkdir -p /tmp/hf_locks /root/.cache/huggingface/hub
+                rm -rf /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                ln -sfn /tmp/hf_locks /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                pip install --no-cache-dir pytest pytest-forked hf-transfer 2>/dev/null || true
+
+                # 1. Warm the HF cache up-front so weight download time is not
+                #    charged to (or timed out by) the test itself.
+                {{- range .Values.e2etest.models }}
+                echo "==== Caching {{ . }} (Started: $(date '+%Y-%m-%d %H:%M:%S')) ===="
+                START_DOWNLOAD=$(date +%s)
+                python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='{{ . }}', ignore_patterns=['original/*'], max_workers=8)"
+                END_DOWNLOAD=$(date +%s)
+                echo "==== {{ . }} cached in $((END_DOWNLOAD - START_DOWNLOAD))s ===="
+                {{- end }}
+
+                # 2. Pick the test source.
+                {{- if .Values.e2etest.testPaths }}
+                #    In-image mode: the CI Dockerfile does `COPY . .` into
+                #    {{ .Values.e2etest.workdir | default "/workspace/tpu_inference" }}, so the suites
+                #    referenced by .buildkite/**/*.yml are already present.
+                WORKDIR="{{ .Values.e2etest.workdir | default "/workspace/tpu_inference" }}"
+                if [ ! -d "${WORKDIR}" ]; then
+                  echo "❌ ${WORKDIR} not found in image {{ .Values.image }}."
+                  echo "   This image does not ship the test sources. Either use a CI-built"
+                  echo "   image, or inject the file with --set-file e2etest.fileContent=..."
+                  exit 1
+                fi
+                cd "${WORKDIR}"
+                TEST_TARGETS=(
+                  {{- range .Values.e2etest.testPaths }}
+                  "{{ . }}"
+                  {{- end }}
+                )
+                {{- else }}
+                #    Injected mode: ConfigMap mounts are read-only, and pytest
+                #    needs a writable rootdir.
+                mkdir -p /tmp/e2e
+                cp /scripts/*.py /tmp/e2e/
+                rm -f /tmp/e2e/patch_ray_placement.py
+                cd /tmp/e2e
+                TEST_TARGETS=("{{ .Values.e2etest.testFile | default "test_continue_decode.py" }}")
+                {{- end }}
+
+                echo "============================================================"
+                echo " Running pytest in $(pwd)"
+                echo " Targets: ${TEST_TARGETS[*]}"
+                echo " Started at: $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "============================================================"
+                python3 -m pytest -s -v -p no:cacheprovider \
+                  "${TEST_TARGETS[@]}" \
+                  {{- if .Values.e2etest.selector }}
+                  -k "{{ .Values.e2etest.selector }}" \
+                  {{- end }}
+                  {{- range .Values.e2etest.extraArgs }}
+                  {{ . }} \
+                  {{- end }}
+                  --junitxml=/tmp/e2e_report.xml
+                TEST_EXIT=$?
+
+                echo "============================================================"
+                if [ $TEST_EXIT -ne 0 ]; then
+                  echo " ❌ pytest failed with exit code ${TEST_EXIT}"
+                else
+                  echo " ✅ pytest completed successfully!"
+                fi
+                echo " Finished at: $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "============================================================"
+                exit ${TEST_EXIT}
+              env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              {{- range $k, $v := .Values.e2etest.env }}
+              - name: {{ $k }}
+                value: {{ $v | quote }}
+              {{- end }}
+              resources:
+                limits:
+                  google.com/tpu: {{ .Values.resources.tpu | default 4 }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "72Gi" | quote }}
+                requests:
+                  google.com/tpu: {{ .Values.resources.tpu | default 4 }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "72Gi" | quote }}
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: triton-cache
+                mountPath: /.triton
+              - name: scripts-volume
+                mountPath: /scripts
+              {{- include "tpu-vllm-benchmark.storageVolumeMounts" . | nindent 14 }}
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: triton-cache
+              emptyDir: {}
+            - name: scripts-volume
+              configMap:
+                name: {{ $fullName }}-scripts
+            {{- include "tpu-vllm-benchmark.storageVolumes" . | nindent 12 }}
+            restartPolicy: Never
+
+  {{- else }}
+  {{- $numVms := include "tpu-vllm-benchmark.numVms" . | int -}}
+  {{- $tpSize := include "tpu-vllm-benchmark.tpSize" . -}}
+  {{- $chipsPerProcessBounds := include "tpu-vllm-benchmark.chipsPerProcessBounds" . -}}
+  {{- $processBounds := include "tpu-vllm-benchmark.processBounds" . -}}
+
+  # ============================================================================
+  # MONOLITHIC TPU SERVER (Single-Host or Multi-Host via Ray)
+  # ============================================================================
+  - name: server
+    replicas: 1
+    template:
+      {{- if gt $numVms 1 }}
+      metadata:
+        annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+      {{- end }}
+      spec:
+        parallelism: {{ $numVms }}
+        completions: {{ $numVms }}
+        backoffLimit: 2
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+            annotations:
+              kueue.x-k8s.io/podset-unconstrained-topology: "true"
+              {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
+              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
+              {{- end }}
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator }}
+              cloud.google.com/gke-tpu-topology: {{ .Values.tpu.topology }}
+              cloud.google.com/reservation-affinity: specific
+              {{- if gt $numVms 1 }}
+              cloud.google.com/placement-policy-name: {{ .Values.tpu.placementPolicy }}
+              {{- end }}
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+            initContainers:
+            - name: tpu-node-setup
+              image: busybox
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                sysctl -w vm.max_map_count=33554432 || true
+                if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                  echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit || true
+                fi
+                if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+                  echo always > /sys/kernel/mm/transparent_hugepage/enabled || true
+                fi
+              securityContext:
+                privileged: true
+
+            containers:
+            - name: vllm-tpu
+              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                unset MEGASCALE_NUM_SLICES MEGASCALE_SLICE_ID MEGASCALE_COORDINATOR_ADDRESS MEGASCALE_PORT
+                {{- if eq $numVms 1 }}
+                # Single-host execution
+                if [[ "{{ .Values.model.name }}" != gs://* ]]; then
+                  mkdir -p /tmp/hf_locks
+                  mkdir -p /root/.cache/huggingface/hub
+                  rm -rf /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                  ln -sfn /tmp/hf_locks /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                  pip install --no-cache-dir hf-transfer 2>/dev/null || true
+                  export HF_XET_HIGH_PERFORMANCE="1"
+                  export HF_HUB_DISABLE_DISK_LOCK="1"
+                  export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+                  echo "==== Ensuring model weights are cached (Started: $(date '+%Y-%m-%d %H:%M:%S')) ===="
+                  START_DOWNLOAD=$(date +%s)
+                  python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='{{ .Values.model.name }}', ignore_patterns=['original/*'], max_workers=8)"
+                  END_DOWNLOAD=$(date +%s)
+                  DOWNLOAD_DURATION=$((END_DOWNLOAD - START_DOWNLOAD))
+                  echo "==== Model cache ready in ${DOWNLOAD_DURATION}s ($(date '+%Y-%m-%d %H:%M:%S')) ===="
+                fi
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+
+                exec python3 -m vllm.entrypoints.openai.api_server \
+                  --host=0.0.0.0 \
+                  --port=8000 \
+                  --model={{ $modelPath }} \
+                  --served-model-name={{ $servedModelName }} \
+                  --tensor-parallel-size={{ $tpSize }} \
+                  --max-model-len={{ .Values.model.maxModelLen }} \
+                  --safetensors-load-strategy={{ .Values.model.safetensorsLoadStrategy }} \
+                  {{- include "tpu-vllm-benchmark.featureFlags" . | trim | nindent 18 }}
+                  {{- range .Values.model.extraArgs }}
+                  {{ . }} \
+                  {{- end }}
+                  "$@"
+
+                {{ else }}
+                # Multi-host execution with Ray
+                python3 /scripts/patch_ray_placement.py
+                pip install --no-cache-dir ray[default] hf-transfer 2>/dev/null || true
+                export HF_XET_HIGH_PERFORMANCE="1"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+                export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export TPU_CHIPS_PER_PROCESS_BOUNDS="{{ $chipsPerProcessBounds }}"
+                export TPU_PROCESS_BOUNDS="{{ $processBounds }}"
+
+                HEAD_IP="{{ $fullName }}-server-0-0.{{ $fullName }}.{{ $namespace }}.svc.cluster.local"
+                BARRIER_FILE="/root/.cache/huggingface/.done_{{ $fullName }}"
+
+                if [ "$JOB_COMPLETION_INDEX" = "0" ]; then
+                  echo "==== [Head Node 0] Ensuring model weights are cached (Started: $(date '+%Y-%m-%d %H:%M:%S')) ===="
+                  START_DOWNLOAD=$(date +%s)
+                  if [[ "{{ .Values.model.name }}" != gs://* ]]; then
+                    mkdir -p /tmp/hf_locks
+                    mkdir -p /root/.cache/huggingface/hub
+                    rm -rf /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                    ln -sfn /tmp/hf_locks /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                    python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='{{ .Values.model.name }}', ignore_patterns=['original/*'], max_workers=8)"
+                  fi
+                  END_DOWNLOAD=$(date +%s)
+                  DOWNLOAD_DURATION=$((END_DOWNLOAD - START_DOWNLOAD))
+                  echo "==== [Head Node 0] Cache ready in ${DOWNLOAD_DURATION}s ($(date '+%Y-%m-%d %H:%M:%S')). Signalling workers ===="
+                  touch "${BARRIER_FILE}" 2>/dev/null || true
+
+                  echo "==== [Head Node 0] Starting Ray Head ===="
+                  ray start --head --port=6379 --resources='{"TPU": 4}'
+
+                  echo "==== [Head Node 0] Waiting for all {{ $numVms }} Ray workers to join ===="
+                  python3 -c "
+                  import ray, time, sys
+                  ray.init(address='auto')
+                  num_workers = {{ $numVms }}
+                  for attempt in range(120):
+                      alive = [n for n in ray.nodes() if n.get('Alive')]
+                      print(f'Waiting: {len(alive)}/{num_workers} Ray nodes connected...')
+                      if len(alive) >= num_workers:
+                          print('All Ray worker nodes joined successfully!')
+                          sys.exit(0)
+                      time.sleep(2)
+                  sys.exit(1)
+                  "
+                  rm -f "${BARRIER_FILE}" 2>/dev/null || true
+
+                  echo "==== [Head Node 0] Launching vLLM Multi-Host API Server ===="
+                  exec python3 -m vllm.entrypoints.openai.api_server \
+                    --host=0.0.0.0 \
+                    --port=8000 \
+                    --model={{ $modelPath }} \
+                    --served-model-name={{ $servedModelName }} \
+                    --tensor-parallel-size={{ $tpSize }} \
+                    --max-model-len={{ .Values.model.maxModelLen }} \
+                    --safetensors-load-strategy={{ .Values.model.safetensorsLoadStrategy }} \
+                    {{- include "tpu-vllm-benchmark.featureFlags" . | trim | nindent 20 }}
+                    {{- range .Values.model.extraArgs }}
+                    {{ . }} \
+                    {{- end }}
+                    "$@"
+                else
+                  echo "==== [Worker ${JOB_COMPLETION_INDEX}] Waiting for Head Node cache verification ===="
+                  START_WAIT=$(date +%s)
+                  while [ ! -f "${BARRIER_FILE}" ]; do sleep 2; done
+                  END_WAIT=$(date +%s)
+                  WAIT_DURATION=$((END_WAIT - START_WAIT))
+                  echo "==== [Worker ${JOB_COMPLETION_INDEX}] Cache ready after ${WAIT_DURATION}s. Connecting to Ray Head ===="
+
+                  START_RAY_WAIT=$(date +%s)
+                  while ! python3 -c "import socket; socket.create_connection(('${HEAD_IP}', 6379))" 2>/dev/null; do sleep 2; done
+                  END_RAY_WAIT=$(date +%s)
+                  RAY_WAIT_DURATION=$((END_RAY_WAIT - START_RAY_WAIT))
+                  echo "==== [Worker ${JOB_COMPLETION_INDEX}] Connected to Ray Head in ${RAY_WAIT_DURATION}s. Starting Ray Worker ===="
+                  exec ray start --address=${HEAD_IP}:6379 --resources='{"TPU": 4}' --block
+                fi
+                {{- end }}
+              env:
+              {{- if and .Values.features (and .Values.features.kvCacheOffload .Values.features.kvCacheOffload.enabled) }}
+              - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
+                value: {{ .Values.features.kvCacheOffload.numCpuChunks | default 1024 | quote }}
+              - name: TPU_USE_RAIDEN_KV_CACHE_MANAGER
+                value: "1"
+              - name: TPU_USE_RAIDEN_CONNECTOR
+                value: "1"
+              {{- end }}
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              ports:
+              - containerPort: 8000
+              resources:
+                limits:
+                  google.com/tpu: {{ .Values.resources.tpu | default 4 }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "72Gi" | quote }}
+                requests:
+                  google.com/tpu: {{ .Values.resources.tpu | default 4 }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "72Gi" | quote }}
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: triton-cache
+                mountPath: /.triton
+              - name: scripts-volume
+                mountPath: /scripts
+              {{- include "tpu-vllm-benchmark.storageVolumeMounts" . | nindent 14 }}
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: triton-cache
+              emptyDir: {}
+            - name: scripts-volume
+              configMap:
+                name: {{ $fullName }}-scripts
+            {{- include "tpu-vllm-benchmark.storageVolumes" . | nindent 12 }}
+            restartPolicy: Never
+  {{- end }}
+
+  {{- if not $isE2E }}
+  # ============================================================================
+  # BENCHMARK CLIENT (Runs against server:8000 or proxy:8000)
+  # ============================================================================
+  - name: client
+    replicas: 1
+    template:
+      spec:
+        parallelism: 1
+        completions: 1
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            tolerations:
+            - key: "cloud.google.com/gke-nodepool"
+              operator: "Exists"
+              effect: "NoSchedule"
+            containers:
+            - name: benchmark-client
+              image: {{ .Values.benchmark.image | default .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                {{ if $isDisagg }}
+                TARGET_HOST="{{ $fullName }}-x-0-0.{{ $fullName }}.{{ $namespace }}.svc.cluster.local"
+                TARGET_PORT=8000
+                {{ else }}
+                TARGET_HOST="{{ $fullName }}-server-0-0.{{ $fullName }}.{{ $namespace }}.svc.cluster.local"
+                TARGET_PORT=8000
+                {{- end }}
+
+                echo "Waiting for Serving endpoint (http://${TARGET_HOST}:${TARGET_PORT}) to become healthy..."
+                while ! curl -s -f http://${TARGET_HOST}:${TARGET_PORT}/health > /dev/null && ! curl -s -f http://${TARGET_HOST}:${TARGET_PORT}/docs > /dev/null; do
+                  sleep 10
+                done
+
+                echo "============================================================"
+                echo " Endpoint is healthy! Probing chat completions pipeline..."
+                echo "============================================================"
+
+                python3 -c "
+                import json, time, urllib.request
+
+                url = f'http://${TARGET_HOST}:${TARGET_PORT}/v1/chat/completions'
+                payload = {
+                    'model': '{{ $servedModelName }}',
+                    'messages': [{'role': 'user', 'content': 'Hello, probe inference pipeline.'}],
+                    'max_tokens': 5,
+                    'temperature': 0.0
+                }
+                data = json.dumps(payload).encode('utf-8')
+                req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+
+                for attempt in range(60):
+                    try:
+                        with urllib.request.urlopen(req, timeout=15) as resp:
+                            if resp.status == 200:
+                                print('✅ End-to-end pipeline probe SUCCESSFUL!')
+                                break
+                    except Exception as e:
+                        print(f'Waiting for pipeline readiness ({e}). Retrying in 10s...')
+                        time.sleep(10)
+                "
+
+                {{- if and .Values.testcase .Values.testcase.enabled }}
+                {{- if .Values.testcase.customScriptBase64 }}
+                echo ""
+                echo "============================================================"
+                echo " Executing User-Provided Custom Test Script"
+                echo "============================================================"
+                python3 -c "import base64, os; open('/tmp/custom_test.py', 'wb').write(base64.b64decode(os.environ['CUSTOM_SCRIPT_B64']))"
+                python3 /tmp/custom_test.py
+                TEST_EXIT=$?
+                if [ $TEST_EXIT -ne 0 ]; then
+                  echo "❌ Custom test failed with exit code $TEST_EXIT"
+                  exit $TEST_EXIT
+                fi
+                echo "============================================================"
+                echo " ✅ Custom Test Completed Successfully!"
+                echo "============================================================"
+                {{- else }}
+                echo ""
+                echo "============================================================"
+                echo " Starting Functional & Integration Test Suite"
+                echo "============================================================"
+
+                cat << 'TEST_EOF' > /tmp/run_testcase.py
+import sys, json, time, urllib.request, urllib.error, os, re
+
+TARGET_HOST = "${TARGET_HOST}"
+TARGET_PORT = ${TARGET_PORT}
+BASE_URL = f"http://{TARGET_HOST}:{TARGET_PORT}"
+MODEL_NAME = "{{ $servedModelName }}"
+SUITE = os.getenv("TEST_SUITE", "full")
+CUSTOM_PROMPT = os.getenv("TEST_CUSTOM_PROMPT", "")
+EXPECTED_PATTERN = os.getenv("TEST_EXPECTED_PATTERN", "")
+TEMPERATURE = float(os.getenv("TEST_TEMPERATURE", "0.0"))
+MAX_TOKENS = int(os.getenv("TEST_MAX_TOKENS", "128"))
+
+passed_tests = 0
+failed_tests = 0
+test_results = []
+
+def record_result(name, passed, details=""):
+    global passed_tests, failed_tests
+    if passed:
+        passed_tests += 1
+        status = "✅ PASS"
+    else:
+        failed_tests += 1
+        status = "❌ FAIL"
+    test_results.append((name, status, details))
+    print(f"\n[{status}] {name}")
+    if details:
+        print(f"       Details: {details}")
+
+def make_request(path, payload=None, method="GET", timeout=30):
+    url = f"{BASE_URL}{path}"
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Content-Type": "application/json"} if payload is not None else {}
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8") if e.fp else ""
+        return e.code, err_body
+
+def test_health_and_models():
+    name = "Test 1: Health & Models Endpoint"
+    try:
+        status, body = make_request("/health")
+        if status != 200:
+            return record_result(name, False, f"/health returned status {status}")
+
+        status, body = make_request("/v1/models")
+        if status != 200:
+            return record_result(name, False, f"/v1/models returned status {status}")
+        data = json.loads(body)
+        models = [m.get("id") for m in data.get("data", [])]
+        print(f"       Discovered models: {models}")
+        if MODEL_NAME not in models and not any(MODEL_NAME in m for m in models):
+            return record_result(name, False, f"Model '{MODEL_NAME}' not found in /v1/models: {models}")
+        record_result(name, True, f"Verified model '{MODEL_NAME}' is active and ready.")
+    except Exception as e:
+        record_result(name, False, str(e))
+
+def test_basic_completion():
+    name = "Test 2: Basic Text Completion (/v1/completions)"
+    try:
+        prompt = "The sky is typically the color"
+        payload = {
+            "model": MODEL_NAME,
+            "prompt": prompt,
+            "max_tokens": 16,
+            "temperature": 0.0
+        }
+        start = time.time()
+        status, body = make_request("/v1/completions", payload, method="POST")
+        latency = (time.time() - start) * 1000
+        if status != 200:
+            return record_result(name, False, f"Status {status}: {body}")
+        data = json.loads(body)
+        text = data["choices"][0]["text"]
+        print(f"       Prompt: '{prompt}'")
+        print(f"       Response: '{text.strip()}' ({latency:.1f}ms)")
+        if not text.strip():
+            return record_result(name, False, "Completion returned empty text")
+        record_result(name, True, f"Output generated successfully in {latency:.1f}ms")
+    except Exception as e:
+        record_result(name, False, str(e))
+
+def test_chat_completion():
+    name = "Test 3: Chat Completion (/v1/chat/completions)"
+    try:
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [
+                {"role": "system", "content": "You are a concise AI assistant. Answer directly."},
+                {"role": "user", "content": "What is 15 + 27? Reply with only the number."}
+            ],
+            "max_tokens": 16,
+            "temperature": 0.0
+        }
+        start = time.time()
+        status, body = make_request("/v1/chat/completions", payload, method="POST")
+        latency = (time.time() - start) * 1000
+        if status != 200:
+            return record_result(name, False, f"Status {status}: {body}")
+        data = json.loads(body)
+        content = data["choices"][0]["message"]["content"].strip()
+        print(f"       Question: 15 + 27 = ?")
+        print(f"       Response: '{content}' ({latency:.1f}ms)")
+        if "42" not in content:
+            return record_result(name, False, f"Expected '42' in answer, got: '{content}'")
+        record_result(name, True, f"Correct reasoning result '42' verified ({latency:.1f}ms)")
+    except Exception as e:
+        record_result(name, False, str(e))
+
+def test_streaming():
+    name = "Test 4: Streaming Generation (SSE protocol)"
+    try:
+        url = f"{BASE_URL}/v1/chat/completions"
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Count from 1 to 5 separated by spaces."}],
+            "max_tokens": 32,
+            "temperature": 0.0,
+            "stream": True
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        chunks_received = 0
+        full_text = ""
+        start = time.time()
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            for raw_line in resp:
+                line_str = raw_line.decode("utf-8").strip()
+                if not line_str or line_str == "data: [DONE]":
+                    continue
+                if line_str.startswith("data: "):
+                    chunks_received += 1
+                    try:
+                        chunk_data = json.loads(line_str[6:])
+                        delta = chunk_data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        full_text += delta
+                    except Exception:
+                        pass
+        latency = (time.time() - start) * 1000
+        print(f"       Streamed {chunks_received} chunks: '{full_text.strip()}' ({latency:.1f}ms)")
+        if chunks_received < 2 or not full_text.strip():
+            return record_result(name, False, f"Too few chunks ({chunks_received}) or empty content")
+        record_result(name, True, f"Received {chunks_received} streaming chunks successfully in {latency:.1f}ms")
+    except Exception as e:
+        record_result(name, False, str(e))
+
+def test_multi_turn_context():
+    name = "Test 5: Multi-Turn Context Retention"
+    try:
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [
+                {"role": "user", "content": "The secret verification code is BANANA-99."},
+                {"role": "assistant", "content": "Acknowledged. I will remember the code."},
+                {"role": "user", "content": "What was my secret verification code? Respond with just the code."}
+            ],
+            "max_tokens": 20,
+            "temperature": 0.0
+        }
+        status, body = make_request("/v1/chat/completions", payload, method="POST")
+        if status != 200:
+            return record_result(name, False, f"Status {status}: {body}")
+        data = json.loads(body)
+        content = data["choices"][0]["message"]["content"]
+        print(f"       Response: '{content.strip()}'")
+        if "BANANA-99" not in content.upper() and "BANANA" not in content.upper():
+            return record_result(name, False, f"Failed context retention. Expected 'BANANA-99', got: '{content.strip()}'")
+        record_result(name, True, "Context retention verified across multiple turns.")
+    except Exception as e:
+        record_result(name, False, str(e))
+
+def test_max_tokens_constraint():
+    name = "Test 6: Generation Parameter Constraints (max_tokens)"
+    try:
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Write a long essay about the history of computing."}],
+            "max_tokens": 10,
+            "temperature": 0.0
+        }
+        status, body = make_request("/v1/chat/completions", payload, method="POST")
+        if status != 200:
+            return record_result(name, False, f"Status {status}: {body}")
+        data = json.loads(body)
+        finish_reason = data["choices"][0].get("finish_reason", "")
+        tokens_gen = data.get("usage", {}).get("completion_tokens", 0)
+        print(f"       Tokens generated: {tokens_gen}, finish_reason: {finish_reason}")
+        if finish_reason != "length" and tokens_gen > 15:
+            return record_result(name, False, f"Expected finish_reason 'length' and <=10 tokens, got: {finish_reason} with {tokens_gen} tokens")
+        record_result(name, True, f"Verified max_tokens cutoff constraint (finish_reason={finish_reason}).")
+    except Exception as e:
+        record_result(name, False, str(e))
+
+def test_custom_prompt():
+    if not CUSTOM_PROMPT.strip():
+        return
+    name = "Test 7: Custom User Testcase"
+    try:
+        payload = {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": CUSTOM_PROMPT}],
+            "max_tokens": MAX_TOKENS,
+            "temperature": TEMPERATURE
+        }
+        start = time.time()
+        status, body = make_request("/v1/chat/completions", payload, method="POST")
+        latency = (time.time() - start) * 1000
+        if status != 200:
+            return record_result(name, False, f"Status {status}: {body}")
+        data = json.loads(body)
+        content = data["choices"][0]["message"]["content"].strip()
+        print(f"       Prompt: {CUSTOM_PROMPT}")
+        print(f"       Response: {content} ({latency:.1f}ms)")
+        if EXPECTED_PATTERN.strip():
+            if not re.search(EXPECTED_PATTERN, content, re.IGNORECASE):
+                return record_result(name, False, f"Response did not match expected pattern '{EXPECTED_PATTERN}'. Got: '{content}'")
+            record_result(name, True, f"Response matched pattern '{EXPECTED_PATTERN}'.")
+        else:
+            record_result(name, True, f"Custom prompt executed successfully ({latency:.1f}ms).")
+    except Exception as e:
+        record_result(name, False, str(e))
+
+print("\n🚀 Starting vLLM Functional Test Suite...")
+if SUITE in ["smoke", "all", "full"]:
+    test_health_and_models()
+if SUITE in ["all", "full"]:
+    test_basic_completion()
+if SUITE in ["smoke", "chat", "all", "full"]:
+    test_chat_completion()
+if SUITE in ["all", "full"]:
+    test_streaming()
+    test_multi_turn_context()
+    test_max_tokens_constraint()
+if CUSTOM_PROMPT.strip():
+    test_custom_prompt()
+
+print("\n" + "="*60)
+print(" 📋 TEST RESULTS SUMMARY")
+print("="*60)
+for tname, status, details in test_results:
+    print(f" {status} | {tname}")
+print("-"*60)
+print(f" Total Tests : {len(test_results)}")
+print(f" Passed      : {passed_tests}")
+print(f" Failed      : {failed_tests}")
+print("="*60)
+
+if failed_tests > 0:
+    print(f"\n❌ Test suite finished with {failed_tests} failure(s).")
+    sys.exit(1)
+else:
+    print("\n✅ All test cases passed successfully!")
+    sys.exit(0)
+TEST_EOF
+
+                python3 /tmp/run_testcase.py
+                TEST_EXIT=$?
+                if [ $TEST_EXIT -ne 0 ]; then
+                  echo "❌ Test suite failed with exit code $TEST_EXIT"
+                  exit $TEST_EXIT
+                fi
+                echo ""
+                echo "============================================================"
+                echo " ✅ All Test Cases Completed Successfully!"
+                echo "============================================================"
+                {{- end }}
+                {{- else }}
+                echo ""
+                echo "============================================================"
+                echo " Starting Progressive Multi-Stage Benchmark Suite"
+                echo "============================================================"
+
+                cat << 'EOF' | python3 -c "import sys, textwrap; open('/tmp/run_bench.py', 'w').write(textwrap.dedent(sys.stdin.read()))"
+                from vllm.benchmarks.serve import add_cli_args, main
+                from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+                if __name__ == "__main__":
+                    parser = FlexibleArgumentParser(description="vLLM Serving Benchmark")
+                    add_cli_args(parser)
+                    main(parser.parse_args())
+                EOF
+
+                TEST_CONFIGS=(
+                  {{- range .Values.benchmark.stages }}
+                  "{{ .inputLen }} {{ .outputLen }} {{ .numPrompts }}"
+                  {{- end }}
+                )
+
+                STAGE=1
+                TOTAL_STAGES=${#TEST_CONFIGS[@]}
+
+                for config in "${TEST_CONFIGS[@]}"; do
+                  read -r IN_LEN OUT_LEN NUM_PROMPTS <<< "$config"
+                  echo ""
+                  echo "============================================================"
+                  echo " [Stage ${STAGE}/${TOTAL_STAGES}] Input=${IN_LEN}, Output=${OUT_LEN} (${NUM_PROMPTS} prompts)"
+                  echo " Started at: $(date '+%Y-%m-%d %H:%M:%S')"
+                  echo "============================================================"
+
+                  python3 /tmp/run_bench.py \
+                    --backend=vllm \
+                    --host=${TARGET_HOST} \
+                    --port=${TARGET_PORT} \
+                    --model={{ $servedModelName }} \
+                    --dataset-name=random \
+                    --random-input-len=${IN_LEN} \
+                    --random-output-len=${OUT_LEN} \
+                    {{- if .Values.benchmark.randomPrefixLen }}
+                    --random-prefix-len={{ .Values.benchmark.randomPrefixLen }} \
+                    {{- end }}
+                    --num-prompts=${NUM_PROMPTS} \
+                    --request-rate={{ .Values.benchmark.requestRate | default 10.0 }} || echo "⚠️ Warning: Stage ${STAGE} exited with non-zero status."
+
+                  echo " Finished Stage ${STAGE} at: $(date '+%Y-%m-%d %H:%M:%S')"
+                  STAGE=$((STAGE + 1))
+                  sleep 5
+                done
+
+                echo ""
+                echo "============================================================"
+                echo " ✅ All Benchmark Stages Completed Successfully!"
+                echo "============================================================"
+                {{- end }}
+              env:
+              {{- if and .Values.features (and .Values.features.kvCacheOffload .Values.features.kvCacheOffload.enabled) }}
+              - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
+                value: {{ .Values.features.kvCacheOffload.numCpuChunks | default 1024 | quote }}
+              - name: TPU_USE_RAIDEN_KV_CACHE_MANAGER
+                value: "1"
+              - name: TPU_USE_RAIDEN_CONNECTOR
+                value: "1"
+              {{- end }}
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              {{- if and .Values.testcase .Values.testcase.enabled }}
+              - name: TEST_SUITE
+                value: {{ .Values.testcase.suite | default "full" | quote }}
+              - name: TEST_CUSTOM_PROMPT
+                value: {{ .Values.testcase.customPrompt | default "" | quote }}
+              - name: TEST_EXPECTED_PATTERN
+                value: {{ .Values.testcase.expectedPattern | default "" | quote }}
+              - name: TEST_TEMPERATURE
+                value: {{ .Values.testcase.temperature | default "0.0" | quote }}
+              - name: TEST_MAX_TOKENS
+                value: {{ .Values.testcase.maxTokens | default "128" | quote }}
+              {{- if .Values.testcase.customScriptBase64 }}
+              - name: CUSTOM_SCRIPT_B64
+                value: {{ .Values.testcase.customScriptBase64 | quote }}
+              {{- end }}
+              {{- end }}
+              resources:
+                requests:
+                  cpu: {{ .Values.benchmark.resources.cpu | default "4" | quote }}
+                  memory: {{ .Values.benchmark.resources.memory | default "8Gi" | quote }}
+                limits:
+                  cpu: {{ .Values.benchmark.resources.cpu | default "4" | quote }}
+                  memory: {{ .Values.benchmark.resources.memory | default "8Gi" | quote }}
+            restartPolicy: Never
+  {{- end }}

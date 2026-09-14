@@ -1,0 +1,48 @@
+{{- $fullName := include "tpu-vllm-benchmark.fullname" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullName }}-scripts
+  namespace: {{ .Release.Namespace | default "default" }}
+data:
+  patch_ray_placement.py: |
+    import glob, re, textwrap
+
+    code_to_insert = r"""
+    def _get_node_sort_key(node):
+        labels = node.get("Labels", {}) or {}
+        tpu_worker_id = labels.get("ray.io/tpu-worker-id")
+        if tpu_worker_id is not None:
+            try:
+                return (0, int(tpu_worker_id))
+            except ValueError:
+                pass
+        hostname = node.get("NodeManagerHostname", "") or ""
+        match = re.search(r"-(\d+)$", hostname)
+        if match:
+            return (1, int(match.group(1)))
+        return (2, node.get("NodeManagerAddress") or node.get("NodeName", ""))
+
+    nodes_with_device.sort(key=_get_node_sort_key)
+    logger.info(f"RayDistributedExecutorV2 | Sorted nodes: {[(n.get('NodeManagerHostname'), n.get('NodeManagerAddress'), _get_node_sort_key(n)) for n in nodes_with_device]}")
+    placement_group_specs = [{device_str: (node["Resources"][device_str] if pp_size == 1 else self.vllm_config.sharding_config.total_devices), f"node:{node.get('NodeManagerAddress') or node.get('NodeName')}": 0.001} for node in nodes_with_device]
+    """
+
+    indented_block = textwrap.indent(textwrap.dedent(code_to_insert).strip(), '        ')
+
+    for p in glob.glob('/workspace/**/ray_distributed_executor*.py', recursive=True) + glob.glob('/usr/local/lib/**/ray_distributed_executor*.py', recursive=True):
+        try:
+            t = open(p).read()
+            if '_get_node_sort_key' not in t:
+                t = t.replace('import os', 'import os, re')
+                t = re.sub(r' +if pp_size == 1:[\s\S]*?placement_group_specs\[0\]\[f"node:\{current_ip\}"\] = 0\.001', lambda m: indented_block, t)
+                open(p, 'w').write(t)
+                print('Patched Ray placement pinning in:', p)
+        except Exception as e:
+            print('Patch error:', e)
+{{- if and .Values.e2etest .Values.e2etest.enabled .Values.e2etest.fileContent }}
+  {{ .Values.e2etest.testFile | default "test_continue_decode.py" }}: |
+{{ .Values.e2etest.fileContent | indent 4 }}
+  conftest.py: |
+{{ .Values.e2etest.conftestContent | default "# no conftest injected\n" | indent 4 }}
+{{- end }}

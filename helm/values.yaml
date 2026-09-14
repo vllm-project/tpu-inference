@@ -1,0 +1,196 @@
+# ==============================================================================
+# TPU vLLM Benchmark Helm Chart Configuration (values.yaml)
+# ==============================================================================
+
+# Serving Mode:
+# - "aggregated"    : Default monolithic serving (1 TPU slice runs both prefill & decode)
+# - "disaggregated" : Disaggregated serving (Separate Prefill & Decode TPU slices with Proxy Router)
+mode: "aggregated"
+
+# Container Image Configuration
+image: "docker.io/vllm/vllm-tpu:v0.27.0"  # Default vLLM TPU container image (tpu-inference)
+
+# Model Configuration
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"  # HuggingFace repo ID or GCS path (gs://bucket/dir)
+  servedName: ""                            # Optional: Custom served model name (inferred from model.name if omitted)
+  maxModelLen: 4096                         # Maximum context length supported by the server
+  safetensorsLoadStrategy: "prefetch"       # Strategy for loading safetensors weights
+  extraArgs: []                             # Extra CLI flags to pass to vllm serve
+
+# Advanced Inference & Serving Features (Bulk & Low-Latency)
+features:
+  # Bulk inference optimizations:
+  asyncScheduling: true               # Overlap CPU batch scheduling with TPU execution (--async-scheduling)
+  kvCacheOffload:
+    enabled: false                    # Enable offloading KV cache blocks from TPU HBM to Host DRAM
+    connector: "RaidenOffloadConnector" # "RaidenOffloadConnector" or "TPUOffloadConnector"
+    numCpuChunks: 1024                # Number of host memory chunks allocated for offloading
+
+  # Prod low-latency optimizations:
+  prefixCaching: true                 # Automatic Prefix Caching (APC) for prompt reuse (--enable-prefix-caching)
+  chunkedPrefill:
+    enabled: true                     # Interleave prefill chunks with decode steps (--enable-chunked-prefill)
+    maxNumBatchedTokens: 2048         # Maximum batched tokens per step (--max-num-batched-tokens)
+
+  wideEP:
+    enabled: false                    # Wide Expert Parallelism for MoE models (--enable-expert-parallel)
+    size: 1                           # Degree of expert parallelism (e.g. 8 or 16)
+
+  speculativeDecoding:
+    enabled: false                    # Speculative decoding (e.g. Eagle3)
+    method: "eagle3"                  # Speculative decoding method ("eagle3", "ngram", etc.)
+    draftModel: ""                    # Draft model repo ID or path (--speculative-model)
+    numSpeculativeTokens: 3           # Candidate tokens proposed per step (--num-speculative-tokens)
+
+  structuredOutput:
+    enabled: false                    # Grammar-guided structured decoding (JSON schema)
+    backend: "auto"                   # Grammar backend engine ("auto", "xgrammar", "outlines")
+
+# Monolithic TPU Hardware Configuration (Active when mode == "aggregated")
+tpu:
+  accelerator: "tpu7x"                      # TPU accelerator type
+  topology: "2x2x1"                         # TPU topology shape: "2x2x1" (1 VM / 8 cores) or "2x2x4" (4 VMs / 32 cores)
+  placementPolicy: ""                       # Placement policy (required for multihost topologies)
+  chipsPerProcessBounds: ""                 # Chip bounds (e.g. "2,2,1", auto-computed if empty)
+  processBounds: ""                         # Process bounds (e.g. "1,1,1" for 2x2x1, "1,1,4" for 2x2x4, auto-computed if empty)
+  tensorParallelSize: 0                     # 0 = auto-computed from topology (chips * 2)
+
+# Disaggregated Architecture Configuration (Active when mode == "disaggregated")
+disaggregated:
+  kvConnector: "TPUConnector"               # "TPUConnector" (vllm-tpu) or "TPURaidenConnector" (torchtpu)
+  kvConnectorModule: ""                     # Auto-detected if empty
+
+  # Prefill Slice (KV Producer)
+  prefill:
+    replicas: 1                             # Number of Prefill slices
+    topology: "2x2x1"                       # Prefill TPU topology shape (e.g. 2x2x1)
+    port: 8400                              # API server port for prefiller
+    placementPolicy: ""                     # Placement policy (if multihost)
+    chipsPerProcessBounds: ""               # Auto-computed if empty
+    processBounds: ""                       # Auto-computed if empty
+    tensorParallelSize: 0                   # Auto-computed if 0
+    resources:
+      cpu: "32"
+      memory: "72Gi"
+      tpu: 4
+
+  # Decode Slice (KV Consumer)
+  decode:
+    replicas: 1                             # Number of Decode slices (e.g. 2 for 2x 2x2x1 horizontal scaling)
+    topology: "2x2x2"                       # Decode TPU topology shape (e.g. 2x2x1 symmetric or 2x2x2 asymmetric)
+    port: 9400                              # API server port for decoder
+    placementPolicy: ""                     # Placement policy (if multihost, e.g. 2x2x2 or 2x2x4)
+    chipsPerProcessBounds: ""               # Auto-computed if empty
+    processBounds: ""                       # Auto-computed if empty
+    tensorParallelSize: 0                   # Auto-computed if 0
+    resources:
+      cpu: "32"
+      memory: "72Gi"
+      tpu: 4
+
+  # Disaggregated Proxy Router (CPU)
+  proxy:
+    port: 8000
+    resources:
+      cpu: "8"
+      memory: "16Gi"
+
+# Storage & Weight Caching (Shared across both modes)
+storage:
+  type: "gcs-cache"                         # "gcs-cache" (GCS FUSE cache) | "ramdisk" (Pure In-Memory) | "gcs-direct" (Direct GCS Model Mount)
+  bucketName: "<your-hf-cache-bucket>"          # GCS Bucket name
+  cacheSubpath: "hf-cache"                  # Subfolder in GCS bucket for HuggingFace cache
+  ramCacheLimit: "32Gi"                     # EmptyDir memory cache limit for GCS FUSE
+  gcsFuse:
+    memoryLimit: "72Gi"
+    cpuLimit: "8"
+
+# Security & Identity
+serviceAccount: "vllm-sa"
+hfTokenSecret:
+  name: "hf-token-secret"
+  key: "HF_TOKEN"
+
+# Monolithic Compute Resources (Per TPU Server Node when mode == "aggregated")
+resources:
+  cpu: "32"
+  memory: "200Gi"
+  tpu: 4
+
+# Job Duration & Queue Management
+job:
+  declaredDurationMinutes: 90               # Max declared duration for Kueue scheduling
+  priorityClass: "medium"
+
+# Progressive Benchmark Client Configuration
+benchmark:
+  image: ""                                 # Optional: override benchmark client image
+  requestRate: 10.0                         # Benchmark traffic rate in req/s
+  randomPrefixLen: 0                        # Length of fixed shared prompt prefix across requests (>0 enables Prefix Caching test)
+  stages:
+    - inputLen: 128
+      outputLen: 128
+      numPrompts: 100
+    - inputLen: 512
+      outputLen: 256
+      numPrompts: 100
+    - inputLen: 1024
+      outputLen: 512
+      numPrompts: 100
+    - inputLen: 2048
+      outputLen: 512
+      numPrompts: 100
+    - inputLen: 3072
+      outputLen: 512
+      numPrompts: 100
+  resources:
+    cpu: "4"
+    memory: "8Gi"
+
+# Functional / Integration Test Case Client Configuration
+testcase:
+  enabled: false                            # Set to true to execute functional test cases instead of benchmark
+  suite: "full"                             # Options: "full", "smoke", "chat", "custom"
+  customPrompt: ""                          # Optional: custom prompt to evaluate
+  expectedPattern: ""                       # Optional: regex pattern expected in output
+  temperature: 0.0                          # Sampling temperature for test cases
+  maxTokens: 128                            # Max output tokens
+  customScriptBase64: ""                    # Optional: base64-encoded custom python script
+
+# ==============================================================================
+# Offline (in-process) pytest runner
+# ------------------------------------------------------------------------------
+# Runs tests/e2e/*.py directly ON the TPU pod (tests that construct `LLM(...)`
+# in-process cannot use the CPU-only HTTP benchmark client).
+# When enabled: the api_server ("server") job and the benchmark "client" job are
+# NOT rendered, and the JobSet succeeds when the pytest job exits 0.
+# ==============================================================================
+e2etest:
+  enabled: false                            # Set to true to run pytest instead of serving/benchmarking
+
+  # --- Test source: pick ONE of the two modes below ---
+  # Mode 1 (in-image, mirrors .buildkite): paths/node-ids that already exist in
+  # the image. docker/Dockerfile does `COPY . .` into /workspace/tpu_inference,
+  # so CI-built images ship the whole tests/ tree.
+  #   e.g. ["tests/e2e/test_continue_decode.py::test_continue_decode_correctness_matrix"]
+  testPaths: []
+  workdir: "/workspace/tpu_inference"       # pytest rootdir for in-image mode
+  # Mode 2 (inject a local file): use when the image has no tests/, or to run
+  # local edits that are not pushed yet.
+  testFile: ""                              # File name as mounted from the ConfigMap
+  fileContent: ""                           # Injected via --set-file e2etest.fileContent=tests/e2e/<test>.py
+  conftestContent: ""                       # Injected via --set-file e2etest.conftestContent=tests/conftest.py
+
+  selector: ""                              # pytest -k expression, e.g. "correctness_DP_torchax"
+  extraArgs:                                # Extra pytest flags
+    - "-x"
+    - "--durations=0"
+  models:                                   # Warm the HF cache before pytest starts
+    - "meta-llama/Llama-3.1-8B-Instruct"
+    - "Qwen/Qwen1.5-MoE-A2.7B"
+  # Env vars for the test pod. Mirror the `env:` block of the .buildkite step you
+  # are reproducing -- the job does NOT hardcode per-suite switches.
+  #   e.g. NEW_MODEL_DESIGN: "1"  (set by DP.yml / EP.yml, but not async_scheduler.yml)
+  #        JAX_COMPILATION_CACHE_DIR: "/root/.cache/jax"
+  env: {}

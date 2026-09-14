@@ -1,0 +1,22 @@
+# Values for single-host Llama-3.1-8B-Instruct benchmark on TPU v7x-8
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  maxModelLen: 4096
+
+tpu:
+  topology: "2x2x1"
+  accelerator: "tpu7x"
+
+storage:
+  type: "gcs-cache"
+  bucketName: "<your-hf-cache-bucket>"
+  cacheSubpath: "hf-cache"
+  ramCacheLimit: "32Gi"
+
+resources:
+  cpu: "32"
+  memory: "72Gi"
+  tpu: 4
+
+job:
+  declaredDurationMinutes: 90
