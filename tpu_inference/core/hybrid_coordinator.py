@@ -40,11 +40,15 @@ logger = init_logger(__name__)
 #    - Non-DP Serving (DP=1):
 #      Runs in the same process where KVCacheManager registered the total capacity via
 #      set_mamba_num_blocks().
-#    - Multi-process serving (Ray / multiproc executor): the runner is not in the
-#      engine-core process, so `install_hybrid_coordinator_hooks` wraps
-#      `EngineCore._initialize_kv_caches` to fetch the allocated row count from the
-#      workers (`collective_rpc("get_mamba_num_blocks")`) and write it to the same
-#      places, plus `kv_cache_config.mamba_num_blocks`, before the scheduler is built.
+#    - Multi-process serving (Ray / multiproc executor): the runner's process is not
+#      the engine-core process, so neither write above is visible there. The TPU
+#      executors mix in `MambaPoolSyncExecutorMixin`: right after the workers have
+#      allocated their caches (`Executor.initialize_from_config`, still inside
+#      `EngineCore._initialize_kv_caches`, before any scheduler is built) it fetches
+#      the allocated row count with `collective_rpc("get_mamba_num_blocks")` and
+#      writes it to the same two places plus `kv_cache_config.mamba_num_blocks`.
+#      (The engine-core process only re-runs the platform config hook after the
+#      engine is built, so a hook installed from there would be too late.)
 #    - Last resort: `derive_mamba_num_blocks` recomputes the runner's sizing from
 #      VllmConfig. It cannot see the runner's HBM re-split, so it only runs, with a
 #      warning, when the RPC channel above did not.
@@ -683,15 +687,21 @@ def tpu_get_kv_cache_coordinator(
     return orig_get_kv_cache_coordinator(kv_cache_config, *args, **kwargs)
 
 
-def propagate_mamba_num_blocks(engine_core: Any, kv_cache_config: Any,
+def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
                                vllm_config: Any) -> int | None:
     """Fetch the mamba pool size the workers allocated and publish it in the
-    engine-core process, after KV cache init and before the scheduler is
-    built. Returns None when no worker reported one (no mamba layers)."""
+    engine-core process.
+
+    `rpc_owner` is anything with vLLM's `collective_rpc(method)` (the executor
+    or the engine core). Call it after every worker has run
+    `initialize_kv_cache` and before the scheduler is built. Returns the
+    value, or None when no worker reported one (no mamba layers, or compact
+    sizing did not run) so callers fall back to derivation.
+    """
     if not any(is_mamba_group(g) for g in kv_cache_config.kv_cache_groups):
         return None
     reported = [
-        v for v in engine_core.collective_rpc("get_mamba_num_blocks")
+        v for v in rpc_owner.collective_rpc("get_mamba_num_blocks")
         if v is not None
     ]
     if not reported:
@@ -714,27 +724,35 @@ def propagate_mamba_num_blocks(engine_core: Any, kv_cache_config: Any,
     return mamba_num_blocks
 
 
-def _install_engine_core_hook(engine_core_cls: type | None = None) -> None:
-    """Wrap `EngineCore._initialize_kv_caches` so the worker-allocated mamba
-    pool size reaches the engine-core process before the scheduler exists."""
-    import functools
+class MambaPoolSyncExecutorMixin:
+    """Executor mixin: publish the workers' allocated mamba pool size in the
+    engine-core process as soon as the KV caches exist.
 
-    if engine_core_cls is None:
-        import vllm.v1.engine.core as core_mod
-        engine_core_cls = core_mod.EngineCore
+    `Executor.initialize_from_config` runs in the engine-core process inside
+    `EngineCore._initialize_kv_caches`, after every worker has allocated its
+    caches and before vLLM builds the scheduler, so this is the earliest point
+    where the allocated size is known and the last point where the scheduler
+    can still pick it up. Mix in ahead of the vLLM executor base class.
+    """
 
-    original = engine_core_cls._initialize_kv_caches
-    if getattr(original, "_tpu_mamba_hook", False):
-        return
+    def initialize_from_config(self, kv_cache_configs: Any) -> None:
+        super().initialize_from_config(kv_cache_configs)
+        if kv_cache_configs:
+            propagate_mamba_num_blocks(self, kv_cache_configs[0],
+                                       self.vllm_config)
 
-    @functools.wraps(original)
-    def _initialize_kv_caches(self, vllm_config):
-        kv_cache_config = original(self, vllm_config)
-        propagate_mamba_num_blocks(self, kv_cache_config, vllm_config)
-        return kv_cache_config
 
-    _initialize_kv_caches._tpu_mamba_hook = True
-    engine_core_cls._initialize_kv_caches = _initialize_kv_caches
+def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
+    """Install the hooks when mamba prefix caching (align mode) is on.
+
+    Called from the executors' `_init_executor`, which runs in the engine-core
+    process before `EngineCore._initialize_kv_caches`; the platform config
+    hook only runs in the process that builds the VllmConfig.
+    """
+    cache_config = vllm_config.cache_config
+    if (cache_config.enable_prefix_caching
+            and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
+        install_hybrid_coordinator_hooks(vllm_config)
 
 
 def install_hybrid_coordinator_hooks(vllm_config: Any | None = None) -> None:
@@ -747,8 +765,6 @@ def install_hybrid_coordinator_hooks(vllm_config: Any | None = None) -> None:
 
     import vllm.v1.core.kv_cache_coordinator as coord_mod
     import vllm.v1.core.kv_cache_manager as mgr_mod
-
-    _install_engine_core_hook()
 
     coord_mod.get_kv_cache_coordinator = tpu_get_kv_cache_coordinator
     mgr_mod.get_kv_cache_coordinator = tpu_get_kv_cache_coordinator

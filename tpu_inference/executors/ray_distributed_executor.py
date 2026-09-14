@@ -37,6 +37,8 @@ from vllm.v1.executor.ray_utils import RayWorkerWrapper as RayWorkerWrapperV1
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 from vllm.v1.outputs import ModelRunnerOutput
 
+from tpu_inference.core.hybrid_coordinator import (
+    MambaPoolSyncExecutorMixin, maybe_install_hybrid_coordinator_hooks)
 from tpu_inference.distributed.jax_parallel_state import get_pp_group
 from tpu_inference.distributed.utils import set_node_kv_ip_port
 from tpu_inference.logger import init_logger
@@ -69,7 +71,8 @@ class AsyncResultFuture(Future):
             return ray.get(ret_refs[0], timeout=timeout)
 
 
-class RayDistributedExecutor(RayDistributedExecutorV1):
+class RayDistributedExecutor(MambaPoolSyncExecutorMixin,
+                             RayDistributedExecutorV1):
     """Ray-based distributed executor for TPU.
 
     The implementation is similar to vllm/executor/ray_distributed_executor.py
@@ -94,6 +97,7 @@ class RayDistributedExecutor(RayDistributedExecutorV1):
         return True
 
     def _init_executor(self) -> None:
+        maybe_install_hybrid_coordinator_hooks(self.vllm_config)
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
         os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
