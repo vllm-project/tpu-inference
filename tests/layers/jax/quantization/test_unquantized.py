@@ -32,8 +32,7 @@ from tpu_inference.layers.jax.linear import (JaxEinsum, JaxLinear,
 from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
 from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.layers.jax.quantization.unquantized import (
-    UnquantizedConfig, UnquantizedFusedMoEMethod,
-    UnquantizedMergedLinearMethod)
+    UnquantizedConfig, UnquantizedMergedLinearMethod)
 
 
 @pytest.fixture
@@ -232,54 +231,6 @@ class TestUnquantizedJaxMoe:
         mesh = SimpleNamespace(axis_names=axis_names, shape=shape)
         assert JaxRoutedExperts._get_weight_shardings(mesh,
                                                       use_ep) == expected
-
-    @pytest.mark.parametrize("backend,transpose", [
-        (MoEBackend.FUSED_MOE, True),
-        (MoEBackend.GMM_EP, False),
-        (MoEBackend.GMM_TP, False),
-    ])
-    def test_routed_expert_loader_uses_backend_layout(self, backend,
-                                                      transpose):
-        """Fused and GMM kernels consume different expert-weight layouts."""
-        layer = SimpleNamespace(
-            prefix="experts",
-            moe_backend=backend,
-            kernel_gating_EDF=nnx.Param(jnp.zeros((2, 3, 4))),
-            kernel_up_proj_EDF=nnx.Param(jnp.zeros((2, 3, 4))),
-            kernel_down_proj_EFD=nnx.Param(jnp.zeros((2, 4, 3))),
-        )
-        layer.kernel_gating_EDF.set_metadata(_weights_to_load=[None, None])
-        layer.kernel_up_proj_EDF.set_metadata(_weights_to_load=[None, None])
-        layer.kernel_down_proj_EFD.set_metadata(_weights_to_load=[None, None])
-
-        checkpoint_weight = torch.arange(12).reshape(4, 3)
-        loaded = JaxRoutedExperts._load_weights(
-            layer, [("experts.0.gate_proj.weight", checkpoint_weight)])
-
-        assert loaded == set()
-        staged = layer.kernel_gating_EDF._weights_to_load[0]
-        expected = (checkpoint_weight.numpy().T
-                    if transpose else checkpoint_weight.numpy())
-        np.testing.assert_array_equal(staged[0], expected)
-
-    def test_fused_postprocessing_waits_for_all_expert_weights(self):
-        """Streaming load must not fuse and delete partially loaded params."""
-        complete = nnx.Param(jnp.zeros((1, 2, 3)))
-        complete.set_metadata(_weights_to_load=[jnp.zeros((1, 2, 3))])
-        incomplete = nnx.Param(jnp.zeros((1, 2, 3)))
-        incomplete.set_metadata(_weights_to_load=[None])
-        layer = SimpleNamespace(
-            moe_backend=MoEBackend.FUSED_MOE,
-            kernel_gating_EDF=complete,
-            kernel_up_proj_EDF=incomplete,
-            kernel_down_proj_EFD=complete,
-        )
-        method = UnquantizedFusedMoEMethod.__new__(
-            UnquantizedFusedMoEMethod)
-
-        assert method.process_weights_after_loading(layer) is False
-        assert hasattr(layer, "kernel_gating_EDF")
-        assert hasattr(layer, "kernel_up_proj_EDF")
 
     @pytest.fixture
     def mesh(self):

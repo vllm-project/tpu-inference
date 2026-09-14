@@ -512,13 +512,10 @@ class JaxRoutedExperts(JaxModule):
                 raise ValueError(f"Unexpected param type in {rel_name}, "
                                  "expected gate_proj, up_proj, or down_proj")
             assert isinstance(jax_param, nnx.Param)
-            permute_dims = ((0, 2, 1) if self.moe_backend
-                            == MoEBackend.FUSED_MOE else None)
             jax_param._weights_to_load[
                 expert_id] = jax_array_from_reshaped_torch(
                     torch_weight,
-                    reshape_dims=(1, ) + torch_weight.shape,
-                    permute_dims=permute_dims)
+                    reshape_dims=(1, ) + torch_weight.shape)
             cnt += 1
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")
