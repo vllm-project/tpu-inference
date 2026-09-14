@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from types import SimpleNamespace
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -208,29 +206,16 @@ class TestJaxMergedColumnParallelLinear:
 
 class TestUnquantizedJaxMoe:
 
-    @pytest.mark.parametrize(
-        "axis_names,shape,use_ep,expected",
-        [
-            (("data", "model"), {
-                "data": 1,
-                "model": 8
-            }, True, (("model", None, None), ("model", None, None))),
-            (("expert", "model"), {
-                "expert": 4,
-                "model": 2
-            }, True, ((('expert', 'model'), None, None),
-                      (('expert', 'model'), None, None))),
-            (("expert", "model"), {
-                "expert": 1,
-                "model": 8
-            }, False, ((None, None, "model"), (None, "model", None))),
-        ],
-    )
-    def test_routed_expert_weight_shardings(self, axis_names, shape, use_ep,
-                                            expected):
-        mesh = SimpleNamespace(axis_names=axis_names, shape=shape)
-        assert JaxRoutedExperts._get_weight_shardings(mesh,
-                                                      use_ep) == expected
+    @pytest.mark.parametrize("use_ep", [True, False])
+    def test_routed_expert_weight_shardings(self, mesh, use_ep):
+        edf_spec, efd_spec = JaxRoutedExperts._get_weight_shardings(
+            mesh, use_ep)
+        if use_ep:
+            assert edf_spec == P(ShardingAxisName.EXPERT)
+            assert efd_spec == P(ShardingAxisName.EXPERT)
+        else:
+            assert edf_spec == P(None, None, ShardingAxisName.MLP_TENSOR)
+            assert efd_spec == P(None, ShardingAxisName.MLP_TENSOR, None)
 
     @pytest.fixture
     def mesh(self):

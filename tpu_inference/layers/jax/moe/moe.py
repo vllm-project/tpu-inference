@@ -395,25 +395,25 @@ class JaxRoutedExperts(JaxModule):
         # tensor is temporarily replicated on every device before the quant
         # method gets a chance to redistribute it, which can exhaust HBM.
         self.use_ep = self._compute_use_ep()
-        self.edf_sharding, self.efd_sharding = self._get_weight_shardings(
+        edf_sharding, efd_sharding = self._get_weight_shardings(
             mesh, self.use_ep)
 
         self.kernel_gating_EDF = create_param(rngs,
                                               shape=(E, D, F),
                                               dtype=dtype,
-                                              sharding=self.edf_sharding,
+                                              sharding=edf_sharding,
                                               random_init=random_init)
         self.kernel_gating_EDF.set_metadata(_weights_to_load=[None] * E)
         self.kernel_up_proj_EDF = create_param(rngs,
                                                shape=(E, D, F),
                                                dtype=dtype,
-                                               sharding=self.edf_sharding,
+                                               sharding=edf_sharding,
                                                random_init=random_init)
         self.kernel_up_proj_EDF.set_metadata(_weights_to_load=[None] * E)
         self.kernel_down_proj_EFD = create_param(rngs,
                                                  shape=(E, F, D),
                                                  dtype=dtype,
-                                                 sharding=self.efd_sharding,
+                                                 sharding=efd_sharding,
                                                  random_init=random_init)
         self.kernel_down_proj_EFD.set_metadata(_weights_to_load=[None] * E)
 
@@ -447,33 +447,24 @@ class JaxRoutedExperts(JaxModule):
         return (pc.data_parallel_size * pc.prefill_context_parallel_size *
                 pc.tensor_parallel_size) > 1 and pc.enable_expert_parallel
 
-    # TODO: refactor with moe_weights.py:_get_expert_shard_axis
     @staticmethod
-    def _get_weight_shardings(mesh: jax.sharding.Mesh,
-                              use_ep: bool) -> tuple[tuple, tuple]:
-        """Return EDF/EFD layouts without assigning one mesh axis twice."""
-
-        def active_axis(candidates):
-            axes = tuple(axis for axis in candidates
-                         if mesh.shape.get(axis, 1) > 1)
-            if not axes:
-                return None
-            return axes[0] if len(axes) == 1 else axes
-
-        if "expert" in mesh.axis_names:
-            expert_axis = active_axis(
-                ("attn_dp_expert", "expert", "model", "attn_dp", "dcp", "pcp"))
-            tensor_axis = active_axis(("model", "attn_dp", "dcp", "pcp"))
-        else:
-            expert_axis = tensor_axis = active_axis(("model", ))
-
-        if not use_ep:
-            return (None, None, tensor_axis), (None, tensor_axis, None)
-
-        # GMM EP shards complete experts across the aggregate expert axis. It
-        # requires each local expert to retain its full hidden/intermediate
-        # dimensions; sharding F here makes the kernel mistake local F for D.
-        return (expert_axis, None, None), (expert_axis, None, None)
+    def _get_weight_shardings(
+            mesh: jax.sharding.Mesh,
+            use_ep: bool) -> tuple[jax.sharding.PartitionSpec, jax.sharding.PartitionSpec]:
+        """Return EDF/EFD weight sharding PartitionSpecs matching moe_weights._get_moe_weight_shardings."""
+        from tpu_inference.layers.common.process_weights.moe_weights import (
+            FusedMoEWeights, _get_moe_weight_shardings)
+        moe_backend = MoEBackend.GMM_EP if use_ep else MoEBackend.GMM_TP
+        dummy_weights = FusedMoEWeights(
+            w13_weight=None,
+            w13_weight_scale=None,
+            w13_bias=None,
+            w2_weight=None,
+            w2_weight_scale=None,
+            w2_bias=None,
+        )
+        shardings = _get_moe_weight_shardings(dummy_weights, moe_backend, mesh)
+        return shardings.w13_weight.spec, shardings.w2_weight.spec
 
     def __call__(
         self,
