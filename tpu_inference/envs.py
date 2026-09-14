@@ -86,6 +86,8 @@ if TYPE_CHECKING:
     TPU_MESH_SORT_BY_COORDS: bool = False
     VERIFY_WEIGHTS: bool = False
     SAMPLING_MICROBATCH_SIZE: int = 0
+    DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
+    RAIDEN_H2D_SETTLE: bool = True
 
 
 def env_with_choices(
@@ -512,6 +514,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Microbatch size for sampling block. Set to 0 to disable microbatching (disabled by default).
     "SAMPLING_MICROBATCH_SIZE":
     lambda: int(os.getenv("SAMPLING_MICROBATCH_SIZE", "0")),
+    # Largest runtime top-k handled by distributed candidate sampling. This is
+    # read at trace time so candidate tensor shapes remain static.
+    "DISTRIBUTED_SAMPLING_MAX_TOP_K":
+    lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
+    # RL weight sync: wait for the async Raiden H2D DMA to settle before
+    # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
+    "RAIDEN_H2D_SETTLE":
+    env_bool("RAIDEN_H2D_SETTLE", default=True),
 }
 
 
