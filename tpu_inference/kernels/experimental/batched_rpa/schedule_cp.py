@@ -295,6 +295,12 @@ class CPMetadataComputer(schedule.BaseMetadataComputer):
             if cfgs.serve.kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
                 cache_pages = pl.cdiv(bkv_sz_cache, cfgs.serve.page_size)
                 hbm_token_idx_base = src_hbm
+                if cfgs.serve.paged_new_kv:
+                    # With a page table the new KV is not contiguous, so index
+                    # within the sequence's own new KV and let copy_in resolve
+                    # the page. This path already fetches whole pages, so the
+                    # offset it stores is page-aligned either way.
+                    hbm_token_idx_base = new_kv_pos
                 new_tok_offset = hbm_token_idx_base % cfgs.serve.page_size
                 num_pages_to_fetch = jnp.where(
                     new_sz > 0,

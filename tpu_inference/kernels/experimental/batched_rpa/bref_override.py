@@ -102,12 +102,26 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
                     sem,
                 ).start()
 
+            if self.cfgs.serve.paged_new_kv:
+                # `fetch_hbm` is a page-aligned offset into the sequence's own
+                # new KV; the table maps it to where that page really landed.
+                pages_per_seq = (new_kv_page_indices_ref.shape[0] //
+                                 self.cfgs.serve.num_seqs)
+                row = jnp.maximum(schedule_ref.s_idx[block_idx, b],
+                                  0) * pages_per_seq
+
             for i in range(self.cfgs.bkv_p_new):
                 dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
                 src_new_off = dma_entry.fetch_hbm[...]
                 dst_vmem_off = dma_entry.fetch_vmem[...]
                 dma_valid = dma_entry.fetch_val
                 sz = dma_valid * self.cfgs.serve.page_size
+                if self.cfgs.serve.paged_new_kv:
+                    page = jnp.minimum(
+                        src_new_off >> self.cfgs.serve.page_size_log2,
+                        pages_per_seq - 1)
+                    src_new_off = (new_kv_page_indices_ref[row + page]
+                                   << self.cfgs.serve.page_size_log2)
                 src_new_off = pl.multiple_of(src_new_off, 128)
                 dst_vmem_off = pl.multiple_of(dst_vmem_off, 128)
                 sz = pl.multiple_of(sz, 128)

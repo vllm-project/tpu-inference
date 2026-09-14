@@ -791,11 +791,6 @@ def ragged_paged_attention(
             raise ValueError(
                 f"Expected {new_kv_page_indices.shape[0]=} to be divisible by "
                 f"{max_num_seqs=}.")
-        if kv_layout == configs.KVLayout.SEQ_ALONG_LANE:
-            raise NotImplementedError(
-                "A new-KV page table is only wired up for "
-                "KVLayout.HEAD_ALONG_SUBLANE.")
-
 
     model_cfgs = configs.ModelConfigs(
         num_q_heads=num_q_heads,

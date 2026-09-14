@@ -436,6 +436,8 @@ def pcp_forward_batched(
     v_scale: float | None = None,
     update_kv_cache: bool = True,
     use_causal_mask: bool = True,
+    kv_layout: batched_rpa_configs.KVLayout = (
+        batched_rpa_configs.KVLayout.HEAD_ALONG_SUBLANE),
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward on the batched RPA kernel.
 
@@ -455,7 +457,12 @@ def pcp_forward_batched(
     two_p = 2 * pcp_size
     padded_q_len = q.shape[0]
     C = padded_q_len // two_p
-    page_size = kv_cache.shape[1] // pcp_size
+    # The pcp ranks stripe the pages of a sequence, so a global page spans
+    # `pcp_size` per-rank pages.
+    if kv_layout == batched_rpa_configs.KVLayout.SEQ_ALONG_LANE:
+        page_size = kv_cache.shape[4] // pcp_size
+    else:
+        page_size = kv_cache.shape[1] // pcp_size
     num_seqs = md.seq_lens.shape[0]
 
     # Page table for the all-gathered current KV, so the kernel can read it in
@@ -480,14 +487,19 @@ def pcp_forward_batched(
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
-    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
-                      ShardingAxisName.KV_HEAD, None, None)
+    if kv_layout == batched_rpa_configs.KVLayout.SEQ_ALONG_LANE:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_HEAD,
+                          None, None, ShardingAxisName.KV_CONTEXT)
+    else:
+        kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                          ShardingAxisName.KV_HEAD, None, None)
 
     common = dict(sm_scale=sm_scale,
                   q_scale=q_scale,
                   k_scale=k_scale,
                   v_scale=v_scale,
                   cp_group_size=pcp_size,
+                  kv_layout=kv_layout,
                   return_lse=True)
 
     cache_pages = md.pcp.cache_pages

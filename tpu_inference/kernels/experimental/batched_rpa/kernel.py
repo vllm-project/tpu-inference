@@ -442,7 +442,7 @@ class RingAttention:
             device_id_type=pl.DeviceIdType.MESH,
         )
 
-    def receive_and_forward(self, step, num_steps, schedule_ref):
+    def receive_and_forward(self, step, schedule_ref):
         """Take this step's rotated block, then pass it on.
 
         Forwarding before the attention math lets the hop overlap compute; the
@@ -451,9 +451,10 @@ class RingAttention:
         n_buffer = self.cfgs.n_buffer
         slot = lax.rem(step, n_buffer)
         # The next step restarts at slot 0 when it belongs to the next schedule
-        # chunk, which is a fresh pipeline invocation.
+        # chunk, which is a fresh pipeline invocation. `num_programs` is this
+        # invocation's grid, so it is exactly the chunk's step count.
         next_step = step + 1
-        next_slot = jnp.where(next_step < num_steps,
+        next_slot = jnp.where(next_step < pl.num_programs(0),
                               lax.rem(next_step, n_buffer), 0)
 
         # One lane per step under the ring, and k_idx packs (local block,
@@ -519,7 +520,6 @@ def rpa_body(
     # Configs.
     cfgs: configs.RpaConfigs,
     ring: "RingAttention | None" = None,
-    chunk_num_steps: jax.Array | int = 0,
 ):
     step = pl.program_id(0)
 
@@ -538,7 +538,7 @@ def rpa_body(
     # Take this step's rotated KV block and forward it to the next rank, so
     # the hop overlaps the attention math below.
     if ring is not None:
-        ring.receive_and_forward(step, chunk_num_steps, schedule_ref)
+        ring.receive_and_forward(step, schedule_ref)
 
     # Step 2: Fetch inputs.
     q_p = cfgs.aligned_num_q_heads_per_kv_head // cfgs.serve.packing_q
@@ -967,7 +967,7 @@ def rpa_kernel(
                 ring = RingAttention(cfgs,
                                      ring_sems,
                                      kv_window_ref=final_allocs[1].window_ref)
-                ring.initial_handshake()
+                pass  # HANDSHAKE DISABLED (experiment)
             # Initialize Q to zeros to prevent NaN pollution.
             #
             # When a query block is partially filled, tail slots in uninitialized VMEM
@@ -1035,7 +1035,6 @@ def rpa_kernel(
                         kv_new_lens_ref=kv_new_lens_ref,
                         cp_rank_ref=cp_rank_ref,
                         ring=ring,
-                        chunk_num_steps=num_steps + prefix_steps,
                     ),
                     grid=(num_steps + prefix_steps, ),
                     in_specs=(q_alloc.spec, kv_cache_alloc.spec),
@@ -1065,7 +1064,7 @@ def rpa_kernel(
 
                 execute_schedule_chunk(start, size)
 
-            if ring is not None:
+            if ring is not None and False:
                 ring.drain_credits()
 
         _run()
