@@ -19,11 +19,11 @@
 # gates a merge on this one, so a failure here reads as a question about the
 # fleet without pipeline_jax.yml being touched.
 #
-# Every v6e step of pipeline_jax.yml is here, with keys kept identical so the
-# two files read side by side. What is absent is what the fleet cannot run:
-# steps gated on tpu7x want eight v7x chips on one host, and the largest v7x
-# shape the fleet has node pools for is four. Steps gated on NIGHTLY stay
-# gated, on the same expressions.
+# Every step of pipeline_jax.yml that is not gated on tpu7x is here, with keys
+# kept identical so the two files read side by side. The tpu7x-gated steps have
+# not been ported yet; the fleet can run their shape, so nothing but the work
+# stands in the way. Steps gated on NIGHTLY stay gated, on the same
+# expressions.
 #
 # pipeline_jax.yml's notification step has no counterpart here. It exists there
 # because every step in that file is soft_fail, so something has to re-read the
@@ -39,6 +39,24 @@
 # level wins over one passed to `bk build create --env`, so anything defaulted
 # here could not be overridden per build. What needs a default gets one in
 # run.sh instead, which leaves it free for a build that wants to vary it.
+
+# The kube spelling of pipeline_jax.yml's TPU_QUEUE_SINGLE and TPU_QUEUE_MULTI,
+# interpolated the same way, so bootstrap.sh can upload this file once per
+# generation exactly as it uploads that one:
+#
+#   tpu_v6e_queue    v6e-1    1 chip   ct6e-standard-1t/1x1
+#   tpu_v6e_8_queue  v6e-8    8 chips  ct6e-standard-8t/2x4
+#   tpu_v7x_2_queue  tpu7x-2  1 chip   tpu7x-standard-1t/1x1x1
+#   tpu_v7x_8_queue  tpu7x-8  4 chips  tpu7x-standard-4t/2x2x1
+#
+# A bare-metal queue name counts TensorCores and a shape counts chips, which is
+# why the two v7x rows read as different numbers for the same hardware.
+#
+# Reached through `env:` rather than written into the command, because a YAML
+# anchor cannot be spliced into a string: naming the shape once and referring
+# to it is the only way a step that changes hardware changes one line.
+x-shape-single: &shape_single "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
 
 # No `retry:` for preemption anywhere below. The agent runs in a CPU pod
 # outside the Kueue workload, so an eviction pauses the step's log rather than
@@ -87,7 +105,7 @@ steps:
     agents:
       queue: "cpu_64_core"
     env:
-      TPU_VERSION: "tpu6e"
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       # The image tag is the tpu-inference and vLLM commits and nothing else, so
       # this pipeline and pipeline_build.yml write the same tag for the same
       # commit. Matching their build args is what keeps that from being a
@@ -116,49 +134,54 @@ steps:
   # Fourteen of these against a two-chip nominal quota, so most are borrowing
   # and are the first reclaimed when an eight-chip step arrives.
 
-  - label: ":kubernetes: E2E MLPerf tests for JAX models"
-    key: "tpu6e_test_0"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
+    key: "${TPU_VERSION:-tpu6e}_test_0"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-  - label: ":kubernetes: E2E MLPerf tests for JAX models with quantization"
-    key: "tpu6e_test_1"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models with quantization"
+    key: "${TPU_VERSION:-tpu6e}_test_1"
     if: build.env("NIGHTLY") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       QUANTIZATION: "True"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-  - label: ":kubernetes: E2E MLPerf tests for JAX new models"
-    key: "tpu6e_test_2"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX new models"
+    key: "${TPU_VERSION:-tpu6e}_test_2"
     if: build.env("NIGHTLY") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       NEW_MODEL_DESIGN: "1"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-  - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on single chip"
-    key: "tpu6e_test_3"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on single chip"
+    key: "${TPU_VERSION:-tpu6e}_test_3"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
       MODEL_IMPL_TYPE: "vllm"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-  - label: ":kubernetes: E2E speculative decoding test"
-    key: "tpu6e_test_6"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E speculative decoding test"
+    key: "${TPU_VERSION:-tpu6e}_test_6"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
@@ -167,7 +190,7 @@ steps:
         # conftest collection gate narrows to @pytest.mark.bvt cases only when
         # BVT_ONLY=1.
         if [ "$${NIGHTLY:-0}" = "1" ]; then export BVT_ONLY=; else export BVT_ONLY=1; fi
-        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 \
+        .buildkite/kubernetes/run.sh $$SHAPE \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py
 
   # The coverage file is uploaded from inside the pod rather than collected by
@@ -181,16 +204,17 @@ steps:
   # the process happens to be standing when it exits, which a test that chdirs
   # can move; the copy then fails and the run reports no coverage at all rather
   # than a bad number.
-  - label: ":kubernetes: JAX unit tests part1"
-    key: "tpu6e_test_7_1"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests part1"
+    key: "${TPU_VERSION:-tpu6e}_test_7_1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
       - |
-        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c '
-          export COVERAGE_FILE=/tmp/.coverage.part1.tpu6e
+        .buildkite/kubernetes/run.sh $$SHAPE bash -c '
+          export COVERAGE_FILE=/tmp/.coverage.part1.${TPU_VERSION:-tpu6e}
           python3 -m pytest -s -v -x \
             /workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
             /workspace/tpu_inference/tests/layers/vllm/test_awq.py \
@@ -202,23 +226,24 @@ steps:
           # A lost upload is not cosmetic: the combine step below reports on
           # whatever arrived, so a silent loss here reads downstream as a
           # genuine coverage number measured over half the suite.
-          if ! (cd /tmp && buildkite-agent artifact upload .coverage.part1.tpu6e); then
+          if ! (cd /tmp && buildkite-agent artifact upload .coverage.part1.${TPU_VERSION:-tpu6e}); then
             echo "ERROR: coverage part1 was produced but could not be uploaded" >&2
             [ "$$rc" -eq 0 ] && rc=1
           fi
           exit $$rc
         '
 
-  - label: ":kubernetes: JAX unit tests part2"
-    key: "tpu6e_test_7_2"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests part2"
+    key: "${TPU_VERSION:-tpu6e}_test_7_2"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
       - |
-        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c '
-          export COVERAGE_FILE=/tmp/.coverage.part2.tpu6e
+        .buildkite/kubernetes/run.sh $$SHAPE bash -c '
+          export COVERAGE_FILE=/tmp/.coverage.part2.${TPU_VERSION:-tpu6e}
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
             --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
             --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py \
@@ -241,7 +266,7 @@ steps:
           rc=$$?
           # As in part1: a coverage file that never leaves the pod turns into a
           # smaller denominator rather than an error.
-          if ! (cd /tmp && buildkite-agent artifact upload .coverage.part2.tpu6e); then
+          if ! (cd /tmp && buildkite-agent artifact upload .coverage.part2.${TPU_VERSION:-tpu6e}); then
             echo "ERROR: coverage part2 was produced but could not be uploaded" >&2
             [ "$$rc" -eq 0 ] && rc=1
           fi
@@ -251,11 +276,11 @@ steps:
   # No chips, so no launcher: this downloads what the two steps above uploaded
   # and reports on it. It still runs on the kube queue, which is where this
   # pipeline's CPU work goes.
-  - label: ":kubernetes: JAX unit tests combine and report"
-    key: "tpu6e_test_7_3"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
+    key: "${TPU_VERSION:-tpu6e}_test_7_3"
     depends_on:
-      - "tpu6e_test_7_1"
-      - "tpu6e_test_7_2"
+      - "${TPU_VERSION:-tpu6e}_test_7_1"
+      - "${TPU_VERSION:-tpu6e}_test_7_2"
     agents:
       queue: "kube"
     commands:
@@ -279,13 +304,13 @@ steps:
         # happens to be present would let one missing shard report a plausible
         # percentage over half the suite, which is the one failure a coverage
         # gate must not pass.
-        for f in .coverage.part1.tpu6e .coverage.part2.tpu6e; do
+        for f in .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}; do
           if [ ! -f "$$f" ]; then
             echo "missing $$f: that shard's coverage never arrived" >&2
             exit 1
           fi
         done
-        if ! python3 -m coverage combine .coverage.part1.tpu6e .coverage.part2.tpu6e; then
+        if ! python3 -m coverage combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}; then
           echo "coverage combine failed; the report below would be stale" >&2
           exit 1
         fi
@@ -294,97 +319,105 @@ steps:
         rm -f .coverage.part* .coveragerc .coverage
         exit $$EXIT_CODE
 
-  - label: ":kubernetes: JAX unit tests - kernels"
-    key: "tpu6e_test_8"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
+    key: "${TPU_VERSION:-tpu6e}_test_8"
     # Nightly, or opted into by name, which is what lets a kernel change run
     # these without a full nightly. bootstrap.sh sets RUN_KERNEL_TESTS from the
     # diff; a build that wants them can pass it directly.
     if: build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_TESTS") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
       - |
-        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 \
+        .buildkite/kubernetes/run.sh $$SHAPE \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
           --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
           --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
           --ignore=/workspace/tpu_inference/tests/kernels/collectives \
           --ignore=/workspace/tpu_inference/tests/kernels/spmm_v1_test.py
 
-  - label: ":kubernetes: lora e2e tests single chip - test_lora"
-    key: "tpu6e_test_10_1"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests single chip - test_lora"
+    key: "${TPU_VERSION:-tpu6e}_test_10_1"
     if: build.env("NIGHTLY") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL_IMPL_TYPE: "vllm"
       TPU_BACKEND_TYPE: "jax"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
 
-  - label: ":kubernetes: lora e2e tests single chip - test_lora_adapter"
-    key: "tpu6e_test_10_2"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests single chip - test_lora_adapter"
+    key: "${TPU_VERSION:-tpu6e}_test_10_2"
     if: build.env("NIGHTLY") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL_IMPL_TYPE: "vllm"
       TPU_BACKEND_TYPE: "jax"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_adapter.py
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_adapter.py
 
-  - label: ":kubernetes: lora unit tests on single chip"
-    key: "tpu6e_test_15"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora unit tests on single chip"
+    key: "${TPU_VERSION:-tpu6e}_test_15"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
       - |
-        .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash -c \
+        .buildkite/kubernetes/run.sh $$SHAPE bash -c \
           'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
            python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
 
-  - label: ":kubernetes: Runai Model Streamer JAX UniProcExecutor"
-    key: "tpu6e_test_27"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer JAX UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_test_27"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
 
-  - label: ":kubernetes: Runai Model Streamer Torchax UniProcExecutor"
-    key: "tpu6e_test_28"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer Torchax UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_test_28"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
 
-  - label: ":kubernetes: Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
-    key: "tpu6e_test_33"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_test_33"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
       TENSOR_PARALLEL_SIZE: "1"
       MINIMUM_ACCURACY_THRESHOLD: "0.72"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-1t/1x1 bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
 
   # ------------------------------------------------------------- eight chip ---
   # Only one of these fits at a time, so they serialise and each one squeezes
   # the single-chip steps down to their nominal two chips.
 
-  - label: ":kubernetes: E2E MLperf tests for Llama4 models"
-    key: "tpu6e_test_4"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLperf tests for Llama4 models"
+    key: "${TPU_VERSION:-tpu6e}_test_4"
     if: build.env("NIGHTLY") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       NEW_MODEL_DESIGN: "1"
       # Not the queue selector its name suggests - the shape below already says
       # eight chips. mlperf.sh reads it to swap the model list to Llama-4-Scout
@@ -393,32 +426,35 @@ steps:
       USE_V6E8_QUEUE: "True"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-  - label: ":kubernetes: JAX unit tests - collective kernels"
-    key: "tpu6e_test_9"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests - collective kernels"
+    key: "${TPU_VERSION:-tpu6e}_test_9"
     if: build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_COLLECTIVES_TESTS") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
 
-  - label: ":kubernetes: E2E MLPerf tests for JAX + vLLM models on multiple chips"
-    key: "tpu6e_test_11"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on multiple chips"
+    key: "${TPU_VERSION:-tpu6e}_test_11"
     if: build.env("NIGHTLY") == "1"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       MODEL_IMPL_TYPE: "vllm"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-  - label: ":kubernetes: lora e2e tests multi chips"
-    key: "tpu6e_test_13"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests multi chips"
+    key: "${TPU_VERSION:-tpu6e}_test_13"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
       TEST_LORA_TP: "True"
       VLLM_LOG_LEVEL: "INFO"
@@ -426,19 +462,20 @@ steps:
       TPU_BACKEND_TYPE: "jax"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
 
-  - label: ":kubernetes: lora unit tests on multi chips"
-    key: "tpu6e_test_16"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora unit tests on multi chips"
+    key: "${TPU_VERSION:-tpu6e}_test_16"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
       VLLM_LOG_LEVEL: "INFO"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py
 
-  # pipeline_jax.yml's tpu6e_test_25, which on bare metal is eight docker
+  # pipeline_jax.yml's ${TPU_VERSION:-tpu6e}_test_25, which on bare metal is eight docker
   # containers on one 8-chip VM. "Multi-host" there means eight TPU processes,
   # not eight machines: every container uses --network host and addresses the
   # others as 127.0.0.1, so a pod holding all 8 chips is the same environment
@@ -449,10 +486,11 @@ steps:
   #
   # Not a JobSet: that is for a slice spanning several nodes, and this needs one
   # ct6e-standard-8t.
-  - label: ":kubernetes: E2E test for Multihost DCN-based P/D disaggregation"
-    key: "tpu6e_test_25"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Multihost DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_test_25"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
       MODEL: "Qwen/Qwen3-0.6B"
       INPUT_LEN: "1024"
@@ -471,21 +509,23 @@ steps:
         - exit_status: 75
           limit: 1
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/examples/disagg/run_disagg_multi_host_pod.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/examples/disagg/run_disagg_multi_host_pod.sh
 
-  - label: ":kubernetes: Runai Model Streamer Torchax RayDistributedExecutor"
-    key: "tpu6e_test_29"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer Torchax RayDistributedExecutor"
+    key: "${TPU_VERSION:-tpu6e}_test_29"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
+      - .buildkite/kubernetes/run.sh $$SHAPE python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
 
-  - label: ":kubernetes: E2E test for Single Host DCN-based P/D disaggregation"
-    key: "tpu6e_test_34"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Single Host DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_test_34"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
       MODEL: "Qwen/Qwen3-0.6B"
       INPUT_LEN: "512"
@@ -494,18 +534,19 @@ steps:
       REQUEST_RATE: "4"
     <<: *tpu_step
     commands:
-      - .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash /workspace/tpu_inference/examples/disagg/run_disagg_single_host.sh
+      - .buildkite/kubernetes/run.sh $$SHAPE bash /workspace/tpu_inference/examples/disagg/run_disagg_single_host.sh
 
-  - label: ":kubernetes: E2E test for MPMD data parallelism"
-    key: "tpu6e_test_35"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for MPMD data parallelism"
+    key: "${TPU_VERSION:-tpu6e}_test_35"
     env:
-      TPU_VERSION: "tpu6e"
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
       NEW_MODEL_DESIGN: "1"
     <<: *tpu_step
     commands:
       - |
-        .buildkite/kubernetes/run.sh ct6e-standard-8t/2x4 bash -c '
+        .buildkite/kubernetes/run.sh $$SHAPE bash -c '
           set -eu
           MODEL=meta-llama/Llama-3.1-8B-Instruct
           TPU_MULTIPROCESS_DP=1 \
