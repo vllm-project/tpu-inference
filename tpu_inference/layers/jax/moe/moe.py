@@ -449,8 +449,8 @@ class JaxRoutedExperts(JaxModule):
 
     @staticmethod
     def _get_weight_shardings(
-            mesh: jax.sharding.Mesh,
-            use_ep: bool) -> tuple[jax.sharding.PartitionSpec, jax.sharding.PartitionSpec]:
+        mesh: jax.sharding.Mesh, use_ep: bool
+    ) -> tuple[jax.sharding.PartitionSpec, jax.sharding.PartitionSpec]:
         """Return EDF/EFD weight sharding PartitionSpecs matching moe_weights._get_moe_weight_shardings."""
         from tpu_inference.layers.common.process_weights.moe_weights import (
             FusedMoEWeights, _get_moe_weight_shardings)
@@ -504,9 +504,9 @@ class JaxRoutedExperts(JaxModule):
                                  "expected gate_proj, up_proj, or down_proj")
             assert isinstance(jax_param, nnx.Param)
             jax_param._weights_to_load[
-                expert_id] = jax_array_from_reshaped_torch(
-                    torch_weight,
-                    reshape_dims=(1, ) + torch_weight.shape)
+                expert_id] = jax_array_from_reshaped_torch(torch_weight,
+                                                           reshape_dims=(1, ) +
+                                                           torch_weight.shape)
             cnt += 1
 
         logger.debug(f"Loaded {cnt} weights for {self.prefix} MoE layer.")

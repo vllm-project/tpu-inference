@@ -53,8 +53,8 @@ class TestGemma4ForConditionalGeneration:
                 enable_return_routed_experts=enabled,
             )
 
-        assert (routed_experts_init.call_args.kwargs[
-            "enable_return_routed_experts"] is enabled)
+        assert (routed_experts_init.call_args.
+                kwargs["enable_return_routed_experts"] is enabled)
 
     def _run_model_loading_test(self, model_name, pp_rank, pp_world_size,
                                 load_format, truncate_layers, rng, mesh,

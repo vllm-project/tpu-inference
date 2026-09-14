@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest import mock
+
 # /home/pooyam/tpu_inference/tests/models/jax/layers/test_sampling.py
 import jax
 import jax.numpy as jnp
@@ -20,7 +22,6 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
-from unittest import mock
 from tpu_inference import envs
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
@@ -262,7 +263,8 @@ class TestProcessedLogprobs:
         metadata = self._make_sampling_metadata(1, temperature=0.5)
         with mock.patch.object(envs, "SAMPLING_MICROBATCH_SIZE", 16):
             _, processed_logits = sample(jax.random.PRNGKey(0),
-                                         self._get_fake_mesh(), logits, metadata)
+                                         self._get_fake_mesh(), logits,
+                                         metadata)
         processed = compute_logprobs(processed_logits)
 
         # With temperature < 1, processed logprobs should be more peaked
@@ -297,7 +299,8 @@ class TestProcessedLogprobs:
         metadata = self._make_sampling_metadata(1, temperature=1.0, top_k=2)
         with mock.patch.object(envs, "SAMPLING_MICROBATCH_SIZE", 16):
             _, processed_logits = sample(jax.random.PRNGKey(0),
-                                         self._get_fake_mesh(), logits, metadata)
+                                         self._get_fake_mesh(), logits,
+                                         metadata)
         processed = compute_logprobs(processed_logits)
 
         # Top-2 tokens are indices 1 (5.0) and 4 (4.0).
@@ -318,7 +321,8 @@ class TestProcessedLogprobs:
         metadata = self._make_sampling_metadata(1, temperature=1.0, top_p=0.5)
         with mock.patch.object(envs, "SAMPLING_MICROBATCH_SIZE", 16):
             _, processed_logits = sample(jax.random.PRNGKey(0),
-                                         self._get_fake_mesh(), logits, metadata)
+                                         self._get_fake_mesh(), logits,
+                                         metadata)
         processed = compute_logprobs(processed_logits)
 
         # Token 0 has very high probability and should remain.
@@ -336,7 +340,8 @@ class TestProcessedLogprobs:
         metadata = self._make_sampling_metadata(1, temperature=1e-7)
         with mock.patch.object(envs, "SAMPLING_MICROBATCH_SIZE", 16):
             _, processed_logits = sample(jax.random.PRNGKey(0),
-                                         self._get_fake_mesh(), logits, metadata)
+                                         self._get_fake_mesh(), logits,
+                                         metadata)
         processed = compute_logprobs(processed_logits)
 
         assert np.allclose(raw_logprobs, processed, atol=1e-6)
@@ -344,8 +349,8 @@ class TestProcessedLogprobs:
     def test_sampling_transforms_microbatch_preserves_results(self):
         """A batch of 32 should match two independent batches of 16."""
         batch_size = 32
-        logits = jnp.arange(batch_size * 64, dtype=jnp.float32).reshape(
-            batch_size, 64)
+        logits = jnp.arange(batch_size * 64,
+                            dtype=jnp.float32).reshape(batch_size, 64)
         logits = (logits % 37) / 10.0
         metadata = TPUSupportedSamplingMetadata(
             temperature=jnp.linspace(0.5, 1.5, batch_size),
@@ -357,7 +362,8 @@ class TestProcessedLogprobs:
 
         with mock.patch.object(envs, "SAMPLING_MICROBATCH_SIZE", 16):
             _, processed_logits = sample(jax.random.PRNGKey(0),
-                                         self._get_fake_mesh(), logits, metadata)
+                                         self._get_fake_mesh(), logits,
+                                         metadata)
 
         chunk_results = []
         for start in (0, 16):

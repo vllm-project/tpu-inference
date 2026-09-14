@@ -18,7 +18,8 @@ import numpy as np
 import pytest
 import torch
 from flax import nnx
-from jax.sharding import Mesh, PartitionSpec as P
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from tpu_inference.layers.common.moe import MoEBackend

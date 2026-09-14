@@ -525,7 +525,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
 }
 
 
-
 def __getattr__(name: str) -> Any:
     """
     Gets environment variables lazily.
