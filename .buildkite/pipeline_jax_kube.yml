@@ -15,9 +15,9 @@
 # pipeline_jax.yml on the Kueue fleet.
 #
 # A pipeline of its own rather than a branch inside pipeline_jax.yml. The two
-# run the same tests on different hardware from different pools, and while the
-# fleet is being brought up a failure here must not read as a regression in the
-# repo - so this one is non-blocking and pipeline_jax.yml is untouched.
+# run the same tests on different hardware from different pools, and nothing
+# gates a merge on this one, so a failure here reads as a question about the
+# fleet without pipeline_jax.yml being touched.
 #
 # Every v6e step of pipeline_jax.yml is here, with keys kept identical so the
 # two files read side by side. What is absent is what the fleet cannot run:
@@ -25,10 +25,11 @@
 # shape the fleet has node pools for is four. Steps gated on NIGHTLY stay
 # gated, on the same expressions.
 #
-# pipeline_jax.yml's notification step is here as a results check instead. The
-# aggregation is the part that matters - every test step is soft_fail, so the
-# build's own state says nothing - while raising a failing nightly with the team
-# is for a lane that is already trusted.
+# pipeline_jax.yml's notification step has no counterpart here. It exists there
+# because every step in that file is soft_fail, so something has to re-read the
+# outcomes and decide; here a failing step fails the build and the build page
+# already names it. Raising a failing nightly with the team is for a lane that
+# is already trusted.
 #
 # Each step names a shape and a command; chips, topology, Kueue queue, caches
 # and deadlines all come from the cluster-side profile registry in ci-infra, so
@@ -44,14 +45,12 @@
 # losing the agent, and the launcher resubmits within the workload's own
 # deadline.
 #
-# soft_fail matches pipeline_jax.yml: one failing test should not hide the
-# rest. One timeout for every step, covering waiting as well as running,
+# One timeout for every step, covering waiting as well as running,
 # because Buildkite adds no queue time of its own - the agent pod starts at
 # once and then waits inside the step. A hung test is bounded separately by the
 # workload's activeDeadlineSeconds, which queueing cannot consume.
 .tpu_step: &tpu_step
   depends_on: "build_docker_kube"
-  soft_fail: true
   timeout_in_minutes: 480
   agents:
     queue: "kube"
@@ -257,7 +256,6 @@ steps:
     depends_on:
       - "tpu6e_test_7_1"
       - "tpu6e_test_7_2"
-    soft_fail: true
     agents:
       queue: "kube"
     commands:
@@ -529,77 +527,3 @@ steps:
             -H "Content-Type: application/json" \
             -d "{\"model\": \"$$MODEL\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}"
         '
-
-  # ------------------------------------------------------------- the verdict ---
-  # Every step above is soft_fail, so without this the build reads `passed` no
-  # matter how many tests failed - and a lane whose result cannot be read is not
-  # a lane. check_results.sh re-reads each step's outcome and fails here, which
-  # is the same gate pipeline_jax.yml uses; `skipped` counts as fine, so the
-  # NIGHTLY-gated steps do not fail a per-push build.
-  #
-  # Not soft_fail itself: nothing depends on this pipeline, so a red build costs
-  # nobody a merge and is the only thing that says the lane did not pass.
-  - label: ":kubernetes: Test results"
-    key: "check_results"
-    timeout_in_minutes: 10
-    agents:
-      queue: "cpu_64_core"
-    depends_on:
-      - step: "tpu6e_test_0"
-        allow_failure: true
-      - step: "tpu6e_test_1"
-        allow_failure: true
-      - step: "tpu6e_test_2"
-        allow_failure: true
-      - step: "tpu6e_test_3"
-        allow_failure: true
-      - step: "tpu6e_test_4"
-        allow_failure: true
-      - step: "tpu6e_test_6"
-        allow_failure: true
-      - step: "tpu6e_test_7_1"
-        allow_failure: true
-      - step: "tpu6e_test_7_2"
-        allow_failure: true
-      - step: "tpu6e_test_7_3"
-        allow_failure: true
-      - step: "tpu6e_test_8"
-        allow_failure: true
-      - step: "tpu6e_test_9"
-        allow_failure: true
-      - step: "tpu6e_test_10_1"
-        allow_failure: true
-      - step: "tpu6e_test_10_2"
-        allow_failure: true
-      - step: "tpu6e_test_11"
-        allow_failure: true
-      - step: "tpu6e_test_13"
-        allow_failure: true
-      - step: "tpu6e_test_15"
-        allow_failure: true
-      - step: "tpu6e_test_16"
-        allow_failure: true
-      - step: "tpu6e_test_25"
-        allow_failure: true
-      - step: "tpu6e_test_27"
-        allow_failure: true
-      - step: "tpu6e_test_28"
-        allow_failure: true
-      - step: "tpu6e_test_29"
-        allow_failure: true
-      - step: "tpu6e_test_33"
-        allow_failure: true
-      - step: "tpu6e_test_34"
-        allow_failure: true
-      - step: "tpu6e_test_35"
-        allow_failure: true
-    commands:
-      - |
-        .buildkite/scripts/check_results.sh \
-          "TPU JAX kube tests failed" \
-          tpu6e_test_0 tpu6e_test_1 tpu6e_test_2 tpu6e_test_3 tpu6e_test_4 \
-          tpu6e_test_6 tpu6e_test_7_1 tpu6e_test_7_2 tpu6e_test_7_3 \
-          tpu6e_test_8 tpu6e_test_9 tpu6e_test_10_1 tpu6e_test_10_2 \
-          tpu6e_test_11 tpu6e_test_13 tpu6e_test_15 tpu6e_test_16 \
-          tpu6e_test_25 tpu6e_test_27 tpu6e_test_28 tpu6e_test_29 \
-          tpu6e_test_33 tpu6e_test_34 tpu6e_test_35
