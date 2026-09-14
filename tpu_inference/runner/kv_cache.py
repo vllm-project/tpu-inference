@@ -123,9 +123,7 @@ def _get_mamba_cache_allocator(
 
     @partial(jax.jit, out_shardings=sharding)
     def _allocate() -> jax.Array:
-        # Zero-fill like `_get_kv_cache_allocator` so a slot read before it
-        # is written holds finite state rather than whatever XLA chooses.
-        return jnp.zeros(
+        return jnp.empty(
             shape=cache_shape,
             dtype=cache_dtype,
         )
