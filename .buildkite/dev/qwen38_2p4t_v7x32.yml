@@ -1,9 +1,10 @@
 # Bring up Qwen/Qwen3.8-2.4T-A95B-FP8 on a v7x-32 slice (4 hosts, 32 devices).
 #
 # Weights: 2469 GB of parameters (2371 GB of that is the 512 routed experts in
-# block-wise fp8) loaded with runai_streamer. At model=16/attn_dp=2 that is
-# ~79.7 GB per device against the 96 GB each v7x JAX device sees, i.e. ~83% of
-# HBM before any KV cache.
+# block-wise fp8) loaded with runai_streamer. At model=8/attn_dp=4 with the
+# attention and gated-delta-net projections quantized to fp8 at load time, that
+# is ~75.5 GB per device against the 94.74 GB each v7x JAX device reports, i.e.
+# ~80% of HBM before any KV cache.
 #
 # The source is chosen at runtime: qwen38_2p4t_preflight.sh looks for a copy of
 # the checkpoint mounted on every host of the slice and, finding one, bind
@@ -33,11 +34,11 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, model=16 x attn_dp=2, EP=32)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, model=8 x attn_dp=4, EP=32)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
-    timeout_in_minutes: 660
+    timeout_in_minutes: 420
     env:
       TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
       MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
@@ -51,13 +52,14 @@ steps:
       # bound a pathological run, and a load regression is far more useful as a
       # slow progress tail than as a killed job. timeout_in_minutes above has to
       # exceed it or Buildkite kills the job first.
-      # Raised 5h -> 10h for the xhigh eval leg. Measured on tc#959: at
-      # reasoning_effort=xhigh, GPQA requests retire at ~122s each at conc 32,
-      # i.e. ~3900s of latency per request, because most of them run the 32768
-      # output cap to exhaustion rather than stopping on EOS. 198 of those is
-      # ~6.7h, against the ~35 min the low-effort run took. This budget covers
-      # serve for the whole job, not just bring-up, so it has to span the evals.
-      VLLM_ENGINE_READY_TIMEOUT_S: "36000"
+      # Back down to 6h from the 10h the xhigh GPQA leg needed: this build runs
+      # two perf legs and GSM8K only. Bring-up is the usual ~33 min load plus a
+      # precompile that will be cold -- model=8 x attn_dp=4 is a mesh no
+      # previous build has compiled, so every cached entry misses -- and the
+      # client side is ~40 min of benchmark plus ~10 min of GSM8K. This budget
+      # covers serve for the whole job, not just bring-up, so it has to span
+      # the legs; timeout_in_minutes above has to exceed it.
+      VLLM_ENGINE_READY_TIMEOUT_S: "21600"
       # Mirror engine stats into the Buildkite log during the eval leg. Read by
       # run_multihost.sh on the host, so it belongs here rather than in
       # MULTIHOST_ENV_VARS. 120s is coarse enough not to bloat the log over a
@@ -145,218 +147,158 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # Benchmark shape: 8192 in / 1024 out, up from 1024/128. Three knobs
-        # move together with it and none of them is optional.
+        # Sharding: model=8 x attn_dp=4, EP=32. This is the one variable.
         #
-        # MAX_MODEL_LEN has to clear 8192+1024=9216 or every request is
-        # rejected; 12288 leaves room for the accuracy leg's 2048-token
-        # reasoning budget too.
+        # Every build from tc#943 to #25 has run model=16 x attn_dp=2. That
+        # split was forced at bf16: attention and gated-delta-net projections
+        # shard on ShardingAxisName.ATTN_HEAD, which does *not* include
+        # attn_dp, so they are replicated once per attn_dp group. At bf16 they
+        # cost ~4.8 GiB/chip replicated x2 and a third copy pair was
+        # unaffordable. #19 quantized them to fp8 at block 512 and measured
+        # -2.37 GiB/chip at GPQA 0.899 and perf parity, which buys exactly the
+        # room the fourth replica needs.
         #
-        # NUM_PROMPTS 64 -> 128 is the variance ask. Every request is exactly
-        # 8192/1024 (RandomDataset range_ratio defaults to 0) and --ignore-eos
-        # pins the output, so the sample is 16 full waves of identical work
-        # rather than 4.
+        # What moving to attn_dp=4 costs: those same projections now replicate
+        # x4 instead of x2, ~+2.4 GiB/chip, i.e. it gives back almost all of
+        # #19's saving.
         #
-        # MAX_NUM_SEQS 32 -> 80 and BENCH_SWEEP are this run's whole point: the
-        # dedicated batch-size run the comment below has been deferring.
+        # What it buys is larger, and it is a padding effect rather than a
+        # sharding one. This model has 4 KV heads. kv_cache_manager.py:197
+        # calls get_padded_num_heads(4, product(mesh, ATTN_HEAD)), and
+        # utils.py:240 pads *up* to the sharding size when the head count is
+        # below it -- so at model=16 the cache is built for 16 KV heads, four
+        # times more than exist, and at model=8 for 8. The per-device
+        # attention page halves:
         #
-        # The batch the server can hold is dp_size x max_num_seqs
-        # (tpu_runner.py:1049), so 80 gives 160 -- the DP scheduler hands each
-        # of the two ranks the full max_num_seqs (dp_scheduler.py:561) and half
-        # the block pool (:591), i.e. 80 requests against 6144 blocks per rank.
-        # A 9216-token request holds 72 blocks, so peak demand is 5760 of 6144
-        # per rank: 94% utilisation, but preemption is impossible by
-        # construction because no rank can admit an 81st request. That matters
-        # here -- preemption under attn_dp>=2 leaks mamba slots.
+        #   model=16, attn_dp=2:  23 layers x 65,536 B / 2 = 753,664 B per
+        #                         global block per device
+        #   model=8,  attn_dp=4:  23 layers x 65,536 B / 4 = 376,832 B
         #
-        # 160 is one step below the HBM ceiling of 172. Derivation, calibration
-        # against tc#960 and build #2, and the formula for other configs are in
-        # experiments/.../KV_HBM_BATCH_SIZE_MODEL.md; the short version is that
-        # one recurrent slot costs 24.35 attention blocks, so each concurrent
-        # request costs 72 + 24.35 = 96.35 block-equivalents out of a measured
-        # budget of 16,757, and 160 spends 92.3% of it.
+        # (65,536 B is the per-device per-layer page: the global page is
+        # (2, 64*model_cnt, 4, 128) fp8 and it is sharded model_cnt ways on
+        # KV_HEAD and attn_dp ways on BATCH. Verified against #19's logged
+        # regular_attn_shape=(num_blocks, (2, 1024, 4, 128)) at model=16.)
         #
-        # BENCH_SWEEP runs two legs against the one server. Latency and
-        # throughput are the same measurement read at two ends of the
-        # concurrency curve: at conc 8 the TTFT/TPOT numbers are per-request
-        # latency on a near-idle machine and directly comparable to
-        # tc#953/tc#959/tc#960/tc#962/#2; at conc 160 they are queueing delay and
-        # the throughput number is the one that means something. Keeping the
-        # conc-8 leg is what makes the throughput gain attributable -- on its
-        # own a saturated run cannot separate "decode got slower" from "the
-        # batch got bigger". MAX_CONCURRENCY stays 8 so bench.json keeps
-        # meaning what it meant in every earlier MANIFEST.
+        # Recurrent state does not move: mamba shards on ATTN_HEAD for the head
+        # axis and ATTN_DATA for the slot axis, and attn_dp x model is 32 in
+        # both meshes, so it stays 18,352,896 B per global slot per device --
+        # also confirmed against #19 (69 x 8,511,488 B / 32).
         #
-        # n=640 at conc 160 is four full waves, matching the 16 waves the conc-8
-        # leg gets from n=128. It is also the cheaper leg in wall-clock terms:
-        # chunked prefill caps the engine at max_num_batched_tokens per rank per
-        # step regardless of batch size, so 5x the prompts costs well under 5x
-        # the time.
+        # EP is unaffected. attn_dp is a member of ShardingAxisName.EXPERT, and
+        # from_vllm_config moves expert_parallelism to attn_dp_expert whenever
+        # attn_dp > 1, so the product over EXPERT stays 32 and no expert weight
+        # is replicated. Expected mesh: ('data':1, 'attn_dp':4,
+        # 'attn_dp_expert':1, 'expert':1, 'model':8, 'dcp':1, 'pcp':1).
         #
-        # #24 completed the standard-harness baseline -- GPQA 0.7778 on-spec,
-        # GSM8K 0.9780, MMLU 0.8942, all three legs recording for the first
-        # time. This build is a single-variable follow-up to one loose end of
-        # it, so the config is #24's exactly: no load-time quantization,
-        # QUANTIZE_BF16_LINEAR_PATTERNS still absent below, the stock
-        # checkpoint as #12/#20/#23/#24 ran it.
+        # Note this is also what the auto heuristic picks unaided:
+        # sharding.py:261 divides TP by num_kv_heads*2 = 8 when
+        # USE_BATCHED_RPA_SEQ_ON_LANE is on. ATTN_DP_SIZE=4 states it
+        # explicitly rather than relying on that.
         #
-        # The variable is the GPQA system prompt, and only that.
+        # MAX_NUM_SEQS=64 -> 256 concurrent, the calculated ceiling.
         #
-        # Every stock-lm_eval GPQA run so far has lost 19-24 of 198
-        # generations to the 32768-token wall, and a truncated generation
-        # scores *wrong* rather than unscored (group_select: -1 takes the last
-        # "(X)" anywhere in the text). The fork-based runs #17-#19 reported far
-        # less of that at a comparable 0.899-0.904, and the one setting they
-        # carried that lm_eval does not is a system prompt:
+        # The runner gives every DP rank the full max_num_seqs
+        # (dp_scheduler.py:556) and num_blocks/dp_size of the pool (:591), so
+        # the server holds attn_dp x max_num_seqs = 256 requests and each rank
+        # admits 64 against 19456/4 = 4864 blocks. A 9216-token request holds
+        # 72 blocks plus margin, call it 74, so peak per-rank demand is 4736 of
+        # 4864: preemption is impossible by construction because no rank can
+        # admit a 65th request. That property is load-bearing under attn_dp --
+        # see TODO_ENGINE_BUG_mamba_slot_pool_underflow.
         #
-        #    Answer with only the letter in parentheses, e.g. (A).
+        # Where 64 comes from, against the calibration #19 provides
+        # (Init model 73.02 GiB, Init kv-cache 84.46 GiB, so 11.44 GiB of KV,
+        # which the two per-unit costs above reproduce to 0.4%):
         #
-        # (qwen38_2p4t_eval.sh:93, and visible verbatim in #19's Namespace
-        # dump as --chat-template-system-prompt). It tells a reasoning model to
-        # stop early, which is exactly what a runaway generation fails to do.
-        # GPQA_SYSTEM_PROMPT below hands it to lm_eval as --system_instruction;
-        # the stock gpqa_cot_zeroshot task has no `description`, so the
-        # conversation gets exactly that one system turn and nothing else
-        # changes. Verified offline against a recording server.
+        #   base at attn_dp=4  = 73.07 + 2.4 (fourth projection replica)
+        #                      ~ 75.5 GiB
+        #   KV budget to hold  = 87.0 GiB, the Init kv-cache figure #12 ran at
+        #     the same total      and returned from, so proven safe
+        #   per seq per rank   = 296 blocks x 376,832 B + 4 slots x 18,352,896
+        #                      = 185.0 MB
+        #   => max_num_seqs   <= (87.0 - 75.5) GiB / 185.0 MB = 66
         #
-        # GPQA_SAMPLING=greedy, not auto. #20 (21 truncated) and #23 (19) are
-        # both greedy with no system prompt, so greedy here isolates the prompt
-        # against two existing controls; #24's on-spec run would confound it.
-        # Note that greedy also makes lm_eval's pinned seed=1234 inert --
-        # SamplingType is GREEDY, not RANDOM_SEED, so the 500s #22/#23 hit do
-        # not arise (see the seed: null note in qwen38_2p4t_eval_std.sh).
+        # 64 is one step under that, and it is also the value that makes the
+        # arithmetic land on a round pool. At 64:
         #
-        # This deliberately breaks the "stock lm_eval, comparable to a GPU run"
-        # property that #20-#24 exist to provide. That is the point of running
-        # it as a separate build rather than folding it into the baseline: #24
-        # stays THE baseline, and this measures what one house modification is
-        # worth on top of it. Read the truncation count first -- GPQA's
-        # run-to-run noise floor on this deployment is ~+-0.035 (two greedy
-        # runs flipped 19/198 answers with no change of setting), so the
-        # accuracy delta alone cannot carry a conclusion, but the truncation
-        # count moved consistently across #20/#23/#24 and can.
+        #   attention  19456 x 376,832 B                =  6.83 GiB
+        #   mamba      roundup_4(4*64+1) = 260 slots     =  4.44 GiB
+        #   total KV                                     = 11.27 GiB
+        #   predicted Init kv-cache  75.5 + 11.27        ~ 86.8 GiB / 94.74
         #
-        # STD_EVAL_SUITE=gpqa: GSM8K and MMLU are settled and unaffected by a
-        # GPQA-only knob, and dropping them takes ~28 min off the run.
+        # which is #12's proven high-water mark, not a new one. NOTE that
+        # NUM_GPU_BLOCKS_OVERRIDE early-returns past the utilization check
+        # (kv_cache_manager.py:347), so GPU_MEMORY_UTILIZATION does not defend
+        # this -- the allocation either fits physically or the TPU allocator
+        # OOMs. The margin to the 94.74 GiB wall is ~8 GiB.
         #
-        # EVAL_SUITE=none, STD_EVAL_SUITE=gpqa: the accuracy leg is
-        # qwen38_2p4t_eval_std.sh, not qwen38_2p4t_eval.sh. Our older numbers
-        # (GPQA 0.899-0.904 at xhigh across tc#962 and #2) come from this repo's
-        # fork of benchmark_serving.py and are comparable to our own runs and to
-        # nothing else; #20-#24 replaced them with stock lm_eval task
-        # definitions -- gpqa_diamond_cot_zeroshot, gsm8k 5-shot, and the full
-        # 14042-question mmlu rather than the fork's 1000-question subset --
-        # which can sit next to a GPU run of the same checkpoint. Only the GPQA
-        # leg runs here, with the one deviation described above; the gsm8k and
-        # mmlu numbers stand from #24 and a GPQA system prompt cannot move them.
+        # NUM_GPU_BLOCKS_OVERRIDE=19456 rather than the 18,944 that 256x74
+        # strictly needs: the extra 512 blocks cost 0.18 GiB and absorb an
+        # off-by-a-few in the block accounting rather than turning it into
+        # preemption. It remains required for the reason it has been required
+        # since tc#960 -- only the value on the serve command line reaches
+        # engine-core, where get_kv_cache_config() reads it; the worker's own
+        # mamba-aware sizing never crosses the RPC boundary.
         #
-        # BENCH_SWEEP is cut to one short leg for the same reason: #12 already
-        # measured this exact configuration's perf, so re-measuring it costs
-        # ~40 min of a 480 min build. The leg is kept rather
-        # than dropped because BENCH_SWEEP has no "off" -- an empty value falls
-        # back to MAX_CONCURRENCY:NUM_PROMPTS -- and because a perf leg that
-        # completes is the cheapest proof the server is healthy before three
-        # hours of evals are queued against it.
+        # THE 30-SECOND VALIDATION, before trusting any number below it: the
+        # Init kv-cache line must read
+        #   regular_attn_shape=(num_blocks, (2, 512, 4, 128))
+        # with 'attn_dp': 4 and 'model': 8 in the mesh. If it still says
+        # (2, 1024, 4, 128) the mesh did not change, the pool is 2x too
+        # expensive per block, and 256 concurrent will preempt.
         #
-        # The three *_TIMEOUT_S below are caps, not estimates, and they are
-        # sized so that the worst case still fits inside the job rather than so
-        # that each leg gets what it might want. Two ceilings bound them:
-        # timeout_in_minutes 660 and VLLM_ENGINE_READY_TIMEOUT_S 36000 (600
-        # min), which covers serve for the whole job. Load plus precompile plus
-        # the short perf leg is ~90 min, so the evals get 480: 10800 + 7200 +
-        # 10800 = 480 exactly, and the expected case is far below it.
-        # Measured on the fork harness at the same concurrency, GPQA at xhigh is
-        # ~3300s (#17 3312, #19 3325, #2 3241) -- tc#960's 24935s was the KV
-        # pool defect, not the workload -- and low-effort GSM8K was 765s. MMLU
-        # here is loglikelihood, so its 56168 requests are prefill plus one
-        # token each rather than generations. Expect ~4.5h total, not 9.5.
+        # BENCH_SWEEP=8:128 256:1024 -- the measurement.
         #
-        # NUM_GPU_BLOCKS_OVERRIDE is the fix for the defect that made tc#960's
-        # eval unscoreable. The runner sizes the attention pool against mamba's
-        # real footprint and allocates ~15,150 blocks, but it does so
-        # worker-side, after engine-core has already built the scheduler's
-        # block pool from vLLM's uniform hybrid sizing -- and the
-        # `num_gpu_blocks_override` it sets never crosses the RPC boundary. So
-        # tc#960 ran with 15,150 blocks of HBM reserved and 661 admitted against
-        # (83,822 tokens, "Maximum concurrency ... 2.05x"), 13x oversubscribed
-        # at conc 32, and lost 28 of 198 GPQA questions to preemption.
-        # Passing it on the serve command line puts it in the engine-core
-        # config, which is the only place get_kv_cache_config() reads it.
+        # conc 8 is the control and is unchanged from every run since tc#953:
+        # on a near-idle machine TTFT/TPOT are per-request latency and directly
+        # comparable across builds. It is what makes a throughput change
+        # attributable, because a saturated run on its own cannot separate "the
+        # batch got bigger" from "decode got slower" -- and decode *could* get
+        # slower here, since attention and GDN now have 8-way head parallelism
+        # instead of 16-way, with the work made up by running 4 data-parallel
+        # groups instead of 2.
         #
-        # 12288 is held fixed across the batch-size change so the attention pool
-        # is identical to build #2 and max_num_seqs is the only variable. It
-        # clears the 11,520 blocks that 160 concurrent 9216-token requests need,
-        # and the extra 96 mamba slots (66 -> 162) cost 1.76 GB/device, putting
-        # the run at a predicted 86.9 GB of the 94.74 GB physical wall. Note
-        # that on the pinned path there is no software check for this: setting
-        # the flag early-returns _maybe_set_compact_mamba_num_blocks_override
-        # (kv_cache_manager.py:347) before `avail` is ever computed, so the
-        # allocation either fits physically or the TPU allocator OOMs.
-        # Since #3481 the worker takes its own tensor sizing *from*
-        # kv_cache_config.num_blocks, so the two can no longer disagree in the
-        # direction that matters -- but the flag is still required, because
-        # that only makes the worker follow the scheduler, and nothing makes
-        # the scheduler learn the compact-mamba pool size on its own.
+        # conc 256 is the point of the build. 1024 prompts is four full waves,
+        # matching the four #19 got from 160:640. The comparison is against
+        # #19's 160-concurrency leg: 0.708 req/s, 6521 total tok/s, median TPOT
+        # 208 ms.
         #
-        # Setting the flag also used to trip an early return in
-        # _maybe_set_compact_mamba_num_blocks_override that would have given
-        # all 69 mamba layers 12288 slots (~7.2 TB) and OOM'd at KV init.
-        # #3481 added a fallback that sizes mamba at max_num_reqs + 1
-        # independently of that path, so the two are now safe together; the
-        # observed layout is mamba=66, attention=12288.
+        # Secondary effect worth reading in the metrics scrape: aggregate
+        # prefill capacity is attn_dp x MAX_NUM_BATCHED_TOKENS, so it goes from
+        # 4096 to 8192 tokens per step. #12 concluded prefill was the wall at
+        # this shape. MAX_NUM_BATCHED_TOKENS itself stays 2048 per rank so the
+        # per-rank chunking is identical to #19 and the change stays single-
+        # variable.
         #
-        # BENCH_REQUEST_TIMEOUT_S bounds a single request. The benchmark client
-        # hardcoded a 6h aiohttp total, and that timeout is also how long a
-        # stuck request holds its slot in the concurrency semaphore -- so on
-        # tc#960, 28 requests that the engine had already dropped kept 28 of 32
-        # slots occupied until the leg's own 8h wall clock ran out. The engine
-        # went idle at 13:38 and the job burned another 3h56m, 57% of the leg,
-        # with nothing running. 7200s is ~4x the measured P99 E2EL of 1622s and
-        # covers a full 32768-token generation even at 200ms/token, so it
-        # cannot truncate a legitimate answer; it just stops one wedged request
-        # from costing four hours.
+        # STD_EVAL_SUITE=gsm8k, EVAL_SUITE=none -- the accuracy guard.
         #
-        # MAX_NUM_BATCHED_TOKENS stays at 2048, so an 8192-token prompt is four
-        # chunked-prefill passes. Raising it would grow the profiling peak that
-        # vLLM subtracts from the KV budget, shrinking the pool that is already
-        # the binding constraint. TTFT here is therefore a chunked number.
+        # A sharding change should be numerically invisible, so this leg exists
+        # to catch the case where it is not. GSM8K is the right guard rather
+        # than GPQA: #24 measured it at 0.9780 strict==flexible under stock
+        # lm_eval, it is 5-shot and greedy-ish at reasoning_effort=low, it
+        # takes ~10 min instead of ~55, and its run-to-run noise is far below
+        # GPQA's +-0.035. Anything below ~0.96 means the mesh changed the model
+        # and the perf numbers above it are not worth reading. MMLU is skipped
+        # because it is loglikelihood and adds ~19 min; GPQA because its noise
+        # floor is wider than any effect a sharding change should have.
         #
-        # MOE_STAGE_WEIGHTS_ON_HOST is what cut the weight load from 3h34m to
-        # 33m: fp8 MoE expert weights are assembled in host memory and moved to
-        # device once, instead of one device round-trip per expert slice. It
-        # landed upstream in #3503 as opt-in (envs.py default False), so it has
-        # to be set explicitly here -- without it this model silently goes back
-        # to a 3.5-hour load and blows the health-wait budget.
-        #
-        # QUANTIZE_BF16_LINEAR_PATTERNS and QUANTIZE_BF16_LINEAR_BLOCK_SIZE are
-        # deliberately NOT set. Every run from #17 on has carried them, and the
-        # accuracy each produced is only interpretable against a number measured
-        # on the same harness with them off. We do not have that number: the
-        # 0.899-0.904 GPQA band those runs are compared to came from this repo's
-        # benchmark_serving.py fork, which is a different prompt, a different
-        # extractor and a different subset from anything a GPU run reports.
-        #
-        # So this build is the control. The model is the stock checkpoint --
-        # 512 routed experts in block-wise fp8 as shipped, all 92 layers'
-        # attention and gated-delta-net projections left in the bf16 the
-        # checkpoint stores them in (4.27 GiB/chip, replicated x2 because they
-        # shard on ATTN_HEAD, which excludes attn_dp). Nothing is requantized at
-        # load time and no gmm_v2 block-size constraint is in play, which is the
-        # point: whatever the three lm_eval legs report is attributable to the
-        # model and the serving stack, not to a quantization decision.
-        #
-        # Everything the removed knobs encoded -- the 2.13 GiB/chip fp8 recovers,
-        # the mxu_column_size=256 floor below which no fp8 matmul is issued, and
-        # the block-256 rhs-scale bug that produced #18's GPQA 0.0 -- is recorded
-        # in todo_gmm_v2_block_straddling and in the #19 build notes. Restoring
-        # them is a one-line change; measuring against this baseline is the
-        # reason to bother.
+        # Quantization is #19's exactly -- QUANTIZE_BF16_LINEAR_PATTERNS over
+        # self_attn and the linear_attn projections at
+        # QUANTIZE_BF16_LINEAR_BLOCK_SIZE=512. It is not optional here: the
+        # whole HBM argument above is built on the -2.37 GiB/chip it recovers,
+        # and at bf16 this mesh has only ~7.4 GiB for KV and tops out near 156
+        # concurrent, worse than what we already run. 512, not 256 -- see
+        # todo_gmm_v2_block_straddling for the rhs-scale bug that gave #18
+        # GPQA 0.0.
         #
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
         # USE_BATCHED_RPA_KERNEL in particular is read at import time by
         # runner/kv_cache.py to pick the kernel module, so it has to be in the
-        # environment of every Ray worker container.
+        # environment of every Ray worker container. USE_BATCHED_RPA_SEQ_ON_LANE
+        # matters doubly here: it selects KVLayout.SEQ_ALONG_LANE, which is what
+        # makes the per-device page 65,536 B instead of 131,072 B, and it is
+        # also the flag that tells the attn_dp heuristic to divide by 8.
         export MULTIHOST_ENV_VARS="$$(printf '%s\n' \
           'MODEL_IMPL_TYPE=vllm' \
           'NEW_MODEL_DESIGN=1' \
@@ -373,36 +315,29 @@ steps:
           'RUNAI_STREAMER_LOG_TO_STDERR=1' \
           'TPU_WEIGHT_LOAD_PROFILE=1' \
           'TPU_WEIGHT_LOAD_PROFILE_EVERY=10000' \
+          'QUANTIZE_BF16_LINEAR_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
+          'QUANTIZE_BF16_LINEAR_BLOCK_SIZE=512' \
           'TENSOR_PARALLEL_SIZE=32' \
-          'ATTN_DP_SIZE=2' \
+          'ATTN_DP_SIZE=4' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=80' \
-          'NUM_GPU_BLOCKS_OVERRIDE=12288' \
+          'MAX_NUM_SEQS=64' \
+          'NUM_GPU_BLOCKS_OVERRIDE=19456' \
           'MAX_NUM_BATCHED_TOKENS=2048' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=32' \
+          'NUM_PROMPTS=128' \
           'MAX_CONCURRENCY=8' \
-          'BENCH_SWEEP=8:32' \
+          'BENCH_SWEEP=8:128 256:1024' \
           'NUM_WARMUPS=32' \
           'EVAL_SUITE=none' \
-          'STD_EVAL_SUITE=gpqa' \
-          'GPQA_REASONING_EFFORT=xhigh' \
-          'GPQA_SAMPLING=greedy' \
-          'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
-          'GPQA_MAX_GEN_TOKS=32768' \
-          'GPQA_CONCURRENCY=32' \
-          'GPQA_TIMEOUT_S=10800' \
+          'STD_EVAL_SUITE=gsm8k' \
           'GSM8K_REASONING_EFFORT=low' \
           'GSM8K_CONCURRENCY=64' \
           'GSM8K_MAX_TOKENS=1024' \
           'GSM8K_TIMEOUT_S=7200' \
-          'MMLU_BATCH_SIZE=8' \
-          'MMLU_CONCURRENCY=8' \
-          'MMLU_TIMEOUT_S=10800' \
           'BENCH_REQUEST_TIMEOUT_S=7200' \
           "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
           "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
