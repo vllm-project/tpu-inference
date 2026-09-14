@@ -172,8 +172,7 @@ else
   exit 0
 fi
 
-if false; then
-  # Disabled to avoid using scarce v7 hardware during testing
+if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v7x Pipeline Group"
   # Export v7x specific variables
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"
@@ -192,5 +191,6 @@ if false; then
     printf "%s\n" "${pipeline_v7x_fragments[@]}" | sed 's/^/      /'
   } | buildkite-agent pipeline upload
 else
-  echo "--- Skipping TPU v7x upload (disabled for testing)."
+  echo "--- No .yml files found, nothing to upload."
+  exit 0
 fi
