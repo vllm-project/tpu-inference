@@ -41,8 +41,8 @@
 # run.sh instead, which leaves it free for a build that wants to vary it.
 
 # The kube spelling of pipeline_jax.yml's TPU_QUEUE_SINGLE and TPU_QUEUE_MULTI,
-# interpolated the same way, so bootstrap.sh can upload this file once per
-# generation exactly as it uploads that one:
+# interpolated the same way, so a build picks its generation the way that file
+# does:
 #
 #   tpu_v6e_queue    v6e-1    1 chip   ct6e-standard-1t/1x1
 #   tpu_v6e_8_queue  v6e-8    8 chips  ct6e-standard-8t/2x4
@@ -55,6 +55,12 @@
 # Reached through `env:` rather than written into the command, because a YAML
 # anchor cannot be spliced into a string: naming the shape once and referring
 # to it is the only way a step that changes hardware changes one line.
+#
+# One generation per build, unlike pipeline_jax.yml, which bootstrap.sh uploads
+# twice into the same one. That works there because every key in it is
+# parameterised and the image is built by pipeline_build.yml; build_docker_kube
+# below is this file's own and its key is not, so a second upload would collide
+# on it. Two generations at once means hoisting that step out first.
 x-shape-single: &shape_single "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
 x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
 
@@ -402,7 +408,11 @@ steps:
       SHAPE: *shape_single
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
-      TENSOR_PARALLEL_SIZE: "1"
+      # Chips and JAX devices are not the same count. tpu7x-standard-1t is one
+      # chip and two TensorCores, so the single-chip shape has two devices on
+      # v7x and one on v6e - which is why this travels with the generation
+      # rather than with the shape.
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
       MINIMUM_ACCURACY_THRESHOLD: "0.72"
     <<: *tpu_step
     commands:
