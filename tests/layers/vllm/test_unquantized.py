@@ -1045,13 +1045,14 @@ def test_quantize_bf16_linear_pattern_match(monkeypatch, prefix, expected):
     Nothing in the checkpoint is called `qkv_proj`, `in_proj_qkvz` or
     `in_proj_ba`, so selecting those depends on expanding them back into the
     shards they fuse."""
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS",
+                       QWEN3_5_ATTN_PATTERNS)
     assert should_quantize_bf16_linear(prefix,
                                        QWEN3_5_FUSED_MAPPING) is expected
 
 
 def test_quantize_bf16_linear_no_patterns_selects_nothing(monkeypatch):
-    monkeypatch.delenv("QUANTIZE_BF16_LINEAR_PATTERNS", raising=False)
+    monkeypatch.delenv("BF16_LINEAR_REQUANTIZE_PATTERNS", raising=False)
     assert not should_quantize_bf16_linear("model.layers.3.self_attn.qkv_proj",
                                            QWEN3_5_FUSED_MAPPING)
 
@@ -1061,7 +1062,7 @@ def test_quantize_bf16_linear_bare_pattern_is_the_whole_name(monkeypatch):
 
     A suffix has to be spelled as a regex, so the bare form cannot quietly
     select more layers than it names."""
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS",
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS",
                        "model.layers.3.self_attn.o_proj,o_proj")
     assert should_quantize_bf16_linear("model.layers.3.self_attn.o_proj",
                                        QWEN3_5_FUSED_MAPPING)
@@ -1070,7 +1071,7 @@ def test_quantize_bf16_linear_bare_pattern_is_the_whole_name(monkeypatch):
 
 
 def test_quantize_bf16_linear_regex_pattern_matches_suffix(monkeypatch):
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS",
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS",
                        r"re:.*\.o_proj$,re:.*\.down_proj$")
     assert should_quantize_bf16_linear("model.layers.3.self_attn.o_proj",
                                        QWEN3_5_FUSED_MAPPING)
@@ -1085,7 +1086,7 @@ def test_quantize_bf16_linear_partial_fused_shard_raises(monkeypatch):
     The `$` is load-bearing: `re:` patterns are anchored at the start only, so
     an unanchored `.*\\.in_proj_b` would match `in_proj_ba` itself and select the
     fused weight outright instead of half of it."""
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", r"re:.*\.in_proj_b$")
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS", r"re:.*\.in_proj_b$")
     with pytest.raises(ValueError, match="some but not all shards"):
         should_quantize_bf16_linear("model.layers.0.linear_attn.in_proj_ba",
                                     QWEN3_5_FUSED_MAPPING)
@@ -1105,9 +1106,11 @@ def test_quantized_bf16_merged_column_parallel_linear(monkeypatch, model,
     what changes is that the parameter that lands on the device is fp8 with a
     per-output-channel scale (or a blockwise one), and the result still tracks
     the bf16 matmul."""
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS",
+                       QWEN3_5_ATTN_PATTERNS)
     if block_size is not None:
-        monkeypatch.setenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE", str(block_size))
+        monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_BLOCK_SIZE",
+                           str(block_size))
 
     mesh = test_utils.get_spmd_mesh(num_devices)
     dtype = torch.bfloat16
@@ -1192,9 +1195,11 @@ def test_quantized_bf16_row_parallel_linear(monkeypatch, model, num_devices,
     """Row-parallel shards the contracting axis, so the per-output-channel
     scale is replicated and the psum still sums like-scaled partial products.
     A blockwise scale shards along that axis with the weight instead."""
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS",
+                       QWEN3_5_ATTN_PATTERNS)
     if block_size is not None:
-        monkeypatch.setenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE", str(block_size))
+        monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_BLOCK_SIZE",
+                           str(block_size))
 
     mesh = test_utils.get_spmd_mesh(num_devices)
     dtype = torch.bfloat16
@@ -1277,8 +1282,9 @@ def test_quantized_bf16_block_size_rejected(monkeypatch, model, block_size,
     time, naming the env var rather than failing deep inside the jit."""
     if jax.local_device_count() < 8:
         pytest.skip("needs 8 devices to shard the contracting axis 8 ways")
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE", str(block_size))
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS",
+                       QWEN3_5_ATTN_PATTERNS)
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_BLOCK_SIZE", str(block_size))
 
     mesh = test_utils.get_spmd_mesh(8)
     engine_args = EngineArgs(
@@ -1309,7 +1315,8 @@ def test_quantized_bf16_block_size_rejected(monkeypatch, model, block_size,
 
 @pytest.mark.parametrize("model", MODELS)
 def test_unselected_linear_stays_unquantized(monkeypatch, model):
-    monkeypatch.setenv("QUANTIZE_BF16_LINEAR_PATTERNS", QWEN3_5_ATTN_PATTERNS)
+    monkeypatch.setenv("BF16_LINEAR_REQUANTIZE_PATTERNS",
+                       QWEN3_5_ATTN_PATTERNS)
     mesh = test_utils.get_spmd_mesh(1)
 
     engine_args = EngineArgs(
@@ -1344,7 +1351,7 @@ def test_unquantized_linear_stores_no_scale(monkeypatch, model, fuse_matmuls,
                                             bias):
     """The shared store step hangs a scale off the layer only when the build
     step produced one, so an unquantized layer keeps a bare bf16 weight."""
-    monkeypatch.delenv("QUANTIZE_BF16_LINEAR_PATTERNS", raising=False)
+    monkeypatch.delenv("BF16_LINEAR_REQUANTIZE_PATTERNS", raising=False)
     mesh = test_utils.get_spmd_mesh(1)
     dtype = torch.bfloat16
 

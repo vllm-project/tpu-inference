@@ -208,7 +208,7 @@ def _load_weight_for_layer(
 
 
 def _prefix_matches(prefix: str, patterns: Sequence[str]) -> bool:
-    """Match a layer prefix against one of the QUANTIZE_BF16_LINEAR_PATTERNS.
+    """Match a layer prefix against one of the BF16_LINEAR_REQUANTIZE_PATTERNS.
 
     Patterns follow the same convention as the `ignore` /
     `modules_to_not_convert` lists these names are usually copied from: a bare
@@ -230,7 +230,7 @@ def should_quantize_bf16_linear(
     is quantized only when every shard it covers is selected, since one weight
     cannot be half fp8.
     """
-    patterns = envs.QUANTIZE_BF16_LINEAR_PATTERNS
+    patterns = envs.BF16_LINEAR_REQUANTIZE_PATTERNS
     if not patterns:
         return False
     if _prefix_matches(prefix, patterns):
@@ -246,7 +246,7 @@ def should_quantize_bf16_linear(
     ]
     if any(matched) and not all(matched):
         raise ValueError(
-            f"QUANTIZE_BF16_LINEAR_PATTERNS selects some but not all shards of "
+            f"BF16_LINEAR_REQUANTIZE_PATTERNS selects some but not all shards of "
             f"{prefix} ({fused_mapping[proj_name]}); it is a single fused "
             f"weight, so it has to be selected as a whole or not at all.")
     return all(matched)
@@ -487,7 +487,7 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
                                     VllmUnquantizedLinearMethod):
     """Quantizes a linear weight the checkpoint left unquantized, at load time.
 
-    Selected by QUANTIZE_BF16_LINEAR_PATTERNS. The weight arrives in the
+    Selected by BF16_LINEAR_REQUANTIZE_PATTERNS. The weight arrives in the
     checkpoint dtype and is loaded exactly as the unquantized path loads it, so
     everything about weight loading and sharding is inherited -- the one step
     that differs is `_build_linear_weights`, which quantizes the weight on its
@@ -498,7 +498,7 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
     [in, out] weight, which stays valid under both column-parallel sharding (the
     scale shards with the output axis) and row-parallel sharding (the scale is
     identical across contracting shards, so the psum is still a sum of
-    like-scaled partial products). QUANTIZE_BF16_LINEAR_BLOCK_SIZE splits the
+    like-scaled partial products). BF16_LINEAR_REQUANTIZE_BLOCK_SIZE splits the
     input axis into blocks instead, giving a [in // block, out] scale; that also
     survives both shardings, but only the blockwise gmm kernel can consume it
     directly, so setting it switches the matmul over to that kernel.
@@ -510,12 +510,14 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
 
     def __init__(self, linear_config: VllmQuantLinearConfig):
         VllmUnquantizedLinearMethod.__init__(self, linear_config)
-        self.weight_dtype = to_jax_dtype(envs.QUANTIZE_BF16_LINEAR_DTYPE)
-        self.block_size = envs.QUANTIZE_BF16_LINEAR_BLOCK_SIZE
+        self.weight_dtype = to_jax_dtype(
+            envs.BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE)
+        self.block_size = envs.BF16_LINEAR_REQUANTIZE_BLOCK_SIZE
         logger.info_once(
-            "Quantizing unquantized linear layers matching %s to %s (%s).",
-            ", ".join(envs.QUANTIZE_BF16_LINEAR_PATTERNS),
-            envs.QUANTIZE_BF16_LINEAR_DTYPE,
+            "BF16_LINEAR_REQUANTIZE_PATTERNS selected the unquantized linear "
+            "layers matching %s; quantizing them to %s (%s).",
+            ", ".join(envs.BF16_LINEAR_REQUANTIZE_PATTERNS),
+            envs.BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE,
             f"blocks of {self.block_size} input features"
             if self.block_size else "per output channel")
 
@@ -532,20 +534,20 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
             return
         if self.block_size <= 0:
             raise ValueError(
-                f"QUANTIZE_BF16_LINEAR_BLOCK_SIZE={self.block_size} is not a "
+                f"BF16_LINEAR_REQUANTIZE_BLOCK_SIZE={self.block_size} is not a "
                 f"positive number of input features. Unset it to scale per "
                 f"output channel.")
         name = type(layer).__name__
         if in_features % self.block_size:
             raise ValueError(
-                f"QUANTIZE_BF16_LINEAR_BLOCK_SIZE={self.block_size} does not "
+                f"BF16_LINEAR_REQUANTIZE_BLOCK_SIZE={self.block_size} does not "
                 f"divide the {in_features} input features of {name}.")
         n_blocks = in_features // self.block_size
         in_shards = get_mesh_shape_product(
             self.linear_config.mesh, self.linear_config.weight_sharding[0])
         if n_blocks > 1 and n_blocks % in_shards:
             raise ValueError(
-                f"QUANTIZE_BF16_LINEAR_BLOCK_SIZE={self.block_size} splits the "
+                f"BF16_LINEAR_REQUANTIZE_BLOCK_SIZE={self.block_size} splits the "
                 f"{in_features} input features of {name} into {n_blocks} "
                 f"blocks, which its input axis cannot shard {in_shards} ways. "
                 f"Use a block size that leaves a multiple of {in_shards} "

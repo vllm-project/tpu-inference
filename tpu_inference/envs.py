@@ -32,9 +32,9 @@ if TYPE_CHECKING:
     ENABLE_QUANTIZED_MATMUL_KERNEL: bool = False
     REQUANTIZE_BLOCK_SIZE: int | None = None
     REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
-    QUANTIZE_BF16_LINEAR_PATTERNS: list[str] = []
-    QUANTIZE_BF16_LINEAR_DTYPE: str = "float8_e4m3fn"
-    QUANTIZE_BF16_LINEAR_BLOCK_SIZE: int | None = None
+    BF16_LINEAR_REQUANTIZE_PATTERNS: list[str] = []
+    BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE: str = "float8_e4m3fn"
+    BF16_LINEAR_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
@@ -315,18 +315,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # fuses may be named as the checkpoint names them (q_proj for qkv_proj),
     # but every shard of a fused layer must be selected or none of it is.
     # Empty (default) leaves every unquantized linear in its checkpoint dtype.
-    "QUANTIZE_BF16_LINEAR_PATTERNS":
-    env_str_list("QUANTIZE_BF16_LINEAR_PATTERNS"),
-    # Weight dtype for the layers QUANTIZE_BF16_LINEAR_PATTERNS selects.
-    "QUANTIZE_BF16_LINEAR_DTYPE":
-    lambda: os.getenv("QUANTIZE_BF16_LINEAR_DTYPE", "float8_e4m3fn"),
+    "BF16_LINEAR_REQUANTIZE_PATTERNS":
+    env_str_list("BF16_LINEAR_REQUANTIZE_PATTERNS"),
+    # Weight dtype for the layers BF16_LINEAR_REQUANTIZE_PATTERNS selects.
+    "BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE":
+    lambda: os.getenv("BF16_LINEAR_REQUANTIZE_WEIGHT_DTYPE", "float8_e4m3fn"),
     # Scale those layers once per block of this many input features, instead of
     # once per output channel when unset (the default). Smaller blocks track
     # outliers better for a little more scale memory. Must divide the layer's
     # input size and leave a block count the layer's input axis can shard.
-    "QUANTIZE_BF16_LINEAR_BLOCK_SIZE":
-    lambda: int(block_size)
-    if (block_size := os.getenv("QUANTIZE_BF16_LINEAR_BLOCK_SIZE")) else None,
+    "BF16_LINEAR_REQUANTIZE_BLOCK_SIZE":
+    lambda: int(block_size) if
+    (block_size := os.getenv("BF16_LINEAR_REQUANTIZE_BLOCK_SIZE")) else None,
     # Specify dtype for quantized MoE weights
     "MOE_REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", ""),
