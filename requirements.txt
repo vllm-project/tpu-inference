@@ -14,7 +14,7 @@ jaxtyping
 fastapi[standard]<0.137.0
 flax==0.12.8
 torchax==0.0.13
-qwix==0.1.2
+qwix>=0.1.8
 torchvision==0.25.0
 pathwaysutils
 parameterized
