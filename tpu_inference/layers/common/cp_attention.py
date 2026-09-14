@@ -15,11 +15,15 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
+import tpu_inference.kernels.experimental.batched_rpa.wrapper as batched_rpa
 import tpu_inference.kernels.experimental.rpa_v3_cp.kernel as rpa_v3_cp
+from tpu_inference.kernels.experimental.batched_rpa import \
+    configs as batched_rpa_configs
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -393,6 +397,187 @@ def pcp_forward(
         else:
             out, _ = merge_attn_states(context_out, context_lse, curr_out,
                                        curr_lse)
+        return kv_cache_updated, out.astype(q.dtype)
+
+    return jax.shard_map(
+        _shard_fn,
+        mesh=mesh,
+        in_specs=(
+            q_spec,
+            kv_spec,
+            kv_spec,
+            kv_cache_spec,
+            P(),  # kv_lens: replicated
+            P(),  # pcp.kv_cache_lens: replicated
+            P(),  # page_indices: replicated
+            P(),  # distribution: replicated
+            P(pcp_axis, None),  # pcp.query_start_loc: per-rank cu_q_lens
+            P(pcp_axis, None),  # pcp.q_pos_offsets: per-rank position offsets
+        ),
+        out_specs=(kv_cache_spec, q_spec),
+        check_vma=False,
+    )(q, k, v, kv_cache, md.seq_lens, md.pcp.kv_cache_lens, md.block_tables,
+      md.request_distribution, md.pcp.query_start_loc, md.pcp.q_pos_offsets)
+
+
+# ── PCP on the batched RPA kernel ─────────────────────────────────────────────
+
+
+def pcp_forward_batched(
+    mesh: Mesh,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    kv_cache: jax.Array,
+    md: AttentionMetadata,
+    sm_scale: float,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    update_kv_cache: bool = True,
+    use_causal_mask: bool = True,
+) -> tuple[jax.Array, jax.Array]:
+    """PCP attention forward on the batched RPA kernel.
+
+    Same two-phase decomposition as `pcp_forward`:
+
+      1. cache phase     in-kernel ring: each rank's stripe of the KV cache
+                         rotates around the pcp axis while the rank attends
+                         with its own Q, so one online softmax covers the whole
+                         cache. Only KV crosses the wire.
+      2. current phase   local Q (head+tail chunks, as two sequences with their
+                         own `q_positions`) attends the all-gathered current KV
+                         and writes it back striped over the pcp ranks.
+      3. merge_attn_states
+    """
+    pcp_axis = ShardingAxisName.PREFILL_CONTEXT
+    pcp_size = get_mesh_shape_product(mesh, pcp_axis)
+    two_p = 2 * pcp_size
+    padded_q_len = q.shape[0]
+    C = padded_q_len // two_p
+    page_size = kv_cache.shape[1] // pcp_size
+    num_seqs = md.seq_lens.shape[0]
+
+    # Page table for the all-gathered current KV, so the kernel can read it in
+    # its natural rank order. `all_gather` concatenates the per-rank blocks, and
+    # a rank stores its head chunk then its tail chunk, so global chunk c of
+    # `two_p` is rank c's head for c < pcp_size and rank 2P-1-c's tail
+    # otherwise. Both sequences of a request address the whole chunk, so they
+    # share a row.
+    if C % page_size:
+        raise NotImplementedError(
+            f"PCP chunk size {C} must be a multiple of the page size "
+            f"{page_size} to address the gathered current KV by page.")
+    pages_per_chunk = C // page_size
+    rank_pages = 2 * pages_per_chunk
+    _table = np.zeros((num_seqs, two_p * pages_per_chunk), np.int32)
+    for _c in range(two_p):
+        _rank = _c if _c < pcp_size else two_p - 1 - _c
+        _base = _rank * rank_pages + (0 if _c < pcp_size else pages_per_chunk)
+        for _p in range(pages_per_chunk):
+            _table[:, _c * pages_per_chunk + _p] = _base + _p
+    new_kv_page_indices = jnp.asarray(_table.reshape(-1))
+
+    q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
+    kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
+    kv_cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
+                      ShardingAxisName.KV_HEAD, None, None)
+
+    common = dict(sm_scale=sm_scale,
+                  q_scale=q_scale,
+                  k_scale=k_scale,
+                  v_scale=v_scale,
+                  cp_group_size=pcp_size,
+                  return_lse=True)
+
+    cache_pages = md.pcp.cache_pages
+
+    def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
+                  kv_cache_lens_local, page_indices_local, distribution_local,
+                  pcp_cu_q_lens_local, pcp_q_pos_offsets_local):
+        cp_rank = jnp.reshape(lax.axis_index(pcp_axis), (1, )).astype(jnp.int32)
+        # The all-gathered current chunk is what every sequence of the request
+        # contributes as new KV, in both phases; the kernel derives the cache
+        # length from it.
+        kv_new_lens = kv_lens_local - kv_cache_lens_local
+
+        def all_gather_tokens(x):
+            return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
+
+
+        # ---- Cache phase --------------------------------------------------
+        if cache_pages == 0:
+            # Nothing cached (first chunk of a chunked prefill): the cache
+            # phase would attend an empty cache and its -inf result would be
+            # discarded by merge_attn_states. Skip it outright.
+            context_out = context_lse = None
+        else:
+            # The in-kernel ring walks this rank's own Q over every rank's
+            # stripe of the cache, so there is nothing to gather or merge
+            # afterwards -- one online softmax covers the whole cache.
+            cu_ring = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(
+                q_local.shape[0])
+            # The cache phase reads no new KV; k/v are passed only so the
+            # kernel can size its (unused) new-KV staging buffer, so the
+            # ungathered local ones do.
+            context_out, _, context_lse = batched_rpa.ragged_paged_attention(
+                q_local,
+                k_local,
+                v_local,
+                kv_cache_local,
+                kv_lens_local,
+                page_indices_local,
+                cu_ring,
+                jnp.array([0, 0, 1], jnp.int32),
+                cp_rank=cp_rank,
+                kv_new_lens=kv_new_lens,
+                attention_scope=batched_rpa_configs.AttentionScope.CACHE_ONLY,
+                pcp_ring_axis_name=pcp_axis,
+                pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
+                update_kv_cache=False,
+                **common)
+            context_out = context_out.astype(jnp.float32)
+            context_lse = context_lse.astype(jnp.float32)
+
+        # ---- Current phase ------------------------------------------------
+        # Head and tail chunks are two sequences of the same request: they
+        # share the cache length and the whole all-gathered current KV, and
+        # differ only in where their Q sits inside it. Only the last of them
+        # writes the current KV back; the kernel extends that sequence's last Q
+        # block over the full chunk, since its own causal range does not reach.
+        q_positions = kv_cache_lens_local + pcp_q_pos_offsets_local[0]
+        seq_ids = jnp.arange(num_seqs, dtype=jnp.int32)
+        writes = jnp.logical_and(update_kv_cache,
+                                 seq_ids == distribution_local[2] - 1)
+        # The gathered current KV keeps its natural rank order; the page
+        # table maps global token order onto it.
+        k_curr = all_gather_tokens(k_local)
+        v_curr = all_gather_tokens(v_local)
+        curr_out, kv_cache_updated, curr_lse = batched_rpa.ragged_paged_attention(
+            q_local,
+            k_curr,
+            v_curr,
+            kv_cache_local,
+            kv_lens_local,
+            page_indices_local,
+            pcp_cu_q_lens_local[0],
+            distribution_local,
+            cp_rank=cp_rank,
+            kv_new_lens=kv_new_lens,
+            q_positions=q_positions,
+            update_kv_cache=writes,
+            new_kv_page_indices=new_kv_page_indices,
+            attention_scope=batched_rpa_configs.AttentionScope.
+            NEW_TOKENS_ONLY,
+            use_causal_mask=use_causal_mask,
+            **common)
+
+        if context_out is None:
+            out = curr_out
+        else:
+            out, _ = merge_attn_states(context_out, context_lse,
+                                       curr_out.astype(jnp.float32),
+                                       curr_lse.astype(jnp.float32))
         return kv_cache_updated, out.astype(q.dtype)
 
     return jax.shard_map(

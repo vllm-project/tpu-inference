@@ -103,6 +103,9 @@ class ServingConfigs:
     max_schedule_size_multiplier: int = 16
     decode_query_size: int = 1
     cp_group_size: int | None = None
+    pcp_ring_axis_name: str | None = None
+    pcp_ring_mesh_axis_names: tuple[str, ...] | None = None
+    paged_new_kv: bool = False
     attention_scope: AttentionScope = AttentionScope.FULL
     return_lse: bool = False
 
@@ -141,7 +144,20 @@ class ServingConfigs:
 
     @property
     def is_sharding_kv_cache(self) -> bool:
-        return self.cp_group_size is not None and self.attention_scope == configs.AttentionScope.CACHE_ONLY and self.pcp_ring_axis_name is None
+        """Whether this kernel attend partial kv cache. Only true under DCP cache phase. """
+        return (self.cp_group_size is not None
+                and self.attention_scope == AttentionScope.CACHE_ONLY
+                and self.pcp_ring_axis_name is None)
+
+    @property
+    def write_last_q_block(self) -> bool:
+        """Whether the new-KV write is owned by a sequence's last Q block.
+
+        By default the first Q block that attends a new-KV block writes it.
+        In CP new_token_only phase, the write is owned by the last Q block,
+        whose KV loop `q_loop` extends to cover the full new KV.  
+    """
+        return self.cp_group_size is not None and self.attention_scope == AttentionScope.NEW_TOKENS_ONLY
 
 
 class RpaCase(enum.StrEnum):
@@ -210,6 +226,26 @@ class RpaConfigs:
         return self.block.n_buffer
 
     # Define derived values.
+
+    @property
+    def ring_enabled(self) -> bool:
+        """Whether this kernel rotates KV around the PCP ring."""
+        return (self.serve.pcp_ring_axis_name is not None
+                and self.serve.attention_scope == AttentionScope.CACHE_ONLY
+                and self.mode != RpaCase.DECODE)
+
+    def local_kv_cache_len(self, global_kv_cache_len, rank):
+        """This call's cache length in its own KV index space. CP only.
+
+        The cache is page-striped across the CP group, so a cache-phase call walks
+        only one rank's stripe. 
+        """
+        if (self.serve.cp_group_size is None
+                or self.serve.attention_scope != AttentionScope.CACHE_ONLY):
+            return global_kv_cache_len
+        return utils.cp_local_cache_len(global_kv_cache_len,
+                                        self.serve.cp_group_size, rank,
+                                        self.serve.page_size)
 
     @property
     def max_steps_ub(self) -> int:
@@ -412,12 +448,19 @@ class RpaConfigs:
         )
 
     @property
+    def lse_rows_per_token(self) -> int:
+        """LSE rows a token occupies, sublane-aligned."""
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
+        return utils.align_to(self.aligned_num_q_heads_per_kv_head,
+                              num_sublanes)
+
+    @property
     def lse_vmem_shape(self):
         num_lanes = pltpu.get_tpu_info().num_lanes
         return (
             self.block.batch_size,
             self.model.num_kv_heads,
-            self.block.bq_sz * self.aligned_num_q_heads_per_kv_head,
+            self.block.bq_sz * self.lse_rows_per_token,
             num_lanes,
         )
 
@@ -452,10 +495,10 @@ class RpaConfigs:
                 f"Expected 3D array for {q.shape=}, {k.shape=}, {v.shape=}")
         if k.shape != v.shape:
             raise ValueError(f"Expected {k.shape=} to be equal to {v.shape=}")
-        if not (q.shape[0] == k.shape[0] == v.shape[0]):
+        if q.shape[0] > k.shape[0]:
             raise ValueError(
-                "Expected number of sequences in Q, K, and V to be the same, but got"
-                f" {q.shape[0]=}, {k.shape[0]=}, and {v.shape[0]=}")
+                "Expected at least as many K/V tokens as Q tokens, but got"
+                f" {q.shape[0]=} and {k.shape[0]=}")
         expected_kv_head_dim = q.shape[2]
         if self.serve.dtype_kv == jnp.uint8:
             expected_kv_head_dim = q.shape[2] // 2

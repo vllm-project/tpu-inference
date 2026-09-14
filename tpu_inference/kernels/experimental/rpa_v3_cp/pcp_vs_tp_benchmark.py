@@ -26,6 +26,12 @@ parallelism layouts, each cell relative to the all-device TP baseline.
                          Q/K/V head-tail sharded over pcp, heads over model,
                          KV cache page-striped over pcp. In-kernel ring for the
                          cache phase.
+  * ``bpcp{P}xtp{N/P}``- the same layout and the same in-kernel ring, on the
+                         batched RPA kernel
+                         (``cp_attention.pcp_forward_batched``). Needs the PCP
+                         chunk size to be a multiple of the page size, so that
+                         the all-gathered current KV can be addressed by page
+                         in its natural rank order.
 
 Attention alone understates the difference between the layouts. Per the
 sharding rules (``ShardingAxisName``): o_proj is row-parallel over the model
@@ -140,15 +146,25 @@ def _ladder(max_ctx):
 # --------------------------------------------------------------------------
 def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                  warmup, iters, collectives, profile_dir, profile_contexts, n):
-    # tpu_inference must be imported before jax (its __init__ loads the
-    # engine first).
+    # Raiden's engine extension must be loaded before jaxlib's XLA copy or the
+    # two collide in static initializers and the process segfaults.
+    # `tpu_inference.__init__` tries to do this, but by then its own
+    # `env_override` has pulled in vLLM, whose platform-plugin discovery
+    # imports tpu_inference.platforms -> jax. So preload it here, first.
+    try:
+        import tpu_raiden.frameworks.jax._tpu_raiden_jax  # noqa: F401
+    except ImportError:
+        pass
+    import tpu_inference  # noqa: F401  isort: skip
+
     import jax
     import jax.numpy as jnp
     import numpy as np
     from jax.sharding import Mesh, NamedSharding
     from jax.sharding import PartitionSpec as P
 
-    import tpu_inference  # noqa: F401
+    from tpu_inference.kernels.experimental.batched_rpa import \
+        wrapper as batched_rpa
     from tpu_inference.kernels.experimental.rpa_v3_cp import \
         kernel as rpa_v3_cp
     from tpu_inference.kernels.ragged_paged_attention.v3 import \
@@ -159,7 +175,8 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         ragged_paged_attention
     from tpu_inference.layers.common.attention_metadata import (
         AttentionMetadata, PCPMetadata)
-    from tpu_inference.layers.common.cp_attention import pcp_forward
+    from tpu_inference.layers.common.cp_attention import (pcp_forward,
+                                                          pcp_forward_batched)
     from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                       ShardingAxisName,
                                                       ShardingAxisNameBase)
@@ -270,65 +287,17 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
 
         return measure
 
+    def make_pcp(pcp, tp, batched=False):
+        """PCP through cp_attention on a (pcp, model) mesh.
 
-    def make_multi_req_pcp(pcp, tp): 
-        num_requests = 3 
-        block_size = 256
-        input_lengths = [1024, 4095, 2048]
-        kv_cache_lens = [4095, 8192, 4096]
-        requests = [jnp.arange(length, jnp.int32) for length in input_lengths]
-        # pad each pcp chunk to be a multiple of block size 
-        padded_request_lengths = [cdiv(length, 2*pcp*block_size) for length in input_lengths]
-        padded_requests = [jnp.pad(request, (0, padded_length))
-                         for request, padded_length in zip(requests, padded_request_lengths)]                        
-        reshaped_tokens = [ x.reshape(-1, block_size) for x in padded_requests]
-
-
-        head_tail_arranged_tokens = [[[] for _ in range(pcp)] for _ in range(num_requests)]
-        q_positions_current_phase = [[[] for _ in range(pcp)] for _ in range(num_requests)]
-        for i in range(num_requests):
-            blocks =  reshaped_tokens[i].shape[0] //2
-            for j in range(blocks):
-                rank = j % pcp
-                head_tail_arranged_tokens[i][rank].append(reshaped_tokens[i][j]) # hail
-                head_tail_arranged_tokens[i][rank].append(reshaped_tokens[i][blocks - j -1]) # tail
-                q_positions_current_phase[i][rank].append(j*block_size)
-                q_positions_current_phase[i][rank].append((blocks - j -1)*block_size)
-
-        head_tail_arranged_tokens_concated = [ [jnp.concatenate(x) for x in y] for y in head_tail_arranged_tokens]
-        head_tail_arranged_tokens_concated = [ [jnp.concatenate(x) for x in y] for y in q_positions_current_phase]
-
-        # now each request is a contigous sequence 
-        # CACHE phase
-        # head and tail are treated the same request
-        cu_q_lens_cache_phase = [0] + [ padded_request_lengths // pcp for x in padded_request_lengths]
-        cu_q_lens_cache_phase = jnp.cumsum(jnp.array(cu_q_lens_cache_phase))
-        q_positions = kv_cache_lens
-        page_indices = [[...]]
-        kv_lens_cache_phase = kv_cache_lens + input_lengths
-        kv_new_lens_cache_phase = input_lengths 
-
-        # CURRENT Phase
-        # head and tail are treated as independent requests.
-        cu_q_lens_current_phase = [0] + [ padded_request_lengths // (2*pcp) for x in padded_request_lengths]
-        # new kv pages in order. eg. if pcp =4, and each request only had 4 pages of new kv. [[0, 6, 7, 1], [2,8,9,3], [4, 10, 11, 5]]
-        new_kv_page_indices = [[]]
-
-        update_kv_current_phase= [[True, False] for _ in range(num_requests)]
-        kv_lens_current_phase=  kv_lens_cache_phase.repeat(1)
-        kv_new_lens_current_phase = input_lengths.repeat(1)
-
-        # forward with batched rpa. 
-        
-
-
-
-        
-
-
-
-    def make_pcp(pcp, tp):
-        """rpa_v3_cp through cp_attention.pcp_forward on a (pcp, model) mesh."""
+        `batched` picks the batched RPA kernel (`pcp_forward_batched`) over
+        rpa_v3_cp (`pcp_forward`). Both see the same inputs and the same cache
+        layout; they differ in how the cache phase combines the per-rank
+        partials (out-of-kernel LSE merge vs the in-kernel ring).
+        """
+        forward = pcp_forward_batched if batched else pcp_forward
+        kv_cache_shape_fn = (batched_rpa.get_kv_cache_shape
+                             if batched else rpa_v3_cp.get_kv_cache_shape)
         shape = tuple(pcp if a == "pcp" else tp if a == "model" else 1
                       for a in MESH_AXIS_NAMES)
         mesh = Mesh(
@@ -341,8 +310,7 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
         # Each rank holds `page` tokens of every global page (KV_CONTEXT shards
         # the page dim over pcp) and its own KV heads (KV_HEAD shards the
         # packed planes over tp); the per-rank layout is the CP kernel's own.
-        per_rank = rpa_v3_cp.get_kv_cache_shape(npages, page, NKV // tp, HD,
-                                                kv_dtype)
+        per_rank = kv_cache_shape_fn(npages, page, NKV // tp, HD, kv_dtype)
         cache_shape = (npages, gpage, per_rank[2] * tp) + tuple(per_rank[3:])
         cache_spec = P(ShardingAxisName.BATCH, ShardingAxisName.KV_CONTEXT,
                        ShardingAxisName.KV_HEAD, None, None)
@@ -394,15 +362,15 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
                                         q_pos_offsets=pcp_qp,
                                         cache_pages=_cp),
                     )
-                    cache, out = pcp_forward(mesh,
-                                             q,
-                                             k,
-                                             v,
-                                             cache,
-                                             md,
-                                             sm_scale=sm_scale,
-                                             update_kv_cache=True,
-                                             use_causal_mask=True)
+                    cache, out = forward(mesh,
+                                         q,
+                                         k,
+                                         v,
+                                         cache,
+                                         md,
+                                         sm_scale=sm_scale,
+                                         update_kv_cache=True,
+                                         use_causal_mask=True)
                     # Heads are sharded over the model axis; all-reduce there.
                     out = jax.shard_map(functools.partial(
                         layer_collectives,
@@ -436,7 +404,10 @@ def _run_variant(mp, variant, chunk, max_ctx, kv_dtype_name, page, slack,
 
         return measure
 
-    if variant.startswith("pcp"):
+    if variant.startswith("bpcp"):
+        pcp, tp = (int(x) for x in variant[4:].split("xtp"))
+        measure = make_pcp(pcp, tp, batched=True)
+    elif variant.startswith("pcp"):
         pcp, tp = (int(x) for x in variant[3:].split("xtp"))
         measure = make_pcp(pcp, tp)
     else:
@@ -498,6 +469,7 @@ def _variants(mp, n, pcp_sizes):
             # (TP replicates KV heads when tp > num_kv_heads, PCP does not).
             continue
         out.append(f"pcp{p}xtp{tp}")
+        out.append(f"bpcp{p}xtp{tp}")
     return out
 
 
@@ -594,6 +566,11 @@ def main():
                 args.cache_slack, args.warmup, args.iters,
                 not args.no_collectives, args.profile_dir,
                 [int(c) for c in args.profile_contexts.split(",")], int(n))
+        except NotImplementedError:
+            # The kernel does not support this head config (e.g. batched RPA
+            # needs a sublane-aligned head group to return LSE); report it
+            # instead of failing the sweep.
+            res = {"error": "unsupported"}
         except Exception as e:  # noqa: BLE001
             if "vmem" not in str(e):
                 raise

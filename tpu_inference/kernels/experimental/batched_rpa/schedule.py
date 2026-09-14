@@ -464,7 +464,7 @@ def _compute_waits(
 
         # LSE OUT
         lse_bytes_per_token = (cfgs.model.num_kv_heads *
-                               cfgs.aligned_num_q_heads_per_kv_head * 128 *
+                               cfgs.lse_rows_per_token * 128 *
                                cfgs.serve.dtype_out.itemsize)
         schedule.total_wait_lse_out[step] = (
             o_out_tokens * lse_bytes_per_token) // dma_chunk_size
@@ -554,7 +554,7 @@ class BaseMetadataComputer:
         q_end,
         q_src,
         q_sz_task,
-        global_kv_cache_len,
+        kv_cache_len,
         kv_new_len,
         end_k_idx,
         update_kv_cache,
@@ -576,9 +576,9 @@ class BaseMetadataComputer:
 
         kv_len_start = k_idx * cfgs.bkv_sz
         kv_p_start = k_idx * cfgs.bkv_p
-        k_len = global_kv_cache_len + kv_new_len
+        k_len = kv_cache_len + kv_new_len
         kv_left = k_len - kv_len_start
-        kv_left_frm_cache = jnp.maximum(global_kv_cache_len - kv_len_start, 0)
+        kv_left_frm_cache = jnp.maximum(kv_cache_len - kv_len_start, 0)
         p_offset = s_idx * cfgs.serve.pages_per_seq + kv_p_start
 
         for i in range(cfgs.bkv_p_cache):
@@ -605,9 +605,10 @@ class BaseMetadataComputer:
 
         # Writeback logic: each new k block is written back by the first q block
         # that attends to it.
-        q_wb = jnp.maximum(0, (kv_len_start - global_kv_cache_len)) // cfgs.bq_sz
+        q_wb = jnp.maximum(0, kv_len_start - kv_cache_len) // cfgs.bq_sz
 
-        do_writeback = jnp.where((new_sz > 0) & (q_idx == q_wb) & update_kv_cache, 1, 0)
+        do_writeback = jnp.where(
+            (new_sz > 0) & (q_idx == q_wb) & update_kv_cache, 1, 0)
         schedule.do_writeback[step, target_lane] = do_writeback
         src_hbm = q_end - kv_left_frm_new
 
@@ -723,6 +724,7 @@ class BaseMetadataComputer:
         global_kv_cache_len,
         kv_new_len,
         num_k,
+        num_q,
         update_kv_cache,
     ) -> LoopCarry:
         cfgs = self.cfgs
@@ -739,7 +741,8 @@ class BaseMetadataComputer:
         end_k_idx = jnp.minimum(num_k, end_k_idx_causal)
 
         if cfgs.serve.attention_scope == configs.AttentionScope.NEW_TOKENS_ONLY:
-            start_k_idx = jnp.maximum(start_k_idx, global_kv_cache_len // cfgs.bkv_sz)
+            start_k_idx = jnp.maximum(start_k_idx,
+                                      global_kv_cache_len // cfgs.bkv_sz)
 
         k_loop_fn = functools.partial(
             self.k_loop,
@@ -748,7 +751,7 @@ class BaseMetadataComputer:
             q_end=q_end,
             q_src=q_src,
             q_sz_task=q_sz_task,
-            global_kv_cache_len=global_kv_cache_len,
+            kv_cache_len=global_kv_cache_len,
             kv_new_len=kv_new_len,
             end_k_idx=end_k_idx,
             update_kv_cache=update_kv_cache,
@@ -790,6 +793,7 @@ class BaseMetadataComputer:
             global_kv_cache_len=global_kv_cache_len,
             kv_new_len=kv_new_len,
             num_k=num_k,
+            num_q=num_q,
             update_kv_cache=update_kv_cache,
         )
 
@@ -800,10 +804,9 @@ class BaseMetadataComputer:
         cu_q_lens_ref: jax.Ref,
         q_positions_ref: jax.Ref,
         global_kv_cache_lens_ref: jax.Ref,
-        kv_cache_lens_ref: jax.Ref,
         kv_new_lens_ref: jax.Ref,
-        distribution_ref: jax.Ref,
         update_kv_cache_ref: jax.Ref,
+        distribution_ref: jax.Ref,
     ) -> LoopCarry:
         """Generates the metadata schedule across all sequences."""
         seq_loop_fn = functools.partial(
@@ -811,7 +814,6 @@ class BaseMetadataComputer:
             cu_q_lens_ref=cu_q_lens_ref,
             q_positions_ref=q_positions_ref,
             global_kv_cache_lens_ref=global_kv_cache_lens_ref,
-            kv_cache_lens_ref=kv_cache_lens_ref,
             kv_new_lens_ref=kv_new_lens_ref,
             update_kv_cache_ref=update_kv_cache_ref,
         )
@@ -857,10 +859,15 @@ def rpa_metadata_schedule_kernel(
     cu_q_lens_ref: [max_num_seqs + 1]. Cumulative sum of each sequence's query
       length. queries[a:b], keys[a:b], and values[a:b] where a=cu_q_lens[i] and
       b=cu_q_lens[i+1] represents q/k/v of sequence i.
-    q_positions_ref: [max_num_seqs]. Starting Q index for each sequence.
-    kv_cache_lens_ref: [max_num_seqs]. Existing kv cache length of each
-      sequence.
+    q_positions_ref: [max_num_seqs]. Position of each sequence's first query
+      token in the sequence's KV index space (cache tokens followed by new
+      tokens); the causal mask is relative to it.
+    global_kv_cache_lens_ref: [max_num_seqs]. Cache length of each sequence
+      before CP sharding; `RpaConfigs.local_kv_cache_len` narrows it to this
+      call's share.
     kv_new_lens_ref: [max_num_seqs]. New kv length of each sequence.
+    update_kv_cache_ref: [max_num_seqs]. 1 if this sequence writes its new KV
+      back to the paged cache.
     distribution_ref: [3]. Cumulative sum of number of decode, prefill, and
       mixed
     extra_scalars_ref: Additional scalar refs for custom metadata computers.
@@ -907,8 +914,8 @@ def generate_rpa_metadata(
         q_positions: jax.Array,
         global_kv_cache_lens: jax.Array,
         kv_new_lens: jax.Array,
-        distribution: jax.Array,
         update_kv_cache: jax.Array,
+        distribution: jax.Array,
         cfgs: configs.RpaConfigs,
         *,
         computer_cls: type[BaseMetadataComputer] = BaseMetadataComputer,
@@ -928,7 +935,7 @@ def generate_rpa_metadata(
         ),
         out_shape=schedule_hbm,
         grid_spec=pltpu.PrefetchScalarGridSpec(
-            num_scalar_prefetch=6,
+            num_scalar_prefetch=7,
             in_specs=[],
             out_specs=schedule_hbm.out_specs(),
             scratch_shapes=[
@@ -943,7 +950,7 @@ def generate_rpa_metadata(
         q_positions,
         global_kv_cache_lens,
         kv_new_lens,
-        distribution,
         update_kv_cache,
+        distribution,
         extra_scalars,
     )

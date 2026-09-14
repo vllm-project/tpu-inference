@@ -70,11 +70,14 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
 
     def copy_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        # src_ref: (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref)
-        kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref = src_ref
+        # src_ref: (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref,
+        #           new_kv_page_indices_ref)
+        (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref,
+         new_kv_page_indices_ref) = src_ref
         slot = self.current_copy_in_slot
         sem = self.sem_recvs.at[slot]
         block_idx = jnp.maximum(grid_indices[0], 0)
@@ -119,10 +122,11 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
 
     def copy_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        kv_out_ref, _, schedule_ref, page_indices_ref = dst_ref
+        kv_out_ref, _, schedule_ref, page_indices_ref, _ = dst_ref
         slot = self.current_copy_out_slot
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]
@@ -150,10 +154,11 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
 
     def wait_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        _, _, schedule_ref, _ = src_ref
+        _, _, schedule_ref, _, _ = src_ref
         slot = self.current_wait_in_slot
         sem = self.sem_recvs.at[slot]
         block_idx = grid_indices[0]
@@ -171,10 +176,11 @@ class KVBufferedRefSeqAlongLane(_BypassRef):
 
     def wait_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        _, _, schedule_ref, _ = dst_ref
+        _, _, schedule_ref, _, _ = dst_ref
         slot = self.current_wait_out_slot
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]
@@ -227,11 +233,14 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
 
     def copy_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        # src_ref: (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref)
-        kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref = src_ref
+        # src_ref: (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref,
+        #           new_kv_page_indices_ref)
+        (kv_cache_hbm, new_kv_hbm, schedule_ref, page_indices_ref,
+         new_kv_page_indices_ref) = src_ref
         slot = self.current_copy_in_slot
         sem = self.sem_recvs.at[slot]
         block_idx = jnp.maximum(grid_indices[0], 0)
@@ -251,15 +260,34 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
                 src_off = page_indices_ref[p_idx] * self.cfgs.serve.page_size
                 dma_list_cache.append((src_off, dst_off, sz, b))
 
-            # Contiguous fetch for new KV
-            dma_entry_0 = schedule_ref.dma_kv_new[block_idx, b, 0]
-            src_new_off = dma_entry_0.fetch_hbm[...]
-            dst_vmem_off = dma_entry_0.fetch_vmem[...]
-            total_new_sz = 0
-            for i in range(self.cfgs.bkv_p_new):
-                dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
-                total_new_sz += dma_entry.fetch_val
-            dma_list_new.append((src_new_off, dst_vmem_off, total_new_sz, b))
+            if self.cfgs.serve.paged_new_kv:
+                # Each page is its own DMA. `fetch_hbm` is an offset into the sequence's
+                # own new KV.
+                pages_per_seq = (new_kv_page_indices_ref.shape[0] //
+                                 self.cfgs.serve.num_seqs)
+                page_size_log2 = self.cfgs.serve.page_size_log2
+                s_idx = schedule_ref.s_idx[block_idx, b]
+                row = jnp.maximum(s_idx, 0) * pages_per_seq
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    rel_off = dma_entry.fetch_hbm[...]
+                    page = jnp.minimum(rel_off >> page_size_log2,
+                                       pages_per_seq - 1)
+                    src_off = ((new_kv_page_indices_ref[row + page]
+                                << page_size_log2)
+                               | (rel_off & self.cfgs.serve.page_size_mask))
+                    dma_list_new.append((src_off, dma_entry.fetch_vmem[...],
+                                         dma_entry.fetch_val, b))
+            else:
+                # Contiguous fetch for new KV
+                dma_entry_0 = schedule_ref.dma_kv_new[block_idx, b, 0]
+                src_new_off = dma_entry_0.fetch_hbm[...]
+                dst_vmem_off = dma_entry_0.fetch_vmem[...]
+                total_new_sz = 0
+                for i in range(self.cfgs.bkv_p_new):
+                    dma_entry = schedule_ref.dma_kv_new[block_idx, b, i]
+                    total_new_sz += dma_entry.fetch_val
+                dma_list_new.append((src_new_off, dst_vmem_off, total_new_sz, b))
 
         for i in range(len(dma_list_cache)):
             src_off, dst_off, sz, b = dma_list_cache[i]
@@ -279,10 +307,11 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
 
     def copy_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        kv_out_ref, _, schedule_ref, page_indices_ref = dst_ref
+        kv_out_ref, _, schedule_ref, page_indices_ref, _ = dst_ref
         slot = self.current_copy_out_slot
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]
@@ -310,10 +339,11 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
 
     def wait_in(
         self,
-        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        src_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        _, _, schedule_ref, _ = src_ref
+        _, _, schedule_ref, _, _ = src_ref
         slot = self.current_wait_in_slot
         sem = self.sem_recvs.at[slot]
         block_idx = grid_indices[0]
@@ -330,10 +360,11 @@ class KVBufferedRefHeadAlongSublane(_BypassRef):
 
     def wait_out(
         self,
-        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref],
+        dst_ref: tuple[jax.Ref, jax.Ref, schedule.RpaSchedule, jax.Ref,
+                       jax.Ref | None],
         grid_indices: tuple[int | jax.Array, ...],
     ):
-        _, _, schedule_ref, _ = dst_ref
+        _, _, schedule_ref, _, _ = dst_ref
         slot = self.current_wait_out_slot
         sem = self.sem_sends.at[slot]
         block_idx = grid_indices[0]
@@ -484,10 +515,12 @@ class BatchingLSERef(pltpu.BufferedRef):
             q_sz = jnp.where(is_last_k, q_sz, 0)
             dma_list.append((q_src, q_sz, b))
 
+        num_sublanes = pltpu.get_tpu_info().num_sublanes
         for i in range(len(dma_list)):
             q_src, q_sz, b = dma_list[i]
-            q_src = q_src * self.cfgs.aligned_num_q_heads_per_kv_head
-            q_sz = q_sz * self.cfgs.aligned_num_q_heads_per_kv_head
+            q_src = pl.multiple_of(q_src * self.cfgs.lse_rows_per_token,
+                                   num_sublanes)
+            q_sz = q_sz * self.cfgs.lse_rows_per_token
             pltpu.make_async_copy(
                 vmem_src.at[b, :, pl.ds(0, q_sz)],
                 lse_hbm.at[:, pl.ds(q_src, q_sz)],
