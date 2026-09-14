@@ -565,8 +565,12 @@ def load_hf_weights(
         max_workers = min(64, len(weights_files))
         # NOTE(xiang): Disable multi-threading mode if running on multi-host.
         # Because multi-threading would cause different JAX processes to load
-        # different weights at the same time.
-        if envs.TPU_MULTIHOST_BACKEND == "ray":
+        # different weights at the same time. This applies to every
+        # multi-controller backend -- both "ray" and bare jax.distributed
+        # ("spmd") -- since each process must load weight files in the same
+        # deterministic order for the per-host make_array_from_callback shards
+        # to line up.
+        if envs.TPU_MULTIHOST_BACKEND in ("ray", "spmd"):
             max_workers = 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
