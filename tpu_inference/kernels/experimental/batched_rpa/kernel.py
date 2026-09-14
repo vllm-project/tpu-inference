@@ -967,7 +967,7 @@ def rpa_kernel(
                 ring = RingAttention(cfgs,
                                      ring_sems,
                                      kv_window_ref=final_allocs[1].window_ref)
-                pass  # HANDSHAKE DISABLED (experiment)
+                ring.initial_handshake()
             # Initialize Q to zeros to prevent NaN pollution.
             #
             # When a query block is partially filled, tail slots in uninitialized VMEM
@@ -1064,7 +1064,7 @@ def rpa_kernel(
 
                 execute_schedule_chunk(start, size)
 
-            if ring is not None and False:
+            if ring is not None:
                 ring.drain_credits()
 
         _run()

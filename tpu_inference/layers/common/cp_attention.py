@@ -438,6 +438,7 @@ def pcp_forward_batched(
     use_causal_mask: bool = True,
     kv_layout: batched_rpa_configs.KVLayout = (
         batched_rpa_configs.KVLayout.HEAD_ALONG_SUBLANE),
+    pcp_chunk_sizes: tuple[int, ...] | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward on the batched RPA kernel.
 
@@ -456,7 +457,6 @@ def pcp_forward_batched(
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
     two_p = 2 * pcp_size
     padded_q_len = q.shape[0]
-    C = padded_q_len // two_p
     # The pcp ranks stripe the pages of a sequence, so a global page spans
     # `pcp_size` per-rank pages.
     if kv_layout == batched_rpa_configs.KVLayout.SEQ_ALONG_LANE:
@@ -465,25 +465,58 @@ def pcp_forward_batched(
         page_size = kv_cache.shape[1] // pcp_size
     num_seqs = md.seq_lens.shape[0]
 
+    # Every request is split into its own `two_p` chunks, so each keeps its own
+    # head-tail balance instead of inheriting the batch's. `pcp_chunk_sizes[i]`
+    # is request i's padded chunk size; the default is one request covering all
+    # of `q`. Request i owns virtual sequences 2i (head) and 2i+1 (tail).
+    if pcp_chunk_sizes is None:
+        pcp_chunk_sizes = (padded_q_len // two_p, )
+    num_reqs = len(pcp_chunk_sizes)
+    if two_p * sum(pcp_chunk_sizes) != padded_q_len:
+        raise ValueError(
+            f"{pcp_chunk_sizes=} span {two_p * sum(pcp_chunk_sizes)} tokens "
+            f"but q has {padded_q_len}.")
+    if 2 * num_reqs > num_seqs:
+        raise ValueError(
+            f"{num_reqs} requests need {2 * num_reqs} virtual sequences, but "
+            f"the metadata holds only {num_seqs}.")
+    if bad := [c for c in pcp_chunk_sizes if c % page_size]:
+        raise NotImplementedError(
+            f"PCP chunk sizes {bad} must be a multiple of the page size "
+            f"{page_size} to address the gathered current KV by page.")
+
     # Page table for the all-gathered current KV, so the kernel can read it in
     # its natural rank order. `all_gather` concatenates the per-rank blocks, and
-    # a rank stores its head chunk then its tail chunk, so global chunk c of
-    # `two_p` is rank c's head for c < pcp_size and rank 2P-1-c's tail
-    # otherwise. Both sequences of a request address the whole chunk, so they
-    # share a row.
-    if C % page_size:
-        raise NotImplementedError(
-            f"PCP chunk size {C} must be a multiple of the page size "
-            f"{page_size} to address the gathered current KV by page.")
-    pages_per_chunk = C // page_size
-    rank_pages = 2 * pages_per_chunk
-    _table = np.zeros((num_seqs, two_p * pages_per_chunk), np.int32)
-    for _c in range(two_p):
-        _rank = _c if _c < pcp_size else two_p - 1 - _c
-        _base = _rank * rank_pages + (0 if _c < pcp_size else pages_per_chunk)
-        for _p in range(pages_per_chunk):
-            _table[:, _c * pages_per_chunk + _p] = _base + _p
+    # within its block a rank holds each request's head chunk then its tail
+    # chunk, in request order. So chunk c of request i sits on rank c (as a
+    # head) for c < pcp_size and on rank 2P-1-c (as a tail) otherwise. A
+    # request's two sequences both address its whole chunk, so they share a row.
+    local_len = 2 * sum(pcp_chunk_sizes)  # tokens per rank
+    pages_per_seq = two_p * max(pcp_chunk_sizes) // page_size
+    _table = np.zeros((num_seqs, pages_per_seq), np.int32)
+    _prefix = 0
+    for _i, _chunk in enumerate(pcp_chunk_sizes):
+        _req_pages = _chunk // page_size
+        for _c in range(two_p):
+            _rank = _c if _c < pcp_size else two_p - 1 - _c
+            _base = (_rank * local_len + _prefix +
+                     (_chunk if _c >= pcp_size else 0)) // page_size
+            _cols = slice(_c * _req_pages, (_c + 1) * _req_pages)
+            _table[2 * _i, _cols] = _base + np.arange(_req_pages)
+            _table[2 * _i + 1, _cols] = _base + np.arange(_req_pages)
+        _prefix += 2 * _chunk
     new_kv_page_indices = jnp.asarray(_table.reshape(-1))
+
+    # The cache phase merges each request's head and tail into one sequence:
+    # they are adjacent in the local Q, share a cache, and no token of either
+    # is masked against it, so one Q walk per request covers both.
+    _cu_cache = np.zeros(num_seqs + 1, np.int32)
+    _run = 0
+    for _i, _chunk in enumerate(pcp_chunk_sizes):
+        _run += 2 * _chunk
+        _cu_cache[_i + 1:] = _run
+    cu_cache = jnp.asarray(_cu_cache)
+    dist_cache = jnp.asarray(np.array([0, 0, num_reqs], np.int32))
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
@@ -516,6 +549,16 @@ def pcp_forward_batched(
         def all_gather_tokens(x):
             return lax.all_gather(x, pcp_axis, axis=0, tiled=True)
 
+        def _per_request(x):
+            """Per-virtual-sequence array -> one entry per request.
+
+            Requests interleave as (head, tail) and a request's two sequences
+            carry the same cache length and page row, so the heads alone are a
+            complete per-request view.
+            """
+            heads = x[::2]
+            pad = [(0, num_seqs - heads.shape[0])] + [(0, 0)] * (x.ndim - 1)
+            return jnp.pad(heads, pad)
 
         # ---- Cache phase --------------------------------------------------
         if cache_pages == 0:
@@ -527,8 +570,6 @@ def pcp_forward_batched(
             # The in-kernel ring walks this rank's own Q over every rank's
             # stripe of the cache, so there is nothing to gather or merge
             # afterwards -- one online softmax covers the whole cache.
-            cu_ring = jnp.zeros_like(pcp_cu_q_lens_local[0]).at[1:].set(
-                q_local.shape[0])
             # The cache phase reads no new KV; k/v are passed only so the
             # kernel can size its (unused) new-KV staging buffer, so the
             # ungathered local ones do.
@@ -537,12 +578,13 @@ def pcp_forward_batched(
                 k_local,
                 v_local,
                 kv_cache_local,
-                kv_lens_local,
-                page_indices_local,
-                cu_ring,
-                jnp.array([0, 0, 1], jnp.int32),
+                _per_request(kv_lens_local),
+                _per_request(page_indices_local.reshape(num_seqs,
+                                                        -1)).reshape(-1),
+                cu_cache,
+                dist_cache,
                 cp_rank=cp_rank,
-                kv_new_lens=kv_new_lens,
+                kv_new_lens=_per_request(kv_new_lens),
                 attention_scope=batched_rpa_configs.AttentionScope.CACHE_ONLY,
                 pcp_ring_axis_name=pcp_axis,
                 pcp_ring_mesh_axis_names=tuple(mesh.axis_names),
@@ -559,8 +601,19 @@ def pcp_forward_batched(
         # block over the full chunk, since its own causal range does not reach.
         q_positions = kv_cache_lens_local + pcp_q_pos_offsets_local[0]
         seq_ids = jnp.arange(num_seqs, dtype=jnp.int32)
-        writes = jnp.logical_and(update_kv_cache,
-                                 seq_ids == distribution_local[2] - 1)
+        # A rank writes back the pages of the current KV that it owns, driven
+        # by one designated sequence per request whose last Q block the kernel
+        # extends over the whole chunk. Normally that is the tail, but a tail
+        # made entirely of padding has no Q blocks at all, and this rank's
+        # share of the pages would silently never be written -- so fall back to
+        # the head. `q_lens` is this rank's own, so the choice is per rank.
+        q_lens = pcp_cu_q_lens_local[0][1:] - pcp_cu_q_lens_local[0][:-1]
+        tail_is_empty = jnp.repeat(q_lens[1::2] == 0, 2)[:num_seqs]
+        writes = jnp.logical_and(
+            update_kv_cache,
+            jnp.logical_and(
+                jnp.logical_and(seq_ids < distribution_local[2], q_lens > 0),
+                jnp.logical_or(seq_ids % 2 == 1, tail_is_empty)))
         # The gathered current KV keeps its natural rank order; the page
         # table maps global token order onto it.
         k_curr = all_gather_tokens(k_local)
