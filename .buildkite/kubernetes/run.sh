@@ -76,6 +76,10 @@ FORWARD=(
   # Model and backend selection
   TPU_VERSION MODEL_IMPL_TYPE TPU_BACKEND_TYPE NEW_MODEL_DESIGN
   QUANTIZATION USE_PREBUILT_IMAGE SKIP_ACCURACY_TESTS BVT_ONLY
+  # Named for the bare-metal queue they select, but what they reach here is
+  # mlperf.sh, which reads them to pick the model list and the parallelism. The
+  # shape is a run.sh argument, so these say only "this step has eight chips".
+  USE_V6E8_QUEUE USE_V7X8_QUEUE
   NUM_PRECOMPILE_WORKERS VLLM_LOG_LEVEL VLLM_XLA_CHECK_RECOMPILATION
   # Where the compilation cache lives. The Job mounts it; a step that sets
   # these replaces the default, since --env wins over the manifest.
