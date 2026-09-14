@@ -560,14 +560,12 @@ class TestHybridCoordinatorHooks:
         assert isinstance(coord, TPUHybridKVCacheCoordinator)
         assert coord.mamba_num_blocks == 64
 
-    def test_derive_mamba_num_blocks_matches_runner_sizing(self):
-        """The scheduler-side fallback reproduces the runner's formula:
-        `dp_size * max_num_seqs` requests, `custom_mamba_cache_multiplier`
-        (default 8) blocks each, plus the null block, rounded up to the DP
-        shard count."""
+    def test_mamba_blocks_per_request(self):
+        """One resident slot per request outside align mode; in align mode a
+        second resident slot plus `custom_mamba_cache_multiplier` (default 8)
+        checkpoint slots, never fewer than the resident minimum."""
         from tpu_inference.core.hybrid_coordinator import (
-            DEFAULT_MAMBA_CACHE_MULTIPLIER, derive_mamba_num_blocks,
-            mamba_blocks_per_request)
+            DEFAULT_MAMBA_CACHE_MULTIPLIER, mamba_blocks_per_request)
 
         vllm_config = _make_mock_vllm_config(dp_size=2, max_num_seqs=8)
         assert mamba_blocks_per_request(
@@ -575,33 +573,15 @@ class TestHybridCoordinatorHooks:
             is_align_mode=True) == (2, DEFAULT_MAMBA_CACHE_MULTIPLIER)
         assert mamba_blocks_per_request(vllm_config,
                                         is_align_mode=False) == (1, 1)
-        # 2 * 8 * 8 + 1 = 129, rounded up to a multiple of dp_size=2.
-        assert derive_mamba_num_blocks(vllm_config) == 130
 
         vllm_config.additional_config = {"custom_mamba_cache_multiplier": 3}
-        assert derive_mamba_num_blocks(vllm_config) == 2 * 8 * 3 + 2
+        assert mamba_blocks_per_request(vllm_config,
+                                        is_align_mode=True) == (2, 3)
 
         vllm_config.speculative_config = MagicMock(num_speculative_tokens=4)
         # Resident minimum (4 + 1 + 1 = 6) beats the multiplier of 3.
-        assert derive_mamba_num_blocks(vllm_config) == 2 * 8 * 6 + 2
-
-    def test_tpu_get_kv_cache_coordinator_derives_from_hook_config(self):
-        import tpu_inference.core.hybrid_coordinator as hc_mod
-        from tpu_inference.core.hybrid_coordinator import (
-            TPUHybridKVCacheCoordinator, install_hybrid_coordinator_hooks,
-            tpu_get_kv_cache_coordinator)
-
-        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
-        install_hybrid_coordinator_hooks(
-            _make_mock_vllm_config(dp_size=2, max_num_seqs=8))
-        try:
-            cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
-                                                    mamba_num_blocks=None)
-            coord = tpu_get_kv_cache_coordinator(cfg, **_COORD_KWARGS)
-            assert isinstance(coord, TPUHybridKVCacheCoordinator)
-            assert coord.mamba_num_blocks == 130
-        finally:
-            hc_mod._VLLM_CONFIG = None
+        assert mamba_blocks_per_request(vllm_config,
+                                        is_align_mode=True) == (6, 6)
 
     def test_propagate_mamba_num_blocks_publishes_worker_value(self):
         import tpu_inference.core.hybrid_coordinator as hc_mod
@@ -629,11 +609,11 @@ class TestHybridCoordinatorHooks:
         with pytest.raises(ValueError, match="disagree"):
             propagate_mamba_num_blocks(engine_core, cfg, vllm_config)
 
-        # Nothing reported: leave the fallback to the caller.
+        # Nothing reported for a model with mamba layers is an error.
         hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
         engine_core.collective_rpc.return_value = [None, None]
-        assert propagate_mamba_num_blocks(engine_core, cfg,
-                                          vllm_config) is None
+        with pytest.raises(ValueError, match="No worker reported"):
+            propagate_mamba_num_blocks(engine_core, cfg, vllm_config)
         assert hc_mod.get_mamba_num_blocks() is None
 
     def test_executor_mixin_publishes_after_workers_allocate(self):
@@ -706,7 +686,6 @@ class TestHybridCoordinatorHooks:
         from tpu_inference.core.hybrid_coordinator import \
             tpu_get_kv_cache_coordinator
         hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
-        hc_mod._VLLM_CONFIG = None
 
         cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
                                                 mamba_num_blocks=None)

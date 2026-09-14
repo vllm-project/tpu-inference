@@ -19,7 +19,6 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-from tpu_inference import envs
 from tpu_inference.kernels.gdn.v3 import (compute_conv1d, compute_gdn, config,
                                           memory_ref, metadata, vmem_ldst)
 
@@ -541,7 +540,7 @@ def fused_conv1d_gdn(
             scratch_shapes=cfg.get_scratch_shape_dict(),
             input_output_aliases=input_output_aliases,
             compiler_params=pltpu.CompilerParams(
-                disable_bounds_checks=envs.TPU_GDN_DISABLE_BOUNDS_CHECKS,
+                disable_bounds_checks=True,
                 vmem_limit_bytes=cfg.get_vmem_limit_bytes(),
             ),
             name=cfg.get_kernel_name(),

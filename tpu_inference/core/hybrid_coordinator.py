@@ -45,20 +45,14 @@ logger = init_logger(__name__)
 #      which fetches the allocated row count from the workers right after
 #      `initialize_from_config` (before the scheduler is built) and writes it to the
 #      same two places plus `kv_cache_config.mamba_num_blocks`.
-#    - Last resort: `derive_mamba_num_blocks` recomputes the runner's sizing from
-#      VllmConfig. It cannot see the runner's HBM re-split, so it only runs, with a
-#      warning, when the RPC channel above did not.
 #
 # 3. CONSUMER (TPUHybridKVCacheCoordinator):
-#    Resolves mamba_num_blocks from an explicit argument, `kv_cache_config`,
-#    get_mamba_num_blocks(), or the last-resort derivation, and initializes an
-#    independent Mamba BlockPool; fails fast if none of them is known.
+#    Resolves mamba_num_blocks from an explicit argument, `kv_cache_config`, or
+#    get_mamba_num_blocks(), and initializes an independent Mamba BlockPool;
+#    fails fast if none of them is known.
 # ==============================================================================
 _HOOKS_INSTALLED: bool = False
 _GLOBAL_MAMBA_NUM_BLOCKS: int | None = None
-# VllmConfig captured by `install_hybrid_coordinator_hooks`, used only to derive a
-# fallback mamba pool size when the runner's value was never registered here.
-_VLLM_CONFIG: Any | None = None
 
 # Mamba blocks reserved per request in align mode (prefix caching): one for
 # the state a request generates from, the rest for the prefix checkpoints it
@@ -106,21 +100,6 @@ def mamba_pool_size(max_num_reqs: int, blocks_per_req: int,
     a multiple of the sharding `divisor` so per-device shards are equal."""
     blocks = max_num_reqs * blocks_per_req + 1
     return ((blocks + divisor - 1) // divisor) * divisor
-
-
-def derive_mamba_num_blocks(vllm_config: Any) -> int:
-    """Recompute the total align-mode mamba pool size from VllmConfig.
-
-    Mirrors `KVCacheManager._maybe_set_compact_mamba_num_blocks_override`
-    before its HBM re-split: the runner's `max_num_reqs` is
-    `dp_size * max_num_seqs` and the arrays are sharded over the DP axis. Use
-    only when the runner's registered value has not reached this process.
-    """
-    dp_size = vllm_config.sharding_config.total_dp_size
-    max_num_reqs = dp_size * vllm_config.scheduler_config.max_num_seqs
-    _, blocks_per_req = mamba_blocks_per_request(vllm_config,
-                                                 is_align_mode=True)
-    return mamba_pool_size(max_num_reqs, blocks_per_req, divisor=dp_size)
 
 
 def is_mamba_spec(spec: Any) -> bool:
@@ -352,18 +331,11 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         if mamba_num_blocks is None:
             mamba_num_blocks = get_mamba_num_blocks()
         if mamba_num_blocks is None:
-            if _VLLM_CONFIG is None:
-                raise ValueError(
-                    "[TPUHybridKVCacheCoordinator] mamba_num_blocks must be "
-                    "registered via set_mamba_num_blocks() or derivable from "
-                    "the VllmConfig passed to install_hybrid_coordinator_hooks()."
-                )
-            mamba_num_blocks = derive_mamba_num_blocks(_VLLM_CONFIG)
-            logger.warning(
-                "[TPUHybridKVCacheCoordinator] mamba_num_blocks did not "
-                "reach this process from the model runner; derived %d from "
-                "VllmConfig, which may not match the allocated arrays.",
-                mamba_num_blocks)
+            raise ValueError(
+                "[TPUHybridKVCacheCoordinator] mamba_num_blocks must be "
+                "registered via set_mamba_num_blocks() or carried by "
+                "kv_cache_config; the model runner's pool size never reached "
+                "this process.")
         self.mamba_num_blocks = int(mamba_num_blocks)
 
         logger.info(
@@ -687,7 +659,7 @@ def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
                                vllm_config: Any) -> int | None:
     """Fetch the mamba pool size the workers allocated (via
     `rpc_owner.collective_rpc`) and publish it in the engine-core process.
-    Returns None when no worker reported one."""
+    Returns None when the model has no mamba layers."""
     if not any(is_mamba_group(g) for g in kv_cache_config.kv_cache_groups):
         return None
     reported = [
@@ -695,10 +667,10 @@ def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
         if v is not None
     ]
     if not reported:
-        logger.warning(
-            "[tpu_inference] No worker reported a compact mamba pool size; "
-            "the scheduler will derive one from VllmConfig.")
-        return None
+        raise ValueError(
+            "[tpu_inference] No worker reported a compact mamba pool size "
+            "for a model with mamba layers; the scheduler cannot size its "
+            "mamba block pool.")
     if len(set(reported)) != 1:
         raise ValueError(
             "[tpu_inference] Workers disagree on the compact mamba pool "
@@ -738,11 +710,8 @@ def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
 
 def install_hybrid_coordinator_hooks(vllm_config: Any | None = None) -> None:
     """Installs hooks into vLLM to use TPUHybridKVCacheCoordinator and TPUKVCacheManager."""
-    global _HOOKS_INSTALLED, _VLLM_CONFIG
+    global _HOOKS_INSTALLED
     import sys
-
-    if vllm_config is not None:
-        _VLLM_CONFIG = vllm_config
 
     import vllm.v1.core.kv_cache_coordinator as coord_mod
     import vllm.v1.core.kv_cache_manager as mgr_mod
