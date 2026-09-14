@@ -475,8 +475,8 @@ spec:
     # PROXY & BENCHMARK CLIENT
     # ---------------------------------------------------------
     # No accelerator and no cache mounts: this is an HTTP client that reads a
-    # tokenizer and writes JSON. It lands on the worker's system pool, and the
-    # queues charge nothing for it because only google.com/tpu is under quota.
+    # tokenizer and writes JSON. The queues charge nothing for it because only
+    # google.com/tpu is under quota; where it lands is set below.
     - name: benchmark
       # Both engines, not just decode, even though decode already waits on
       # prefill: what this role needs is that both answer /health, and reading
