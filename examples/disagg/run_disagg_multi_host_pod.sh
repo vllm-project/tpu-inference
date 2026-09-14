@@ -108,6 +108,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# EX_TEMPFAIL. The step retries once on exactly this code, so it has to mean
+# "the chips were not ready", never "the test failed".
+EXIT_TEMPFAIL=75
+
+# Exit EX_TEMPFAIL if a vLLM log shows the TPU runtime failing to open a
+# session, as run_disagg_multi_host.sh does on bare metal.
+#
+# Two fixed strings, matched with grep -F, so no generic word can ever trigger a
+# retry. It is still a heuristic: START_SESSION also fails deterministically for
+# a wrong process-bounds setting or chips a previous pod never released, and no
+# number of retries fixes those. `limit: 1` on the step is what bounds the cost
+# of guessing wrong to a single wasted run.
+exit_if_transient_tpu_init_failure() {
+  local log=$1 name=$2
+  [ -f "$log" ] || return 0
+  if grep -qF -e 'TPU initialization failed: GRPC_ERROR' \
+               -e 'START_SESSION failed' "$log" 2>/dev/null; then
+    echo "[disagg-harness] ${name}: TPU runtime session failure; exiting ${EXIT_TEMPFAIL} so the step retries." >&2
+    exit "$EXIT_TEMPFAIL"
+  fi
+}
+
 # Wait for an HTTP service, failing early if the process behind it died. The
 # docker script did this with `docker exec ... kill -0`; here the PID is ours.
 wait_for_server() {
@@ -124,12 +146,14 @@ wait_for_server() {
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "Error: $name (pid $pid) died before becoming healthy." >&2
       [ -f "$log" ] && tail -80 "$log"
+      exit_if_transient_tpu_init_failure "$log" "$name"
       return 1
     fi
     sleep 2
   done
   echo "Error: $name did not become healthy within the timeout." >&2
   [ -f "$log" ] && tail -80 "$log"
+  exit_if_transient_tpu_init_failure "$log" "$name"
   return 1
 }
 

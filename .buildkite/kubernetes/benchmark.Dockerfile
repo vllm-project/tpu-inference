@@ -17,6 +17,15 @@
 # has to be republished here to be usable at all.
 
 ARG BASE_IMAGE=vllm/vllm-tpu:nightly
+
+# Pinned to a release rather than the `3` channel. The base moving under this
+# image is the point; the CLI that uploads the results moving under it is not,
+# and a channel tag makes an agent upgrade arrive in the middle of a benchmark
+# with no commit to point at when uploads start failing.
+ARG AGENT_IMAGE=buildkite/agent:3.138.0
+
+FROM ${AGENT_IMAGE} AS agent
+
 FROM ${BASE_IMAGE}
 
-COPY --from=buildkite/agent:3 /usr/local/bin/buildkite-agent /usr/local/bin/buildkite-agent
+COPY --from=agent /usr/local/bin/buildkite-agent /usr/local/bin/buildkite-agent

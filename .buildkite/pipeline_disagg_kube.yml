@@ -22,10 +22,17 @@
 # number every day; this one runs when someone wants to see the fleet work.
 
 env:
-  # Rebuilt by the first step and named by tag rather than by commit: the base
-  # is upstream's nightly, so what is being measured moves on upstream's clock
-  # and not on this repository's. Nothing in this image comes from the checkout.
-  WORKLOAD_IMAGE: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/disagg-benchmark:kube"
+  # Rebuilt by the first step. Not named by commit: the base is upstream's
+  # nightly, so what is being measured moves on upstream's clock and not on this
+  # repository's - nothing in this image comes from the checkout.
+  #
+  # Named by build number instead, which is what makes the tag immutable. A
+  # fixed tag republished per build is read twice: two builds overlapping would
+  # have the second's push decide what the first benchmarks, and a pod landing
+  # on a node that already holds the tag would not pull at all, since
+  # imagePullPolicy defaults to IfNotPresent for anything but :latest. Tags of
+  # identical content cost no extra storage - the layers are shared by digest.
+  WORKLOAD_IMAGE: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/disagg-benchmark:kube-${BUILDKITE_BUILD_NUMBER}"
 
 steps:
   - label: ":docker: Build Disagg Benchmark Image"
