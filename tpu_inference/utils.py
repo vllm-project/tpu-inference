@@ -22,7 +22,6 @@ from torchax.ops.mappings import t2j_dtype
 from vllm import envs as vllm_envs
 from vllm import utils
 
-from tpu_inference import envs
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 
@@ -125,29 +124,23 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
 
-    multihost_backend = envs.TPU_MULTIHOST_BACKEND
-    if multihost_backend == "ray":
-        # MemoryStats is only supported for addressable PjRt devices.
-        # Assume all the devices have similar memory usage for now.
-        # TODO(ranlihao): find a proper way to get the memory usage of each device.
-        for device in devices:
-            try:
-                hbm_used = device.memory_stats()["bytes_in_use"]
-                hbm_limit = device.memory_stats()["bytes_limit"]
-                logger.info(
-                    "Get memory stats for device %s. Assuming all devices have the same usage.",
-                    device)
-                usage.extend([(hbm_used, hbm_limit)] * len(devices))
-                break
-            except Exception as e:
-                logger.warning(
-                    "Failed to get memory stats for device %s: %s. ", device,
-                    e)
-    else:
-        for device in devices:
+    # MemoryStats is only supported for addressable PjRt devices. Under
+    # multi-host (ray or native jax.distributed) `devices` includes remote
+    # devices whose memory_stats() is not accessible. Sample the first
+    # addressable device and assume all devices have similar usage.
+    # TODO(ranlihao): find a proper way to get the memory usage of each device.
+    local_pi = jax.process_index()
+    for device in devices:
+        if device.process_index != local_pi:
+            continue
+        try:
             hbm_used = device.memory_stats()["bytes_in_use"]
             hbm_limit = device.memory_stats()["bytes_limit"]
-            usage.append((hbm_used, hbm_limit))
+            usage.extend([(hbm_used, hbm_limit)] * len(devices))
+            break
+        except Exception as e:
+            logger.warning("Failed to get memory stats for device %s: %s. ",
+                           device, e)
 
     return usage
 
