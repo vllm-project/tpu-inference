@@ -567,9 +567,9 @@ class TPUConnectorWorker:
         base = int(port)
         local_eps = self.kv_manager.get_local_endpoints()
         if len(local_eps) <= 1:
-            return f"{host}:{base}"
+            return dist_utils.format_host_port(host, base)
         return [{
-            "endpoint": f"{host}:{base + i}",
+            "endpoint": dist_utils.format_host_port(host, base + i),
             "shards": list(ep["shards"])
         } for i, ep in enumerate(local_eps)]
 
