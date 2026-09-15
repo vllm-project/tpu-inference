@@ -73,9 +73,14 @@ x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
 # because Buildkite adds no queue time of its own - the agent pod starts at
 # once and then waits inside the step. A hung test is bounded separately by the
 # workload's activeDeadlineSeconds, which queueing cannot consume.
+#
+# Twenty-four hours because that is the fleet's worst case and this must not be
+# what stops a step first: the launcher allows half a day in line for chips and
+# a manifest may ask for up to twelve hours of runtime, so a step failing here
+# would be reported as a timeout when nothing had timed out.
 .tpu_step: &tpu_step
   depends_on: "build_docker_kube"
-  timeout_in_minutes: 480
+  timeout_in_minutes: 1440
   agents:
     queue: "kube"
   plugins:
