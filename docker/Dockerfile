@@ -51,6 +51,27 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# The buildkite-agent CLI, for steps that run as a Kubernetes workload.
+#
+# On a VM the agent runs beside the container and run_in_docker.sh bind-mounts
+# results into its checkout, so `artifact_paths` can glob them and nothing
+# inside the image ever calls the agent. A pod shares no filesystem with the
+# agent, so anything it produces - a coverage file, a benchmark result - has to
+# be uploaded from inside, which needs the CLI here. The credential is not:
+# run.sh forwards BUILDKITE_AGENT_ACCESS_TOKEN, so it lives only in the pod's
+# environment and dies with the job.
+#
+# The binary alone, not the apt package, which also brings a systemd unit and a
+# config expecting a registration token - an agent this image must never be.
+#
+# Pinned to the 3.x line the fleet's agents run. Artifact upload is a stable
+# REST call and skew would likely be harmless, but a version here that nothing
+# else uses is a difference to rule out first when a step misbehaves.
+ARG BUILDKITE_AGENT_VERSION=3.138.0
+RUN curl -fsSL "https://github.com/buildkite/agent/releases/download/v${BUILDKITE_AGENT_VERSION}/buildkite-agent-linux-amd64-${BUILDKITE_AGENT_VERSION}.tar.gz" \
+      | tar -xz -C /usr/local/bin ./buildkite-agent \
+    && buildkite-agent --version
+
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git

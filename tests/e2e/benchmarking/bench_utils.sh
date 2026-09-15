@@ -52,7 +52,26 @@ waitForServerReady() {
             exit 1
         fi
 
-        if grep -Eq "$error_regex" "$LOG_FILE"; then
+        # One line is excused, by its whole signature rather than by the word
+        # "Warning": JAX logs a failed compilation-cache write as
+        # "UserWarning: ... OSError: [Errno 116] Stale file handle" and goes on
+        # to compile. The cache is a shared gcsfuse mount, and when two pods
+        # write the same content-addressed key at once, Cloud Storage keeps the
+        # first and fails the second's precondition; the loser's write was a
+        # duplicate, so losing it costs nothing - but matching the OSError it
+        # quotes killed a run whose server was healthy.
+        #
+        # Excusing every line that says "Warning:" would be the wider fix and
+        # the wrong one: these patterns are what stands between a hung startup
+        # and a three-hour timeout, and a real fatal line that happens to carry
+        # the word would stop being seen here and on bare metal both.
+        #
+        # Assigned rather than tested through a pipe: with no match the pipeline
+        # exits nonzero, which under the callers' `set -e` would end the run.
+        local fatal_lines
+        fatal_lines=$(grep -E "$error_regex" "$LOG_FILE" \
+            | grep -v -E 'UserWarning.*Stale file handle' || true)
+        if [[ -n "$fatal_lines" ]]; then
             echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
             # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1

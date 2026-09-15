@@ -25,26 +25,17 @@ print_logs_on_exit() {
   LOG_DIR=$HOME/logs
 
   if [ -d "$LOG_DIR" ]; then
-    echo "--- Contents of $LOG_DIR/prefill_0.txt ---"
-    if [ -f "$LOG_DIR/prefill_0.txt" ]; then
-      cat "$LOG_DIR/prefill_0.txt"
-    else
-      echo "File not found."
-    fi
-
-    echo "--- Contents of $LOG_DIR/decode_0.txt ---"
-    if [ -f "$LOG_DIR/decode_0.txt" ]; then
-      cat "$LOG_DIR/decode_0.txt"
-    else
-      echo "File not found."
-    fi
-
-    echo "--- Contents of $LOG_DIR/benchmark_0.txt ---"
-    if [ -f "$LOG_DIR/benchmark_0.txt" ]; then
-      cat "$LOG_DIR/benchmark_0.txt"
-    else
-      echo "File not found."
-    fi
+    # Every log the run writes, including the proxy's. Requests go to the proxy,
+    # not to prefill or decode, so when the benchmark reports connection
+    # refused the proxy's log is the only one that says why.
+    for f in prefill_0 decode_0 proxy_0 benchmark_0; do
+      echo "--- Contents of $LOG_DIR/$f.txt ---"
+      if [ -f "$LOG_DIR/$f.txt" ]; then
+        cat "$LOG_DIR/$f.txt"
+      else
+        echo "File not found."
+      fi
+    done
   else
     echo "Log directory '$LOG_DIR' not found."
   fi
@@ -86,7 +77,7 @@ wait_for_server() {
   timeout 1200 bash -c "
     until curl -s localhost:${port}/health > /dev/null; do
       if ! kill -0 $pid 2>/dev/null; then
-        echo \"Error: vLLM server on port $port (PID $pid) crashed or failed to start!\" >&2
+        echo \"Error: server on port $port (PID $pid) crashed or failed to start!\" >&2
         exit 1
       fi
       sleep 1
@@ -232,15 +223,27 @@ done
 
 echo "starting proxy server"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-# Start proxy server
+# Start proxy server. 127.0.0.1 rather than localhost, which uvicorn resolves
+# to ::1 first: a container with no IPv6 loopback cannot bind that and the
+# proxy exits before serving anything. Everything that talks to it shares the
+# network namespace, so naming the v4 loopback costs nothing.
 python $SCRIPT_DIR/toy_proxy_server.py \
---host localhost \
+--host 127.0.0.1 \
 --port 8000 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
 --prefiller-ports ${PREFILL_PORTS[@]} \
 --decoder-hosts ${DECODE_HOSTS[@]} \
 --decoder-ports ${DECODE_PORTS[@]} \
 > $LOG_DIR/proxy_0.txt 2>&1 &
+PROXY_PID=$!
+
+# The same wait prefill and decode get, for the same reason: the benchmark is
+# the next line, and it talks to the proxy rather than to either of them. It
+# also exposes /health. Without this a proxy that dies on startup is reported
+# as every request failing to connect, which reads as a benchmark or a model
+# problem rather than as a server that is not there.
+echo "Waiting for proxy on port 8000 to start..."
+wait_for_server 8000 $PROXY_PID
 
 # run benchmark for both disagg and non-disagg
 LOG_FILE="$LOG_DIR/benchmark_0.txt"
