@@ -424,6 +424,11 @@ class VllmModelWrapper:
             if expert_indices_list:
                 import jax.numpy as jnp
                 expert_indices = jnp.stack(expert_indices_list, axis=0)
+                # Replicate for the same reason as gather_logprobs: the runner
+                # calls jax.device_get() on this array from a single host, and
+                # a DP-sharded array spans non-addressable devices.
+                expert_indices = jax.lax.with_sharding_constraint(
+                    expert_indices, NamedSharding(self.mesh, PartitionSpec()))
             else:
                 expert_indices = None
             return new_kv_caches, output, aux_hidden_states, expert_indices
