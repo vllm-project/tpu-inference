@@ -176,6 +176,7 @@ class Gemma4MoE(JaxRoutedExperts):
         mesh,
         rngs: nnx.Rngs,
         quant_config,
+        enable_return_routed_experts: bool = False,
         prefix: str = "",
     ) -> None:
         JaxRoutedExperts.__init__(
@@ -190,7 +191,7 @@ class Gemma4MoE(JaxRoutedExperts):
             top_k=config.top_k_experts,
             scoring_func="softmax",
             renormalize=True,
-            enable_return_routed_experts=True,
+            enable_return_routed_experts=enable_return_routed_experts,
             quant_config=quant_config,
             prefix=prefix)
 
@@ -649,6 +650,10 @@ class Gemma4DecoderLayer(JaxModule):
                                      mesh=mesh,
                                      rngs=rng,
                                      quant_config=quant_config,
+                                     enable_return_routed_experts=getattr(
+                                         config,
+                                         "enable_return_routed_experts",
+                                         False),
                                      prefix=prefix + ".experts")
             self.post_feedforward_layernorm_1 = JaxRmsNorm(
                 text_config.hidden_size,
