@@ -252,25 +252,29 @@ class TestTopK:
 class TestLogprobs:
     """Tests for logprobs parameter."""
 
-    def test_logprobs_returns_probabilities(self, llm: LLM):
+    @pytest.mark.parametrize("logprobs", [0, 5])
+    @pytest.mark.parametrize("temperature", [0, 0.7])
+    def test_logprobs_returns_probabilities(self, llm: LLM, logprobs: int,
+                                            temperature: float):
         """logprobs parameter should return log probabilities for tokens."""
         prompt = "Hello"
-        sampling_params = SamplingParams(temperature=0,
+        sampling_params = SamplingParams(temperature=temperature,
                                          max_tokens=5,
-                                         logprobs=5)
+                                         logprobs=logprobs)
 
         outputs = llm.generate([prompt], sampling_params)
         output = outputs[0].outputs[0]
 
         # Check that logprobs are returned
         assert output.logprobs is not None, "logprobs should be returned"
-        assert len(output.logprobs) > 0, "logprobs should contain entries"
+        assert len(output.token_ids) > 0
+        assert len(output.logprobs) == len(output.token_ids)
 
         # Each token should have logprob information
-        for token_logprobs in output.logprobs:
-            assert token_logprobs is not None
-            # Should have up to 5 top logprobs as requested
-            assert len(token_logprobs) <= 5
+        for token_id, token_logprobs in zip(output.token_ids, output.logprobs):
+            assert token_id in token_logprobs
+            # The selected token is returned even with zero alternatives.
+            assert logprobs <= len(token_logprobs) <= logprobs + 1
 
     def test_logprobs_none_returns_no_probabilities(self, llm: LLM):
         """When logprobs=None, no log probabilities should be returned."""
