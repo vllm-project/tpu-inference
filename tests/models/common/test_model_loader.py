@@ -315,6 +315,98 @@ def test_get_flax_model(vllm_config, mesh, tie_word_embeddings):
     assert hasattr(model.model, "named_modules")
 
 
+def test_step_fn_kv_cache_sharding_is_a_fixed_point(vllm_config, mesh, rng):
+    """The step fn must return kv-caches sharded exactly as it received them.
+
+    The runner feeds each step's kv-cache output straight back in as the next
+    step's input, so any divergence between the allocated sharding and the
+    sharding the step fn returns changes the jit cache key and forces a
+    recompile mid-run -- which `ForbidCompile` turns into a hard error. This
+    pins the fixed point across the token buckets a draining batch walks
+    through, and asserts the replay compiles nothing.
+    """
+    from tpu_inference.layers.common.attention_metadata import \
+        AttentionMetadata
+    from tpu_inference.runner.kv_cache import create_kv_caches
+    from tpu_inference.runner.utils import ForbidCompile
+
+    init_pp_distributed_environment(ip="",
+                                    rank=0,
+                                    world_size=1,
+                                    device=jax.devices()[0],
+                                    need_pp=False)
+    with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
+        model = model_loader.get_flax_model(vllm_config, rng, mesh)
+
+        hf_config = vllm_config.model_config.hf_config
+        num_layers = hf_config.num_hidden_layers
+        kv_caches = create_kv_caches(
+            num_blocks=64,
+            block_size=32,
+            num_kv_heads=hf_config.num_key_value_heads,
+            head_size=hf_config.head_dim,
+            mesh=mesh,
+            layer_names=[f"layer.{i}" for i in range(num_layers)],
+            cache_dtype=jnp.bfloat16,
+        )
+        allocated = jax.tree.map(lambda c: c.sharding, kv_caches)
+        cache_index = tuple((f"layer.{i}", i) for i in range(num_layers))
+
+        def step(caches, num_tokens, with_options=True):
+            step_fn = (model.model_fn
+                       if with_options else model.model.step_fn_no_options)
+            num_reqs = min(num_tokens, 8)
+            attention_metadata = AttentionMetadata(
+                input_positions=jnp.zeros((num_tokens, ), dtype=jnp.int32),
+                block_tables=jnp.zeros((num_reqs, 4),
+                                       dtype=jnp.int32).reshape(-1),
+                seq_lens=jnp.ones((num_reqs, ), dtype=jnp.int32),
+                query_start_loc=jnp.arange(num_reqs + 1, dtype=jnp.int32),
+                request_distribution=jnp.array([0, 0, num_reqs],
+                                               dtype=jnp.int32),
+            )
+            return step_fn(
+                model.state_leaves,
+                caches,
+                jnp.ones((num_tokens, ), dtype=jnp.int32),
+                attention_metadata,
+                None,
+                jnp.zeros((num_tokens, ), dtype=jnp.int32),
+                cache_index,
+                None,
+                None,
+                True,
+                True,
+            )[0]
+
+        # A batch drains through decreasing token buckets; every one of them
+        # must hand back caches sharded the way they were allocated.
+        buckets = (64, 32, 16, 8)
+        for num_tokens in buckets:
+            kv_caches = step(kv_caches, num_tokens)
+            got = jax.tree.map(lambda c: c.sharding, kv_caches)
+            drifted = [(want, have) for want, have in zip(
+                jax.tree.leaves(allocated), jax.tree.leaves(got))
+                       if want != have]
+            assert not drifted, (
+                f"kv-cache sharding drifted at num_tokens={num_tokens}: "
+                f"{len(drifted)} leaf(s) changed, e.g. allocated "
+                f"{drifted[0][0]} came back as {drifted[0][1]}")
+
+        # Replaying the same buckets with the returned caches must reuse the
+        # compiled executables rather than trigger a fresh lowering.
+        with ForbidCompile():
+            for num_tokens in buckets:
+                kv_caches = step(kv_caches, num_tokens)
+
+        # The eagle3 drafter and the `continue_decode` loop both call the step
+        # fn from inside an outer jit, where `kv_caches` arrives as tracers
+        # with no queryable sharding. That must still work.
+        traced_step = jax.jit(
+            lambda caches: step(caches, buckets[0], with_options=False))
+        traced_step(kv_caches)
+
+
 def test_get_flax_model_with_pooling(vllm_config, mesh, rng):
     """Tests that get_flax_model correctly instantiates a pooler when runner_type is 'pooling'."""
     vllm_config.model_config.runner_type = "pooling"

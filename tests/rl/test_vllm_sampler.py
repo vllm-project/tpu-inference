@@ -254,6 +254,19 @@ class TestRLVllmSamplerWeightSync(unittest.TestCase):
 
         asyncio.run(run_lifecycle_test())
 
+    @patch("tpu_inference.rl.vllm_sampler.RLVllmSampler._call_worker_method")
+    def test_raiden_h2d_forwards_uuid(self, mock_call_worker_method):
+        mock_call_worker_method.return_value = []
+        args = AsyncEngineArgs(model="Qwen/Qwen2.5-1.5B")
+        sampler = RLVllmSampler(engine_args=args)
+
+        async def run_test():
+            await sampler.raiden_h2d(uuid=123)
+            mock_call_worker_method.assert_called_once_with("raiden_h2d",
+                                                            uuid=123)
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

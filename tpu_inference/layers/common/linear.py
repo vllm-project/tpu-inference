@@ -22,6 +22,7 @@ from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
@@ -90,6 +91,24 @@ def xla_quantized_matmul(
     return out.astype(x.dtype)
 
 
+def _pad_sharded_activation(
+    x: jax.Array,
+    mesh: Mesh | None,
+    axis_spec,
+    axis_idx: int = 0,
+) -> tuple[jax.Array, int]:
+    """Pads activation tensor `x` along `axis_idx` if unaligned to mesh sharding divisor."""
+    orig_len = x.shape[axis_idx]
+    divisor = get_mesh_shape_product(mesh or jax.sharding.get_abstract_mesh(),
+                                     axis_spec)
+    pad_len = -orig_len % divisor
+    if pad_len:
+        pad_config = [(0, pad_len) if i == axis_idx else (0, 0)
+                      for i in range(x.ndim)]
+        x = jnp.pad(x, pad_config)
+    return x, orig_len
+
+
 def sharded_matmul(x: jax.Array,
                    w: jax.Array,
                    weight_sharding: P | NamedSharding,
@@ -109,6 +128,9 @@ def sharded_matmul(x: jax.Array,
     # x may have extra leading batch dims.
     batch_dims = (None, ) * (x.ndim - 2)
     x_spec = P(ShardingAxisName.ATTN_DATA, *batch_dims, in_axis)
+
+    x, orig_len = _pad_sharded_activation(x, mesh, x_spec[0], axis_idx=0)
+
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_spec) if mesh else x_spec)
@@ -119,13 +141,17 @@ def sharded_matmul(x: jax.Array,
             out = jax.lax.psum(out, axis_name=in_axis)
         return out
 
-    return jax.shard_map(
+    out = jax.shard_map(
         wrapper,
         mesh=mesh,
         in_specs=(x_spec, weight_sharding),
         out_specs=P(ShardingAxisName.ATTN_DATA, *batch_dims, out_axis),
         check_vma=False,
     )(x, w)
+
+    if out.shape[0] != orig_len:
+        out = jax.lax.slice_in_dim(out, 0, orig_len, axis=0)
+    return out
 
 
 def sharded_quantized_matmul(x: jax.Array,
@@ -188,6 +214,8 @@ def sharded_quantized_matmul(x: jax.Array,
             scale_sharding = P(out_axis, )
     out_sharding = P(ShardingAxisName.ATTN_DATA, out_axis)
 
+    x, orig_len = _pad_sharded_activation(x, mesh, x_sharding[0], axis_idx=0)
+
     x = jax.lax.with_sharding_constraint(
         x,
         NamedSharding(mesh, x_sharding) if mesh else x_sharding)
@@ -214,13 +242,17 @@ def sharded_quantized_matmul(x: jax.Array,
             output = jax.lax.psum(output, axis_name=in_axis)
         return output
 
-    return jax.shard_map(
+    out = jax.shard_map(
         wrapper,
         mesh=mesh,
         in_specs=(x_sharding, weight_spec, scale_sharding),
         out_specs=(out_sharding),
         check_vma=False,
     )(x, w_q, w_s)
+
+    if out.shape[0] != orig_len:
+        out = jax.lax.slice_in_dim(out, 0, orig_len, axis=0)
+    return out
 
 
 def _parse_einsum_dims(einsum_str: str):
@@ -306,7 +338,7 @@ def sharded_quantized_batched_matmul(x: jax.Array,
 
     # Build PartitionSpecs for shard_map from the weight spec and einsum
     # structure. The weight_spec maps to the weight's axes directly.
-    lhs, _ = einsum_str.replace(" ", "").split("->")
+    lhs, out_axis = einsum_str.replace(" ", "").split("->")
     x_axis, w_axis = lhs.split(",")
 
     # Build a per-axis sharding map from the weight spec.
@@ -320,6 +352,12 @@ def sharded_quantized_batched_matmul(x: jax.Array,
     _lhs_free = [c for c in x_axis if c not in _shared]
     _dp_axis = _lhs_free[0] if _lhs_free else x_axis[0]
     act_shard = {_dp_axis: ShardingAxisName.ATTN_DATA}
+
+    lhs_dp_idx = x_axis.index(_dp_axis)
+    x, orig_len = _pad_sharded_activation(x,
+                                          mesh,
+                                          act_shard.get(_dp_axis, None),
+                                          axis_idx=lhs_dp_idx)
 
     # Input sharding: activation takes precedence; fall back to weight sharding
     # for shared (batch) axes where activation info is absent.
@@ -374,10 +412,15 @@ def sharded_quantized_batched_matmul(x: jax.Array,
             output = jnp.transpose(output, output_perm)
         return output
 
-    return jax.shard_map(
+    out = jax.shard_map(
         wrapper,
         mesh=mesh,
         in_specs=(x_sharding, weight_spec, scale_sharding),
         out_specs=out_sharding,
         check_vma=False,
     )(x, w_q, w_s)
+
+    out_dp_idx = out_axis.index(_dp_axis)
+    if out.shape[out_dp_idx] != orig_len:
+        out = jax.lax.slice_in_dim(out, 0, orig_len, axis=out_dp_idx)
+    return out

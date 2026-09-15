@@ -16,7 +16,7 @@ import time
 
 os.environ["VLLM_USE_V1"] = "0"
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -369,7 +369,8 @@ class RLVllmSampler:
 
     async def bind_raiden_sync(self,
                                worker_index: int = 0,
-                               parallelism: int = 4) -> None:
+                               parallelism: int = 4,
+                               job_name: str = "rollout") -> None:
         """Binds Raiden to each TPU worker's live weights, in-process.
 
         `get_weights_state()` cannot back a rollout-side weight sync: the
@@ -382,18 +383,22 @@ class RLVllmSampler:
         `tpu_worker.TPUWorker.bind_raiden_sync`.
         """
         await self._call_worker_method("bind_raiden_sync", worker_index,
-                                       parallelism)
+                                       parallelism, job_name)
+
+    async def refresh_model_state_leaves(self) -> None:
+        """Re-points each worker's dispatch view after an h2d weight update."""
+        await self._call_worker_method("refresh_model_state_leaves")
 
     async def get_raiden_metadata(self) -> list[dict]:
         """Wire-safe registration metadata for each worker's current Raiden binding."""
         return await self._call_worker_method("get_raiden_metadata")
 
-    async def raiden_h2d(self) -> list[dict]:
+    async def raiden_h2d(self, uuid: Optional[int] = None) -> list[dict]:
         """Blocks each worker until its just-landed transfer is visible on-device.
 
         Returns each worker's checksums dict (empty unless VERIFY_WEIGHTS=true).
         """
-        return await self._call_worker_method("raiden_h2d")
+        return await self._call_worker_method("raiden_h2d", uuid=uuid)
 
     async def raiden_metrics(self) -> list[dict]:
         return await self._call_worker_method("raiden_metrics")

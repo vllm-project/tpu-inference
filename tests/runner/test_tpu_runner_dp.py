@@ -37,6 +37,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
         self.runner.vllm_config.sharding_config.prefill_cp_size = 1
         self.runner.max_num_tokens = 64
         self.runner.max_num_reqs = 8
+        self.runner.attn_max_num_seqs = 8
         self.runner.max_num_blocks_per_req = 8
         self.runner.num_tokens_paddings = [16, 32, 64]
 
@@ -1422,6 +1423,7 @@ class TestSamplingMetadataPassthrough:
         runner.dp_size = 2
         runner.vllm_config.sharding_config.prefill_cp_size = 1
         runner.max_num_reqs = 8
+        runner.attn_max_num_seqs = 8
         runner.max_num_blocks_per_req = 8
         runner.speculative_config = None
         runner.input_batch.num_reqs = 2

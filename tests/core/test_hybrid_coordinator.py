@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (BlockHash,
@@ -11,7 +12,8 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference.core.hybrid_coordinator import (
-    TPUDualBlockPool, TPUHybridKVCacheCoordinator, TPUKVCacheManager,
+    MambaBlockPool, MirrorMambaBlockPool, TPUDualBlockPool,
+    TPUHybridKVCacheCoordinator, TPUKVCacheManager,
     install_hybrid_coordinator_hooks, set_mamba_num_blocks)
 
 
@@ -151,7 +153,201 @@ class TestTPUDualBlockPool:
         pool_mamba.evict_blocks.assert_not_called()
 
 
+class TestMirrorMambaBlockPool:
+    """Mirroring makes G mamba groups cost one block id, not G.
+
+    A pool of N ids otherwise holds N/G checkpoints while the memory behind it
+    holds N: every mamba layer has N slots and a checkpoint needs one per
+    layer.
+    """
+
+    def _pools(self, num_gpu_blocks=12, primary_group_id=1):
+        primary = MambaBlockPool(num_gpu_blocks=num_gpu_blocks,
+                                 enable_caching=True,
+                                 hash_block_size=16,
+                                 primary_group_id=primary_group_id)
+        return primary, MirrorMambaBlockPool(primary)
+
+    def test_mirror_reuses_the_primary_block_ids(self):
+        primary, mirror = self._pools()
+
+        first = primary.get_new_blocks(2)
+        second = mirror.get_new_blocks(2)
+        third = mirror.get_new_blocks(2)
+
+        assert [b.block_id for b in second] == [b.block_id for b in first]
+        assert [b.block_id for b in third] == [b.block_id for b in first]
+        # Three groups genuinely reference each block, so the count must show
+        # it or the first free would return a block another group still uses.
+        assert all(b.ref_cnt == 3 for b in first)
+        # Only 2 ids were consumed, not 6.
+        assert primary.get_num_free_blocks() == 12 - 1 - 2
+
+    def test_mirror_refuses_to_alias_when_groups_diverge(self):
+        primary, mirror = self._pools()
+        primary.get_new_blocks(2)
+
+        # A different count means the groups are no longer in lockstep;
+        # aliasing here would point a layer at an unrelated request's slot.
+        with pytest.raises(AssertionError, match="lockstep"):
+            mirror.get_new_blocks(3)
+
+    def test_lookup_of_every_group_resolves_to_one_entry(self):
+        primary, _ = self._pools(primary_group_id=1)
+
+        req = Request(request_id="r0",
+                      prompt_token_ids=list(range(16)),
+                      sampling_params=MagicMock(),
+                      pooling_params=None)
+        req.block_hashes = [BlockHash(b"h0")]
+        blocks = primary.get_new_blocks(1)
+        primary.cache_full_blocks(request=req,
+                                  blocks=blocks,
+                                  num_cached_blocks=0,
+                                  num_full_blocks=1,
+                                  block_size=16,
+                                  kv_cache_group_id=1)
+
+        # One cached entry must satisfy a lookup spanning all three groups,
+        # returning that block once per group.
+        hit = primary.get_cached_block(BlockHash(b"h0"), [1, 2, 3])
+        assert hit is not None
+        assert len(hit) == 3
+        assert {b.block_id for b in hit} == {blocks[0].block_id}
+        assert len(primary.cached_block_hash_to_block) == 1
+
+    def test_mirror_does_not_double_cache(self):
+        primary, mirror = self._pools()
+        req = Request(request_id="r0",
+                      prompt_token_ids=list(range(16)),
+                      sampling_params=MagicMock(),
+                      pooling_params=None)
+        req.block_hashes = [BlockHash(b"h0")]
+        blocks = primary.get_new_blocks(1)
+
+        mirror.cache_full_blocks(request=req,
+                                 blocks=blocks,
+                                 num_cached_blocks=0,
+                                 num_full_blocks=1,
+                                 block_size=16,
+                                 kv_cache_group_id=2)
+
+        assert len(primary.cached_block_hash_to_block) == 0
+
+    def test_mirror_forwards_the_rest_of_the_pool_api(self):
+        primary, mirror = self._pools()
+        assert mirror.num_gpu_blocks == primary.num_gpu_blocks
+        assert mirror.null_block is primary.null_block
+        assert mirror.hash_block_size == primary.hash_block_size
+
+        blocks = primary.get_new_blocks(1)
+        mirror.get_new_blocks(1)  # second reference
+        mirror.free_blocks(blocks)
+        assert blocks[0].ref_cnt == 1
+
+    def test_no_canonicalisation_without_a_primary_group(self):
+        # A model whose mamba layers already form one group has nothing to
+        # mirror, so the pool keeps vLLM's per-group keying: a lookup spanning
+        # three group ids then needs three cached entries.
+        pool = MambaBlockPool(num_gpu_blocks=12,
+                              enable_caching=True,
+                              hash_block_size=16)
+        req = Request(request_id="r0",
+                      prompt_token_ids=list(range(16)),
+                      sampling_params=MagicMock(),
+                      pooling_params=None)
+        req.block_hashes = [BlockHash(b"h0")]
+        blocks = pool.get_new_blocks(1)
+        pool.cache_full_blocks(request=req,
+                               blocks=blocks,
+                               num_cached_blocks=0,
+                               num_full_blocks=1,
+                               block_size=16,
+                               kv_cache_group_id=1)
+
+        assert pool.get_cached_block(BlockHash(b"h0"), [1]) is not None
+        assert pool.get_cached_block(BlockHash(b"h0"), [1, 2, 3]) is None
+
+
 class TestTPUHybridKVCacheCoordinator:
+
+    def _make_multi_mamba_group_config(self, num_mamba_groups=3):
+        """The Qwen3.5 shape: vLLM splits the mamba layers across groups."""
+        attn_spec = FullAttentionSpec(block_size=16,
+                                      num_kv_heads=8,
+                                      head_size=128,
+                                      dtype=torch.bfloat16)
+        mamba_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                               dtypes=(torch.bfloat16, torch.float32),
+                               block_size=16,
+                               mamba_cache_mode="align")
+        groups = [KVCacheGroupSpec(["attn_0"], attn_spec)]
+        groups += [
+            KVCacheGroupSpec([f"mamba_{i}"], mamba_spec)
+            for i in range(num_mamba_groups)
+        ]
+        set_mamba_num_blocks(50)
+        return KVCacheConfig(num_blocks=500,
+                             kv_cache_tensors=[],
+                             kv_cache_groups=groups)
+
+    def _make_coordinator(self, cfg):
+        return TPUHybridKVCacheCoordinator(
+            kv_cache_config=cfg,
+            max_model_len=1024,
+            max_in_flight_tokens=128,
+            use_eagle=False,
+            enable_caching=True,
+            enable_kv_cache_events=False,
+            dcp_world_size=1,
+            pcp_world_size=1,
+            scheduler_block_size=16,
+            hash_block_size=16,
+        )
+
+    def test_multiple_mamba_groups_are_mirrored_by_default(self):
+        coord = self._make_coordinator(self._make_multi_mamba_group_config())
+
+        assert coord.mirror_mamba_groups is True
+        assert coord.primary_mamba_group_id == 1  # group 0 is attention
+        assert coord.mamba_block_pool.primary_group_id == 1
+        # Only the primary group owns the pool; the rest are handed its ids.
+        assert coord.single_type_managers[
+            1].block_pool is coord.mamba_block_pool
+        for i in (2, 3):
+            assert isinstance(coord.single_type_managers[i].block_pool,
+                              MirrorMambaBlockPool)
+
+    def test_single_mamba_group_is_not_mirrored(self):
+        coord = self._make_coordinator(
+            self._make_multi_mamba_group_config(num_mamba_groups=1))
+
+        # Nothing to share ids with, so keep vLLM's per-group keying.
+        assert coord.mirror_mamba_groups is False
+        assert coord.mamba_block_pool.primary_group_id is None
+        assert coord.single_type_managers[
+            1].block_pool is coord.mamba_block_pool
+
+    def test_mirrored_groups_do_not_multiply_the_capacity_check(self):
+        coord = self._make_coordinator(self._make_multi_mamba_group_config())
+        req = Request(request_id="r0",
+                      prompt_token_ids=list(range(32)),
+                      sampling_params=MagicMock(),
+                      pooling_params=None)
+        req.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(2)]
+
+        # 3 mamba groups asking for the same blocks is one block's worth of
+        # demand, not three: counting each would reject requests that fit.
+        empty = tuple([] for _ in coord.kv_cache_config.kv_cache_groups)
+        assert coord.can_allocate_tokens(
+            request=req,
+            num_tokens=32,
+            new_computed_blocks=empty,
+            num_encoder_tokens=0,
+            total_computed_tokens=0,
+            num_local_computed_tokens=0,
+            num_tokens_main_model=32,
+        ) is True
 
     def test_decoupled_pool_initialization(self):
         cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=500,

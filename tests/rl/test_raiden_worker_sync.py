@@ -3,6 +3,7 @@
 """Unit tests for tpu_inference.rl.raiden_worker_sync."""
 
 import unittest
+import unittest.mock
 from types import SimpleNamespace
 
 from tpu_inference.rl import raiden_worker_sync as rws
@@ -75,6 +76,66 @@ class TestAxisName(unittest.TestCase):
         self.assertEqual(rws._axis_name(("fsdp", "tp")), "fsdp,tp")
 
 
+class TestIsWeight(unittest.TestCase):
+    """`_filter_bindable` drops KV-cache leaves; the trainer has no counterpart
+    for them and the controller pairs by name."""
+
+    def test_keeps_ordinary_weights(self):
+        self.assertTrue(
+            rws._is_weight("['base']['decoder']['layers_0']['mlp']['kernel']"))
+
+    def test_drops_cache_leaves(self):
+        self.assertFalse(
+            rws._is_weight(
+                "['base']['decoder']['layers_0']['attention']['cache']"
+                "['cached_prefill_key']"))
+
+    def test_filter_bindable_drops_cache_without_touching_weights(self):
+        leaf = SimpleNamespace(shape=(2, ), dtype="float32")
+        names = ["['w']", "['attention']['cache']['cached_prefill_key']"]
+        kept_names, kept_arrays = rws._filter_bindable(names, [leaf, leaf])
+        # The cache leaf is dropped before `_bindable` is consulted, so it goes
+        # even though it is an ordinary float array.
+        self.assertEqual(kept_names, [])
+        self.assertEqual(kept_arrays, [])
+
+
+class TestWaitUntilSettled(unittest.TestCase):
+
+    def _sync_with_digests(self, digests):
+        sync = rws.RaidenWorkerSync("rollout")
+        sync.arrays = [object()]
+        seq = iter(digests)
+        last = [digests[-1]]
+
+        def fake_l1_norm(_arrays):
+            try:
+                last[0] = next(seq)
+            except StopIteration:
+                pass
+            return last[0]
+
+        return sync, fake_l1_norm
+
+    def test_returns_once_the_digest_stops_changing(self):
+        sync, fake = self._sync_with_digests([1.0, 2.0, 3.0, 3.0, 3.0, 3.0])
+        with unittest.mock.patch.object(rws, "_l1_norm", fake), \
+             unittest.mock.patch.object(rws.time, "sleep", lambda _s: None):
+            sync._wait_until_settled(timeout_s=5.0, interval_s=0.0)
+
+    def test_returns_early_when_the_transfer_has_not_started(self):
+        """Known limitation: a digest that has not moved yet reads as settled.
+
+        `stable` counts *unchanged* reads and there is no "saw it change at
+        least once" precondition, so if h2d() returns before Raiden has DMA'd
+        any bytes this declares success on the pre-sync weights.
+        """
+        sync, fake = self._sync_with_digests([7.0] * 6)
+        with unittest.mock.patch.object(rws, "_l1_norm", fake), \
+             unittest.mock.patch.object(rws.time, "sleep", lambda _s: None):
+            sync._wait_until_settled(timeout_s=5.0, interval_s=0.0)
+
+
 class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
 
     def test_raises_without_a_sharded_array(self):
@@ -94,6 +155,59 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
         self.assertFalse(sync.bound)
         sync.names = ["w"]
         self.assertTrue(sync.bound)
+
+
+class TestRaidenWorkerSyncH2D(unittest.TestCase):
+
+    def test_h2d_calls_wait_for_transfer_completion_when_available(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        mock_ws = unittest.mock.MagicMock()
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     sync,
+                                     "_wait_until_settled") as mock_settle:
+            sync.h2d(uuid=42)
+            mock_ws.wait_for_transfer_completion.assert_called_once_with(42)
+            mock_ws.h2d.assert_not_called()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_not_called()
+
+    def test_h2d_fallback_when_wait_for_transfer_completion_missing(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        mock_ws = unittest.mock.MagicMock(
+            spec=["h2d"])  # lacks wait_for_transfer_completion
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     sync,
+                                     "_wait_until_settled") as mock_settle:
+            sync.h2d()
+            mock_ws.h2d.assert_called_once()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_called_once()
+
+    def test_h2d_fallback_does_not_settle_when_env_disabled(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        mock_ws = unittest.mock.MagicMock(
+            spec=["h2d"])  # lacks wait_for_transfer_completion
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     rws.envs, "RAIDEN_H2D_SETTLE",
+                                     False), unittest.mock.patch.object(
+                                         sync,
+                                         "_wait_until_settled") as mock_settle:
+            sync.h2d()
+            mock_ws.h2d.assert_called_once()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_not_called()
 
 
 if __name__ == "__main__":
