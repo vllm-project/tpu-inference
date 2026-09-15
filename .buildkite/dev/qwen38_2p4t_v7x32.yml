@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, prefill roofline: 8 x 8k per pass)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, prefill roofline: 4 x 8k per pass)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -149,129 +149,117 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # Prefill roofline: one forward pass per 8 prompts, no chunking.
+        # Prefill roofline, second target: 4 x 8k tokens per forward pass.
         #
-        # #26 established model=8 x attn_dp=4 as the mesh (+40.6% throughput
-        # over #19, GSM8K unmoved, 0 preemptions) and, more usefully, said
-        # where the remaining time goes. Its ITL distribution splits cleanly:
-        # 80.8% of engine steps sit in the 129-256 token bucket -- one token
-        # per running request, no prefill -- and cost a median 91.14 ms, while
-        # ~7.6% of steps carry the prefill and consume roughly two thirds of
-        # all engine time. Median ITL was *identical* to #19's (91.87 ms)
-        # despite 1.6x the batch, so decode step cost is not what grows.
-        # Prefill is the wall, and #26 only converted 70% of a doubled prefill
-        # budget into throughput.
+        # #26 established model=8 x attn_dp=4 as the mesh and said where the
+        # time goes: 80.8% of engine steps carry one token per running request
+        # at a median 91.14 ms, ~7.6% carry the prefill and eat roughly two
+        # thirds of engine time, and median ITL was identical to #19's at 1.6x
+        # the batch. Prefill is the wall, and #26 converted only 70% of a
+        # doubled prefill budget into throughput.
         #
-        # This build measures the prefill roofline directly. An offline
-        # roofline analysis for this mesh puts optimal prefill throughput at a
-        # batch of 8 sequences, and models prefill and decode as separate whole
-        # steps with no chunking. Both halves of that are configured here.
+        # #27 and #28 tried to measure the offline roofline's stated optimum,
+        # a batch of 8 sequences = 65536 aggregate tokens. BOTH FAILED, in the
+        # same place: compiling `backbone` at num_tokens=65536. Zero
+        # 65536-class compiles completed in either run.
         #
-        # MAX_NUM_BATCHED_TOKENS=16384, and note the units: it is PER RANK.
-        # dp_scheduler.py:556-557 reads it as `per_rank_max_tokens` and derives
-        # `global_max_tokens = per_rank * dp_size`; tpu_runner.py:1060-1065
-        # builds the compiled buckets from `max_num_batched_tokens * dp_size`,
-        # which is why #26 logged
-        #   Prepared token paddings: [16, 32, ..., 4096, 8192]
-        # at a nominal 2048. So 16384/rank is an aggregate of 65536 = 8 x 8192,
-        # which is the batch the MoE expert GEMMs see -- they gather across all
-        # 32 chips, and that is where the FLOPs are (2371 GB of 2469 GB). The
-        # attention and GDN path, being per-rank, sees 16384.
+        #   #27  MAX_NUM_SEQS=16, pool 4864, resident 78.77
+        #        "total memory required for HLO temporaries (94.98G) exceeds
+        #         available HBM (94.74G)"                      short 0.24 GiB
+        #   #28  MAX_NUM_SEQS=8,  pool 2432, resident 77.36
+        #        "Used 95.26G of 94.74G hbm. Exceeded hbm capacity by
+        #         536.74M."                                    short 0.54 GiB
         #
-        # The second half matters as much as the first: at 16384/rank an
-        # 8192-token prompt is prefilled in ONE pass instead of four. Every
-        # build to date ran 2048/rank, so every prompt was chunked four ways
-        # and no measurement we have matches the roofline's no-chunking
-        # assumption. This one does.
+        # Read those two together, because they are the reason this build
+        # targets 32768 instead. Cutting 1.41 GiB of resident KV between the
+        # runs made the requirement go UP by 0.28 GiB, with every shape in the
+        # failing function getting smaller (padded_num_reqs 64 -> 32,
+        # query_start_loc 68 -> 36). XLA buffer assignment at this size is not
+        # monotone in the input shapes, so trading pool for compile headroom is
+        # not a lever that can be aimed -- #27's write-up claimed it was a 1:1
+        # trade and #28 falsified that. Note also the two builds raised
+        # different XLA errors, so they may not even measure the same
+        # quantity.
         #
-        # MAX_NUM_SEQS=8 -> 32 concurrent, down from #26's 64 -> 256. This is
-        # a deliberate trade of KV capacity for activation headroom and it
-        # makes the run NOT comparable to #26 on throughput. That is fine:
-        # #26 is the capacity number and already exists. This build answers a
-        # different question, and a light decode load is if anything a feature
-        # for a prefill measurement.
+        # 65536 is therefore parked, not disproven. It needs a smaller resident
+        # footprint (weights are 75.87 GiB, 80% of the chip) rather than a
+        # smaller pool.
         #
-        # The size of the cut is set by #27, which ran this same config at
-        # MAX_NUM_SEQS=16 and died compiling the 65536 bucket:
+        # GPU_MEMORY_UTILIZATION is not the escape hatch and is left at 0.92.
+        # tpu_worker.py:513-520 takes total_hbm_limit from
+        # device.memory_stats()["bytes_limit"] and multiplies only a *software*
+        # budget by the fraction; #28 logged both, 3031.62 GiB limit against a
+        # 2789.09 GiB cap. The 94.74 GiB/device in the OOM is the hardware
+        # number and the fraction cannot move it. The cap is doubly inert here:
+        # NUM_GPU_BLOCKS_OVERRIDE early-returns past it
+        # (kv_cache_manager.py:346-347), and #28 used 1.47 GiB of the 11.28
+        # GiB/device the budget was already willing to give.
         #
-        #   RESOURCE_EXHAUSTED: the total memory required for HLO temporaries
-        #   (94.98G) exceeds available HBM (94.74G).
+        # MAX_NUM_BATCHED_TOKENS=8192 per rank -> aggregate 32768 = 4 x 8192.
+        # This is the largest value that keeps the top compiled bucket at
+        # 32768: get_token_paddings doubles from 16 until it covers
+        # max_num_batched_tokens * dp_size (tpu_runner.py:1063,
+        # VLLM_TPU_BUCKET_PADDING_GAP=0), so anything above 8192/rank pulls
+        # 65536 back into the ladder and we are back where #27 and #28 died.
+        # 32768 compiled cleanly in both of those runs, taking 100-107 s.
         #
-        # Read that carefully, because it says how big the cut has to be.
-        # "Available HBM 94.74" is the whole device, not the free part, and the
-        # 94.98 includes the resident buffers the program reads:
+        # Batch 4, not the roofline's 8. What this build can still settle is
+        # the other half of the roofline's assumption -- that prefill is a
+        # whole step rather than four chunks -- and the shape of the curve
+        # between #26's aggregate 8192 and here.
         #
-        #   resident (weights 75.87 + KV 2.90)    78.77
-        #   true temporaries at 65536           + 16.21
-        #                                       -------
-        #   total required                        94.98
-        #   device                                94.74
-        #   SHORT BY                               0.24
+        # ⚠️ Caveat on "unchunked": the per-rank token budget covers decode
+        # tokens too. With 32 decode requests on a rank, an 8192-token prompt
+        # gets 8192-32 = 8160 tokens in the step and a 32-token tail in the
+        # next, i.e. two chunks rather than one. Raising the budget to 8224 to
+        # avoid that would push the ladder to 65536, so it is not available.
+        # In practice the common case here is still unchunked: --ignore-eos
+        # with a fixed output length retires a whole wave together, so the
+        # prefill that follows a wave boundary has no decode to share with.
         #
-        # That decomposition is the only one consistent with the pass/fail
-        # boundary: temporaries scale with token count, so 32768 needs ~8.1
-        # (total 86.9) and 16384 ~4.1 (total 82.8), and both compiled. It also
-        # means KV and temporaries trade 1:1, so cutting the pool genuinely
-        # helps -- had "temporaries" meant temporaries alone, 65536 would have
-        # been unreachable at any pool size.
+        # MAX_NUM_SEQS=32 -> 128 concurrent. Temporaries at 32768 should be
+        # roughly half of 65536's, call it ~9 GiB against the 16.21/17.90 the
+        # two failures implied, so the budget is far looser than #27/#28 had:
         #
-        # So, against a 0.24 GiB shortfall:
+        #   attention  9728 x 376,832 B          = 3.41 GiB
+        #   mamba      roundup_4(4*32+1) = 132    = 2.26 GiB
+        #   Init kv-cache  75.87 + 5.67          ~ 81.54 GiB
+        #   predicted total at 32768             ~ 90.5 of 94.74
+        #   margin                                 ~4.2 GiB
         #
-        #   attention  2432 x 376,832 B          = 0.85 GiB  (#27: 1.71)
-        #   mamba      roundup_4(4*8+1) = 36      = 0.62 GiB  (#27: 1.16)
-        #   Init kv-cache  75.87 + 1.47          ~ 77.34 GiB (#27: 78.77)
-        #   predicted total at 65536             ~ 93.55 of 94.74
-        #   margin                                 +1.19 GiB
+        # That margin is 3.5x what #28 had and it would survive temporaries
+        # coming in 3 GiB above the extrapolation -- which, given #28 landed
+        # 1.69 GiB above what #27 implied, is the kind of error that needs
+        # covering. 128 concurrent also keeps prefill demand continuous, which
+        # matters for the measurement.
         #
-        # Five times the known shortfall. The larger margin rather than
-        # MAX_NUM_SEQS=12 (+0.52) because 16.21 is the requirement of the ONE
-        # 65536-class function that was attempted -- #27 completed zero of them
-        # -- and the others could need more. A second OOM costs another ~64 min
-        # of slice time.
-        #
-        # Everything else about the HBM model came through #27 intact:
-        # predicted Init kv-cache 78.9 against a measured 78.77, and Init model
-        # unchanged at 75.87, so sizing the input buffers at 65536 instead of
-        # 8192 costs nothing measurable.
-        #
-        # NUM_GPU_BLOCKS_OVERRIDE=2432: per rank 608 against a peak demand of
-        # 8 x 74 = 592, so preemption stays impossible by construction -- no
-        # rank can admit a 9th request. Same property #26 relied on, which
+        # NUM_GPU_BLOCKS_OVERRIDE=9728: per rank 2432 against a peak demand of
+        # 32 x 74 = 2368, so preemption stays impossible by construction -- no
+        # rank can admit a 33rd request. Same property #26 relied on, which
         # matters under attn_dp because preemption leaks mamba slots.
         #
-        # BENCH_SWEEP="8:128 32:256". conc 8 is the control, unchanged since
-        # tc#953 and directly comparable to every prior build; keeping it is
-        # what makes any change attributable. conc 32 with 256 prompts is 8
-        # full waves. GSM8K_CONCURRENCY drops 64 -> 32 to match the server.
+        # Batch-4 formation needs no wave luck, unlike the 65536 attempts: at
+        # 8192/rank a rank fills its budget with ONE prompt, and the admission
+        # accumulator flushes at threshold = dp_size = 4
+        # (dp_scheduler.py:825-840), which is exactly one pending prompt per
+        # rank. The mechanism is aligned with the target for once. Still read
+        # iteration_token_bins in metrics_c128.json to confirm the steps land
+        # in the large buckets.
         #
-        # ⚠️ The thing to verify before trusting the result: batch-8 formation
-        # is NOT guaranteed by the scheduler. Admission batching
-        # (dp_scheduler.py:825-840, DP_SCHED_BATCH_PREFILL defaults on) flushes
-        # at threshold = dp_size = 4, i.e. one prompt per rank, and flushes
-        # even earlier when idle ranks >= pending. In steady state at 64
-        # concurrent, arrivals per rank are far slower than prefill steps, so
-        # most prefill steps would carry one prompt. What makes this work is
-        # wave synchronisation: --ignore-eos with a fixed 1024-token output
-        # retires all 32 requests together, so each rank receives 8
-        # un-prefilled prompts at once and only 2 are needed to fill its
-        # 16384-token budget. That
-        # is a property of the benchmark, not the scheduler. READ
-        # iteration_token_bins IN metrics_c32.json FIRST -- if the steps are
-        # not landing in the large buckets, the roofline point was never
-        # exercised and the next build needs a prefill-dominated leg
-        # (OUTPUT_LEN small, so requests retire straight after prefill and
-        # demand is continuous) instead of relying on waves.
+        # BENCH_SWEEP="8:128 128:512". conc 8 is the control, unchanged since
+        # tc#953 and directly comparable to every prior build. conc 128 with
+        # 512 prompts is 4 full waves.
         #
         # The number to compare against the roofline is
         # timed_prompt_tokens_per_s in the metrics scrape: 8152 tok/s at #26
         # (aggregate 8192, four-way chunked), 5797 at #19. Median ITL is the
         # wrong instrument -- #26 showed it is decode-step cost, drawn from the
         # steps that carry no prefill at all. Median TTFT is the useful
-        # secondary read and should drop sharply now that prompts are not
-        # chunked.
+        # secondary read and should drop sharply now that prompts are
+        # essentially unchunked.
         #
         # STD_EVAL_SUITE=gsm8k is retained as a guard, ~8 min. The sharding is
-        # #26's exactly so accuracy should not move, but an 8x larger prefill
+        # #26's exactly so accuracy should not move, but a 4x larger prefill
         # batch is new ground for the MoE kernels and 0.9803 is a cheap check
         # that they still compute the right answer.
         #
@@ -308,9 +296,9 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=4' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=8' \
-          'NUM_GPU_BLOCKS_OVERRIDE=2432' \
-          'MAX_NUM_BATCHED_TOKENS=16384' \
+          'MAX_NUM_SEQS=32' \
+          'NUM_GPU_BLOCKS_OVERRIDE=9728' \
+          'MAX_NUM_BATCHED_TOKENS=8192' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
@@ -318,12 +306,12 @@ steps:
           'OUTPUT_LEN=1024' \
           'NUM_PROMPTS=128' \
           'MAX_CONCURRENCY=8' \
-          'BENCH_SWEEP=8:128 32:256' \
+          'BENCH_SWEEP=8:128 128:512' \
           'NUM_WARMUPS=32' \
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gsm8k' \
           'GSM8K_REASONING_EFFORT=low' \
-          'GSM8K_CONCURRENCY=32' \
+          'GSM8K_CONCURRENCY=64' \
           'GSM8K_MAX_TOKENS=1024' \
           'GSM8K_TIMEOUT_S=7200' \
           'BENCH_REQUEST_TIMEOUT_S=7200' \
