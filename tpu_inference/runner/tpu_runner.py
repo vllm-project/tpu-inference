@@ -2122,7 +2122,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                        == "processed_logprobs" else logits)
                 logprobs = compute_and_gather_logprobs(
                     logprobs_logits, next_tokens,
-                    self.model_config.max_logprobs)
+                    self.model_config.max_logprobs, self.mesh)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)
             else:
                 logprobs = None
@@ -2136,6 +2136,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp,
                 self.dp_size,
                 max_logprobs=self.model_config.max_logprobs,
+                mesh=self.mesh,
             )
 
         num_reqs = self.input_batch.num_reqs

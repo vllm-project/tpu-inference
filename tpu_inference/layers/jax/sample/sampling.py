@@ -354,26 +354,29 @@ def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+@jax.jit(static_argnames=("max_logprobs", "mesh"))
 def compute_and_gather_logprobs(
     logits: jax.Array,
     next_tokens: jax.Array,
     max_logprobs: int,
+    mesh: Optional[Mesh] = None,
 ) -> LogprobsTensors:
     """Compute logprobs from logits and gather the requested top-k."""
     logprobs = compute_logprobs(logits)
-    return gather_logprobs(logprobs, next_tokens, max_logprobs)
+    return gather_logprobs(logprobs, next_tokens, max_logprobs, mesh)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+@jax.jit(static_argnames=("max_logprobs", "mesh"))
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
     input_ids: jax.Array,
     max_logprobs: int,
+    mesh: Optional[Mesh] = None,
 ) -> LogprobsTensors:
     """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
     prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
-    return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
+    return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs,
+                                       mesh)
 
 
 def compute_prompt_logprobs(
@@ -385,6 +388,7 @@ def compute_prompt_logprobs(
     req_ids_dp: Optional[Dict[int, List[str]]],
     dp_size: int,
     max_logprobs: int,
+    mesh: Optional[Mesh] = None,
 ) -> Optional[PromptLogprobsAsyncData]:
     """Dispatches prompt logprob computation on TPU and snapshots per-request state.
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
@@ -398,7 +402,7 @@ def compute_prompt_logprobs(
     # We use the statically precompiled max_logprobs instead of the dynamic user max_k
     # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
     prompt_lp_tensors = compute_and_gather_prompt_logprobs(
-        full_logits, input_ids, max_logprobs)
+        full_logits, input_ids, max_logprobs, mesh)
     prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     # Snapshot all mutable per-request state before update_states(N+1) runs.
@@ -442,6 +446,7 @@ def gather_logprobs(
     logprobs: jax.Array,
     token_ids: jax.Array,
     num_logprobs: int,
+    mesh: Optional[Mesh] = None,
 ) -> LogprobsTensors:
     """
     Gather logprobs for topk and sampled/prompt token.
@@ -454,6 +459,10 @@ def gather_logprobs(
                     with (num tokens) elements
         num_logprobs: minimum number of logprobs to
                     retain per token
+        mesh: optional device mesh. When it is provided the returned
+                    tensors are constrained to be fully replicated over
+                    it, so that a single host can fetch them in a
+                    multi-controller (multi-host) setup.
 
 
     Returns:
@@ -477,5 +486,19 @@ def gather_logprobs(
 
     # Use int32 to reduce the tensor size.
     indices = jnp.int32(indices)
+
+    # Replicate the results so that in a multi-controller jax setup
+    # (i.e. Ray based multi-host setup), we won't hit error like
+    # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
+    # (non process local) devices is not possible.
+    # Without this the tensors inherit the `attn_data` (DP) sharding of
+    # `logprobs`, which spans devices owned by the other host, and the
+    # host-side jax.device_get() in the runner fails. This mirrors what
+    # sample() already does for `next_tokens`.
+    if mesh is not None:
+        replicated = NamedSharding(mesh, P())
+        indices = jax.lax.with_sharding_constraint(indices, replicated)
+        logprobs = jax.lax.with_sharding_constraint(logprobs, replicated)
+        token_ranks = jax.lax.with_sharding_constraint(token_ranks, replicated)
 
     return LogprobsTensors(indices, logprobs, token_ranks)

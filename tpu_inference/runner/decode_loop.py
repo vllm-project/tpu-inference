@@ -197,7 +197,7 @@ def _decode_core_impl(
             from tpu_inference.layers.jax.sample.sampling import \
                 compute_and_gather_logprobs
             step_logprobs = compute_and_gather_logprobs(
-                logprobs_logits, next_tokens, max_logprobs)
+                logprobs_logits, next_tokens, max_logprobs, mesh)
             lp_ids_step = step_logprobs.logprob_token_ids
             lp_val_step = step_logprobs.logprobs
             lp_ranks_step = step_logprobs.selected_token_ranks

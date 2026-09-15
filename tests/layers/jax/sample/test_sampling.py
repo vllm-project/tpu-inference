@@ -17,7 +17,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.experimental import mesh_utils
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -250,6 +251,35 @@ class TestProcessedLogprobs:
         axis_names = (ShardingAxisName.ATTN_DATA, )
         device_mesh = mesh_utils.create_device_mesh(mesh_shape, devices)
         return Mesh(device_mesh, axis_names)
+
+    def test_gather_logprobs_replicated_with_mesh(self):
+        """Passing a mesh replicates the outputs without changing them."""
+        mesh = self._get_fake_mesh()
+        num_tokens = 2 * len(jax.devices())
+        vocab_size = 8
+        logits = jnp.arange(num_tokens * vocab_size,
+                            dtype=jnp.float32).reshape(num_tokens, vocab_size)
+        logprobs = jax.device_put(
+            compute_logprobs(logits),
+            NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+        token_ids = jax.device_put(
+            jnp.zeros((num_tokens, ), dtype=jnp.int32),
+            NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA)))
+
+        unconstrained = jax.jit(lambda lp, ids: gather_logprobs(lp, ids, 2))(
+            logprobs, token_ids)
+        replicated = jax.jit(
+            lambda lp, ids: gather_logprobs(lp, ids, 2, mesh))(logprobs,
+                                                               token_ids)
+
+        assert replicated.logprob_token_ids.sharding.is_fully_replicated
+        assert replicated.logprobs.sharding.is_fully_replicated
+        assert replicated.selected_token_ranks.sharding.is_fully_replicated
+        assert np.array_equal(replicated.logprob_token_ids,
+                              unconstrained.logprob_token_ids)
+        assert np.allclose(replicated.logprobs, unconstrained.logprobs)
+        assert np.array_equal(replicated.selected_token_ranks,
+                              unconstrained.selected_token_ranks)
 
     def test_processed_logprobs_with_temperature(self):
         """Temperature scaling should change the logprobs distribution."""
