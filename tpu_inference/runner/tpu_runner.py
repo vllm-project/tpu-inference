@@ -34,6 +34,8 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
+    get_routed_experts_attn_gid
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
@@ -199,6 +201,7 @@ def _process_continue_decode_outputs(
     enable_return_routed_experts: bool = False,
     requests: Optional[Dict[str, Any]] = None,
     block_size: int = 0,
+    routed_experts_attn_gid: int = 0,
     scheduler_output: Optional["VllmSchedulerOutput"] = None,
     input_batch: Optional[Any] = None,
     max_num_reqs: int = 0,
@@ -300,7 +303,8 @@ def _process_continue_decode_outputs(
                     req_state,
                     actual_len,
                     block_size,
-                    start_pos=req_state.num_computed_tokens)
+                    start_pos=req_state.num_computed_tokens,
+                    kv_cache_group_id=routed_experts_attn_gid)
                 expert_slots_list.append(slots_arr)
 
             if input_batch is not None:
@@ -417,6 +421,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                 False) if self._runner else False,
             requests=getattr(self._runner, "requests", None),
             block_size=getattr(self._runner, "block_size", 0),
+            routed_experts_attn_gid=getattr(self._runner,
+                                            "routed_experts_attn_gid", 0),
             is_async=True,
         )
 
@@ -657,6 +663,7 @@ def _reconstruct_slots_for_request(
     num_tokens: int,
     block_size: int,
     start_pos: int,
+    kv_cache_group_id: int,
 ) -> np.ndarray:
     """Reconstructs physical KV-cache slots for ``num_tokens`` tokens of a
     request using vectorized NumPy.
@@ -670,6 +677,15 @@ def _reconstruct_slots_for_request(
     ``num_computed_tokens``, so it passes ``num_computed_tokens``). The slots
     must match the scheduler-side read (``RoutedExpertsManager.get``, which is
     block-relative from position 0).
+
+    ``kv_cache_group_id`` selects which group's block IDs to key the slots by.
+    It must be the *full-attention* group, because that is the group the
+    scheduler reads back with (``get_routed_experts_attn_gid``). It is not
+    always group 0: on hybrid models the groups follow model layer order, so a
+    model whose first layer is linear attention (Qwen3.5, whose
+    ``full_attention_interval`` of 4 makes layer 0 linear) gets
+    ``[linear, linear, linear, full]`` and the full-attention group is last.
+    See :func:`TPUModelRunner.initialize_kv_cache`.
     """
     if num_tokens <= 0:
         return np.array([], dtype=np.int32)
@@ -678,7 +694,17 @@ def _reconstruct_slots_for_request(
         f"[routed-experts] start_pos must be non-negative, got {start_pos} "
         f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
         f"indexing")
-    block_ids = req_state.block_ids[0] if req_state.block_ids else []
+    block_ids = []
+    if req_state.block_ids:
+        # Fail loudly rather than silently keying the slots by the wrong
+        # group: a mismatch with the scheduler-side read is invisible in the
+        # output (it just yields zero-filled prompt routing, or another
+        # request's routing once block IDs get recycled).
+        assert kv_cache_group_id < len(req_state.block_ids), (
+            f"[routed-experts] kv_cache_group_id={kv_cache_group_id} is out "
+            f"of range for a request with {len(req_state.block_ids)} "
+            "KV-cache group(s)")
+        block_ids = req_state.block_ids[kv_cache_group_id]
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
@@ -710,6 +736,7 @@ def _reconstruct_routed_experts(
     block_size = runner.block_size
     total_active_tokens = scheduler_output.total_num_scheduled_tokens
     dp_size = runner.dp_size
+    attn_gid = runner.routed_experts_attn_gid
 
     # Absolute start position of each request's chunk = its PRE-step
     # computed-token count, sourced from scheduler_output (not from
@@ -772,7 +799,8 @@ def _reconstruct_routed_experts(
                         req_state,
                         n,
                         block_size,
-                        start_pos=chunk_start[req_id])
+                        start_pos=chunk_start[req_id],
+                        kv_cache_group_id=attn_gid)
 
     # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
@@ -814,6 +842,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rank = rank
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
+        # Resolved from the KV-cache config in `initialize_kv_cache`.
+        self.routed_experts_attn_gid = 0
 
         self._init_random()
         self._init_mesh()
@@ -1327,6 +1357,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
+        # KV-cache group whose physical slots key the scheduler-side
+        # routed-experts buffer. The scheduler reads a completed prefill's
+        # routing back through the full-attention group's block IDs
+        # (`RoutedExpertsManager.get`), so the write side must key the slots
+        # by the same group. Groups follow model layer order, so this is not
+        # always group 0: Qwen3.5 (`full_attention_interval=4`, layer 0
+        # linear) yields `[linear, linear, linear, full]`.
+        self.routed_experts_attn_gid = (
+            get_routed_experts_attn_gid(kv_cache_config)
+            if self.model_config.enable_return_routed_experts else 0)
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
 
@@ -1989,6 +2029,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 False),
             requests=self.requests,
             block_size=self.block_size,
+            routed_experts_attn_gid=self.routed_experts_attn_gid,
             scheduler_output=scheduler_output,
             input_batch=self.input_batch,
             max_num_reqs=self.max_num_reqs,

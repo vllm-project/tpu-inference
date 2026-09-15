@@ -22,6 +22,12 @@ contracts); ``_reconstruct_routed_experts`` sources it from ``scheduler_output``
 (the pre-step computed-token count), which is correct on both the sync and
 async output paths -- unlike ``req_state.num_computed_tokens``, whose
 advancement timing differs between them.
+
+The slots must also be keyed by the *same KV-cache group* the scheduler reads
+back with -- the full-attention one (``get_routed_experts_attn_gid``). That is
+not always group 0: KV-cache groups follow model layer order, so a hybrid model
+whose first layer is linear attention (Qwen3.5, ``full_attention_interval=4``)
+gets ``[linear, linear, linear, full]``.
 """
 from types import SimpleNamespace
 
@@ -31,12 +37,20 @@ import pytest
 from tpu_inference.runner.tpu_runner import (_reconstruct_routed_experts,
                                              _reconstruct_slots_for_request)
 
+# Block ID owned by the non-full-attention groups in these tests.
+_WRONG_GROUP_BLOCK_ID = 7
 
-def _req(num_computed_tokens, block_ids):
-    # Only num_computed_tokens and block_ids are read; CachedRequestState
-    # stores the per-attention-group block IDs as block_ids[0].
+
+def _req(num_computed_tokens, block_ids, num_groups=1, attn_gid=0):
+    # Only num_computed_tokens and block_ids are read. CachedRequestState
+    # stores one list of block IDs per KV-cache group; `block_ids` here are the
+    # full-attention group's, placed at `attn_gid`. The other groups get a
+    # distinct, deliberately wrong block ID so that reading the wrong group is
+    # visible in the resulting slots rather than silently plausible.
+    groups = [[_WRONG_GROUP_BLOCK_ID] for _ in range(num_groups)]
+    groups[attn_gid] = block_ids
     return SimpleNamespace(num_computed_tokens=num_computed_tokens,
-                           block_ids=[block_ids])
+                           block_ids=groups)
 
 
 class TestReconstructSlotsForRequest:
@@ -47,7 +61,8 @@ class TestReconstructSlotsForRequest:
         slots = _reconstruct_slots_for_request(_req(5, [1]),
                                                num_tokens=5,
                                                block_size=16,
-                                               start_pos=0)
+                                               start_pos=0,
+                                               kv_cache_group_id=0)
         np.testing.assert_array_equal(
             slots, np.array([16, 17, 18, 19, 20], dtype=np.int32))
 
@@ -56,7 +71,8 @@ class TestReconstructSlotsForRequest:
         slots = _reconstruct_slots_for_request(_req(6, [1]),
                                                num_tokens=1,
                                                block_size=16,
-                                               start_pos=5)
+                                               start_pos=5,
+                                               kv_cache_group_id=0)
         np.testing.assert_array_equal(slots, np.array([21], dtype=np.int32))
 
     def test_spanning_multiple_blocks(self):
@@ -64,7 +80,8 @@ class TestReconstructSlotsForRequest:
         slots = _reconstruct_slots_for_request(_req(20, [1, 2]),
                                                num_tokens=20,
                                                block_size=16,
-                                               start_pos=0)
+                                               start_pos=0,
+                                               kv_cache_group_id=0)
         expected = np.concatenate(
             [1 * 16 + np.arange(16), 2 * 16 + np.arange(4)]).astype(np.int32)
         np.testing.assert_array_equal(slots, expected)
@@ -73,7 +90,8 @@ class TestReconstructSlotsForRequest:
         slots = _reconstruct_slots_for_request(_req(5, [1]),
                                                num_tokens=0,
                                                block_size=16,
-                                               start_pos=0)
+                                               start_pos=0,
+                                               kv_cache_group_id=0)
         assert slots.size == 0
 
     def test_negative_start_pos_raises(self):
@@ -83,7 +101,34 @@ class TestReconstructSlotsForRequest:
             _reconstruct_slots_for_request(_req(3, [1]),
                                            num_tokens=5,
                                            block_size=16,
-                                           start_pos=-2)
+                                           start_pos=-2,
+                                           kv_cache_group_id=0)
+
+    def test_hybrid_model_keys_slots_by_full_attention_group(self):
+        # Qwen3.5-shaped hybrid layout: 4 KV-cache groups, full attention last
+        # (layer 0 is linear attention, so the groups are
+        # [linear, linear, linear, full]). Keying the slots by group 0 wrote
+        # the prompt's routing to the linear-attention blocks, where the
+        # scheduler -- which reads back through the full-attention group --
+        # never looks, so every prompt row came back zero-filled.
+        req_state = _req(5, [1], num_groups=4, attn_gid=3)
+        slots = _reconstruct_slots_for_request(req_state,
+                                               num_tokens=5,
+                                               block_size=16,
+                                               start_pos=0,
+                                               kv_cache_group_id=3)
+        np.testing.assert_array_equal(
+            slots, np.array([16, 17, 18, 19, 20], dtype=np.int32))
+
+    def test_out_of_range_group_raises(self):
+        # Silently falling back to another group would reintroduce the bug in
+        # its hardest-to-spot form, so this must fail loudly.
+        with pytest.raises(AssertionError):
+            _reconstruct_slots_for_request(_req(5, [1]),
+                                           num_tokens=5,
+                                           block_size=16,
+                                           start_pos=0,
+                                           kv_cache_group_id=3)
 
 
 def _new_req_sched(req_id, num_computed_tokens):
@@ -111,6 +156,7 @@ class TestReconstructRoutedExperts:
         req_state = _req(num_computed_tokens=99999, block_ids=[1])
         runner = SimpleNamespace(block_size=block_size,
                                  dp_size=1,
+                                 routed_experts_attn_gid=0,
                                  requests={req_id: req_state})
         scheduler_output = SimpleNamespace(
             num_scheduled_tokens={req_id: n},
@@ -153,6 +199,7 @@ class TestReconstructRoutedExperts:
         req_state = _req(num_computed_tokens=99999, block_ids=[1, 2])
         runner = SimpleNamespace(block_size=block_size,
                                  dp_size=1,
+                                 routed_experts_attn_gid=0,
                                  requests={req_id: req_state})
         scheduler_output = SimpleNamespace(
             num_scheduled_tokens={req_id: n},
@@ -177,3 +224,54 @@ class TestReconstructRoutedExperts:
         # Position 20 -> block_ids[20 // 16 = 1] = block 2 -> 2*16 + 20%16 = 36.
         np.testing.assert_array_equal(result.slot_mapping,
                                       np.array([36], dtype=np.int32))
+
+    def test_hybrid_prefill_slots_use_full_attention_group(self):
+        """Regression: on a hybrid model the prompt's slots must be keyed by
+        the full-attention KV-cache group, not by group 0.
+
+        Qwen3.5 has 3 linear-attention groups ahead of its full-attention
+        group, so the hardcoded group 0 sent every prompt row to the
+        linear-attention blocks. The scheduler reads the completed prefill
+        back through the full-attention blocks, so `routed_experts[:P]` came
+        back all zeros -- or, once block IDs were recycled across groups,
+        holding another request's routing. Decode rows were unaffected: they
+        are sliced straight out of the step's routing_data and never go
+        through the slot buffer.
+        """
+        req_id = "req0"
+        n = 5
+        block_size = 16
+        num_layers, top_k = 2, 4
+        attn_gid = 3
+        req_state = _req(num_computed_tokens=0,
+                         block_ids=[1],
+                         num_groups=4,
+                         attn_gid=attn_gid)
+        runner = SimpleNamespace(block_size=block_size,
+                                 dp_size=1,
+                                 routed_experts_attn_gid=attn_gid,
+                                 requests={req_id: req_state})
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={req_id: n},
+            total_num_scheduled_tokens=n,
+            scheduled_new_reqs=[_new_req_sched(req_id, 0)],
+            scheduled_cached_reqs=_empty_cached(),
+        )
+        expert_indices_cpu = np.arange(num_layers * n * top_k,
+                                       dtype=np.int32).reshape(
+                                           num_layers, n, top_k)
+
+        result = _reconstruct_routed_experts(
+            runner=runner,
+            scheduler_output=scheduler_output,
+            expert_indices_cpu=expert_indices_cpu,
+            req_ids=[req_id],
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=n,
+        )
+
+        # Full-attention block 1 -> slots 16..20. Keying by group 0 would have
+        # produced block 7 -> slots 112..116.
+        np.testing.assert_array_equal(
+            result.slot_mapping, np.array([16, 17, 18, 19, 20],
+                                          dtype=np.int32))
