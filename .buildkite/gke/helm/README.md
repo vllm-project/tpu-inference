@@ -176,6 +176,7 @@ Configured via `storage.type` in values:
 | :--- | :--- | :--- | :--- | :--- |
 | [`values.yaml`](./values.yaml) | Monolithic | Llama-3.1-8B | `2x2x1` (1 VM, 4 chips) | Base default values |
 | [`values-llama8b.yaml`](./values-llama8b.yaml) | Monolithic | Llama-3.1-8B | `2x2x1` (1 VM, 4 chips) | Monolithic baseline |
+| [`values-llama8b-ci.yaml`](./values-llama8b-ci.yaml) | Script Runner (`mode: "script"`) | Llama-3.1-8B | `2x1x1` (1 VM, 2 chips, `tpu7x-2`) | Direct Buildkite CI test runner (executes `benchmark.sh`, sonnet dataset, TP=2, threshold >= 10.77 req/s) |
 | [`values-llama70b.yaml`](./values-llama70b.yaml) | Monolithic | Llama-3.1-70B | `2x2x4` (4 VMs, 16 chips via Ray) | Multi-host monolithic benchmark |
 | [`values-qwen4b.yaml`](./values-qwen4b.yaml) | Monolithic | Qwen3.5-4B | `2x2x1` (1 VM, 4 chips) | Lightweight 4B test |
 | [`values-disagg-symmetric.yaml`](./values-disagg-symmetric.yaml) | Disaggregated | Llama-3.1-8B | Prefill `2x2x1`, Decode `2x2x1` | 1:1 symmetric serving (10 RPS) |

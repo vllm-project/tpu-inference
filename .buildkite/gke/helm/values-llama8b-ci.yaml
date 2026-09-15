@@ -1,0 +1,56 @@
+# ==============================================================================
+# Llama-3.1-8B CI Benchmark Configuration (Buildkite Parity Test)
+# Executes the exact same benchmark.sh script from tpu-inference in GKE TPU.
+# Corresponds to .buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml:
+# - TPU: tpu7x-2 (Topology: 2x1x1, TP=2, 2 TPU chips)
+# - Script: /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+# - Dataset: sonnet (benchmarks/sonnet.txt)
+# - Input/Output: 1800 / 128
+# - Min Throughput: 10.77 req/s
+# ==============================================================================
+
+mode: "script"
+
+image:
+  registry: "us-central1-docker.pkg.dev/cloud-tpu-shared-capacity/tpu-images/dennis-vllm-tpu"
+  tpuInferenceCommit: "eda7055d27bdd8a5a34b45a067983f4c0d4eb11b"  # Existing prebuilt image in GAR
+  vllmCommit: "51da0ca66c8065619c79e35dff97aa99aeaf5644"          # vLLM commit hash (from .buildkite/vllm_lkg.version)
+
+# Optional on-demand builder: checks if image exists in GAR; if absent, builds and pushes.
+builder:
+  enabled: false
+  gitRepo: "https://github.com/vllm-project/tpu-inference.git"
+
+tpu:
+  accelerator: "tpu7x"
+  topology: "2x2x1"
+
+resources:
+  tpu: 4
+  cpu: "32"
+  memory: "100Gi"
+
+script:
+  command: "bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh"
+  workingDir: "/workspace/vllm"
+  backoffLimit: 1
+  env:
+    TEST_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+    TENSOR_PARALLEL_SIZE: "2"
+    MINIMUM_THROUGHPUT_THRESHOLD: "10.77"
+    INPUT_LEN: "1800"
+    OUTPUT_LEN: "128"
+    PREFIX_LEN: "0"
+    MAX_MODEL_LEN: "2048"
+    MAX_NUM_SEQS: "256"
+    MAX_NUM_BATCHED_TOKENS: "1024"
+
+storage:
+  type: "ramdisk"
+
+hfTokenSecret:
+  name: "dennis-hf-token"
+  key: "token"
+
+
+

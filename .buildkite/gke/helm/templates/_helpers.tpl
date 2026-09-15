@@ -51,7 +51,27 @@ Generalized helper: Calculate number of VMs from any topology string (e.g. 2x2x1
 {{- $y := index $parts 1 | int -}}
 {{- $z := index $parts 2 | int -}}
 {{- $chips := mul $x $y $z -}}
+{{- if lt $chips 4 -}}
+1
+{{- else -}}
 {{- div $chips 4 -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Calculate TPU chips per VM from topology string (e.g. 2x1x1 -> 2, 2x2x1 -> 4, 2x2x2 -> 4 per VM)
+*/}}
+{{- define "tpu-vllm-benchmark.chipsPerVmForTopo" -}}
+{{- $parts := splitList "x" . -}}
+{{- $x := index $parts 0 | int -}}
+{{- $y := index $parts 1 | int -}}
+{{- $z := index $parts 2 | int -}}
+{{- $chips := mul $x $y $z -}}
+{{- if lt $chips 4 -}}
+{{- $chips -}}
+{{- else -}}
+4
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -335,4 +355,136 @@ Advanced Inference & Serving Feature Flags Helper
 {{- end -}}
 {{- end -}}
 {{- end -}}
+{{- if and .Values.model .Values.model.maxNumSeqs -}}
+--max-num-seqs={{ .Values.model.maxNumSeqs }} \
 {{- end -}}
+{{- end -}}
+
+{{/*
+================================================================================
+Container Image Determination Helper
+================================================================================
+Tag format is strictly: <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion>
+Never uses any other tag format. If commit hashes are empty (""), they default to "latest".
+*/}}
+{{- define "tpu-vllm-benchmark.computedImage" -}}
+  {{- $registry := "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu" -}}
+  {{- $tpuCommit := "" -}}
+  {{- $vllmCommit := "" -}}
+  {{- if kindIs "map" .Values.image -}}
+    {{- if .Values.image.registry -}}{{- $registry = .Values.image.registry -}}{{- end -}}
+    {{- if .Values.image.tpuInferenceCommit -}}{{- $tpuCommit = .Values.image.tpuInferenceCommit -}}{{- end -}}
+    {{- if .Values.image.vllmCommit -}}{{- $vllmCommit = .Values.image.vllmCommit -}}{{- end -}}
+  {{- end -}}
+  {{- if and .Values.builder -}}
+    {{- if .Values.builder.registry -}}{{- $registry = .Values.builder.registry -}}{{- end -}}
+    {{- if and (not $tpuCommit) .Values.builder.tpuInferenceCommit -}}{{- $tpuCommit = .Values.builder.tpuInferenceCommit -}}{{- end -}}
+    {{- if and (not $vllmCommit) .Values.builder.vllmCommit -}}{{- $vllmCommit = .Values.builder.vllmCommit -}}{{- end -}}
+  {{- end -}}
+  {{- if not $tpuCommit -}}
+    {{- fail "image.tpuInferenceCommit is required and cannot be empty. Please specify a commit hash in your values file or via --set image.tpuInferenceCommit=<hash>" -}}
+  {{- end -}}
+  {{- if not $vllmCommit -}}
+    {{- fail "image.vllmCommit is required and cannot be empty. Please specify a commit hash in your values file or via --set image.vllmCommit=<hash>" -}}
+  {{- end -}}
+  {{- $tpuVer := .Values.tpu.accelerator | default "tpu7x" -}}
+  {{- printf "%s:%s-%s-%s" $registry $tpuCommit $vllmCommit $tpuVer -}}
+{{- end }}
+
+{{/*
+================================================================================
+Image Builder InitContainer Definition
+================================================================================
+Runs Docker-in-Docker to check if the target image exists in Google Artifact Registry (GAR).
+If missing, clones the repo, builds the image with setup_docker_env.sh flags, and pushes it.
+Tag format is strictly: <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion>
+*/}}
+{{- define "tpu-vllm-benchmark.imageBuilderInitContainer" -}}
+{{- $registry := "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu" -}}
+{{- $tpuCommit := "" -}}
+{{- $vllmCommit := "" -}}
+{{- if kindIs "map" .Values.image -}}
+  {{- if .Values.image.registry -}}{{- $registry = .Values.image.registry -}}{{- end -}}
+  {{- if .Values.image.tpuInferenceCommit -}}{{- $tpuCommit = .Values.image.tpuInferenceCommit -}}{{- end -}}
+  {{- if .Values.image.vllmCommit -}}{{- $vllmCommit = .Values.image.vllmCommit -}}{{- end -}}
+{{- end -}}
+{{- if and .Values.builder -}}
+  {{- if .Values.builder.registry -}}{{- $registry = .Values.builder.registry -}}{{- end -}}
+  {{- if and (not $tpuCommit) .Values.builder.tpuInferenceCommit -}}{{- $tpuCommit = .Values.builder.tpuInferenceCommit -}}{{- end -}}
+  {{- if and (not $vllmCommit) .Values.builder.vllmCommit -}}{{- $vllmCommit = .Values.builder.vllmCommit -}}{{- end -}}
+{{- end -}}
+{{- $tpuVer := .Values.tpu.accelerator | default "tpu7x" -}}
+{{- $gitRepo := "https://github.com/vllm-project/tpu-inference.git" -}}
+{{- if and .Values.builder .Values.builder.gitRepo -}}{{- $gitRepo = .Values.builder.gitRepo -}}{{- end -}}
+- name: image-builder
+  image: docker:dind
+  securityContext:
+    privileged: true
+  env:
+  - name: DOCKER_TLS_CERTDIR
+    value: ""
+  command: ["/bin/sh", "-c"]
+  args:
+  - |
+    set -euo pipefail
+    TARGET_IMAGE="{{ include "tpu-vllm-benchmark.computedImage" . }}"
+    REGISTRY_HOST="{{ (splitList "/" $registry) | first }}"
+    echo "============================================================"
+    echo " Image Builder InitContainer"
+    echo " Target Image:       ${TARGET_IMAGE}"
+    echo " Registry Host:      ${REGISTRY_HOST}"
+    echo " TPU Inference Ref:  {{ $tpuCommit }}"
+    echo " vLLM Commit Ref:    {{ $vllmCommit }}"
+    echo "============================================================"
+
+    echo "Starting dockerd in background..."
+    dockerd > /tmp/dockerd.log 2>&1 &
+    DOCKERD_PID=$!
+    trap 'kill $DOCKERD_PID >/dev/null 2>&1 || true' EXIT
+
+    echo "Waiting for Docker daemon to become ready..."
+    for i in $(seq 1 30); do
+      if docker info > /dev/null 2>&1; then
+        echo "Docker daemon ready."
+        break
+      fi
+      sleep 1
+    done
+
+    echo "Authenticating to registry via GCE metadata server..."
+    TOKEN=$(wget -q -O - --header="Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" 2>/dev/null | grep -o '"access_token": *"[^"]*"' | cut -d'"' -f4 || true)
+    if [ -n "$TOKEN" ]; then
+      echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin "https://${REGISTRY_HOST}"
+      echo "Authenticated successfully via metadata server."
+    else
+      echo "WARNING: Failed to obtain metadata token. Proceeding with unauthenticated / existing creds."
+    fi
+
+    echo "Checking if target image exists in registry (fast-path)..."
+    if docker manifest inspect "${TARGET_IMAGE}" > /dev/null 2>&1 || docker pull -q "${TARGET_IMAGE}" > /dev/null 2>&1; then
+      echo ">>> Image ${TARGET_IMAGE} already exists in registry. Skipping build! <<<"
+      exit 0
+    fi
+
+    echo "Target image not found in registry. Proceeding with on-demand build..."
+    apk add --no-cache git bash curl
+
+    BUILD_DIR=$(mktemp -d)
+    echo "Cloning {{ $gitRepo }}..."
+    git clone {{ $gitRepo }} "${BUILD_DIR}/repo"
+    cd "${BUILD_DIR}/repo"
+
+    echo "Checking out commit: {{ $tpuCommit }}..."
+    git checkout {{ $tpuCommit }}
+
+    echo "Building Docker image: ${TARGET_IMAGE}..."
+    docker build \
+      --build-arg IS_TEST=true \
+      --build-arg BM_INFRA=true \
+      --build-arg VLLM_COMMIT_HASH={{ $vllmCommit }} \
+      -f docker/Dockerfile -t "${TARGET_IMAGE}" .
+
+    echo "Pushing ${TARGET_IMAGE} to registry..."
+    docker push "${TARGET_IMAGE}"
+    echo ">>> Successfully built and pushed ${TARGET_IMAGE} <<<"
+{{- end }}

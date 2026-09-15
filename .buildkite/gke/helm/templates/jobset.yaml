@@ -3,6 +3,7 @@
 {{- $servedModelName := include "tpu-vllm-benchmark.servedModelName" . -}}
 {{- $modelPath := include "tpu-vllm-benchmark.modelPath" . -}}
 {{- $isDisagg := eq .Values.mode "disaggregated" -}}
+{{- $isScript := eq .Values.mode "script" -}}
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -18,11 +19,163 @@ spec:
   successPolicy:
     operator: All
     targetReplicatedJobs:
+    {{- if $isScript }}
+    - runner
+    {{- else }}
     - client
+    {{- end }}
 
   replicatedJobs:
 
-  {{ if $isDisagg }}
+  {{ if $isScript }}
+  {{- $topo := .Values.tpu.topology | default "1x2x1" -}}
+  {{- $chips := include "tpu-vllm-benchmark.chipsPerVmForTopo" $topo | int -}}
+  {{- $tpuLimit := .Values.resources.tpu | default $chips -}}
+
+  # ============================================================================
+  # SCRIPT TEST RUNNER (Single-Host TPU Runner for benchmark.sh / custom tests)
+  # ============================================================================
+  - name: runner
+    replicas: 1
+    template:
+      spec:
+        parallelism: 1
+        completions: 1
+        backoffLimit: {{ .Values.script.backoffLimit | default 1 }}
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+            annotations:
+              kueue.x-k8s.io/podset-unconstrained-topology: "true"
+              {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
+              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
+              {{- end }}
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            {{- if .Values.imagePullSecrets }}
+            imagePullSecrets:
+              {{- toYaml .Values.imagePullSecrets | nindent 14 }}
+            {{- end }}
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator | default "tpu7x" }}
+              cloud.google.com/gke-tpu-topology: {{ $topo }}
+              # cloud.google.com/reservation-affinity: specific
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+            initContainers:
+            {{- if and .Values.builder .Values.builder.enabled }}
+            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
+            {{- end }}
+            - name: tpu-node-setup
+              image: busybox
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                sysctl -w vm.max_map_count=33554432 || true
+                if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                  echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit || true
+                fi
+                if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+                  echo always > /sys/kernel/mm/transparent_hugepage/enabled || true
+                fi
+              securityContext:
+                privileged: true
+            {{- if and .Values.script (and .Values.script.git .Values.script.git.enabled) }}
+            - name: git-sync
+              image: alpine/git:latest
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                set -e
+                echo "Cloning {{ .Values.script.git.repo }} (branch: {{ .Values.script.git.branch | default "main" }})..."
+                mkdir -p {{ .Values.script.git.dest | default "/workspace/tpu_inference" }}
+                git clone --depth 1 -b {{ .Values.script.git.branch | default "main" }} {{ .Values.script.git.repo }} {{ .Values.script.git.dest | default "/workspace/tpu_inference" }}
+              volumeMounts:
+              - name: workspace-volume
+                mountPath: /workspace
+            {{- end }}
+
+            containers:
+            - name: test-runner
+              image: {{ include "tpu-vllm-benchmark.computedImage" . }}
+              securityContext:
+                privileged: true
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                set -e
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export TPU_VERSION="{{ .Values.tpu.accelerator | default "tpu7x" }}"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+                export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+
+                {{- if and .Values.script .Values.script.workingDir }}
+                cd {{ .Values.script.workingDir }} 2>/dev/null || cd /workspace 2>/dev/null || true
+                {{- end }}
+
+                echo "============================================================"
+                echo " Starting Custom Test Execution"
+                echo " Script Command: {{ .Values.script.command }}"
+                echo " Working Dir:    $(pwd)"
+                echo " Timestamp:      $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "============================================================"
+
+                exec {{ .Values.script.command }}
+
+              env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              {{- if and .Values.script .Values.script.env }}
+              {{- range $k, $v := .Values.script.env }}
+              - name: {{ $k | quote }}
+                value: {{ $v | quote }}
+              {{- end }}
+              {{- end }}
+
+              resources:
+                limits:
+                  google.com/tpu: {{ $tpuLimit }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "100Gi" | quote }}
+                requests:
+                  google.com/tpu: {{ $tpuLimit }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "100Gi" | quote }}
+
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              {{- if and .Values.script (and .Values.script.git .Values.script.git.enabled) }}
+              - name: workspace-volume
+                mountPath: /workspace
+              {{- end }}
+              {{- include "tpu-vllm-benchmark.storageVolumeMounts" . | nindent 14 }}
+
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            {{- if and .Values.script (and .Values.script.git .Values.script.git.enabled) }}
+            - name: workspace-volume
+              emptyDir: {}
+            {{- end }}
+            {{- include "tpu-vllm-benchmark.storageVolumes" . | nindent 12 }}
+            restartPolicy: Never
+
+  {{- else if $isDisagg }}
   {{- $prefillNumVms := include "tpu-vllm-benchmark.prefillNumVms" . | int -}}
   {{- $prefillTpSize := include "tpu-vllm-benchmark.prefillTpSize" . -}}
   {{- $prefillChipsBounds := include "tpu-vllm-benchmark.prefillChipsBounds" . -}}
@@ -75,6 +228,9 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
+            {{- if and .Values.builder .Values.builder.enabled }}
+            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
+            {{- end }}
             - name: tpu-node-setup
               image: busybox
               command: ["/bin/sh", "-c"]
@@ -92,7 +248,7 @@ spec:
 
             containers:
             - name: vllm-tpu
-              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              image: {{ include "tpu-vllm-benchmark.computedImage" . }}
               command: ["/bin/bash", "-c"]
               args:
               - |
@@ -308,6 +464,9 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
+            {{- if and .Values.builder .Values.builder.enabled }}
+            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
+            {{- end }}
             - name: tpu-node-setup
               image: busybox
               command: ["/bin/sh", "-c"]
@@ -325,7 +484,7 @@ spec:
 
             containers:
             - name: vllm-tpu
-              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              image: {{ include "tpu-vllm-benchmark.computedImage" . }}
               command: ["/bin/bash", "-c"]
               args:
               - |
@@ -510,7 +669,7 @@ spec:
               effect: "NoSchedule"
             containers:
             - name: proxy-server
-              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              image: {{ include "tpu-vllm-benchmark.computedImage" . }}
               command: ["/bin/bash", "-c"]
               args:
               - |
@@ -611,8 +770,11 @@ spec:
               {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
               {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
               {{- end }}
-          spec:
             serviceAccountName: {{ .Values.serviceAccount }}
+            {{- if .Values.imagePullSecrets }}
+            imagePullSecrets:
+              {{- toYaml .Values.imagePullSecrets | nindent 14 }}
+            {{- end }}
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator }}
               cloud.google.com/gke-tpu-topology: {{ .Values.tpu.topology }}
@@ -626,6 +788,9 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
+            {{- if and .Values.builder .Values.builder.enabled }}
+            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
+            {{- end }}
             - name: tpu-node-setup
               image: busybox
               command: ["/bin/sh", "-c"]
@@ -643,7 +808,7 @@ spec:
 
             containers:
             - name: vllm-tpu
-              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              image: {{ include "tpu-vllm-benchmark.computedImage" . }}
               command: ["/bin/bash", "-c"]
               args:
               - |
@@ -814,6 +979,7 @@ spec:
             restartPolicy: Never
   {{- end }}
 
+  {{- if not $isScript }}
   # ============================================================================
   # BENCHMARK CLIENT (Runs against server:8000 or proxy:8000)
   # ============================================================================
@@ -828,15 +994,18 @@ spec:
           metadata:
             labels:
               declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
-          spec:
             serviceAccountName: {{ .Values.serviceAccount }}
+            {{- if .Values.imagePullSecrets }}
+            imagePullSecrets:
+              {{- toYaml .Values.imagePullSecrets | nindent 14 }}
+            {{- end }}
             tolerations:
             - key: "cloud.google.com/gke-nodepool"
               operator: "Exists"
               effect: "NoSchedule"
             containers:
             - name: benchmark-client
-              image: {{ .Values.benchmark.image | default .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              image: {{ .Values.benchmark.image | default (include "tpu-vllm-benchmark.computedImage" .) }}
               command: ["/bin/bash", "-c"]
               args:
               - |
@@ -925,7 +1094,7 @@ spec:
                     --random-prefix-len={{ .Values.benchmark.randomPrefixLen }} \
                     {{- end }}
                     --num-prompts=${NUM_PROMPTS} \
-                    --request-rate={{ .Values.benchmark.requestRate | default 10.0 }} || echo "⚠️ Warning: Stage ${STAGE} exited with non-zero status."
+                    --request-rate={{ if hasKey .Values.benchmark "requestRate" }}{{ .Values.benchmark.requestRate }}{{ else }}10.0{{ end }} || echo "⚠️ Warning: Stage ${STAGE} exited with non-zero status."
 
                   echo " Finished Stage ${STAGE} at: $(date '+%Y-%m-%d %H:%M:%S')"
                   STAGE=$((STAGE + 1))
@@ -958,3 +1127,4 @@ spec:
                   cpu: {{ .Values.benchmark.resources.cpu | default "4" | quote }}
                   memory: {{ .Values.benchmark.resources.memory | default "8Gi" | quote }}
             restartPolicy: Never
+  {{- end }}

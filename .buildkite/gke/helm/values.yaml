@@ -5,16 +5,31 @@
 # Serving Mode:
 # - "aggregated"    : Default monolithic serving (1 TPU slice runs both prefill & decode)
 # - "disaggregated" : Disaggregated serving (Separate Prefill & Decode TPU slices with Proxy Router)
+# - "script"        : Custom test runner (Single TPU Pod directly executes a specified test script e.g. benchmark.sh)
 mode: "aggregated"
 
 # Container Image Configuration
-image: "docker.io/vllm/vllm-tpu:v0.27.0"  # Default vLLM TPU container image (tpu-inference)
+# Tag format is strictly: <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion>
+# Matches setup_docker_env.sh and pipeline_build.yml in tpu-inference.
+image:
+  registry: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu"
+  tpuInferenceCommit: "4b8006086b4493dd6fd4b10ab69b8ed44d7ef538"  # Git commit hash of tpu-inference to test
+  vllmCommit: "51da0ca66c8065619c79e35dff97aa99aeaf5644"          # vLLM commit hash (from .buildkite/vllm_lkg.version)
+imagePullSecrets: []                      # Optional: Kubernetes imagePullSecrets for private registries (e.g. [{"name": "my-regcred"}])
+
+# On-Demand Image Builder (Docker-in-Docker in initContainer)
+# If enabled, checks if <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion> exists in GAR.
+# If already present (e.g. prebuilt by CI with USE_PREBUILT_IMAGE=1), skips build in 2s. If missing, builds and pushes.
+builder:
+  enabled: false
+  gitRepo: "https://github.com/vllm-project/tpu-inference.git"
 
 # Model Configuration
 model:
   name: "meta-llama/Llama-3.1-8B-Instruct"  # HuggingFace repo ID or GCS path (gs://bucket/dir)
   servedName: ""                            # Optional: Custom served model name (inferred from model.name if omitted)
   maxModelLen: 4096                         # Maximum context length supported by the server
+  maxNumSeqs: null                          # Optional: Maximum sequences per iteration (--max-num-seqs)
   safetensorsLoadStrategy: "prefetch"       # Strategy for loading safetensors weights
   extraArgs: []                             # Extra CLI flags to pass to vllm serve
 
@@ -147,3 +162,17 @@ benchmark:
   resources:
     cpu: "4"
     memory: "8Gi"
+
+# Custom Script Runner Configuration (Active when mode == "script")
+# Directly executes an arbitrary test script (e.g. tpu-inference benchmark.sh, test_accuracy.sh, or pytest)
+# on a single TPU-allocated pod with automatic GKE TPU node setup and secret injection.
+script:
+  command: "bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh"
+  workingDir: "/workspace/vllm"             # Working directory for script execution
+  backoffLimit: 1                           # Number of retries on failure (0 = fail-fast, 1 = retry once)
+  git:
+    enabled: false                         # Optional: Clone a fresh repo branch at Pod startup
+    repo: "https://github.com/vllm-project/tpu-inference.git"
+    branch: "main"
+    dest: "/workspace/tpu_inference"
+  env: {}                                  # Environment variables passed as key-value pairs (e.g. TEST_MODEL: "...", INPUT_LEN: 1800)
