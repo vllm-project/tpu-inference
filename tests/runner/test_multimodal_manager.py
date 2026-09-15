@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -647,3 +649,218 @@ class TestMultiModalManager:
         np.testing.assert_array_equal(
             self.runner.mrope_positions_cpu[:, 16:24], mrope_b)
         assert np.all(self.runner.mrope_positions_cpu[:, 24:32] == -7)
+
+    # ---- Vision-encoder temporal chunking (MM_ENCODER_FRAME_CHUNK) ----
+
+    def _set_temporal_patch_size(self, tps: int = 2):
+        """Give the runner a minimal hf_config with the vision temporal patch
+        size the chunking helper reads to convert frames -> temporal patches."""
+        self.runner.model_config.hf_config = SimpleNamespace(
+            vision_config=SimpleNamespace(temporal_patch_size=tps))
+
+    def _make_video_group(self, t, h, w, feat=5):
+        """Build an mm_kwargs_group dict shaped like the one execute_mm_encoder
+        passes for a single video item: flat pixels [t*h*w, feat], grid [1,3],
+        per-temporal-patch timestamps [t]."""
+        import torch
+        rows = t * h * w
+        pixels = torch.arange(rows * feat,
+                              dtype=torch.float32).reshape(rows, feat)
+        grid = torch.tensor([[t, h, w]], dtype=torch.int64)
+        timestamps = torch.arange(t, dtype=torch.float32)
+        return {
+            "pixel_values_videos": pixels,
+            "video_grid_thw": grid,
+            "timestamps": timestamps,
+        }, pixels, timestamps
+
+    def test_video_encoder_chunking_splits_and_concats(self):
+        """With chunking on, a large video is encoded in temporal chunks and the
+        per-chunk outputs are concatenated on the token axis in order."""
+        import torch
+        self._set_temporal_patch_size(tps=2)
+        self.runner.state_leaves = MagicMock()
+
+        t, h, w = 8, 2, 2  # rows_per_temporal_patch = h*w = 4
+        group, pixels, timestamps = self._make_video_group(t, h, w)
+
+        H_out = 6  # visual_dim + deepstack levels, packed on hidden axis
+        calls = []
+
+        def fake_embed(state_leaves, modality, **kwargs):
+            assert state_leaves is self.runner.state_leaves
+            assert modality == "video"
+            calls.append(kwargs)
+            idx = len(calls) - 1
+            ct = int(kwargs["video_grid_thw"].tolist()[0][0])
+            # one item -> length-1 tuple; mark rows with the chunk index.
+            return (jnp.full((ct, H_out), float(idx), dtype=jnp.float32), )
+
+        self.runner.embed_multimodal_fn = fake_embed
+
+        # frame_chunk=4, tps=2 -> chunk_t=2 temporal patches -> 4 chunks.
+        with patch.dict(os.environ, {"MM_ENCODER_FRAME_CHUNK": "4"}):
+            out = self.runner.mm_manager._embed_multimodal_maybe_chunked(
+                "video", 1, group)
+
+        # 4 chunks of 2 temporal patches each.
+        assert len(calls) == 4
+        rows_per_t = h * w
+        for i, kw in enumerate(calls):
+            g = kw["video_grid_thw"].tolist()[0]
+            assert g == [2, h, w]  # temporal count reduced to the chunk size
+            # pixels sliced to this chunk's rows, matching the original slab.
+            expected_pixels = pixels[i * 2 * rows_per_t:(i + 1) * 2 *
+                                     rows_per_t]
+            assert torch.equal(kw["pixel_values_videos"], expected_pixels)
+            # timestamps sliced to the chunk's temporal extent.
+            assert torch.equal(kw["timestamps"], timestamps[i * 2:(i + 1) * 2])
+
+        # Output: single item, concatenation of the 4 chunk outputs (8 tokens).
+        assert isinstance(out, list) and len(out) == 1
+        result = np.asarray(out[0])
+        assert result.shape == (t, H_out)
+        expected = np.concatenate(
+            [np.full((2, H_out), float(i)) for i in range(4)], axis=0)
+        np.testing.assert_array_equal(result, expected)
+
+    def test_video_encoder_no_chunk_when_disabled(self):
+        """MM_ENCODER_FRAME_CHUNK=0 -> single un-chunked call, passthrough."""
+        self._set_temporal_patch_size(tps=2)
+        self.runner.state_leaves = MagicMock()
+        group, _, _ = self._make_video_group(8, 2, 2)
+
+        sentinel = (jnp.ones((32, 6), dtype=jnp.float32), )
+        mock = MagicMock(return_value=sentinel)
+        self.runner.embed_multimodal_fn = mock
+
+        with patch.dict(os.environ, {"MM_ENCODER_FRAME_CHUNK": "0"}):
+            out = self.runner.mm_manager._embed_multimodal_maybe_chunked(
+                "video", 1, group)
+
+        mock.assert_called_once()
+        assert out is sentinel  # returned as-is, not re-wrapped
+
+    def test_video_encoder_no_chunk_when_fits_one_chunk(self):
+        """A video smaller than one chunk is encoded in a single call."""
+        self._set_temporal_patch_size(tps=2)
+        self.runner.state_leaves = MagicMock()
+        group, _, _ = self._make_video_group(4, 2, 2)  # t=4 temporal patches
+
+        mock = MagicMock(return_value=(jnp.ones((16, 6), dtype=jnp.float32), ))
+        self.runner.embed_multimodal_fn = mock
+
+        # chunk_t = 100//2 = 50 >= t=4 -> no split.
+        with patch.dict(os.environ, {"MM_ENCODER_FRAME_CHUNK": "100"}):
+            self.runner.mm_manager._embed_multimodal_maybe_chunked(
+                "video", 1, group)
+
+        mock.assert_called_once()
+
+    def test_video_encoder_no_chunk_when_pruning_enabled(self):
+        """EVS video-token pruning selects tokens across the whole video, so
+        chunking is skipped to stay lossless."""
+        self._set_temporal_patch_size(tps=2)
+        self.runner.model_config.multimodal_config = SimpleNamespace(
+            video_pruning_rate=0.5)
+        self.runner.state_leaves = MagicMock()
+        group, _, _ = self._make_video_group(8, 2, 2)
+
+        mock = MagicMock(return_value=(jnp.ones((16, 6), dtype=jnp.float32), ))
+        self.runner.embed_multimodal_fn = mock
+
+        with patch.dict(os.environ, {"MM_ENCODER_FRAME_CHUNK": "4"}):
+            self.runner.mm_manager._embed_multimodal_maybe_chunked(
+                "video", 1, group)
+
+        mock.assert_called_once()
+
+    def test_video_encoder_no_chunk_for_image_modality(self):
+        """Chunking only applies to video; images are never split."""
+        import torch
+        self._set_temporal_patch_size(tps=2)
+        self.runner.state_leaves = MagicMock()
+        group = {
+            "pixel_values":
+            torch.arange(32 * 5, dtype=torch.float32).reshape(32, 5),
+            "image_grid_thw":
+            torch.tensor([[8, 2, 2]], dtype=torch.int64),
+        }
+
+        mock = MagicMock(return_value=(jnp.ones((32, 6), dtype=jnp.float32), ))
+        self.runner.embed_multimodal_fn = mock
+
+        with patch.dict(os.environ, {"MM_ENCODER_FRAME_CHUNK": "4"}):
+            self.runner.mm_manager._embed_multimodal_maybe_chunked(
+                "image", 1, group)
+
+        mock.assert_called_once()
+
+    def test_video_encoder_no_chunk_multiple_items(self):
+        """A batched multi-item group is not chunked (only single video item)."""
+        self._set_temporal_patch_size(tps=2)
+        self.runner.state_leaves = MagicMock()
+        group, _, _ = self._make_video_group(8, 2, 2)
+
+        mock = MagicMock(return_value=(jnp.ones((16, 6), dtype=jnp.float32),
+                                       jnp.ones((16, 6), dtype=jnp.float32)))
+        self.runner.embed_multimodal_fn = mock
+
+        with patch.dict(os.environ, {"MM_ENCODER_FRAME_CHUNK": "4"}):
+            self.runner.mm_manager._embed_multimodal_maybe_chunked(
+                "video", 2, group)
+
+        mock.assert_called_once()
+
+    def test_video_encoder_chunking_ragged_last_chunk(self):
+        """When t is not a multiple of chunk_t, the last chunk is smaller and
+        the concatenated length still matches the full video."""
+        import torch
+        self._set_temporal_patch_size(tps=2)
+        self.runner.state_leaves = MagicMock()
+
+        t, h, w = 7, 1, 3  # 7 temporal patches, chunk_t=2 -> [2,2,2,1]
+        group, pixels, timestamps = self._make_video_group(t, h, w)
+        H_out = 4
+        calls = []
+
+        def fake_embed(state_leaves, modality, **kwargs):
+            calls.append(kwargs)
+            ct = int(kwargs["video_grid_thw"].tolist()[0][0])
+            return (jnp.full((ct, H_out), float(len(calls)),
+                             dtype=jnp.float32), )
+
+        self.runner.embed_multimodal_fn = fake_embed
+
+        with patch.dict(os.environ, {"MM_ENCODER_FRAME_CHUNK": "4"}):
+            out = self.runner.mm_manager._embed_multimodal_maybe_chunked(
+                "video", 1, group)
+
+        cts = [int(kw["video_grid_thw"].tolist()[0][0]) for kw in calls]
+        assert cts == [2, 2, 2, 1]
+        # last chunk pixels/timestamps cover the ragged tail.
+        rows_per_t = h * w
+        assert torch.equal(calls[-1]["pixel_values_videos"],
+                           pixels[6 * rows_per_t:7 * rows_per_t])
+        assert torch.equal(calls[-1]["timestamps"], timestamps[6:7])
+        assert np.asarray(out[0]).shape == (t, H_out)
+
+    def test_slice_timestamps_variants(self):
+        """_slice_timestamps handles 1D/2D tensors, lists, nested lists and
+        passes through non-sliceable values."""
+        import torch
+        slc = self.runner.mm_manager._slice_timestamps
+
+        # 1D tensor
+        r = slc(torch.arange(10), 2, 5)
+        assert torch.equal(r, torch.tensor([2, 3, 4]))
+        # 2D [1, T] tensor -> slice last axis
+        r = slc(torch.arange(10).reshape(1, 10), 2, 5)
+        assert r.shape == (1, 3)
+        assert torch.equal(r, torch.tensor([[2, 3, 4]]))
+        # flat list
+        assert slc(list(range(10)), 2, 5) == [2, 3, 4]
+        # nested single-item list
+        assert slc([list(range(10))], 2, 5) == [[2, 3, 4]]
+        # non-sliceable -> passthrough
+        assert slc(None, 2, 5) is None
