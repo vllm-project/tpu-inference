@@ -193,8 +193,9 @@ if [ -f "${ART}/bench_c${MAX_CONCURRENCY}.json" ]; then
 fi
 
 # One table across the sweep. Throughput alone is not a result -- the point of
-# the low-concurrency leg is that median TPOT next to it says whether a
-# throughput gain came from batching or from something getting faster.
+# the low-concurrency leg is that median ITL and median TPOT next to it say
+# whether a throughput gain came from batching or from something getting
+# faster, and which of decode and prefill interference moved.
 if [ "${#LEG_FILES[@]}" -gt 1 ]; then
   echo "--- benchmark sweep summary"
   python3 - "${LEG_FILES[@]}" <<'PY'
@@ -207,8 +208,27 @@ import json, sys
 # admission queue and prefill, so they say which half moved. Note the windows
 # differ -- out_tok/s and tot_tok/s are the timed run, while pf_tok/s, q_ms and
 # pf_ms come from counters spanning the whole invocation, warmups included.
+#
+# med_itl sits next to med_tpot because the pair is the useful reading, not
+# either alone. Both are built from the same gaps: vLLM's bench records one ITL
+# per token gap (endpoint_request_func.py:243) and defines
+# tpot = (latency - ttft) / (output_len - 1) (serve.py:614-618), so a request's
+# TPOT is the mean of its own ITLs. The difference is where the percentile is
+# taken: ITL percentiles come from every gap pooled across requests, TPOT
+# percentiles from per-request means. With a fixed output length the
+# *means* are arithmetically identical; the medians are not, and the gap
+# between them is the prefill-interference tail.
+#
+# That makes med_itl the cleanest decode-step number available: on #26 the
+# per-step token histogram showed 80.8% of engine steps carrying one token per
+# running request and no prefill at all, which is the population the median
+# gap is drawn from. med_itl held at 91.87 -> 91.14 ms between #19 at conc 160
+# and #26 at conc 256 while med_tpot rose 208 -> 236, i.e. decode step cost was
+# flat and the whole TPOT increase was stall. Read a med_tpot regression
+# against med_itl before attributing it to decode.
 hdr = ("conc", "peak_bs", "n", "dur_s", "out_tok/s", "tot_tok/s", "pf_tok/s",
-       "med_ttft", "p99_ttft", "q_ms", "pf_ms", "med_tpot", "p99_tpot", "med_e2el")
+       "med_ttft", "p99_ttft", "q_ms", "pf_ms", "med_itl", "p99_itl",
+       "med_tpot", "p99_tpot", "med_e2el")
 print("  ".join(f"{h:>10}" for h in hdr))
 for path in sys.argv[1:]:
     d = json.load(open(path))
@@ -226,6 +246,7 @@ for path in sys.argv[1:]:
            mv("prompt_tokens_per_s"),
            f"{d.get('median_ttft_ms', 0):.0f}", f"{d.get('p99_ttft_ms', 0):.0f}",
            mv("queue_time_ms", 0), mv("prefill_time_ms", 0),
+           f"{d.get('median_itl_ms', 0):.2f}", f"{d.get('p99_itl_ms', 0):.2f}",
            f"{d.get('median_tpot_ms', 0):.2f}", f"{d.get('p99_tpot_ms', 0):.2f}",
            f"{d.get('median_e2el_ms', 0):.0f}")
     print("  ".join(f"{str(c):>10}" for c in row))
