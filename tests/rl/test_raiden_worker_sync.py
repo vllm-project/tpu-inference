@@ -157,5 +157,58 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
         self.assertTrue(sync.bound)
 
 
+class TestRaidenWorkerSyncH2D(unittest.TestCase):
+
+    def test_h2d_calls_wait_for_transfer_completion_when_available(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        mock_ws = unittest.mock.MagicMock()
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     sync,
+                                     "_wait_until_settled") as mock_settle:
+            sync.h2d(uuid=42)
+            mock_ws.wait_for_transfer_completion.assert_called_once_with(42)
+            mock_ws.h2d.assert_not_called()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_not_called()
+
+    def test_h2d_fallback_when_wait_for_transfer_completion_missing(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        mock_ws = unittest.mock.MagicMock(
+            spec=["h2d"])  # lacks wait_for_transfer_completion
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     sync,
+                                     "_wait_until_settled") as mock_settle:
+            sync.h2d()
+            mock_ws.h2d.assert_called_once()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_called_once()
+
+    def test_h2d_fallback_does_not_settle_when_env_disabled(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        mock_ws = unittest.mock.MagicMock(
+            spec=["h2d"])  # lacks wait_for_transfer_completion
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     rws.envs, "RAIDEN_H2D_SETTLE",
+                                     False), unittest.mock.patch.object(
+                                         sync,
+                                         "_wait_until_settled") as mock_settle:
+            sync.h2d()
+            mock_ws.h2d.assert_called_once()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
