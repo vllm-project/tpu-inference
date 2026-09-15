@@ -164,10 +164,11 @@ def _scheduler_worker_process(
         from tpu_inference.core.hybrid_coordinator import (
             install_hybrid_coordinator_hooks, set_mamba_num_blocks)
         install_hybrid_coordinator_hooks(vllm_config)
-        mamba_num_blocks = getattr(kv_cache_config, "mamba_num_blocks", None)
-        if mamba_num_blocks is not None:
-            set_mamba_num_blocks(mamba_num_blocks)
-            cache_config.mamba_num_blocks = mamba_num_blocks
+        # Always set: `DPScheduler._create_per_rank_configs` partitions the
+        # total pool (registered by the runner or derived from VllmConfig).
+        mamba_num_blocks = kv_cache_config.mamba_num_blocks
+        set_mamba_num_blocks(mamba_num_blocks)
+        cache_config.mamba_num_blocks = mamba_num_blocks
 
     # Initialize the scheduler in this process
     import inspect
@@ -597,14 +598,32 @@ class DPScheduler(SchedulerInterface):
     def _create_per_rank_configs(self, kv_cache_config: KVCacheConfig) -> None:
         # mamba_num_blocks is computed during device HBM profiling and written to
         # vllm_config.cache_config. Symmetrically partition across DP ranks.
-        mamba_num_blocks = getattr(self.vllm_config.cache_config,
-                                   "mamba_num_blocks", None)
+        cache_config = self.vllm_config.cache_config
+        mamba_num_blocks = getattr(cache_config, "mamba_num_blocks", None)
+        if (mamba_num_blocks is None and getattr(
+                cache_config, "mamba_cache_mode", "none") == "align"):
+            # The engine-core hook normally fetches the runner's value over
+            # RPC; recompute it rather than leave the per-rank pools unsized.
+            from tpu_inference.core.hybrid_coordinator import \
+                derive_mamba_num_blocks
+            mamba_num_blocks = derive_mamba_num_blocks(self.vllm_config)
+            logger.warning(
+                "[DPScheduler] mamba_num_blocks did not reach this process "
+                "from the model runner; derived %d from VllmConfig, which "
+                "may not match the allocated arrays.", mamba_num_blocks)
+        per_rank_mamba_num_blocks = None
+        if mamba_num_blocks is not None:
+            per_rank_mamba_num_blocks = mamba_num_blocks // self.dp_size
+            assert per_rank_mamba_num_blocks > 0, (
+                f"mamba_num_blocks={mamba_num_blocks} is smaller than "
+                f"dp_size={self.dp_size}")
+
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)
             rank_kv_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
-            if mamba_num_blocks is not None:
-                rank_kv_config.mamba_num_blocks = mamba_num_blocks // self.dp_size
+            if per_rank_mamba_num_blocks is not None:
+                rank_kv_config.mamba_num_blocks = per_rank_mamba_num_blocks
             self.per_rank_kv_cache_configs.append(rank_kv_config)
 
     def _send_command(self,

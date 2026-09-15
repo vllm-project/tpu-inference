@@ -21,13 +21,15 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 from vllm.v1.executor.ray_utils import _wait_until_pg_ready
 
+from tpu_inference.core.hybrid_coordinator import (
+    MambaPoolSyncExecutorMixin, maybe_install_hybrid_coordinator_hooks)
 from tpu_inference.distributed.utils import set_node_kv_ip_port
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class RayDistributedExecutorV2(RayExecutorV2):
+class RayDistributedExecutorV2(MambaPoolSyncExecutorMixin, RayExecutorV2):
     """Ray-based distributed executor V2 for TPU.
 
     Inherits from vLLM V1's RayExecutorV2, leveraging the high-performance
@@ -36,6 +38,7 @@ class RayDistributedExecutorV2(RayExecutorV2):
     """
 
     def _init_executor(self) -> None:
+        maybe_install_hybrid_coordinator_hooks(self.vllm_config)
         # Step 1: Pre-initialize the Ray cluster with custom TPU placement group.
         # This ensures the parent class's RayExecutorV2._init_executor()
         # reuses our TPU-optimized placement group.
