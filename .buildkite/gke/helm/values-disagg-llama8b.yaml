@@ -1,0 +1,47 @@
+# ==============================================================================
+# Disaggregated Llama-3.1-8B-Instruct on TPU v7x: Asymmetric Prefill & Decode
+# Prefill: 2x2x1 (1 VM, 8 chips / 16 cores, TP=8)
+# Decode : 2x2x2 (2 VMs, 16 chips / 32 cores, TP=16)
+# ==============================================================================
+
+mode: "disaggregated"
+
+model:
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  maxModelLen: 4096
+  safetensorsLoadStrategy: "prefetch"
+
+disaggregated:
+  kvConnector: "TPUConnector"
+
+  prefill:
+    topology: "2x2x1"
+    port: 8400
+    resources:
+      cpu: "32"
+      memory: "72Gi"
+      tpu: 4
+
+  decode:
+    topology: "2x2x2"
+    port: 9400
+    placementPolicy: "gke-bodaborg-tpu7x-n-crp-2x2x2-grp"
+    resources:
+      cpu: "32"
+      memory: "72Gi"
+      tpu: 4
+
+  proxy:
+    port: 8000
+    resources:
+      cpu: "8"
+      memory: "16Gi"
+
+storage:
+  type: "gcs-cache"
+  bucketName: "<your-hf-cache-bucket>"
+  cacheSubpath: "hf-cache"
+  ramCacheLimit: "32Gi"
+
+benchmark:
+  requestRate: 35.0

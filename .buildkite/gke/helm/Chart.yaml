@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tpu-vllm-benchmark
+description: Helm chart for vLLM on Google Cloud TPU (v7x) benchmark JobSets
+type: application
+version: 0.1.0
+appVersion: "v0.27.0"
