@@ -282,6 +282,14 @@ steps:
   # No chips, so no launcher: this downloads what the two steps above uploaded
   # and reports on it. It still runs on the kube queue, which is where this
   # pipeline's CPU work goes.
+  #
+  # The dependencies are plain, so a failing shard skips this rather than
+  # running it. That is deliberate: the shards run pytest -x, so a failure
+  # means the run stopped early and its coverage describes a fraction of the
+  # suite. Combining that with a complete shard produces a percentage that
+  # looks real and is not, and --fail-under would then be measuring how far
+  # the tests got rather than what they cover. A red build with no coverage
+  # number is the honest outcome; the tests are what needs fixing first.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
     key: "${TPU_VERSION:-tpu6e}_test_7_3"
     depends_on:
