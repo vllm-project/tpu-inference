@@ -172,7 +172,7 @@ else
   exit 0
 fi
 
-if [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
+if false; then # [[ "${#pipeline_v7x_fragments[@]}" -gt 0 ]]; then
   echo "--- Uploading TPU v7x Pipeline Group"
   # Export v7x specific variables
   export TPU_QUEUE_SINGLE="tpu_v7x_2_queue"

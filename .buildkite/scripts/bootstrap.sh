@@ -176,15 +176,14 @@ set_jax_envs() {
 
 upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
-      # Upload JAX pipeline for v6 (default)
-      set_jax_envs v6
-      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-      set_jax_envs unset
+      # Temporarily skipped JAX v6 and v7 for testing support matrix
+      # set_jax_envs v6
+      # upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+      # set_jax_envs unset
 
-      # Upload JAX pipeline for v7
-      set_jax_envs v7
-      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-      set_jax_envs unset
+      # set_jax_envs v7
+      # upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+      # set_jax_envs unset
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
@@ -278,14 +277,14 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
   
     # Upload JAX pipeline for v7
-    set_jax_envs v7
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
+    # set_jax_envs v7
+    # upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+    # set_jax_envs unset
 
     # Upload JAX pipeline for v6 (default)
-    set_jax_envs v6
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
+    # set_jax_envs v6
+    # upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+    # set_jax_envs unset
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
