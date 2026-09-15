@@ -39,6 +39,13 @@ print_logs_on_exit() {
       echo "File not found."
     fi
 
+    echo "--- Contents of $LOG_DIR/proxy_0.txt ---"
+    if [ -f "$LOG_DIR/proxy_0.txt" ]; then
+      cat "$LOG_DIR/proxy_0.txt"
+    else
+      echo "File not found."
+    fi
+
     echo "--- Contents of $LOG_DIR/benchmark_0.txt ---"
     if [ -f "$LOG_DIR/benchmark_0.txt" ]; then
       cat "$LOG_DIR/benchmark_0.txt"
@@ -234,13 +241,21 @@ echo "starting proxy server"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Start proxy server
 python $SCRIPT_DIR/toy_proxy_server.py \
---host localhost \
+--host 127.0.0.1 \
 --port 8000 \
 --prefiller-hosts ${PREFILL_HOSTS[@]} \
 --prefiller-ports ${PREFILL_PORTS[@]} \
 --decoder-hosts ${DECODE_HOSTS[@]} \
 --decoder-ports ${DECODE_PORTS[@]} \
 > $LOG_DIR/proxy_0.txt 2>&1 &
+PROXY_PID=$!
+
+# Wait for the proxy the same way we wait for prefill and decode. Without
+# this the benchmark below opens port 8000 while uvicorn is still importing,
+# and every request fails with ECONNREFUSED - 200 of 200, reported as failed
+# requests rather than as a proxy that was not up yet.
+echo "Waiting for proxy on port 8000 to start..."
+wait_for_server 8000 $PROXY_PID
 
 # run benchmark for both disagg and non-disagg
 LOG_FILE="$LOG_DIR/benchmark_0.txt"
