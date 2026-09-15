@@ -84,12 +84,16 @@ def format_feature_status(raw_status: str) -> str:
     return mapping.get(raw_status.strip().lower(), raw_status)
 
 
-def natural_sort_key(s: str) -> List:
-    """Provides natural sort key (e.g. model-2 before model-10)."""
+def version_sort_key(s: str) -> List:
+    """Provides version sort key matching GNU sort -V (case-sensitive ASCII order)."""
     return [
-        int(text) if text.isdigit() else text.lower()
+        int(text) if text.isdigit() else text
         for text in re.split(r"(\d+)", s)
     ]
+
+
+# Alias for backward compatibility
+natural_sort_key = version_sort_key
 
 
 class BuildkiteClient:
@@ -222,9 +226,12 @@ def process_features(
     bk: BuildkiteClient,
     tpu_dir: Path,
     tpu_prefix: str,
+    categorized_rows: Optional[Dict[Path, Tuple[str, List[List[str]]]]] = None,
+    write_to_disk: bool = True,
 ) -> Tuple[Dict[Path, Tuple[str, List[List[str]]]], bool]:
     """Builds feature support matrices grouped by category."""
-    categorized_rows: Dict[Path, Tuple[str, List[List[str]]]] = {}
+    if categorized_rows is None:
+        categorized_rows = {}
     any_failed = False
     valid_passes = {
         "✅ Passing",
@@ -240,9 +247,9 @@ def process_features(
         if not feature:
             continue
 
-        default_cat = "feature support matrix" if mode == "DEFAULT" else ""
+        # In upstream bash, category lookup always defaults to "feature support matrix"
         category = bk.get_metadata(
-            f"{tpu_prefix}{feature}_category", default=default_cat
+            f"{tpu_prefix}{feature}_category", default="feature support matrix"
         )
         if not category:
             continue
@@ -276,7 +283,8 @@ def process_features(
                         next(reader)  # skip header
                         for r in reader:
                             if r:
-                                existing_rows.append([f'"{c}"' if not c.startswith('"') else c for c in r])
+                                col0 = f'"{r[0]}"' if not r[0].startswith('"') else r[0]
+                                existing_rows.append([col0] + r[1:])
                     except StopIteration:
                         pass
             categorized_rows[csv_file] = (header, existing_rows)
@@ -305,13 +313,13 @@ def process_features(
 
         categorized_rows[csv_file][1].append(row)
 
-    # Sort each category file rows naturally and write to disk
-    for csv_file, (header, rows) in categorized_rows.items():
-        rows.sort(key=lambda r: natural_sort_key(r[0]))
-        with open(csv_file, "w", newline="", encoding="utf-8") as f:
-            f.write(header + "\n")
-            for r in rows:
-                f.write(",".join(r) + "\n")
+    if write_to_disk:
+        for csv_file, (header, rows) in categorized_rows.items():
+            rows.sort(key=lambda r: version_sort_key(r[0]))
+            with open(csv_file, "w", newline="", encoding="utf-8") as f:
+                f.write(header + "\n")
+                for r in rows:
+                    f.write(",".join(r) + "\n")
 
     return categorized_rows, any_failed
 
@@ -472,24 +480,41 @@ def run_pipeline(
         if models_failed:
             any_failed = True
 
-    # Process Features (DEFAULT mode)
+    # Process Features
     all_feature_csvs: Dict[Path, Tuple[str, List[List[str]]]] = {}
     if default_feature_names:
-        feat_csvs, default_failed = process_features(
-            "DEFAULT", default_feature_names, bk, tpu_dir, tpu_prefix
+        _, default_failed = process_features(
+            "DEFAULT",
+            default_feature_names,
+            bk,
+            tpu_dir,
+            tpu_prefix,
+            categorized_rows=all_feature_csvs,
+            write_to_disk=False,
         )
-        all_feature_csvs.update(feat_csvs)
         if default_failed:
             any_failed = True
 
-    # Process Features (METADATA mode)
     if metadata_feature_list:
-        feat_csvs, meta_failed = process_features(
-            "METADATA", metadata_feature_list, bk, tpu_dir, tpu_prefix
+        _, meta_failed = process_features(
+            "METADATA",
+            metadata_feature_list,
+            bk,
+            tpu_dir,
+            tpu_prefix,
+            categorized_rows=all_feature_csvs,
+            write_to_disk=False,
         )
-        all_feature_csvs.update(feat_csvs)
         if meta_failed:
             any_failed = True
+
+    # Sort each category file rows with version_sort_key (matching sort -V) and write to disk
+    for csv_file, (header, rows) in all_feature_csvs.items():
+        rows.sort(key=lambda r: version_sort_key(r[0]))
+        with open(csv_file, "w", newline="", encoding="utf-8") as f:
+            f.write(header + "\n")
+            for r in rows:
+                f.write(",".join(r) + "\n")
 
     # Set overall test failure flag in metadata
     bk.set_metadata(f"{tpu_prefix}_CI_TESTS_FAILED", str(any_failed).lower())
