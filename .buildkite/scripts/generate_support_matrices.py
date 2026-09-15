@@ -46,6 +46,44 @@ PARALLELISM_STAGES = [
 
 QUANT_COLS_LIST = ["w16a16", "w8a8", "w8a16", "w4a4", "w4a8", "w4a16"]
 
+# Validation Sets (kept separate for domain clarity)
+MODEL_VALID_PASSES = {"✅ Passing", "⚪ N/A", "❓ Untested", "not enough HBM"}
+FEATURE_VALID_PASSES = {
+    "✅ Passing",
+    "⚪ N/A",
+    "❓ Untested",
+    "⚠️ Beta",
+    "🧪 Experimental",
+    "📝 Planned",
+    "⛔️ Unplanned",
+}
+
+MODEL_TYPE_MAPPING = {
+    "multimodal": "Multimodal",
+    "embedding": "Embedding",
+    "diffusion": "Diffusion",
+}
+
+# Category Configurations: (Header, Stages)
+CATEGORY_CONFIG: Dict[str, Tuple[str, List[str]]] = {
+    "quantization support matrix": (
+        "Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest",
+        FEATURE_STAGES_QUANTIZATION,
+    ),
+    "kernel support matrix microbenchmarks": (
+        "kernels,CorrectnessTest,PerformanceTest",
+        FEATURE_STAGES_MICROBENCHMARKS,
+    ),
+    "parallelism support matrix": (
+        "Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest",
+        PARALLELISM_STAGES,
+    ),
+}
+DEFAULT_CATEGORY_CONFIG = (
+    "Feature,CorrectnessTest,PerformanceTest",
+    FEATURE_STAGES,
+)
+
 
 def get_tpu_generation(key: str) -> str:
     """Maps quantization dtype to recommended TPU generations."""
@@ -135,6 +173,16 @@ class BuildkiteClient:
             pass
 
 
+def upload_matrix_csv(csv_file: Path, title: str, bk: BuildkiteClient) -> None:
+    """Prints and uploads a CSV matrix artifact."""
+    if not csv_file.is_file():
+        return
+    print(f"--- Uploading {title}: {csv_file} ---")
+    with open(csv_file, "r", encoding="utf-8") as f:
+        print(f.read())
+    bk.upload_artifact(str(csv_file))
+
+
 def parse_default_features(
     default_features_file: Path, bk: BuildkiteClient, tpu_prefix: str
 ) -> List[str]:
@@ -176,7 +224,6 @@ def process_models(
     """Builds and writes model support matrix CSV."""
     model_rows: List[List[str]] = []
     any_failed = False
-    valid_passes = {"✅ Passing", "⚪ N/A", "❓ Untested", "not enough HBM"}
 
     for model in model_list:
         if not model:
@@ -184,14 +231,7 @@ def process_models(
         category = bk.get_metadata(
             f"{tpu_prefix}{model}_category", default="text-only"
         )
-        if category == "multimodal":
-            type_val = "Multimodal"
-        elif category == "embedding":
-            type_val = "Embedding"
-        elif category == "diffusion":
-            type_val = "Diffusion"
-        else:
-            type_val = "Text"
+        type_val = MODEL_TYPE_MAPPING.get(category, "Text")
 
         row = [f'"{model}"', type_val]
         for stage in MODEL_STAGES[1:]:
@@ -199,7 +239,7 @@ def process_models(
                 f"{tpu_prefix}{model}:{stage}", default="❓ Untested"
             )
             row.append(res)
-            if res not in valid_passes:
+            if res not in MODEL_VALID_PASSES:
                 any_failed = True
 
         model_rows.append(row)
@@ -233,15 +273,6 @@ def process_features(
     if categorized_rows is None:
         categorized_rows = {}
     any_failed = False
-    valid_passes = {
-        "✅ Passing",
-        "⚪ N/A",
-        "❓ Untested",
-        "⚠️ Beta",
-        "🧪 Experimental",
-        "📝 Planned",
-        "⛔️ Unplanned",
-    }
 
     for feature in feature_list:
         if not feature:
@@ -257,22 +288,8 @@ def process_features(
         category_filename = category.replace(" ", "_")
         csv_file = tpu_dir / f"{category_filename}.csv"
 
+        header, stages_to_use = CATEGORY_CONFIG.get(category, DEFAULT_CATEGORY_CONFIG)
         is_quant = category == "quantization support matrix"
-        is_micro = category == "kernel support matrix microbenchmarks"
-        is_parallel = category == "parallelism support matrix"
-
-        if is_quant:
-            stages_to_use = FEATURE_STAGES_QUANTIZATION
-            header = "Quantization dtype,Quantization methods,Recommended TPU Generations,CorrectnessTest,PerformanceTest"
-        elif is_micro:
-            stages_to_use = FEATURE_STAGES_MICROBENCHMARKS
-            header = "kernels,CorrectnessTest,PerformanceTest"
-        elif is_parallel:
-            stages_to_use = PARALLELISM_STAGES
-            header = "Feature,Single-Host CorrectnessTest,Single-Host PerformanceTest,Multi-Host CorrectnessTest,Multi-Host PerformanceTest"
-        else:
-            stages_to_use = FEATURE_STAGES
-            header = "Feature,CorrectnessTest,PerformanceTest"
 
         if csv_file not in categorized_rows:
             existing_rows: List[List[str]] = []
@@ -307,7 +324,7 @@ def process_features(
 
             if (
                 stage not in ("QuantizationMethods", "RecommendedTPUGenerations")
-                and result not in valid_passes
+                and result not in FEATURE_VALID_PASSES
             ):
                 any_failed = True
 
@@ -397,10 +414,7 @@ def process_kernel_matrix_to_pivot(
                 row_items.append(cell)
             f.write(",".join(row_items) + "\n")
 
-    print(f"--- Uploading Pivoted Kernel Matrix: {output_file} ---")
-    with open(output_file, "r", encoding="utf-8") as f:
-        print(f.read())
-    bk.upload_artifact(str(output_file))
+    upload_matrix_csv(output_file, "Pivoted Kernel Matrix", bk)
     return output_file
 
 
@@ -521,26 +535,16 @@ def run_pipeline(
 
     # Upload Model Matrices
     for csv_file in model_csv_files:
-        if csv_file.is_file():
-            print(f"--- Uploading Model Matrix: {csv_file} ---")
-            with open(csv_file, "r", encoding="utf-8") as f:
-                print(f.read())
-            bk.upload_artifact(str(csv_file))
+        upload_matrix_csv(csv_file, "Model Matrix", bk)
 
     # Upload Feature Matrices (skipping raw microbenchmarks)
     for csv_file in all_feature_csvs.keys():
-        if csv_file.is_file():
-            if not csv_file.name.endswith(
-                "kernel_support_matrix_microbenchmarks.csv"
-            ):
-                print(f"--- Uploading Feature Matrix: {csv_file} ---")
-                with open(csv_file, "r", encoding="utf-8") as f:
-                    print(f.read())
-                bk.upload_artifact(str(csv_file))
-            else:
-                print(
-                    f"Skipping direct upload for {csv_file} (will be pivoted later)."
-                )
+        if not csv_file.name.endswith("kernel_support_matrix_microbenchmarks.csv"):
+            upload_matrix_csv(csv_file, "Feature Matrix", bk)
+        else:
+            print(
+                f"Skipping direct upload for {csv_file} (will be pivoted later)."
+            )
 
     # Pivot Microbenchmark Matrix & Upload
     process_kernel_matrix_to_pivot(tpu_dir, bk)
