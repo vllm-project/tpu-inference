@@ -184,48 +184,65 @@ steps:
         # and no measurement we have matches the roofline's no-chunking
         # assumption. This one does.
         #
-        # MAX_NUM_SEQS=16 -> 64 concurrent, down from #26's 64 -> 256. This is
+        # MAX_NUM_SEQS=8 -> 32 concurrent, down from #26's 64 -> 256. This is
         # a deliberate trade of KV capacity for activation headroom and it
         # makes the run NOT comparable to #26 on throughput. That is fine:
         # #26 is the capacity number and already exists. This build answers a
-        # different question.
+        # different question, and a light decode load is if anything a feature
+        # for a prefill measurement.
         #
-        # The trade is forced. #26 finished at Init kv-cache 87.19 of 94.74
-        # GiB, leaving 7.55 GiB for the whole transient activation set, and
-        # NUM_GPU_BLOCKS_OVERRIDE early-returns past the utilization check
-        # (kv_cache_manager.py:347), so overshooting is a TPU OOM rather than a
-        # smaller pool. Token count is going up 8x and activations scale with
-        # it. Shrinking the pool buys:
+        # The size of the cut is set by #27, which ran this same config at
+        # MAX_NUM_SEQS=16 and died compiling the 65536 bucket:
         #
-        #   attention  4864 x 376,832 B          = 1.71 GiB  (was 6.83)
-        #   mamba      roundup_4(4*16+1) = 68     = 1.16 GiB  (was 4.44)
-        #   Init kv-cache  ~76.1 + 2.87          ~ 78.9 GiB  (was 87.19)
-        #   activation headroom                  ~ 15.8 GiB  (was 7.55)
+        #   RESOURCE_EXHAUSTED: the total memory required for HLO temporaries
+        #   (94.98G) exceeds available HBM (94.74G).
         #
-        # Honest about the residual risk: 8x needs the current transient set to
-        # be under ~1.98 GiB and we have no measurement of it, only the bound
-        # that it fits in 7.55 GiB today. The MoE ragged gather-reduce alone
-        # runs on num_tokens x top_k rows of hidden 8192 -- #26's tuning keys
-        # confirm input_size = num_tokens * 10 exactly, up to 81920 -- which is
-        # 1.34 GB logical at the old ceiling. Weights are 75.87 GiB, so ~18 GiB
-        # is the hard ceiling on activation budget at this mesh regardless of
-        # pool size. If 65536 does not fit in that, it does not fit at all.
+        # Read that carefully, because it says how big the cut has to be.
+        # "Available HBM 94.74" is the whole device, not the free part, and the
+        # 94.98 includes the resident buffers the program reads:
         #
-        # This is cheap to find out. KV is allocated before precompilation
-        # (#26: Init kv-cache 21:31:30, precompile 21:32-21:55) and precompile
-        # exercises every bucket at full size, so an OOM lands at ~40 min
-        # rather than three hours in. Laddering through 8192 first would cost a
-        # full bring-up and tell us nothing precompile will not.
+        #   resident (weights 75.87 + KV 2.90)    78.77
+        #   true temporaries at 65536           + 16.21
+        #                                       -------
+        #   total required                        94.98
+        #   device                                94.74
+        #   SHORT BY                               0.24
         #
-        # NUM_GPU_BLOCKS_OVERRIDE=4864: per rank 1216 against a peak demand of
-        # 16 x 74 = 1184, so preemption stays impossible by construction -- no
-        # rank can admit a 17th request. Same property #26 relied on, which
+        # That decomposition is the only one consistent with the pass/fail
+        # boundary: temporaries scale with token count, so 32768 needs ~8.1
+        # (total 86.9) and 16384 ~4.1 (total 82.8), and both compiled. It also
+        # means KV and temporaries trade 1:1, so cutting the pool genuinely
+        # helps -- had "temporaries" meant temporaries alone, 65536 would have
+        # been unreachable at any pool size.
+        #
+        # So, against a 0.24 GiB shortfall:
+        #
+        #   attention  2432 x 376,832 B          = 0.85 GiB  (#27: 1.71)
+        #   mamba      roundup_4(4*8+1) = 36      = 0.62 GiB  (#27: 1.16)
+        #   Init kv-cache  75.87 + 1.47          ~ 77.34 GiB (#27: 78.77)
+        #   predicted total at 65536             ~ 93.55 of 94.74
+        #   margin                                 +1.19 GiB
+        #
+        # Five times the known shortfall. The larger margin rather than
+        # MAX_NUM_SEQS=12 (+0.52) because 16.21 is the requirement of the ONE
+        # 65536-class function that was attempted -- #27 completed zero of them
+        # -- and the others could need more. A second OOM costs another ~64 min
+        # of slice time.
+        #
+        # Everything else about the HBM model came through #27 intact:
+        # predicted Init kv-cache 78.9 against a measured 78.77, and Init model
+        # unchanged at 75.87, so sizing the input buffers at 65536 instead of
+        # 8192 costs nothing measurable.
+        #
+        # NUM_GPU_BLOCKS_OVERRIDE=2432: per rank 608 against a peak demand of
+        # 8 x 74 = 592, so preemption stays impossible by construction -- no
+        # rank can admit a 9th request. Same property #26 relied on, which
         # matters under attn_dp because preemption leaks mamba slots.
         #
-        # BENCH_SWEEP="8:128 64:512". conc 8 is the control, unchanged since
+        # BENCH_SWEEP="8:128 32:256". conc 8 is the control, unchanged since
         # tc#953 and directly comparable to every prior build; keeping it is
-        # what makes any change attributable. conc 64 with 512 prompts is 8
-        # full waves.
+        # what makes any change attributable. conc 32 with 256 prompts is 8
+        # full waves. GSM8K_CONCURRENCY drops 64 -> 32 to match the server.
         #
         # ⚠️ The thing to verify before trusting the result: batch-8 formation
         # is NOT guaranteed by the scheduler. Admission batching
@@ -235,10 +252,11 @@ steps:
         # concurrent, arrivals per rank are far slower than prefill steps, so
         # most prefill steps would carry one prompt. What makes this work is
         # wave synchronisation: --ignore-eos with a fixed 1024-token output
-        # retires all 64 requests together, so each rank receives ~16
-        # un-prefilled prompts at once and fills its 16384-token budget. That
+        # retires all 32 requests together, so each rank receives 8
+        # un-prefilled prompts at once and only 2 are needed to fill its
+        # 16384-token budget. That
         # is a property of the benchmark, not the scheduler. READ
-        # iteration_token_bins IN metrics_c64.json FIRST -- if the steps are
+        # iteration_token_bins IN metrics_c32.json FIRST -- if the steps are
         # not landing in the large buckets, the roofline point was never
         # exercised and the next build needs a prefill-dominated leg
         # (OUTPUT_LEN small, so requests retire straight after prefill and
@@ -290,8 +308,8 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=4' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=16' \
-          'NUM_GPU_BLOCKS_OVERRIDE=4864' \
+          'MAX_NUM_SEQS=8' \
+          'NUM_GPU_BLOCKS_OVERRIDE=2432' \
           'MAX_NUM_BATCHED_TOKENS=16384' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
@@ -300,12 +318,12 @@ steps:
           'OUTPUT_LEN=1024' \
           'NUM_PROMPTS=128' \
           'MAX_CONCURRENCY=8' \
-          'BENCH_SWEEP=8:128 64:512' \
+          'BENCH_SWEEP=8:128 32:256' \
           'NUM_WARMUPS=32' \
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gsm8k' \
           'GSM8K_REASONING_EFFORT=low' \
-          'GSM8K_CONCURRENCY=64' \
+          'GSM8K_CONCURRENCY=32' \
           'GSM8K_MAX_TOKENS=1024' \
           'GSM8K_TIMEOUT_S=7200' \
           'BENCH_REQUEST_TIMEOUT_S=7200' \
