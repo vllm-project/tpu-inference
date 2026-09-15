@@ -16,6 +16,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
@@ -215,6 +216,48 @@ class TestSampling:
         assert result.logprob_token_ids[0, 0] == 1
         top_k_indices = sorted(result.logprob_token_ids[0, 1:].tolist())
         assert top_k_indices == [0, 1, 2] or top_k_indices == [0, 1, 3]
+
+    @pytest.mark.parametrize("allow_distributed_sampling", [True, False])
+    def test_top_k_one_is_argmax_with_tied_logits(self,
+                                                  allow_distributed_sampling):
+        """top_k=1 must be deterministic even when the top logits tie.
+
+        Both top-k implementations are threshold based and retain every value
+        tied with the k-th rank, so a tie at the maximum leaves more than one
+        candidate for top_k=1 and the draw picks between them. bf16 logits
+        make such ties common. top_k=1 is exactly argmax, so it must return
+        the lowest-index maximum like vLLM's exact-k top-k does.
+        """
+        devices = jax.devices()
+        # Distributed candidate sampling needs enough logits per vocab shard.
+        vocab_size = 256 * len(devices)
+        logits_np = np.full((1, vocab_size), -10.0, dtype=np.float32)
+        logits_np[0, 7] = 5.0
+        logits_np[0, vocab_size - 3] = 5.0  # exact tie at the maximum
+        logits = jnp.asarray(logits_np)
+
+        metadata = TPUSupportedSamplingMetadata(
+            temperature=jnp.array([1.0], dtype=jnp.float32),
+            top_k=jnp.array([1], dtype=jnp.int32),
+            top_p=jnp.array([1.0], dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+        )
+        device_mesh = mesh_utils.create_device_mesh((1, len(devices)), devices)
+        mesh = Mesh(device_mesh,
+                    (ShardingAxisName.MLP_DATA, ShardingAxisName.MODEL))
+
+        tokens = {
+            int(
+                sample(jax.random.PRNGKey(seed),
+                       mesh,
+                       logits,
+                       metadata,
+                       allow_distributed_sampling=allow_distributed_sampling)
+                [0][0])
+            for seed in range(16)
+        }
+        assert tokens == {7}
 
 
 class TestProcessedLogprobs:
