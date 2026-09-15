@@ -620,7 +620,6 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator }}
               cloud.google.com/gke-tpu-topology: {{ .Values.tpu.topology }}
-              cloud.google.com/reservation-affinity: specific
             tolerations:
             - key: "google.com/tpu"
               operator: "Exists"
@@ -808,7 +807,6 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator }}
               cloud.google.com/gke-tpu-topology: {{ .Values.tpu.topology }}
-              cloud.google.com/reservation-affinity: specific
               {{- if gt $numVms 1 }}
               cloud.google.com/placement-policy-name: {{ .Values.tpu.placementPolicy }}
               {{- end }}
