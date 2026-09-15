@@ -61,8 +61,7 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingConfigManager)
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (
-    PromptLogprobsAsyncData, PromptLogprobsReqSnap,
-    _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
+    PromptLogprobsAsyncData, compute_and_gather_logprobs,
     compute_prompt_logprobs, distributed_sampling_allowed, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -2123,7 +2122,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 logprobs = compute_and_gather_logprobs(
                     logprobs_logits, next_tokens,
                     self.model_config.max_logprobs)
-                logprobs = _jax_logprobs_copy_to_host_async(logprobs)
+                logprobs = jax.copy_to_host_async(logprobs)
             else:
                 logprobs = None
 
@@ -2401,7 +2400,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             data.tensors.selected_token_ranks))
 
         prompt_logprobs_dict: Dict[str, Any] = {}
-        completed_snaps: List[PromptLogprobsReqSnap] = []
 
         for snap in data.req_snaps:
             req_state = snap.req_state
@@ -2429,11 +2427,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                         selected_token_ranks=torch.from_numpy(
                             ranks_buf.copy()),
                     )
-                completed_snaps.append(snap)
-
-        for snap in completed_snaps:
-            self.input_batch.num_prompt_logprobs.pop(snap.req_id, None)
-            snap.req_state.in_progress_prompt_logprobs_cpu = None
+                req_state.in_progress_prompt_logprobs_cpu = None
 
         return prompt_logprobs_dict
 
