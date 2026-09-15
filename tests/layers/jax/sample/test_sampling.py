@@ -23,9 +23,9 @@ from vllm.v1.outputs import LogprobsTensors
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _can_sample_distributed, _merge_topk_candidates, compute_logprobs,
-    compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
-    sample)
+    _can_sample_distributed, _distributed_sampling_fits,
+    _merge_topk_candidates, compute_logprobs, compute_prompt_logprobs,
+    distributed_sampling_allowed, gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -39,6 +39,18 @@ class TestSampling:
         assert distributed_sampling_allowed(True, "raw_logits")
         assert not distributed_sampling_allowed(True, "processed_logprobs")
         assert not distributed_sampling_allowed(True, "processed_logits")
+
+    def test_distributed_sampling_fits_is_opt_in(self, monkeypatch):
+        """The candidate path stays off unless USE_VOCAB_SHARDED_SAMPLING is set."""
+        mesh = Mesh(
+            np.array(jax.devices()[:1]).reshape(1, 1), ("data", "model"))
+        monkeypatch.delenv("USE_VOCAB_SHARDED_SAMPLING", raising=False)
+        assert not _distributed_sampling_fits(mesh, 1 << 20)
+        monkeypatch.setenv("USE_VOCAB_SHARDED_SAMPLING", "1")
+        assert _distributed_sampling_fits(mesh, 1 << 20)
+        # Even when enabled, a shard too small for the candidate capacity
+        # falls back to the full-vocab sampler.
+        assert not _distributed_sampling_fits(mesh, 8)
 
     def test_distributed_sampling_requires_positive_top_p(self):
         metadata = TPUSupportedSamplingMetadata(
