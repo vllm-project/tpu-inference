@@ -98,20 +98,8 @@ class PromptLogprobsReqSnap:
 @dataclass
 class PromptLogprobsAsyncData:
     """Holds async-copied prompt logprob tensors + per-request snapshots for get_output()."""
-    tensors: LogprobsTensors  # Result of _jax_logprobs_copy_to_host_async (pending transfer).
+    tensors: LogprobsTensors  # Pending host transfer.
     req_snaps: List[PromptLogprobsReqSnap]
-
-
-def _jax_logprobs_copy_to_host_async(
-        logprobs_tensors: LogprobsTensors) -> LogprobsTensors:
-    """Initiate non-blocking TPU-to-host copies for all logprobs arrays."""
-    return LogprobsTensors(
-        logprob_token_ids=jax.copy_to_host_async(
-            logprobs_tensors.logprob_token_ids),
-        logprobs=jax.copy_to_host_async(logprobs_tensors.logprobs),
-        selected_token_ranks=jax.copy_to_host_async(
-            logprobs_tensors.selected_token_ranks),
-    )
 
 
 def _apply_sampling_transforms(
@@ -354,7 +342,7 @@ def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_logprobs(
     logits: jax.Array,
     next_tokens: jax.Array,
@@ -365,7 +353,7 @@ def compute_and_gather_logprobs(
     return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
     input_ids: jax.Array,
@@ -399,7 +387,7 @@ def compute_prompt_logprobs(
     # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
     prompt_lp_tensors = compute_and_gather_prompt_logprobs(
         full_logits, input_ids, max_logprobs)
-    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
+    prompt_lp_tensors = jax.copy_to_host_async(prompt_lp_tensors)
 
     # Snapshot all mutable per-request state before update_states(N+1) runs.
     padded_tokens_per_dp = full_logits.shape[0] // dp_size
@@ -422,6 +410,8 @@ def compute_prompt_logprobs(
                     else:
                         num_logits = num_remaining
                         is_last_chunk = True
+                        # All hosts must choose the same logits path next step.
+                        del num_prompt_logprobs[req_id]
                     req_snaps.append(
                         PromptLogprobsReqSnap(
                             req_id=req_id,

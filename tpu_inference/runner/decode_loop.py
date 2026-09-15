@@ -194,10 +194,10 @@ def _decode_core_impl(
         if has_logprobs:
             logprobs_logits = (processed_logits if logprobs_mode
                                == "processed_logprobs" else logits)
-            from tpu_inference.layers.jax.sample.sampling import \
-                compute_and_gather_logprobs
-            step_logprobs = compute_and_gather_logprobs(
-                logprobs_logits, next_tokens, max_logprobs)
+            from tpu_inference.layers.jax.sample.sampling import (
+                compute_logprobs, gather_logprobs)
+            step_logprobs = gather_logprobs(compute_logprobs(logprobs_logits),
+                                            next_tokens, max_logprobs)
             lp_ids_step = step_logprobs.logprob_token_ids
             lp_val_step = step_logprobs.logprobs
             lp_ranks_step = step_logprobs.selected_token_ranks
