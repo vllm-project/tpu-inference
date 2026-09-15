@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    DP_SCHED_ROUTING: str = "least_loaded"
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
@@ -439,6 +440,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DP scheduler: timeout (ms) to force flush pending requests.
     "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    # DP scheduler: how new requests are assigned to DP ranks.
+    # "least_loaded" (default) queries every rank's pending-prefill tokens,
+    # request counts and remaining output for each request; "round_robin"
+    # assigns ranks cyclically with no per-request rank queries, which is
+    # cheaper for large batches of similar requests (e.g. RL rollouts) but
+    # ignores rank load for mixed workloads.
+    "DP_SCHED_ROUTING":
+    env_with_choices("DP_SCHED_ROUTING",
+                     "least_loaded", ["least_loaded", "round_robin"],
+                     case_sensitive=False),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
     "VLLM_MOE_CHUNK_SIZE":

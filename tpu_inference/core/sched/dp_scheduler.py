@@ -492,6 +492,12 @@ class DPScheduler(SchedulerInterface):
         self._batch_prefill_last_flush: float = time()
         self._pending_new_requests: List[Request] = []
 
+        # How new requests are assigned to ranks (envs.DP_SCHED_ROUTING,
+        # validated there): "least_loaded" queries every rank per request,
+        # "round_robin" cycles through the ranks with no queries.
+        self._routing_policy: str = envs.DP_SCHED_ROUTING.lower()
+        self._round_robin_next_rank: int = 0
+
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
         if vllm_config.cache_config.enable_prefix_caching:
@@ -806,9 +812,17 @@ class DPScheduler(SchedulerInterface):
 
         self._route_and_forward_request(request)
 
+    def _pick_rank_for_request(self, request: Request) -> int:
+        """Choose the DP rank for a new request per the routing policy."""
+        if self._routing_policy == "round_robin":
+            rank = self._round_robin_next_rank
+            self._round_robin_next_rank = (rank + 1) % self.dp_size
+            return rank
+        return self._find_best_rank_for_request(request)
+
     def _route_and_forward_request(self, request: Request) -> None:
         """Route a single request to a DP rank and send ADD_REQUEST IPC."""
-        rank = self._find_best_rank_for_request(request)
+        rank = self._pick_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
 
         self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
