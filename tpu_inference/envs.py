@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     TPU_MESH_SORT_BY_COORDS: bool = False
     VERIFY_WEIGHTS: bool = False
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
+    USE_VOCAB_SHARDED_SAMPLING: bool = False
     RAIDEN_H2D_SETTLE: bool = True
 
 
@@ -514,6 +515,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # read at trace time so candidate tensor shapes remain static.
     "DISTRIBUTED_SAMPLING_MAX_TOP_K":
     lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
+    # Sample from per-shard top-k candidates gathered across the vocab shards
+    # instead of all-gathering the full vocabulary (opt-in).
+    "USE_VOCAB_SHARDED_SAMPLING":
+    env_bool("USE_VOCAB_SHARDED_SAMPLING", default=False),
     # RL weight sync: wait for the async Raiden H2D DMA to settle before
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":

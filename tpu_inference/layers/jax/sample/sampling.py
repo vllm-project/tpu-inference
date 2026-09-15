@@ -52,7 +52,13 @@ def _distributed_sampling_candidates_per_shard() -> int:
 
 
 def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
-    """Whether each vocab shard can provide the static candidate capacity."""
+    """Whether distributed candidate sampling is enabled and fits the mesh.
+
+    The path is opt-in through USE_VOCAB_SHARDED_SAMPLING; when enabled, each
+    vocab shard must be able to provide the static candidate capacity.
+    """
+    if not envs.USE_VOCAB_SHARDED_SAMPLING:
+        return False
     tensor_axes = ShardingAxisName.MLP_TENSOR
     tensor_axes = tensor_axes if isinstance(tensor_axes,
                                             (tuple, list)) else (tensor_axes, )

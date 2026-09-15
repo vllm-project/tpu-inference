@@ -113,6 +113,15 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     assert envs.USE_BATCHED_RPA_KERNEL is True
 
 
+def test_use_vocab_sharded_sampling_is_opt_in(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("USE_VOCAB_SHARDED_SAMPLING", raising=False)
+    assert envs.USE_VOCAB_SHARDED_SAMPLING is False
+    monkeypatch.setenv("USE_VOCAB_SHARDED_SAMPLING", "1")
+    assert envs.USE_VOCAB_SHARDED_SAMPLING is True
+    monkeypatch.setenv("USE_VOCAB_SHARDED_SAMPLING", "false")
+    assert envs.USE_VOCAB_SHARDED_SAMPLING is False
+
+
 def test_distributed_sampling_max_top_k(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", raising=False)
     assert envs.DISTRIBUTED_SAMPLING_MAX_TOP_K == 64
