@@ -22,6 +22,7 @@ KV_CONNECTOR=""
 IMAGE_TPU_INFERENCE="docker.io/vllm/vllm-tpu:v0.27.0"
 IMAGE_TORCHTPU="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/vllm-torchtpu/torchtpu-vllm-prod:latest"
 IMAGE="${IMAGE:-${IMAGE_TPU_INFERENCE}}"
+IMAGE_EXPLICIT=false
 SERVICE_ACCOUNT="vllm-sa"
 GCS_BUCKET=""
 PLACEMENT_POLICY=""
@@ -69,7 +70,10 @@ FEATURE_KV_OFFLOAD=false
 FEATURE_OFFLOAD_CONNECTOR="RaidenOffloadConnector"
 FEATURE_STRUCTURED_OUTPUT=false
 
+# Prints the help text and exits. Pass a non-zero code when called from an
+# error path so callers/CI can distinguish "user asked for help" from "bad input".
 usage() {
+    local exit_code="${1:-0}"
     echo "=================================================================="
     echo " TPU vLLM Test Case Runner (Helm-Powered)"
     echo "=================================================================="
@@ -162,7 +166,7 @@ usage() {
     echo "     $0 --pytest-file tests/e2e/test_continue_decode.py \\\\"
     echo "        -k correctness_DP_torchax --pytest-model Qwen/Qwen1.5-MoE-A2.7B"
     echo "============================================================"
-    exit 0
+    exit "$exit_code"
 }
 
 # Single unified CLI option parsing
@@ -258,13 +262,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --torchtpu|--vllm-torchtpu|--prod)
             IMAGE="${IMAGE_TORCHTPU}"
+            IMAGE_EXPLICIT=true
             shift
             ;;
         --tpu-inference|--vllm-tpu)
             IMAGE="${IMAGE_TPU_INFERENCE}"
+            IMAGE_EXPLICIT=true
             shift
             ;;
         -i|--image)
+            IMAGE_EXPLICIT=true
             case "$2" in
                 torchtpu|vllm-torchtpu|prod)
                     IMAGE="${IMAGE_TORCHTPU}"
@@ -279,6 +286,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --image=*)
+            IMAGE_EXPLICIT=true
             val="${1#*=}"
             case "$val" in
                 torchtpu|vllm-torchtpu|prod)
@@ -401,11 +409,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            usage
+            usage 0
             ;;
         *)
-            echo "Error: Unknown option $1"
-            usage
+            echo "Error: Unknown option $1" >&2
+            usage 1
             ;;
     esac
 done
@@ -471,6 +479,11 @@ if [ "$E2E_MODE" = true ]; then
     if [ "$DURATION_EXPLICIT" = false ]; then
         DURATION_MINUTES="300"
     fi
+    # E2E pytest requires in-image test sources and test utilities from torchtpu.
+    # If the user did not explicitly specify an image, default to IMAGE_TORCHTPU.
+    if [ "$IMAGE_EXPLICIT" = false ]; then
+        IMAGE="${IMAGE_TORCHTPU}"
+    fi
 fi
 
 # Function to calculate VMs and TP
@@ -479,7 +492,9 @@ calc_topology() {
     IFS='x' read -r tx ty tz <<< "$topo"
     local chips=$((tx * ty * tz))
     local vms=$((chips / 4))
+    [ "$vms" -lt 1 ] && vms=1
     local tp=$((chips * 2))
+    [ "$tp" -lt 1 ] && tp=1
     echo "$vms $tp"
 }
 
@@ -494,6 +509,19 @@ discover_placement_policy() {
 
 if [ "$MODE" = "aggregated" ]; then
     read -r NUM_VMS TP_SIZE <<< "$(calc_topology "$TOPOLOGY")"
+    # The e2e job hardcodes parallelism=1: the offline pytest suites all fit in a
+    # single host, so it runs no Ray bootstrap and sets none of the multi-host
+    # TPU_* env vars. A multi-host topology would still be requested through the
+    # nodeSelector, so the extra VMs would sit idle while the lone Pod hangs
+    # waiting for slice peers that never join. Reject it up front rather than
+    # letting it fail later as an opaque libtpu error.
+    if [ "$E2E_MODE" = true ] && [ "$NUM_VMS" -gt 1 ]; then
+        echo "❌ Error: pytest mode only supports single-host topologies."
+        echo "   ${TOPOLOGY} needs ${NUM_VMS} VMs, but the e2e job always runs exactly 1 Pod,"
+        echo "   so the other $((NUM_VMS - 1)) VM(s) would be allocated and left idle."
+        echo "   Use a single-host topology instead (e.g. -t 2x2x1)."
+        exit 1
+    fi
     if [ "$NUM_VMS" -gt 1 ] && [ -z "$PLACEMENT_POLICY" ]; then
         PLACEMENT_POLICY=$(discover_placement_policy "$TOPOLOGY")
     fi
@@ -501,11 +529,19 @@ else
     read -r PREFILL_NUM_VMS PREFILL_TP_SIZE <<< "$(calc_topology "$PREFILL_TOPOLOGY")"
     read -r DECODE_NUM_VMS DECODE_TP_SIZE <<< "$(calc_topology "$DECODE_TOPOLOGY")"
 
-    if [ "$PREFILL_NUM_VMS" -gt 1 ]; then
-        PREFILL_PLACEMENT_POLICY=$(discover_placement_policy "$PREFILL_TOPOLOGY")
+    if [ -z "$PREFILL_PLACEMENT_POLICY" ]; then
+        if [ -n "$PLACEMENT_POLICY" ]; then
+            PREFILL_PLACEMENT_POLICY="$PLACEMENT_POLICY"
+        elif [ "$PREFILL_NUM_VMS" -gt 1 ]; then
+            PREFILL_PLACEMENT_POLICY=$(discover_placement_policy "$PREFILL_TOPOLOGY")
+        fi
     fi
-    if [ "$DECODE_NUM_VMS" -gt 1 ]; then
-        DECODE_PLACEMENT_POLICY=$(discover_placement_policy "$DECODE_TOPOLOGY")
+    if [ -z "$DECODE_PLACEMENT_POLICY" ]; then
+        if [ -n "$PLACEMENT_POLICY" ]; then
+            DECODE_PLACEMENT_POLICY="$PLACEMENT_POLICY"
+        elif [ "$DECODE_NUM_VMS" -gt 1 ]; then
+            DECODE_PLACEMENT_POLICY=$(discover_placement_policy "$DECODE_TOPOLOGY")
+        fi
     fi
 fi
 
@@ -819,6 +855,7 @@ fi
 
 # Mode 4: DEFAULT -> Deploy immediately with Helm!
 TMP_VALS=$(mktemp /tmp/values-XXXXXX.yaml)
+trap 'rm -f "$TMP_VALS"' EXIT
 echo "$OUTPUT_BODY" > "$TMP_VALS"
 
 echo "============================================================"
@@ -876,6 +913,8 @@ echo ""
 if [ "$E2E_MODE" = true ]; then
 echo " 2. Stream pytest logs (live PASS/FAIL):"
 echo "    kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=e2e -f"
+echo "    # Or stream, save and generate test summary via e2e_log.sh:"
+echo "    ./helm/bin/e2e_log.sh ${JOBSET_NAME}"
 echo ""
 echo " 3. Check overall JobSet completion status:"
 echo "    kubectl get jobset ${JOBSET_NAME}"
@@ -905,7 +944,7 @@ fi
 fi
 echo ""
 echo " 7. Teardown / Cleanup after testing:"
-echo "    ./gke/bin/cleanup.sh ${RELEASE_NAME}"
+echo "    ./helm/bin/cleanup.sh ${RELEASE_NAME}"
 echo "    # Or via helm directly:"
 echo "    helm uninstall ${RELEASE_NAME}"
 echo "============================================================"
