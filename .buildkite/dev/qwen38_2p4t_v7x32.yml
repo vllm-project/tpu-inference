@@ -34,11 +34,11 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, accuracy audit of the fp8 requantization)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, memory profile of the 8k/1k steady state)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
-    timeout_in_minutes: 540
+    timeout_in_minutes: 300
     env:
       TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
       MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
@@ -52,12 +52,11 @@ steps:
       # bound a pathological run, and a load regression is far more useful as a
       # slow progress tail than as a killed job. timeout_in_minutes above has to
       # exceed it or Buildkite kills the job first.
-      # 500 min. This build runs all three lm_eval tasks and the xhigh GPQA
-      # leg is the long pole at ~3100-3900 s measured (#25 3116, #24 3837),
-      # plus ~500 s GSM8K and ~1100 s MMLU against a ~60 min bring-up. The
-      # budget covers serve for the whole job, not just bring-up, so it has to
-      # span every leg; timeout_in_minutes above has to exceed it.
-      VLLM_ENGINE_READY_TIMEOUT_S: "30000"
+      # 4h. This build runs one perf leg and no evals: ~33 min load, a
+      # precompile that should be warm from #26/#30, and ~10 min of benchmark.
+      # The budget covers serve for the whole job, not just bring-up;
+      # timeout_in_minutes above has to exceed it.
+      VLLM_ENGINE_READY_TIMEOUT_S: "14400"
       # Mirror engine stats into the Buildkite log during the eval leg. Read by
       # run_multihost.sh on the host, so it belongs here rather than in
       # MULTIHOST_ENV_VARS. 120s is coarse enough not to bloat the log over a
@@ -145,90 +144,81 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # Accuracy audit: does the load-time fp8 requantization cost anything?
+        # Memory profile: what is actually in the forward-pass scratch?
         #
-        # Every build from #19 on has carried QUANTIZE_BF16_LINEAR_PATTERNS,
-        # which requantizes the attention and gated-delta-net projections from
-        # the bf16 the checkpoint stores them in to fp8 at block 512. It buys
-        # -2.37 GiB/chip, and that saving is what makes model=8 x attn_dp=4
-        # affordable, which in turn is what #26 measured at +40.6% throughput.
+        # We have never measured it. Every scratch figure quoted so far came
+        # from subtracting an `Init kv-cache` bytes_in_use snapshot from a
+        # number scraped out of an XLA OOM string -- 16.21 GiB at aggregate
+        # 65536 from #27, 17.90 from #28 for the SAME function with strictly
+        # smaller shapes. That contradiction is the whole reason for this
+        # build: the inference method is not reliable enough to plan with, and
+        # an attempt to decompose it per-buffer was wrong twice (it mistook
+        # `input_size` in a ragged_gather_reduce TuningKey, which is the length
+        # of an int32 index array, for a materialised activation buffer).
         #
-        # What we do NOT have is a full accuracy comparison for it. #19 checked
-        # GPQA alone, through this repo's benchmark_serving.py fork, which is a
-        # different prompt and extractor from anything a GPU run reports. #26
-        # checked GSM8K alone (0.9803 against #24's 0.9780). The standard
-        # baseline in QWEN38_2P4T_EVAL_BASELINE.md -- GPQA 0.8838, GSM8K
-        # 0.9780, MMLU 0.8942 -- was measured on the STOCK checkpoint.
+        # Two independent instruments, both new here.
         #
-        # This build runs all three stock-lm_eval tasks against the requantized
-        # model so the two can sit side by side.
+        # 1. memory_analysis() at the precompile hook
+        #    (compilation_manager.py, `_log_memory_analysis`). XLA already
+        #    computes a buffer assignment for every shape it compiles; this
+        #    just logs it. Each bucket now reports
+        #      temp / argument / output / alias / generated_code
+        #    where `temp` IS the scratch we have been inferring. It costs
+        #    nothing, needs no profiler, and covers every compiled bucket
+        #    rather than only the one that happened to OOM -- so one build
+        #    yields the whole scratch-vs-token-count curve. `argument` and
+        #    `alias` are a bonus: they say how much of the program's footprint
+        #    is the resident weights and KV being passed in, which is exactly
+        #    the term the #27/#28 subtraction was guessing at.
         #
-        # SERVE CONFIG IS #26's, BYTE FOR BYTE. Reverted from the commit rather
-        # than retyped: same quantization patterns and block 512, same
-        # model=8 x attn_dp=4, MAX_MODEL_LEN=40960, MAX_NUM_SEQS=64,
-        # NUM_GPU_BLOCKS_OVERRIDE=19456, MAX_NUM_BATCHED_TOKENS=2048. Nothing
-        # about how the model is built or sharded is a variable here.
+        # 2. PHASED_PROFILING_DIR, which needs no code change at all. The
+        #    runner auto-captures a jax.profiler trace on the first
+        #    prefill-heavy (>=0.9 of scheduled tokens are prefill),
+        #    decode-heavy (<=0.2) and mixed (0.4-0.6) batch it sees, and logs
+        #    the batch composition next to each. Pointed inside
+        #    /workspace/artifacts so the traces land in dev_artifacts and get
+        #    uploaded; without that they die with the container.
         #
-        # EVAL KNOBS ARE #24/#25's, BYTE FOR BYTE, so the harness is not a
-        # variable either:
-        #   GPQA   xhigh, greedy, the fork's system prompt, 32768 gen cap,
-        #          concurrency 32  -- these are #25's, which produced the 0.8838
-        #          the baseline doc treats as canonical because it is closest to
-        #          the model card.
-        #   GSM8K  low effort, concurrency 64, 1024 tokens -- #24's.
-        #   MMLU   batch 8, concurrency 8, full 14042 questions -- #24's.
-        # Leg order is gpqa -> gsm8k -> mmlu, which is the script's own order
-        # (qwen38_2p4t_eval_std.sh:636, :677, :715) and the one the baseline
-        # was measured in.
+        #    ⚠️ It is NOT established that this yields memory data. The capture
+        #    is a plain jax.profiler trace with tpu_trace_mode=TRACE_COMPUTE
+        #    (runner/utils.py:582-588); nothing memory-specific is requested
+        #    and nothing is excluded. Whether tensorboard-plugin-profile's
+        #    `memory_viewer` (peak HBM by buffer, with HLO op names -- the
+        #    composition we actually want) populates from it is an empirical
+        #    question this build answers. If it does not, the fallback is an
+        #    XLA buffer-assignment dump via --xla_dump_to, which is certain to
+        #    work and merely verbose.
         #
-        # ⚠️ TWO VARIABLES, NOT ONE. The baseline ran the stock checkpoint at
-        # model=16 x attn_dp=2; this runs the requantized checkpoint at
-        # model=8 x attn_dp=4. A clean single-variable test would need the
-        # baseline mesh, which cannot hold this pool. The reason to accept the
-        # confound: #26 already ran GSM8K on this exact mesh and got 0.9803
-        # against the baseline's 0.9780, i.e. the mesh alone does not move
-        # accuracy, and a sharding change has no mechanism by which it should.
-        # If a task comes back low, the mesh is the second hypothesis to rule
-        # out, not the first.
+        #    PROFILE_SINGLE_DEVICE=1 traces one chip per task instead of all
+        #    eight. The hosts run the same program on the same shapes, so one
+        #    chip's trace is representative, and the full-slice version would
+        #    be ~8x the bytes for no extra information.
         #
-        # ⚠️ NOISE FLOOR. GPQA's run-to-run spread on this deployment is about
-        # +-0.035 -- two greedy runs with no setting changed flipped 19 of 198
-        # answers. So a GPQA reading anywhere in 0.85-0.92 is consistent with
-        # "no change" and cannot on its own establish a regression. Read the
-        # truncation count alongside it: that moved consistently across
-        # #20/#23/#24 and is the more sensitive indicator. GSM8K (+-0.004) and
-        # MMLU (+-0.0025) are far tighter and are where a real drop would show
-        # first.
+        # SERVE CONFIG IS #26's, reverted from 9bf32a3c9 rather than retyped:
+        # model=8 x attn_dp=4, the fp8 requantization at block 512,
+        # MAX_NUM_SEQS=64 (256 concurrent), NUM_GPU_BLOCKS_OVERRIDE=19456,
+        # MAX_NUM_BATCHED_TOKENS=2048, MAX_MODEL_LEN=40960. #26 is the
+        # best-throughput configuration we have and #30 confirmed it costs no
+        # accuracy, so it is the one whose memory behaviour is worth
+        # characterising. Reproducing Init model 75.87 / Init kv-cache 87.19 is
+        # the cheap check that the revert worked.
         #
-        # GPQA block arithmetic, because this is the leg that can preempt. A
-        # GPQA request can run to MAX_MODEL_LEN, so 40960/128 = 320 blocks.
-        # Concurrency 32 spread over 4 ranks is 8 per rank, 8 x 320 = 2560
-        # against a per-rank pool of 19456/4 = 4864 -- 53% utilisation. The
-        # baseline sat at 83% (16 per rank of 6144 at attn_dp=2), so this mesh
-        # is strictly safer at the same client concurrency, and the client cap
-        # is what bounds it: MAX_NUM_SEQS=64 would admit far more than the pool
-        # could hold at full length, exactly as it would have in #24/#25.
-        # Watch for preemptions in the metrics scrape anyway -- the guarantee
-        # here is statistical (the DP balancer spreads requests) rather than
-        # structural, unlike the 8k/1k legs.
+        # BENCH_SWEEP=256:512 -- one leg, at the max fitted batch, 2 full
+        # waves. No conc-8 control and no sweep: this build measures memory,
+        # not throughput, and #26 already has the perf numbers at both ends of
+        # the curve. 512 prompts is enough for the phased profiler to encounter
+        # all three batch compositions (wave boundaries are prefill-heavy, the
+        # long middle of a wave is decode-heavy, the transitions are mixed) and
+        # short enough that profiling overhead does not dominate the job.
         #
-        # BENCH_SWEEP is cut to one short leg, 8:32. #26 already measured this
-        # configuration's perf properly at both ends of the curve and there is
-        # nothing to add; the leg is kept because BENCH_SWEEP has no "off" and
-        # because a completed perf leg is the cheapest proof the server is
-        # healthy before three hours of evals are queued behind it.
+        # STD_EVAL_SUITE=none and EVAL_SUITE=none. #30 just measured accuracy
+        # on this exact configuration -- GPQA 0.8990, GSM8K 0.9788, MMLU 0.8928,
+        # all inside half a sigma of the stock baseline -- so there is nothing
+        # to re-establish and ~90 min to save.
         #
-        # Timeouts: the xhigh GPQA leg is the long pole. Measured at
-        # concurrency 32 it takes ~3100-3900 s (#25 3116, #24 3837), GSM8K
-        # ~500 s and MMLU ~1100 s, so ~90 min of eval against a ~60 min
-        # bring-up. VLLM_ENGINE_READY_TIMEOUT_S covers serve for the whole job,
-        # not just bring-up, hence 30000 s; GPQA_TIMEOUT_S=10800 bounds the leg
-        # itself in case the generation tail misbehaves the way tc#960's did.
-        #
-        # Precompile should be largely WARM for once: #26 compiled this exact
-        # mesh at this exact padded_num_reqs (256) and the cache lives on the
-        # hosts at /tmp/jax_cache_tpu7x. If it misses, the shapes are the same
-        # ones #26 paid ~24 min for.
+        # Expect ~50 min: 33 min load, a precompile that should be warm from
+        # #26/#30 (5.34 s per shape rather than 50-105 s), and ~10 min of
+        # benchmark. VLLM_ENGINE_READY_TIMEOUT_S is cut to 4h accordingly.
         #
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -252,6 +242,8 @@ steps:
           'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
           'RUNAI_STREAMER_LOG_LEVEL=INFO' \
           'RUNAI_STREAMER_LOG_TO_STDERR=1' \
+          'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
+          'PROFILE_SINGLE_DEVICE=1' \
           'TPU_WEIGHT_LOAD_PROFILE=1' \
           'TPU_WEIGHT_LOAD_PROFILE_EVERY=10000' \
           'QUANTIZE_BF16_LINEAR_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
@@ -267,25 +259,16 @@ steps:
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=32' \
-          'MAX_CONCURRENCY=8' \
-          'BENCH_SWEEP=8:32' \
+          'NUM_PROMPTS=512' \
+          'MAX_CONCURRENCY=256' \
+          'BENCH_SWEEP=256:512' \
           'NUM_WARMUPS=32' \
           'EVAL_SUITE=none' \
-          'STD_EVAL_SUITE=gpqa,gsm8k,mmlu' \
-          'GPQA_REASONING_EFFORT=xhigh' \
-          'GPQA_SAMPLING=greedy' \
-          'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
-          'GPQA_MAX_GEN_TOKS=32768' \
-          'GPQA_CONCURRENCY=32' \
-          'GPQA_TIMEOUT_S=10800' \
+          'STD_EVAL_SUITE=none' \
           'GSM8K_REASONING_EFFORT=low' \
           'GSM8K_CONCURRENCY=64' \
           'GSM8K_MAX_TOKENS=1024' \
           'GSM8K_TIMEOUT_S=7200' \
-          'MMLU_BATCH_SIZE=8' \
-          'MMLU_CONCURRENCY=8' \
-          'MMLU_TIMEOUT_S=10800' \
           'BENCH_REQUEST_TIMEOUT_S=7200' \
           "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
           "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \

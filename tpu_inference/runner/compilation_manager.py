@@ -55,6 +55,41 @@ logger = init_logger(__name__)
 BLOCK_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
 
 
+def _log_memory_analysis(name: str, compiled: Any) -> None:
+    """Log XLA's own memory accounting for a freshly compiled executable.
+
+    `temp` is the peak scratch a step needs on top of its inputs -- the
+    quantity that decides whether a given max_num_batched_tokens fits, and the
+    one we have otherwise had to infer by subtracting a `bytes_in_use` snapshot
+    from an OOM message (see build27/build28 MANIFESTs for how badly that
+    reads). It costs nothing to log: the numbers fall out of the buffer
+    assignment the compiler has already done, so every bucket reports its own
+    scratch during the normal precompile pass.
+
+    jax.stages.Compiled.memory_analysis() is documented as best-effort -- "its
+    structure can be arbitrary: it may be inconsistent across versions of JAX
+    and jaxlib, or even across invocations" -- and returns None on backends
+    that do not implement it. Hence the blanket guard and the per-field
+    getattr: this is diagnostics, and it must never be able to fail a compile.
+    """
+    try:
+        stats = compiled.memory_analysis()
+    except Exception as e:  # noqa: BLE001 - diagnostics must not break compile
+        logger.debug("memory_analysis unavailable for %s: %r", name, e)
+        return
+    if stats is None:
+        return
+    fields = ("temp_size_in_bytes", "argument_size_in_bytes",
+              "output_size_in_bytes", "alias_size_in_bytes",
+              "host_temp_size_in_bytes", "generated_code_size_in_bytes")
+    parts = [
+        f"{f[:-len('_size_in_bytes')]}={v / (1 << 30):.3f}GiB"
+        for f in fields if isinstance(v := getattr(stats, f, None), (int, float))
+    ]
+    if parts:
+        logger.info("Memory analysis of %s | %s", name, " | ".join(parts))
+
+
 class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
@@ -187,6 +222,7 @@ class CompilationManager:
                 elapsed = time.perf_counter() - start
                 logger.info("Compilation of %s finished in %.2f [secs].", name,
                             elapsed)
+                _log_memory_analysis(name, compiled)
                 return compiled
 
         if self._compile_executor is None:
