@@ -20,6 +20,7 @@ from tpu_inference.layers.vllm.custom_ops import linear as linear
 from tpu_inference.layers.vllm.custom_ops import mhc as mhc
 from tpu_inference.layers.vllm.custom_ops import mla_attention as mla_attention
 from tpu_inference.layers.vllm.custom_ops import rope as rope
+from tpu_inference.layers.vllm.custom_ops import mamba_mixer2 as mamba_mixer2
 
 # Register custom op to vLLM so that vLLM model implementation will instantiante
 # classes with definitions in tpu-inference.
