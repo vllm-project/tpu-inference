@@ -320,9 +320,11 @@ class RaidenWorkerSync:
         ]
         mesh_axes: tuple = ()
         mesh_shape = None
+        bound_mesh = None
         for arr in self.arrays:
             mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
             if mesh is not None:
+                bound_mesh = mesh
                 mesh_axes = tuple(mesh.axis_names)
                 mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
                 break
@@ -331,6 +333,16 @@ class RaidenWorkerSync:
                 f"{self.job_name}: no bound array carries a sharding mesh; "
                 "cannot determine mesh_shape/mesh_axes for registration "
                 "metadata.")
+
+        host_subgrid = None
+        try:
+            if (bound_mesh is not None and hasattr(bound_mesh, "local_mesh")
+                    and bound_mesh.local_mesh is not None
+                    and hasattr(bound_mesh.local_mesh, "devices")):
+                host_subgrid = list(bound_mesh.local_mesh.devices.shape)
+        except (AttributeError, ValueError, TypeError):
+            host_subgrid = None
+
         data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
         control_addr = (f"{self.ip}:{self._sync.listener_port}"
                         if self._sync and self._sync.listener_port else "")
@@ -347,4 +359,5 @@ class RaidenWorkerSync:
             "mesh_shape": list(mesh_shape),
             "variables": variables,
             "mesh_axes": list(mesh_axes) if mesh_axes else None,
+            "host_subgrid": host_subgrid,
         }

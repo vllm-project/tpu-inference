@@ -156,6 +156,36 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
         sync.names = ["w"]
         self.assertTrue(sync.bound)
 
+    def test_metadata_dict_extracts_host_subgrid_from_local_mesh(self):
+        sync = rws.RaidenWorkerSync("rollout")
+        sync.names = ["w"]
+        mock_devices = unittest.mock.MagicMock()
+        mock_devices.shape = (1, 4)
+        mock_local_mesh = SimpleNamespace(devices=mock_devices)
+        mock_mesh = SimpleNamespace(
+            axis_names=("x", "y"),
+            shape={
+                "x": 1,
+                "y": 4
+            },
+            local_mesh=mock_local_mesh,
+        )
+        mock_sharding = SimpleNamespace(
+            mesh=mock_mesh,
+            spec=(),
+            shard_shape=lambda shape: shape,
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(2, 4),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=2,
+            )
+        ]
+        meta = sync.metadata_dict()
+        self.assertEqual(meta["host_subgrid"], [1, 4])
+
 
 class TestRaidenWorkerSyncH2D(unittest.TestCase):
 
