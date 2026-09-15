@@ -73,26 +73,15 @@ def get_quantization_method(key: str) -> str:
     return mapping.get(key, "N/A")
 
 
-def format_status_result(raw_result: str, mode: str = "METADATA") -> str:
-    """Maps status string variations to standardized emoji status labels."""
-    if not raw_result:
-        return "✅ Passing" if mode == "DEFAULT" else "❓ Untested"
-
+def format_feature_status(raw_status: str) -> str:
+    """Formats custom roadmap status strings from feature configs to emoji labels."""
     mapping = {
-        "passed": "✅ Passing",
-        "pass": "✅ Passing",
-        "failed": "❌ Failing",
-        "fail": "❌ Failing",
-        "flaky": "⚠️ Flaky",
-        "missing": "❓ Missing",
         "beta": "⚠️ Beta",
-        "planned": "📝 Planned",
         "experimental": "🧪 Experimental",
+        "planned": "📝 Planned",
         "unplanned": "⛔️ Unplanned",
-        "n/a": "N/A",
-        "na": "N/A",
     }
-    return mapping.get(raw_result.strip().lower(), raw_result)
+    return mapping.get(raw_status.strip().lower(), raw_status)
 
 
 def natural_sort_key(s: str) -> List:
@@ -205,7 +194,6 @@ def process_models(
             res = bk.get_metadata(
                 f"{tpu_prefix}{model}:{stage}", default="❓ Untested"
             )
-            res = format_status_result(res)
             row.append(res)
             if res not in valid_passes:
                 any_failed = True
@@ -305,7 +293,7 @@ def process_features(
                 raw_res = bk.get_metadata(
                     f"{tpu_prefix}{feature}:{stage}", default="❓ Untested"
                 )
-                result = format_status_result(raw_res, mode=mode)
+                result = format_feature_status(raw_res)
 
             row.append(result)
 
