@@ -4,11 +4,11 @@
 
 Runs inside the EngineCore subprocess where the live TPU arrays live; only
 plain-data metadata (`RaidenWorkerSync.metadata_dict`) crosses the
-`collective_rpc` boundary back to `RLVllmSampler`.
+`collective_rpc` boundary back to `RLVllmSampler` (in Tunix).
 
 Duplicates (rather than imports) tunix's
 `raiden_synchronizer.RaidenSynchronizer` binding mechanics, since
-`vllm_sampler.py` has no Tunix dependency. Keep the two in sync by hand;
+`tpu-inference` has no Tunix dependency. Keep the two in sync by hand;
 tunix's `weight_sync.dict_to_metadata` defines the metadata shape.
 """
 
