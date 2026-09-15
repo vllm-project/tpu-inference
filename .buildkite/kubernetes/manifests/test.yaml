@@ -1,0 +1,157 @@
+# One TPU step: one pod on one host, holding every chip on the node.
+#
+# The command comes from the launcher (`launch --profile P -- <command>`),
+# chip count, topology and node labels from the profile it names, and the two
+# caches from PersistentVolumeClaims the cluster publishes: jax-cache is the
+# compilation cache and hf-cache the model weights, both GCS FUSE mounts on
+# regional buckets. A claim named jax-cache means the local cache in every
+# region, so this manifest is correct wherever the pod is dispatched.
+apiVersion: batch/v1
+kind: Job
+spec:
+  parallelism: 1
+  completions: 1
+  # No retry for a test that failed - Buildkite already has its result - but
+  # a pod the infrastructure took away (node lost, autoscaler) is replaced for
+  # as long as activeDeadlineSeconds allows: DisruptionTarget is ignored, and
+  # only the workload container's own exit code fails the Job.
+  backoffLimit: 0
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget
+      - action: FailJob
+        onExitCodes:
+          containerName: workload
+          operator: NotIn
+          values: [0]
+  activeDeadlineSeconds: ${MAX_RUNTIME}
+  template:
+    metadata:
+      annotations:
+        # Without this GKE does not inject the sidecar and the csi volumes
+        # below never mount.
+        gke-gcsfuse/volumes: "true"
+        # Do not let the autoscaler reclaim this node underneath a running
+        # test. Job pods are evictable by default, so once the rest of a build
+        # drains, the last long step is a lone pod on an otherwise idle node -
+        # exactly what OPTIMIZE_UTILIZATION consolidates away, and it presents
+        # as a job that vanished rather than as an eviction.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        # Headroom for metadata prefetch on both mounts. GKE's guidance is
+        # 512Mi or higher; 2Gi because the compilation cache prefix holds tens
+        # of thousands of entries and a prefetch that runs out of memory falls
+        # back to a lookup per miss.
+        gke-gcsfuse/metadata-prefetch-memory-limit: "2Gi"
+        # Unlimited sidecar CPU and memory. Parallel downloads are the whole
+        # reason a multi-gigabyte checkpoint arrives in one pass rather than
+        # eight sequential ones, and they are CPU-bound; the default limits
+        # throttle exactly the work we tuned for. Permitted on Standard
+        # clusters only, which these are.
+        gke-gcsfuse/cpu-limit: "0"
+        gke-gcsfuse/memory-limit: "0"
+    spec:
+      restartPolicy: Never
+      # The identity the cache buckets authorise, published by ci-infra
+      # alongside the claims below.
+      #
+      # Named rather than left as `default`, which every pod without this field
+      # runs as. Granting cache writes to `default` would extend them to
+      # anything scheduled in this namespace, and the launcher accepts whatever
+      # image a step names - allowed_image_repos is still empty.
+      serviceAccountName: tpu-workload
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: ${ACCELERATOR_LABEL}
+        cloud.google.com/gke-tpu-topology: ${TOPOLOGY}
+      tolerations:
+        - key: "google.com/tpu"
+          operator: "Equal"
+          value: "present"
+          effect: "NoSchedule"
+      containers:
+        - name: workload
+          image: ${IMAGE}
+          command: ["/bin/bash", "-lc"]
+          workingDir: /workspace/tpu_inference
+          env:
+            # Only what is the same for every test. Everything else arrives
+            # through `--env`, which skips names the step did not set - unlike
+            # template substitution, which cannot express "leave this unset" and
+            # renders MODEL_IMPL_TYPE="" where tpu_inference wants it absent.
+            - name: HF_HOME
+              value: /workspace/.cache/huggingface
+            # Unbuffered, so output reaches the log as it happens rather
+            # than in blocks when a pipe flushes.
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # Both names for the same reason run_in_docker.sh sets both: the
+            # first stops vLLM's CompilationManager substituting its default,
+            # the second catches tests that never go through it.
+            - name: VLLM_XLA_CACHE_PATH
+              value: /cache/jax
+            - name: JAX_COMPILATION_CACHE_DIR
+              value: /cache/jax
+          resources:
+            limits:
+              google.com/tpu: "${CHIPS}"
+            requests:
+              google.com/tpu: "${CHIPS}"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: jax-cache
+              mountPath: /cache/jax
+            - name: hf-cache
+              mountPath: /workspace/.cache/huggingface/hub
+      volumes:
+        # Backing store for the gcsfuse file cache, in RAM.
+        #
+        # Sized by the launcher from the profile's machine type: half of host
+        # memory, which is 80Gi on ct6e-standard-1t's 176 GB and 670Gi on
+        # ct6e-standard-8t's 1440 GB. One fixed number cannot serve both - it
+        # is either unsafe on the smallest shape or leaves most of the largest
+        # idle. GKE's own gcsfuse profiles use 0.7 of allocatable; half is
+        # deliberately below that, because tmpfs writes count against the
+        # container and the tests need room of their own.
+        #
+        # A sizeLimit, not a reservation: tmpfs holds only what is written, so
+        # the larger figures cost nothing until the cache fills.
+        #
+        # Without this volume the sidecar falls back to 5GiB of ephemeral
+        # storage and fileCacheCapacity becomes a cheque it cannot cash - build
+        # 239 spent 113.6m of part2 loading checkpoints that way, against 8.8m
+        # with a cache that fits.
+        - name: gke-gcsfuse-cache
+          emptyDir:
+            medium: Memory
+            sizeLimit: ${FUSE_CACHE_SIZE}
+        # JAX and vLLM use shared memory heavily; the 64MB default is far too
+        # small and fails in ways that look like unrelated crashes.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+        # Both caches are claims, not mounts.
+        #
+        # The bucket is regional - a cache in another region costs 502ms per
+        # miss against 36ms in-region - so its name differs per cluster. Naming
+        # it here would put a bucket in every manifest, pipeline and step. The
+        # PersistentVolume behind these claims holds it instead, created by
+        # ci-infra alongside the cluster, and the claim names are identical
+        # everywhere.
+        #
+        # It also survives MultiKueue placing this Job in a different region
+        # than it was submitted from: the claim resolves at mount time, in
+        # whichever cluster the pod actually landed in. An inline volume is
+        # rendered before submission, when that is not yet known.
+        #
+        # Tuning lives in the PV too - as a proper list rather than the
+        # comma-separated string an inline volume needs, which folded YAML has
+        # silently corrupted before.
+        - name: jax-cache
+          persistentVolumeClaim:
+            claimName: jax-cache
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: hf-cache
