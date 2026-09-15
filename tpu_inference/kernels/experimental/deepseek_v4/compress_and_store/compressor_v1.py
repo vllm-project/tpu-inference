@@ -201,10 +201,21 @@ def prepare_boundary_batch(
     dest = jnp.where(is_decode, index, dest_prefill)
     dest = jnp.where(valid_token, dest, output_size)
 
-    # 6. Scatter to output once
+    # 6. Scatter to output once. Do NOT rely on scatter mode="drop" to
+    # discard the out-of-bounds sentinel rows: on TPU, drop-mode scatter
+    # semantics for out-of-bounds indices are not honored at every row
+    # width (observed on jax 0.10.2: sentinel indices that are correctly
+    # dropped at one width silently wrap at another, overwriting live
+    # rows). Instead keep every index in bounds by construction: scatter
+    # into a buffer with one extra sentinel row, route every
+    # out-of-range destination (the valid_token sentinel above, or any
+    # tiling overflow) to that row, and slice it off.
+    sentinel = output_size
+    safe_dest = jnp.where((dest >= 0) & (dest < output_size), dest, sentinel)
+
     def scatter(default_val, src):
-        return jnp.full((output_size, ), default_val,
-                        dtype=src.dtype).at[dest].set(src, mode="drop")
+        out = jnp.full((output_size + 1, ), default_val, dtype=src.dtype)
+        return out.at[safe_dest].set(src)[:output_size]
 
     return (
         scatter(0, pos),
