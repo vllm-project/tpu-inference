@@ -3,6 +3,12 @@
 {{- $servedModelName := include "tpu-vllm-benchmark.servedModelName" . -}}
 {{- $modelPath := include "tpu-vllm-benchmark.modelPath" . -}}
 {{- $isDisagg := eq .Values.mode "disaggregated" -}}
+{{- $isE2E := and .Values.e2etest .Values.e2etest.enabled -}}
+{{- if $isE2E }}
+{{- if not (or .Values.e2etest.testPaths .Values.e2etest.fileContent) }}
+{{- fail "e2etest.enabled=true requires a test source: either e2etest.testPaths (paths inside the image, e.g. tests/e2e/test_x.py::test_y) or e2etest.fileContent (--set-file e2etest.fileContent=tests/e2e/test_x.py)" }}
+{{- end }}
+{{- end }}
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -18,11 +24,11 @@ spec:
   successPolicy:
     operator: All
     targetReplicatedJobs:
-    - client
+    - {{ if $isE2E }}e2e{{ else }}client{{ end }}
 
   replicatedJobs:
 
-  {{ if $isDisagg }}
+  {{ if and $isDisagg (not $isE2E) }}
   {{- $prefillNumVms := include "tpu-vllm-benchmark.prefillNumVms" . | int -}}
   {{- $prefillTpSize := include "tpu-vllm-benchmark.prefillTpSize" . -}}
   {{- $prefillChipsBounds := include "tpu-vllm-benchmark.prefillChipsBounds" . -}}
@@ -581,7 +587,192 @@ spec:
                   memory: {{ .Values.disaggregated.proxy.resources.memory | default "32Gi" | quote }}
             restartPolicy: Never
 
-  {{ else }}
+  {{- else if $isE2E }}
+
+  # ============================================================================
+  # OFFLINE E2E PYTEST RUNNER
+  # ----------------------------------------------------------------------------
+  # Runs pytest directly on the TPU host. Used for tests that build `LLM(...)`
+  # in-process (e.g. tests/e2e/test_continue_decode.py), which cannot be driven
+  # from the CPU-only HTTP benchmark client. No api_server is started here, so
+  # the whole slice is available to the test process.
+  # Single-host only: the test topologies (tp8xdp1 / tp1xdp8 / tp4xdp2) all need
+  # exactly 8 devices == one 2x2x1 tpu7x host, so no Ray bootstrap is required.
+  # ============================================================================
+  - name: e2e
+    replicas: 1
+    template:
+      spec:
+        parallelism: 1
+        completions: 1
+        backoffLimit: 0
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+            annotations:
+              kueue.x-k8s.io/podset-unconstrained-topology: "true"
+              {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
+              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
+              {{- end }}
+          spec:
+            serviceAccountName: {{ .Values.serviceAccount }}
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator }}
+              cloud.google.com/gke-tpu-topology: {{ .Values.tpu.topology }}
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+            initContainers:
+            - name: tpu-node-setup
+              image: busybox
+              command: ["/bin/sh", "-c"]
+              args:
+              - |
+                sysctl -w vm.max_map_count=33554432 || true
+                if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
+                  echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit || true
+                fi
+                if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+                  echo always > /sys/kernel/mm/transparent_hugepage/enabled || true
+                fi
+              securityContext:
+                privileged: true
+
+            containers:
+            - name: e2e-pytest
+              image: {{ .Values.image | default "docker.io/vllm/vllm-tpu:v0.27.0" }}
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                set -uo pipefail
+                unset MEGASCALE_NUM_SLICES MEGASCALE_SLICE_ID MEGASCALE_COORDINATOR_ADDRESS MEGASCALE_PORT
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+                export HF_XET_HIGH_PERFORMANCE="1"
+                export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+                # Per-suite switches (NEW_MODEL_DESIGN, MODEL_IMPL_TYPE, ...) are
+                # deliberately NOT hardcoded here: .buildkite sets them per step
+                # (DP.yml/EP.yml set NEW_MODEL_DESIGN=1, async_scheduler.yml does
+                # not), and several suites set them from inside the test. Pass
+                # them through e2etest.env to mirror a specific CI step.
+
+                mkdir -p /tmp/hf_locks /root/.cache/huggingface/hub
+                rm -rf /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                ln -sfn /tmp/hf_locks /root/.cache/huggingface/hub/.locks 2>/dev/null || true
+                pip install --no-cache-dir pytest pytest-forked hf-transfer 2>/dev/null || true
+
+                # 1. Warm the HF cache up-front so weight download time is not
+                #    charged to (or timed out by) the test itself.
+                {{- range .Values.e2etest.models }}
+                echo "==== Caching {{ . }} (Started: $(date '+%Y-%m-%d %H:%M:%S')) ===="
+                START_DOWNLOAD=$(date +%s)
+                python3 -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='{{ . }}', ignore_patterns=['original/*'], max_workers=8)"
+                END_DOWNLOAD=$(date +%s)
+                echo "==== {{ . }} cached in $((END_DOWNLOAD - START_DOWNLOAD))s ===="
+                {{- end }}
+
+                # 2. Pick the test source.
+                {{- if .Values.e2etest.testPaths }}
+                #    In-image mode: the CI Dockerfile does `COPY . .` into
+                #    {{ .Values.e2etest.workdir | default "/workspace/tpu_inference" }}, so the suites
+                #    referenced by .buildkite/**/*.yml are already present.
+                WORKDIR="{{ .Values.e2etest.workdir | default "/workspace/tpu_inference" }}"
+                if [ ! -d "${WORKDIR}" ]; then
+                  echo "❌ ${WORKDIR} not found in image {{ .Values.image }}."
+                  echo "   This image does not ship the test sources. Either use a CI-built"
+                  echo "   image, or inject the file with --set-file e2etest.fileContent=..."
+                  exit 1
+                fi
+                cd "${WORKDIR}"
+                TEST_TARGETS=(
+                  {{- range .Values.e2etest.testPaths }}
+                  "{{ . }}"
+                  {{- end }}
+                )
+                {{- else }}
+                #    Injected mode: ConfigMap mounts are read-only, and pytest
+                #    needs a writable rootdir.
+                mkdir -p /tmp/e2e
+                cp /scripts/*.py /tmp/e2e/
+                rm -f /tmp/e2e/patch_ray_placement.py
+                cd /tmp/e2e
+                TEST_TARGETS=("{{ .Values.e2etest.testFile | default "test_continue_decode.py" }}")
+                {{- end }}
+
+                echo "============================================================"
+                echo " Running pytest in $(pwd)"
+                echo " Targets: ${TEST_TARGETS[*]}"
+                echo " Started at: $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "============================================================"
+                python3 -m pytest -s -v -p no:cacheprovider \
+                  "${TEST_TARGETS[@]}" \
+                  {{- if .Values.e2etest.selector }}
+                  -k "{{ .Values.e2etest.selector }}" \
+                  {{- end }}
+                  {{- range .Values.e2etest.extraArgs }}
+                  {{ . }} \
+                  {{- end }}
+                  --junitxml=/tmp/e2e_report.xml
+                TEST_EXIT=$?
+
+                echo "============================================================"
+                if [ $TEST_EXIT -ne 0 ]; then
+                  echo " ❌ pytest failed with exit code ${TEST_EXIT}"
+                else
+                  echo " ✅ pytest completed successfully!"
+                fi
+                echo " Finished at: $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "============================================================"
+                exit ${TEST_EXIT}
+              env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ .Values.hfTokenSecret.name }}
+                    key: {{ .Values.hfTokenSecret.key }}
+              {{- range $k, $v := .Values.e2etest.env }}
+              - name: {{ $k }}
+                value: {{ $v | quote }}
+              {{- end }}
+              resources:
+                limits:
+                  google.com/tpu: {{ .Values.resources.tpu | default 4 }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "72Gi" | quote }}
+                requests:
+                  google.com/tpu: {{ .Values.resources.tpu | default 4 }}
+                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
+                  memory: {{ .Values.resources.memory | default "72Gi" | quote }}
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              - name: triton-cache
+                mountPath: /.triton
+              - name: scripts-volume
+                mountPath: /scripts
+              {{- include "tpu-vllm-benchmark.storageVolumeMounts" . | nindent 14 }}
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            - name: triton-cache
+              emptyDir: {}
+            - name: scripts-volume
+              configMap:
+                name: {{ $fullName }}-scripts
+            {{- include "tpu-vllm-benchmark.storageVolumes" . | nindent 12 }}
+            restartPolicy: Never
+
+  {{- else }}
   {{- $numVms := include "tpu-vllm-benchmark.numVms" . | int -}}
   {{- $tpSize := include "tpu-vllm-benchmark.tpSize" . -}}
   {{- $chipsPerProcessBounds := include "tpu-vllm-benchmark.chipsPerProcessBounds" . -}}
@@ -616,7 +807,6 @@ spec:
             nodeSelector:
               cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator }}
               cloud.google.com/gke-tpu-topology: {{ .Values.tpu.topology }}
-              cloud.google.com/reservation-affinity: specific
               {{- if gt $numVms 1 }}
               cloud.google.com/placement-policy-name: {{ .Values.tpu.placementPolicy }}
               {{- end }}
@@ -814,6 +1004,7 @@ spec:
             restartPolicy: Never
   {{- end }}
 
+  {{- if not $isE2E }}
   # ============================================================================
   # BENCHMARK CLIENT (Runs against server:8000 or proxy:8000)
   # ============================================================================
@@ -881,6 +1072,44 @@ spec:
                         time.sleep(10)
                 "
 
+                {{- if and .Values.testcase .Values.testcase.enabled }}
+                {{- if .Values.testcase.customScriptBase64 }}
+                echo ""
+                echo "============================================================"
+                echo " Executing User-Provided Custom Test Script"
+                echo "============================================================"
+                python3 -c "import base64, os; open('/tmp/custom_test.py', 'wb').write(base64.b64decode(os.environ['CUSTOM_SCRIPT_B64']))"
+                python3 /tmp/custom_test.py
+                TEST_EXIT=$?
+                if [ $TEST_EXIT -ne 0 ]; then
+                  echo "❌ Custom test failed with exit code $TEST_EXIT"
+                  exit $TEST_EXIT
+                fi
+                echo "============================================================"
+                echo " ✅ Custom Test Completed Successfully!"
+                echo "============================================================"
+                {{- else }}
+                echo ""
+                echo "============================================================"
+                echo " Starting Functional & Integration Test Suite"
+                echo "============================================================"
+
+                # The suite lives in scripts/run_testcase.py and is mounted from the
+                # <release>-scripts ConfigMap, so it stays lintable/testable as real Python.
+                export TARGET_HOST TARGET_PORT
+                export MODEL_NAME="{{ $servedModelName }}"
+                python3 /scripts/run_testcase.py
+                TEST_EXIT=$?
+                if [ $TEST_EXIT -ne 0 ]; then
+                  echo "❌ Test suite failed with exit code $TEST_EXIT"
+                  exit $TEST_EXIT
+                fi
+                echo ""
+                echo "============================================================"
+                echo " ✅ All Test Cases Completed Successfully!"
+                echo "============================================================"
+                {{- end }}
+                {{- else }}
                 echo ""
                 echo "============================================================"
                 echo " Starting Progressive Multi-Stage Benchmark Suite"
@@ -936,6 +1165,7 @@ spec:
                 echo "============================================================"
                 echo " ✅ All Benchmark Stages Completed Successfully!"
                 echo "============================================================"
+                {{- end }}
               env:
               {{- if and .Values.features (and .Values.features.kvCacheOffload .Values.features.kvCacheOffload.enabled) }}
               - name: TPU_OFFLOAD_NUM_CPU_CHUNKS
@@ -950,6 +1180,22 @@ spec:
                   secretKeyRef:
                     name: {{ .Values.hfTokenSecret.name }}
                     key: {{ .Values.hfTokenSecret.key }}
+              {{- if and .Values.testcase .Values.testcase.enabled }}
+              - name: TEST_SUITE
+                value: {{ .Values.testcase.suite | default "full" | quote }}
+              - name: TEST_CUSTOM_PROMPT
+                value: {{ .Values.testcase.customPrompt | default "" | quote }}
+              - name: TEST_EXPECTED_PATTERN
+                value: {{ .Values.testcase.expectedPattern | default "" | quote }}
+              - name: TEST_TEMPERATURE
+                value: {{ .Values.testcase.temperature | default "0.0" | quote }}
+              - name: TEST_MAX_TOKENS
+                value: {{ .Values.testcase.maxTokens | default "128" | quote }}
+              {{- if .Values.testcase.customScriptBase64 }}
+              - name: CUSTOM_SCRIPT_B64
+                value: {{ .Values.testcase.customScriptBase64 | quote }}
+              {{- end }}
+              {{- end }}
               resources:
                 requests:
                   cpu: {{ .Values.benchmark.resources.cpu | default "4" | quote }}
@@ -957,4 +1203,12 @@ spec:
                 limits:
                   cpu: {{ .Values.benchmark.resources.cpu | default "4" | quote }}
                   memory: {{ .Values.benchmark.resources.memory | default "8Gi" | quote }}
+              volumeMounts:
+              - name: scripts-volume
+                mountPath: /scripts
+            volumes:
+            - name: scripts-volume
+              configMap:
+                name: {{ $fullName }}-scripts
             restartPolicy: Never
+  {{- end }}
