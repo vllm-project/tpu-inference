@@ -246,6 +246,20 @@ class RaidenWorkerSync:
     def bind(self, state: Any) -> None:
         """Binds (or rebinds after a weight update) this worker's weights."""
         self.names, self.arrays = _filter_bindable(*flatten_weights(state))
+        # The synchronizer's host-side allocation is the usual suspect when bind
+        # fails with a bare `MemoryError: std::bad_alloc`, and the message says
+        # nothing about size. Log both footprints: `global` is every shard of
+        # every bound array, `addressable` only the shards this process owns.
+        # They differ by the number of hosts, so which one the allocation tracks
+        # decides whether a given model fits.
+        _global_bytes = sum(getattr(a, "nbytes", 0) for a in self.arrays)
+        _local_bytes = sum(
+            s.data.nbytes for a in self.arrays
+            for s in getattr(a, "addressable_shards", ()))
+        logger.info(
+            "binding %d weight arrays: global=%.1f GiB, addressable=%.1f GiB",
+            len(self.arrays), _global_bytes / 2**30, _local_bytes / 2**30)
+
         try:
             import tpu_sync.frameworks.jax.utils as jax_utils
             if hasattr(jax_utils, "get_shard_sorting_permutation"):
