@@ -69,13 +69,6 @@ def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
 
 
 def logprobs_use_processed_logits(logprobs_mode) -> bool:
-    """Whether the logprobs path consumes sample()'s processed logits.
-
-    This also fixes the sharding of the logits handed to
-    compute_and_gather_logprobs, so precompilation has to agree with it:
-      True  -> sample() output, constrained to P(ATTN_DATA, None).
-      False -> raw compute_logits output, P(MLP_DATA, MLP_TENSOR).
-    """
     return logprobs_mode in PROCESSED_LOGPROBS_MODES
 
 

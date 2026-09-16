@@ -1084,9 +1084,7 @@ class CompilationManager:
         # Match the sharding of the logits the runner actually passes in.
         # Processed modes feed sample()'s output, which sample_full_vocab
         # constrains to P(ATTN_DATA, None); raw modes feed the compute_logits
-        # output, which stays P(MLP_DATA, MLP_TENSOR). Getting this wrong does
-        # not fail loudly -- it just misses the jit cache and recompiles the
-        # full-vocab log_softmax/gather during serving (seconds per bucket).
+        # output, which stays P(MLP_DATA, MLP_TENSOR).
         if logprobs_use_processed_logits(
                 self.runner.model_config.logprobs_mode):
             logits_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None)
