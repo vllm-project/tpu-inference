@@ -14,6 +14,7 @@ tunix's `weight_sync.dict_to_metadata` defines the metadata shape.
 
 from __future__ import annotations
 
+import inspect
 import socket
 import time
 from typing import Any, List, Optional, Tuple
@@ -235,6 +236,35 @@ class RaidenWorkerSync:
             raise RuntimeError(
                 f"{self.job_name}: tpu_sync is not importable, cannot bind "
                 f"weight_synchronizer. Original error: {_RAIDEN_IMPORT_ERROR}")
+        # Which global shards this process owns. Newer tpu_sync takes this as
+        # `global_shard_indices` and, when it is not supplied, tries to derive
+        # it from `jax_arrays[0].sharding.mesh` -- silently giving up when that
+        # array's sharding carries no mesh, which is the case for several of the
+        # leaves here. Older tpu_sync has no such parameter at all and assumes
+        # `process_index * len(local_devices)`, which is only right when every
+        # array is spread over every host. Compute it explicitly and pass it
+        # when the installed wheel accepts it.
+        _shard_indices = None
+        if self.arrays:
+            _a0 = self.arrays[0]
+            _mesh = getattr(getattr(_a0, "sharding", None), "mesh", None)
+            _flat = (list(_mesh.devices.flat)
+                     if _mesh is not None else list(jax.devices()))
+            try:
+                _shard_indices = [
+                    _flat.index(s.device) for s in _a0.addressable_shards
+                ]
+            except (ValueError, AttributeError):
+                _shard_indices = None
+        logger.info(
+            "global shard indices=%s (from %s)", _shard_indices,
+            "array mesh" if self.arrays and getattr(
+                getattr(self.arrays[0], "sharding", None), "mesh", None)
+            is not None else "jax.devices()")
+        _ws_kwargs = {}
+        if _shard_indices is not None and "global_shard_indices" in inspect.signature(
+                _ws_lib.WeightSynchronizer.__init__).parameters:
+            _ws_kwargs["global_shard_indices"] = _shard_indices
         if self._sync is None:
             self._sync = _ws_lib.WeightSynchronizer(
                 self.arrays,
@@ -249,6 +279,7 @@ class RaidenWorkerSync:
                 # partway between the initial and synced values. Matches how
                 # tunix's in-process destination already binds.
                 auto_h2d=True,
+                **_ws_kwargs,
             )
         else:
             self._sync.bind_weights(self.arrays)
