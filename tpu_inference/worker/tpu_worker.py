@@ -815,6 +815,17 @@ class TPUWorker(WorkerBase):
         from tpu_inference.rl import \
             raiden_worker_sync  # pylint: disable=g-import-not-at-top
 
+        # Raiden splits a job's weights across the hosts that register under
+        # one job_name, keyed by worker_index (num_dst_physical_hosts in
+        # raiden_controller). collective_rpc broadcasts identical arguments to
+        # every worker, so the caller physically cannot hand each host its own
+        # index -- they all arrive with the same one, Raiden concludes the job
+        # has a single destination host, and every host stages a full copy of
+        # the model instead of its share. Derive the index locally, where the
+        # answer is known.
+        if jax.process_count() > 1:
+            worker_index = jax.process_index()
+
         state = self.get_weights_state()
         if self._raiden_rl_weight_sync is None:
             self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
