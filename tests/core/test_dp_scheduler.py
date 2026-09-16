@@ -435,6 +435,32 @@ class TestDPScheduler:
         scheduler._get_result.assert_called_with(1,
                                                  SchedulerCommand.ADD_REQUEST)
 
+    def test_round_robin_routing_skips_rank_queries(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """round_robin assigns ranks cyclically without querying rank state."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = False
+        scheduler._send_command = MagicMock()
+        scheduler._get_result = MagicMock(return_value=None)
+        scheduler._find_best_rank_for_request = MagicMock(
+            side_effect=AssertionError("must not query rank state"))
+
+        requests = []
+        for i in range(5):
+            req = MagicMock(spec=Request)
+            req.request_id = f"req-{i}"
+            requests.append(req)
+            scheduler.add_request(req)
+
+        assert [scheduler.assigned_dp_rank[r.request_id]
+                for r in requests] == [0, 1, 0, 1, 0]
+        sent = [c.args[1] for c in scheduler._send_command.call_args_list]
+        assert sent == [SchedulerCommand.ADD_REQUEST] * 5
+
     def test_schedule_sends_commands_and_combines_output(
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):

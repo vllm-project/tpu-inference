@@ -455,6 +455,13 @@ class DPScheduler(SchedulerInterface):
     A request will be freed from its assigned rank when it is completed or preempted.
     """
 
+    class RoutingPolicy(str, Enum):
+        """How new requests are assigned to DP ranks (envs.DP_SCHED_ROUTING)."""
+        # Query every rank's load per request and pick the least loaded.
+        LEAST_LOADED = "least_loaded"
+        # Cycle through the ranks with no per-request rank queries.
+        ROUND_ROBIN = "round_robin"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -491,6 +498,12 @@ class DPScheduler(SchedulerInterface):
             envs.DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS)
         self._batch_prefill_last_flush: float = time()
         self._pending_new_requests: List[Request] = []
+
+        # How new requests are assigned to ranks (envs.DP_SCHED_ROUTING,
+        # validated there); see RoutingPolicy for the available options.
+        self._routing_policy = self.RoutingPolicy(
+            envs.DP_SCHED_ROUTING.lower())
+        self._round_robin_next_rank: int = 0
 
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
@@ -806,9 +819,17 @@ class DPScheduler(SchedulerInterface):
 
         self._route_and_forward_request(request)
 
+    def _pick_rank_for_request(self, request: Request) -> int:
+        """Choose the DP rank for a new request per the routing policy."""
+        if self._routing_policy == self.RoutingPolicy.ROUND_ROBIN:
+            rank = self._round_robin_next_rank
+            self._round_robin_next_rank = (rank + 1) % self.dp_size
+            return rank
+        return self._find_best_rank_for_request(request)
+
     def _route_and_forward_request(self, request: Request) -> None:
         """Route a single request to a DP rank and send ADD_REQUEST IPC."""
-        rank = self._find_best_rank_for_request(request)
+        rank = self._pick_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
 
         self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
