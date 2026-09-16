@@ -156,8 +156,18 @@ def general_device_put(tensor: jax.Array,
         # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
         # `source_mesh`.
         with ctx:
+            # `dtype` is passed explicitly because jax infers it from the
+            # callback's return value, and the callback is never invoked on a
+            # process that owns no addressable shard of `sharding`:
+            #   ValueError: If the Array has no addressable shards, `dtype` must
+            #   be provided via the `dtype` argument to
+            #   `jax.make_array_from_callback`.
+            # Every host holds a shard of a purely tensor-parallel array, so
+            # this only shows up once some axis is not spread over all hosts --
+            # expert parallelism being the common case, where a host holds no
+            # shard of the experts it was not assigned.
             global_array = jax.make_array_from_callback(
-                t.shape, sharding, lambda index: t[index])
+                t.shape, sharding, lambda index: t[index], dtype=t.dtype)
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):
