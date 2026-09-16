@@ -18,6 +18,7 @@ import jax.numpy as jnp
 import torch
 from torchax.ops.jtorch import register_function
 
+from tpu_inference.kernels.flash_attention.kernel import SegmentIds
 from tpu_inference.layers.common.attention_interface import (
     segment_ids_from_cu_seqlens, sharded_flash_attention)
 
@@ -66,37 +67,65 @@ def scaled_dot_product_attention(
         key = jnp.pad(key, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
         value = jnp.pad(value, ((0, 0), (0, 0), (0, kv_pad), (0, 0)))
 
-    # Prevent nan while using -inf
-    mask_value = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
-    attention_bias = jnp.zeros((batch, num_heads, q_seq_len, kv_seq_len),
-                               dtype=jnp.float32)
-    if attn_mask is not None:
+    # batch is always 1 here (vLLM's ViT flattens all images in a request
+    # into one sequence via cu_seqlens/segment_ids, no real batch axis), so
+    # it must stay replicated rather than sharded by the DP ('data') axis --
+    # sharding a size-1 axis by DP>1 fails divisibility under enable_dp_attention.
+    if attn_mask is None:
+        # Without a caller-supplied mask the bias would only ever carry the
+        # 128-alignment padding mask, so materializing a dense
+        # (batch, num_heads, q_seq_len, kv_seq_len) float32 tensor spends
+        # O(S^2) memory to express an O(S) constraint -- that OOMs on long
+        # vision/video sequences. Segment ids encode the same thing: real
+        # tokens share segment 0, padding lands in the trailing segment, so
+        # real queries cannot attend to padded keys.
+        if q_pad > 0 or kv_pad > 0:
+            q_seg = segment_ids_from_cu_seqlens(jnp.array([0, q_seq_len]),
+                                                q_seq_len + q_pad)
+            kv_seg = segment_ids_from_cu_seqlens(jnp.array([0, kv_seq_len]),
+                                                 kv_seq_len + kv_pad)
+            seg_ids = SegmentIds(q=jnp.broadcast_to(q_seg,
+                                                    (batch, q_seg.shape[0])),
+                                 kv=jnp.broadcast_to(kv_seg,
+                                                     (batch, kv_seg.shape[0])))
+        else:
+            seg_ids = None
+
+        attn_fn = sharded_flash_attention(
+            mesh,
+            causal=is_causal,
+            sm_scale=scale,
+            vmem_limit_bytes=_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES,
+            use_attention_bias=False,
+            batch_axis=None)
+        out = attn_fn(query, key, value, seg_ids)
+    else:
+        # Prevent nan while using -inf
+        mask_value = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
+        attention_bias = jnp.zeros((batch, num_heads, q_seq_len, kv_seq_len),
+                                   dtype=jnp.float32)
         # attn_mask shape: (batch, num_heads, q_len, kv_len)
         if attn_mask.dtype == jnp.bool_:
             attention_bias = jnp.where(attn_mask, attention_bias, mask_value)
         else:
             attention_bias += attn_mask
 
-    if q_pad > 0 or kv_pad > 0:
-        attention_bias = jnp.pad(
-            attention_bias,
-            ((0, 0), (0, 0), (0, q_pad), (0, kv_pad)),
-            mode="constant",
-            constant_values=mask_value,
-        )
+        if q_pad > 0 or kv_pad > 0:
+            attention_bias = jnp.pad(
+                attention_bias,
+                ((0, 0), (0, 0), (0, q_pad), (0, kv_pad)),
+                mode="constant",
+                constant_values=mask_value,
+            )
 
-    # batch is always 1 here (vLLM's ViT flattens all images in a request
-    # into one sequence via cu_seqlens/segment_ids, no real batch axis), so
-    # it must stay replicated rather than sharded by the DP ('data') axis --
-    # sharding a size-1 axis by DP>1 fails divisibility under enable_dp_attention.
-    attn_fn = sharded_flash_attention(
-        mesh,
-        causal=is_causal,
-        sm_scale=scale,
-        vmem_limit_bytes=_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES,
-        use_attention_bias=True,
-        batch_axis=None)
-    out = attn_fn(query, key, value, attention_bias, None)
+        attn_fn = sharded_flash_attention(
+            mesh,
+            causal=is_causal,
+            sm_scale=scale,
+            vmem_limit_bytes=_VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES,
+            use_attention_bias=True,
+            batch_axis=None)
+        out = attn_fn(query, key, value, attention_bias, None)
 
     if q_pad > 0:
         out = out[:, :, :q_seq_len, :]
@@ -157,7 +186,6 @@ def vllm_vit_sdpa(
         q_seg = jnp.broadcast_to(q_seg, (batch, q_seg.shape[0]))
         kv_seg = jnp.broadcast_to(kv_seg, (batch, kv_seg.shape[0]))
 
-        from tpu_inference.kernels.flash_attention.kernel import SegmentIds
         seg_ids = SegmentIds(q=q_seg, kv=kv_seg)
     else:
         seg_ids = None

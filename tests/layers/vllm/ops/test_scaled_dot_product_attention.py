@@ -22,6 +22,7 @@ from jax.sharding import Mesh
 
 import tpu_inference.layers.common.attention_interface as attention_interface
 import tpu_inference.layers.vllm.ops.scaled_dot_product_attention as sdpa_ops
+from tpu_inference.kernels.flash_attention.kernel import mha_reference
 from tpu_inference.layers.vllm.ops.scaled_dot_product_attention import (
     scaled_dot_product_attention, vllm_vit_sdpa)
 
@@ -143,3 +144,100 @@ class TestVitVmemLimit:
         assert mock_sfa.call_count == 1
         assert mock_sfa.call_args.kwargs['vmem_limit_bytes'] == \
             sdpa_ops._VIT_FLASH_ATTENTION_VMEM_LIMIT_BYTES
+
+
+class TestSdpaSkipsBiasWithoutMask:
+    """Without a caller-supplied `attn_mask`, `scaled_dot_product_attention`
+    must not materialize a dense (batch, num_heads, q_seq_len, kv_seq_len)
+    float32 bias: that spends O(S^2) memory to express the O(S) 128-alignment
+    padding constraint, and OOMs on long vision/video sequences. Segment ids
+    carry the same information."""
+
+    def _capture_call(self, seq_len, **kwargs):
+        """Runs the op with the kernel mocked out, returning the mock."""
+        padded = seq_len + (128 - (seq_len % 128)) % 128
+        q = k = v = jnp.ones((1, 2, seq_len, 64), dtype=jnp.float32)
+        with mock.patch.object(sdpa_ops,
+                               'sharded_flash_attention') as mock_sfa:
+            mock_sfa.return_value = mock.MagicMock(
+                return_value=jnp.ones((1, 2, padded, 64), dtype=jnp.float32))
+            scaled_dot_product_attention(q, k, v, **kwargs)
+        return mock_sfa
+
+    def test_unaligned_seq_len_uses_segment_ids_not_bias(self):
+        # seq_len 100 -> q_pad = kv_pad = 28, so padding must be masked.
+        mock_sfa = self._capture_call(100)
+
+        assert mock_sfa.call_args.kwargs['use_attention_bias'] is False
+        args = mock_sfa.return_value.call_args[0]
+        assert len(args) == 4  # (q, k, v, segment_ids) -- no bias tensor
+        seg_ids = args[3]
+        q_seg = np.asarray(seg_ids.q[0])
+        kv_seg = np.asarray(seg_ids.kv[0])
+        assert q_seg.shape == (128, )
+        # Real tokens share segment 0; the pad tail gets its own segment, so
+        # real queries cannot attend to padded keys.
+        np.testing.assert_array_equal(q_seg[:100], np.zeros(100))
+        np.testing.assert_array_equal(q_seg[100:], np.ones(28))
+        np.testing.assert_array_equal(kv_seg, q_seg)
+
+    def test_aligned_seq_len_needs_no_segment_ids(self):
+        # seq_len 128 needs no padding, so there is nothing to mask.
+        mock_sfa = self._capture_call(128)
+
+        assert mock_sfa.call_args.kwargs['use_attention_bias'] is False
+        assert mock_sfa.return_value.call_args[0][3] is None
+
+    def test_explicit_attn_mask_still_uses_bias(self):
+        mock_sfa = self._capture_call(128,
+                                      attn_mask=jnp.zeros((1, 2, 128, 128),
+                                                          dtype=jnp.float32))
+
+        assert mock_sfa.call_args.kwargs['use_attention_bias'] is True
+        args = mock_sfa.return_value.call_args[0]
+        assert len(args) == 5  # (q, k, v, attention_bias, segment_ids)
+        assert args[3].shape == (1, 2, 128, 128)
+        assert args[4] is None
+
+    def test_segment_ids_match_bias_numerically(self):
+        """The segment-id path must produce the same attention as the bias it
+        replaces. An all-zero `attn_mask` is semantically 'no mask', so the two
+        paths must agree."""
+
+        def mock_flash_attention(q,
+                                 k,
+                                 v,
+                                 ab=None,
+                                 segment_ids=None,
+                                 sm_scale=1.0,
+                                 causal=False,
+                                 **kwargs):
+            return mha_reference(q,
+                                 k,
+                                 v,
+                                 ab,
+                                 segment_ids,
+                                 causal=causal,
+                                 sm_scale=sm_scale)
+
+        key = jax.random.PRNGKey(42)
+        q, k, v = jax.random.normal(key, (3, 1, 2, 100, 64), dtype=jnp.float32)
+        mesh = Mesh(
+            np.array(jax.devices()[:1]).reshape(1, 1), ('data', 'model'))
+
+        # The real Pallas kernel calls pltpu.get_tpu_info(), which rejects a
+        # CPU device kind, so swap in the reference implementation.
+        with jax.set_mesh(mesh), mock.patch.object(
+                attention_interface,
+                'flash_attention',
+                side_effect=mock_flash_attention):
+            out_seg = scaled_dot_product_attention(q, k, v, attn_mask=None)
+            out_bias = scaled_dot_product_attention(q,
+                                                    k,
+                                                    v,
+                                                    attn_mask=jnp.zeros(
+                                                        (1, 2, 100, 100),
+                                                        dtype=jnp.float32))
+
+        assert out_seg.shape == (1, 2, 100, 64)
+        np.testing.assert_allclose(out_seg, out_bias, rtol=1e-5, atol=1e-5)
