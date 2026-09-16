@@ -12,23 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest import mock
+
+# Configure 8 simulated CPU devices for multi-device mesh testing before importing JAX
+os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=8")
 
 # /home/pooyam/tpu_inference/tests/models/jax/layers/test_sampling.py
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference import envs
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  ShardingAxisName,
+                                                  ShardingAxisNameBase)
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _can_sample_distributed, _merge_topk_candidates, compute_logprobs,
-    compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
-    sample)
+    _can_sample_distributed, _distributed_sampling_fits,
+    _merge_topk_candidates, compute_logprobs, compute_prompt_logprobs,
+    distributed_sampling_allowed, gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -42,6 +49,10 @@ class TestSampling:
         assert distributed_sampling_allowed(True, "raw_logits")
         assert not distributed_sampling_allowed(True, "processed_logprobs")
         assert not distributed_sampling_allowed(True, "processed_logits")
+        assert not distributed_sampling_allowed(
+            False, "raw_logits", is_vocab_sharded=False)
+        assert not distributed_sampling_allowed(
+            True, "raw_logits", is_vocab_sharded=False)
 
     def test_distributed_sampling_requires_positive_top_p(self):
         metadata = TPUSupportedSamplingMetadata(
@@ -432,3 +443,102 @@ class TestComputePromptLogprobs:
         assert snap.start_idx == 0
         assert snap.num_logits == 2
         assert snap.is_last_chunk is False
+
+
+class TestDistributedSamplingSharding:
+
+    @pytest.fixture(autouse=True)
+    def _use_base_axes(self):
+        # The affected deployments run with the 7D axis names.
+        ShardingAxisName.override(
+            LOGITS_BATCH=ShardingAxisNameBase.LOGITS_BATCH,
+            LOGITS_VOCAB=ShardingAxisNameBase.LOGITS_VOCAB,
+        )
+        yield
+        ShardingAxisName.reset()
+
+    def test_logits_sharding_enums(self):
+        """Verify LOGITS_BATCH and LOGITS_VOCAB do not have conflicting axes."""
+        batch_axes = set(ShardingAxisNameBase.LOGITS_BATCH)
+        vocab_axes = set(ShardingAxisNameBase.LOGITS_VOCAB)
+        assert not (batch_axes & vocab_axes), (
+            f"Overlapping axes found between LOGITS_BATCH and LOGITS_VOCAB: {batch_axes & vocab_axes}"
+        )
+
+    def test_unpartitioned_vocab_logits_does_not_fit(self):
+        """b/562098990: When vocab is unpartitioned (TP=1 on MoE mesh), distributed sampling must not fit."""
+        devices = jax.devices()
+        if len(devices) < 8:
+            pytest.skip(f"needs 8 devices, found {len(devices)}")
+        # Qwen3.5-35B-A3B: dp attention, tensor_parallelism=1, EP=8.
+        sizes = {"attn_dp_expert": 4, "expert": 2}
+        shape = tuple(sizes.get(axis, 1) for axis in MESH_AXIS_NAMES)
+        mesh = Mesh(np.array(devices[:8]).reshape(shape), MESH_AXIS_NAMES)
+
+        dummy_logits = jax.ShapeDtypeStruct(
+            (256, 151936),
+            jnp.float32,
+            sharding=jax.sharding.NamedSharding(
+                mesh,
+                jax.sharding.PartitionSpec(ShardingAxisName.LOGITS_BATCH,
+                                           None)),
+        )
+        assert _distributed_sampling_fits(mesh, 151936, dummy_logits) is False
+
+    def test_partitioned_vocab_logits_fits(self):
+        """When vocab is partitioned (TP=8), distributed sampling fits."""
+        devices = jax.devices()
+        if len(devices) < 8:
+            pytest.skip(f"needs 8 devices, found {len(devices)}")
+        sizes = {"model": 8}
+        shape = tuple(sizes.get(axis, 1) for axis in MESH_AXIS_NAMES)
+        mesh = Mesh(np.array(devices[:8]).reshape(shape), MESH_AXIS_NAMES)
+
+        dummy_logits = jax.ShapeDtypeStruct(
+            (256, 151936),
+            jnp.float32,
+            sharding=jax.sharding.NamedSharding(
+                mesh,
+                jax.sharding.PartitionSpec(None,
+                                           ShardingAxisName.LOGITS_VOCAB)),
+        )
+        assert _distributed_sampling_fits(mesh, 151936, dummy_logits) is True
+
+    def test_compiled_sample_unpartitioned_vocab_moe_mesh(self):
+        """Regression test for b/562098990 across the jax.jit boundary on an 8-device MoE mesh."""
+        devices = jax.devices()
+        if len(devices) < 8:
+            pytest.skip(f"needs 8 devices, found {len(devices)}")
+        # Qwen3.5-35B-A3B: dp attention, tensor_parallelism=1, EP=8.
+        sizes = {"attn_dp_expert": 4, "expert": 2}
+        shape = tuple(sizes.get(axis, 1) for axis in MESH_AXIS_NAMES)
+        mesh = Mesh(np.array(devices[:8]).reshape(shape), MESH_AXIS_NAMES)
+
+        logits = jax.device_put(
+            jnp.ones((2, 1024), dtype=jnp.float32),
+            jax.sharding.NamedSharding(
+                mesh,
+                jax.sharding.PartitionSpec(ShardingAxisName.LOGITS_BATCH,
+                                           None)),
+        )
+        metadata = TPUSupportedSamplingMetadata(
+            temperature=jnp.array([1.0, 1.0], dtype=jnp.float32),
+            top_k=jnp.array([20, 20], dtype=jnp.int32),
+            top_p=jnp.array([0.9, 0.9], dtype=jnp.float32),
+            do_sampling=True,
+            logprobs=False,
+        )
+        allow_distributed_sampling = distributed_sampling_allowed(
+            metadata.logprobs, "raw", is_vocab_sharded=False)
+        assert allow_distributed_sampling is False
+
+        # sample is decorated with @jax.jit; compile and execute
+        tokens, processed_logits = sample(
+            jax.random.PRNGKey(0),
+            mesh,
+            logits,
+            metadata,
+            allow_distributed_sampling=allow_distributed_sampling,
+        )
+        assert tokens.shape == (2, )
+        assert processed_logits.shape == (2, 1024)

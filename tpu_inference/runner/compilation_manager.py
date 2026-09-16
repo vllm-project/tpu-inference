@@ -985,10 +985,18 @@ class CompilationManager:
             # `logits_sharding` need to be consistent with
             # compute_logits_fn's output sharding to avoid serving
             # time re-compilation.
+            tp_size = 1
+            if getattr(self.runner,
+                       "vllm_config", None) is not None and getattr(
+                           self.runner.vllm_config, "parallel_config",
+                           None) is not None:
+                tp_size = self.runner.vllm_config.parallel_config.tensor_parallel_size
+            elif hasattr(self.runner, 'mesh') and self.runner.mesh is not None:
+                tp_size = self.runner.mesh.shape.get(ShardingAxisName.MODEL, 1)
+            vocab_sharding = ShardingAxisName.LOGITS_VOCAB if tp_size > 1 else None
             logits_sharding = NamedSharding(
                 self.runner.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))
+                PartitionSpec(ShardingAxisName.LOGITS_BATCH, vocab_sharding))
             # Similarly, `sampling_metadata_sharding` need to consistent
             # with runtime sampling_metadata sharding to the sample
             # function.
@@ -1031,7 +1039,9 @@ class CompilationManager:
                         do_sampling=do_sampling,
                         logprobs=logprobs)
                     allow_distributed_sampling = distributed_sampling_allowed(
-                        logprobs, self.runner.model_config.logprobs_mode)
+                        logprobs,
+                        self.runner.model_config.logprobs_mode,
+                        is_vocab_sharded=(vocab_sharding is not None))
                     self._run_compilation(
                         f"worker{self.runner.rank} sample",
                         sample,
