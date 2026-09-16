@@ -111,7 +111,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant = scheme.get("input_activations")
             if self._ct._is_fp8_w8a8(weight_quant, input_quant):
                 return Fp8FusedMoEMethod(_weight_block_size(weight_quant))
-            return UnquantizedFusedMoEMethod(layer)
+            raise NotImplementedError(
+                f"compressed-tensors scheme for layer '{prefix}' is not yet "
+                "supported in the JAX path.")
         if not isinstance(layer, JaxEinsum):
             return None
 
