@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import csv
 import os
 from pathlib import Path
@@ -21,7 +22,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 # Configuration Constants
 MODEL_LIST_KEY = "model-list"
@@ -39,7 +40,6 @@ PARALLELISM_STAGES = [
 QUANT_COLS = ["w16a16", "w8a8", "w8a16", "w4a4", "w4a8", "w4a16"]
 QUANT_COLS_LIST = QUANT_COLS
 
-# Domain validation sets (kept separate for domain clarity)
 MODEL_VALID_PASSES = {"✅ Passing", "⚪ N/A", "❓ Untested", "not enough HBM"}
 FEATURE_VALID_PASSES = {
     "✅ Passing", "⚪ N/A", "❓ Untested",
@@ -75,6 +75,14 @@ CATEGORY_CONFIG: Dict[str, Tuple[str, List[str]]] = {
 }
 DEFAULT_CATEGORY_CONFIG = ("Feature,CorrectnessTest,PerformanceTest", FEATURE_STAGES)
 
+KERNEL_NAME_SUBSTITUTIONS = {
+    "generic ragged paged attention v3": "generic ragged paged<br>attention v3*",
+    "generic_ragged_paged_attention_v3": "generic ragged paged<br>attention v3*",
+    "mla": "mla*",
+    "ragged paged attention v3 head_dim 64": "ragged paged attention v3<br>head_dim 64*",
+    "ragged_paged_attention_v3_head_dim_64": "generic ragged paged<br>attention v3 (head_dim=64)*",
+}
+
 
 def get_tpu_generation(key: str) -> str:
     return TPU_GENERATIONS.get(key, "N/A")
@@ -93,27 +101,62 @@ def version_sort_key(s: str) -> List:
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
 
 
-# Alias for backward compatibility
 natural_sort_key = version_sort_key
 
 
 class BuildkiteClient:
-    """Buildkite Agent CLI wrapper with support for mocking/testing."""
+    """Buildkite Agent CLI wrapper with in-memory caching and parallel pre-fetching."""
 
-    def __init__(self, agent_cmd: str = "buildkite-agent"):
+    def __init__(self, agent_cmd: str = "buildkite-agent", max_workers: int = 16):
         self.agent_cmd = agent_cmd
+        self.max_workers = max_workers
+        self._cache: Dict[str, str] = {}
+        self._existing_keys: Optional[Set[str]] = None
 
-    def get_metadata(self, key: str, default: str = "") -> str:
+    def get_existing_keys(self) -> Optional[Set[str]]:
+        """Discovers all existing metadata keys in a single CLI call."""
+        if self._existing_keys is None:
+            try:
+                res = subprocess.run([self.agent_cmd, "meta-data", "keys"], capture_output=True, text=True, check=False)
+                if res.returncode == 0:
+                    self._existing_keys = {line.strip() for line in res.stdout.splitlines() if line.strip()}
+            except FileNotFoundError:
+                pass
+        return self._existing_keys
+
+    def prefetch_metadata(self, keys: Iterable[str]) -> None:
+        """Prefetches metadata keys concurrently, skipping keys known not to exist."""
+        existing = self.get_existing_keys()
+        needed = [k for k in set(keys) if k not in self._cache and (existing is None or k in existing)]
+        if not needed:
+            return
+
+        def _fetch(key: str) -> Tuple[str, str]:
+            return key, self._fetch_cli(key, default="")
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(self.max_workers, len(needed))) as executor:
+            for key, val in executor.map(_fetch, needed):
+                self._cache[key] = val
+
+    def _fetch_cli(self, key: str, default: str = "") -> str:
         try:
-            res = subprocess.run(
-                [self.agent_cmd, "meta-data", "get", key, "--default", default],
-                capture_output=True, text=True, check=False
-            )
+            res = subprocess.run([self.agent_cmd, "meta-data", "get", key, "--default", default], capture_output=True, text=True, check=False)
             return res.stdout.strip()
         except FileNotFoundError:
             return default
 
+    def get_metadata(self, key: str, default: str = "") -> str:
+        if key in self._cache:
+            return self._cache[key] or default
+        existing = self.get_existing_keys()
+        if existing is not None and key not in existing:
+            return default
+        val = self._fetch_cli(key, default)
+        self._cache[key] = val
+        return val
+
     def set_metadata(self, key: str, value: str) -> None:
+        self._cache[key] = value
         try:
             subprocess.run([self.agent_cmd, "meta-data", "set", key, value], check=False, capture_output=True)
         except FileNotFoundError:
@@ -136,20 +179,19 @@ def upload_matrix_csv(csv_file: Path, title: str, bk: BuildkiteClient) -> None:
 
 
 def write_csv(path: Path, header: str, rows: List[List[str]]) -> None:
-    rows.sort(key=lambda r: version_sort_key(r[0]))
     with open(path, "w", newline="", encoding="utf-8") as f:
         f.write(header + "\n" + "".join(",".join(r) + "\n" for r in rows))
 
 
-def parse_default_features(default_file: Path, bk: BuildkiteClient, tpu_prefix: str) -> List[str]:
-    """Reads default features and sets category metadata."""
+def load_default_features(default_file: Path, bk: BuildkiteClient, tpu_prefix: str) -> Dict[str, str]:
+    """Reads default features from file, caches categories, and sets Buildkite metadata for external tools."""
     if not default_file.is_file():
         print(f"Warning: Default features file not found at {default_file}")
-        return []
+        return {}
 
     print("--- Loading Feature Categories from file ---")
     regex = re.compile(r"^(.+)\s+\((.+)\)$")
-    feature_names: List[str] = []
+    feature_categories: Dict[str, str] = {}
     with open(default_file, "r", encoding="utf-8") as f:
         for line in f:
             clean = line.strip()
@@ -157,18 +199,30 @@ def parse_default_features(default_file: Path, bk: BuildkiteClient, tpu_prefix: 
                 continue
             m = regex.match(clean)
             name, cat = (m.group(1).strip(), m.group(2).strip()) if m else (clean, "feature support matrix")
-            feature_names.append(name)
+            feature_categories[name] = cat
             print(f"Setting category for '{name}': {cat}")
             bk.set_metadata(f"{tpu_prefix}{name}_category", cat)
-    return feature_names
+    return feature_categories
 
 
-def process_models(model_list: List[str], bk: BuildkiteClient, tpu_dir: Path, tpu_prefix: str) -> Tuple[List[Path], bool]:
-    """Builds and writes model support matrix CSV."""
+def collect_metadata_keys(models: List[str], metadata_features: List[str], tpu_prefix: str) -> List[str]:
+    """Collects all metadata keys needed by models and features for parallel pre-fetching."""
+    stages = (
+        "CorrectnessTest", "PerformanceTest",
+        "Single-Host CorrectnessTest", "Single-Host PerformanceTest",
+        "Multi-Host CorrectnessTest", "Multi-Host PerformanceTest",
+    )
+    keys = [f"{tpu_prefix}{m}_category" for m in models] + [f"{tpu_prefix}{m}:{s}" for m in models for s in MODEL_STAGES[1:]]
+    keys += [f"{tpu_prefix}{f}_category" for f in metadata_features] + [f"{tpu_prefix}{f}:{s}" for f in metadata_features for s in stages]
+    return keys
+
+
+def build_model_matrix(models: List[str], bk: BuildkiteClient, tpu_prefix: str) -> Tuple[List[List[str]], bool]:
+    """Builds model support matrix rows and determines if any test failed."""
     rows: List[List[str]] = []
     any_failed = False
 
-    for model in filter(None, model_list):
+    for model in filter(None, models):
         category = bk.get_metadata(f"{tpu_prefix}{model}_category", default="text-only")
         row = [f'"{model}"', MODEL_TYPE_MAP.get(category, "Text")]
         for stage in MODEL_STAGES[1:]:
@@ -178,71 +232,71 @@ def process_models(model_list: List[str], bk: BuildkiteClient, tpu_dir: Path, tp
                 any_failed = True
         rows.append(row)
 
-    if not rows:
-        return [], any_failed
-
     rows.sort(key=lambda r: (r[1], r[0]))
-    csv_file = tpu_dir / "model_support_matrix.csv"
-    with open(csv_file, "w", newline="", encoding="utf-8") as f:
-        f.write(",".join(["Model"] + MODEL_STAGES) + "\n" + "".join(",".join(r) + "\n" for r in rows))
-    return [csv_file], any_failed
+    return rows, any_failed
 
 
-def process_features(
-    mode: str,
-    feature_list: List[str],
+def resolve_feature_cell(
+    feature: str, stage: str, is_quant: bool, is_default: bool, bk: BuildkiteClient, tpu_prefix: str
+) -> str:
+    """Resolves a single cell status for a feature stage."""
+    if is_quant and stage == "RecommendedTPUGenerations":
+        return get_tpu_generation(feature)
+    if is_quant and stage == "QuantizationMethods":
+        return get_quantization_method(feature)
+    if is_default:
+        return "✅ Passing"
+    raw_res = bk.get_metadata(f"{tpu_prefix}{feature}:{stage}", default="❓ Untested")
+    return format_feature_status(raw_res)
+
+
+def build_feature_matrices(
+    default_features: Dict[str, str],
+    metadata_features: List[str],
     bk: BuildkiteClient,
-    tpu_dir: Path,
     tpu_prefix: str,
-    categorized_rows: Optional[Dict[Path, Tuple[str, List[List[str]]]]] = None,
-    write_to_disk: bool = True,
-) -> Tuple[Dict[Path, Tuple[str, List[List[str]]]], bool]:
+    tpu_dir: Path,
+) -> Tuple[Dict[str, Tuple[str, List[List[str]]]], bool]:
     """Builds feature support matrices grouped by category."""
-    if categorized_rows is None:
-        categorized_rows = {}
+    categorized: Dict[str, Tuple[str, List[List[str]]]] = {}
     any_failed = False
 
-    for feature in filter(None, feature_list):
-        category = bk.get_metadata(f"{tpu_prefix}{feature}_category", default="feature support matrix")
-        if not category:
-            continue
-
-        csv_file = tpu_dir / f"{category.replace(' ', '_')}.csv"
+    def _add_feature(feature: str, category: str, is_default: bool):
+        nonlocal any_failed
         header, stages = CATEGORY_CONFIG.get(category, DEFAULT_CATEGORY_CONFIG)
         is_quant = category == "quantization support matrix"
 
-        if csv_file not in categorized_rows:
+        if category not in categorized:
             existing = []
+            csv_file = tpu_dir / f"{category.replace(' ', '_')}.csv"
             if csv_file.is_file():
                 with open(csv_file, "r", encoding="utf-8") as f_ex:
                     reader = csv.reader(f_ex)
                     next(reader, None)
                     existing = [[f'"{r[0]}"' if not r[0].startswith('"') else r[0]] + r[1:] for r in reader if r]
-            categorized_rows[csv_file] = (header, existing)
+            categorized[category] = (header, existing)
 
         row = [f'"{feature}"']
         for stage in stages:
-            if is_quant and stage == "RecommendedTPUGenerations":
-                result = get_tpu_generation(feature)
-            elif is_quant and stage == "QuantizationMethods":
-                result = get_quantization_method(feature)
-            elif mode == "DEFAULT":
-                result = "✅ Passing"
-            else:
-                raw_res = bk.get_metadata(f"{tpu_prefix}{feature}:{stage}", default="❓ Untested")
-                result = format_feature_status(raw_res)
-
+            result = resolve_feature_cell(feature, stage, is_quant, is_default, bk, tpu_prefix)
             row.append(result)
             if stage not in ("QuantizationMethods", "RecommendedTPUGenerations") and result not in FEATURE_VALID_PASSES:
                 any_failed = True
+        categorized[category][1].append(row)
 
-        categorized_rows[csv_file][1].append(row)
+    for feature, category in default_features.items():
+        if feature:
+            _add_feature(feature, category, is_default=True)
 
-    if write_to_disk:
-        for csv_file, (header, rows) in categorized_rows.items():
-            write_csv(csv_file, header, rows)
+    for feature in filter(None, metadata_features):
+        category = bk.get_metadata(f"{tpu_prefix}{feature}_category", default="feature support matrix")
+        if category:
+            _add_feature(feature, category, is_default=False)
 
-    return categorized_rows, any_failed
+    for cat, (header, rows) in categorized.items():
+        rows.sort(key=lambda r: version_sort_key(r[0]))
+
+    return categorized, any_failed
 
 
 def process_kernel_matrix_to_pivot(tpu_dir: Path, bk: BuildkiteClient) -> Optional[Path]:
@@ -278,18 +332,10 @@ def process_kernel_matrix_to_pivot(tpu_dir: Path, bk: BuildkiteClient) -> Option
             if base_kernel not in kernel_order:
                 kernel_order.append(base_kernel)
 
-    subs = {
-        "generic ragged paged attention v3": "generic ragged paged<br>attention v3*",
-        "generic_ragged_paged_attention_v3": "generic ragged paged<br>attention v3*",
-        "mla": "mla*",
-        "ragged paged attention v3 head_dim 64": "ragged paged attention v3<br>head_dim 64*",
-        "ragged_paged_attention_v3_head_dim_64": "generic ragged paged<br>attention v3 (head_dim=64)*",
-    }
-
     with open(output_file, "w", newline="", encoding="utf-8") as f:
         f.write(header + "\n")
         for k in kernel_order:
-            row_items = [f'"{subs.get(k, k)}"']
+            row_items = [f'"{KERNEL_NAME_SUBSTITUTIONS.get(k, k)}"']
             for q in QUANT_COLS:
                 corr, perf = matrix.get((k, q), ("❓ Untested", "❓ Untested"))
                 row_items.append(f"{corr},{perf}" if corr or perf else "❓ Untested,❓ Untested")
@@ -336,39 +382,41 @@ def run_pipeline(bk: BuildkiteClient, features_file: Path = DEFAULT_FEATURES_FIL
 
     models = [m.strip() for m in bk.get_metadata(MODEL_LIST_KEY, default="").splitlines() if m.strip()]
     metadata_features = [f.strip() for f in bk.get_metadata(FEATURE_LIST_KEY, default="").splitlines() if f.strip()]
-    default_features = parse_default_features(features_file, bk, tpu_prefix)
+    default_features = load_default_features(features_file, bk, tpu_prefix)
 
-    model_csv_files, models_failed = process_models(models, bk, tpu_dir, tpu_prefix) if models else ([], False)
-    if models_failed:
-        any_failed = True
+    # Pre-fetch all metadata keys in parallel across worker threads
+    keys_to_prefetch = collect_metadata_keys(models, metadata_features, tpu_prefix)
+    bk.prefetch_metadata(keys_to_prefetch)
 
-    all_feature_csvs: Dict[Path, Tuple[str, List[List[str]]]] = {}
-    if default_features:
-        _, def_failed = process_features("DEFAULT", default_features, bk, tpu_dir, tpu_prefix, all_feature_csvs, False)
-        if def_failed:
+    # 1. Models
+    if models:
+        model_rows, models_failed = build_model_matrix(models, bk, tpu_prefix)
+        if models_failed:
+            any_failed = True
+        model_csv = tpu_dir / "model_support_matrix.csv"
+        write_csv(model_csv, ",".join(["Model"] + MODEL_STAGES), model_rows)
+        upload_matrix_csv(model_csv, "Model Matrix", bk)
+
+    # 2. Features
+    if default_features or metadata_features:
+        categorized, features_failed = build_feature_matrices(default_features, metadata_features, bk, tpu_prefix, tpu_dir)
+        if features_failed:
             any_failed = True
 
-    if metadata_features:
-        _, meta_failed = process_features("METADATA", metadata_features, bk, tpu_dir, tpu_prefix, all_feature_csvs, False)
-        if meta_failed:
-            any_failed = True
+        for category, (header, rows) in categorized.items():
+            csv_file = tpu_dir / f"{category.replace(' ', '_')}.csv"
+            write_csv(csv_file, header, rows)
+            if not csv_file.name.endswith("kernel_support_matrix_microbenchmarks.csv"):
+                upload_matrix_csv(csv_file, "Feature Matrix", bk)
+            else:
+                print(f"Skipping direct upload for {csv_file} (will be pivoted later).")
 
-    for csv_file, (header, rows) in all_feature_csvs.items():
-        write_csv(csv_file, header, rows)
-
-    bk.set_metadata(f"{tpu_prefix}_CI_TESTS_FAILED", str(any_failed).lower())
-
-    for cf in model_csv_files:
-        upload_matrix_csv(cf, "Model Matrix", bk)
-
-    for cf in all_feature_csvs:
-        if not cf.name.endswith("kernel_support_matrix_microbenchmarks.csv"):
-            upload_matrix_csv(cf, "Feature Matrix", bk)
-        else:
-            print(f"Skipping direct upload for {cf} (will be pivoted later).")
-
+    # 3. Kernel Microbenchmarks Pivot & Tar Packaging
     process_kernel_matrix_to_pivot(tpu_dir, bk)
     package_support_matrices_tar(tpu_dir, bk)
+
+    # 4. Status Notification Key
+    bk.set_metadata(f"{tpu_prefix}_CI_TESTS_FAILED", str(any_failed).lower())
     print("Reports uploaded successfully.")
 
     if cleanup and tpu_dir.is_dir():
