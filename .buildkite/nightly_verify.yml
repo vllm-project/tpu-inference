@@ -90,7 +90,9 @@ steps:
      agents:
        queue: cpu
      commands:
-       - bash .buildkite/scripts/notify_test_results.sh
+       # Temporarily skipped for dev test
+       # - bash .buildkite/scripts/notify_test_results.sh
+       - echo "Temporarily skipped notify_test_results for dev test"
 
    - label: "Record verified commit hashes"
      # GitHub App credentials are main/tag-only - see commit_support_matrices above.

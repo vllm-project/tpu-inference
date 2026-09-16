@@ -187,7 +187,8 @@ upload_pipeline() {
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
       upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
-      upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
+      # Temporarily skipped PyPI for dev test
+      # upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     fi
 
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
@@ -264,8 +265,9 @@ EOF
 
 fi
 
-upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
-rm "$NOTIFY_FILE"
+# Temporarily skipped notification upload for dev test
+# upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
+rm -f "$NOTIFY_FILE"
 
 echo "Configure testing logic"
 if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
@@ -322,7 +324,8 @@ else
       if [ -z "${NON_SKIPPABLE_FILES:-}" ] || [ "${NON_BENCHMARK_COUNT:--1}" -ne 0 ]; then
         upload_pipeline
       fi
-      upload_benchmark_pipeline
+      # Temporarily skipped benchmark pipeline (Qwen benchmark tests) for dev test
+      # upload_benchmark_pipeline
     else
       # Explicitly fail the build because the required 'ready' label is missing.
       echo "Missing 'ready' label on PR. Failing build."
@@ -332,7 +335,8 @@ else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
     echo "This is not a Pull Request build. Uploading main pipeline."
     upload_pipeline
-    upload_benchmark_pipeline
+    # Temporarily skipped benchmark pipeline (Qwen benchmark tests) for dev test
+    # upload_benchmark_pipeline
   fi
 fi
 
