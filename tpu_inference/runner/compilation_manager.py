@@ -33,7 +33,7 @@ from tpu_inference.layers.common.attention_metadata import (
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs,
-    distributed_sampling_allowed, sample)
+    distributed_sampling_allowed, logprobs_use_processed_logits, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -1081,11 +1081,20 @@ class CompilationManager:
     def _precompile_gather_logprobs(self) -> None:
         logger.info("Compiling gather_logprobs with different input shapes.")
         hsize = self.runner.vocab_size
+        # Match the sharding of the logits the runner actually passes in.
+        # Processed modes feed sample()'s output, which sample_full_vocab
+        # constrains to P(ATTN_DATA, None); raw modes feed the compute_logits
+        # output, which stays P(MLP_DATA, MLP_TENSOR). Getting this wrong does
+        # not fail loudly -- it just misses the jit cache and recompiles the
+        # full-vocab log_softmax/gather during serving (seconds per bucket).
+        if logprobs_use_processed_logits(
+                self.runner.model_config.logprobs_mode):
+            logits_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, None)
+        else:
+            logits_spec = PartitionSpec(ShardingAxisName.MLP_DATA,
+                                        ShardingAxisName.MLP_TENSOR)
         for num_reqs in self.runner.num_reqs_paddings:
-            logits_sharding = NamedSharding(
-                self.runner.mesh,
-                PartitionSpec(ShardingAxisName.MLP_DATA,
-                              ShardingAxisName.MLP_TENSOR))
+            logits_sharding = NamedSharding(self.runner.mesh, logits_spec)
             token_ids_sharding = NamedSharding(self.runner.mesh,
                                                PartitionSpec())
             logits = jax.ShapeDtypeStruct((num_reqs, hsize),
