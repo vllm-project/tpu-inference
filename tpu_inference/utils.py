@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import itertools
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -130,7 +131,14 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
         # MemoryStats is only supported for addressable PjRt devices.
         # Assume all the devices have similar memory usage for now.
         # TODO(ranlihao): find a proper way to get the memory usage of each device.
-        for device in devices:
+        #
+        # `devices` can contain no device addressable from this process at all:
+        # it is the set this worker's shard is placed on, which under expert
+        # parallelism need not intersect the process's own chips. Falling back
+        # to the local devices keeps the existing "all devices have similar
+        # usage" approximation instead of returning an empty list, which
+        # silently becomes a 0-byte limit in determine_available_memory.
+        for device in itertools.chain(devices, jax.local_devices()):
             try:
                 hbm_used = device.memory_stats()["bytes_in_use"]
                 hbm_limit = device.memory_stats()["bytes_limit"]
@@ -143,6 +151,11 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                 logger.warning(
                     "Failed to get memory stats for device %s: %s. ", device,
                     e)
+        else:
+            raise RuntimeError(
+                "Could not read memory stats from any of the "
+                f"{len(devices)} target devices or the "
+                f"{len(jax.local_devices())} devices local to this process.")
     else:
         for device in devices:
             hbm_used = device.memory_stats()["bytes_in_use"]
