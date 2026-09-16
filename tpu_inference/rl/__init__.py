@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tpu_inference.rl.vllm_sampler import RLVllmSampler
+from tpu_inference.rl.raiden_worker_sync import RaidenWorkerSync
 
 __all__ = [
-    "RLVllmSampler",
+    "RaidenWorkerSync",
 ]
