@@ -770,6 +770,7 @@ spec:
               {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
               {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
               {{- end }}
+          spec:
             serviceAccountName: {{ .Values.serviceAccount }}
             {{- if .Values.imagePullSecrets }}
             imagePullSecrets:
@@ -994,6 +995,7 @@ spec:
           metadata:
             labels:
               declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+          spec:
             serviceAccountName: {{ .Values.serviceAccount }}
             {{- if .Values.imagePullSecrets }}
             imagePullSecrets:
