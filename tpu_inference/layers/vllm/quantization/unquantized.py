@@ -462,25 +462,40 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             bias_jax = jax_view(
                 bias) if bias is not None and not layer.skip_bias_add else None
             if self.linear_config.fuse_matmuls:
-                weight_jax = jax_view(layer.weight)
-                out_jax = self._apply_fused(x_jax, weight_jax, bias_jax)
-                out: torch.Tensor = torch_view(out_jax)
+                out_jax = self._matmul_fused(layer, x_jax, bias_jax)
             else:
                 assert isinstance(layer.weight, torch.nn.ParameterList)
-                # jax_view cannot handle ParameterList directly, so explicitly
-                # convert to list.
-                weight_jax = [jax_view(w) for w in layer.weight]
                 if bias_jax is not None:
                     assert isinstance(layer.bias, torch.nn.ParameterList)
+                    # jax_view cannot handle ParameterList directly, so
+                    # explicitly convert to a list.
                     bias_jax = [jax_view(b) for b in layer.bias]
-                out_jax = self._apply_split(x_jax, weight_jax, bias_jax)
-                out: torch.Tensor = torch_view(out_jax)
+                out_jax = self._matmul_split(layer, x_jax, bias_jax)
+            out: torch.Tensor = torch_view(out_jax)
 
             if out_sharding := self.linear_config.get_output_sharding(out):
                 out.shard_(NamedSharding(self.linear_config.mesh,
                                          out_sharding))
 
         return out
+
+    def _matmul_fused(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: jax.Array | None) -> jax.Array:
+        """The layer's matmul, over the one fused weight.
+
+        This and `_matmul_split` are the only part of `apply` that depends on
+        how the weight is stored, so they are the pair a subclass overrides --
+        always both, since which `_apply_*` they reach comes from the
+        subclass's MRO.
+        """
+        return self._apply_fused(x_jax, jax_view(layer.weight), bias_jax)
+
+    def _matmul_split(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: Sequence[jax.Array] | None) -> jax.Array:
+        # jax_view cannot handle ParameterList directly, so explicitly convert
+        # to a list.
+        return self._apply_split(x_jax, [jax_view(w) for w in layer.weight],
+                                 bias_jax)
 
 
 class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
@@ -489,10 +504,11 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
 
     Selected by BF16_LINEAR_REQUANTIZE_PATTERNS. The weight arrives in the
     checkpoint dtype and is loaded exactly as the unquantized path loads it, so
-    everything about weight loading and sharding is inherited -- the one step
-    that differs is `_build_linear_weights`, which quantizes the weight on its
-    way to the device. The matmul then comes from the fp8 path rather than the
-    unquantized one.
+    everything about weight loading, sharding and `apply` is inherited. Only
+    three steps differ: `_build_linear_weights` quantizes the weight on its way
+    to the device, and `_matmul_fused` / `_matmul_split` pass the resulting
+    scale along, which is what reaches the fp8 kernels rather than the
+    unquantized matmul.
 
     The scale is per output channel by default: a single value per column of the
     [in, out] weight, which stays valid under both column-parallel sharding (the
@@ -588,46 +604,22 @@ class VllmQuantizedBf16LinearMethod(common_fp8.Fp8LinearMethod,
 
         return quantize_linear_weights(weight, bias)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert isinstance(layer, vllm_linear.LinearBase)
+    def _matmul_fused(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: jax.Array | None) -> jax.Array:
+        return self._apply_fused(x_jax, jax_view(layer.weight),
+                                 jax_view(layer.weight_scale), bias_jax)
 
-        with jax.named_scope(layer._get_name()):
-            if in_sharding := self.linear_config.get_input_sharding(x):
-                x.shard_(NamedSharding(self.linear_config.mesh, in_sharding))
-
-            x_jax = jax_view(x)
-            bias_jax = jax_view(
-                bias) if bias is not None and not layer.skip_bias_add else None
-            if self.linear_config.fuse_matmuls:
-                out_jax = self._apply_fused(x_jax, jax_view(layer.weight),
-                                            jax_view(layer.weight_scale),
-                                            bias_jax)
-            else:
-                assert isinstance(layer.weight, torch.nn.ParameterList)
-                assert isinstance(layer.weight_scale, torch.nn.ParameterList)
-                # jax_view cannot handle ParameterList directly, so explicitly
-                # convert to list.
-                weight_and_scale = [
-                    (jax_view(w), jax_view(s))
-                    for w, s in zip(layer.weight, layer.weight_scale)
-                ]
-                if bias_jax is not None:
-                    assert isinstance(layer.bias, torch.nn.ParameterList)
-                    bias_jax = [jax_view(b) for b in layer.bias]
-                out_jax = self._apply_split(x_jax,
-                                            weight_and_scale,
-                                            bias_jax,
-                                            mesh=self.linear_config.mesh)
-            out: torch.Tensor = torch_view(out_jax)
-
-            if out_sharding := self.linear_config.get_output_sharding(out):
-                out.shard_(NamedSharding(self.linear_config.mesh,
-                                         out_sharding))
-
-        return out
+    def _matmul_split(self, layer: torch.nn.Module, x_jax: jax.Array,
+                      bias_jax: Sequence[jax.Array] | None) -> jax.Array:
+        assert isinstance(layer.weight_scale, torch.nn.ParameterList)
+        # jax_view cannot handle ParameterList directly, so explicitly convert
+        # to a list.
+        weight_and_scale = [(jax_view(w), jax_view(s))
+                            for w, s in zip(layer.weight, layer.weight_scale)]
+        return self._apply_split(x_jax,
+                                 weight_and_scale,
+                                 bias_jax,
+                                 mesh=self.linear_config.mesh)
 
 
 class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
