@@ -8,6 +8,13 @@ from tpu_inference.envs import enable_envs_cache, environment_variables
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
+    # A default is only observable if the variable is unset, and the TPU device
+    # plugin injects TPU_ACCELERATOR_TYPE and TPU_NAME into any container
+    # holding a chip.
+    for name in ("JAX_PLATFORMS", "PHASED_PROFILING_DIR", "TPU_NAME",
+                 "TPU_ACCELERATOR_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")
