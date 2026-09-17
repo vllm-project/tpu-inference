@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, fused-RS MoE kernel @ 16k aggregate)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, fused-RS MoE kernel, SP off)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,72 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # Retry of #34 with sequence-parallel MoE off and the token ladder's
+        # bottom rung raised.
+        #
+        # #34 proved the kernel engages on this mesh -- "fused_moe_rs kernel in
+        # use" at fused_moe_gmm.py:597 -- and then died tracing the backbone.
+        # The visible error was an AssertionError in vLLM's shared-expert
+        # mailbox, but that was the third symptom, not the cause. Chronological
+        # order in the log:
+        #
+        #   19:22:58  ValueError: shard_map applied to moe_gmm_local_rs_nodedup
+        #             ... was given argument arrays with axis sizes that are not
+        #             evenly divisible by the corresponding mesh axis sizes.
+        #             The mesh given has shape (1, 4, 1, 1, 8, 1, 1) ...
+        #             the passed args[10] of shape bfloat16[16,10]
+        #   19:23:00  AssertionError in shared_experts.py:182
+        #   19:23:28  ray ActorHandleNotFoundError (teardown)
+        #
+        # args[10] is `topk_weights` -- count the in_specs tuple at
+        # fused_moe_rs.py:401-414 -- and bf16[16,10] is [num_tokens, top_k] for
+        # the SMALLEST precompile bucket, 16 tokens. With sequence-parallel MoE
+        # on, that argument's spec is
+        #
+        #   topk_w_spec = P(combine_partition_axes(MLP_DATA, expert_axis), None)
+        #
+        # whose axis product is 1 x 4 x 1 x 1 x 8 = 32. 16 does not divide by
+        # 32, so shard_map refuses. Every bucket from 32 up divides; only the
+        # bottom rung is bad.
+        #
+        # The AssertionError is a consequence. vLLM's shared expert hands its
+        # result through a one-slot mailbox
+        # (vllm/.../fused_moe/runner/shared_experts.py:55), written by
+        # `forward` behind `assert self._output[...] is None` (:182) and
+        # cleared by the `output` property (:164). Write and read are paired
+        # inside one call -- moe_runner.py:631 then :643 -- so the slot is
+        # always emptied. The shard_map ValueError unwound the trace between
+        # them, leaving the mailbox dirty, and the next trace attempt asserted.
+        # One cause, three layers of symptom.
+        #
+        # TWO CHANGES, both one-line:
+        #
+        # TPU_MOE_ENABLE_SP=0 is the real fix. It was never set and defaults ON
+        # (fused_moe_rs.py:77-79, `os.environ.get("TPU_MOE_ENABLE_SP", "1") !=
+        # "0"`). With SP off every routing spec becomes P() -- replicated, with
+        # the body slicing its own chunk, as the comment at :372 says -- so the
+        # divisibility requirement disappears entirely rather than being dodged.
+        # It also makes moe_out_spec P() instead of a 32-way scatter, which is
+        # the same replicated output shape expert_parallel_gmm produces.
+        #
+        # MIN_TOKEN_BUCKET=32 raises the ladder's floor so the 16-token bucket
+        # is never built (tpu_runner.py:1060-1062 takes
+        # max(MIN_TOKEN_BUCKET, next_power_of_2(dp_size * kv_packing)), and
+        # both terms are 16 today). Belt and braces: with SP off it is not
+        # needed, and it costs only that a 16-token step pads to 32.
+        #
+        # Checked while here, so neither is a hidden variable:
+        #   - TPU_MOE_FP8_OUTPUT_COMM is unset and defaults to "" (:136-138),
+        #     so turning SP off does not silently switch on fp8 output comms
+        #     through the `not sp_enabled and ...` clause at :369-371.
+        #   - vLLM-level sequence parallelism is not set anywhere in
+        #     qwen38_2p4t_serve.sh.
+        #
+        # Everything below is #34's, which is #30's plus the kernel and the
+        # token budget.
+        #
+        # Original #34 rationale follows.
+        #
         # Sample run: does the fused reduce-scatter MoE kernel work here, and
         # what does it do to activation memory?
         #
@@ -251,6 +317,8 @@ steps:
           'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
           'USE_MOE_EP_KERNEL=0' \
           'USE_GMM_FUSED_RS_KERNEL=1' \
+          'TPU_MOE_ENABLE_SP=0' \
+          'MIN_TOKEN_BUCKET=32' \
           'VLLM_INCREMENTAL_FP8_LOADING=1' \
           'MOE_STAGE_WEIGHTS_ON_HOST=1' \
           'VLLM_XLA_CHECK_RECOMPILATION=0' \
