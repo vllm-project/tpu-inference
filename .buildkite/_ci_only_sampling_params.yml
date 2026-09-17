@@ -1,0 +1,46 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# TEMPORARY - DO NOT MERGE.
+#
+# Scratch pipeline used to verify the rewritten tie-aware top_k tests before
+# opening the real PR. Mirrors the steps that
+# .buildkite/features/sampling_params.yml produces during a nightly build, with
+# two deliberate differences:
+#   - no soft_fail, so the build status is the test result
+#   - runs unconditionally, instead of only under NIGHTLY=1
+#
+# Both generations run: tpu7x is the config that flaked, tpu6e is a fallback
+# in case the v7x queue stays saturated. Each depends on its own image build
+# rather than the whole build_docker group, so neither waits on the other.
+steps:
+  - label: "tpu7x Correctness tests for sampling_params (VERIFICATION ONLY)"
+    key: "tpu7x_sampling_params_CorrectnessTest"
+    depends_on: "build_docker_tpu7x"
+    env:
+      TPU_VERSION: "tpu7x"
+    agents:
+      queue: "tpu_v7x_2_queue"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_sampling_params.py
+
+  - label: "tpu6e Correctness tests for sampling_params (VERIFICATION ONLY)"
+    key: "tpu6e_sampling_params_CorrectnessTest"
+    depends_on: "build_docker_tpu6e"
+    env:
+      TPU_VERSION: "tpu6e"
+    agents:
+      queue: "tpu_v6e_queue"
+    commands:
+      - .buildkite/scripts/run_in_docker.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_sampling_params.py

@@ -174,7 +174,19 @@ set_jax_envs() {
     esac
 }
 
+# TEMPORARY - DO NOT MERGE. Upload only the sampling_params correctness step so
+# the tie-aware top_k test rewrite can be verified without provisioning every
+# TPU queue. Restore the original body (see git history) before the PR.
 upload_pipeline() {
+    upload_with_priority .buildkite/_ci_only_sampling_params.yml "$JOB_PRIORITY"
+}
+
+# TEMPORARY - DO NOT MERGE. Benchmarks are irrelevant to this verification run.
+upload_benchmark_pipeline() {
+    echo "--- Skipping benchmark pipeline (sampling_params verification build)"
+}
+
+_orig_upload_pipeline() {
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
       set_jax_envs v6
@@ -194,7 +206,7 @@ upload_pipeline() {
     upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
 }
 
-upload_benchmark_pipeline() {
+_orig_upload_benchmark_pipeline() {
     export BM_INFRA="true"
     VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")
     TPU_COMMIT_HASH=$(git rev-parse HEAD)
