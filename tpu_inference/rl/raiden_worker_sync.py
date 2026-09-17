@@ -153,6 +153,20 @@ def _axis_name(axis: Any) -> str:
     return ",".join(axis)
 
 
+def _compute_global_shard_index(indices: tuple[slice, ...],
+                                shape: tuple[int, ...]) -> int:
+    shard_idx = 0
+    stride = 1
+    for s, dim in zip(reversed(indices), reversed(shape)):
+        start = s.start or 0
+        step = s.stop - start if s.stop is not None else dim
+        num_shards = dim // step if step > 0 else 1
+        idx = start // step if step > 0 else 0
+        shard_idx += idx * stride
+        stride *= num_shards
+    return shard_idx
+
+
 def _tensor_metadata_dict(name: str, arr: Any, layer_idx: int) -> dict:
     sharding: Any = getattr(arr, "sharding", None)
     spec = tuple(getattr(sharding, "spec", ()) or ())
@@ -162,6 +176,17 @@ def _tensor_metadata_dict(name: str, arr: Any, layer_idx: int) -> dict:
         mesh_shape = tuple(g // s for g, s in zip(arr.shape, local))
     except Exception:  # pylint: disable=broad-exception-caught
         mesh_shape = (1, ) * arr.ndim
+    global_shard_indices: tuple[int, ...] = ()
+    if sharding is not None and hasattr(sharding, "devices_indices_map"):
+        try:
+            devices_indices_map = sharding.devices_indices_map(arr.shape)
+            if devices_indices_map is not None:
+                global_shard_indices = tuple(
+                    _compute_global_shard_index(indices, arr.shape)
+                    for device, indices in devices_indices_map.items()
+                    if device in sharding.mesh.local_devices)
+        except Exception:  # pylint: disable=broad-exception-caught
+            global_shard_indices = ()
     return {
         "name": name,
         "shape": list(arr.shape),
@@ -170,6 +195,7 @@ def _tensor_metadata_dict(name: str, arr: Any, layer_idx: int) -> dict:
         "item_size": arr.dtype.itemsize,
         "layer_idx": layer_idx,
         "sharding_spec": [_axis_name(a) for a in spec],
+        "global_shard_indices": list(global_shard_indices),
     }
 
 
@@ -218,6 +244,20 @@ class RaidenWorkerSync:
     def bind(self, state: Any) -> None:
         """Binds (or rebinds after a weight update) this worker's weights."""
         self.names, self.arrays = _filter_bindable(*flatten_weights(state))
+        try:
+            import tpu_sync.frameworks.jax.utils as jax_utils
+            if hasattr(jax_utils, "get_shard_sorting_permutation"):
+                orig_fn = jax_utils.get_shard_sorting_permutation
+
+                def _safe_get_shard_sorting_permutation(*args, **kwargs):
+                    try:
+                        return orig_fn(*args, **kwargs)
+                    except ValueError:
+                        return []
+
+                jax_utils.get_shard_sorting_permutation = _safe_get_shard_sorting_permutation
+        except (ImportError, AttributeError):
+            pass
         if _ws_lib is None:
             raise RuntimeError(
                 f"{self.job_name}: tpu_sync is not importable, cannot bind "
