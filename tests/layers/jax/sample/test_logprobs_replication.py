@@ -107,3 +107,29 @@ def test_replication_is_free_for_the_raw_modes():
         f"replication added {constrained - plain} collectives in a raw mode, "
         "where the outputs are already replicated")
 
+
+def test_expert_indices_replication_under_dp_attention():
+    """Verify stacked routed expert indices are replicated over the mesh."""
+    mesh = _mesh()
+    num_reqs = max(2, mesh.shape["data"] * mesh.shape["attn_dp"])
+    top_k = 4
+    sharded_spec = NamedSharding(mesh, P(ATTN_DATA, None))
+
+    layer0 = jax.device_put(
+        jnp.arange(num_reqs * top_k, dtype=jnp.int32).reshape(num_reqs, top_k),
+        sharded_spec)
+    layer1 = jax.device_put(
+        jnp.arange(num_reqs * top_k, 2 * num_reqs * top_k,
+                   dtype=jnp.int32).reshape(num_reqs, top_k), sharded_spec)
+
+    @jax.jit
+    def stack_and_replicate(e_list):
+        stacked = jnp.stack(e_list, axis=0)
+        return jax.lax.with_sharding_constraint(stacked,
+                                                NamedSharding(mesh, P()))
+
+    got = stack_and_replicate([layer0, layer1])
+    want = jnp.stack([layer0, layer1], axis=0)
+
+    assert got.sharding.is_fully_replicated
+    assert np.array_equal(np.asarray(got), np.asarray(want))
