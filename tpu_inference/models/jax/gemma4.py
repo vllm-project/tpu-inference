@@ -650,10 +650,8 @@ class Gemma4DecoderLayer(JaxModule):
                                      mesh=mesh,
                                      rngs=rng,
                                      quant_config=quant_config,
-                                     enable_return_routed_experts=getattr(
-                                         config,
-                                         "enable_return_routed_experts",
-                                         False),
+                                     enable_return_routed_experts=config.
+                                     enable_return_routed_experts,
                                      prefix=prefix + ".experts")
             self.post_feedforward_layernorm_1 = JaxRmsNorm(
                 text_config.hidden_size,
