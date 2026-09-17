@@ -64,6 +64,8 @@ def test_boolean_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("USE_MOE_EP_KERNEL", "0")
     monkeypatch.setenv("LAYOUT_Q_PROJ_AS_NDH", "0")
     monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "0")
+    monkeypatch.setenv("GEMMA4_EARLY_GLOBAL_KV_GATHER", "0")
+    monkeypatch.setenv("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", "0")
     monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "0")
 
     # Test SKIP_JAX_PRECOMPILE (default False)
@@ -133,6 +135,16 @@ def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+    assert envs.GEMMA4_EARLY_GLOBAL_KV_GATHER is False
+    monkeypatch.setenv("GEMMA4_EARLY_GLOBAL_KV_GATHER", "1")
+    assert envs.GEMMA4_EARLY_GLOBAL_KV_GATHER is True
+    monkeypatch.setenv("GEMMA4_EARLY_GLOBAL_KV_GATHER", "0")
+
+    assert envs.GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS is False
+    monkeypatch.setenv("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", "1")
+    assert envs.GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS is True
+    monkeypatch.setenv("GEMMA4_REPLICATE_GLOBAL_KV_WEIGHTS", "0")
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):

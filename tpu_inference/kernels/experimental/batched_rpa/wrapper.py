@@ -36,8 +36,8 @@ from jax.experimental.pallas import tpu as pltpu
 from tpu_inference import envs
 from tpu_inference.kernels.experimental.batched_rpa import (configs, kernel,
                                                             schedule, utils)
-from tpu_inference.kernels.experimental.batched_rpa.tuned_params import \
-    get_tuned_params
+from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
+    get_block_sizes_override, get_tuned_params)
 
 
 def prepare_inputs(
@@ -185,6 +185,7 @@ def get_kv_cache_shape(
         "chunk_prefill_size",
         "decode_block_sizes",
         "prefill_block_sizes",
+        "mixed_block_sizes",
         "vmem_limit_bytes",
         "debug_mode",
         "out_dtype",
@@ -221,6 +222,7 @@ def ragged_paged_attention(
     chunk_prefill_size: int | None = None,
     decode_block_sizes: configs.BlockSizes | None = None,
     prefill_block_sizes: configs.BlockSizes | None = None,
+    mixed_block_sizes: configs.BlockSizes | None = None,
     vmem_limit_bytes: int | None = None,
     debug_mode: bool = False,
     out_dtype: jnp.dtype | None = None,
@@ -260,7 +262,10 @@ def ragged_paged_attention(
              can be higher in case of speculative decoding)
         chunk_prefill_size: Not used.
         decode_block_sizes: Kernel block size to use during decode.
-        prefill_block_sizes: Kernel block size to use during prefill.
+        prefill_block_sizes: Kernel block size to use during prefill. For
+            backwards compatibility, this is also the explicit mixed-mode
+            override when mixed_block_sizes is not supplied.
+        mixed_block_sizes: Kernel block size to use for mixed requests.
         vmem_limit_bytes: VMEM size limit of the kernel. Defaults to maximum VMEM
             size of the hardware.
         debug_mode: Not used.
@@ -345,18 +350,26 @@ def ragged_paged_attention(
         kv_cache: jax.Array,
     ):
         if mode == configs.RpaCase.DECODE:
-            effective_blocks = decode_block_sizes or get_tuned_params(
-                model_cfgs,
-                serve_cfgs,
-                case='decode',
-                vmem_limit_bytes=vmem_limit_bytes,
-                decode_query_size=decode_query_size)
+            explicit_blocks = decode_block_sizes
+            tuning_case = 'decode'
+        elif mode == configs.RpaCase.PREFILL:
+            explicit_blocks = prefill_block_sizes
+            tuning_case = 'prefill'
         else:
-            effective_blocks = prefill_block_sizes or get_tuned_params(
-                model_cfgs,
-                serve_cfgs,
-                case='prefill',
-                vmem_limit_bytes=vmem_limit_bytes)
+            # prefill_block_sizes historically controlled every non-decode
+            # launch, so preserve that API when no mixed-specific value exists.
+            explicit_blocks = mixed_block_sizes or prefill_block_sizes
+            tuning_case = 'prefill'
+
+        operator_blocks = get_block_sizes_override(mode.value,
+                                                   serve_cfgs.page_size)
+        effective_blocks = (explicit_blocks or operator_blocks
+                            or get_tuned_params(
+                                model_cfgs,
+                                serve_cfgs,
+                                case=tuning_case,
+                                vmem_limit_bytes=vmem_limit_bytes,
+                                decode_query_size=decode_query_size))
 
         cfgs = configs.RpaConfigs(
             block=effective_blocks,
