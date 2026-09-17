@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding, PartitionSpec
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.attention_metadata import (
@@ -311,6 +312,21 @@ def _decode_core_impl(
     (step_idx_final, current_tokens, active_mask, positions, seq_lens,
      kv_caches, token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
      lp_ranks_buffer, _) = _unpack(final_carry)
+
+    if has_logprobs:
+        # The runner device_get()s these, which on a multi-host mesh only works
+        # for fully replicated arrays. Replicate the accumulated buffers once
+        # here rather than each step's [num_reqs, max_logprobs+1] slice inside
+        # the loop body: same bytes, but one collective instead of one per
+        # decode step. Measured on tpu7x: per-step costs ~11us/step at 8 steps
+        # and ~17us/step at 32.
+        replicated = NamedSharding(mesh, PartitionSpec())
+        lp_ids_buffer = jax.lax.with_sharding_constraint(
+            lp_ids_buffer, replicated)
+        lp_val_buffer = jax.lax.with_sharding_constraint(
+            lp_val_buffer, replicated)
+        lp_ranks_buffer = jax.lax.with_sharding_constraint(
+            lp_ranks_buffer, replicated)
 
     return (step_idx_final, current_tokens, active_mask, positions, seq_lens,
             kv_caches, token_buffer, expert_buffer, lp_ids_buffer,

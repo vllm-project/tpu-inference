@@ -376,6 +376,49 @@ def compute_and_gather_prompt_logprobs(
     return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
 
 
+# The `_for_host` variants below are the ones the runner calls: their results
+# go straight to `_jax_logprobs_copy_to_host_async()` and then `device_get()`,
+# which on a multi-host mesh can only read fully replicated arrays. Under DP
+# attention the logits are sharded over ATTN_DATA, an axis that spans both
+# hosts, so the outputs inherit a sharding no single process can fetch:
+#
+#   RuntimeError: Fetching value for `jax.Array` that spans non-addressable
+#   (non process local) devices is not possible.
+#
+# `out_shardings` states that up front instead of leaving it to each caller,
+# the same guarantee `sample()` gives for `next_tokens`. It costs nothing when
+# it is not needed: for the raw logprobs modes the logits are sharded over the
+# vocab axis rather than over requests, the outputs are already replicated, and
+# the constraint folds away to zero extra collectives.
+#
+# Callers must run under `jax.set_mesh()` so the bare PartitionSpec resolves.
+#
+# Do NOT route the fused decode loop through these. It calls the plain variant
+# once per step inside a `while` body, so replicating there emits a collective
+# per decode step; it replicates its accumulated buffers once after the loop
+# instead.
+
+
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
+def compute_and_gather_logprobs_for_host(
+    logits: jax.Array,
+    next_tokens: jax.Array,
+    max_logprobs: int,
+) -> LogprobsTensors:
+    """`compute_and_gather_logprobs`, with every output replicated."""
+    return compute_and_gather_logprobs(logits, next_tokens, max_logprobs)
+
+
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
+def compute_and_gather_prompt_logprobs_for_host(
+    logits: jax.Array,
+    input_ids: jax.Array,
+    max_logprobs: int,
+) -> LogprobsTensors:
+    """`compute_and_gather_prompt_logprobs`, with every output replicated."""
+    return compute_and_gather_prompt_logprobs(logits, input_ids, max_logprobs)
+
+
 def compute_prompt_logprobs(
     full_logits: Optional[jax.Array],
     input_ids: Optional[jax.Array],
@@ -389,6 +432,10 @@ def compute_prompt_logprobs(
     """Dispatches prompt logprob computation on TPU and snapshots per-request state.
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
     the snapshotted state needed to safely slice them in get_output().
+
+    Must be called under `jax.set_mesh()`: the returned tensors are replicated
+    for the host fetch, and the bare PartitionSpec that does it resolves
+    against the mesh in context.
     """
     if (not num_prompt_logprobs or full_logits is None or input_ids is None):
         return None
@@ -397,7 +444,7 @@ def compute_prompt_logprobs(
     # start async transfer to host (overlaps with next step's execute_model).
     # We use the statically precompiled max_logprobs instead of the dynamic user max_k
     # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
-    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
+    prompt_lp_tensors = compute_and_gather_prompt_logprobs_for_host(
         full_logits, input_ids, max_logprobs)
     prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 

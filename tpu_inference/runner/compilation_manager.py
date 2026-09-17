@@ -32,8 +32,9 @@ from tpu_inference.layers.common.attention_metadata import (
     SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
-    compute_and_gather_logprobs, compute_and_gather_prompt_logprobs,
-    distributed_sampling_allowed, sample)
+    compute_and_gather_logprobs_for_host,
+    compute_and_gather_prompt_logprobs_for_host, distributed_sampling_allowed,
+    sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -1096,7 +1097,7 @@ class CompilationManager:
                                              sharding=token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} gather_logprobs",
-                compute_and_gather_logprobs,
+                compute_and_gather_logprobs_for_host,
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,
@@ -1126,7 +1127,7 @@ class CompilationManager:
                         sharding=token_ids_sharding)
                     self._run_compilation(
                         f"worker{self.runner.rank} gather_logprobs_spec",
-                        compute_and_gather_logprobs,
+                        compute_and_gather_logprobs_for_host,
                         logits,
                         token_ids,
                         self.runner.model_config.max_logprobs,
@@ -1163,7 +1164,7 @@ class CompilationManager:
                                              sharding=token_ids_sharding)
             self._run_compilation(
                 f"worker{self.runner.rank} compute_and_gather_prompt_logprobs",
-                compute_and_gather_prompt_logprobs,
+                compute_and_gather_prompt_logprobs_for_host,
                 logits,
                 token_ids,
                 self.runner.model_config.max_logprobs,
