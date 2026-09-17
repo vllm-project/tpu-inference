@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from jax.sharding import PartitionSpec
 
@@ -78,7 +79,10 @@ class TestDescribeSignature:
 
 def _precompiled_logits_specs(logprobs_mode):
     """PartitionSpecs `_precompile_gather_logprobs` warms up for a mode."""
-    mesh = jax.make_mesh((1, 8, 2), ("data", "attn_dp", "model"))
+    # Only the PartitionSpec that gets selected matters here, not the mesh
+    # extent, so size the mesh off one device to stay portable across lanes.
+    device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1)
+    mesh = jax.make_mesh(device_array.shape, ("data", "attn_dp", "model"))
     runner = SimpleNamespace(
         mesh=mesh,
         rank=0,
