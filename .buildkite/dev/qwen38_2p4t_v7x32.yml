@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, fused-RS MoE kernel, SP off)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, fused-RS MoE kernel, SP default)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -183,26 +183,40 @@ steps:
         # them, leaving the mailbox dirty, and the next trace attempt asserted.
         # One cause, three layers of symptom.
         #
-        # TWO CHANGES, both one-line:
+        # ONE CHANGE: MIN_TOKEN_BUCKET=32.
         #
-        # TPU_MOE_ENABLE_SP=0 is the real fix. It was never set and defaults ON
+        # It raises the ladder's floor so the 16-token bucket is never built
+        # (tpu_runner.py:1060-1062 takes
+        # max(MIN_TOKEN_BUCKET, next_power_of_2(dp_size * kv_packing)), and both
+        # terms are 16 today). Every remaining bucket -- 32, 64, ... 16384 -- is
+        # a power of two at or above 32, so all of them divide the 32-way
+        # topk_weights split. The cost is that a 16-token step pads to 32.
+        #
+        # SEQUENCE-PARALLEL MoE IS LEFT AT ITS DEFAULT, which is ON
         # (fused_moe_rs.py:77-79, `os.environ.get("TPU_MOE_ENABLE_SP", "1") !=
-        # "0"`). With SP off every routing spec becomes P() -- replicated, with
-        # the body slicing its own chunk, as the comment at :372 says -- so the
-        # divisibility requirement disappears entirely rather than being dodged.
-        # It also makes moe_out_spec P() instead of a 32-way scatter, which is
-        # the same replicated output shape expert_parallel_gmm produces.
+        # "0"`). A first attempt at this run set TPU_MOE_ENABLE_SP=0, which also
+        # fixes the error -- with SP off every routing spec becomes P(),
+        # replicated, and the body slices its own chunk (:372) -- but that is
+        # the wrong experiment. SP off makes moe_out_spec P() instead of a
+        # 32-way scatter, i.e. it turns off the reduce-scatter this kernel
+        # exists to fuse. Testing the default is what tells us whether the
+        # kernel is usable as intended; the SP-off variant remains as a
+        # fallback if the default does not work.
         #
-        # MIN_TOKEN_BUCKET=32 raises the ladder's floor so the 16-token bucket
-        # is never built (tpu_runner.py:1060-1062 takes
-        # max(MIN_TOKEN_BUCKET, next_power_of_2(dp_size * kv_packing)), and
-        # both terms are 16 today). Belt and braces: with SP off it is not
-        # needed, and it costs only that a 16-token step pads to 32.
+        # ⚠️ Consequence worth expecting. With SP on the kernel's output IS
+        # reduce-scattered, and that is precisely the case
+        # `_fused_output_is_reduced` (custom_ops/fused_moe.py:78-110) does not
+        # know about: it keys on the BACKEND, and USE_GMM_FUSED_RS_KERNEL does
+        # not change the backend -- select_moe_backend_from_fused_moe_config
+        # still returns GMM_EP while fused_moe_gmm.py:594 swaps the kernel
+        # underneath. So the shared-expert AssertionError that appeared in #34
+        # as a cascade behind the shard_map error may reappear here as a
+        # genuine failure. If it does, the fix is an RS-kernel case in that
+        # property, modelled on torchtpu's patch of the same upstream property
+        # (vllm_torchtpu/__init__.py:235-258) -- a code change, not a flag.
         #
         # Checked while here, so neither is a hidden variable:
-        #   - TPU_MOE_FP8_OUTPUT_COMM is unset and defaults to "" (:136-138),
-        #     so turning SP off does not silently switch on fp8 output comms
-        #     through the `not sp_enabled and ...` clause at :369-371.
+        #   - TPU_MOE_FP8_OUTPUT_COMM is unset and defaults to "" (:136-138).
         #   - vLLM-level sequence parallelism is not set anywhere in
         #     qwen38_2p4t_serve.sh.
         #
@@ -317,7 +331,6 @@ steps:
           'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
           'USE_MOE_EP_KERNEL=0' \
           'USE_GMM_FUSED_RS_KERNEL=1' \
-          'TPU_MOE_ENABLE_SP=0' \
           'MIN_TOKEN_BUCKET=32' \
           'VLLM_INCREMENTAL_FP8_LOADING=1' \
           'MOE_STAGE_WEIGHTS_ON_HOST=1' \
