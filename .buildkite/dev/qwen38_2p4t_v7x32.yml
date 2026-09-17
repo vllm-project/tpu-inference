@@ -169,18 +169,35 @@ steps:
         # shared-expert projections to the pattern. It is #30 repeated with one
         # variable changed.
         #
-        #   re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$
+        #   re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj)$$
         #
-        # Worth ~0.52 GiB/chip. From #31's memory profile, per device across all
-        # 92 layers:
+        # gate_up_proj only. Worth ~0.36 GiB/chip: from #31's memory profile it
+        # is bf16[8192, 512] x 92 layers = 736 MiB per device, which fp8 halves
+        # less the scales. Predicted Init model 75.87 -> ~75.51 and Init
+        # kv-cache 87.19 -> ~86.83.
         #
-        #   mlp.shared_expert.gate_up_proj   bf16[8192, 512]   x92 =  736 MiB
-        #   mlp.shared_expert.down_proj      bf16[ 256, 8192]  x92 =  368 MiB
-        #                                                            -------
-        #                                                            1104 MiB
+        # ⚠️ down_proj is EXCLUDED and cannot be included at block 512. Build
+        # #32 tried and died 13 min in:
         #
-        # so fp8 halves it, less the scales. Predicted Init model 75.87 ->
-        # ~75.35 and Init kv-cache 87.19 -> ~86.67.
+        #   ValueError: QUANTIZE_BF16_LINEAR_BLOCK_SIZE=512 splits the 2048
+        #   input features of VllmRowParallelLinear into 4 blocks, which its
+        #   input axis cannot shard 8 ways.
+        #
+        # `_check_block_size` (unquantized.py:522-546) requires
+        # `n_blocks % in_shards == 0`. down_proj is row-parallel, so its input
+        # axis is the sharded one, and the shared expert's intermediate is only
+        # 2048 wide: 2048/512 = 4 blocks against 8 model shards. The other
+        # row-parallel layers in the pattern pass only because they are wider --
+        # self_attn.o_proj and linear_attn.out_proj both have 16384 input
+        # features, i.e. 32 blocks.
+        #
+        # The fix is not to lower the block size. 256 would give 2048/256 = 8
+        # blocks and divide, but it is the size that mis-indexes the rhs block
+        # scale in gmm_v2 and took #18's GPQA to 0.0, and the knob is global --
+        # it would move the attention and GDN quantization off the 512 that #19
+        # validated and #30 measured, destroying the comparison this build
+        # exists to make. 368 MiB is not worth that. down_proj stays bf16 until
+        # the block size can be set per pattern.
         #
         # Both forms are listed because the module is fused. vLLM names it
         # `gate_up_proj` while the checkpoint names the halves `gate_proj` and
@@ -298,7 +315,7 @@ steps:
           'RUNAI_STREAMER_LOG_TO_STDERR=1' \
           'TPU_WEIGHT_LOAD_PROFILE=1' \
           'TPU_WEIGHT_LOAD_PROFILE_EVERY=10000' \
-          'QUANTIZE_BF16_LINEAR_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$' \
+          'QUANTIZE_BF16_LINEAR_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj)$$' \
           'QUANTIZE_BF16_LINEAR_BLOCK_SIZE=512' \
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=4' \
