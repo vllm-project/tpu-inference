@@ -15,6 +15,7 @@ from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax._src.numpy.scalar_types import _ScalarMeta
+from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from torchax.ops.mappings import t2j as torchax_t2j
@@ -40,6 +41,31 @@ _DTYPE_STR_ALIAS_TO_JAX_DTYPE = {
     # NOTE: vLLM doesn't have this str dtype yet
     "fp4": jnp.float4_e2m1fn.dtype,
 }
+
+
+def safe_device_get(arr: Any) -> Any:
+    """Copy a jax.Array to host numpy, safely under multi-host SPMD.
+
+    On a multi-host mesh a global ``jax.Array`` can span non-addressable (non
+    process-local) devices, so a plain ``jax.device_get()`` raises:
+    ``RuntimeError: Fetching value for jax.Array that spans non-addressable
+    (non process local) devices is not possible``.
+
+    To handle both replicated and sharded arrays correctly:
+    - If the array is **fully replicated**, every host holds the complete value
+      on its first process-local shard, so we read that shard directly (cheap,
+      no collective).
+    - If the array is **sharded** (e.g. across the data-parallel axis), we must
+      gather it across processes with ``process_allgather`` to reconstruct the
+      full value -- taking a single shard would silently return partial data.
+    - Otherwise (single-host arrays or plain numpy / non-jax inputs) we fall
+      back to ``jax.device_get()``.
+    """
+    if hasattr(arr, "addressable_shards") and arr.addressable_shards:
+        if getattr(arr, "is_fully_replicated", False):
+            return np.asarray(arr.addressable_shards[0].data)
+        return np.asarray(multihost_utils.process_allgather(arr, tiled=True))
+    return np.asarray(jax.device_get(arr))
 
 
 def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
