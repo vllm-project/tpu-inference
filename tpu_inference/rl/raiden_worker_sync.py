@@ -4,24 +4,32 @@
 
 Runs inside the EngineCore subprocess where the live TPU arrays live; only
 plain-data metadata (`RaidenWorkerSync.metadata_dict`) crosses the
-`collective_rpc` boundary back to `RLVllmSampler`.
+`collective_rpc` boundary back to `RLVllmSampler` (in Tunix).
 
 Duplicates (rather than imports) tunix's
 `raiden_synchronizer.RaidenSynchronizer` binding mechanics, since
-`vllm_sampler.py` has no Tunix dependency. Keep the two in sync by hand;
+`tpu-inference` has no Tunix dependency. Keep the two in sync by hand;
 tunix's `weight_sync.dict_to_metadata` defines the metadata shape.
 """
 
 from __future__ import annotations
 
 import socket
+import time
 from typing import Any, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+from tpu_inference import envs
+from tpu_inference.logger import init_logger
+
+logger = init_logger(__name__)
 
 _ws_lib: Any = None
 _RAIDEN_IMPORT_ERROR: Optional[Exception] = None
+
 try:
     from tpu_sync.api.jax import \
         weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
@@ -68,12 +76,13 @@ def extract_weight_state(state: Any, model: Any) -> Any:
                 pass
         return state
     if model is not None:
-        from flax import nnx
         if maxtext:
             inner = getattr(model, "model", None)
             if inner is not None:
+                from flax import nnx
                 return {"base": nnx.state(inner, nnx.Param)}
             return None
+        from flax import nnx
         return nnx.state(model, nnx.Param)
     return None
 
@@ -106,17 +115,33 @@ def _bindable(arr: Any) -> bool:
         return False
 
 
+# KV-cache leaves are ordinary float arrays in the weight tree, so _bindable
+# accepts them, but the trainer has no counterpart to pair them with.
+_NON_WEIGHT_PATH_PARTS = ("['cache']", )
+
+
+def _is_weight(name: str) -> bool:
+    return not any(part in name for part in _NON_WEIGHT_PATH_PARTS)
+
+
 def _filter_bindable(names: List[str],
                      arrays: List[Any]) -> Tuple[List[str], List[Any]]:
-    """Drops leaves the native layer cannot bind (e.g. RNG-key arrays)."""
+    """Drops leaves the native layer cannot bind, and non-weight state."""
     keep_names: List[str] = []
     keep_arrays: List[Any] = []
+    dropped_non_weight = 0
     for name, arr in zip(names, arrays):
+        if not _is_weight(name):
+            dropped_non_weight += 1
+            continue
         if _bindable(arr):
             if hasattr(arr, "block_until_ready"):
                 arr.block_until_ready()
             keep_names.append(name)
             keep_arrays.append(arr)
+    if dropped_non_weight:
+        logger.info("skipped %d non-weight leaves (KV cache) when binding",
+                    dropped_non_weight)
     return keep_names, keep_arrays
 
 
@@ -146,6 +171,21 @@ def _tensor_metadata_dict(name: str, arr: Any, layer_idx: int) -> dict:
         "layer_idx": layer_idx,
         "sharding_spec": [_axis_name(a) for a in spec],
     }
+
+
+def _l1_norm(arrays: List[Any]) -> float:
+    """L1 norm over every array, as one stacked device sync.
+
+    Accumulated in float64 on the host: float32 loses the low digits at 35b
+    scale, which blinds _wait_until_settled to a small tensor still landing.
+    Not bit-comparable against tunix's source-side total, which sums
+    sequentially in Python -- compare with a tolerance.
+    """
+    if not arrays:
+        return 0.0
+    per_tensor = jnp.stack(
+        [jnp.sum(jnp.abs(a), dtype=jnp.float32) for a in arrays])
+    return float(np.asarray(per_tensor, dtype=np.float64).sum())
 
 
 class RaidenWorkerSync:
@@ -205,11 +245,46 @@ class RaidenWorkerSync:
             raise RuntimeError(f"{self.job_name}: bind() must run before {op}")
         return self._sync
 
-    def h2d(self) -> None:
+    def h2d(self, uuid: Optional[int] = None) -> None:
         # h2d() is async; block so a checksum/read right after sees the
         # transferred data.
-        self._require_sync("h2d()").h2d()
+        sync = self._require_sync("h2d()")
+        if hasattr(sync, "wait_for_transfer_completion"):
+            sync.wait_for_transfer_completion(uuid)
+            jax.block_until_ready(self.arrays)
+            return
+        sync.h2d()
         jax.block_until_ready(self.arrays)
+        # `block_until_ready` only orders JAX computations. Raiden's H2D is
+        # documented as asynchronous and writes these buffers via DMA outside
+        # the JAX graph, so it is not a completion barrier -- without the wait
+        # below the rollout can resume generating from half-written weights.
+        if envs.RAIDEN_H2D_SETTLE:
+            self._wait_until_settled()
+
+    def _wait_until_settled(self,
+                            timeout_s: float = 180.0,
+                            interval_s: float = 0.5,
+                            stable_reads: int = 3) -> None:
+        """Blocks until a digest over all bound arrays stops changing.
+
+        Interim stand-in for a real completion signal; drop it once
+        `WeightSynchronizer` exposes one (its API has no wait/join today).
+        """
+        prev = None
+        stable = 0
+        t0 = time.time()
+        while time.time() - t0 < timeout_s:
+            cur = _l1_norm(self.arrays)
+            if prev is not None and cur == prev:
+                stable += 1
+                if stable >= stable_reads:
+                    return
+            else:
+                stable = 0
+            prev = cur
+            time.sleep(interval_s)
+        logger.warning("raiden h2d did not settle within %.0fs", timeout_s)
 
     def metrics(self) -> dict:
         if self._sync is None:
@@ -225,14 +300,11 @@ class RaidenWorkerSync:
         says nothing about how much of the model actually arrived.
         """
 
-        def total(arr):
-            return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
-
         out = {
-            name: total(arr)
+            name: _l1_norm([arr])
             for name, arr in list(zip(self.names, self.arrays))[:sample]
         }
-        out["__grand_total__"] = sum(total(arr) for arr in self.arrays)
+        out["__grand_total__"] = _l1_norm(self.arrays)
         # Totals only compare if both sides bound the same tensors.
         out["__tensor_count__"] = len(self.arrays)
         out["__element_count__"] = int(sum(a.size for a in self.arrays))
@@ -248,9 +320,11 @@ class RaidenWorkerSync:
         ]
         mesh_axes: tuple = ()
         mesh_shape = None
+        bound_mesh = None
         for arr in self.arrays:
             mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
             if mesh is not None:
+                bound_mesh = mesh
                 mesh_axes = tuple(mesh.axis_names)
                 mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
                 break
@@ -259,6 +333,16 @@ class RaidenWorkerSync:
                 f"{self.job_name}: no bound array carries a sharding mesh; "
                 "cannot determine mesh_shape/mesh_axes for registration "
                 "metadata.")
+
+        host_subgrid = None
+        try:
+            if (bound_mesh is not None and hasattr(bound_mesh, "local_mesh")
+                    and bound_mesh.local_mesh is not None
+                    and hasattr(bound_mesh.local_mesh, "devices")):
+                host_subgrid = list(bound_mesh.local_mesh.devices.shape)
+        except (AttributeError, ValueError, TypeError):
+            host_subgrid = None
+
         data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
         control_addr = (f"{self.ip}:{self._sync.listener_port}"
                         if self._sync and self._sync.listener_port else "")
@@ -275,4 +359,5 @@ class RaidenWorkerSync:
             "mesh_shape": list(mesh_shape),
             "variables": variables,
             "mesh_axes": list(mesh_axes) if mesh_axes else None,
+            "host_subgrid": host_subgrid,
         }

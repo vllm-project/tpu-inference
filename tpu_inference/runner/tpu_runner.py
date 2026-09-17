@@ -54,7 +54,7 @@ from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, PCPMetadata,
-    SharedAttentionMetadata, round_up_pcp_cache_pages)
+    SharedAttentionMetadata, pcp_seq_arrays, pcp_token_layout)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   MESH_AXIS_NAMES_2D,
                                                   ShardingAxisName,
@@ -63,7 +63,7 @@ from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap,
     _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
-    compute_prompt_logprobs, sample)
+    compute_prompt_logprobs, distributed_sampling_allowed, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -143,16 +143,34 @@ def _compute_active_mask(
     return active_mask
 
 
-def _extract_valid_tokens_host(
-    tokens: np.ndarray,
+def _extract_valid_lengths_host(
+    generated_tokens: np.ndarray,
     eos_token_id: Union[int, List[int], np.ndarray],
-) -> List[int]:
-    """Trim 1D array of generated token IDs at the first EOS token (inclusive)."""
-    is_eos = np.isin(tokens, eos_token_id)
-    eos_indices = np.where(is_eos)[0]
-    if len(eos_indices) > 0:
-        return tokens[:eos_indices[0] + 1].tolist()
-    return tokens.tolist()
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-row valid lengths after trimming at the first EOS, for a whole
+    ``[num_reqs, num_steps]`` decode window.
+
+    Returns ``(lengths, has_eos)``: ``lengths[i]`` is the token count of row
+    ``i`` up to and including its first EOS (or the full row width when the
+    row has none), and ``has_eos[i]`` flags whether the row reached an EOS.
+    A single ``np.isin`` over the window plus one ``argmax`` replaces the
+    per-request ``np.isin`` / ``np.where`` scan that previously ran once per
+    row on the host critical path.
+    """
+    num_reqs, num_steps = (generated_tokens.shape
+                           if generated_tokens.ndim == 2 else (0, 0))
+    # No rows, or zero-width rows: nothing to scan (argmax over an empty axis
+    # would otherwise raise). Every row keeps its (zero) width and hits no EOS.
+    if num_reqs == 0 or num_steps == 0:
+        return (np.zeros(num_reqs,
+                         dtype=np.int64), np.zeros(num_reqs, dtype=bool))
+    is_eos = np.isin(generated_tokens, np.atleast_1d(eos_token_id))
+    has_eos = is_eos.any(axis=1)
+    # argmax returns the first True column, or 0 for rows with no EOS -- those
+    # rows are overwritten with the full width by the where().
+    first_eos_col = is_eos.argmax(axis=1)
+    lengths = np.where(has_eos, first_eos_col + 1, num_steps).astype(np.int64)
+    return lengths, has_eos
 
 
 REASON_EOS_HIT = "eos_hit"
@@ -262,22 +280,19 @@ def _process_continue_decode_outputs(
     lp_token_ids_list = []
     lp_vals_list = []
     lp_ranks_list = []
-    num_eos_hits = 0
-    eos_arr = np.atleast_1d(eos_token_id)
+    # One vectorized EOS scan for the whole window; the per-request work
+    # below is then a slice + tolist instead of np.isin/np.where per row.
+    valid_lens, has_eos = _extract_valid_lengths_host(generated_tokens_cpu,
+                                                      eos_token_id)
+    num_eos_hits = int(has_eos.sum())
     requests_dict = requests if requests is not None and hasattr(
         requests, "get") else None
 
     for req_idx, req_id in enumerate(req_ids):
         req_state = requests_dict.get(
             req_id) if requests_dict is not None else None
-        tokens = generated_tokens_cpu[req_idx]
-
-        valid_tokens = _extract_valid_tokens_host(tokens, eos_token_id)
-        if len(valid_tokens) < len(tokens) or (valid_tokens and
-                                               valid_tokens[-1] in eos_arr):
-            num_eos_hits += 1
-
-        actual_len = len(valid_tokens)
+        actual_len = int(valid_lens[req_idx])
+        valid_tokens = generated_tokens_cpu[req_idx, :actual_len].tolist()
         sampled_token_ids.append(valid_tokens)
 
         if scheduler_output is not None:
@@ -1048,6 +1063,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         # The total number of requests is dp_size * max_num_seqs
         self.max_num_reqs = max(self.dp_size * scheduler_config.max_num_seqs,
                                 MIN_NUM_SEQS)
+        # PCP presents each request to the attention kernel as two fused seqs
+        # (head and tail chunk), so the attention metadata buffers need twice
+        # the slots.  Sampling/logits stay per-request.
+        pcp_size = self.vllm_config.sharding_config.prefill_cp_size
+        self.attn_max_num_seqs = self.max_num_reqs * (2 if pcp_size > 1 else 1)
 
         additional_sizes = self.vllm_config.additional_config.get(
             "compilation_sizes", [])
@@ -1057,14 +1077,30 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             cache_dtype = self.dtype
         kv_cache_dtype = to_jax_dtype(cache_dtype)
         kv_packing = common_utils.get_dtype_packing(kv_cache_dtype)
-        self.num_tokens_paddings = runner_utils.get_token_paddings(
+        # PCP rounds every request's chunk size up independently, so the token
+        # buffer the layout needs can exceed max_num_batched_tokens by up to
+        # 2 * pcp_size * max_num_seqs; add a bucket with exactly that headroom.
+        if pcp_size > 1:
+            _worst = (scheduler_config.max_num_batched_tokens +
+                      2 * pcp_size * scheduler_config.max_num_seqs)
+            # 128-aligned so T_pad % pcp_size == 0 for any power-of-two pcp.
+            additional_sizes = list(additional_sizes) + [
+                common_utils.align_to(_worst * self.dp_size, 128)
+            ]
+        # Never pad a step past the scheduler's own token budget: a full
+        # chunked-prefill step must not jump to the next exponential bucket
+        # (which can be ~2x the budget and, on some shapes, compiles into a
+        # program that returns wrong last-position logits). The budget joins
+        # the bucket list through the same merge as `compilation_sizes` (and
+        # the PCP headroom bucket above), and unreachable generated buckets
+        # above it are dropped.
+        self.num_tokens_paddings = runner_utils.build_token_paddings(
             min_token_size=max(envs.MIN_TOKEN_BUCKET,
                                next_power_of_2(self.dp_size * kv_packing)),
             max_token_size=scheduler_config.max_num_batched_tokens *
             self.dp_size,
-            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
-        self.num_tokens_paddings = sorted(self.num_tokens_paddings +
-                                          additional_sizes)
+            padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP,
+            additional_sizes=additional_sizes)
         self.num_tokens_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_tokens_paddings
         ]
@@ -1126,6 +1162,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.num_reqs_paddings_per_dp = [
             padding // self.dp_size for padding in self.num_reqs_paddings
         ]
+
+        # PCP request-count ladder: `PCPMetadata.num_reqs` is a static meta
+        # field, so every rung is a compiled variant.  {1, max_num_seqs} keeps
+        # single-request batches on the single-request path and everything
+        # else on one padded multi-request variant (a wider ladder pushed
+        # warmup past 40 minutes on Qwen3-8B).
+        _max_seqs = scheduler_config.max_num_seqs
+        if pcp_size > 1 and _max_seqs > 1:
+            self.pcp_num_reqs_paddings = [1, _max_seqs]
+        else:
+            self.pcp_num_reqs_paddings = [1]
 
         # Padding for logits. Without speculative decoding, each request has one position to select from.
         # With speculative decoding, each request has multiple positions to select from.
@@ -1263,6 +1310,17 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         logger.info(f"Init model | "
                     f"hbm={common_utils.hbm_usage_gb(self.devices)}GiB")
+
+    def refresh_state_leaves(self) -> None:
+        """Re-derives the dispatch view of the weights from `state`.
+
+        `model_fn` and friends take `state_leaves` as their first argument,
+        which for the vllm-impl path aliases `state` outright. Any code that
+        rebinds `state` -- a LoRA load, a Raiden weight sync -- must call this,
+        or dispatch keeps running against the previous arrays.
+        """
+        self.state_leaves = (tuple(jax.tree_util.tree_leaves(self.state)) if
+                             isinstance(self.state, nnx.State) else self.state)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         runner_type = self.model_config.runner_type
@@ -1427,18 +1485,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 generated_tokens_cpu = generated_tokens_cpu[
                     pre_logits_indices_selector]
 
+            valid_lens, _ = _extract_valid_lengths_host(
+                generated_tokens_cpu, self.eos_token_id)
             for pre_req_idx, req_state, _ in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
                 req_idx = self.input_batch.req_id_to_index[req_id]
 
-                tokens = generated_tokens_cpu[pre_req_idx]
-                valid_tokens = _extract_valid_tokens_host(
-                    tokens, self.eos_token_id)
+                actual_len = int(valid_lens[pre_req_idx])
+                valid_tokens = generated_tokens_cpu[
+                    pre_req_idx, :actual_len].tolist()
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-                actual_len = len(valid_tokens)
 
                 self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
                                                actual_len] = valid_tokens
@@ -2009,6 +2068,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         processed_bonus_logits = None
+        allow_distributed_sampling = distributed_sampling_allowed(
+            tpu_sampling_metadata.logprobs, self.model_config.logprobs_mode)
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:
@@ -2017,6 +2078,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.mesh,
                     logits,
                     tpu_sampling_metadata,
+                    allow_distributed_sampling=allow_distributed_sampling,
                 )
         else:
             if tpu_sampling_metadata.do_sampling:
@@ -2032,6 +2094,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh,
                 bonus_logits,
                 tpu_sampling_metadata,
+                allow_distributed_sampling=allow_distributed_sampling,
             )
             target_logits = self._select_from_array_fn(
                 logits, spec_decode_metadata.target_logits_indices, self.mesh,
@@ -2423,6 +2486,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_num_scheduled_tokens_across_dp = max(
             num_scheduled_tokens_per_dp_rank.values())
 
+        # PCP rounds each request's chunk size up independently, so size the
+        # bucket off the layout's padded requirement, not the raw token count.
+        pcp_size = self.vllm_config.sharding_config.prefill_cp_size
+        if pcp_size > 1:
+            for dp_rank in range(dp_size):
+                counts = scheduled_tokens_per_dp_rank[dp_rank]
+                if not counts:
+                    continue
+                _, _, s_live = pcp_token_layout([int(c) for c in counts],
+                                                pcp_size)
+                max_num_scheduled_tokens_across_dp = max(
+                    max_num_scheduled_tokens_across_dp, pcp_size * s_live)
+
         # Find maximum number of requests across DP ranks
         max_num_reqs_across_dp = max(
             len(req_ids) for req_ids in req_ids_dp.values())
@@ -2702,8 +2778,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         input_ids_view = self.device_buffer.get_view(
             (padded_total_num_scheduled_tokens, ), key="input_ids")
         query_start_loc_view = self.device_buffer.get_view(
-            (self.max_num_reqs + dp_size, ), key="query_start_loc")
-        seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
+            (self.attn_max_num_seqs + dp_size, ), key="query_start_loc")
+        seq_lens_view = self.device_buffer.get_view((self.attn_max_num_seqs, ),
                                                     key="seq_lens")
 
         if self.speculative_config:
@@ -2859,66 +2935,106 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         request_distribution = np.array(_request_distribution,
                                         dtype=np.int32).ravel()
 
-        # Prefill context parallelism (single request, prefill only): head-tail
-        # arrange this request's current tokens into rank order
+        # Prefill context parallelism (prefill-only batches): zigzag-chunk
+        # each request independently and lay the tokens out in rank order.
         pcp_metadata = None
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         if pcp_size > 1:
-            counts = scheduled_tokens_per_dp_rank[0]
-            assert len(
-                counts
-            ) == 1, "PCP currently only supports a single request at a time."
-            num_current = int(counts[0])
+            assert dp_size == 1, "PCP with DP > 1 is not supported."
+            counts = [int(c) for c in scheduled_tokens_per_dp_rank[0]]
+            req_idxs = [int(i) for i in req_indices_dp[0]]
+            computed = [
+                int(self.input_batch.num_computed_tokens_cpu[i])
+                for i in req_idxs
+            ]
+            # Prefill-only: a decode request would occupy 2P query rows to
+            # carry one token.
+            for n_i, l_i in zip(counts, computed):
+                if n_i == 1 and l_i > 0:
+                    raise NotImplementedError(
+                        "PCP supports prefill-only batches; got a decode "
+                        f"request (num_scheduled=1, num_computed={l_i}).")
+
+            num_pcp_reqs = len(counts)
             two_p = 2 * pcp_size
-            pcp_chunk_size = padded_num_scheduled_tokens_per_dp_rank // two_p
-            # Head-tail row order: rank r owns chunk r (head) and chunk 2P-1-r (tail)
-            row_perm = np.array(
-                [c for r in range(pcp_size) for c in (r, two_p - 1 - r)])
+            # The layout covers the live requests only: both attention phases
+            # iterate the seq count from request_distribution, so the slots
+            # padding the count up to `PCPMetadata.num_reqs` need no rows.
+            chunk, off, s_live = pcp_token_layout(counts, pcp_size)
+            t_pad = padded_num_scheduled_tokens_per_dp_rank
+            assert t_pad % pcp_size == 0 and t_pad >= pcp_size * s_live, (
+                f"PCP token bucket {t_pad} cannot hold {pcp_size * s_live} "
+                f"tokens ({num_pcp_reqs} reqs, chunks {chunk})")
+            s_pad = t_pad // pcp_size
+            if num_pcp_reqs == 1:
+                # Single request: chunk = t_pad / 2P, filling every rank's
+                # slice.  pcp_forward's kernel-side K/V remap derives the chunk
+                # from the buffer width, so the layout must match it.
+                assert t_pad % two_p == 0, (t_pad, two_p)
+                chunk = [t_pad // two_p]
+                off = [0]
 
-            def _rearrange(buf):  # natural token order -> rank order
-                buf[num_current:] = 0
-                buf[:] = buf.reshape(two_p,
-                                     pcp_chunk_size)[row_perm].reshape(-1)
+            # `perm[g]` is the token-order source of global rank-order slot g
+            # (-1 for padding); `kv_order` is the inverse map for the
+            # all-gathered current K/V, into request-major token order.
+            src_off = np.cumsum([0] + counts)[:-1]
+            perm = np.full(t_pad, -1, np.int64)
+            kv_order = np.zeros(t_pad, np.int32)
+            ranks = np.arange(pcp_size)
+            for i in range(num_pcp_reqs):
+                c_i = chunk[i]
+                j = np.arange(c_i)
+                kv_base = pcp_size * off[i]  # == kv_new_starts of request i
+                for h in (0, 1):
+                    chunk_idx = ranks if h == 0 else two_p - 1 - ranks
+                    dst = (ranks[:, None] * s_pad + off[i] + h * c_i +
+                           j[None, :])
+                    tok = chunk_idx[:, None] * c_i + j[None, :]
+                    real = tok < counts[i]
+                    perm[dst[real]] = src_off[i] + tok[real]
+                    kv_order[kv_base + tok.ravel()] = dst.ravel()
 
-            _rearrange(positions)
-            _rearrange(input_ids_view)
+            valid = perm >= 0
+            for buf in (positions, input_ids_view):
+                src = np.asarray(buf).copy()
+                buf[:] = 0
+                buf[valid] = src[perm[valid]]
 
-            # seq_lens
-            req_idx = int(req_indices_dp[0][0])
-            num_computed = int(
-                self.input_batch.num_computed_tokens_cpu[req_idx])
-            seq_lens_view[:2] = num_computed + num_current  # [T, T]
-            seq_lens_view[2:] = 0
+            # Attention metadata: request i occupies seqs 2i (head), 2i+1
+            # (tail), carrying identical request-level values.
+            n_seqs = 2 * num_pcp_reqs
+            n_off = np.asarray(seq_lens_view).shape[0]  # attn_max_num_seqs
+            assert n_seqs <= n_off, (
+                f"PCP needs {n_seqs} attention seq slots, have {n_off}")
 
-            # distribution. The fused current phase presents head+tail as two prefill seqs.
-            request_distribution[:] = (0, 0, 2)
+            def per_seq(xs):
+                return np.repeat(np.asarray(xs, np.int32), 2)
 
-            # kv_cache_lens
-            kv_cache_lens_np = np.zeros_like(np.asarray(seq_lens_view))
-            kv_cache_lens_np[:2] = num_computed  # [P, P]
+            seq_lens_view[:n_seqs] = per_seq(
+                [l_i + n_i for n_i, l_i in zip(counts, computed)])
+            seq_lens_view[n_seqs:] = 0
+            request_distribution[:] = (0, 0, n_seqs)
+            kv_cache_lens_np = np.zeros(n_off, np.int32)
+            kv_cache_lens_np[:n_seqs] = per_seq(computed)
 
-            # cu_q_lens and q_pos_offsets.
-            n_off = np.asarray(seq_lens_view).shape[0]  # max_num_reqs
-            pcp_cu_np = np.zeros((pcp_size, n_off + 1), np.int32)
-            pcp_qpos_np = np.zeros((pcp_size, n_off), np.int32)
-            for rank in range(pcp_size):
-                tail_off = (two_p - 1 - rank) * pcp_chunk_size
-                tail_real = int(
-                    np.clip(num_current - tail_off, 0, pcp_chunk_size))
-                pcp_cu_np[rank, 1] = pcp_chunk_size  # seq 0 (head) end
-                pcp_cu_np[rank,
-                          2:] = pcp_chunk_size + tail_real  # seq 1 (tail) end
-                pcp_qpos_np[rank, 0] = rank * pcp_chunk_size
-                pcp_qpos_np[rank, 1] = tail_off
+            # cu_q_lens is rank-invariant (both halves are full length); only
+            # q_pos_offsets varies by rank.
+            cu_row, pcp_qpos_np, kv_new_starts_np = pcp_seq_arrays(
+                chunk, off, pcp_size, n_off)
+            # A zero-length seq inside the iterated range hangs the kernel.
+            assert np.all(np.diff(cu_row[:n_seqs + 1]) > 0), (
+                f"zero-length PCP seq in cu_q_lens: {cu_row[:n_seqs + 1]}")
+            pcp_cu_np = np.tile(cu_row, (pcp_size, 1))
 
-            # logits_indices
-            inv_row = np.empty(two_p, np.int64)
-            inv_row[row_perm] = np.arange(two_p)
-            last = num_current - 1
-            logits_indices_view[0] = (
-                inv_row[last // pcp_chunk_size] * pcp_chunk_size +
-                last % pcp_chunk_size)
-            logits_indices_view[1:] = -1
+            # logits_indices: the global slot of each request's last token.
+            logits_indices_view[:] = -1
+            for i in range(num_pcp_reqs):
+                last = counts[i] - 1
+                c = last // chunk[i]
+                rank = c if c < pcp_size else two_p - 1 - c
+                h = 0 if c < pcp_size else 1
+                logits_indices_view[i] = (rank * s_pad + off[i] +
+                                          h * chunk[i] + last % chunk[i])
 
             pcp_spec = NamedSharding(
                 self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
@@ -2928,18 +3044,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
              pcp_q_pos_offsets) = device_array(self.mesh,
                                                (pcp_cu_np, pcp_qpos_np),
                                                sharding=pcp_spec)
+            (pcp_kv_cache_lens, pcp_kv_new_starts,
+             pcp_kv_token_order) = device_array(
+                 self.mesh, (kv_cache_lens_np, kv_new_starts_np, kv_order),
+                 sharding=repl)
             pcp_metadata = PCPMetadata(
                 query_start_loc=pcp_query_start_loc,
-                kv_cache_lens=device_array(self.mesh,
-                                           kv_cache_lens_np,
-                                           sharding=repl),
+                kv_cache_lens=pcp_kv_cache_lens,
                 q_pos_offsets=pcp_q_pos_offsets,
-                # Snap the request's live cached-page count up to the shared
-                # ladder that precompilation warms (0 == nothing cached, which
-                # elides the cache phase entirely).
-                cache_pages=round_up_pcp_cache_pages(
-                    num_computed, self.block_size,
-                    self.max_num_blocks_per_req),
+                kv_new_starts=pcp_kv_new_starts,
+                kv_token_order=pcp_kv_token_order,
+                has_cached_kv=any(l_i > 0 for l_i in computed),
+                num_reqs=runner_utils.get_padded_token_len(
+                    self.pcp_num_reqs_paddings, num_pcp_reqs),
             )
         spec_decode_metadata = None
         if self.speculative_config:
@@ -2985,7 +3102,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
             block_tables_view = self.device_buffer.get_view(
-                (self.max_num_reqs, block_table_obj.max_num_blocks_per_req),
+                (self.attn_max_num_seqs,
+                 block_table_obj.max_num_blocks_per_req),
                 key=f"block_tables_gid_{kv_cache_gid}")
 
             # Zero out the view once for correct padding
@@ -3006,13 +3124,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                               _num_reqs])
 
             if pcp_size > 1:
-                # PCP fuses the request's head+tail chunks into one
-                # launch as two sequences of the same request. The kernel
-                # indexes page_indices as `seq_idx * pages_per_seq`, and the
-                # writing seq is the tail (seq 1) -- so seq 1 must carry a copy
-                # of the request's block table, not the zero padding, or every
-                # strided KV write lands on page 0.
-                block_tables_view[1] = block_tables_view[0]
+                # Each request is two fused seqs (head, tail) and the kernel
+                # indexes page_indices by seq, so the tail must carry a copy
+                # of its request's block table or its KV write lands on page 0.
+                n = num_req_per_dp_rank[0]
+                block_tables_view[:2 * n] = np.repeat(block_tables_view[:n],
+                                                      2,
+                                                      axis=0)
 
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0

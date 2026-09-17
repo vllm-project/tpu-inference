@@ -245,6 +245,8 @@ class TestPallasAttentionBackendImpl:
             query, key, value, kv_cache, metadata, shared_metadata = \
                 create_inputs(mesh)
             cache_before = np.asarray(jax.device_get(kv_cache))
+            if shared:
+                key = value = None
 
             with torchax.default_env(), set_vllm_model_wrapper_context(
                     kv_caches=[kv_cache],
