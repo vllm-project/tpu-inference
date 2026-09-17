@@ -1,0 +1,193 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# 1P1D disaggregated serving. The two engines are eight chips - the whole v7x
+# reservation - so this runs alone. ${WORKLOAD_NAME} and ${IMAGE} are
+# substituted before submission, so a literal dollar is $$, and every container
+# must be named `workload`: the launcher forwards step environment into that
+# name and reads its logs.
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  annotations:
+    # Fleet pod setup - caches, tolerations, retries. See manifests/README.md.
+    tpu-ci.google.com/defaults: standard
+spec:
+  # Per-pod DNS is how the client reaches the engines; there is no Service.
+  network:
+    enableDNSHostnames: true
+  # The engines never exit, so the client finishing is what finishes the run.
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+      - benchmark
+  replicatedJobs:
+    - name: prefill
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          # A ceiling, not an estimate: a wedged engine must not hold the
+          # reservation.
+          activeDeadlineSeconds: 39600
+          # Required by enableDNSHostnames: the pod index is half the hostname.
+          completionMode: Indexed
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-topology: 2x2x1
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+              containers:
+              - name: workload
+                image: ${IMAGE}
+                command: ["/bin/bash", "/opt/kube/disagg_engine.sh", "prefill"]
+                # An hour, enough for a cold compile: without it an engine stuck
+                # in TPU init holds its chips until the JobSet deadline.
+                startupProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  periodSeconds: 30
+                  failureThreshold: 120
+                # What the benchmark's dependsOn waits on.
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  periodSeconds: 10
+                # Decode takes this whole list by alias. What the engines share
+                # otherwise lives in disagg_engine.sh; these have to be on the
+                # pod spec itself, so they stay here rather than move with it.
+                env: &engine_env
+                - name: POD_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.podIP
+                # Empty, not absent: GKE fills in only the names a pod leaves
+                # unset, and for a JobSet with two TPU jobs it picks a MegaScale
+                # topology that leaves libtpu blocked forever on "Missing hosts".
+                # Blanking them from the script instead would work but relies on
+                # nothing reading them before it runs.
+                - name: MEGASCALE_NUM_SLICES
+                  value: ""
+                - name: MEGASCALE_SLICE_ID
+                  value: ""
+                - name: MEGASCALE_COORDINATOR_ADDRESS
+                  value: ""
+                - name: MEGASCALE_PORT
+                  value: ""
+                - name: TPU_WORKER_ID
+                  value: "0"
+                - name: TPU_WORKER_HOSTNAMES
+                  value: ""
+                - name: TPU_PROCESS_ADDRESSES
+                  value: ""
+                - name: TPU_PROCESS_PORT
+                  value: ""
+                ports:
+                - containerPort: 8000
+                # Only the chips; memory comes from the shape's profile. Never
+                # add a cpu request here - it is a scheduling floor and can stop
+                # the TPU pool building nodes at all. See manifests/README.md.
+                resources:
+                  limits:
+                    google.com/tpu: "4"
+                  requests:
+                    google.com/tpu: "4"
+
+    # Identical to prefill but for kv_role and the memory fraction: this engine
+    # holds the KV cache for the whole generation, not one prefill.
+    - name: decode
+      # Both engines write the same HF cache, so they race while a model is
+      # still downloading: the first run of a new one needs a re-run.
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          activeDeadlineSeconds: 39600
+          completionMode: Indexed
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-topology: 2x2x1
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+              containers:
+              - name: workload
+                image: ${IMAGE}
+                command: ["/bin/bash", "/opt/kube/disagg_engine.sh", "decode"]
+                startupProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  periodSeconds: 30
+                  failureThreshold: 120
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  periodSeconds: 10
+                env: *engine_env
+                ports:
+                - containerPort: 8000
+                resources:
+                  limits:
+                    google.com/tpu: "4"
+                  requests:
+                    google.com/tpu: "4"
+
+    - name: benchmark
+      # Both engines, not just decode: this client needs both to answer /health.
+      dependsOn:
+        - name: prefill
+          status: Ready
+        - name: decode
+          status: Ready
+      replicas: 1
+      template:
+        spec:
+          parallelism: 1
+          completions: 1
+          activeDeadlineSeconds: 39600
+          completionMode: Indexed
+          backoffLimit: 0
+          template:
+            spec:
+              restartPolicy: Never
+              serviceAccountName: tpu-workload
+              # Keeps this client off a TPU node, where it would idle 4 chips.
+              nodeSelector:
+                cloud.google.com/compute-class: worker-cpu
+              containers:
+              - name: workload
+                image: ${IMAGE}
+                command: ["/bin/bash", "/opt/kube/disagg_benchmark.sh"]
+                env:
+                # JobSet builds each engine's DNS name from this.
+                - name: WORKLOAD_NAME
+                  value: ${WORKLOAD_NAME}
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                # Requests == limits: this shares the worker-cpu node.
+                resources:
+                  requests:
+                    cpu: "6"
+                    memory: "16Gi"
+                    ephemeral-storage: "20Gi"
+                  limits:
+                    cpu: "6"
+                    memory: "16Gi"
+                    ephemeral-storage: "20Gi"
