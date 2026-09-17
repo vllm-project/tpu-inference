@@ -1,25 +1,34 @@
 #!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # ==============================================================================
 # TPU Testcase Log Streaming & Tee Utility
 #
-# Slimmed-down companion to tee_logs.sh, dedicated to the Helm chart deployed by
+# Companion to tee_logs.sh, dedicated to Helm charts deployed by
 # .buildkite/gke/helm/run_testcase.sh (mode: "script").
 #
-# That chart renders exactly ONE replicatedJob:
-#   replicatedjob-name = runner
-#     initContainers : tpu-node-setup, [git-sync]
-#     container      : test-runner
-#
-# Everything related to the benchmark stack (client / p / d / x / server),
-# multiplexed output, colored tags and generate_summary.py reporting has been
-# removed, since none of it is ever deployed in script mode.
+# Supports one or more replicatedJobs under the scriptJobs list (e.g. unittest,
+# accuracy, benchmark). Streams each step to a separate log file
+# (<JOB_NAME>-<STEP>.log), or a single <JOB_NAME>.log for single-job runs.
 # ==============================================================================
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GKE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-REP_JOB="runner"
+REP_JOB=""
 CONTAINER="test-runner"
 
 # Resolve default log directory (gke/log)
@@ -31,7 +40,7 @@ CLEAN_USER="$(printf '%s' "$CURRENT_USER" | tr '[:upper:]' '[:lower:]' | tr -dc 
 JOB_NAME=""
 LOG_NUM=""
 FOLLOW=true
-WAIT_TIMEOUT=900   # seconds to wait for the runner pod to appear
+WAIT_TIMEOUT=900   # seconds to wait for each pod to appear
 
 usage() {
     cat <<EOF
@@ -42,38 +51,35 @@ Usage: $0 [options] [JOB_NAME] [LOG_NUMBER]
 
 Arguments (positional, order independent):
   JOB_NAME          JobSet / Helm release name from run_testcase.sh.
-                    If omitted, auto-detects the newest JobSet that owns a
-                    '${REP_JOB}' replicatedJob (prefers '${CLEAN_USER}-test-*').
-                    The log is always saved to '<JOB_NAME>.log' (or '<JOB_NAME>.log<N>').
-  LOG_NUMBER        Optional numeric suffix for the log file (e.g. 4 -> <JOB_NAME>.log4).
+                    If omitted, auto-detects the newest testcase JobSet.
+                    Logs are saved to '<JOB_NAME>-<step>.log' (or '<JOB_NAME>.log').
+  LOG_NUMBER        Optional numeric suffix for the log file (e.g. 4 -> *.log4).
 
 Options:
-  -j, --job <NAME>     Specify JobSet name explicitly
-  -n, --number <NUM>   Specify log number suffix explicitly
-  -c, --container <C>  Container to read (default: ${CONTAINER};
-                       use 'git-sync' or 'tpu-node-setup' for init containers)
-  -s, --dump           Snapshot current logs without following (-f)
-  -o, --dir <DIR>      Output directory (default: ${LOG_DIR})
-  -t, --timeout <SEC>  Seconds to wait for the runner pod (default: ${WAIT_TIMEOUT})
-  -h, --help           Show this help message
+  -j, --job <NAME>             Specify JobSet name explicitly
+  -r, --replicated-job <NAME>  Target specific ReplicatedJob (e.g. 'benchmark')
+  -n, --number <NUM>           Specify log number suffix explicitly
+  -c, --container <C>          Container to read (default: ${CONTAINER};
+                               use 'git-sync' or 'tpu-node-setup' for init containers)
+  -s, --dump                   Snapshot current logs without following (-f)
+  -o, --dir <DIR>              Output directory (default: ${LOG_DIR})
+  -t, --timeout <SEC>          Seconds to wait for the pod (default: ${WAIT_TIMEOUT})
+  -h, --help                   Show this help message
 
 Exit code mirrors the testcase result: 0 = Succeeded, 1 = Failed/unknown.
 
 Examples:
-  1. Stream the newest testcase run into log/<detected_jobset>.log:
+  1. Stream newest testcase run (all steps into separate log files):
      $0
 
-  2. Stream a specific release into log/<JOB_NAME>.log:
+  2. Stream a specific release:
      $0 dennis-test-a1b2c
 
-  3. Stream a specific release with numeric suffix into log/<JOB_NAME>.log4:
-     $0 dennis-test-a1b2c 4
+  3. Stream only the benchmark step of a release:
+     $0 -r benchmark dennis-test-a1b2c
 
   4. Snapshot the logs of a finished run:
      $0 --dump dennis-test-a1b2c
-
-  5. Inspect the git-sync init container instead:
-     $0 -c git-sync --dump
 ==================================================================
 EOF
 }
@@ -84,6 +90,10 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -j|--job)
             JOB_NAME="$2"
+            shift 2
+            ;;
+        -r|--replicated-job)
+            REP_JOB="$2"
             shift 2
             ;;
         -n|--number)
@@ -141,12 +151,20 @@ fi
 mkdir -p "${LOG_DIR}"
 
 # --- AUTO-DISCOVER THE TESTCASE JOBSET ---
-# Only JobSets exposing a 'runner' replicatedJob come from run_testcase.sh.
 if [ -z "$JOB_NAME" ]; then
-    echo "🔍 Detecting latest testcase JobSet (replicatedJob '${REP_JOB}')..."
+    echo "🔍 Detecting latest testcase JobSet..."
     CANDIDATES="$(kubectl get jobset \
-        -o jsonpath="{range .items[?(@.spec.replicatedJobs[*].name=='${REP_JOB}')]}{.metadata.name}{'\n'}{end}" \
+        -o jsonpath="{range .items[?(@.spec.replicatedJobs[*].template.metadata.labels.role=='test-runner')]}{.metadata.name}{'\n'}{end}" \
         2>/dev/null || true)"
+
+    if [ -z "$CANDIDATES" ]; then
+        CANDIDATES="$(kubectl get jobset \
+            -o jsonpath="{range .items[?(@.spec.replicatedJobs[*].name=='runner')]}{.metadata.name}{'\n'}{end}" \
+            2>/dev/null || true)"
+    fi
+    if [ -z "$CANDIDATES" ] && [ -n "$CLEAN_USER" ]; then
+        CANDIDATES="$(kubectl get jobset -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep "^${CLEAN_USER}-" || true)"
+    fi
 
     if [ -n "$CLEAN_USER" ]; then
         JOB_NAME="$(printf '%s\n' "$CANDIDATES" | grep "^${CLEAN_USER}-" | tail -n 1 || true)"
@@ -162,104 +180,137 @@ if [ -z "$JOB_NAME" ]; then
     echo "   Found JobSet: ${JOB_NAME}"
 fi
 
-LABEL="jobset.sigs.k8s.io/jobset-name=${JOB_NAME},jobset.sigs.k8s.io/replicatedjob-name=${REP_JOB}"
-
-# Verify the JobSet (or at least its pods) exists
-if ! kubectl get jobset "${JOB_NAME}" >/dev/null 2>&1; then
-    echo "⚠️  JobSet '${JOB_NAME}' not found, falling back to pod lookup..."
-    if [ -z "$(kubectl get pods -l "$LABEL" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]; then
-        echo "❌ Error: no '${REP_JOB}' pods found for '${JOB_NAME}'." >&2
-        exit 1
-    fi
-fi
-
-# --- LOG FILE DETERMINATION (AVOID OVERWRITING) ---
-if [ -n "$LOG_NUM" ]; then
-    TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log${LOG_NUM}"
-    if [ -e "$TESTCASE_LOG" ]; then
-        SUFFIX=$((LOG_NUM + 1))
-        while [ -e "${LOG_DIR}/${JOB_NAME}.log${SUFFIX}" ]; do
-            SUFFIX=$((SUFFIX + 1))
-        done
-        TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log${SUFFIX}"
-        LOG_NUM="$SUFFIX"
-    fi
+# --- RESOLVE TARGET REPLICATED JOBS ---
+TARGET_JOBS=()
+if [ -n "$REP_JOB" ]; then
+    TARGET_JOBS=("$REP_JOB")
 else
-    TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log"
-    if [ -e "$TESTCASE_LOG" ]; then
-        SUFFIX=2
-        while [ -e "${LOG_DIR}/${JOB_NAME}.log${SUFFIX}" ]; do
-            SUFFIX=$((SUFFIX + 1))
-        done
-        TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log${SUFFIX}"
-        LOG_NUM="$SUFFIX"
+    DISCOVERED_JOBS="$(kubectl get jobset "${JOB_NAME}" -o jsonpath='{.spec.replicatedJobs[*].name}' 2>/dev/null || true)"
+    if [ -n "$DISCOVERED_JOBS" ]; then
+        read -r -a TARGET_JOBS <<< "$DISCOVERED_JOBS"
+    else
+        TARGET_JOBS=("runner")
     fi
 fi
 
-echo "============================================================"
-echo " ⚡ TPU Testcase Log Streamer & Tee Utility"
-echo "============================================================"
-echo " JobSet Name : ${JOB_NAME}"
-echo " Target      : ${REP_JOB} / ${CONTAINER}"
-if [ -n "$LOG_NUM" ]; then
-    echo " Log Suffix  : ${LOG_NUM}"
-fi
-echo " Mode        : $([ "$FOLLOW" = true ] && echo stream || echo dump)"
-echo " Target Log  : ${TESTCASE_LOG}"
-echo "============================================================"
+TOTAL_JOBS="${#TARGET_JOBS[@]}"
+CURRENT_LOG_FILE=""
 
 summary() {
-    if [ -f "${TESTCASE_LOG}" ]; then
-        LINES="$(wc -l < "${TESTCASE_LOG}" | tr -d ' ')"
-        SIZE="$(ls -lh "${TESTCASE_LOG}" | awk '{print $5}')"
+    if [ -n "${CURRENT_LOG_FILE}" ] && [ -f "${CURRENT_LOG_FILE}" ]; then
+        LINES="$(wc -l < "${CURRENT_LOG_FILE}" | tr -d ' ')"
+        SIZE="$(ls -lh "${CURRENT_LOG_FILE}" | awk '{print $5}')"
         echo ""
         echo "============================================================"
-        printf " 📋 Captured %-20s : %8s (%s lines)\n" "$(basename "${TESTCASE_LOG}")" "$SIZE" "$LINES"
+        printf " 📋 Captured %-20s : %8s (%s lines)\n" "$(basename "${CURRENT_LOG_FILE}")" "$SIZE" "$LINES"
         echo "============================================================"
     fi
 }
 
-pod_phase() {
-    kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true
+stream_single_job() {
+    local TARGET_REP="$1"
+    local STEP_NUM="$2"
+
+    local LABEL="jobset.sigs.k8s.io/jobset-name=${JOB_NAME},jobset.sigs.k8s.io/replicatedjob-name=${TARGET_REP}"
+
+    # Determine log file: separate file per step if multiple jobs exist
+    local BASE_NAME="${JOB_NAME}"
+    if [ "$TOTAL_JOBS" -gt 1 ]; then
+        BASE_NAME="${JOB_NAME}-${TARGET_REP}"
+    fi
+
+    local TESTCASE_LOG=""
+    if [ -n "$LOG_NUM" ]; then
+        TESTCASE_LOG="${LOG_DIR}/${BASE_NAME}.log${LOG_NUM}"
+        if [ -e "$TESTCASE_LOG" ]; then
+            local SUFFIX=$((LOG_NUM + 1))
+            while [ -e "${LOG_DIR}/${BASE_NAME}.log${SUFFIX}" ]; do
+                SUFFIX=$((SUFFIX + 1))
+            done
+            TESTCASE_LOG="${LOG_DIR}/${BASE_NAME}.log${SUFFIX}"
+        fi
+    else
+        TESTCASE_LOG="${LOG_DIR}/${BASE_NAME}.log"
+        if [ -e "$TESTCASE_LOG" ]; then
+            local SUFFIX=2
+            while [ -e "${LOG_DIR}/${BASE_NAME}.log${SUFFIX}" ]; do
+                SUFFIX=$((SUFFIX + 1))
+            done
+            TESTCASE_LOG="${LOG_DIR}/${BASE_NAME}.log${SUFFIX}"
+        fi
+    fi
+
+    CURRENT_LOG_FILE="${TESTCASE_LOG}"
+
+    echo "============================================================"
+    echo " ⚡ TPU Testcase Log Streamer & Tee Utility"
+    if [ "$TOTAL_JOBS" -gt 1 ]; then
+        echo " Step        : [${STEP_NUM}/${TOTAL_JOBS}] ${TARGET_REP}"
+    fi
+    echo " JobSet Name : ${JOB_NAME}"
+    echo " Target      : ${TARGET_REP} / ${CONTAINER}"
+    if [ -n "$LOG_NUM" ]; then
+        echo " Log Suffix  : ${LOG_NUM}"
+    fi
+    echo " Mode        : $([ "$FOLLOW" = true ] && echo stream || echo dump)"
+    echo " Target Log  : ${TESTCASE_LOG}"
+    echo "============================================================"
+
+    pod_phase() {
+        kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true
+    }
+
+    # --- DUMP MODE ---
+    if [ "$FOLLOW" = false ]; then
+        echo "📥 Snapshotting ${TARGET_REP} (${CONTAINER}) logs..."
+        kubectl logs -l "$LABEL" -c "$CONTAINER" --tail=-1 > "${TESTCASE_LOG}" 2>&1 || true
+        summary
+        local DUMP_PHASE="$(pod_phase)"
+        [ "$DUMP_PHASE" = "Succeeded" ] && return 0 || return 1
+    fi
+
+    # --- WAIT FOR POD ---
+    echo "⏳ Waiting for the ${TARGET_REP} pod (timeout ${WAIT_TIMEOUT}s)..."
+    local WAITED=0
+    while [ -z "$(kubectl get pods -l "$LABEL" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]; do
+        if [ "$WAITED" -ge "$WAIT_TIMEOUT" ]; then
+            echo "❌ Error: timed out waiting for the ${TARGET_REP} pod." >&2
+            return 1
+        fi
+        sleep 2
+        WAITED=$((WAITED + 2))
+    done
+
+    trap 'summary' EXIT INT TERM
+
+    echo "📡 Streaming & teeing ${TARGET_REP} (${CONTAINER}) to screen -> $(basename "${TESTCASE_LOG}")..."
+    : > "${TESTCASE_LOG}"
+    local PHASE=""
+    while true; do
+        kubectl logs -l "$LABEL" -c "$CONTAINER" --tail=-1 -f 2>&1 | tee -a "${TESTCASE_LOG}" || true
+        PHASE="$(pod_phase)"
+        if [ "$PHASE" = "Succeeded" ] || [ "$PHASE" = "Failed" ] || [ -z "$PHASE" ]; then
+            break
+        fi
+        sleep 2
+    done
+
+    echo ""
+    echo "🏁 Testcase step '${TARGET_REP}' pod phase: ${PHASE:-unknown}"
+    summary
+    [ "$PHASE" = "Succeeded" ] && return 0 || return 1
 }
 
-# --- DUMP MODE: one-shot snapshot, no waiting ---
-if [ "$FOLLOW" = false ]; then
-    echo "📥 Snapshotting ${REP_JOB} (${CONTAINER}) logs..."
-    kubectl logs -l "$LABEL" -c "$CONTAINER" --tail=-1 > "${TESTCASE_LOG}" 2>&1 || true
-    summary
-    [ "$(pod_phase)" = "Succeeded" ] && exit 0 || exit 1
-fi
-
-# --- WAIT FOR THE RUNNER POD ---
-echo "⏳ Waiting for the ${REP_JOB} pod (timeout ${WAIT_TIMEOUT}s)..."
-WAITED=0
-while [ -z "$(kubectl get pods -l "$LABEL" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]; do
-    if [ "$WAITED" -ge "$WAIT_TIMEOUT" ]; then
-        echo "❌ Error: timed out waiting for the ${REP_JOB} pod." >&2
+# --- EXECUTE STREAMING ACROSS ALL TARGET REPLICATED JOBS ---
+STEP_IDX=1
+for JOB in "${TARGET_JOBS[@]}"; do
+    if ! stream_single_job "$JOB" "$STEP_IDX"; then
+        echo "❌ Step '${JOB}' failed! Aborting log streaming." >&2
         exit 1
     fi
-    sleep 2
-    WAITED=$((WAITED + 2))
-done
-
-trap 'summary' EXIT INT TERM
-
-# --- STREAM & TEE ---
-# kubectl logs -f drops out while the pod is still pulling images / running init
-# containers (tpu-node-setup, git-sync), so retry until the job reaches a
-# terminal phase. Truncate once, then append across retries.
-echo "📡 Streaming & teeing ${REP_JOB} (${CONTAINER}) to screen -> $(basename "${TESTCASE_LOG}")..."
-: > "${TESTCASE_LOG}"
-while true; do
-    kubectl logs -l "$LABEL" -c "$CONTAINER" --tail=-1 -f 2>&1 | tee -a "${TESTCASE_LOG}" || true
-    PHASE="$(pod_phase)"
-    if [ "$PHASE" = "Succeeded" ] || [ "$PHASE" = "Failed" ] || [ -z "$PHASE" ]; then
-        break
-    fi
-    sleep 2
+    STEP_IDX=$((STEP_IDX + 1))
 done
 
 echo ""
-echo "🏁 Testcase pod phase: ${PHASE:-unknown}"
-[ "$PHASE" = "Succeeded" ] && exit 0 || exit 1
+echo "🎉 All testcase step(s) in JobSet '${JOB_NAME}' completed successfully."
+exit 0
