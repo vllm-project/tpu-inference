@@ -4,7 +4,7 @@
 # Python package. 
 #
 # Key differences from the standard Dockerfile:
-# 1. It builds a redistributable wheel (.whl) for vllm-tpu.
+# 1. It builds a redistributable wheel (.whl) for vllm-jaxtpu.
 # 2. It installs the 'tpu-inference' package from a package index.
 # 3. Use this file if you are verifying the PyPI distribution flow or need 
 #    a production-ready wheel installation rather than an editable source build.
@@ -54,13 +54,13 @@ COPY . .
 RUN python3 -m pip install build
 RUN python3 -m build
 
-# Build vllm-tpu wheel
+# Build vllm-jaxtpu wheel
 WORKDIR /workspace
 ARG VLLM_COMMIT_HASH
 RUN VLLM_TPU_VERSION=$(date -u +%Y%m%d) && \
     bash tpu_inference/.buildkite/scripts/build_vllm_tpu.sh --local "${VLLM_TPU_VERSION}" "${VLLM_COMMIT_HASH}"
 
-# Install vllm-tpu wheel
+# Install vllm-jaxtpu wheel
 RUN pip install --no-cache-dir vllm/dist/*.whl
 
 

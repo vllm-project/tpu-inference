@@ -20,16 +20,16 @@
 #
 # Examples:
 #   # Default: Start vLLM server
-#   docker run vllm-tpu
+#   docker run vllm-jaxtpu
 #   
 #   # Start vLLM server with arguments
-#   docker run -e VLLM_ARGS="--model=meta-llama/Llama-2-7b --port=8080" vllm-tpu
+#   docker run -e VLLM_ARGS="--model=meta-llama/Llama-2-7b --port=8080" vllm-jaxtpu
 #
 #   # Start bash shell instead (backward compatible)
-#   docker run -e DISABLE_VLLM_SERVER=true -it vllm-tpu
+#   docker run -e DISABLE_VLLM_SERVER=true -it vllm-jaxtpu
 #
 #   # Run custom command
-#   docker run vllm-tpu python3 my_script.py
+#   docker run vllm-jaxtpu python3 my_script.py
 
 set -e
 

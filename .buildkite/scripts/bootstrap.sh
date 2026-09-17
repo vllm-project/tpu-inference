@@ -204,7 +204,7 @@ upload_benchmark_pipeline() {
     JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"
     buildkite-agent meta-data set "JOB_REFERENCE" "${JOB_REFERENCE}"
     echo "[BM-DEBUG] Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    echo "[BM-DEBUG] Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
+    echo "[BM-DEBUG] Using vllm-jaxtpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
 
     # Upload benchmark pipelines
     local case_folder=".buildkite/benchmark/cases/ci"

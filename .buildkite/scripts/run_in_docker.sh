@@ -40,7 +40,7 @@ printf "[INFO] %s = %s\n" "BENCHMARK_DOCKER_ARGS" "${BENCHMARK_DOCKER_ARGS[*]}"
 
 # TODO(Qiliang Cui): This is temp solution to mitigate the docker image
 #     not cleaned issue when migrating benchmark to buildkite.
-docker rm -f vllm-tpu || true
+docker rm -f vllm-jaxtpu || true
 
 # Environment variables for docker run
 ENV_VARS=(
@@ -70,7 +70,7 @@ if [ -z "${MODEL_IMPL_TYPE:-}" ]; then
     MODEL_IMPL_TYPE=auto
 fi
 
-IMAGE_NAME='vllm-tpu'
+IMAGE_NAME='vllm-jaxtpu'
 declare -a DEV_MOUNT=()
 if [[ "${DEV_MODE:-false}" == "true" ]]; then
     FULL_IMAGE_TAG="${IMAGE_NAME}:dev"

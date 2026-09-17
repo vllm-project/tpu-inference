@@ -53,7 +53,7 @@ upload_benchmark_pipeline() {
     CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
     buildkite-agent meta-data set "CODE_HASH" "${CODE_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
-    echo "Using vllm-tpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
+    echo "Using vllm-jaxtpu commit hash: $(buildkite-agent meta-data get "CODE_HASH")"
 
     # Convert uppercase target_case_type to lowercase for the directory path.
     local folder_name="${target_case_type,,}"

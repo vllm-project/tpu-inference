@@ -253,12 +253,12 @@ source "$SCRIPT_DIR/setup_docker_env.sh"
 # Determine the Docker image name and registry path.
 # Use the local image for multi-host benchmarks; otherwise, default to the remote GCR image.
 if [[ "${IS_MULTI_HOST_BENCH:-false}" == "true" ]]; then
-  IMAGE_NAME='vllm-tpu'
+  IMAGE_NAME='vllm-jaxtpu'
   setup_environment "$IMAGE_NAME"
   # Use the exported CI cache image path so Worker Nodes can pull it directly
   DOCKER_IMAGE="${EXPORTED_CI_CACHE_IMAGE:-$IMAGE_NAME:latest}"
 else
-  IMAGE_NAME="${GCR_REPO}/vllm-tpu"
+  IMAGE_NAME="${GCR_REPO}/vllm-jaxtpu"
   # Pass "true" to enable pushing to GCR
   setup_environment "${IMAGE_NAME}" "true"
   DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"

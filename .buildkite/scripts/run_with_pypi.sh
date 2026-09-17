@@ -16,7 +16,7 @@
 # Exit on error, exit on unset variable, fail on pipe errors.
 set -euo pipefail
 
-# Build vllm-tpu with local tpu-inference (using docker/Dockerfile.pypi instead of docker/Dockerfile).
+# Build vllm-jaxtpu with local tpu-inference (using docker/Dockerfile.pypi instead of docker/Dockerfile).
 export RUN_WITH_PYPI="true"
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 

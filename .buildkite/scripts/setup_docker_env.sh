@@ -46,8 +46,8 @@ cleanup_docker_resource() {
     echo "Starting cleanup for ${IMG}"
 
     # Use format to get "Repository ID" and use awk for exact or suffix matching.
-    # $1 == img          -> Matches exact local image (e.g., "vllm-tpu")
-    # $1 ~ "/"img"$"     -> Matches Google Artifact Registry paths (e.g., ".../.../vllm-tpu")
+    # $1 == img          -> Matches exact local image (e.g., "vllm-jaxtpu")
+    # $1 ~ "/"img"$"     -> Matches Google Artifact Registry paths (e.g., ".../.../vllm-jaxtpu")
     OLD_IMAGES=$(docker images --format '{{.Repository}} {{.ID}}' | awk -v img="${IMG}" '$1 == img || $1 ~ "/"img"$" {print $2}' | sort -u)
     
     if [[ -n "$OLD_IMAGES" ]]; then
@@ -149,7 +149,7 @@ verify_image_tokamax() {
 }
 
 setup_environment() {
-  local image_name_param=${1:-"vllm-tpu"}
+  local image_name_param=${1:-"vllm-jaxtpu"}
   local should_push=${2:-"false"}
   local push_to_ci_cache=${3:-"false"}
   IMAGE_NAME="$image_name_param"

@@ -30,7 +30,7 @@ spec:
     spec:
       containers:
       - name: proxy-container
-        image: vllm/vllm-tpu:nightly
+        image: vllm/vllm-jaxtpu:nightly
         imagePullPolicy: IfNotPresent
         command: ["/bin/bash", "-c"]
         args:

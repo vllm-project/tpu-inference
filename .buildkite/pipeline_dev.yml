@@ -47,7 +47,7 @@ steps:
     env:
       TPU_VERSION: "tpu7x"
     commands:
-      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-jaxtpu" "false" "true"'
 
   # -----------------------------------------------------------------
   # Demo 1: offline_inference.py

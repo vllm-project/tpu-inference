@@ -13,7 +13,7 @@
 # limitations under the License.
 
 steps:
-  - label: "Publish vllm/vllm-tpu nightly image"
+  - label: "Publish vllm/vllm-jaxtpu nightly image"
     if: build.branch == "main" && build.env("NIGHTLY") == "1"
     agents:
       queue: cpu
@@ -25,9 +25,9 @@ steps:
       - "VLLM_SHORT_COMMIT=$${VLLM_COMMIT_HASH:0:7}"
       - "BUILDKITE_SHORT_COMMIT=$${BUILDKITE_COMMIT:0:7}"
       - "yes | docker system prune -a"
-      - "docker build --build-arg VLLM_COMMIT_HASH=$$VLLM_COMMIT_HASH --no-cache -f docker/Dockerfile -t vllm/vllm-tpu:nightly -t vllm/vllm-tpu:nightly-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT ."
-      - "docker push vllm/vllm-tpu:nightly"
-      - "docker push vllm/vllm-tpu:nightly-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT"
+      - "docker build --build-arg VLLM_COMMIT_HASH=$$VLLM_COMMIT_HASH --no-cache -f docker/Dockerfile -t vllm/vllm-jaxtpu:nightly -t vllm/vllm-jaxtpu:nightly-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT ."
+      - "docker push vllm/vllm-jaxtpu:nightly"
+      - "docker push vllm/vllm-jaxtpu:nightly-$$DATE-$$BUILDKITE_SHORT_COMMIT-$$VLLM_SHORT_COMMIT"
     plugins:
       - docker-login#v3.0.0:
           username: tpuinference

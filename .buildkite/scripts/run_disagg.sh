@@ -16,7 +16,7 @@
 
 set -ex
 
-IMAGE_NAME='vllm-tpu'
+IMAGE_NAME='vllm-jaxtpu'
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script
 # shellcheck disable=SC1091

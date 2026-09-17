@@ -64,8 +64,8 @@ spec:
           securityContext:
             privileged: true
       containers:
-      - name: vllm-tpu
-        image: vllm/vllm-tpu:nightly
+      - name: vllm-jaxtpu
+        image: vllm/vllm-jaxtpu:nightly
         imagePullPolicy: Always
         command: [ "/bin/bash", "-c", "--" ]
         args: ["vllm serve --seed=42 --model=Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --max-model-len=10240 --max-num-batched-tokens=8192 --max-num-seqs=512 --no-enable-prefix-caching --tensor-parallel-size=8 --kv-cache-dtype=fp8 --gpu-memory-utilization=0.70 --async-scheduling --enable-expert-parallel --kv-transfer-config '{\"kv_connector\":\"TPUConnector\",\"kv_connector_module_path\":\"tpu_inference.distributed.tpu_connector\",\"kv_role\":\"kv_producer\"}'"]
