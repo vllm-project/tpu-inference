@@ -696,10 +696,6 @@ def _reconstruct_slots_for_request(
         f"indexing")
     block_ids = []
     if req_state.block_ids:
-        # Fail loudly rather than silently keying the slots by the wrong
-        # group: a mismatch with the scheduler-side read is invisible in the
-        # output (it just yields zero-filled prompt routing, or another
-        # request's routing once block IDs get recycled).
         assert kv_cache_group_id < len(req_state.block_ids), (
             f"[routed-experts] kv_cache_group_id={kv_cache_group_id} is out "
             f"of range for a request with {len(req_state.block_ids)} "
@@ -842,7 +838,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rank = rank
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
-        # Resolved from the KV-cache config in `initialize_kv_cache`.
         self.routed_experts_attn_gid = 0
 
         self._init_random()
@@ -1357,13 +1352,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
-        # KV-cache group whose physical slots key the scheduler-side
-        # routed-experts buffer. The scheduler reads a completed prefill's
-        # routing back through the full-attention group's block IDs
-        # (`RoutedExpertsManager.get`), so the write side must key the slots
-        # by the same group. Groups follow model layer order, so this is not
-        # always group 0: Qwen3.5 (`full_attention_interval=4`, layer 0
-        # linear) yields `[linear, linear, linear, full]`.
         self.routed_experts_attn_gid = (
             get_routed_experts_attn_gid(kv_cache_config)
             if self.model_config.enable_return_routed_experts else 0)
