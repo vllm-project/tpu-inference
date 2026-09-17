@@ -15,33 +15,17 @@
 
 # Multi-host DCN disaggregation, run as processes in one pod.
 #
-# The same test as run_disagg_multi_host.sh, which starts one docker container
-# per TPU process. That script cannot run here: it drives `docker run`, and a
-# workload pod has no docker daemon and runs under PodSecurity `baseline`,
-# which rejects the --privileged it asks for.
-#
-# The conversion is small, because "multi-host" here means multiple TPU
-# processes rather than multiple machines. All eight containers already run
-# --network host and address each other as 127.0.0.1, so a pod - one network
-# namespace, all 8 chips of a ct6e-standard-8t - is the same environment with
-# the container boundaries removed. `docker run` becomes a background process
-# and `docker exec` becomes a plain command.
+# The same test as run_disagg_multi_host.sh, which cannot run here: it drives
+# `docker run`, and a workload pod has no docker daemon and runs under
+# PodSecurity `baseline`, which rejects the --privileged it asks for.
 #
 #   prefill  4 processes, chips 0-3, Ray cluster on 8100, vLLM on 8400
 #   decode   4 processes, chips 4-7, Ray cluster on 9100, vLLM on 9400
 #   proxy    1 process, port 8000, no chips
 #
-# Two things the container boundary was providing for free, which have to be
-# arranged explicitly now:
-#
-#   Ray temp dirs, one per process. A Ray node keeps its session directory and
-#   its raylet and plasma sockets under --temp-dir, so two raylets sharing one
-#   collide. The docker script gets this free from the mount namespace: even
-#   with --network host, each container has a private /tmp.
-#
-#   Process identity. TPU_VISIBLE_CHIPS, CLOUD_TPU_TASK_ID and TPU_PROCESS_PORT
-#   differ per process and were per-container env. Here they are set per
-#   command, which is why each `ray start` is wrapped in `env`.
+# TPU_VISIBLE_CHIPS, CLOUD_TPU_TASK_ID and TPU_PROCESS_PORT differ per process
+# and were per-container env, which is why each command below is wrapped in
+# `env`.
 
 # shellcheck disable=all
 set -e
@@ -53,13 +37,13 @@ OUTPUT_LEN=${OUTPUT_LEN:=20}
 NUM_PROMPTS=${NUM_PROMPTS:=100}
 RANDOM_SEED=${RANDOM_SEED:=10}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
-# 1 benchmark, 2 correctness, 3 both. Same meaning as the docker script.
+# 1 benchmark, 2 correctness, 3 both.
 TEST_MODE=${TEST_MODE:=1}
 
 LOG_DIR=${LOG_DIR:-$HOME/logs}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 
-# v6e has 4 chips per instance; tpu7x has 2. Mirrors run_disagg_multi_host.sh.
+# v6e has 4 chips per instance; tpu7x has 2.
 NUM_HOSTS_PER_INSTANCE=4
 TPU_PROCESS_BOUNDS="2,2,1"
 PREFILL_TPU_PORTS=(8476 8477 8478 8479)
@@ -112,14 +96,10 @@ trap cleanup EXIT
 # "the chips were not ready", never "the test failed".
 EXIT_TEMPFAIL=75
 
-# Exit EX_TEMPFAIL if a vLLM log shows the TPU runtime failing to open a
-# session, as run_disagg_multi_host.sh does on bare metal.
-#
-# Two fixed strings, matched with grep -F, so no generic word can ever trigger a
-# retry. It is still a heuristic: START_SESSION also fails deterministically for
-# a wrong process-bounds setting or chips a previous pod never released, and no
-# number of retries fixes those. `limit: 1` on the step is what bounds the cost
-# of guessing wrong to a single wasted run.
+# Fixed strings, matched with grep -F, so no generic word can trigger a retry.
+# It is still a heuristic: START_SESSION also fails deterministically for a
+# wrong process-bounds setting or chips a previous pod never released, which is
+# why the step's retry is capped at one.
 exit_if_transient_tpu_init_failure() {
   local log=$1 name=$2
   [ -f "$log" ] || return 0
@@ -130,15 +110,13 @@ exit_if_transient_tpu_init_failure() {
   fi
 }
 
-# Wait for an HTTP service, failing early if the process behind it died. The
-# docker script did this with `docker exec ... kill -0`; here the PID is ours.
 wait_for_server() {
   local port=$1 pid=$2 name=$3 log=$4
   echo "Waiting for $name on port $port (pid $pid)..."
   local end=$((SECONDS + 900))
   while [ $SECONDS -lt $end ]; do
     # 127.0.0.1, not localhost: localhost resolves to ::1 first and the pod
-    # has no IPv6 loopback, which is what broke single-host disagg on kube.
+    # has no IPv6 loopback.
     if curl -fs --max-time 5 "127.0.0.1:${port}/health" >/dev/null; then
       echo "=== $name healthy on port $port ==="
       return 0
@@ -177,9 +155,7 @@ rm -rf /tmp/ray-prefill* /tmp/ray-decode* /tmp/libtpu_lockfile
 ray stop --force >/dev/null 2>&1 || true
 
 # One Ray cluster per instance, then the vLLM server that drives it.
-#
-# `ray start --block` stays in the foreground, so each process goes to the
-# background here - the docker script got the same effect from `docker run -d`.
+# `ray start --block` stays in the foreground, hence the backgrounding.
 start_instance() {
   local role=$1 ray_port=$2 chip_base=$3 kv_base=$4 tmpdir=$5 vllm_port=$6 kv_role=$7
   shift 7
@@ -190,16 +166,11 @@ start_instance() {
   joined=$(IFS=, ; echo "${addrs[*]}")
 
   for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
-    # One temp dir per process, not per cluster. A Ray node keeps its session
+    # One temp dir per process, not per cluster: a Ray node keeps its session
     # directory, raylet socket and plasma socket under --temp-dir, so raylets
-    # sharing one collide and workers attach to the wrong raylet, which presents
-    # as all the workers of an instance stalling in xla_bridge backend init
-    # while racing for the same chip.
-    #
-    # The docker script gets this from the mount namespace: --network host
-    # shares the network but each container still has a private /tmp, so every
-    # raylet already has its own /tmp/ray. That is also what a real Ray cluster
-    # looks like - one session dir per node. Only the network is ever shared.
+    # sharing one collide and workers attach to the wrong raylet. That presents
+    # as every worker of an instance stalling in xla_bridge backend init while
+    # racing for the same chip.
     local cmd="ray start --block --temp-dir=${tmpdir}-${i}"
     if [ "$i" -eq 0 ]; then
       cmd="$cmd --head --port=${ray_port}"
@@ -207,13 +178,11 @@ start_instance() {
     else
       cmd="$cmd --address=127.0.0.1:${ray_port}"
     fi
-    # VLLM_XLA_CHECK_RECOMPILATION=0, against the 1 run.sh exports everywhere
-    # else. This test sets SKIP_JAX_PRECOMPILE=1, so the first real request
-    # necessarily compiles, and the check exists to fail a run that does exactly
-    # that. Bare metal never trips it because `docker run` passes an explicit
-    # env list that omits the flag; processes in a pod inherit the pod's
-    # environment instead. run_disagg_single_host.sh sets it to 0 for the same
-    # reason.
+    # VLLM_XLA_CHECK_RECOMPILATION=0 against the 1 run.sh exports: this test
+    # sets SKIP_JAX_PRECOMPILE=1, so the first real request necessarily
+    # compiles and the check exists to fail exactly that. These processes
+    # inherit the pod's environment, so the flag has to be overridden per
+    # command.
     env \
       VLLM_XLA_CHECK_RECOMPILATION=0 \
       TPU_MULTIHOST_BACKEND=ray \
@@ -235,7 +204,7 @@ start_instance() {
 
   echo "--- started $role Ray cluster: ${NUM_HOSTS_PER_INSTANCE} processes, chips ${chip_base}-$(( chip_base + NUM_HOSTS_PER_INSTANCE - 1 )) ---"
 
-  # vLLM attaches to node 0 of that cluster, exactly as `docker exec ...-0` did.
+  # vLLM attaches to node 0 of that cluster.
   env \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
     TPU_MULTIHOST_BACKEND=ray \
@@ -271,8 +240,8 @@ start_instance decode "$DECODE_RAY_PORT" "$NUM_HOSTS_PER_INSTANCE" 9200 /tmp/ray
 wait_for_server "$PREFILL_VLLM_PORT" "$PREFILL_VLLM_PID" "prefill vllm" "$LOG_DIR/prefill.txt"
 wait_for_server "$DECODE_VLLM_PORT" "$DECODE_VLLM_PID" "decode vllm" "$LOG_DIR/decode.txt"
 
-# 127.0.0.1 rather than localhost: localhost resolves to ::1 first, and the
-# pod has no IPv6 loopback. That is what broke single-host disagg on kube.
+# 127.0.0.1, not localhost: localhost resolves to ::1 first and the pod has no
+# IPv6 loopback.
 python3 "$SCRIPT_DIR/toy_proxy_server.py" --host 127.0.0.1 --port "$PROXY_PORT" \
   >"$LOG_DIR/proxy.txt" 2>&1 &
 PROXY_PID=$!
