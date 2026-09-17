@@ -12,16 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
-
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
-from tpu_inference.layers.jax.sample.sampling_metadata import \
-    TPUSupportedSamplingMetadata
 from tpu_inference.runner.decode_loop import (TpuSamplingState,
                                               _decode_core_impl, _split_rngs,
                                               _update_loop_state,
@@ -594,124 +589,3 @@ def test_continue_decode_exit_on_eos_interval():
 
     # EOS hit at step 0. Step checks at i=1, i=2 do not exit. Step check at i=3 (3 % 3 == 0) exits.
     assert int(final_state.step_counter) == 3
-
-
-def _decode_core_with_logprobs(mesh, static_max_decode_steps=4):
-    """Lower/run the fused loop with logprobs on, sharded over ATTN_DATA.
-
-    The stub model/logits/sample fns emit no collectives of their own, but the
-    logits they produce are pinned to ATTN_DATA so the per-step logprobs really
-    are sharded. Any collective in the compiled program therefore comes from
-    replicating them -- which lets a test say exactly where that landed.
-    """
-    # One request per ATTN_DATA shard, so the logprobs are genuinely split.
-    batch_size = mesh.shape["data"] * mesh.shape["attn_dp"]
-    vocab_size = 32
-    max_logprobs = 2
-    attn_data = NamedSharding(mesh, PartitionSpec(("data", "attn_dp"), None))
-
-    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
-                      **kwargs):
-        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
-                                                                          None,
-                                                                          None]
-        return kv_caches, hidden_states, None, None
-
-    def mock_compute_logits_fn(state, hidden_states, _):
-        logits = jnp.zeros((batch_size, vocab_size)).at[:, 3].set(10.0)
-        return jax.lax.with_sharding_constraint(logits, attn_data)
-
-    def mock_sample_fn(rng, m, logits, sampling_metadata, **kwargs):
-        return jnp.zeros((batch_size, ), dtype=jnp.int32), logits
-
-    step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), static_max_decode_steps,
-                               static_max_decode_steps)
-    kwargs = dict(
-        state={},
-        kv_caches=[jnp.zeros((2, 10))],
-        step_rngs=step_rngs,
-        sampling_metadata=TPUSupportedSamplingMetadata(logprobs=True),
-        inputs_embeds=None,
-        lora_metadata=None,
-        intermediate_tensors=None,
-        block_tables=jnp.zeros((batch_size, 16), dtype=jnp.int32),
-        query_start_loc=jnp.arange(batch_size + 1, dtype=jnp.int32),
-        request_distribution=jnp.zeros((batch_size, ), dtype=jnp.int32),
-        mamba_state_indices=None,
-        current_tokens=jnp.full((batch_size, ), 10, dtype=jnp.int32),
-        active_mask=jnp.ones((batch_size, ), dtype=jnp.bool_),
-        input_positions=jnp.zeros((batch_size, ), dtype=jnp.int32),
-        seq_lens=jnp.ones((batch_size, ), dtype=jnp.int32),
-        model_fn=mock_model_fn,
-        compute_logits_fn=mock_compute_logits_fn,
-        sample_fn=mock_sample_fn,
-        mesh=mesh,
-        max_decode_steps=static_max_decode_steps,
-        static_max_decode_steps=static_max_decode_steps,
-        eos_token_id=(99, ),
-        padding_token_id=-1,
-        dp_size=1,
-        pad_len=0,
-        has_experts=False,
-        expert_shape=None,
-        expert_dtype=None,
-        layer_name_to_kvcache_index=(),
-        is_first_rank=True,
-        is_last_rank=True,
-        max_logprobs=max_logprobs,
-        logprobs_mode="raw_logprobs",
-        continue_decode_eos_check_interval=-1,
-    )
-    with jax.set_mesh(mesh):
-        return _decode_core_impl(**kwargs), kwargs
-
-
-def _while_body_text(hlo_text):
-    """The HLO of the computation the top-level `while` loops over."""
-    body = re.search(r'while\([^)]*\)[^\n]*body=%([\w.\-]+)', hlo_text)
-    assert body, "no while op found in the decode core"
-    name = body.group(1)
-    block = re.search(r'^%' + re.escape(name) + r'\b.*?\{$(.*?)^\}$',
-                      hlo_text,
-                      flags=re.S | re.M)
-    assert block, f"body computation %{name} not found"
-    return block.group(1)
-
-
-def _logprobs_mesh():
-    devices = np.array(jax.devices()).reshape(1, len(jax.devices()), 1)
-    return Mesh(devices, ("data", "attn_dp", "model"))
-
-
-def test_decode_loop_replicates_its_logprobs_buffers():
-    """The runner device_get()s these buffers, so they must be replicated."""
-    outputs, _ = _decode_core_with_logprobs(_logprobs_mesh())
-    for name, buf in (("ids", outputs[8]), ("vals", outputs[9]),
-                      ("ranks", outputs[10])):
-        assert buf.sharding.is_fully_replicated, name
-
-
-def test_decode_loop_replicates_once_not_per_step():
-    """Replication belongs after the loop, not in its body.
-
-    Constraining each step's slice inside the `while` costs one collective per
-    decode step for the same total bytes. The stubs emit no collectives, so a
-    collective-free body is exactly the invariant we want to hold.
-    """
-    mesh = _logprobs_mesh()
-    _, kwargs = _decode_core_with_logprobs(mesh)
-    static_argnames = ("model_fn", "compute_logits_fn", "sample_fn", "mesh",
-                       "static_max_decode_steps", "eos_token_id",
-                       "padding_token_id", "dp_size", "pad_len", "has_experts",
-                       "expert_shape", "expert_dtype",
-                       "layer_name_to_kvcache_index", "is_first_rank",
-                       "is_last_rank", "max_logprobs", "logprobs_mode",
-                       "continue_decode_eos_check_interval")
-    with jax.set_mesh(mesh):
-        text = jax.jit(_decode_core_impl,
-                       static_argnames=static_argnames).lower(
-                           **kwargs).compile().as_text()
-
-    in_body = re.findall(r'= \S+ (all-gather|all-reduce)\(',
-                         _while_body_text(text))
-    assert not in_body, f"per-step collectives in the loop body: {in_body}"

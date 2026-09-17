@@ -62,7 +62,7 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
 from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap,
-    _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs_for_host,
+    _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
     compute_prompt_logprobs, distributed_sampling_allowed, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -2119,7 +2119,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     logprobs_logits = (processed_logits
                                        if self.model_config.logprobs_mode
                                        == "processed_logprobs" else logits)
-                logprobs = compute_and_gather_logprobs_for_host(
+                logprobs = compute_and_gather_logprobs(
                     logprobs_logits, next_tokens,
                     self.model_config.max_logprobs)
                 logprobs = _jax_logprobs_copy_to_host_async(logprobs)

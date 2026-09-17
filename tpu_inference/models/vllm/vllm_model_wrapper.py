@@ -424,12 +424,6 @@ class VllmModelWrapper:
             if expert_indices_list:
                 import jax.numpy as jnp
                 expert_indices = jnp.stack(expert_indices_list, axis=0)
-                # Same host-fetch boundary as the logprobs tensors: the runner
-                # device_get()s this, so it has to be replicated. Only reached
-                # when enable_return_routed_experts is on, which is why this
-                # never surfaced.
-                expert_indices = jax.lax.with_sharding_constraint(
-                    expert_indices, NamedSharding(self.mesh, PartitionSpec()))
             else:
                 expert_indices = None
             return new_kv_caches, output, aux_hidden_states, expert_indices
