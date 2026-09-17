@@ -28,8 +28,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tpu_inference.runner.tpu_runner import (_reconstruct_routed_experts,
-                                             _reconstruct_slots_for_request)
+from tpu_inference.runner.tpu_runner import (
+    _reconstruct_routed_experts, _reconstruct_slots_for_request,
+    _snapshot_block_ids_for_routed_experts)
 
 
 def _req(num_computed_tokens, block_ids):
@@ -44,7 +45,7 @@ class TestReconstructSlotsForRequest:
 
     def test_slots_are_block_relative_from_start_pos(self):
         # 5 tokens starting at absolute position 0 in block 1 -> slots 16..20.
-        slots = _reconstruct_slots_for_request(_req(5, [1]),
+        slots = _reconstruct_slots_for_request([1],
                                                num_tokens=5,
                                                block_size=16,
                                                start_pos=0)
@@ -53,7 +54,7 @@ class TestReconstructSlotsForRequest:
 
     def test_single_token_at_offset(self):
         # One token at absolute position 5 in block 1 -> slot 21.
-        slots = _reconstruct_slots_for_request(_req(6, [1]),
+        slots = _reconstruct_slots_for_request([1],
                                                num_tokens=1,
                                                block_size=16,
                                                start_pos=5)
@@ -61,7 +62,7 @@ class TestReconstructSlotsForRequest:
 
     def test_spanning_multiple_blocks(self):
         # 20 tokens from position 0 across blocks [1, 2], block_size 16.
-        slots = _reconstruct_slots_for_request(_req(20, [1, 2]),
+        slots = _reconstruct_slots_for_request([1, 2],
                                                num_tokens=20,
                                                block_size=16,
                                                start_pos=0)
@@ -70,7 +71,7 @@ class TestReconstructSlotsForRequest:
         np.testing.assert_array_equal(slots, expected)
 
     def test_zero_tokens_returns_empty(self):
-        slots = _reconstruct_slots_for_request(_req(5, [1]),
+        slots = _reconstruct_slots_for_request([1],
                                                num_tokens=0,
                                                block_size=16,
                                                start_pos=0)
@@ -80,10 +81,31 @@ class TestReconstructSlotsForRequest:
         # A negative start_pos would silently produce wrong slots via numpy
         # negative indexing; the helper must reject it loudly instead.
         with pytest.raises(AssertionError):
-            _reconstruct_slots_for_request(_req(3, [1]),
+            _reconstruct_slots_for_request([1],
                                            num_tokens=5,
                                            block_size=16,
                                            start_pos=-2)
+
+
+class TestSnapshotBlockIds:
+    """The snapshot is what decouples slot reconstruction from the lifetime of
+    the request, so it must copy and must tolerate an absent request."""
+
+    def test_snapshot_copies_the_block_list(self):
+        req_state = _req(5, [1, 2])
+        runner = SimpleNamespace(requests={"r0": req_state})
+
+        snapshot = _snapshot_block_ids_for_routed_experts(runner, ["r0"])
+        # Mutating the live state afterwards must not change the snapshot.
+        req_state.block_ids[0].append(99)
+
+        assert snapshot == {"r0": [1, 2]}
+
+    def test_absent_request_yields_empty_list(self):
+        runner = SimpleNamespace(requests={})
+        assert _snapshot_block_ids_for_routed_experts(runner, ["gone"]) == {
+            "gone": []
+        }
 
 
 def _new_req_sched(req_id, num_computed_tokens):
@@ -130,6 +152,8 @@ class TestReconstructRoutedExperts:
             req_ids=[req_id],
             req_ids_dp={0: [req_id]},
             padded_num_scheduled_tokens_per_dp_rank=n,
+            block_ids_by_req=_snapshot_block_ids_for_routed_experts(
+                runner, [req_id]),
         )
 
         # Prompt tokens at positions 0..4 in block 1 -> slots 16..20.
@@ -172,8 +196,59 @@ class TestReconstructRoutedExperts:
             req_ids=[req_id],
             req_ids_dp={0: [req_id]},
             padded_num_scheduled_tokens_per_dp_rank=n,
+            block_ids_by_req=_snapshot_block_ids_for_routed_experts(
+                runner, [req_id]),
         )
 
         # Position 20 -> block_ids[20 // 16 = 1] = block 2 -> 2*16 + 20%16 = 36.
+        np.testing.assert_array_equal(result.slot_mapping,
+                                      np.array([36], dtype=np.int32))
+
+    def test_request_evicted_before_output_resolves(self):
+        """Regression: the reconstruction must not depend on the request still
+        being in `runner.requests`.
+
+        With the engine's batch queue, `execute_model` for the next step runs
+        `_update_states`, which pops finished requests, *before* the previous
+        step's async output is resolved. Reading `runner.requests[req_id]` at
+        resolution time therefore raised
+        `KeyError: '<req_id>'` and killed EngineCore mid-generation -- seen with
+        two concurrent requests where one finished first.
+        """
+        req_id = "reqGone"
+        n = 1
+        block_size = 16
+        num_layers, top_k = 2, 4
+        req_state = _req(num_computed_tokens=0, block_ids=[1, 2])
+        runner = SimpleNamespace(block_size=block_size,
+                                 dp_size=1,
+                                 requests={req_id: req_state})
+        # Snapshot at dispatch, while the request is still live...
+        snapshot = _snapshot_block_ids_for_routed_experts(runner, [req_id])
+        # ...then the request finishes and `_update_states` evicts it.
+        runner.requests.pop(req_id)
+
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={req_id: n},
+            total_num_scheduled_tokens=n,
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[req_id],
+                                                  num_computed_tokens=[20]),
+        )
+        expert_indices_cpu = np.arange(num_layers * n * top_k,
+                                       dtype=np.int32).reshape(
+                                           num_layers, n, top_k)
+
+        result = _reconstruct_routed_experts(
+            runner=runner,
+            scheduler_output=scheduler_output,
+            expert_indices_cpu=expert_indices_cpu,
+            req_ids=[req_id],
+            req_ids_dp={0: [req_id]},
+            padded_num_scheduled_tokens_per_dp_rank=n,
+            block_ids_by_req=snapshot,
+        )
+
+        # Same slots as if the request were still live.
         np.testing.assert_array_equal(result.slot_mapping,
                                       np.array([36], dtype=np.int32))

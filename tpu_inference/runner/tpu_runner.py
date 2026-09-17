@@ -312,7 +312,8 @@ def _process_continue_decode_outputs(
 
             if (all_expert_indices_cpu is not None and actual_len > 0):
                 slots_arr = _reconstruct_slots_for_request(
-                    req_state,
+                    list(req_state.block_ids[0])
+                    if req_state.block_ids else [],
                     actual_len,
                     block_size,
                     start_pos=req_state.num_computed_tokens)
@@ -391,6 +392,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                  scheduler_output: Optional["VllmSchedulerOutput"] = None,
                  req_ids_dp: Optional[Dict] = None,
                  padded_num_scheduled_tokens_per_dp_rank: int = 0,
+                 routed_experts_block_ids: Optional[Dict[str,
+                                                         List[int]]] = None,
                  runner=None):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -405,6 +408,9 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._scheduler_output = scheduler_output
         self._req_ids_dp = req_ids_dp
         self._padded_num_scheduled_tokens_per_dp_rank = padded_num_scheduled_tokens_per_dp_rank
+        # Snapshotted at dispatch: `runner.requests` may no longer hold these
+        # requests by the time `get_output` runs.
+        self._routed_experts_block_ids = routed_experts_block_ids or {}
         self._runner = runner
         self._is_continue_decode = False
         self._actual_steps_future = None
@@ -492,6 +498,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                     req_ids_dp=self._req_ids_dp,
                     padded_num_scheduled_tokens_per_dp_rank=self.
                     _padded_num_scheduled_tokens_per_dp_rank,
+                    block_ids_by_req=self._routed_experts_block_ids,
                 )
                 self._model_runner_output.routed_experts = routed_experts
 
@@ -667,8 +674,31 @@ def _jax_logprobs_materialize(
     )
 
 
+def _snapshot_block_ids_for_routed_experts(
+    runner,
+    req_ids: List[str],
+) -> Dict[str, List[int]]:
+    """Copies the block IDs that routed-experts slot reconstruction needs.
+
+    Must be called while the step is being *dispatched*, not when its output is
+    resolved. ``_update_states`` for a later step pops finished requests out of
+    ``runner.requests`` (see ``persistent_batch_manager``), and with the engine's
+    batch queue that happens before the previous step's async output is
+    resolved -- so the reconstruction can outlive the request it describes.
+    Copying the list also keeps the snapshot stable if the request's block list
+    is mutated afterwards.
+    """
+    snapshot: Dict[str, List[int]] = {}
+    for req_id in req_ids:
+        req_state = runner.requests.get(req_id)
+        snapshot[req_id] = (list(req_state.block_ids[0])
+                            if req_state is not None and req_state.block_ids
+                            else [])
+    return snapshot
+
+
 def _reconstruct_slots_for_request(
-    req_state: CachedRequestState,
+    block_ids: List[int],
     num_tokens: int,
     block_size: int,
     start_pos: int,
@@ -685,6 +715,11 @@ def _reconstruct_slots_for_request(
     ``num_computed_tokens``, so it passes ``num_computed_tokens``). The slots
     must match the scheduler-side read (``RoutedExpertsManager.get``, which is
     block-relative from position 0).
+
+    ``block_ids`` is the request's attention-group block list, passed in rather
+    than read off a ``CachedRequestState`` so that callers resolving an async
+    output cannot depend on the request still being live. See
+    :func:`_snapshot_block_ids_for_routed_experts`.
     """
     if num_tokens <= 0:
         return np.array([], dtype=np.int32)
@@ -693,7 +728,6 @@ def _reconstruct_slots_for_request(
         f"[routed-experts] start_pos must be non-negative, got {start_pos} "
         f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
         f"indexing")
-    block_ids = req_state.block_ids[0] if req_state.block_ids else []
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
@@ -719,6 +753,7 @@ def _reconstruct_routed_experts(
     req_ids: List[str],
     req_ids_dp: Dict,
     padded_num_scheduled_tokens_per_dp_rank: int,
+    block_ids_by_req: Dict[str, List[int]],
 ) -> RoutedExpertsLists:
     """Reconstructs physical slot mappings and performs DP-rank reordering for MoE routed expert indices."""
     num_layers, _, top_k = expert_indices_cpu.shape
@@ -780,11 +815,10 @@ def _reconstruct_routed_experts(
             # pre-step chunk start from scheduler_output (see chunk_start above);
             # the slots must match the scheduler-side block-relative read
             # (RoutedExpertsManager.get, from position 0).
-            req_state = runner.requests[req_id]
             if n > 0:
                 global_slots[
                     global_start:global_end] = _reconstruct_slots_for_request(
-                        req_state,
+                        block_ids_by_req.get(req_id, []),
                         n,
                         block_size,
                         start_pos=chunk_start[req_id])
@@ -2278,6 +2312,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
+                routed_experts_block_ids=(
+                    _snapshot_block_ids_for_routed_experts(
+                        self, model_runner_output.req_ids) if
+                    self.model_config.enable_return_routed_experts else None),
                 runner=self)
             return async_model_runner_output
 
@@ -2339,6 +2377,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
+                block_ids_by_req=_snapshot_block_ids_for_routed_experts(
+                    self, self.input_batch.req_ids[:num_reqs]),
             )
             model_runner_output.routed_experts = routed_experts
 
