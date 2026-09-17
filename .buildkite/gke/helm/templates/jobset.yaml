@@ -1,9 +1,23 @@
-{{- $fullName := include "tpu-vllm-benchmark.fullname" . -}}
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{ $fullName := include "tpu-vllm-benchmark.fullname" . -}}
 {{- $namespace := .Release.Namespace | default "default" -}}
 {{- $servedModelName := include "tpu-vllm-benchmark.servedModelName" . -}}
 {{- $modelPath := include "tpu-vllm-benchmark.modelPath" . -}}
 {{- $isDisagg := eq .Values.mode "disaggregated" -}}
-{{- $isScript := eq .Values.mode "script" -}}
+{{- $isScript := eq .Values.mode "script" }}
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
@@ -20,46 +34,69 @@ spec:
     operator: All
     targetReplicatedJobs:
     {{- if $isScript }}
-    - runner
+    {{- range .Values.scriptJobs }}
+    - {{ .name }}
+    {{- end }}
     {{- else }}
     - client
     {{- end }}
 
+  {{- if $isScript }}
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  failurePolicy:
+    rules:
+    - action: FailJobSet
+  {{- end }}
+
   replicatedJobs:
 
   {{ if $isScript }}
-  {{- $topo := .Values.tpu.topology | default "1x2x1" -}}
-  {{- $chips := include "tpu-vllm-benchmark.chipsPerVmForTopo" $topo | int -}}
-  {{- $tpuLimit := .Values.resources.tpu | default $chips -}}
+  {{- $root := . -}}
+  {{- range $job := .Values.scriptJobs }}
+  {{- $jobName := $job.name -}}
+  {{- $jobTopo := ($job.tpu | default dict).topology | default $root.Values.tpu.topology | default "1x2x1" -}}
+  {{- $jobAccelerator := ($job.tpu | default dict).accelerator | default $root.Values.tpu.accelerator | default "tpu7x" -}}
+  {{- $chips := include "tpu-vllm-benchmark.chipsPerVmForTopo" $jobTopo | int -}}
+  {{- $tpuLimit := (($job.resources | default dict).tpu | default $root.Values.resources.tpu) | default $chips -}}
+  {{- $cpuLimit := (($job.resources | default dict).cpu | default $root.Values.resources.cpu) | default "32" -}}
+  {{- $memLimit := (($job.resources | default dict).memory | default $root.Values.resources.memory) | default "100Gi" -}}
+  {{- $jobBackoff := 1 -}}
+  {{- if hasKey $job "backoffLimit" -}}
+  {{- $jobBackoff = $job.backoffLimit -}}
+  {{- end -}}
+  {{- $jobWorkingDir := $job.workingDir | default "/workspace/vllm" -}}
+  {{- $jobGit := $job.git -}}
 
   # ============================================================================
-  # SCRIPT TEST RUNNER (Single-Host TPU Runner for benchmark.sh / custom tests)
+  # SCRIPT TEST RUNNER: {{ $jobName }}
   # ============================================================================
-  - name: runner
+  - name: {{ $jobName }}
     replicas: 1
     template:
       spec:
         parallelism: 1
         completions: 1
-        backoffLimit: {{ .Values.script.backoffLimit | default 1 }}
+        backoffLimit: {{ $jobBackoff }}
         template:
           metadata:
             labels:
-              declared-duration-minutes: "{{ .Values.job.declaredDurationMinutes | default 90 }}"
+              declared-duration-minutes: "{{ $root.Values.job.declaredDurationMinutes | default 90 }}"
+              role: test-runner
             annotations:
               kueue.x-k8s.io/podset-unconstrained-topology: "true"
-              {{- if or (eq .Values.storage.type "gcs-cache") (eq .Values.storage.type "gcs-direct") }}
-              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" . | nindent 14 }}
+              {{- if or (eq $root.Values.storage.type "gcs-cache") (eq $root.Values.storage.type "gcs-direct") }}
+              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" $root | nindent 14 }}
               {{- end }}
           spec:
-            serviceAccountName: {{ .Values.serviceAccount }}
-            {{- if .Values.imagePullSecrets }}
+            serviceAccountName: {{ $root.Values.serviceAccount }}
+            {{- if $root.Values.imagePullSecrets }}
             imagePullSecrets:
-              {{- toYaml .Values.imagePullSecrets | nindent 14 }}
+              {{- toYaml $root.Values.imagePullSecrets | nindent 14 }}
             {{- end }}
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: {{ .Values.tpu.accelerator | default "tpu7x" }}
-              cloud.google.com/gke-tpu-topology: {{ $topo }}
+              cloud.google.com/gke-tpu-accelerator: {{ $jobAccelerator }}
+              cloud.google.com/gke-tpu-topology: {{ $jobTopo }}
               # cloud.google.com/reservation-affinity: specific
             tolerations:
             - key: "google.com/tpu"
@@ -67,8 +104,8 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
-            {{- if and .Values.builder .Values.builder.enabled }}
-            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
+            {{- if and $root.Values.builder $root.Values.builder.enabled }}
+            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" $root | nindent 12 }}
             {{- end }}
             - name: tpu-node-setup
               image: busybox
@@ -84,16 +121,16 @@ spec:
                 fi
               securityContext:
                 privileged: true
-            {{- if and .Values.script (and .Values.script.git .Values.script.git.enabled) }}
+            {{- if and $jobGit $jobGit.enabled }}
             - name: git-sync
               image: alpine/git:latest
               command: ["/bin/sh", "-c"]
               args:
               - |
                 set -e
-                echo "Cloning {{ .Values.script.git.repo }} (branch: {{ .Values.script.git.branch | default "main" }})..."
-                mkdir -p {{ .Values.script.git.dest | default "/workspace/tpu_inference" }}
-                git clone --depth 1 -b {{ .Values.script.git.branch | default "main" }} {{ .Values.script.git.repo }} {{ .Values.script.git.dest | default "/workspace/tpu_inference" }}
+                echo "Cloning {{ $jobGit.repo }} (branch: {{ $jobGit.branch | default "main" }})..."
+                mkdir -p {{ $jobGit.dest | default "/workspace/tpu_inference" }}
+                git clone --depth 1 -b {{ $jobGit.branch | default "main" }} {{ $jobGit.repo }} {{ $jobGit.dest | default "/workspace/tpu_inference" }}
               volumeMounts:
               - name: workspace-volume
                 mountPath: /workspace
@@ -101,7 +138,7 @@ spec:
 
             containers:
             - name: test-runner
-              image: {{ include "tpu-vllm-benchmark.computedImage" . }}
+              image: {{ include "tpu-vllm-benchmark.computedImage" $root }}
               securityContext:
                 privileged: true
               command: ["/bin/bash", "-c"]
@@ -110,36 +147,36 @@ spec:
                 set -e
                 export VLLM_TARGET_DEVICE="tpu"
                 export PJRT_DEVICE="TPU"
-                export TPU_VERSION="{{ .Values.tpu.accelerator | default "tpu7x" }}"
+                export TPU_VERSION="{{ $jobAccelerator }}"
                 export HF_HUB_DISABLE_DISK_LOCK="1"
                 export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
 
-                {{- if and .Values.script .Values.script.workingDir }}
-                cd {{ .Values.script.workingDir }} 2>/dev/null || cd /workspace 2>/dev/null || true
+                {{- if $jobWorkingDir }}
+                cd {{ $jobWorkingDir }} 2>/dev/null || cd /workspace 2>/dev/null || true
                 {{- end }}
 
                 echo "============================================================"
-                echo " Starting Custom Test Execution"
-                echo " Script Command: {{ .Values.script.command }}"
+                echo " Starting Custom Test Execution: {{ $jobName }}"
+                echo " Script Command: {{ $job.command }}"
                 echo " Working Dir:    $(pwd)"
                 echo " Timestamp:      $(date '+%Y-%m-%d %H:%M:%S')"
                 echo "============================================================"
 
-                exec {{ .Values.script.command }}
+                exec {{ $job.command }}
 
               env:
               - name: HUGGING_FACE_HUB_TOKEN
                 valueFrom:
                   secretKeyRef:
-                    name: {{ .Values.hfTokenSecret.name }}
-                    key: {{ .Values.hfTokenSecret.key }}
+                    name: {{ $root.Values.hfTokenSecret.name }}
+                    key: {{ $root.Values.hfTokenSecret.key }}
               - name: HF_TOKEN
                 valueFrom:
                   secretKeyRef:
-                    name: {{ .Values.hfTokenSecret.name }}
-                    key: {{ .Values.hfTokenSecret.key }}
-              {{- if and .Values.script .Values.script.env }}
-              {{- range $k, $v := .Values.script.env }}
+                    name: {{ $root.Values.hfTokenSecret.name }}
+                    key: {{ $root.Values.hfTokenSecret.key }}
+              {{- if $job.env }}
+              {{- range $k, $v := $job.env }}
               - name: {{ $k | quote }}
                 value: {{ $v | quote }}
               {{- end }}
@@ -148,32 +185,33 @@ spec:
               resources:
                 limits:
                   google.com/tpu: {{ $tpuLimit }}
-                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
-                  memory: {{ .Values.resources.memory | default "100Gi" | quote }}
+                  cpu: {{ $cpuLimit | quote }}
+                  memory: {{ $memLimit | quote }}
                 requests:
                   google.com/tpu: {{ $tpuLimit }}
-                  cpu: {{ .Values.resources.cpu | default "32" | quote }}
-                  memory: {{ .Values.resources.memory | default "100Gi" | quote }}
+                  cpu: {{ $cpuLimit | quote }}
+                  memory: {{ $memLimit | quote }}
 
               volumeMounts:
               - name: dshm
                 mountPath: /dev/shm
-              {{- if and .Values.script (and .Values.script.git .Values.script.git.enabled) }}
+              {{- if and $jobGit $jobGit.enabled }}
               - name: workspace-volume
                 mountPath: /workspace
               {{- end }}
-              {{- include "tpu-vllm-benchmark.storageVolumeMounts" . | nindent 14 }}
+              {{- include "tpu-vllm-benchmark.storageVolumeMounts" $root | nindent 14 }}
 
             volumes:
             - name: dshm
               emptyDir:
                 medium: Memory
-            {{- if and .Values.script (and .Values.script.git .Values.script.git.enabled) }}
+            {{- if and $jobGit $jobGit.enabled }}
             - name: workspace-volume
               emptyDir: {}
             {{- end }}
-            {{- include "tpu-vllm-benchmark.storageVolumes" . | nindent 12 }}
+            {{- include "tpu-vllm-benchmark.storageVolumes" $root | nindent 12 }}
             restartPolicy: Never
+  {{ end }}
 
   {{- else if $isDisagg }}
   {{- $prefillNumVms := include "tpu-vllm-benchmark.prefillNumVms" . | int -}}

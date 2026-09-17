@@ -1,4 +1,18 @@
 #!/bin/bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 
 
 set -euo pipefail
@@ -203,14 +217,16 @@ if [[ "$BUILDER_ENABLED" == "true" ]]; then
         "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME} -c image-builder -f"
 fi
 
-step "Stream & Tee logs into log/${JOBSET_NAME}.log:" \
+step "Stream & Tee every step into log/${JOBSET_NAME}-<step>.log:" \
     "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}" \
     "# Or follow every container (build + setup + test) side by side:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}"
+    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}" \
+    "# Or follow a single step only:" \
+    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -r <step> ${JOBSET_NAME}"
 
 if [[ "$MODE" == "script" ]]; then
     step "Stream testcase runner logs:" \
-        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=runner -f"
+        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},role=test-runner -f"
 elif [[ "$MODE" == "aggregated" ]]; then
     step "Stream server logs (vLLM / XLA compilation):" \
         "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=server -f"

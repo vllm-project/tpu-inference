@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # ==============================================================================
 # TPU vLLM Benchmark Helm Chart Configuration (values.yaml)
 # ==============================================================================
@@ -163,16 +177,18 @@ benchmark:
     cpu: "4"
     memory: "8Gi"
 
-# Custom Script Runner Configuration (Active when mode == "script")
-# Directly executes an arbitrary test script (e.g. tpu-inference benchmark.sh, test_accuracy.sh, or pytest)
-# on a single TPU-allocated pod with automatic GKE TPU node setup and secret injection.
-script:
-  command: "bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh"
-  workingDir: "/workspace/vllm"             # Working directory for script execution
-  backoffLimit: 1                           # Number of retries on failure (0 = fail-fast, 1 = retry once)
-  git:
-    enabled: false                         # Optional: Clone a fresh repo branch at Pod startup
-    repo: "https://github.com/vllm-project/tpu-inference.git"
-    branch: "main"
-    dest: "/workspace/tpu_inference"
-  env: {}                                  # Environment variables passed as key-value pairs (e.g. TEST_MODEL: "...", INPUT_LEN: 1800)
+# Script Runner Configuration (Active when mode == "script")
+# Executes custom test/benchmark scripts on TPU pods via ReplicatedJobs in JobSet.
+# Supports one or more jobs in the scriptJobs list.
+scriptJobs:
+  - name: "benchmark"
+    command: "bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh"
+    workingDir: "/workspace/vllm"             # Working directory for script execution
+    backoffLimit: 1                           # Number of retries on failure (0 = fail-fast, 1 = retry once)
+    git:
+      enabled: false                         # Optional: Clone a fresh repo branch at Pod startup
+      repo: "https://github.com/vllm-project/tpu-inference.git"
+      branch: "main"
+      dest: "/workspace/tpu_inference"
+    env: {}                                  # Environment variables passed as key-value pairs (e.g. TEST_MODEL: "...", INPUT_LEN: 1800)
+

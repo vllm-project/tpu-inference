@@ -38,7 +38,10 @@ Supports both **Monolithic (Aggregated)** and **Disaggregated (Prefill/Decode P/
 gke/helm/
 ├── Chart.yaml                          # Helm chart metadata (v0.1.0)
 ├── values.yaml                         # Base default configuration
+├── buildkite_to_helm.py                # Buildkite CI pipeline to Helm values converter
+├── run_benchmark.sh                    # Automated Helm benchmark deployment script
 ├── values-llama8b.yaml                 # Monolithic Llama-3.1-8B (2x2x1, 1 VM)
+├── values-llama8b-ci.yaml              # Llama-3.1-8B CI Benchmark runner (Buildkite Parity Test)
 ├── values-llama70b.yaml                # Monolithic Llama-3.1-70B (2x2x4, 4 VMs via Ray)
 ├── values-qwen4b.yaml                  # Monolithic Qwen3.5-4B (2x2x1, 1 VM)
 ├── values-disagg-llama8b.yaml          # Disaggregated 8B (Prefill 2x2x1, Decode 2x2x2)
@@ -48,7 +51,8 @@ gke/helm/
 └── templates/
     ├── _helpers.tpl                    # Hardware sizing macros, TP math & placement calculations
     ├── configmap.yaml                  # Embedded startup scripts, health probes & benchmark runner
-    └── jobset.yaml                     # Unified JobSet manifest (supports aggregated & disaggregated)
+    └── jobset.yaml                     # Unified JobSet manifest (aggregated, disaggregated & script)
+
 ```
 
 ---
@@ -80,8 +84,8 @@ In monolithic mode, `templates/jobset.yaml` renders two `replicatedJobs`:
                    +-------------------------------------------------------------+
 ```
 
-* **Server Job (`replicatedJob: server`)**: Runs on TPU nodes (`cloud.google.com/gke-tpu-accelerator: tpu7x`). For multi-host topologies (e.g. `2x2x4`), Worker 0 acts as the Ray Head, and Workers 1..N join as Ray Workers.
-* **Client Job (`replicatedJob: client`)**: Runs on CPU nodes (`cloud.google.com/gke-nodepool: cpu-np`), polls server readiness, runs the 5-stage progressive benchmark, and terminates the JobSet upon completion.
+- **Server Job (`replicatedJob: server`)**: Runs on TPU nodes (`cloud.google.com/gke-tpu-accelerator: tpu7x`). For multi-host topologies (e.g. `2x2x4`), Worker 0 acts as the Ray Head, and Workers 1..N join as Ray Workers.
+- **Client Job (`replicatedJob: client`)**: Runs on CPU nodes (`cloud.google.com/gke-nodepool: cpu-np`), polls server readiness, runs the 5-stage progressive benchmark, and terminates the JobSet upon completion.
 
 ---
 
@@ -118,10 +122,10 @@ Separates prefill computation and decode token generation across independent TPU
        +-----------------------------------------------------------------------------------------+
 ```
 
-* **Prefill Job (`replicatedJob: p`)**: Handles prompt processing and KV cache generation, serving internal requests on port 8400.
-* **Decode Job (`replicatedJob: d`)**: Handles autoregressive token generation on port 9400. Configurable with multiple replicas (`decode.replicas: 2`).
-* **Proxy Router (`replicatedJob: x`)**: Lightweight CPU pod running `toy_proxy_server.py` on port 8000. It dynamically inspects request lengths and routes them to prefill and decode instances.
-* **Benchmark Client (`replicatedJob: client`)**: Sends traffic to proxy port 8000.
+- **Prefill Job (`replicatedJob: p`)**: Handles prompt processing and KV cache generation, serving internal requests on port 8400.
+- **Decode Job (`replicatedJob: d`)**: Handles autoregressive token generation on port 9400. Configurable with multiple replicas (`decode.replicas: 2`).
+- **Proxy Router (`replicatedJob: x`)**: Lightweight CPU pod running `toy_proxy_server.py` on port 8000. It dynamically inspects request lengths and routes them to prefill and decode instances.
+- **Benchmark Client (`replicatedJob: client`)**: Sends traffic to proxy port 8000.
 
 ---
 
@@ -137,8 +141,8 @@ alpha.jobset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
 {{- end }}
 ```
 
-* **TPU Jobs (`server`, `p`, `d`)**: Scheduled with 1:1 mapping to dedicated TPU node pools created by GKE Node Auto-Provisioning (NAP).
-* **CPU Jobs (`x`, `client`)**: Explicitly override node affinity via `cloud.google.com/gke-nodepool: cpu-np`, allowing them to run in the shared CPU pool without blocking or triggering new TPU node pool allocations.
+- **TPU Jobs (`server`, `p`, `d`)**: Scheduled with 1:1 mapping to dedicated TPU node pools created by GKE Node Auto-Provisioning (NAP).
+- **CPU Jobs (`x`, `client`)**: Explicitly override node affinity via `cloud.google.com/gke-nodepool: cpu-np`, allowing them to run in the shared CPU pool without blocking or triggering new TPU node pool allocations.
 
 ---
 
@@ -286,6 +290,7 @@ Ensure the following command-line tools are installed on your system:
 | **`jq` & `bc`** | Any | Required by diagnostic and runner scripts for JSON parsing and math |
 
 **Quick Installation (Debian/Ubuntu/gLinux):**
+
 ```bash
 # Install gke-gcloud-auth-plugin and kubectl via gcloud
 gcloud components install kubectl gke-gcloud-auth-plugin
@@ -342,6 +347,7 @@ kubectl create secret generic "${CLEAN_USER}-test-token" \
 
 > [!TIP]
 > Verify your secret exists with:
+>
 > ```bash
 > kubectl get secret "${CLEAN_USER}-test-token"
 > ```
@@ -503,4 +509,92 @@ helm uninstall my-70b-disagg
 
 # Or use the comprehensive cleanup script:
 ./gke/bin/cleanup.sh my-70b-disagg
+```
+
+---
+
+## Buildkite CI Pipeline Converter (`buildkite_to_helm.py`)
+
+Converts any Buildkite model pipeline YAML (from `.buildkite/models/*.yml`) into GKE TPU Helm `values.yaml` files, filtering steps that invoke `.buildkite/scripts/run_in_docker.sh` and mapping them into Kubernetes JobSet test runners.
+
+### Features
+- **Automatic Step Filtering**: Extracts only `run_in_docker.sh` steps (`UnitTest`, `Accuracy`, `Benchmark`), skipping non-containerized steps like `record_step_result.sh`.
+- **Unified `scriptJobs` Architecture**: Always generates ReplicatedJobs under the `scriptJobs` array. Configured with `startupPolicyOrder: InOrder` and fail-fast `failurePolicy` so multi-job pipelines execute sequentially without resource race.
+- **RFC 1123 Compliant Job Naming**: ReplicatedJob names are cleanly derived from the substring after the last `_` of the Buildkite step key (e.g. `benchmark`, `unittest`, `accuracy`), lowercased, and length-bounded to guarantee full compliance with Kubernetes DNS label and Pod naming limits.
+- **Dynamic Accelerator Replacement**: Dynamically resolves `${TPU_VERSION:-...}` to the `--accelerator` parameter (defaults to `tpu7x`).
+- **Target Step Key Filtering (`--step <step_key>`)**: Matches against target step keys, sanitized names, or stages with validation and provides a list of available steps if unmatched.
+- **Base Values Inheritance**: Directly inherits `image.tpuInferenceCommit`, `image.vllmCommit`, storage, and secrets from the base values template.
+- **Environment Variable Resolution**: Automatically parses Bash expansions (e.g. `${TENSOR_PARALLEL_SIZE_SINGLE:-1}`) and supports `--tensor-parallel-size` overrides.
+
+### Usage Examples
+
+```bash
+# 1. Convert all qualifying steps in Buildkite pipeline to multi-job Helm values:
+python3 gke/helm/buildkite_to_helm.py \
+  -b /path/to/tpu-inference/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \
+  -o gke/helm/values-llama8b-ci.yaml
+
+# 2. Extract only a specific step by matching its step key:
+python3 gke/helm/buildkite_to_helm.py \
+  -b /path/to/tpu-inference/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \
+  --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark \
+  --tensor-parallel-size 2 \
+  -o gke/helm/values-llama8b-ci.yaml
+
+# 3. Preview generated YAML on stdout:
+python3 gke/helm/buildkite_to_helm.py \
+  -b /path/to/tpu-inference/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \
+  -v
+```
+
+---
+
+## Testcase Log Streamer (`../bin/tee_testcase_logs.sh`)
+
+Follows a `mode: "script"` release along **both** of its dimensions: every step
+(`scriptJobs` → replicatedJob) in the order the JobSet runs them, and every
+container inside each step's Pod.
+
+```
+JobSet dennis-test-a1b2c
+├── step unittest   → Pod ├── init  image-builder / tpu-node-setup / git-sync
+│                         └── main  test-runner (+ gke-gcsfuse-sidecar)
+├── step accuracy   → Pod ...
+└── step benchmark  → Pod ...
+```
+
+### Behaviour
+- **Sequential steps**: waits for each step's Pod (timeout counted only once the
+  step is reached), streams it, then moves on. The first step whose main
+  container exits non-zero aborts the run and its exit code is propagated,
+  matching the chart's `startupPolicyOrder: InOrder` + `FailJobSet` policy.
+- **Container discovery**: the container list comes from the live Pod spec, so
+  optional containers (`image-builder`, `git-sync`, gcsfuse) appear automatically.
+- **Per-container termination tracking**: streaming of a container stops when
+  *that* container terminates, not when the whole Pod does — which is what makes
+  init-container logs (e.g. the on-demand image build) usable.
+- **Log files**: `log/<JOBSET>-<step>.log[N]` for the main container and
+  `log/<JOBSET>-<step>.<container>.log[N]` for the others. Existing files are
+  never overwritten; the whole run shares one numeric suffix.
+
+### Usage Examples
+
+```bash
+# 1. Stream the test-runner of every step of the newest run (auto-detected):
+./gke/bin/tee_testcase_logs.sh
+
+# 2. Stream every container side by side (build + setup + test), colour-tagged:
+./gke/bin/tee_testcase_logs.sh -c all dennis-test-a1b2c
+
+# 3. Follow one step only:
+./gke/bin/tee_testcase_logs.sh -r benchmark dennis-test-a1b2c
+
+# 4. Watch just the on-demand image build:
+./gke/bin/tee_testcase_logs.sh -c image-builder
+
+# 5. Snapshot the logs of a finished run (no follow):
+./gke/bin/tee_testcase_logs.sh --dump -c all dennis-test-a1b2c
+
+# 6. Inspect which containers each step's Pod has:
+./gke/bin/tee_testcase_logs.sh --list
 ```
