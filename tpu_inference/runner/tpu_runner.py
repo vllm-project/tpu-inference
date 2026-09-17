@@ -300,11 +300,11 @@ def _process_continue_decode_outputs(
 
             if (all_expert_indices_cpu is not None and actual_len > 0):
                 slots_arr = _reconstruct_slots_for_request(
-                    req_state,
+                    list(req_state.block_ids[routed_experts_attn_gid])
+                    if req_state.block_ids else [],
                     actual_len,
                     block_size,
-                    start_pos=req_state.num_computed_tokens,
-                    kv_cache_group_id=routed_experts_attn_gid)
+                    start_pos=req_state.num_computed_tokens)
                 expert_slots_list.append(slots_arr)
 
             if input_batch is not None:
@@ -380,6 +380,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                  scheduler_output: Optional["VllmSchedulerOutput"] = None,
                  req_ids_dp: Optional[Dict] = None,
                  padded_num_scheduled_tokens_per_dp_rank: int = 0,
+                 routed_experts_block_ids: Optional[Dict[str,
+                                                         List[int]]] = None,
                  runner=None):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -394,6 +396,9 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._scheduler_output = scheduler_output
         self._req_ids_dp = req_ids_dp
         self._padded_num_scheduled_tokens_per_dp_rank = padded_num_scheduled_tokens_per_dp_rank
+        # Snapshotted at dispatch: `runner.requests` may no longer hold these
+        # requests by the time `get_output` runs.
+        self._routed_experts_block_ids = routed_experts_block_ids or {}
         self._runner = runner
         self._is_continue_decode = False
         self._actual_steps_future = None
@@ -483,6 +488,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                     req_ids_dp=self._req_ids_dp,
                     padded_num_scheduled_tokens_per_dp_rank=self.
                     _padded_num_scheduled_tokens_per_dp_rank,
+                    block_ids_by_req=self._routed_experts_block_ids,
                 )
                 self._model_runner_output.routed_experts = routed_experts
 
@@ -658,12 +664,44 @@ def _jax_logprobs_materialize(
     )
 
 
+def _snapshot_block_ids_for_routed_experts(
+    runner,
+    req_ids: List[str],
+    kv_cache_group_id: int,
+) -> Dict[str, List[int]]:
+    """Copies the block IDs that routed-experts slot reconstruction needs.
+
+    Must be called while the step is being *dispatched*, not when its output is
+    resolved. ``_update_states`` for a later step pops finished requests out of
+    ``runner.requests`` (see ``persistent_batch_manager``), and with the engine's
+    batch queue that happens before the previous step's async output is
+    resolved -- so the reconstruction can outlive the request it describes.
+    Copying the list also keeps the snapshot stable if the request's block list
+    is mutated afterwards.
+
+    ``kv_cache_group_id`` must be the full-attention group, the one the
+    scheduler reads back with (see
+    :func:`TPUModelRunner.initialize_kv_cache`).
+    """
+    snapshot: Dict[str, List[int]] = {}
+    for req_id in req_ids:
+        req_state = runner.requests.get(req_id)
+        if req_state is None or not req_state.block_ids:
+            snapshot[req_id] = []
+            continue
+        assert kv_cache_group_id < len(req_state.block_ids), (
+            f"[routed-experts] kv_cache_group_id={kv_cache_group_id} is out "
+            f"of range for a request with {len(req_state.block_ids)} "
+            "KV-cache group(s)")
+        snapshot[req_id] = list(req_state.block_ids[kv_cache_group_id])
+    return snapshot
+
+
 def _reconstruct_slots_for_request(
-    req_state: CachedRequestState,
+    block_ids: List[int],
     num_tokens: int,
     block_size: int,
     start_pos: int,
-    kv_cache_group_id: int,
 ) -> np.ndarray:
     """Reconstructs physical KV-cache slots for ``num_tokens`` tokens of a
     request using vectorized NumPy.
@@ -678,14 +716,8 @@ def _reconstruct_slots_for_request(
     must match the scheduler-side read (``RoutedExpertsManager.get``, which is
     block-relative from position 0).
 
-    ``kv_cache_group_id`` selects which group's block IDs to key the slots by.
-    It must be the *full-attention* group, because that is the group the
-    scheduler reads back with (``get_routed_experts_attn_gid``). It is not
-    always group 0: on hybrid models the groups follow model layer order, so a
-    model whose first layer is linear attention (Qwen3.5, whose
-    ``full_attention_interval`` of 4 makes layer 0 linear) gets
-    ``[linear, linear, linear, full]`` and the full-attention group is last.
-    See :func:`TPUModelRunner.initialize_kv_cache`.
+    ``block_ids`` is the full-attention group's block list, resolved and copied
+    by :func:`_snapshot_block_ids_for_routed_experts`.
     """
     if num_tokens <= 0:
         return np.array([], dtype=np.int32)
@@ -694,13 +726,6 @@ def _reconstruct_slots_for_request(
         f"[routed-experts] start_pos must be non-negative, got {start_pos} "
         f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
         f"indexing")
-    block_ids = []
-    if req_state.block_ids:
-        assert kv_cache_group_id < len(req_state.block_ids), (
-            f"[routed-experts] kv_cache_group_id={kv_cache_group_id} is out "
-            f"of range for a request with {len(req_state.block_ids)} "
-            "KV-cache group(s)")
-        block_ids = req_state.block_ids[kv_cache_group_id]
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
@@ -726,13 +751,13 @@ def _reconstruct_routed_experts(
     req_ids: List[str],
     req_ids_dp: Dict,
     padded_num_scheduled_tokens_per_dp_rank: int,
+    block_ids_by_req: Dict[str, List[int]],
 ) -> RoutedExpertsLists:
     """Reconstructs physical slot mappings and performs DP-rank reordering for MoE routed expert indices."""
     num_layers, _, top_k = expert_indices_cpu.shape
     block_size = runner.block_size
     total_active_tokens = scheduler_output.total_num_scheduled_tokens
     dp_size = runner.dp_size
-    attn_gid = runner.routed_experts_attn_gid
 
     # Absolute start position of each request's chunk = its PRE-step
     # computed-token count, sourced from scheduler_output (not from
@@ -788,15 +813,13 @@ def _reconstruct_routed_experts(
             # pre-step chunk start from scheduler_output (see chunk_start above);
             # the slots must match the scheduler-side block-relative read
             # (RoutedExpertsManager.get, from position 0).
-            req_state = runner.requests[req_id]
             if n > 0:
                 global_slots[
                     global_start:global_end] = _reconstruct_slots_for_request(
-                        req_state,
+                        block_ids_by_req.get(req_id, []),
                         n,
                         block_size,
-                        start_pos=chunk_start[req_id],
-                        kv_cache_group_id=attn_gid)
+                        start_pos=chunk_start[req_id])
 
     # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
@@ -2291,6 +2314,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
+                routed_experts_block_ids=(
+                    _snapshot_block_ids_for_routed_experts(
+                        self, model_runner_output.req_ids,
+                        self.routed_experts_attn_gid) if
+                    self.model_config.enable_return_routed_experts else None),
                 runner=self)
             return async_model_runner_output
 
@@ -2352,6 +2380,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
+                block_ids_by_req=_snapshot_block_ids_for_routed_experts(
+                    self, self.input_batch.req_ids[:num_reqs],
+                    self.routed_experts_attn_gid),
             )
             model_runner_output.routed_experts = routed_experts
 
