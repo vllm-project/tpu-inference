@@ -51,6 +51,19 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# The buildkite-agent CLI, so a pod can upload its own artifacts - it shares no
+# filesystem with the agent that scheduled it. Test images only; the credential
+# is not baked in, the pod is handed one at run time.
+#
+# The binary alone, not the apt package, which also brings a systemd unit and a
+# config expecting a registration token.
+ARG BUILDKITE_AGENT_VERSION=3.138.0
+RUN if [ "$IS_TEST" = "true" ]; then \
+        curl -fsSL "https://github.com/buildkite/agent/releases/download/v${BUILDKITE_AGENT_VERSION}/buildkite-agent-linux-amd64-${BUILDKITE_AGENT_VERSION}.tar.gz" \
+          | tar -xz -C /usr/local/bin ./buildkite-agent \
+        && buildkite-agent --version; \
+    fi
+
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git

@@ -52,7 +52,18 @@ waitForServerReady() {
             exit 1
         fi
 
-        if grep -Eq "$error_regex" "$LOG_FILE"; then
+        # JAX logs a failed compilation-cache write as "UserWarning: ...
+        # OSError: [Errno 116] Stale file handle" and then compiles anyway: two
+        # writers raced for the same content-addressed key and the loser's copy
+        # was a duplicate. Excused by its whole signature, not by the word
+        # "Warning" - these patterns are what catches a hung startup.
+        #
+        # Assigned rather than piped into the test: with no match the pipeline
+        # exits nonzero, which under the callers' `set -e` would end the run.
+        local fatal_lines
+        fatal_lines=$(grep -E "$error_regex" "$LOG_FILE" \
+            | grep -v -E 'UserWarning.*Stale file handle' || true)
+        if [[ -n "$fatal_lines" ]]; then
             echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
             # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1
