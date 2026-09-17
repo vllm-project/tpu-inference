@@ -143,16 +143,34 @@ def _compute_active_mask(
     return active_mask
 
 
-def _extract_valid_tokens_host(
-    tokens: np.ndarray,
+def _extract_valid_lengths_host(
+    generated_tokens: np.ndarray,
     eos_token_id: Union[int, List[int], np.ndarray],
-) -> List[int]:
-    """Trim 1D array of generated token IDs at the first EOS token (inclusive)."""
-    is_eos = np.isin(tokens, eos_token_id)
-    eos_indices = np.where(is_eos)[0]
-    if len(eos_indices) > 0:
-        return tokens[:eos_indices[0] + 1].tolist()
-    return tokens.tolist()
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-row valid lengths after trimming at the first EOS, for a whole
+    ``[num_reqs, num_steps]`` decode window.
+
+    Returns ``(lengths, has_eos)``: ``lengths[i]`` is the token count of row
+    ``i`` up to and including its first EOS (or the full row width when the
+    row has none), and ``has_eos[i]`` flags whether the row reached an EOS.
+    A single ``np.isin`` over the window plus one ``argmax`` replaces the
+    per-request ``np.isin`` / ``np.where`` scan that previously ran once per
+    row on the host critical path.
+    """
+    num_reqs, num_steps = (generated_tokens.shape
+                           if generated_tokens.ndim == 2 else (0, 0))
+    # No rows, or zero-width rows: nothing to scan (argmax over an empty axis
+    # would otherwise raise). Every row keeps its (zero) width and hits no EOS.
+    if num_reqs == 0 or num_steps == 0:
+        return (np.zeros(num_reqs,
+                         dtype=np.int64), np.zeros(num_reqs, dtype=bool))
+    is_eos = np.isin(generated_tokens, np.atleast_1d(eos_token_id))
+    has_eos = is_eos.any(axis=1)
+    # argmax returns the first True column, or 0 for rows with no EOS -- those
+    # rows are overwritten with the full width by the where().
+    first_eos_col = is_eos.argmax(axis=1)
+    lengths = np.where(has_eos, first_eos_col + 1, num_steps).astype(np.int64)
+    return lengths, has_eos
 
 
 REASON_EOS_HIT = "eos_hit"
@@ -262,22 +280,19 @@ def _process_continue_decode_outputs(
     lp_token_ids_list = []
     lp_vals_list = []
     lp_ranks_list = []
-    num_eos_hits = 0
-    eos_arr = np.atleast_1d(eos_token_id)
+    # One vectorized EOS scan for the whole window; the per-request work
+    # below is then a slice + tolist instead of np.isin/np.where per row.
+    valid_lens, has_eos = _extract_valid_lengths_host(generated_tokens_cpu,
+                                                      eos_token_id)
+    num_eos_hits = int(has_eos.sum())
     requests_dict = requests if requests is not None and hasattr(
         requests, "get") else None
 
     for req_idx, req_id in enumerate(req_ids):
         req_state = requests_dict.get(
             req_id) if requests_dict is not None else None
-        tokens = generated_tokens_cpu[req_idx]
-
-        valid_tokens = _extract_valid_tokens_host(tokens, eos_token_id)
-        if len(valid_tokens) < len(tokens) or (valid_tokens and
-                                               valid_tokens[-1] in eos_arr):
-            num_eos_hits += 1
-
-        actual_len = len(valid_tokens)
+        actual_len = int(valid_lens[req_idx])
+        valid_tokens = generated_tokens_cpu[req_idx, :actual_len].tolist()
         sampled_token_ids.append(valid_tokens)
 
         if scheduler_output is not None:
@@ -1470,18 +1485,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 generated_tokens_cpu = generated_tokens_cpu[
                     pre_logits_indices_selector]
 
+            valid_lens, _ = _extract_valid_lengths_host(
+                generated_tokens_cpu, self.eos_token_id)
             for pre_req_idx, req_state, _ in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
                 req_idx = self.input_batch.req_id_to_index[req_id]
 
-                tokens = generated_tokens_cpu[pre_req_idx]
-                valid_tokens = _extract_valid_tokens_host(
-                    tokens, self.eos_token_id)
+                actual_len = int(valid_lens[pre_req_idx])
+                valid_tokens = generated_tokens_cpu[
+                    pre_req_idx, :actual_len].tolist()
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-                actual_len = len(valid_tokens)
 
                 self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
                                                actual_len] = valid_tokens
