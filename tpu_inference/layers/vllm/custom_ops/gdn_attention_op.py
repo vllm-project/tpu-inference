@@ -141,8 +141,15 @@ def gdn_attention_core_tpu(
         write_col = jnp.maximum(seq_lens_sliced - 1, 0) // mamba_block_size
 
         batch_idx = jnp.arange(seq_lens_sliced.shape[0])
-        read_state_indices_sliced = block_tables_sliced[batch_idx, read_col]
-        state_indices_sliced = block_tables_sliced[batch_idx, write_col]
+        # Slot ids are rank-local: each per-rank scheduler hands out ids in
+        # [0, mamba_num_blocks // dp_size), the shard size of the mamba arrays.
+        # The kernel DMAs these ids with bounds checks disabled, so clamp them
+        # here to keep an out-of-range id from halting the core.
+        local_rows = max(conv_state.shape[0] // dp_size, 1)
+        read_state_indices_sliced = jnp.clip(
+            block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
+        state_indices_sliced = jnp.clip(
+            block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
     else:
         # Index mamba state by the per-request slot id from
         # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
