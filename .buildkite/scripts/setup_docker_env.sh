@@ -19,7 +19,7 @@ set -euo pipefail
 
 cleanup_docker_resource() {
   # Define defaults and get the parameter
-  DEFAULT_IMAGES=("vllm-tpu")
+  DEFAULT_IMAGES=("vllm-jaxtpu")
   IMAGE_NAME="${1:-}"
 
   # Combine image sets

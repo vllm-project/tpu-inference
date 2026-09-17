@@ -41,7 +41,7 @@ if [[ "$1" == "--local" ]]; then
     fi
 
     # Detect local wheel and extract version automatically
-    WHL_PATH=$(find /workspace/tpu_inference/dist -name "tpu_inference-*.whl" 2>/dev/null | head -n 1)
+    WHL_PATH=$(find /workspace/tpu_inference/dist -name "vllm_jaxtpu_core-*.whl" 2>/dev/null | head -n 1)
     if [ -z "${WHL_PATH}" ]; then
         echo "ERROR: Local wheel not found. Please ensure you have built tpu-inference first."
         exit 1

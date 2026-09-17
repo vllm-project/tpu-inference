@@ -70,7 +70,7 @@ def get_version():
 
 
 setup(
-    name="tpu_inference",
+    name="vllm_jaxtpu_core",
     version=get_version(),
     description="",
     long_description=open("README.md").read() if hasattr(

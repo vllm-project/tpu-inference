@@ -20,7 +20,7 @@
       - exit_status: "*"
         limit: 3
   commands:
-    - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+    - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-jaxtpu" "false" "true"'
 
 steps:
   - group: "Build Docker Images"

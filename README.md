@@ -76,7 +76,7 @@ Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn
 
 Below is the live status of our supported models, features, and kernels. Click on any category to expand the detailed support table. It is automatically updated from our detailed [Support Matrices](https://github.com/vllm-project/tpu-inference/tree/main/support_matrices).
 
-*Last Updated: 2026-08-27 07:02 AM UTC*
+*Last Updated: 2026-09-16 02:23 AM UTC*
 
 <details open markdown="1">
 <summary> <b>🚦 <i>Status Legend</i> </b> </summary>
@@ -539,18 +539,20 @@ Below is the live status of our supported models, features, and kernels. Click o
 | [meta-llama/Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [meta-llama/Llama-3.3-70B-Instruct](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3-30B-A3B](https://huggingface.co/Qwen/Qwen3-30B-A3B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
+| [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3-Coder-480B-A35B-Instruct](https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
 | [Qwen/Qwen3.5-397B-A17B](https://huggingface.co/Qwen/Qwen3.5-397B-A17B) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> |
-| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> |
 | [Qwen/Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) | Embedding | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
+| [Qwen/Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) | Multimodal | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [deepseek-ai/DeepSeek-R1](https://huggingface.co/deepseek-ai/DeepSeek-R1) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [moonshotai/Kimi-K2.6](https://huggingface.co/moonshotai/Kimi-K2.6) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
 | [openai/gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b) | Text | <span title="✅ Passing">✅</span> | <span title="✅ Passing">✅</span> | <span title="❓ Untested">❓</span> |
-| [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
-| [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | Multimodal | <span title="✅ Passing">✅</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
-| [Qwen/Qwen3-32B](https://huggingface.co/Qwen/Qwen3-32B) | Text | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [google/gemma-4-E2B-it](https://huggingface.co/google/gemma-4-E2B-it) | Multimodal | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) | Multimodal | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [mistralai/Mistral-Small-4-119B-2603/text-only](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603/text-only) | Text | <span title="❓ Untested">❓</span> | <span title="❌ Failing">❌</span> | <span title="❓ Untested">❓</span> |
 | [deepseek-ai/DeepSeek-OCR](https://huggingface.co/deepseek-ai/DeepSeek-OCR) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
+| [meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal](https://huggingface.co/meta-llama/Llama-4-Maverick-17B-128E-Instruct/multimodal) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [Qwen/Qwen3-Omni-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [Qwen/Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
 | [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | Multimodal | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> | <span title="❓ Untested">❓</span> |
@@ -646,16 +648,22 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>Speculative Decoding: DFlash</td>
+      <td>Speculative Decoding: Ngram</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
     </tr>
     <tr>
-      <td>Speculative Decoding: Ngram</td>
+      <td>Speculative Decoding: DFlash</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
+      <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
-      <td><span title="✅&nbsp;Passing">✅</span></td>
+    </tr>
+    <tr>
+      <td>sampling_params</td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="❌&nbsp;Failing">❌</span></td>
     </tr>
     <tr>
       <td>hybrid kv cache</td>
@@ -671,12 +679,6 @@ Below is the live status of our supported models, features, and kernels. Click o
     </tr>
     <tr>
       <td>runai_model_streamer_loader</td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❓&nbsp;Untested">❓</span></td>
-    </tr>
-    <tr>
-      <td>sampling_params</td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
@@ -743,7 +745,7 @@ Below is the live status of our supported models, features, and kernels. Click o
       <td>TP</td>
       <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
-      <td><span title="❌&nbsp;Failing">❌</span></td>
+      <td><span title="✅&nbsp;Passing">✅</span></td>
       <td><span title="❓&nbsp;Untested">❓</span></td>
     </tr>
     <tr>
