@@ -6,11 +6,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax.sharding import PartitionSpec
+from jax.sharding import Mesh, PartitionSpec
 
 from tpu_inference.layers.common.attention_metadata import \
     SharedAttentionMetadata
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
+                                                  ShardingAxisName)
 from tpu_inference.layers.jax.sample.sampling import \
     logprobs_use_processed_logits
 from tpu_inference.runner.compilation_manager import (CompilationManager,
@@ -81,8 +82,11 @@ def _precompiled_logits_specs(logprobs_mode):
     """PartitionSpecs `_precompile_gather_logprobs` warms up for a mode."""
     # Only the PartitionSpec that gets selected matters here, not the mesh
     # extent, so size the mesh off one device to stay portable across lanes.
-    device_array = np.array(jax.devices()[:1]).reshape(1, 1, 1)
-    mesh = jax.make_mesh(device_array.shape, ("data", "attn_dp", "model"))
+    # Name every axis: ShardingAxisName resolves to ShardingAxisNameBase under
+    # NEW_MODEL_DESIGN/USE_2D_TP, whose specs reference pcp/dcp/expert/... and
+    # NamedSharding rejects a spec naming an axis the mesh does not have.
+    devices = np.array(jax.devices()[:1]).reshape((1, ) * len(MESH_AXIS_NAMES))
+    mesh = Mesh(devices, MESH_AXIS_NAMES)
     runner = SimpleNamespace(
         mesh=mesh,
         rank=0,
