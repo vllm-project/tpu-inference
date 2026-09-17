@@ -23,6 +23,7 @@ from jax._src.interpreters import pxla
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
 from tpu_inference import envs
+from tpu_inference import utils as common_utils
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import InputBatch
 
@@ -947,7 +948,7 @@ def host_extract_sampled_tokens(
     """host retrieve the sampled tokens for the current step."""
     next_tokens = sampled_output
     if spec_decode_metadata is None:
-        next_tokens = np.asarray(jax.device_get(next_tokens))
+        next_tokens = common_utils.safe_device_get(next_tokens)
         # Map tokens back to the pre-dp shuffling order
         if logits_indices_selector is not None:
             next_tokens = next_tokens[logits_indices_selector]
