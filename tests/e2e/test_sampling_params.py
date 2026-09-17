@@ -189,14 +189,16 @@ class TestTopK:
         below the maximum probability can ever be sampled.
         """
         prompt = "Pick a number between 1 and 10:"
+        # n draws independent samples from one batched request, which is much
+        # cheaper than repeating generate().
         sampling_params_k1 = SamplingParams(temperature=1.0,
                                             top_k=1,
                                             max_tokens=5,
-                                            logprobs=5)
+                                            logprobs=5,
+                                            n=10)
 
-        for _ in range(10):
-            outputs = llm.generate([prompt], sampling_params_k1)
-            completion = outputs[0].outputs[0]
+        outputs = llm.generate([prompt], sampling_params_k1)
+        for completion in outputs[0].outputs:
             for sampled_logprob, best_logprob in iter_step_logprobs(
                     completion):
                 assert sampled_logprob == pytest.approx(
@@ -210,22 +212,22 @@ class TestTopK:
 
         Compared against top_k=-1, which may sample below the maximum.
         """
-        prompt = "Pick a number between 1 and 10:"
+        prompt = "Capital of France is:"
+        # n draws independent samples from one batched request, which is much
+        # cheaper than repeating generate().
         sampling_params_all = SamplingParams(temperature=1.0,
                                              top_k=-1,
                                              max_tokens=5,
-                                             logprobs=5)
+                                             logprobs=5,
+                                             n=10)
 
         # With top_k=-1 the whole vocabulary stays in play, so across enough
         # samples at least one token must come from below the tie group.
-        sampled_below_max = False
-        for _ in range(10):
-            outputs = llm.generate([prompt], sampling_params_all)
-            completion = outputs[0].outputs[0]
-            for sampled_logprob, best_logprob in iter_step_logprobs(
-                    completion):
-                if sampled_logprob < best_logprob - TIE_TOLERANCE:
-                    sampled_below_max = True
+        outputs = llm.generate([prompt], sampling_params_all)
+        sampled_below_max = any(sampled_logprob < best_logprob - TIE_TOLERANCE
+                                for completion in outputs[0].outputs
+                                for sampled_logprob, best_logprob in
+                                iter_step_logprobs(completion))
 
         assert sampled_below_max, (
             "top_k=-1 should consider tokens outside the top-probability tie "
