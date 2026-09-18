@@ -96,5 +96,8 @@ setup(
         "vllm.general_plugins": [
             "register_layers = tpu_inference.layers.vllm:register_layers",
         ],
+        "console_scripts": [
+            "tpu-ctl = tpu_inference.tools.ctl:main",
+        ],
     },
 )
