@@ -184,10 +184,11 @@ def _decode_core_impl(
         lp_val_step = None
         lp_ranks_step = None
         if has_logprobs:
-            logprobs_logits = (processed_logits if logprobs_mode
-                               == "processed_logprobs" else logits)
-            from tpu_inference.layers.jax.sample.sampling import \
-                compute_and_gather_logprobs
+            from tpu_inference.layers.jax.sample.sampling import (
+                compute_and_gather_logprobs, logprobs_use_processed_logits)
+            logprobs_logits = (processed_logits
+                               if logprobs_use_processed_logits(logprobs_mode)
+                               else logits)
             step_logprobs = compute_and_gather_logprobs(
                 logprobs_logits, next_tokens, max_logprobs)
             lp_ids_step = step_logprobs.logprob_token_ids
@@ -413,7 +414,9 @@ def continue_decode(
         expert-indices shape is discovered via jax.eval_shape (no execution)
         to presize the accumulation buffer.
       max_logprobs: Minimum number of logprobs to retain per token.
-      logprobs_mode: Logprobs mode from model config ("raw" or "processed_logprobs").
+      logprobs_mode: Logprobs mode from model config. The processed modes
+        (see PROCESSED_LOGPROBS_MODES) read sample()'s transformed logits;
+        the raw modes read compute_logits' output.
 
     Returns:
       Tuple of (generated_tokens, final_kv_caches, final_state, final_rng,

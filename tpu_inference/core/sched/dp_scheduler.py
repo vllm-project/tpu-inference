@@ -599,12 +599,19 @@ class DPScheduler(SchedulerInterface):
         # vllm_config.cache_config. Symmetrically partition across DP ranks.
         mamba_num_blocks = getattr(self.vllm_config.cache_config,
                                    "mamba_num_blocks", None)
+        per_rank_mamba_num_blocks = None
+        if mamba_num_blocks is not None:
+            per_rank_mamba_num_blocks = mamba_num_blocks // self.dp_size
+            assert per_rank_mamba_num_blocks > 0, (
+                f"mamba_num_blocks={mamba_num_blocks} is smaller than "
+                f"dp_size={self.dp_size}")
+
         self.per_rank_kv_cache_configs: List[KVCacheConfig] = []
         for _ in range(self.dp_size):
             rank_kv_config = copy.deepcopy(kv_cache_config)
             rank_kv_config.num_blocks = kv_cache_config.num_blocks // self.dp_size
-            if mamba_num_blocks is not None:
-                rank_kv_config.mamba_num_blocks = mamba_num_blocks // self.dp_size
+            if per_rank_mamba_num_blocks is not None:
+                rank_kv_config.mamba_num_blocks = per_rank_mamba_num_blocks
             self.per_rank_kv_cache_configs.append(rank_kv_config)
 
     def _send_command(self,

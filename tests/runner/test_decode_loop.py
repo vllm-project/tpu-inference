@@ -15,8 +15,11 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.jax.sample.sampling_metadata import \
+    TPUSupportedSamplingMetadata
 from tpu_inference.runner.decode_loop import (TpuSamplingState,
                                               _decode_core_impl, _split_rngs,
                                               _update_loop_state,
@@ -589,3 +592,90 @@ def test_continue_decode_exit_on_eos_interval():
 
     # EOS hit at step 0. Step checks at i=1, i=2 do not exit. Step check at i=3 (3 % 3 == 0) exits.
     assert int(final_state.step_counter) == 3
+
+
+def _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top):
+    """Run one fused decode step and return its top-1 logprob token ids.
+
+    The stub compute_logits and sample fns peak at different vocab indices, so
+    the returned index says which of the two the loop fed to the logprobs jit.
+    """
+    batch_size = 2
+    vocab_size = 100
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        return kv_caches, hidden_states, None, None
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        return jnp.zeros((batch_size, vocab_size)).at[:, raw_top].set(10.0)
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        processed_logits = jnp.zeros(
+            (batch_size, vocab_size)).at[:, processed_top].set(10.0)
+        next_tokens = jnp.zeros((batch_size, ), dtype=jnp.int32)
+        return next_tokens, processed_logits
+
+    step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), 1, 1)
+    outputs = _decode_core_impl(
+        state={},
+        kv_caches=[jnp.zeros((2, 10))],
+        step_rngs=step_rngs,
+        sampling_metadata=TPUSupportedSamplingMetadata(logprobs=True),
+        inputs_embeds=None,
+        lora_metadata=None,
+        intermediate_tensors=None,
+        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+        mamba_state_indices=None,
+        current_tokens=jnp.array([10, 20], dtype=jnp.int32),
+        active_mask=jnp.array([True, True], dtype=jnp.bool_),
+        input_positions=jnp.array([0, 0], dtype=jnp.int32),
+        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        mesh=None,
+        max_decode_steps=1,
+        static_max_decode_steps=1,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        dp_size=1,
+        pad_len=0,
+        has_experts=False,
+        expert_shape=None,
+        expert_dtype=None,
+        layer_name_to_kvcache_index=(),
+        is_first_rank=True,
+        is_last_rank=True,
+        max_logprobs=1,
+        logprobs_mode=logprobs_mode,
+        continue_decode_eos_check_interval=-1,
+    )
+    # logprob_token_ids buffer is (steps, batch, max_logprobs + 1); column 0 is
+    # the sampled token, column 1 the top-1 index.
+    return np.asarray(outputs[8])[0, :, 1]
+
+
+@pytest.mark.parametrize("logprobs_mode", ["raw_logprobs", "raw_logits"])
+def test_decode_loop_raw_modes_use_compute_logits(logprobs_mode):
+    raw_top, processed_top = 7, 13
+    top1 = _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top)
+    assert np.all(top1 == raw_top)
+
+
+@pytest.mark.parametrize("logprobs_mode",
+                         ["processed_logprobs", "processed_logits"])
+def test_decode_loop_processed_modes_use_sample_output(logprobs_mode):
+    """Every processed mode must read sample()'s logits, not the raw ones.
+
+    A literal `== "processed_logprobs"` here silently fed raw logits for
+    `processed_logits`, disagreeing with `_sample_from_logits`.
+    """
+    raw_top, processed_top = 7, 13
+    top1 = _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top)
+    assert np.all(top1 == processed_top)

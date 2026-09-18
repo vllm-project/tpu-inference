@@ -40,13 +40,25 @@ logger = init_logger(__name__)
 #    - Non-DP Serving (DP=1):
 #      Runs in the same process where KVCacheManager registered the total capacity via
 #      set_mamba_num_blocks().
+#    - Multi-process serving (Ray / multiproc executor): the runner is not in the
+#      engine-core process, so the TPU executors mix in `MambaPoolSyncExecutorMixin`,
+#      which fetches the allocated row count from the workers right after
+#      `initialize_from_config` (before the scheduler is built) and writes it to the
+#      same two places plus `kv_cache_config.mamba_num_blocks`.
 #
 # 3. CONSUMER (TPUHybridKVCacheCoordinator):
-#    Resolves mamba_num_blocks directly from get_mamba_num_blocks() (or an explicit
-#    argument) and initializes an independent Mamba BlockPool, failing fast if not set.
+#    Resolves mamba_num_blocks from an explicit argument, `kv_cache_config`, or
+#    get_mamba_num_blocks(), and initializes an independent Mamba BlockPool;
+#    fails fast if none of them is known.
 # ==============================================================================
 _HOOKS_INSTALLED: bool = False
 _GLOBAL_MAMBA_NUM_BLOCKS: int | None = None
+
+# Mamba blocks reserved per request in align mode (prefix caching): one for
+# the state a request generates from, the rest for the prefix checkpoints it
+# leaves behind for later requests to resume from. Override per-run with
+# `--additional-config '{"custom_mamba_cache_multiplier": N}'`.
+DEFAULT_MAMBA_CACHE_MULTIPLIER = 8
 
 
 def set_mamba_num_blocks(num_blocks: int) -> None:
@@ -58,6 +70,36 @@ def set_mamba_num_blocks(num_blocks: int) -> None:
 def get_mamba_num_blocks() -> int | None:
     """Get the registered Mamba block pool capacity."""
     return _GLOBAL_MAMBA_NUM_BLOCKS
+
+
+def mamba_blocks_per_request(vllm_config: Any,
+                             is_align_mode: bool) -> tuple[int, int]:
+    """Return `(min_blocks_per_req, blocks_per_req)` for the compact mamba pool.
+
+    Every request keeps one resident slot per speculative position
+    (`num_spec + 1`), plus one more in align mode for the state it generates
+    from. Align mode also reserves `custom_mamba_cache_multiplier` (default
+    `DEFAULT_MAMBA_CACHE_MULTIPLIER`) slots per request for prefix
+    checkpoints, never fewer than the resident minimum.
+    """
+    num_spec = 0
+    if vllm_config.speculative_config is not None:
+        num_spec = vllm_config.speculative_config.num_speculative_tokens
+    min_blocks_per_req = num_spec + 1 + (1 if is_align_mode else 0)
+    if not is_align_mode:
+        return min_blocks_per_req, min_blocks_per_req
+    multiplier = int(
+        vllm_config.additional_config.get("custom_mamba_cache_multiplier",
+                                          DEFAULT_MAMBA_CACHE_MULTIPLIER))
+    return min_blocks_per_req, max(multiplier, min_blocks_per_req)
+
+
+def mamba_pool_size(max_num_reqs: int, blocks_per_req: int,
+                    divisor: int) -> int:
+    """`max_num_reqs * blocks_per_req` slots plus the null block, rounded up to
+    a multiple of the sharding `divisor` so per-device shards are equal."""
+    blocks = max_num_reqs * blocks_per_req + 1
+    return ((blocks + divisor - 1) // divisor) * divisor
 
 
 def is_mamba_spec(spec: Any) -> bool:
@@ -284,11 +326,16 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # Resolve mamba_num_blocks
         if mamba_num_blocks is None:
+            mamba_num_blocks = getattr(kv_cache_config, "mamba_num_blocks",
+                                       None)
+        if mamba_num_blocks is None:
             mamba_num_blocks = get_mamba_num_blocks()
         if mamba_num_blocks is None:
             raise ValueError(
-                "[TPUHybridKVCacheCoordinator] mamba_num_blocks must be registered "
-                "via set_mamba_num_blocks().")
+                "[TPUHybridKVCacheCoordinator] mamba_num_blocks must be "
+                "registered via set_mamba_num_blocks() or carried by "
+                "kv_cache_config; the model runner's pool size never reached "
+                "this process.")
         self.mamba_num_blocks = int(mamba_num_blocks)
 
         logger.info(
@@ -606,6 +653,59 @@ def tpu_get_kv_cache_coordinator(
     if enable_caching and has_mamba:
         return TPUHybridKVCacheCoordinator(kv_cache_config, *args, **kwargs)
     return orig_get_kv_cache_coordinator(kv_cache_config, *args, **kwargs)
+
+
+def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
+                               vllm_config: Any) -> int | None:
+    """Fetch the mamba pool size the workers allocated (via
+    `rpc_owner.collective_rpc`) and publish it in the engine-core process.
+    Returns None when the model has no mamba layers."""
+    if not any(is_mamba_group(g) for g in kv_cache_config.kv_cache_groups):
+        return None
+    reported = [
+        v for v in rpc_owner.collective_rpc("get_mamba_num_blocks")
+        if v is not None
+    ]
+    if not reported:
+        raise ValueError(
+            "[tpu_inference] No worker reported a compact mamba pool size "
+            "for a model with mamba layers; the scheduler cannot size its "
+            "mamba block pool.")
+    if len(set(reported)) != 1:
+        raise ValueError(
+            "[tpu_inference] Workers disagree on the compact mamba pool "
+            f"size: {reported}. The scheduler cannot size its mamba block "
+            "pool consistently.")
+    mamba_num_blocks = int(reported[0])
+    vllm_config.cache_config.mamba_num_blocks = mamba_num_blocks
+    kv_cache_config.mamba_num_blocks = mamba_num_blocks
+    set_mamba_num_blocks(mamba_num_blocks)
+    logger.info(
+        "[tpu_inference] mamba_num_blocks=%d propagated from %d worker(s) "
+        "to the engine core.", mamba_num_blocks, len(reported))
+    return mamba_num_blocks
+
+
+class MambaPoolSyncExecutorMixin:
+    """Publish the workers' allocated mamba pool size in the engine-core
+    process as soon as the caches exist: `initialize_from_config` runs there
+    after every worker has allocated and before the scheduler is built."""
+
+    def initialize_from_config(self, kv_cache_configs: Any) -> None:
+        super().initialize_from_config(kv_cache_configs)
+        if kv_cache_configs:
+            propagate_mamba_num_blocks(self, kv_cache_configs[0],
+                                       self.vllm_config)
+
+
+def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
+    """Install the hooks when mamba prefix caching (align mode) is on. Called
+    from the executors' `_init_executor`, which runs in the engine-core
+    process; the platform config hook does not."""
+    cache_config = vllm_config.cache_config
+    if (cache_config.enable_prefix_caching
+            and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
+        install_hybrid_coordinator_hooks(vllm_config)
 
 
 def install_hybrid_coordinator_hooks(vllm_config: Any | None = None) -> None:
