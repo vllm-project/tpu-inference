@@ -146,6 +146,42 @@ long before anything else breaks.
 | Qwen3.5-4B | vLLM/torchax | bfloat16 | unchanged, output byte-identical to pre-fix |
 | Qwen3-0.6B | JAX-native | float32 | passes, no changes needed |
 
+## bf16 weights with fp32 activations
+
+fp32 doubles the weights, which is usually the part you did not want. Set
+`WEIGHT_STORAGE_DTYPE` to keep unquantized linear and MoE weights in a narrower
+dtype while everything else -- activations, KV cache, norms, the residual stream
+-- stays fp32:
+
+```bash
+WEIGHT_STORAGE_DTYPE=bfloat16 python examples/offline_inference.py \
+  --model Qwen/Qwen3.5-35B-A3B \
+  --dtype float32 \
+  --tensor-parallel-size 8 \
+  --max-model-len 1024
+```
+
+This is a *storage* choice, not a numerical one. The matmuls promote the weight
+back to the activation dtype, so the arithmetic is fp32 either way -- what you
+trade is the bits the cast throws away for the HBM they occupied. Rounding fp32
+weights to bf16 and promoting them back is numerically the same thing, so this
+also covers the precision-study case without paying for fp32 storage.
+
+No matmul changes were needed. The unquantized linear paths multiply with `@`
+(via `sharded_matmul`) and `jnp.einsum`, both of which promote; `lax.dot_general`
+would not have, and `_matmul_fused` / `_matmul_split` are the documented seam if
+a kernel ever needs an explicit cast.
+
+Measured on Qwen3.5-35B-A3B, `tpu7x-8`, against the same run in plain fp32:
+
+| | fp32 weights | bf16 weights |
+|---|---|---|
+| Weight-resident HBM | 213.75 GiB | 110.17 GiB |
+| Attention KV blocks | 49,105 | 59,710 |
+
+Slightly over half remains rather than exactly half: embeddings, norms and the
+vision tower are not covered by this flag and stay fp32.
+
 ## float16 is still blocked, for an unrelated reason
 
 The loader fix gets fp16 all the way through weight loading, but it then dies

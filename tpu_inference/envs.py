@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     MOE_REQUANTIZE_BLOCK_SIZE: int | None = None
     MOE_REQUANTIZE_WEIGHT_DTYPE: str = ""
     MOE_REQUANTIZE_CLIP_PERCENTILE: float | None = None
+    WEIGHT_STORAGE_DTYPE: str = ""
     MOE_STAGE_WEIGHTS_ON_HOST: bool = False
     ATTN_BUCKETIZED_NUM_REQS: bool = False
     ATTN_CUSTOM_NUM_REQS_BUCKETS: list[int] = []
@@ -329,6 +330,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "BF16_LINEAR_REQUANTIZE_BLOCK_SIZE":
     lambda: int(block_size) if
     (block_size := os.getenv("BF16_LINEAR_REQUANTIZE_BLOCK_SIZE")) else None,
+    # Keep unquantized linear and MoE weights in this dtype on device, while
+    # everything else -- activations, the KV cache, norms, the residual stream
+    # -- stays in the model dtype. Set it to bfloat16 alongside
+    # `--dtype float32` for bf16 weights with fp32 activations: HBM holds the
+    # weights at half of fp32, and the matmuls promote them back to the
+    # activation dtype, so the arithmetic is fp32 throughout.
+    # Empty (default) stores weights in the model dtype, unchanged.
+    "WEIGHT_STORAGE_DTYPE":
+    lambda: os.getenv("WEIGHT_STORAGE_DTYPE", ""),
     # Specify dtype for quantized MoE weights
     "MOE_REQUANTIZE_WEIGHT_DTYPE":
     lambda: os.getenv("MOE_REQUANTIZE_WEIGHT_DTYPE", ""),
