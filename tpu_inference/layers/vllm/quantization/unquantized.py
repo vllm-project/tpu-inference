@@ -97,6 +97,27 @@ def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
             tensor.set_(torch.storage.UntypedStorage())
 
 
+def _weight_storage_dtype() -> Optional[jnp.dtype]:
+    """The dtype unquantized weights are stored in, or None to leave them be.
+
+    See WEIGHT_STORAGE_DTYPE. This is a storage choice, not a numerical one:
+    the matmuls promote the weight back to the activation dtype, so lowering it
+    buys HBM at the cost of the bits the cast throws away, and changes nothing
+    about the precision the arithmetic runs at.
+    """
+    if not envs.WEIGHT_STORAGE_DTYPE:
+        return None
+    return to_jax_dtype(envs.WEIGHT_STORAGE_DTYPE)
+
+
+def _cast_weight_storage_dtype(weight: jax.Array) -> jax.Array:
+    """Cast one unquantized weight to WEIGHT_STORAGE_DTYPE, if it is set."""
+    dtype = _weight_storage_dtype()
+    if dtype is None or weight.dtype == dtype:
+        return weight
+    return weight.astype(dtype)
+
+
 def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
     """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
 
@@ -432,7 +453,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         ) -> LinearWeights:
             return process_linear_weights(
                 LinearWeights(
-                    weight=weight,
+                    weight=_cast_weight_storage_dtype(weight),
                     weight_scale=None,
                     zero_point=None,
                     bias=bias,
@@ -712,13 +733,14 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         else:
             w13_bias = w2_bias = None
 
-        weights = process_unquantized_moe_weights(mesh=self.mesh,
-                                                  moe_backend=self.moe_backend,
-                                                  activation=layer.activation,
-                                                  w13_weight=w13_weight,
-                                                  w13_bias=w13_bias,
-                                                  w2_weight=w2_weight,
-                                                  w2_bias=w2_bias)
+        weights = process_unquantized_moe_weights(
+            mesh=self.mesh,
+            moe_backend=self.moe_backend,
+            activation=layer.activation,
+            w13_weight=_cast_weight_storage_dtype(w13_weight),
+            w13_bias=w13_bias,
+            w2_weight=_cast_weight_storage_dtype(w2_weight),
+            w2_bias=w2_bias)
 
         del w13_weight, w2_weight, w13_bias, w2_bias
 
