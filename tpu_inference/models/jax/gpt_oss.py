@@ -26,13 +26,12 @@ from jax.sharding import PartitionSpec as P
 from vllm.config import VllmConfig
 
 from tpu_inference.layers.common.quant_methods import MXFP4
-from tpu_inference.layers.common.quantization import (e8m0_to_fp32,
-                                                      u8_unpack_e2m1)
 from tpu_inference.layers.jax.attention.gpt_oss_attention import (
     AttentionMetadata, GptOssAttention)
 from tpu_inference.layers.jax.constants import KVCacheType
 from tpu_inference.layers.jax.layers import Embedder, LMhead, RMSNorm
 from tpu_inference.layers.jax.moe.gpt_oss_moe import GptOssMoE, GptOssRouter
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.layers.jax.transformer_block import TransformerBlock
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.weight_utils import (
@@ -46,6 +45,21 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.bfloat16): torch.uint16,
     jnp.dtype(jnp.float32): torch.uint32,
 }
+
+# Everything under `mlp.experts.` belongs to the experts' quant method, which
+# owns the tensor-name contract and rejects names it doesn't recognize.
+_EXPERT_TENSOR_RE = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\..+")
+
+
+@dataclass(kw_only=True)
+class GptOssMoEBlock(nnx.Module):
+    """Calls the GPT-OSS router, then the routed experts on its logits."""
+    router: GptOssRouter
+    experts: GptOssMoE
+
+    def __call__(self, x_TD: jax.Array):
+        router_logits = self.router(x_TD)
+        return self.experts(x_TD, router_logits)
 
 
 @dataclass
@@ -76,6 +90,11 @@ class GptOss(nnx.Module):
         num_experts_per_token: int = self.hf_config.num_experts_per_tok
         rms_norm_eps: float = self.hf_config.rms_norm_eps
         swiglu_limit: float = self.hf_config.swiglu_limit
+        # The shared swigluoai GMM kernel hardcodes limit=7.0.
+        if swiglu_limit != 7.0:
+            raise NotImplementedError(
+                "GPT-OSS native MXFP4 MoE only supports swiglu_limit=7.0, "
+                f"got {swiglu_limit}.")
 
         rope_theta: float = getattr(
             self.hf_config, "rope_theta",
@@ -94,6 +113,7 @@ class GptOss(nnx.Module):
             "random_weights", False)
         self.enable_return_routed_experts = self.vllm_config.model_config.enable_return_routed_experts
         self.mesh = mesh
+        quant_config = get_tpu_quantization_config(vllm_config)
 
         self.embedder = Embedder(
             vocab_size=vocab_size,
@@ -129,7 +149,19 @@ class GptOss(nnx.Module):
                 mesh=self.mesh,
             )
 
-            # MoE MLP block
+            experts = GptOssMoE(
+                rngs=self.rng,
+                dtype=dtype,
+                mesh=self.mesh,
+                quant_config=quant_config,
+                num_local_experts=num_experts,
+                hidden_size=hidden_size,
+                intermediate_size_moe=ffw_intermediate_size,
+                num_experts_per_tok=num_experts_per_token,
+                random_init=self.random_init,
+                enable_return_routed_experts=self.enable_return_routed_experts,
+                prefix=f"model.layers.{i}.mlp.experts",
+            )
             router = GptOssRouter(
                 hidden_size=hidden_size,
                 num_experts=num_experts,
@@ -141,24 +173,10 @@ class GptOss(nnx.Module):
                 activation_ffw_td=P('data', None),
                 ed_sharding=P('model', None),
                 e_sharding=P('model'),
+                moe_backend=experts.moe_backend,
+                mesh=self.mesh,
             )
-
-            moe_mlp = GptOssMoE(
-                dtype=dtype,
-                num_local_experts=num_experts,
-                hidden_size=hidden_size,
-                intermediate_size_moe=ffw_intermediate_size,
-                rngs=self.rng,
-                random_init=self.random_init,
-                router=router,
-                swiglu_limit=swiglu_limit,
-                # Sharding configuration
-                activation_ffw_td=P('data', None),
-                edf_sharding=P('model', None, None),
-                efd_sharding=P('model', None, None),
-                ed_sharding=P('model', None),
-                enable_return_routed_experts=self.enable_return_routed_experts,
-            )
+            moe_mlp = GptOssMoEBlock(router=router, experts=experts)
 
             block = TransformerBlock(
                 pre_attention_norm=RMSNorm(
@@ -221,12 +239,7 @@ class GptOss(nnx.Module):
             "transpose_reshape": lambda w, shape: w.T.reshape(shape),
             "reshape": lambda b, shape: b.reshape(shape),
             "transpose": lambda w, _: w.T,
-            "swap_last2": lambda w, _: w.swapaxes(-1, -2),
         }
-
-        # MXFP4 checkpoints swap last two dims for MoE to place packed dim at most minor
-        swap_mlp_transform = transforms[
-            "swap_last2"] if quant_method == MXFP4 else None
 
         mappings = {
             # Embeddings, Norms, and LM Head
@@ -282,19 +295,6 @@ class GptOss(nnx.Module):
              transforms["transpose"], None),
             "model.layers.*.mlp.router.bias":
             ("layers.*.custom_module.router.bias_E", None, None),
-            "model.layers.*.mlp.experts.gate_up_proj": ([
-                "layers.*.custom_module.gate_proj_kernel",
-                "layers.*.custom_module.up_proj_kernel"
-            ], swap_mlp_transform, None),
-            "model.layers.*.mlp.experts.gate_up_proj_bias": ([
-                "layers.*.custom_module.gate_proj_bias",
-                "layers.*.custom_module.up_proj_bias"
-            ], None, None),
-            "model.layers.*.mlp.experts.down_proj":
-            ("layers.*.custom_module.mlp2_weight_EFD", swap_mlp_transform,
-             None),
-            "model.layers.*.mlp.experts.down_proj_bias":
-            ("layers.*.custom_module.mlp2_bias_ED", None, None),
         }
 
         model_params = nnx.state(self)
@@ -306,16 +306,28 @@ class GptOss(nnx.Module):
             framework="pt",
             download_dir=self.vllm_config.load_config.download_dir)
 
-        # Build a pool of weights with MXFP4 experts combined if neededs
-        pool: dict[str, torch.Tensor | tuple] = (self._build_mxfp4_pool(
-            names_and_weights_generator,
-            mappings) if quant_method == MXFP4 else {
-                loaded_name: loaded_weight
-                for loaded_name, loaded_weight in names_and_weights_generator
-            })
+        pool: dict[str, torch.Tensor] = {
+            loaded_name: loaded_weight
+            for loaded_name, loaded_weight in names_and_weights_generator
+        }
+        expert_weights_by_layer: dict[int, list[tuple[str, torch.Tensor]]] = {}
+        for loaded_name, loaded_weight in pool.items():
+            layer_num = self._match_expert_layer(loaded_name)
+            if layer_num is None:
+                continue
+            if quant_method != MXFP4:
+                raise ValueError(
+                    "Only MXFP4 GPT-OSS expert tensors are supported on the "
+                    f"flax_nnx path, got quant_method={quant_method!r} for "
+                    f"{loaded_name}.")
+            expert_weights_by_layer.setdefault(layer_num, []).append(
+                (loaded_name, loaded_weight))
 
         with jax.default_device(jax.devices("cpu")[0]):
             for loaded_name, loaded_weight in pool.items():
+                if self._match_expert_layer(loaded_name) is not None:
+                    continue
+
                 hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", loaded_name)
                 if hf_pattern not in mappings:
                     continue
@@ -326,168 +338,34 @@ class GptOss(nnx.Module):
                 layer_num = layer_num_match.group(
                     1) if layer_num_match else None
 
-                # Handle Split Mappings (1-to-2)
-                is_split_mapping = isinstance(jax_path_template, list)
-
-                if is_split_mapping:
-                    if isinstance(loaded_weight, tuple):
-                        # MXFP4 Split logic
-                        # Slicing the blocks and scales along the intermediate dimension (even=gate, odd=up)
-                        blocks_u8, scales_u8 = loaded_weight
-                        # Shape check: blocks typically have (E, F/16, 16) where F is combined dim
-                        gate_bundle = (blocks_u8[..., ::2, :],
-                                       scales_u8[..., ::2])
-                        up_bundle = (blocks_u8[..., 1::2, :], scales_u8[...,
-                                                                        1::2])
-
-                        bundles = [gate_bundle, up_bundle]
-                        for i, path_template in enumerate(jax_path_template):
-                            jax_path = path_template.replace("*", layer_num)
-                            model_weight = get_param(model_params, jax_path)
-
-                            b_u8, s_u8 = bundles[i]
-                            # Using the u8_unpack_e2m1 from your current quantization module
-                            codes_fp32_t = u8_unpack_e2m1(b_u8).astype(
-                                jnp.float32)
-                            scales_fp32_t = e8m0_to_fp32(s_u8)
-
-                            self._load_mxfp4(
-                                model_weight=model_weight,
-                                codes_fp32_t=codes_fp32_t,
-                                scales_fp32_t=scales_fp32_t,
-                                transform_fn=transform_fn,
-                            )
-                    else:
-                        # Interleaved split: even=gate, odd=up
-                        gate_w = loaded_weight[..., ::2]
-                        up_w = loaded_weight[..., 1::2]
-
-                        splits = [gate_w, up_w]
-                        for i, path_template in enumerate(jax_path_template):
-                            jax_path = path_template.replace("*", layer_num)
-                            model_weight = get_param(model_params, jax_path)
-                            self._load_regular_param(
-                                model_weight=model_weight,
-                                loaded_weight=splits[i],
-                                cast_type=model_weight.value.dtype,
-                                transform_fn=transform_fn,
-                                target_shape=None,
-                                jax_path_template=path_template,
-                            )
-                else:
-                    # Standard 1-to-1 loading path
-                    jax_path = jax_path_template.replace(
-                        "*", layer_num) if layer_num else jax_path_template
-                    model_weight = get_param(model_params, jax_path)
-
-                    if isinstance(loaded_weight, tuple):
-                        blocks_u8, scales_u8 = loaded_weight
-                        codes_fp32_t = u8_unpack_e2m1(blocks_u8).astype(
-                            jnp.float32)
-                        scales_fp32_t = e8m0_to_fp32(scales_u8)
-                        self._load_mxfp4(model_weight, codes_fp32_t,
-                                         scales_fp32_t, transform_fn)
-                    else:
-                        self._load_regular_param(model_weight, loaded_weight,
-                                                 model_weight.value.dtype,
-                                                 transform_fn, target_shape,
-                                                 jax_path_template)
+                jax_path = jax_path_template.replace(
+                    "*", layer_num) if layer_num else jax_path_template
+                model_weight = get_param(model_params, jax_path)
+                self._load_regular_param(model_weight, loaded_weight,
+                                         model_weight.value.dtype,
+                                         transform_fn, target_shape,
+                                         jax_path_template)
 
                 if is_verbose:
-                    # In split cases, we only print the first param info to avoid clutter
-                    info_weight = get_param(
-                        model_params, jax_path_template[0].replace(
-                            "*",
-                            layer_num)) if is_split_mapping else model_weight
-                    print_param_info(info_weight, loaded_name)
+                    print_param_info(model_weight, loaded_name)
 
         nnx.update(self, model_params)
 
-    def _build_mxfp4_pool(self, names_and_weights_generator, mappings):
-        """Collect MXFP4 weights into a pool keeping tuples (blocks_u8, scales_u8).
+        for layer_num, expert_weights in expert_weights_by_layer.items():
+            experts = self.layers[layer_num].custom_module.experts
+            experts.load_weights(expert_weights)
+            # process_weights_after_loading returns False until all six staged
+            # expert tensors are present.
+            processed = experts.quant_method.process_weights_after_loading(
+                experts)
+            if not processed:
+                raise RuntimeError(
+                    "Incomplete GPT-OSS MXFP4 expert tensors for layer "
+                    f"{layer_num}")
 
-        Combines *_blocks and *_scales pairs and stores uint8 tensors together.
-        Non-expert tensors are kept as-is. Raises if any expert bundle is incomplete.
-        """
-        pool: dict[str, torch.Tensor | tuple] = {}
-        pending_experts: dict[str, dict[str, torch.Tensor]] = {}
-        for loaded_name, loaded_weight in names_and_weights_generator:
-            if loaded_name.endswith("_blocks") or loaded_name.endswith(
-                    "_scales"):
-                base = loaded_name[:-7]
-                entry = pending_experts.setdefault(base, {})
-                if loaded_name.endswith("_blocks"):
-                    entry["blocks"] = loaded_weight
-                else:
-                    entry["scales"] = loaded_weight
-
-                # If we have both parts, place raw pair into the main pool
-                if "blocks" in entry and "scales" in entry:
-                    hf_pattern = re.sub(r"layers\.(\d+)", "layers.*", base)
-                    if hf_pattern not in mappings:
-                        raise ValueError(
-                            f"No mapping found for expert tensor: {base}")
-                    pool[base] = (entry["blocks"], entry["scales"])
-                    # Remove from pending to free memory
-                    pending_experts.pop(base, None)
-            else:
-                pool[loaded_name] = loaded_weight
-
-        # Enforce completeness of expert bundles
-        if pending_experts:
-            details = []
-            for base, entry in pending_experts.items():
-                missing = [k for k in ("blocks", "scales") if k not in entry]
-                details.append(
-                    f"{base} (missing: {', '.join(missing) if missing else 'unknown'})"
-                )
-            raise RuntimeError(
-                "Incomplete MXFP4 expert bundle(s) encountered: " +
-                ", ".join(details))
-        return pool
-
-    def _load_mxfp4(self,
-                    model_weight,
-                    codes_fp32_t,
-                    scales_fp32_t,
-                    transform_fn=None):
-        """Assign decoded MXFP4 codes/scales into a QArray (qvalue/scale)."""
-
-        qv = model_weight.array.qvalue
-        sv = model_weight.array.scale
-        q_dtype = qv.value.dtype
-        s_dtype = sv.value.dtype
-
-        exp_q_shape = tuple(qv.value.shape)
-        exp_s_shape = tuple(sv.value.shape)
-
-        # Apply optional transform (e.g., swap last two dims) before conversion
-        if transform_fn is not None:
-            codes_fp32_t = transform_fn(codes_fp32_t, None)
-            scales_fp32_t = transform_fn(scales_fp32_t, None)
-
-        # Convert from torch.Tensor to numpy before creating JAX arrays
-        codes_fp32_t = codes_fp32_t.detach().cpu().numpy()
-        scales_fp32_t = scales_fp32_t.detach().cpu().numpy()
-
-        codes_jnp = jnp.asarray(codes_fp32_t).astype(q_dtype)
-        scales_jnp = jnp.asarray(scales_fp32_t).astype(s_dtype)
-
-        def get_q_slice(index):
-            return codes_jnp[index]
-
-        def get_s_slice(index):
-            return scales_jnp[index]
-
-        q_sharded = jax.make_array_from_callback(
-            exp_q_shape, NamedSharding(self.mesh, P(*qv.sharding)),
-            get_q_slice)
-        s_sharded = jax.make_array_from_callback(
-            exp_s_shape, NamedSharding(self.mesh, P(*sv.sharding)),
-            get_s_slice)
-
-        model_weight.array.qvalue.value = q_sharded
-        model_weight.array.scale.value = s_sharded
+    def _match_expert_layer(self, loaded_name: str) -> Optional[int]:
+        match = _EXPERT_TENSOR_RE.fullmatch(loaded_name)
+        return int(match.group(1)) if match else None
 
     def _load_regular_param(self, model_weight, loaded_weight: torch.Tensor,
                             cast_type, transform_fn, target_shape,
