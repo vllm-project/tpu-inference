@@ -7,12 +7,15 @@
 #
 # That chart renders exactly ONE replicatedJob:
 #   replicatedjob-name = runner
-#     initContainers : tpu-node-setup, [git-sync]
-#     container      : test-runner
+#     initContainers : [image-builder], tpu-node-setup, [git-sync]
+#     container      : test-runner  (+ [gke-gcsfuse-sidecar] when GCS storage)
 #
-# Everything related to the benchmark stack (client / p / d / x / server),
-# multiplexed output, colored tags and generate_summary.py reporting has been
-# removed, since none of it is ever deployed in script mode.
+# The container list is discovered from the live Pod spec, so optional
+# containers (image-builder, git-sync, gcsfuse) are picked up automatically.
+#
+# Everything related to the benchmark stack (client / p / d / x / server) and
+# generate_summary.py reporting has been removed, since none of it is ever
+# deployed in script mode.
 # ==============================================================================
 set -eu
 
@@ -20,7 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GKE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 REP_JOB="runner"
-CONTAINER="test-runner"
+DEFAULT_MAIN_CONTAINER="test-runner"
 
 # Resolve default log directory (gke/log)
 LOG_DIR="${GKE_ROOT}/log"
@@ -30,8 +33,13 @@ CLEAN_USER="$(printf '%s' "$CURRENT_USER" | tr '[:upper:]' '[:lower:]' | tr -dc 
 
 JOB_NAME=""
 LOG_NUM=""
+CONTAINER="$DEFAULT_MAIN_CONTAINER"
 FOLLOW=true
 WAIT_TIMEOUT=900   # seconds to wait for the runner pod to appear
+
+# Colors used to tag each stream in 'all' mode
+PALETTE=($'\033[36m' $'\033[32m' $'\033[33m' $'\033[35m' $'\033[34m' $'\033[31m')
+CLR_RESET=$'\033[0m'
 
 usage() {
     cat <<EOF
@@ -44,41 +52,51 @@ Arguments (positional, order independent):
   JOB_NAME          JobSet / Helm release name from run_testcase.sh.
                     If omitted, auto-detects the newest JobSet that owns a
                     '${REP_JOB}' replicatedJob (prefers '${CLEAN_USER}-test-*').
-                    The log is always saved to '<JOB_NAME>.log' (or '<JOB_NAME>.log<N>').
-  LOG_NUMBER        Optional numeric suffix for the log file (e.g. 4 -> <JOB_NAME>.log4).
+  LOG_NUMBER        Optional numeric suffix for the log file (e.g. 4 -> <JOB>.log4).
 
 Options:
   -j, --job <NAME>     Specify JobSet name explicitly
   -n, --number <NUM>   Specify log number suffix explicitly
-  -c, --container <C>  Container to read (default: ${CONTAINER};
-                       use 'git-sync' or 'tpu-node-setup' for init containers)
+  -c, --container <C>  Container to read (default: ${DEFAULT_MAIN_CONTAINER}).
+                       Use 'all' to stream every container of the Pod
+                       concurrently, each tagged and teed to its own file.
+                       Individual names: image-builder, tpu-node-setup,
+                       git-sync, test-runner (whichever the Pod actually has).
+  -l, --list           List the containers of the Pod and exit
   -s, --dump           Snapshot current logs without following (-f)
   -o, --dir <DIR>      Output directory (default: ${LOG_DIR})
   -t, --timeout <SEC>  Seconds to wait for the runner pod (default: ${WAIT_TIMEOUT})
   -h, --help           Show this help message
 
-Exit code mirrors the testcase result: 0 = Succeeded, 1 = Failed/unknown.
+Log files:
+  main container  -> <JOB_NAME>.log[N]
+  other container -> <JOB_NAME>.<container>.log[N]
+  An existing file is never overwritten; the suffix is bumped instead.
+
+Exit code mirrors the testcase result: the main container's exit code
+(0 = Succeeded, non-zero = Failed).
 
 Examples:
-  1. Stream the newest testcase run into log/<detected_jobset>.log:
+  1. Stream the main test-runner of the newest run:
      $0
 
-  2. Stream a specific release into log/<JOB_NAME>.log:
-     $0 dennis-test-a1b2c
+  2. Stream EVERY container side by side (build + setup + test):
+     $0 -c all
 
-  3. Stream a specific release with numeric suffix into log/<JOB_NAME>.log4:
-     $0 dennis-test-a1b2c 4
+  3. Watch only the on-demand image build:
+     $0 -c image-builder
 
-  4. Snapshot the logs of a finished run:
-     $0 --dump dennis-test-a1b2c
+  4. Snapshot all logs of a finished run:
+     $0 -c all --dump dennis-test-a1b2c
 
-  5. Inspect the git-sync init container instead:
-     $0 -c git-sync --dump
+  5. See which containers the Pod has:
+     $0 --list
 ==================================================================
 EOF
 }
 
 # --- PARSE ARGUMENTS ---
+LIST_ONLY=false
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -93,6 +111,14 @@ while [[ $# -gt 0 ]]; do
         -c|--container)
             CONTAINER="$2"
             shift 2
+            ;;
+        -a|--all)
+            CONTAINER="all"
+            shift
+            ;;
+        -l|--list)
+            LIST_ONLY=true
+            shift
             ;;
         -s|--save|--dump)
             FOLLOW=false
@@ -164,102 +190,306 @@ fi
 
 LABEL="jobset.sigs.k8s.io/jobset-name=${JOB_NAME},jobset.sigs.k8s.io/replicatedjob-name=${REP_JOB}"
 
-# Verify the JobSet (or at least its pods) exists
-if ! kubectl get jobset "${JOB_NAME}" >/dev/null 2>&1; then
-    echo "⚠️  JobSet '${JOB_NAME}' not found, falling back to pod lookup..."
-    if [ -z "$(kubectl get pods -l "$LABEL" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]; then
-        echo "❌ Error: no '${REP_JOB}' pods found for '${JOB_NAME}'." >&2
-        exit 1
-    fi
-fi
+# ==============================================================================
+# Pod / container introspection helpers
+# ==============================================================================
 
-# --- LOG FILE DETERMINATION (AVOID OVERWRITING) ---
-if [ -n "$LOG_NUM" ]; then
-    TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log${LOG_NUM}"
-    if [ -e "$TESTCASE_LOG" ]; then
-        SUFFIX=$((LOG_NUM + 1))
-        while [ -e "${LOG_DIR}/${JOB_NAME}.log${SUFFIX}" ]; do
-            SUFFIX=$((SUFFIX + 1))
-        done
-        TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log${SUFFIX}"
-        LOG_NUM="$SUFFIX"
-    fi
-else
-    TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log"
-    if [ -e "$TESTCASE_LOG" ]; then
-        SUFFIX=2
-        while [ -e "${LOG_DIR}/${JOB_NAME}.log${SUFFIX}" ]; do
-            SUFFIX=$((SUFFIX + 1))
-        done
-        TESTCASE_LOG="${LOG_DIR}/${JOB_NAME}.log${SUFFIX}"
-        LOG_NUM="$SUFFIX"
-    fi
-fi
-
-echo "============================================================"
-echo " ⚡ TPU Testcase Log Streamer & Tee Utility"
-echo "============================================================"
-echo " JobSet Name : ${JOB_NAME}"
-echo " Target      : ${REP_JOB} / ${CONTAINER}"
-if [ -n "$LOG_NUM" ]; then
-    echo " Log Suffix  : ${LOG_NUM}"
-fi
-echo " Mode        : $([ "$FOLLOW" = true ] && echo stream || echo dump)"
-echo " Target Log  : ${TESTCASE_LOG}"
-echo "============================================================"
-
-summary() {
-    if [ -f "${TESTCASE_LOG}" ]; then
-        LINES="$(wc -l < "${TESTCASE_LOG}" | tr -d ' ')"
-        SIZE="$(ls -lh "${TESTCASE_LOG}" | awk '{print $5}')"
-        echo ""
-        echo "============================================================"
-        printf " 📋 Captured %-20s : %8s (%s lines)\n" "$(basename "${TESTCASE_LOG}")" "$SIZE" "$LINES"
-        echo "============================================================"
-    fi
+pod_exists() {
+    [ -n "$(kubectl get pods -l "$LABEL" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]
 }
 
 pod_phase() {
     kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true
 }
 
-# --- DUMP MODE: one-shot snapshot, no waiting ---
-if [ "$FOLLOW" = false ]; then
-    echo "📥 Snapshotting ${REP_JOB} (${CONTAINER}) logs..."
-    kubectl logs -l "$LABEL" -c "$CONTAINER" --tail=-1 > "${TESTCASE_LOG}" 2>&1 || true
-    summary
-    [ "$(pod_phase)" = "Succeeded" ] && exit 0 || exit 1
-fi
+pod_terminal() {
+    case "$(pod_phase)" in
+        Succeeded|Failed|"") return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
-# --- WAIT FOR THE RUNNER POD ---
-echo "⏳ Waiting for the ${REP_JOB} pod (timeout ${WAIT_TIMEOUT}s)..."
-WAITED=0
-while [ -z "$(kubectl get pods -l "$LABEL" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]; do
-    if [ "$WAITED" -ge "$WAIT_TIMEOUT" ]; then
-        echo "❌ Error: timed out waiting for the ${REP_JOB} pod." >&2
+# Container names straight from the Pod spec: init containers first (in the
+# order they run), then the regular containers.
+pod_init_containers() {
+    kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].spec.initContainers[*].name}' 2>/dev/null || true
+}
+
+pod_main_containers() {
+    kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null || true
+}
+
+# Read one status field of a container, regardless of whether it is an init
+# container or a regular one (only one of the two lookups can ever match).
+container_field() {
+    local name="$1" field="$2"
+    kubectl get pods -l "$LABEL" -o \
+        jsonpath="{.items[0].status.initContainerStatuses[?(@.name=='${name}')].${field}}{.items[0].status.containerStatuses[?(@.name=='${name}')].${field}}" \
+        2>/dev/null || true
+}
+
+container_terminated() {
+    [ -n "$(container_field "$1" 'state.terminated.reason')" ]
+}
+
+container_started() {
+    [ -n "$(container_field "$1" 'state.running.startedAt')" ]
+}
+
+container_exit_code() {
+    container_field "$1" 'state.terminated.exitCode'
+}
+
+# --- WAIT FOR THE RUNNER POD (needed to enumerate containers) ---
+if ! pod_exists; then
+    if [ "$FOLLOW" = false ]; then
+        echo "❌ Error: no '${REP_JOB}' pods found for '${JOB_NAME}'." >&2
         exit 1
     fi
-    sleep 2
-    WAITED=$((WAITED + 2))
-done
+    echo "⏳ Waiting for the ${REP_JOB} pod (timeout ${WAIT_TIMEOUT}s)..."
+    WAITED=0
+    while ! pod_exists; do
+        if [ "$WAITED" -ge "$WAIT_TIMEOUT" ]; then
+            echo "❌ Error: timed out waiting for the ${REP_JOB} pod." >&2
+            exit 1
+        fi
+        sleep 2
+        WAITED=$((WAITED + 2))
+    done
+fi
 
-trap 'summary' EXIT INT TERM
+INIT_CONTAINERS="$(pod_init_containers)"
+MAIN_CONTAINERS="$(pod_main_containers)"
+ALL_CONTAINERS="${INIT_CONTAINERS} ${MAIN_CONTAINERS}"
 
-# --- STREAM & TEE ---
-# kubectl logs -f drops out while the pod is still pulling images / running init
-# containers (tpu-node-setup, git-sync), so retry until the job reaches a
-# terminal phase. Truncate once, then append across retries.
-echo "📡 Streaming & teeing ${REP_JOB} (${CONTAINER}) to screen -> $(basename "${TESTCASE_LOG}")..."
-: > "${TESTCASE_LOG}"
-while true; do
-    kubectl logs -l "$LABEL" -c "$CONTAINER" --tail=-1 -f 2>&1 | tee -a "${TESTCASE_LOG}" || true
-    PHASE="$(pod_phase)"
-    if [ "$PHASE" = "Succeeded" ] || [ "$PHASE" = "Failed" ] || [ -z "$PHASE" ]; then
-        break
+# The container whose exit code decides our own exit code.
+MAIN_CONTAINER=""
+for c in $MAIN_CONTAINERS; do
+    if [ "$c" = "$DEFAULT_MAIN_CONTAINER" ]; then
+        MAIN_CONTAINER="$c"
     fi
-    sleep 2
 done
+if [ -z "$MAIN_CONTAINER" ]; then
+    for c in $MAIN_CONTAINERS; do
+        MAIN_CONTAINER="$c"
+        break
+    done
+fi
 
+if [ "$LIST_ONLY" = true ]; then
+    echo "Containers of ${JOB_NAME} (${REP_JOB}):"
+    for c in $INIT_CONTAINERS; do
+        echo "  [init] ${c}"
+    done
+    for c in $MAIN_CONTAINERS; do
+        if [ "$c" = "$MAIN_CONTAINER" ]; then
+            echo "  [main] ${c}   <- default target"
+        else
+            echo "  [main] ${c}"
+        fi
+    done
+    exit 0
+fi
+
+# --- RESOLVE TARGET CONTAINERS ---
+if [ "$CONTAINER" = "all" ]; then
+    TARGETS="$ALL_CONTAINERS"
+else
+    FOUND=false
+    for c in $ALL_CONTAINERS; do
+        if [ "$c" = "$CONTAINER" ]; then
+            FOUND=true
+        fi
+    done
+    if [ "$FOUND" = false ]; then
+        echo "❌ Error: container '${CONTAINER}' does not exist in this Pod." >&2
+        echo "   Available: ${ALL_CONTAINERS}" >&2
+        echo "   (use '-c all' to stream all of them, or '--list' to inspect)" >&2
+        exit 2
+    fi
+    TARGETS="$CONTAINER"
+fi
+
+# ==============================================================================
+# Log file naming
+# ==============================================================================
+# main container  -> <JOB_NAME>.log[N]
+# other container -> <JOB_NAME>.<container>.log[N]
+log_base_for() {
+    if [ "$1" = "$MAIN_CONTAINER" ]; then
+        printf '%s/%s' "$LOG_DIR" "$JOB_NAME"
+    else
+        printf '%s/%s.%s' "$LOG_DIR" "$JOB_NAME" "$1"
+    fi
+}
+
+log_path_for() {
+    printf '%s.log%s' "$(log_base_for "$1")" "$LOG_SUFFIX"
+}
+
+# A suffix is usable only if it is free for *every* target, so that one run's
+# files always share the same suffix.
+suffix_is_free() {
+    local sfx="$1" c
+    for c in $TARGETS; do
+        if [ -e "$(log_base_for "$c").log${sfx}" ]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+if [ -n "$LOG_NUM" ]; then
+    LOG_SUFFIX="$LOG_NUM"
+else
+    LOG_SUFFIX=""
+fi
+if ! suffix_is_free "$LOG_SUFFIX"; then
+    NEXT=$(( ${LOG_NUM:-1} + 1 ))
+    while ! suffix_is_free "$NEXT"; do
+        NEXT=$((NEXT + 1))
+    done
+    LOG_SUFFIX="$NEXT"
+fi
+
+echo "============================================================"
+echo " ⚡ TPU Testcase Log Streamer & Tee Utility"
+echo "============================================================"
+echo " JobSet Name : ${JOB_NAME}"
+echo " Pod Phase   : $(pod_phase)"
+echo " Mode        : $([ "$FOLLOW" = true ] && echo stream || echo dump) (container: ${CONTAINER})"
+echo " Target Logs :"
+for c in $TARGETS; do
+    printf "   - %-18s : %s\n" "$c" "$(log_path_for "$c")"
+done
+echo "============================================================"
+
+summary() {
+    echo ""
+    echo "============================================================"
+    echo " 📋 Captured logs in ${LOG_DIR}:"
+    local c f lines size
+    for c in $TARGETS; do
+        f="$(log_path_for "$c")"
+        if [ -f "$f" ]; then
+            lines="$(wc -l < "$f" | tr -d ' ')"
+            size="$(ls -lh "$f" | awk '{print $5}')"
+            printf "   - %-34s : %8s (%s lines)\n" "$(basename "$f")" "$size" "$lines"
+        fi
+    done
+    echo "============================================================"
+}
+
+# ==============================================================================
+# Streaming
+# ==============================================================================
+# Streams ONE container until that container terminates.
+#
+# Two things the previous single-container version got wrong and that matter a
+# lot once init containers are involved:
+#   1. The retry loop used to exit only when the whole Pod reached a terminal
+#      phase. An init container finishes long before that, so `kubectl logs -f`
+#      returned immediately and the same log got re-appended every 2s forever.
+#      We now poll the *container's own* terminated state.
+#   2. `kubectl logs` fails with "is waiting to start: PodInitializing" until
+#      the container actually starts, and that error used to be teed into the
+#      log file on every retry. We now wait for the container to start first
+#      and keep stderr out of the file.
+stream_container() {
+    local container="$1"
+    local outfile="$2"
+    local tag="$3"     # empty => no prefix, print raw to stdout
+    local color="$4"
+
+    : > "$outfile"
+
+    # Phase 1: wait until the container starts (or is already done).
+    while ! container_started "$container" && ! container_terminated "$container"; do
+        if pod_terminal; then
+            break
+        fi
+        sleep 2
+    done
+
+    # Phase 2: stream until THIS container terminates.
+    while true; do
+        if [ -n "$tag" ]; then
+            kubectl logs -l "$LABEL" -c "$container" --tail=-1 -f 2>/dev/null \
+                | tee -a "$outfile" \
+                | awk -v col="$color" -v tag="$tag" -v rst="$CLR_RESET" \
+                    '{ printf "%s[%-16s]%s %s\n", col, tag, rst, $0; fflush() }' || true
+        else
+            kubectl logs -l "$LABEL" -c "$container" --tail=-1 -f 2>/dev/null \
+                | tee -a "$outfile" || true
+        fi
+
+        if container_terminated "$container" || pod_terminal; then
+            break
+        fi
+        sleep 2
+    done
+    return 0
+}
+
+dump_container() {
+    local container="$1"
+    local outfile="$2"
+    kubectl logs -l "$LABEL" -c "$container" --tail=-1 > "$outfile" 2>&1 || true
+}
+
+# The container whose result we report: in 'all' mode that is the main
+# container, otherwise the single container the user asked for.
+EXIT_TARGET="$MAIN_CONTAINER"
+if [ "$CONTAINER" != "all" ]; then
+    EXIT_TARGET="$CONTAINER"
+fi
+
+# --- DUMP MODE: one-shot snapshot ---
+if [ "$FOLLOW" = false ]; then
+    for c in $TARGETS; do
+        echo "📥 Snapshotting ${c} -> $(basename "$(log_path_for "$c")")..."
+        dump_container "$c" "$(log_path_for "$c")"
+    done
+    summary
+    CODE="$(container_exit_code "$EXIT_TARGET")"
+    echo ""
+    echo "🏁 ${EXIT_TARGET} exit code: ${CODE:-unknown} (pod phase: $(pod_phase))"
+    exit "${CODE:-1}"
+fi
+
+# --- STREAM MODE ---
+PIDS=()
+CLEANED=false
+cleanup() {
+    if [ "$CLEANED" = true ]; then
+        return
+    fi
+    CLEANED=true
+    for p in ${PIDS[@]+"${PIDS[@]}"}; do
+        kill "$p" >/dev/null 2>&1 || true
+    done
+    summary
+}
+trap cleanup EXIT INT TERM
+
+if [ "$CONTAINER" != "all" ]; then
+    # Single container: plain, untagged output in the foreground.
+    echo "📡 Streaming & teeing ${CONTAINER} -> $(basename "$(log_path_for "$CONTAINER")")..."
+    stream_container "$CONTAINER" "$(log_path_for "$CONTAINER")" "" ""
+else
+    # All containers concurrently, each tagged with its own color and file.
+    echo "📺 Streaming ${TARGETS} concurrently (Ctrl+C to stop)..."
+    i=0
+    for c in $TARGETS; do
+        color="${PALETTE[$(( i % ${#PALETTE[@]} ))]}"
+        stream_container "$c" "$(log_path_for "$c")" "$c" "$color" &
+        PIDS+=("$!")
+        i=$((i + 1))
+    done
+    wait ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
+fi
+
+CODE="$(container_exit_code "$EXIT_TARGET")"
 echo ""
-echo "🏁 Testcase pod phase: ${PHASE:-unknown}"
-[ "$PHASE" = "Succeeded" ] && exit 0 || exit 1
+echo "🏁 ${EXIT_TARGET} exit code: ${CODE:-unknown} (pod phase: $(pod_phase))"
+exit "${CODE:-1}"

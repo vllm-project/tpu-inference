@@ -12,13 +12,13 @@
 mode: "script"
 
 image:
-  registry: "us-central1-docker.pkg.dev/cloud-tpu-shared-capacity/tpu-images/dennis-vllm-tpu"
+  registry: "us-central1-docker.pkg.dev/cienet-cmcs/lyle-vllm-images/vllm-tpu"
   tpuInferenceCommit: "eda7055d27bdd8a5a34b45a067983f4c0d4eb11b"  # Existing prebuilt image in GAR
   vllmCommit: "51da0ca66c8065619c79e35dff97aa99aeaf5644"          # vLLM commit hash (from .buildkite/vllm_lkg.version)
 
 # Optional on-demand builder: checks if image exists in GAR; if absent, builds and pushes.
 builder:
-  enabled: false
+  enabled: true
   gitRepo: "https://github.com/vllm-project/tpu-inference.git"
 
 tpu:

@@ -145,6 +145,21 @@ MODE="$(awk -F: '/^[[:space:]]*mode[[:space:]]*:/ { gsub(/[[:space:]"'\'' ]/, ""
 MODE="${MODE:-aggregated}"
 
 
+# Detect the on-demand image builder so the build-progress hint is only printed
+# when the image-builder initContainer is actually part of the pod. Only the
+# top-level "builder:" block is inspected, since "enabled:" also appears under
+# other sections (features, script.git, ...).
+BUILDER_ENABLED="$(awk -F: '
+    /^[^[:space:]#]/ { in_builder = ($0 ~ /^builder[[:space:]]*:/) }
+    in_builder && /^[[:space:]]+enabled[[:space:]]*:/ {
+        sub(/#.*/, "", $2)
+        gsub(/[[:space:]"'\'' ]/, "", $2)
+        print $2
+        exit
+    }
+' "$VALUES_PATH")"
+
+
 # --- Install the chart ---
 echo "🚀 Deploying Helm release '${RELEASE_NAME}' using values file '${VALUES_FILE}' (hfTokenSecret: '${HF_TOKEN_SECRET}')..."
 cd "$SCRIPT_DIR"
@@ -181,8 +196,17 @@ step "Check JobSet status:" \
 step "Watch pods:" \
     "kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME} -w"
 
+if [[ "$BUILDER_ENABLED" == "true" ]]; then
+    step "Monitor on-demand image build progress (runs before the main container):" \
+        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME} -c image-builder --tail=100" \
+        "# Append -f to follow the build live:" \
+        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME} -c image-builder -f"
+fi
+
 step "Stream & Tee logs into log/${JOBSET_NAME}.log:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}"
+    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}" \
+    "# Or follow every container (build + setup + test) side by side:" \
+    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}"
 
 if [[ "$MODE" == "script" ]]; then
     step "Stream testcase runner logs:" \

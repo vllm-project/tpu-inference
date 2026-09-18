@@ -122,7 +122,7 @@ storage:
     cpuLimit: "8"
 
 # Security & Identity
-serviceAccount: "vllm-sa"
+serviceAccount: "lyle-vllm-ksa"
 hfTokenSecret:
   name: "hf-token-secret"
   key: "HF_TOKEN"
