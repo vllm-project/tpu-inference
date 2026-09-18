@@ -337,6 +337,14 @@ def sample(
         logits = logits + 0 * jnp.sum(
             tpu_sampling_metadata._cache_collision_dummy)
 
+    use_distributed_candidates = (allow_distributed_sampling
+                                  and _distributed_sampling_fits(
+                                      mesh, logits.shape[-1]))
+    if not use_distributed_candidates and tpu_sampling_metadata.do_sampling:
+        # Unshard the logits explicitly to avoid latency increase.
+        logits = jax.lax.with_sharding_constraint(
+            logits, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+
     greedy_tokens = jnp.argmax(logits, axis=-1)
     logits = logits.astype(jnp.float32)
     if not tpu_sampling_metadata.do_sampling:
@@ -357,9 +365,6 @@ def sample(
                                       processed_logits)
             return tokens, output_logits
 
-        use_distributed_candidates = (allow_distributed_sampling
-                                      and _distributed_sampling_fits(
-                                          mesh, logits.shape[-1]))
         if use_distributed_candidates:
             # Candidate shapes use a trace-time maximum; each request's top-k
             # remains dynamic. Greedy and padded rows do not consume a sample.
