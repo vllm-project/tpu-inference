@@ -19,20 +19,25 @@ right JAX quant method (or skipped)? They mirror `test_fp8.py::TestFp8Config`,
 which asserts `layer.quant_method` types rather than running a forward pass.
 """
 
+from types import SimpleNamespace
+
 import jax
 import numpy as np
 import pytest
 from flax import nnx
 from jax.sharding import Mesh
+from vllm.config import ParallelConfig, set_current_vllm_config
 
+from tpu_inference.layers.common.moe import MoEBackend
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.layers.jax.linear import JaxLinear
+from tpu_inference.layers.jax.moe.moe import JaxMoE, JaxRoutedExperts, Router
 from tpu_inference.layers.jax.quantization.compressed_tensors import \
     CompressedTensorsConfig
 from tpu_inference.layers.jax.quantization.fp8 import (
-    Fp8BlockwiseLinearMethod, Fp8TensorwiseLinearMethod)
-from tpu_inference.layers.jax.quantization.unquantized import \
-    UnquantizedLinearMethod
+    Fp8BlockwiseLinearMethod, Fp8FusedMoEMethod, Fp8TensorwiseLinearMethod)
+from tpu_inference.layers.jax.quantization.unquantized import (
+    UnquantizedFusedMoEMethod, UnquantizedLinearMethod)
 
 
 # A compressed-tensors `quantization_config` modeled on
@@ -184,3 +189,87 @@ class TestCompressedTensorsConfig:
             mlp = _MLP(16, 16, rngs, config, prefix="mlp")
         assert isinstance(mlp.proj1.quant_method, Fp8BlockwiseLinearMethod)
         assert isinstance(mlp.proj2.quant_method, UnquantizedLinearMethod)
+
+
+@pytest.fixture(params=[JaxMoE, JaxRoutedExperts],
+                ids=lambda cls: cls.__name__)
+def moe_layer(request, rngs, mesh):
+    """Real, tiny layers; dispatch tests do not run an expert kernel."""
+    kwargs = dict(dtype=jax.numpy.bfloat16,
+                  num_local_experts=2,
+                  hidden_size=16,
+                  intermediate_size_moe=16,
+                  hidden_act="silu",
+                  rngs=rngs,
+                  mesh=mesh)
+    # Expert construction only needs parallel settings, not a serving engine.
+    vllm_config = SimpleNamespace(parallel_config=ParallelConfig())
+    with jax.set_mesh(mesh), set_current_vllm_config(vllm_config):
+        if request.param is JaxRoutedExperts:
+            return JaxRoutedExperts(**kwargs, top_k=1)
+        router = Router(dtype=jax.numpy.bfloat16,
+                        hidden_size=16,
+                        num_experts=2,
+                        num_experts_per_tok=1,
+                        router_act="softmax",
+                        rngs=rngs,
+                        activation_ffw_td=(None, None),
+                        ed_sharding=(None, None),
+                        mesh=mesh)
+        return JaxMoE(**kwargs,
+                      router=router,
+                      activation_ffw_td=(None, None),
+                      activation_ffw_ted=(None, None, None),
+                      edf_sharding=(None, None, None),
+                      efd_sharding=(None, None, None),
+                      apply_expert_weight_before_computation=False,
+                      expert_axis_name=None,
+                      num_expert_parallelism=1,
+                      moe_backend=MoEBackend.DENSE_MAT)
+
+
+def _weight_only_config(num_bits):
+    cfg = _fp8_tensor_config()
+    cfg["format"] = "pack-quantized"
+    group = cfg["config_groups"]["group_0"]
+    group["weights"] = {
+        "num_bits": num_bits,
+        "type": "int",
+        "symmetric": True,
+        "strategy": "group",
+        "group_size": 128,
+        "dynamic": False,
+    }
+    group["input_activations"] = None
+    return cfg
+
+
+@pytest.mark.parametrize("num_bits", [4, 8])
+def test_moe_rejects_unsupported_weight_scheme(moe_layer, num_bits):
+    """A matched quantized layer must not silently select dense dispatch."""
+    config = CompressedTensorsConfig(_weight_only_config(num_bits))
+    prefix = "model.layers.0.mlp.experts"
+    with pytest.raises(NotImplementedError) as exc:
+        config.get_quant_method(moe_layer, prefix)
+    assert prefix in str(exc.value)
+
+
+@pytest.mark.parametrize("config_factory",
+                         [_fp8_tensor_config, _fp8_block_config])
+def test_moe_supported_fp8_dispatch_is_preserved(moe_layer, config_factory):
+    config = CompressedTensorsConfig(config_factory())
+    method = config.get_quant_method(moe_layer, "model.layers.0.mlp.experts")
+    assert isinstance(method, Fp8FusedMoEMethod)
+
+
+@pytest.mark.parametrize("skip_reason", ["ignored", "unmatched"])
+def test_moe_unquantized_dispatch_is_preserved(moe_layer, skip_reason):
+    cfg = _weight_only_config(4)
+    prefix = "model.layers.0.mlp.experts"
+    if skip_reason == "ignored":
+        cfg["ignore"] = [prefix]
+    else:
+        cfg["config_groups"]["group_0"]["targets"] = ["other.layer"]
+    config = CompressedTensorsConfig(cfg)
+    method = config.get_quant_method(moe_layer, prefix)
+    assert isinstance(method, UnquantizedFusedMoEMethod)
