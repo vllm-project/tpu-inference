@@ -71,6 +71,32 @@ P = PartitionSpec
 logger = init_logger(__name__)
 
 
+# TODO: Use custom op with overriding weight loading class so we will have a better
+# and cleaner interface.
+def _free_torch_storage(tensor: Optional[torch.Tensor]) -> None:
+    """Safely frees the underlying CPU memory storage of a PyTorch tensor.
+
+    Tries `untyped_storage().resize_(0)` first, with fallback to `set_(torch.storage.UntypedStorage())`
+    for 0-dim scalars or float8 dtypes that cannot be resized in-place.
+
+    The fallback also covers storage that numpy has been handed a view of, which
+    torch marks non-resizable for good. torchax's `t2j` exports the parameter's
+    own storage that way whenever numpy has a matching scalar type -- float32
+    and float16 do, so an fp32 run frees through `set_()` on every weight, while
+    bf16 and the fp8 formats only ever reach numpy through a widened or
+    bit-cast copy and still resize in place.
+    """
+    if tensor is None:
+        return
+    try:
+        tensor.untyped_storage().resize_(0)
+    except Exception:
+        # `set_` is an in-place op, which torch refuses on a leaf that still
+        # requires grad -- vLLM leaves `requires_grad` on for most parameters.
+        with torch.no_grad():
+            tensor.set_(torch.storage.UntypedStorage())
+
+
 def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
     """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
 
@@ -377,7 +403,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         weight = jnp.transpose(weight)
 
         # Free CPU memory immediately
-        layer.weight.untyped_storage().resize_(0)
+        _free_torch_storage(layer.weight)
         delattr(layer, 'weight')
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
@@ -385,7 +411,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             bias_sharding = NamedSharding(self.linear_config.mesh,
                                           self.linear_config.bias_sharding)
             bias = _load_weight_for_layer(layer, "bias", bias_sharding)
-            layer.bias.untyped_storage().resize_(0)
+            _free_torch_storage(layer.bias)
             delattr(layer, 'bias')
         else:
             bias = None
@@ -671,16 +697,16 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
         w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
         # Free CPU memory immediately
-        layer.w13_weight.untyped_storage().resize_(0)
-        layer.w2_weight.untyped_storage().resize_(0)
+        _free_torch_storage(layer.w13_weight)
+        _free_torch_storage(layer.w2_weight)
         delattr(layer, 'w13_weight')
         delattr(layer, 'w2_weight')
 
         if self.moe.has_bias:
             w13_bias = _load_weight_for_layer(layer, "w13_bias", ep_sharding)
             w2_bias = _load_weight_for_layer(layer, "w2_bias", ep_sharding)
-            layer.w13_bias.untyped_storage().resize_(0)
-            layer.w2_bias.untyped_storage().resize_(0)
+            _free_torch_storage(layer.w13_bias)
+            _free_torch_storage(layer.w2_bias)
             delattr(layer, 'w13_bias')
             delattr(layer, 'w2_bias')
         else:
