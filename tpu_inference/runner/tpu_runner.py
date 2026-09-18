@@ -693,7 +693,10 @@ def _reconstruct_slots_for_request(
         f"[routed-experts] start_pos must be non-negative, got {start_pos} "
         f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
         f"indexing")
-    block_ids = req_state.block_ids[0] if req_state.block_ids else []
+    # For hybrid models (e.g. Qwen3.5 GatedDeltaNet + Full Attention), block_ids[0]
+    # is the 1-block recurrent state cache whereas RoutedExpertsManager.attn_gid
+    # reads from the full-attention KV-cache group (which has the most blocks).
+    block_ids = max(req_state.block_ids, key=len) if req_state.block_ids else []
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
