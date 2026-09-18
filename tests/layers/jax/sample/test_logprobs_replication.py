@@ -25,7 +25,7 @@ MLP_TENSOR = ("attn_dp", "model")
 
 def _mesh():
     n = len(jax.devices())
-    attn_dp, model = (n // 2, 2) if n % 2 == 0 else (n, 1)
+    attn_dp, model = (n // 2, 2) if n >= 4 and n % 2 == 0 else (n, 1)
     return Mesh(
         np.array(jax.devices()).reshape(1, attn_dp, model),
         ("data", "attn_dp", "model"))
