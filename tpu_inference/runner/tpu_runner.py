@@ -672,6 +672,7 @@ def _reconstruct_slots_for_request(
     num_tokens: int,
     block_size: int,
     start_pos: int,
+    attn_gid: Optional[int] = None,
 ) -> np.ndarray:
     """Reconstructs physical KV-cache slots for ``num_tokens`` tokens of a
     request using vectorized NumPy.
@@ -694,9 +695,20 @@ def _reconstruct_slots_for_request(
         f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
         f"indexing")
     # For hybrid models (e.g. Qwen3.5 GatedDeltaNet + Full Attention), block_ids[0]
-    # is the 1-block recurrent state cache whereas RoutedExpertsManager.attn_gid
-    # reads from the full-attention KV-cache group (which has the most blocks).
-    block_ids = max(req_state.block_ids, key=len) if req_state.block_ids else []
+    # is the Mamba/GDN recurrent state cache (which has the same padded list length
+    # as full attention, filled with 0s), whereas RoutedExpertsManager.attn_gid
+    # reads from the FullAttentionSpec KV-cache group (which has the most distinct
+    # non-zero physical blocks).
+    if req_state.block_ids:
+        if attn_gid is not None and attn_gid < len(req_state.block_ids):
+            block_ids = req_state.block_ids[attn_gid]
+        else:
+            block_ids = max(
+                req_state.block_ids,
+                key=lambda b: (len(set(x for x in b if x != 0)), len(b)),
+            )
+    else:
+        block_ids = []
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
@@ -728,6 +740,15 @@ def _reconstruct_routed_experts(
     block_size = runner.block_size
     total_active_tokens = scheduler_output.total_num_scheduled_tokens
     dp_size = runner.dp_size
+    attn_gid = None
+    if getattr(runner, "kv_cache_config", None) is not None:
+        try:
+            from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+                get_routed_experts_attn_gid,
+            )
+            attn_gid = get_routed_experts_attn_gid(runner.kv_cache_config)
+        except Exception:
+            attn_gid = None
 
     # Absolute start position of each request's chunk = its PRE-step
     # computed-token count, sourced from scheduler_output (not from
@@ -790,7 +811,8 @@ def _reconstruct_routed_experts(
                         req_state,
                         n,
                         block_size,
-                        start_pos=chunk_start[req_id])
+                        start_pos=chunk_start[req_id],
+                        attn_gid=attn_gid)
 
     # 3. Perform global rank reordering and transpose in a single fancy indexing sweep!
     expert_indices_reordered = expert_indices_cpu[:, indices_map, :].transpose(
