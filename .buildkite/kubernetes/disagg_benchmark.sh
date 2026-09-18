@@ -97,8 +97,7 @@ run_sweep() {
   local input_len=$1 output_len=$2 num_prompts=$3
   local combined="/tmp/benchmark_results/${input_len}_${output_len}.json"
 
-  # Keep this list short: each extra value is another cell against the deadline.
-  for concurrency in ${DISAGG_CONCURRENCIES:-16 32 64 256}; do
+  for concurrency in ${DISAGG_CONCURRENCIES:-1 4 16 32 64 128 256}; do
     # Nearly serial at low concurrency, where the full count would dominate.
     local effective=$num_prompts
     if [ "$concurrency" -eq 1 ]; then
