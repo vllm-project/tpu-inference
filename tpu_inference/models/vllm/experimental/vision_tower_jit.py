@@ -25,6 +25,9 @@ import torch
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import \
     Qwen3OmniMoeConfig
 from vllm.config import VllmConfig
+from vllm.model_executor.models.qwen3_omni_moe_thinker import \
+    Qwen3OmniMoeThinkerForConditionalGeneration
+from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_jax_dtype
@@ -32,22 +35,17 @@ from tpu_inference.utils import to_jax_dtype
 logger = init_logger(__name__)
 
 # Architectures whose embed_multimodal function is safe to wrap with jax.jit.
-_SUPPORTED_JITTABLE_ARCHS = frozenset({
-    "Qwen3OmniMoeThinkerForConditionalGeneration",
-    "Qwen3VLForConditionalGeneration",
-    "Qwen3VLMoeForConditionalGeneration",
-    "Qwen3_5ForConditionalGeneration",
-    "Qwen3_5MoeForConditionalGeneration",
-})
+# Note: Qwen3VLMoeForConditionalGeneration, Qwen3_5ForConditionalGeneration, and
+# Qwen3_5MoeForConditionalGeneration all subclass Qwen3VLForConditionalGeneration.
+JITTABLE_ARCHS = (
+    Qwen3OmniMoeThinkerForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
+)
 
 
 def is_jittable_architecture(vllm_model) -> bool:
     """Check if the given vLLM model is of an architecture that supports JIT compilation."""
-    architectures = (getattr(getattr(vllm_model, "config", None),
-                             "architectures", ()) or ())
-    is_jittable = (any(arch in _SUPPORTED_JITTABLE_ARCHS
-                       for arch in architectures) or
-                   vllm_model.__class__.__name__ in _SUPPORTED_JITTABLE_ARCHS)
+    is_jittable = isinstance(vllm_model, JITTABLE_ARCHS)
     if is_jittable:
         logger.info_once(
             f"{type(vllm_model)}'s vision tower supports JIT compilation.")
