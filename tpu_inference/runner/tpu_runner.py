@@ -703,10 +703,15 @@ def _reconstruct_slots_for_request(
         if attn_gid is not None and attn_gid < len(req_state.block_ids):
             block_ids = req_state.block_ids[attn_gid]
         else:
-            block_ids = max(
-                req_state.block_ids,
-                key=lambda b: (len(set(x for x in b if x != 0)), len(b)),
+            best_i = max(
+                range(len(req_state.block_ids)),
+                key=lambda i: (
+                    len(set(x for x in req_state.block_ids[i] if x != 0)),
+                    len(req_state.block_ids[i]),
+                    i,
+                ),
             )
+            block_ids = req_state.block_ids[best_i]
     else:
         block_ids = []
 
