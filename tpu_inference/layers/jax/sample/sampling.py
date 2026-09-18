@@ -339,6 +339,14 @@ def sample(
         ret_logits = logits
     else:
         is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+        # top_k == 1 leaves a single candidate, so it is exactly argmax. Both
+        # top-k implementations are threshold based and retain every value
+        # tied with the k-th rank, which would otherwise make these rows
+        # sample uniformly among tied maxima. Take the argmax directly so the
+        # result is deterministic and matches vLLM's exact-k top-k. Note this
+        # only selects the token; `is_greedy` still drives which logits are
+        # returned, so processed logprobs are unaffected.
+        takes_argmax = is_greedy | (tpu_sampling_metadata.top_k == 1)
 
         def sample_full_vocab(_):
             full_logits = jax.lax.with_sharding_constraint(
@@ -347,7 +355,7 @@ def sample(
             processed_logits = _apply_sampling_transforms_microbatched(
                 full_logits, tpu_sampling_metadata)
             sampled_tokens = jax.random.categorical(rng, processed_logits)
-            tokens = jnp.where(is_greedy, greedy_tokens, sampled_tokens)
+            tokens = jnp.where(takes_argmax, greedy_tokens, sampled_tokens)
             output_logits = jnp.where(is_greedy[:, None], full_logits,
                                       processed_logits)
             return tokens, output_logits
@@ -372,7 +380,7 @@ def sample(
                     ))
 
                 def use_candidate_result(_):
-                    tokens = jnp.where(is_greedy, greedy_tokens,
+                    tokens = jnp.where(takes_argmax, greedy_tokens,
                                        sampled_tokens)
                     # Processed-logit modes disable this path. Returning the
                     # raw input supports raw logprobs without materializing
