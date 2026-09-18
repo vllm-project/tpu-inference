@@ -455,9 +455,6 @@ def sample(
         else:
             ret_tokens, ret_logits = sample_full_vocab(None)
 
-        ret_logits = jax.lax.with_sharding_constraint(
-            ret_logits,
-            NamedSharding(mesh, P(ShardingAxisName.LOGITS_BATCH, None)))
     # Replicate the result so that in multi-controller jax setup
     # (i.e. Ray based multi-host setup), we won't hit error like
     # RuntimeError: Fetching value for `jax.Array` that spans non-addressable
