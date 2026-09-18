@@ -300,8 +300,7 @@ def _process_continue_decode_outputs(
 
             if (all_expert_indices_cpu is not None and actual_len > 0):
                 slots_arr = _reconstruct_slots_for_request(
-                    list(req_state.block_ids[routed_experts_attn_gid])
-                    if req_state.block_ids else [],
+                    _block_ids_for_group(req_state, routed_experts_attn_gid),
                     actual_len,
                     block_size,
                     start_pos=req_state.num_computed_tokens)
@@ -686,15 +685,23 @@ def _snapshot_block_ids_for_routed_experts(
     snapshot: Dict[str, List[int]] = {}
     for req_id in req_ids:
         req_state = runner.requests.get(req_id)
-        if req_state is None or not req_state.block_ids:
-            snapshot[req_id] = []
-            continue
-        assert kv_cache_group_id < len(req_state.block_ids), (
-            f"[routed-experts] kv_cache_group_id={kv_cache_group_id} is out "
-            f"of range for a request with {len(req_state.block_ids)} "
-            "KV-cache group(s)")
-        snapshot[req_id] = list(req_state.block_ids[kv_cache_group_id])
+        snapshot[req_id] = ([] if req_state is None else _block_ids_for_group(
+            req_state, kv_cache_group_id))
     return snapshot
+
+
+def _block_ids_for_group(
+    req_state: CachedRequestState,
+    kv_cache_group_id: int,
+) -> List[int]:
+    """Copy of one KV-cache group's block IDs for a request."""
+    if not req_state.block_ids:
+        return []
+    assert kv_cache_group_id < len(req_state.block_ids), (
+        f"[routed-experts] kv_cache_group_id={kv_cache_group_id} is out "
+        f"of range for a request with {len(req_state.block_ids)} "
+        "KV-cache group(s)")
+    return list(req_state.block_ids[kv_cache_group_id])
 
 
 def _reconstruct_slots_for_request(
