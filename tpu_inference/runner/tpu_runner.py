@@ -63,7 +63,8 @@ from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap,
     _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
-    compute_prompt_logprobs, distributed_sampling_allowed, sample)
+    compute_prompt_logprobs, distributed_sampling_allowed,
+    logprobs_use_processed_logits, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -2133,9 +2134,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
                         logprobs_logits = extended_logits
                 else:
-                    logprobs_logits = (processed_logits
-                                       if self.model_config.logprobs_mode
-                                       == "processed_logprobs" else logits)
+                    logprobs_logits = (
+                        processed_logits if logprobs_use_processed_logits(
+                            self.model_config.logprobs_mode) else logits)
                 logprobs = compute_and_gather_logprobs(
                     logprobs_logits, next_tokens,
                     self.model_config.max_logprobs)

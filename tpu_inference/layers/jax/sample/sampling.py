@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
+from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference import envs
@@ -67,9 +68,13 @@ def _distributed_sampling_fits(mesh: Mesh, vocab_size: int) -> bool:
     return local_vocab_size >= _distributed_sampling_candidates_per_shard()
 
 
+def logprobs_use_processed_logits(logprobs_mode) -> bool:
+    return logprobs_mode in PROCESSED_LOGPROBS_MODES
+
+
 def distributed_sampling_allowed(logprobs: bool, logprobs_mode) -> bool:
     """Whether sampling can return raw logits for the requested logprob mode."""
-    return not (logprobs and str(logprobs_mode).startswith("processed"))
+    return not (logprobs and logprobs_use_processed_logits(logprobs_mode))
 
 
 def _can_sample_distributed(
