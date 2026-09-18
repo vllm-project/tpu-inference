@@ -410,24 +410,50 @@ def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+# `out_shardings=P()` on the two functions below: their results go straight to
+# `_jax_logprobs_copy_to_host_async()` and then `device_get()`, which on a
+# multi-host mesh can only read fully replicated arrays. Without it the outputs
+# inherit the sharding of the logits, and under DP attention that is ATTN_DATA,
+# an axis whose replica groups interleave across hosts, so no single process
+# can fetch them:
+#
+#   RuntimeError: Fetching value for `jax.Array` that spans non-addressable
+#   (non process local) devices is not possible.
+#
+# Stating it on the jit rather than asking each caller to opt in is the same
+# guarantee `sample()` gives for `next_tokens`, and it means precompilation
+# necessarily warms up the program the runner actually calls. It costs nothing
+# when it is not needed: for the raw logprobs modes the logits are sharded over
+# the vocab axis rather than over requests, so the outputs are already
+# replicated and the constraint folds away to zero extra collectives.
+#
+# Callers must run under `jax.set_mesh()` so the bare PartitionSpec resolves.
+
+
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_logprobs(
     logits: jax.Array,
     next_tokens: jax.Array,
     max_logprobs: int,
 ) -> LogprobsTensors:
-    """Compute logprobs from logits and gather the requested top-k."""
+    """Compute logprobs from logits and gather the requested top-k.
+
+    Outputs are replicated so every process can `device_get()` them.
+    """
     logprobs = compute_logprobs(logits)
     return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
     input_ids: jax.Array,
     max_logprobs: int,
 ) -> LogprobsTensors:
-    """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
+    """Compute logprobs from full logits and gather the requested top-k for prompt tokens.
+
+    Outputs are replicated so every process can `device_get()` them.
+    """
     prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
     return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
 
@@ -445,6 +471,10 @@ def compute_prompt_logprobs(
     """Dispatches prompt logprob computation on TPU and snapshots per-request state.
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
     the snapshotted state needed to safely slice them in get_output().
+
+    Must be called under `jax.set_mesh()`: the returned tensors are replicated
+    for the host fetch, and the bare PartitionSpec that does it resolves
+    against the mesh in context.
     """
     if (not num_prompt_logprobs or full_logits is None or input_ids is None):
         return None
