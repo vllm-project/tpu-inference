@@ -95,6 +95,40 @@ class UtilsTest(jtu.JaxTestCase):
                 self.assertIsInstance(result, list)
                 self.assertEqual(len(result), 2)
 
+    def test_general_device_put_cpu_jax_array_no_source_mesh(self):
+        # A CPU-pinned jax.Array with source_mesh=None must be converted to
+        # numpy before the make_array_from_callback call so that indexing inside
+        # the callback does not dispatch through JAX in the TPU mesh JIT context
+        # (which would raise "incompatible devices" in multi-host mode).
+        cpu_array = jax.device_put(jnp.ones((self.num_devices, 1)),
+                                   jax.devices('cpu')[0])
+
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', 'ray'):
+            with mock.patch.object(jax, 'device_get',
+                                   wraps=jax.device_get) as mock_device_get:
+                result = general_device_put(cpu_array, self.sharding)
+
+        mock_device_get.assert_called_once_with(cpu_array)
+        self.assertIsInstance(result, jax.Array)
+        self.assertAllClose(result, np.ones((self.num_devices, 1)))
+
+    def test_general_device_put_jax_array_with_source_mesh_skips_numpy_conversion(
+            self):
+        # When source_mesh is provided the existing jax.set_mesh context handles
+        # dispatch correctly; converting to numpy would be unnecessary overhead.
+        tensor = jnp.ones((self.num_devices, 1))
+
+        with mock.patch.object(envs, 'TPU_MULTIHOST_BACKEND', 'ray'):
+            with mock.patch.object(jax, 'device_get',
+                                   wraps=jax.device_get) as mock_device_get:
+                result = general_device_put(tensor,
+                                            self.sharding,
+                                            source_mesh=self.mesh)
+
+        mock_device_get.assert_not_called()
+        self.assertIsInstance(result, jax.Array)
+        self.assertAllClose(result, np.ones((self.num_devices, 1)))
+
     def test_truncate_sharded_tensor(self):
         # Shape: (2, 20), n_shards=4, so each shard has size 5 on the last dim
         t = jnp.arange(40).reshape(2, 20)
