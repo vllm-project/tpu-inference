@@ -28,6 +28,40 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
 
+def _get_kernel_dtype(
+    dtype: jnp.dtype,
+    num_lanes: int,
+    reduce_group_size: int,
+) -> jnp.dtype:
+    """Returns the dtype the kernel should run in to emit a valid output block.
+
+  The kernel's output block has ``(num_lanes // reduce_group_size) // packing``
+  rows, where ``packing = 32 // bits(dtype)``. When a SIMD step produces fewer
+  rows than the packing factor (e.g. 8 lanes on v6e with topk=8 produces 1 row,
+  while bf16 has packing=2), integer division floors that to 0 rows, which
+  Mosaic cannot lower. Running the kernel in FP32 gives packing=1 and a valid
+  1-row block.
+
+  ``is_compatible`` and ``dense_gather_reduce`` must agree on this decision:
+  the former predicts the packing the kernel will use, the latter performs the
+  matching operand upcast. Keep them driven by this single helper.
+
+  Args:
+    dtype: dtype of the operand as supplied by the caller.
+    num_lanes: Number of SparseCore SIMD lanes.
+    reduce_group_size: Number of gathered rows summed per output row.
+
+  Returns:
+    The dtype for kernel execution (jnp.float32 if an upcast is required,
+    otherwise dtype).
+  """
+    native_packing = 32 // jax.dtypes.itemsize_bits(dtype)
+    simd_rows = num_lanes // reduce_group_size
+    if (simd_rows // native_packing < 1) and simd_rows >= 1:
+        return jnp.float32
+    return dtype
+
+
 def is_compatible(
     op: jax.Array,
     idx: jax.Array,
@@ -48,9 +82,11 @@ def is_compatible(
     if sc_info.num_lanes % reduce_group_size != 0:
         return False
 
-    # The output block has (num_lanes // reduce_group_size) // packing rows;
-    # fall back to JAX when that is 0 (the kernel can't emit a zero-row block).
-    packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
+    kernel_dtype = _get_kernel_dtype(op.dtype, sc_info.num_lanes,
+                                     reduce_group_size)
+    packing = 32 // jax.dtypes.itemsize_bits(kernel_dtype)
+    # Unreachable for the bf16/f32 operands allowed above, but kept as a guard
+    # for narrower dtypes (e.g. fp8 -> packing=4) or future lane geometries.
     if (sc_info.num_lanes // reduce_group_size) // packing < 1:
         return False
 
@@ -296,6 +332,7 @@ def dense_gather_reduce(
       multiplication, resulting in zero output.
   """
     if is_compatible(x, indices, reduce_group_size):
+        sc_info = pltpu.get_tpu_info().sparse_core
         K = x.shape[-1]
         # The kernel slices the operand along the hidden (column) dimension,
         # which carries a 128-wide lane tile in the HBM layout
@@ -313,15 +350,21 @@ def dense_gather_reduce(
                 break
             col_chunk_size -= 128
         if col_chunk_size > 0:
+            # Same decision is_compatible() used to pick packing; the upcast
+            # must match it or the kernel emits a zero-row output block.
+            kernel_dtype = _get_kernel_dtype(x.dtype, sc_info.num_lanes,
+                                             reduce_group_size)
+            kernel_x = x.astype(kernel_dtype) if kernel_dtype != x.dtype else x
             # Pallas kernel expects 1D weights
-            return _sc_gather_reduce(
-                x,
+            res = _sc_gather_reduce(
+                kernel_x,
                 indices,
                 topk_weights.reshape(-1),
                 reduce_group_size=reduce_group_size,
                 col_chunk_size=col_chunk_size,
                 topk_wgt_zero_nan=topk_wgt_zero_nan,
             )
+            return res.astype(x.dtype)
     # Fallback to JAX baseline
     return _jax_fallback(x, indices, topk_weights, reduce_group_size,
                          topk_wgt_zero_nan)
