@@ -24,17 +24,22 @@ import torch
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec
 from parameterized import parameterized
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
+from vllm.model_executor.model_loader import get_model_loader
 
 # Assuming the model file is named deepseek_v3.py
 import tpu_inference.kernels.mla.v1.kernel as mla
+from tpu_inference.distributed.jax_parallel_state import \
+    init_pp_distributed_environment
 from tpu_inference.layers.common.attention_interface import get_kv_cache_shape
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import (ShardingAxisName,
                                                   ShardingAxisNameBase)
 from tpu_inference.layers.jax.moe.moe import MoEBackend
+from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
 from tpu_inference.models.jax.deepseek_v3 import (DeepSeekV3,
                                                   DeepseekV3Attention,
+                                                  DeepseekV3ForCausalLM,
                                                   DeepseekV3MLA,
                                                   DeepSeekV3Router,
                                                   DeepSeekV3WeightLoader)
@@ -795,3 +800,63 @@ class TestDeepseekV3Attention(unittest.TestCase):
 
             self.assertEqual(output.shape, (seq_len, hidden_size))
             self.assertEqual(new_kv_cache.shape, kv_cache.shape)
+
+
+@pytest.fixture
+def mock_deepseek_vllm_config(mock_vllm_config):
+    """Wraps the package-level mock_vllm_config with DeepSeek-specific attrs."""
+
+    def _make(model_name, kv_cache_type):
+        cfg = mock_vllm_config(model_name, kv_cache_type)
+        cfg.model_config.use_mla = False
+        cfg.model_config.enable_return_routed_experts = False
+        cfg.sharding_config = MagicMock()
+        cfg.sharding_config.tp_size = 1
+        cfg.sharding_config.attn_dp_size = 1
+        cfg.parallel_config = MagicMock()
+        cfg.parallel_config.enable_expert_parallel = False
+        return cfg
+
+    return _make
+
+
+class TestDeepseekV3ForCausalLM:
+
+    @pytest.mark.parametrize("pp_rank,pp_world_size",
+                             [(0, 1), (0, 4), (1, 4), (3, 4)])
+    def test_model_loading(self, pp_rank, pp_world_size, rng, mesh,
+                           mock_deepseek_vllm_config,
+                           assert_weight_loading_memory_bounded):
+        """Tests that DeepseekV3ForCausalLM initializes and loads with jax_dummy weights.
+
+        Uses jax_dummy to avoid requiring a matching expert count between the
+        tiny test model (16 experts) and the hardcoded model constants (256 experts).
+        """
+        model_name = "hugg1ngfac3/deepseek-r1-tiny"
+        vllm_config = mock_deepseek_vllm_config(model_name, "auto")
+        vllm_config.load_config.load_format = "jax_dummy"
+
+        init_pp_distributed_environment(
+            ip="",
+            rank=pp_rank,
+            world_size=pp_world_size,
+            device=jax.devices()[0],
+            need_pp=False,
+        )
+        vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
+
+        model_config = vllm_config.model_config
+
+        with jax.set_mesh(mesh):
+            model = DeepseekV3ForCausalLM(vllm_config, rng, mesh)
+
+        with jax.set_mesh(mesh):
+            loader = get_model_loader(vllm_config.load_config)
+            with assert_weight_loading_memory_bounded(
+                    model,
+                    description=f"load_weights({model_name})",
+                    threshold_multiplier=0.3,
+            ), set_current_vllm_config(vllm_config):
+                loader.load_weights(model, model_config)
+
+        assert model is not None
