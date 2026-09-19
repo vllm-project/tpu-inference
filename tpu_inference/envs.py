@@ -92,6 +92,8 @@ if TYPE_CHECKING:
     SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     RAIDEN_H2D_SETTLE: bool = True
+    ENABLE_ENGINE_CONTROL_ENDPOINTS: bool = False
+    CONTROL_DRAIN_TIMEOUT_SECONDS: int = 60
 
 
 def env_with_choices(
@@ -559,6 +561,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":
     env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # Administrative engine lifecycle endpoints (/ctl/pause, /ctl/resume, /ctl/status)
+    # for GKE Pod Snapshots (GPS) and orchestrators. Disabled by default for security.
+    "ENABLE_ENGINE_CONTROL_ENDPOINTS":
+    env_bool("ENABLE_ENGINE_CONTROL_ENDPOINTS", default=False),
+    # Timeout in seconds to wait for in-flight requests to drain during pause.
+    "CONTROL_DRAIN_TIMEOUT_SECONDS":
+    lambda: int(os.getenv("CONTROL_DRAIN_TIMEOUT_SECONDS", "60")),
 }
 
 
