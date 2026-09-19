@@ -73,12 +73,10 @@ class UtilsTest(jtu.JaxTestCase):
                 result = general_device_put(tensor, self.sharding)
 
                 mock_make_array.assert_called_once()
-                args, _ = mock_make_array.call_args
+                args, kwargs = mock_make_array.call_args
                 self.assertEqual(args[0], tensor.shape)
                 self.assertEqual(args[1], self.sharding)
-                # Check that x_split contains device_put result
-                # Since we didn't mock device_put, it runs on the tensor slice.
-                # We can check the length of x_split
+                self.assertEqual(kwargs.get('dtype'), tensor.dtype)
                 self.assertAllClose(result, tensor)
 
     def test_general_device_put_multihost_pytree(self):
