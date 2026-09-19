@@ -311,7 +311,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
-        *,
+        *args,
         mamba_num_blocks: int | None = None,
         **kwargs,
     ):
@@ -328,6 +328,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
             num_prefill_lookahead=num_prefill_lookahead,
+            *args,
             **kwargs,
         )
 
