@@ -33,7 +33,7 @@ from tpu_inference.layers.common.attention_metadata import (
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     compute_and_gather_logprobs, compute_and_gather_prompt_logprobs,
-    distributed_sampling_allowed, logprobs_use_processed_logits, sample)
+    logprobs_use_processed_logits, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -1030,8 +1030,6 @@ class CompilationManager:
                         _cache_collision_dummy=_cache_collision_dummy,
                         do_sampling=do_sampling,
                         logprobs=logprobs)
-                    allow_distributed_sampling = distributed_sampling_allowed(
-                        logprobs, self.runner.model_config.logprobs_mode)
                     self._run_compilation(
                         f"worker{self.runner.rank} sample",
                         sample,
@@ -1039,15 +1037,10 @@ class CompilationManager:
                         self.runner.mesh,
                         logits,
                         sampling_metadata,
-                        call_kwargs={
-                            "allow_distributed_sampling":
-                            allow_distributed_sampling
-                        },
                         compile_only=False,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
                         logprobs=logprobs,
-                        allow_distributed_sampling=allow_distributed_sampling,
                     )
 
         self._sampling_precompiled = True

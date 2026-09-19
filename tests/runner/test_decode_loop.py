@@ -161,7 +161,7 @@ def test_continue_decode_early_exit():
         logits = logits.at[:, 0].set(pos)
         return logits
 
-    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata):
         pos = logits[:, 0].astype(jnp.int32)
         token_table = jnp.array(
             [
@@ -267,7 +267,7 @@ def test_continue_decode_with_experts():
     def mock_compute_logits_fn(state, hidden_states, _):
         return jnp.zeros((batch_size, 100))
 
-    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata):
         return jnp.array([42, 43], dtype=jnp.int32), None
 
     rng = jax.random.PRNGKey(0)
@@ -347,7 +347,7 @@ def test_continue_decode_no_exit_on_eos():
         logits = logits.at[:, 0].set(pos)
         return logits
 
-    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata):
         pos = logits[:, 0].astype(jnp.int32)
         token_table = jnp.array(
             [
@@ -447,7 +447,7 @@ def _lower_decode_core(continue_decode_eos_check_interval):
         logits = jnp.zeros((batch_size, 100))
         return logits.at[:, 0].set(hidden_states[:, 0, 0])
 
-    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata):
         pos = logits[:, 0].astype(jnp.int32)
         token_table = jnp.array(
             [[42, 43], [44, 99], [99, 50], [60, 61], [70, 71]],
@@ -547,7 +547,7 @@ def test_continue_decode_exit_on_eos_interval():
         logits = logits.at[:, 0].set(pos)
         return logits
 
-    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata):
         pos = logits[:, 0].astype(jnp.int32)
         # Token table: step 0 (pos 0) produces 99 (EOS) for req 1
         token_table = jnp.array(
