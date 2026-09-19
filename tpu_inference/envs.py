@@ -17,6 +17,10 @@ if TYPE_CHECKING:
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
+    VISION_MIN_SHIFT: int = 4
+    VISION_PRECOMPILE_FRAMES: list[int] = []
+    VISION_PRECOMPILE_VIDEO_GRID: list[int] = []
+    VISION_PRECOMPILE_VIDEO_BATCH_SIZES: list[int] = []
     MODEL_IMPL_TYPE: str = "auto"
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
@@ -259,6 +263,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Check for XLA recompilation during execution
     "VLLM_XLA_CHECK_RECOMPILATION":
     env_bool("VLLM_XLA_CHECK_RECOMPILATION", default=False),
+    # Smallest vision warmup bucket, as a power of two number of patches
+    # (the default, 4, means 1 << 4 = 16 patches).
+    "VISION_MIN_SHIFT":
+    lambda: max(1, int(os.getenv("VISION_MIN_SHIFT", "4"))),
+    # Comma-separated decoded video frame counts to precompile, e.g. "2,4,8".
+    # Empty means "use the per-model default".
+    "VISION_PRECOMPILE_FRAMES":
+    env_int_list("VISION_PRECOMPILE_FRAMES"),
+    # Optional "height,width" override, in patches, for the spatial grid used
+    # by video warmup. Empty means "derive it from the video processor".
+    "VISION_PRECOMPILE_VIDEO_GRID":
+    env_int_list("VISION_PRECOMPILE_VIDEO_GRID"),
+    # Optional comma-separated list of video batch sizes (number of videos
+    # batched together in video_grid_thw) to precompile. Empty defaults to [1].
+    "VISION_PRECOMPILE_VIDEO_BATCH_SIZES":
+    env_int_list("VISION_PRECOMPILE_VIDEO_BATCH_SIZES"),
     # Model implementation type (e.g., "flax_nnx")
     "MODEL_IMPL_TYPE":
     env_with_choices("MODEL_IMPL_TYPE", "auto",
