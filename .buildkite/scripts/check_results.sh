@@ -24,6 +24,20 @@ fi
 FAILURE_LABEL="$1"
 shift
 
+# TOLERATED_SOFT_FAIL_STEPS is an optional, space-separated list of step keys
+# whose soft_failed outcome must not fail this gate. Set it in the pipeline
+# environment while a known-broken step is being fixed, and clear it once the
+# step is green again. Every other non-passed, non-skipped outcome still fails
+# the build, so the gate keeps blocking real regressions.
+TOLERATED_SOFT_FAIL_STEPS="${TOLERATED_SOFT_FAIL_STEPS:-}"
+
+is_tolerated() {
+    case " ${TOLERATED_SOFT_FAIL_STEPS} " in
+        *" $1 "*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 echo "--- Checking Test Outcomes"
 
 for KEY in "$@"; do
@@ -34,7 +48,11 @@ for KEY in "$@"; do
     echo "Step ${KEY} outcome: ${OUTCOME}"
 
     if [ "${OUTCOME}" != "passed" ] && [ "${OUTCOME}" != "skipped" ] ; then
-        ANY_FAILED=true
+        if [ "${OUTCOME}" = "soft_failed" ] && is_tolerated "${KEY}"; then
+            echo "Step ${KEY} is in TOLERATED_SOFT_FAIL_STEPS; not failing the build."
+        else
+            ANY_FAILED=true
+        fi
     fi
 done
 
