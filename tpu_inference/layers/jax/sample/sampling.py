@@ -410,7 +410,9 @@ def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+# Replicate outputs via out_shardings=P() so multi-host device_get() succeeds
+# under DP attention (ATTN_DATA). Callers must run under jax.set_mesh().
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_logprobs(
     logits: jax.Array,
     next_tokens: jax.Array,
@@ -421,7 +423,7 @@ def compute_and_gather_logprobs(
     return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
     input_ids: jax.Array,

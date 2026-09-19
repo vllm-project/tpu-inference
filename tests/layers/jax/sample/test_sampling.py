@@ -411,17 +411,19 @@ class TestComputePromptLogprobs:
         req_ids_dp = {0: ["req1"]}
         dp_size = 1
 
-        res = compute_prompt_logprobs(
-            full_logits=full_logits,
-            input_ids=input_ids,
-            num_prompt_logprobs=num_prompt_logprobs,
-            requests=requests,
-            scheduler_output=mock_scheduler_output,
-            req_ids_dp=req_ids_dp,
-            dp_size=dp_size,
-            max_logprobs=2,
-        )
+        with jax.set_mesh(TestProcessedLogprobs._get_fake_mesh()):
+            res = compute_prompt_logprobs(
+                full_logits=full_logits,
+                input_ids=input_ids,
+                num_prompt_logprobs=num_prompt_logprobs,
+                requests=requests,
+                scheduler_output=mock_scheduler_output,
+                req_ids_dp=req_ids_dp,
+                dp_size=dp_size,
+                max_logprobs=2,
+            )
 
+        assert res.tensors.logprobs.sharding.is_fully_replicated
         assert res is not None
         assert isinstance(res, PromptLogprobsAsyncData)
         assert len(res.req_snaps) == 1

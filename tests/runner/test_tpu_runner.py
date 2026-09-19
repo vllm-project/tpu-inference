@@ -226,6 +226,10 @@ class TestTPUJaxRunner:
         runner.pad_token_id = 0
         runner.layer_name_to_kvcache_index = {}
         runner.block_size = 16
+        # Single KV-cache group, so routing slots key off group 0. Must be a
+        # real int: MagicMock.__index__() returns 1, which would index past
+        # the one-group block_ids below.
+        runner.routed_experts_attn_gid = 0
         runner.requests["req1"].num_computed_tokens = 0
         runner.requests["req1"].block_ids = [[10]]
         runner.requests["req2"].num_computed_tokens = 0
