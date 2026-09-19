@@ -235,8 +235,8 @@ def _process_continue_decode_outputs(
     updates input_batch, scheduler_output, and attn_metadata for synchronous
     runs.
     """
-    generated_tokens_cpu, actual_steps_cpu = jax.device_get(
-        (generated_tokens, actual_steps))
+    generated_tokens_cpu = common_utils.safe_device_get(generated_tokens)
+    actual_steps_cpu = common_utils.safe_device_get(actual_steps)
 
     all_expert_indices_cpu = None
     if expert_indices is not None:
@@ -1533,10 +1533,10 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pre_scheduler_output = self._pre_async_results.scheduler_output
 
         if getattr(self._pre_async_results, "is_continue_decode", False):
-            generated_tokens_cpu, actual_steps = jax.device_get((
-                pre_next_tokens,
-                self._pre_async_results.continue_decode_actual_steps,
-            ))
+            generated_tokens_cpu = common_utils.safe_device_get(
+                pre_next_tokens)
+            actual_steps = common_utils.safe_device_get(
+                self._pre_async_results.continue_decode_actual_steps)
             actual_steps = int(actual_steps)
             generated_tokens_cpu = np.asarray(
                 generated_tokens_cpu)[:actual_steps].T
