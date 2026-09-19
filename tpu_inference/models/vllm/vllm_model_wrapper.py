@@ -424,6 +424,9 @@ class VllmModelWrapper:
             if expert_indices_list:
                 import jax.numpy as jnp
                 expert_indices = jnp.stack(expert_indices_list, axis=0)
+                # Replicate across mesh for multi-host device_get().
+                expert_indices = jax.lax.with_sharding_constraint(
+                    expert_indices, NamedSharding(self.mesh, PartitionSpec()))
             else:
                 expert_indices = None
             return new_kv_caches, output, aux_hidden_states, expert_indices
