@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
+    ENABLE_CONTINUOUS_PROFILING = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
     SLICE_ROPE_CACHE: bool = False
@@ -489,6 +490,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Profile a single device instead of all devices.
     "PROFILE_SINGLE_DEVICE":
     env_bool("PROFILE_SINGLE_DEVICE", default=False),
+    "ENABLE_CONTINUOUS_PROFILING": env_bool("ENABLE_CONTINUOUS_PROFILING", default=False),
     "LORA_MODULE_PATH":
     lambda: os.getenv("LORA_MODULE_PATH", ""),
     "MLA_KV_PACKING_SIZE":
