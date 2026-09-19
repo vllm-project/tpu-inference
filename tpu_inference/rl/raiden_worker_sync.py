@@ -14,6 +14,7 @@ tunix's `weight_sync.dict_to_metadata` defines the metadata shape.
 
 from __future__ import annotations
 
+import os
 import socket
 import time
 from typing import Any, List, Optional, Tuple
@@ -226,7 +227,7 @@ class RaidenWorkerSync:
         job_name: str,
         *,
         worker_index: int = 0,
-        parallelism: int = 4,
+        parallelism: int = 16,
         bind_ip: Optional[str] = None,
     ):
         self.job_name = job_name
@@ -234,7 +235,8 @@ class RaidenWorkerSync:
         self.names: List[str] = []
         self.arrays: List[Any] = []
         self.ip = bind_ip or local_ip()
-        self._parallelism = parallelism
+        self._parallelism = int(
+            os.getenv("RAIDEN_PARALLELISM", str(parallelism)))
         self._sync: Any = None
 
     @property
@@ -383,18 +385,39 @@ class RaidenWorkerSync:
         except (AttributeError, ValueError, TypeError):
             host_subgrid = None
 
-        data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
+        num_shards = self._sync.num_shards if self._sync else 1
+        shards_list = [""] * num_shards
+        if self._sync and hasattr(self._sync, "get_local_endpoints"):
+            try:
+                for ep in self._sync.get_local_endpoints():
+                    ep_addr = ep.get("endpoint", "")
+                    if ep_addr.startswith(":"):
+                        ep_addr = f"{self.ip}{ep_addr}"
+                    elif ":" in ep_addr:
+                        parts = ep_addr.split(":")
+                        if parts[0] in ("0.0.0.0", "127.0.0.1", ""):
+                            ep_addr = f"{self.ip}:{parts[1]}"
+                    for s in ep.get("shards", []):
+                        if 0 <= s < num_shards:
+                            shards_list[s] = ep_addr
+            except Exception:
+                pass
+        if not all(shards_list):
+            data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
+            shards_list = [s or data_addr
+                           for s in shards_list] if data_addr else []
+
         control_addr = (f"{self.ip}:{self._sync.listener_port}"
                         if self._sync and self._sync.listener_port else "")
-        num_shards = self._sync.num_shards if self._sync else 1
         return {
             "unit": {
                 "job_name":
                 self.job_name,
                 "job_replica_id":
-                str(self.worker_index) if self.worker_index else "",
+                str(self.worker_index)
+                if self.worker_index is not None else "",
             },
-            "shards": [data_addr] * num_shards if data_addr else [],
+            "shards": shards_list,
             "control_plane_rpc_address": control_addr,
             "mesh_shape": list(mesh_shape),
             "variables": variables,

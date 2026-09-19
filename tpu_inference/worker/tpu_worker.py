@@ -808,7 +808,7 @@ class TPUWorker(WorkerBase):
 
     def bind_raiden_sync(self,
                          worker_index: int = 0,
-                         parallelism: int = 4,
+                         parallelism: int = 16,
                          job_name: str = "rollout") -> dict:
         """Binds this worker's live weights to Raiden and returns wire-safe
         registration metadata (never the arrays)."""
@@ -816,10 +816,12 @@ class TPUWorker(WorkerBase):
             raiden_worker_sync  # pylint: disable=g-import-not-at-top
 
         state = self.get_weights_state()
+        worker_idx = worker_index if worker_index != 0 else getattr(
+            self, "rank", 0)
         if self._raiden_rl_weight_sync is None:
             self._raiden_rl_weight_sync = raiden_worker_sync.RaidenWorkerSync(
                 job_name=job_name,
-                worker_index=worker_index,
+                worker_index=worker_idx,
                 parallelism=parallelism,
             )
         else:
@@ -827,7 +829,7 @@ class TPUWorker(WorkerBase):
             # this worker to a different Raiden job (per-replica job names), and
             # metadata_dict() would otherwise re-register under the stale one.
             self._raiden_rl_weight_sync.job_name = job_name
-            self._raiden_rl_weight_sync.worker_index = worker_index
+            self._raiden_rl_weight_sync.worker_index = worker_idx
         self._raiden_rl_weight_sync.bind(state)
         return self._raiden_rl_weight_sync.metadata_dict()
 

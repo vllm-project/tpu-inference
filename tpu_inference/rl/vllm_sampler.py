@@ -369,7 +369,7 @@ class RLVllmSampler:
 
     async def bind_raiden_sync(self,
                                worker_index: int = 0,
-                               parallelism: int = 4,
+                               parallelism: int = 16,
                                job_name: str = "rollout") -> None:
         """Binds Raiden to each TPU worker's live weights, in-process.
 
