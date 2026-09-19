@@ -1,19 +1,9 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
 
-# -----------------------------------------------------------------------------
-# BENCHMARK UTILITY FUNCTIONS
-# This file is sourced by various performance scripts (e.g., mlperf.sh,
-# llama_guard_perf_recipe.sh) to share common functions.
-# -----------------------------------------------------------------------------
-
-# waitForServerReady: Blocks execution until the server prints the READY_MESSAGE or times out.
-# This logic is shared across all benchmark scripts.
 waitForServerReady() {
-    # Reject non-integer TIMEOUT_SECONDS up front. Inside `[[ x -ge y ]]` the
-    # operands go through bash arithmetic evaluation, which will execute
-    # command-substitution syntax in the value if a caller ever sets it to
-    # something exotic. Easier to fail loudly than to rely on the caller.
+    # Inside `[[ x -ge y ]]` the operands go through bash arithmetic evaluation,
+    # which would execute command-substitution syntax in a non-integer value.
     if [[ ! "${TIMEOUT_SECONDS:-}" =~ ^[0-9]+$ ]]; then
         echo "ERROR: TIMEOUT_SECONDS must be a non-negative integer, got: '${TIMEOUT_SECONDS:-}'" >&2
         exit 1
@@ -48,13 +38,22 @@ waitForServerReady() {
 
         if [[ "$elapsed_time" -ge "$TIMEOUT_SECONDS" ]]; then
             echo "TIMEOUT: Waited $elapsed_time seconds (limit was $TIMEOUT_SECONDS). The string '$READY_MESSAGE' was NOT found."
-            # Call cleanup and exit (cleanup must be handled by the calling script's trap)
+            # Cleanup is the calling script's trap.
             exit 1
         fi
 
-        if grep -Eq "$error_regex" "$LOG_FILE"; then
+        # JAX logs a losing compilation-cache write race as "UserWarning: ...
+        # OSError: [Errno 116] Stale file handle" and then compiles anyway.
+        # Excused by its whole signature, not by the word "Warning", so the
+        # patterns still catch a hung startup.
+        #
+        # Assigned rather than piped into the test: with no match the pipeline
+        # exits nonzero, which under the callers' `set -e` would end the run.
+        local fatal_lines
+        fatal_lines=$(grep -E "$error_regex" "$LOG_FILE" \
+            | grep -v -E 'UserWarning.*Stale file handle' || true)
+        if [[ -n "$fatal_lines" ]]; then
             echo "FATAL ERROR DETECTED: The server log contains a fatal error pattern."
-            # Call cleanup and exit (cleanup must be handled by the calling script's trap)
             exit 1
         fi
 
@@ -65,16 +64,12 @@ waitForServerReady() {
     done
 }
 
-# cleanUp: Stops the vLLM server process and deletes log files.
 # Usage: cleanUp <MODEL_NAME>
 cleanUp() {
     echo "Stopping the vLLM server and cleaning up log files..."
-    # $1 is the MODEL_NAME passed as argument
     pkill -f "vllm serve $1"
-    # Kill all processes related to vllm.
     pgrep -f -i vllm | xargs -r kill -9
 
-    # Clean up log files. Use -f to avoid errors if files don't exist.
     rm -f "$LOG_FILE"
     rm -f "$BENCHMARK_LOG_FILE"
     echo "Cleanup complete."

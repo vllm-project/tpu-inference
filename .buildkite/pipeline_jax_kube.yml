@@ -1,0 +1,637 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Step keys match pipeline_jax.yml's so the two read side by side.
+#
+# Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
+# profile registry in ci-infra; a step names only a shape and a command.
+#
+# Do not add a pipeline-level `env:` block: a name set there wins over one
+# passed to `bk build create --env` and could no longer be overridden per
+# build. Defaults belong in run.sh.
+
+# One generation per build: build_docker_kube's key is not parameterised, so
+# uploading this file twice into the same build collides on it.
+x-shape-single: &shape_single "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
+
+# The timeout covers queueing for chips as well as running, so it is sized to
+# the fleet's worst case; a hung test is bounded by activeDeadlineSeconds.
+.tpu_step: &tpu_step
+  depends_on: "build_docker_kube"
+  timeout_in_minutes: 1440
+  agents:
+    queue: "kube"
+  plugins:
+    - kubernetes:
+        podTemplate: tpu-launcher
+
+steps:
+  # Publishes the tag it pushed as `ci-image` metadata, which run.sh reads back.
+  # Exits early when the build names its own image; Buildkite treats a
+  # satisfied-but-skipped dependency as met, so the TPU steps still run.
+  - label: ":docker: Build and push CI image"
+    key: "build_docker_kube"
+    timeout_in_minutes: 90
+    agents:
+      queue: "cpu_64_core"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      # This pipeline and pipeline_build.yml write the same tag for the same
+      # commit, so their build args must match or whichever pushes second
+      # replaces the image with one missing google-cloud-cli.
+      BM_INFRA: "true"
+    commands:
+      - |
+        if [[ -n "$${CI_IMAGE:-}" ]]; then
+          buildkite-agent meta-data set ci-image "$$CI_IMAGE"
+          exit 0
+        fi
+        # setup_docker_env.sh refuses to build without VLLM_COMMIT_HASH, and
+        # bootstrap.sh - which sets it for the pipelines it uploads - is not in
+        # the path of this one.
+        source .buildkite/scripts/configs/pipeline_config.sh
+        VLLM_COMMIT_HASH="$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
+        buildkite-agent meta-data set "VLLM_COMMIT_HASH" "$$VLLM_COMMIT_HASH"
+        source .buildkite/scripts/setup_docker_env.sh
+        setup_environment "vllm-tpu" "false" "true"
+        buildkite-agent meta-data set ci-image "$$EXPORTED_CI_CACHE_IMAGE"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models with quantization"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      QUANTIZATION: "True"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX new models"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      NEW_MODEL_DESIGN: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on single chip"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      MODEL_IMPL_TYPE: "vllm"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E speculative decoding test"
+    if: 'build.env("TRIM") != "1"'
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        # conftest narrows collection to @pytest.mark.bvt only when BVT_ONLY=1,
+        # so nightly must clear it to get the full matrix.
+        if [ "$${NIGHTLY:-0}" = "1" ]; then export BVT_ONLY=; else export BVT_ONLY=1; fi
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py
+
+  # The pod shares no filesystem with the agent, so `artifact_paths` cannot see
+  # the coverage file and the test uploads it itself. COVERAGE_FILE pins the
+  # path, which coverage otherwise picks from the cwd a test may have changed.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests part1"
+    key: "${TPU_VERSION:-tpu6e}_test_7_1"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c '
+          export COVERAGE_FILE=/tmp/.coverage.part1.${TPU_VERSION:-tpu6e}
+          python3 -m pytest -s -v -x \
+            /workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_awq.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py \
+            /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py \
+            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report=
+          rc=$$?
+          if ! (cd /tmp && buildkite-agent artifact upload .coverage.part1.${TPU_VERSION:-tpu6e}); then
+            echo "ERROR: coverage part1 was produced but could not be uploaded" >&2
+            [ "$$rc" -eq 0 ] && rc=1
+          fi
+          exit $$rc
+        '
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests part2"
+    key: "${TPU_VERSION:-tpu6e}_test_7_2"
+    if: 'build.env("TRIM") != "1"'
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c '
+          export COVERAGE_FILE=/tmp/.coverage.part2.${TPU_VERSION:-tpu6e}
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py \
+            --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py \
+            --ignore=/workspace/tpu_inference/tests/kernels \
+            --ignore=/workspace/tpu_inference/tests/lora \
+            --ignore=/workspace/tpu_inference/tests/e2e \
+            --ignore=/workspace/tpu_inference/tpu_inference/mock \
+            --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py \
+            --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_multi_request_accuracy_test.py \
+            --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py \
+            --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py \
+            --ignore=/workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py \
+            --ignore=/workspace/tpu_inference/tests/runner/test_async_logprobs.py \
+            --ignore=/workspace/tpu_inference/tests/runner/test_processed_logprobs.py \
+            --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py \
+            --cov-config=/workspace/tpu_inference/.coveragerc --cov tpu_inference --cov-report=
+          rc=$$?
+          if ! (cd /tmp && buildkite-agent artifact upload .coverage.part2.${TPU_VERSION:-tpu6e}); then
+            echo "ERROR: coverage part2 was produced but could not be uploaded" >&2
+            [ "$$rc" -eq 0 ] && rc=1
+          fi
+          exit $$rc
+        '
+
+  # Keep the dependencies plain: the shards run pytest -x, so a failing shard's
+  # coverage covers only part of the suite and --fail-under would then measure
+  # how far the tests got rather than what they cover.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests combine and report"
+    depends_on:
+      - "${TPU_VERSION:-tpu6e}_test_7_1"
+      - "${TPU_VERSION:-tpu6e}_test_7_2"
+    agents:
+      queue: "kube"
+    commands:
+      - |
+        # pip, not the pex pipeline_jax.yml uses: pex 2.1.151 declares
+        # python <3.13 and this image is past that, so it cannot bootstrap an
+        # interpreter.
+        pip install --quiet --break-system-packages coverage \
+          || pip install --quiet coverage
+        python3 -m coverage --version
+      - buildkite-agent artifact download ".coverage.part*" .
+      - |
+        # Maps the container's path back onto the checkout, so the report
+        # attributes coverage to files that exist here.
+        printf '[paths]\nsource =\n    .\n    /workspace/tpu_inference/\n' > .coveragerc
+      - |
+        set -o pipefail
+        # Both parts by name: combining whatever happens to be present would
+        # let a missing shard report a plausible percentage over half the suite.
+        for f in .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}; do
+          if [ ! -f "$$f" ]; then
+            echo "missing $$f: that shard's coverage never arrived" >&2
+            exit 1
+          fi
+        done
+        if ! python3 -m coverage combine .coverage.part1.${TPU_VERSION:-tpu6e} .coverage.part2.${TPU_VERSION:-tpu6e}; then
+          echo "coverage combine failed; the report below would be stale" >&2
+          exit 1
+        fi
+        python3 -m coverage report --fail-under=68
+        EXIT_CODE=$$?
+        rm -f .coverage.part* .coveragerc .coverage
+        exit $$EXIT_CODE
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
+    # One `if:` - a second key would silently replace this one.
+    if: 'build.env("TRIM") != "1" && (build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_TESTS") == "1")'
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels \
+          --ignore=/workspace/tpu_inference/tests/kernels/ragged_paged_attention_kernel_v2_test.py \
+          --ignore=/workspace/tpu_inference/tests/kernels/ragged_kv_cache_update_v2_test.py \
+          --ignore=/workspace/tpu_inference/tests/kernels/collectives \
+          --ignore=/workspace/tpu_inference/tests/kernels/spmm_v1_test.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests single chip - test_lora"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "vllm"
+      TPU_BACKEND_TYPE: "jax"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests single chip - test_lora_adapter"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "vllm"
+      TPU_BACKEND_TYPE: "jax"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_adapter.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora unit tests on single chip"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c \
+          'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
+           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer JAX UniProcExecutor"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer Torchax UniProcExecutor"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
+      # Devices, not chips: tpu7x-standard-1t is one chip and two TensorCores,
+      # so the single-chip shape has two devices on v7x and one on v6e.
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.72"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLperf tests for Llama4 models"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      NEW_MODEL_DESIGN: "1"
+      # Not a queue selector: mlperf.sh reads it to swap the model list to
+      # Llama-4-Scout and serve at TP=8. Without it the step silently runs the
+      # single-chip default list.
+      USE_V6E8_QUEUE: "True"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests - collective kernels"
+    if: build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_COLLECTIVES_TESTS") == "1"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on multiple chips"
+    if: build.env("NIGHTLY") == "1"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL_IMPL_TYPE: "vllm"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests multi chips"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      TEST_LORA_TP: "True"
+      VLLM_LOG_LEVEL: "INFO"
+      MODEL_IMPL_TYPE: "vllm"
+      TPU_BACKEND_TYPE: "jax"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora unit tests on multi chips"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      VLLM_LOG_LEVEL: "INFO"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Multihost DCN-based P/D disaggregation"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "1024"
+      NUM_PROMPTS: "100"
+      RANDOM_SEED: "10"
+      MAX_CONCURRENCY: "10"
+    <<: *tpu_step
+    # Exit 75 is the harness's EX_TEMPFAIL: the TPU runtime refused to open a
+    # session, never that the test failed.
+    retry:
+      automatic:
+        - exit_status: 75
+          limit: 1
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/disagg_multi_host.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer Torchax RayDistributedExecutor"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Single Host DCN-based P/D disaggregation"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: "512"
+      OUTPUT_LEN: "128"
+      NUM_PROMPTS: "200"
+      REQUEST_RATE: "4"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/disagg_single_host.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for MPMD data parallelism"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      NEW_MODEL_DESIGN: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c '
+          set -eu
+          MODEL=meta-llama/Llama-3.1-8B-Instruct
+          TPU_MULTIPROCESS_DP=1 \
+            VLLM_ENGINE_READY_TIMEOUT_S=60000 \
+            MODEL_IMPL_TYPE=flax_nnx \
+            vllm serve $$MODEL \
+              --port 8000 \
+              --data-parallel-size 4 \
+              --tensor-parallel-size 1 \
+              --max-model-len 1024 \
+              --no-enable-prefix-caching \
+              --gpu-memory-utilization 0.9 &
+          trap "kill %1 2>/dev/null || true" EXIT
+          for _ in $$(seq 1 180); do
+            curl -fs localhost:8000/health > /dev/null && break || sleep 10
+          done
+          curl -fsS http://localhost:8000/v1/completions \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "{\"model\": \"$$MODEL\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}"
+        '
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLperf tests for DeepSeek-R1 (no accuracy, 5-decoder layers only)"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      NEW_MODEL_DESIGN: "1"
+      USE_V6E8_QUEUE: "False"
+      SKIP_ACCURACY_TESTS: "True"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "flax_nnx"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m "gs://tpu-commons-ci/deepseek/r1"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MMLU for DeepSeek-R1 torchax backend"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      NEW_MODEL_DESIGN: "1"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "vllm"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek/r1" -n 14042 -l 4
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with fused moe."
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check qwen3 coder with gmm kernel."
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check gpt oss."
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "openai/gpt-oss-120b" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.50 --strict_threshold 0.0
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k with fused moe kernel."
+    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu7x"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.15  --output_token_tput_limit 1170 --total_token_tput_limit 1314 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 1 --block_size 256
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with fused moe kernel."
+    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu7x"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.4  --output_token_tput_limit 381 --total_token_tput_limit 3421 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 1 --block_size 256
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 1k 8k with gmm kernel."
+    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu7x"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.16  --output_token_tput_limit 1673 --total_token_tput_limit 1881 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0 --block_size 256
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Perf regression test for qwen3 coder 8k 1k with gmm kernel."
+    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu7x"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.63  --output_token_tput_limit 645 --total_token_tput_limit 5781 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 0 --block_size 256
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Test EP recompilation."
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'SKIP_JAX_PRECOMPILE=0 USE_MOE_EP_KERNEL=1 VLLM_XLA_CHECK_RECOMPILATION=1  MODEL_IMPL_TYPE=vllm python examples/offline_inference.py --model Qwen/Qwen1.5-MoE-A2.7B  --tensor-parallel-size 4 --enable-expert-parallel --no-async-scheduling --max-model-len 32 --max-num-batched-tokens 32 --max-num-seqs 8'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E lm_eval accuracy check Qwen3.5-397B-A17B with gmm kernel."
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3.5-397B-A17B-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 4096 --max_num_batched_tokens 4096 --max_gen_toks 2048 --enable_expert_parallel 1 --flex_threshold 0.63 --strict_threshold 0.63 --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --limit 100 --enable_thinking false
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Perf regression test for Qwen3.5-397B-A17B 1k 8k with gmm kernel."
+    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu7x"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3.5-397B-A17B-FP8 --tp 8 --req_tput_limit 0.04  --output_token_tput_limit 300 --total_token_tput_limit 345 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0 --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --num_prompts 64 --gpu_memory_utilization 0.88
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Perf regression test for Qwen3.5-397B-A17B 8k 1k with gmm kernel."
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3.5-397B-A17B-FP8 --tp 8 --req_tput_limit 0.05  --output_token_tput_limit 70 --total_token_tput_limit 650 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 0    --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --num_prompts 64 --gpu_memory_utilization 0.88
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Test Kernel Tuner Runner"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      TPU_CORES: "2"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c "
+          export TPU_VERSION=\${TPU_VERSION} && 
+          export TPU_CORES=\${TPU_CORES} && 
+          pip install -r tools/kernel/tuner/v1/storage_management/requirements.txt tensorflow==2.21.0 &&
+          python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_runner.py -v -rs &&
+          python -m pytest tools/kernel/tuner/v1/tests/test_kernel_tuner_base.py -v -rs &&
+          python -m pytest tools/kernel/tuner/v1/tests/test_optimizer.py -v -rs &&
+          python -m pytest tools/kernel/tuner/v1/tests/test_tuned_params_structure.py -v -rs &&
+          python -m pytest tools/kernel/tuner/v1/tests/test_inspect_result_cli.py -v -rs "
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MMLU for DeepSeek-V4-Flash torchax backend"
+    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu7x"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      NEW_MODEL_DESIGN: "1"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "vllm"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek-v4-flash" -n 14042 -l 4
