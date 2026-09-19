@@ -82,7 +82,7 @@ def all_gather_topk_indices_and_weights(
     topk_weights = gathered_blob[1]
     topk_indices = topk_indices.reshape(-1, top_k)
     topk_weights = jax.lax.bitcast_convert_type(topk_weights, jnp.float32)
-    topk_weights = topk_weights.reshape(-1, top_k).astype(dtype)
+    topk_weights = topk_weights.reshape(-1, top_k).astype(jnp.float32)
 
     return topk_indices, topk_weights
 
@@ -652,7 +652,7 @@ def fused_moe_func(
     if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
             topk_indices, topk_weights, dtype, mesh)
-    topk_weights = topk_weights.astype(dtype)
+    topk_weights = topk_weights.astype(jnp.float32)
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
 
