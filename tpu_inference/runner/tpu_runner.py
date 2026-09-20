@@ -242,7 +242,8 @@ def _process_continue_decode_outputs(
 
     all_expert_indices_cpu = None
     if expert_indices is not None:
-        all_expert_indices_cpu = jax.device_get(expert_indices)
+        all_expert_indices_cpu = common_utils.safe_device_get(
+            expert_indices)
 
     lp_token_ids_cpu = None
     lp_vals_cpu = None
@@ -252,7 +253,7 @@ def _process_continue_decode_outputs(
             lp_token_ids_cpu,
             lp_vals_cpu,
             lp_ranks_cpu,
-        ) = jax.device_get((
+        ) = common_utils.safe_device_get((
             logprobs_tensors.logprob_token_ids,
             logprobs_tensors.logprobs,
             logprobs_tensors.selected_token_ranks,
