@@ -137,6 +137,79 @@ class OProjectionTest(parameterized.TestCase):
             atol=1e-2,
         )
 
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="dsv4_flash",
+            num_tokens=256,
+            num_groups=8,
+            lora_rank=1024,
+        ),
+        dict(  # The benchmarked shape: activations [1024, 128, 512].
+            testcase_name="dsv4_pro",
+            num_tokens=1024,
+            num_groups=16,
+            lora_rank=1024,
+        ),
+    )
+    def test_group_major_layout_is_bit_identical(
+        self,
+        *,
+        num_tokens,
+        num_groups,
+        lora_rank,
+    ):
+        """``[G, T, H * head_dim]`` must match ``[T, G * H, head_dim]`` exactly.
+
+    The group-major layout exists purely to remove the sublane -> lane head
+    fold from the kernel, so it has to be a pure relabeling of the same
+    activations -- not an approximation. ``reshape(T, G, H * head_dim)`` maps
+    ``(t, g, h * head_dim + d) -> activations[t, g * H + h, d]``, which is
+    exactly ``wo_a``'s row order, so the weights are reused untouched.
+    """
+        rng = np.random.default_rng(0)
+        activations, wo_a, wo_a_scale = make_inputs(
+            rng,
+            num_tokens=num_tokens,
+            num_groups=num_groups,
+            lora_rank=lora_rank,
+        )
+        positions = jnp.asarray(rng.integers(0,
+                                             MAX_POSITION,
+                                             size=(num_tokens, )),
+                                dtype=jnp.int32)
+        cos_sin_cache = jnp.asarray(make_cos_sin_cache(MAX_POSITION,
+                                                       ROTARY_DIM),
+                                    dtype=jnp.float32)
+        cos_sin = gather_cos_sin(positions, cos_sin_cache, inverse=True)
+
+        reduction = HEADS_PER_GROUP * HEAD_DIM
+        group_major = activations.reshape(num_tokens, num_groups,
+                                          reduction).transpose(1, 0, 2)
+        self.assertEqual(group_major.shape,
+                         (num_groups, num_tokens, reduction))
+
+        for quantize_activations in (False, True):
+            token_out = wo_a_projection(
+                activations,
+                wo_a,
+                wo_a_scale,
+                cos_sin,
+                quantize_activations=quantize_activations,
+            )
+            group_out = wo_a_projection(
+                group_major,
+                wo_a,
+                wo_a_scale,
+                cos_sin,
+                quantize_activations=quantize_activations,
+            )
+            self.assertEqual(token_out.shape, group_out.shape)
+            np.testing.assert_array_equal(
+                np.asarray(token_out, dtype=np.float32),
+                np.asarray(group_out, dtype=np.float32),
+                err_msg=f"quantize_activations={quantize_activations}",
+            )
+
 
 if __name__ == "__main__":
     absltest.main()
