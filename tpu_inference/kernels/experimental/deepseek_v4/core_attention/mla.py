@@ -90,8 +90,8 @@ def _mla_ragged_paged_attention_kernel(
     bm_x2_ref,  # [2, bq_sz, num_l_heads]
     swa_acc_x2_ref,  # [2, bq_sz, num_q_heads, head_dim]
     sems,  # [7, 2]
-    l_ref,  # [bq_sz * num_q_heads, 128],
-    m_ref,  # [bq_sz * num_q_heads, 128],
+    l_ref,  # [bq_sz * num_q_heads, 1],
+    m_ref,  # [bq_sz * num_q_heads, 1],
     acc_ref,  # [bq_sz * num_q_heads, head_dim],
     *,
     static_q_len: int,
@@ -160,7 +160,7 @@ def _mla_ragged_paged_attention_kernel(
         m_prev = head_m_ref[...]
         m_curr = jnp.maximum(m_prev, s_rowmax)
         head_m_ref[...] = m_curr
-        p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
+        p = jnp.exp(s - m_curr)
 
         pv = jnp.einsum("nm,md->nd", p, kv, preferred_element_type=jnp.float32)
 
@@ -170,7 +170,7 @@ def _mla_ragged_paged_attention_kernel(
         l_curr = exp_m_diff * l_prev + p_rowsum
         head_l_ref[...] = l_curr
         o_prev = head_acc_ref[...]
-        o_curr = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
+        o_curr = exp_m_diff * o_prev + pv
         head_acc_ref[...] = o_curr
 
     def _async_copy(src, dst, sem, wait):
@@ -311,12 +311,12 @@ def _mla_ragged_paged_attention_kernel(
             bl = jnp.concat([
                 bl_x2_ref[bq_sem_idx, i, :num_q_heads] for i in range(bq_sz)
             ])[..., None]
-            l_ref[...] = jnp.concat([bl for _ in range(128)], axis=-1)
+            l_ref[...] = bl
 
             bm = jnp.concat([
                 bm_x2_ref[bq_sem_idx, i, :num_q_heads] for i in range(bq_sz)
             ])[..., None]
-            m_ref[...] = jnp.concat([bm for _ in range(128)], axis=-1)
+            m_ref[...] = bm
 
     def start_fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx):
         return _fetch_bkv(seq_idx, bkv_idx, bkv_sem_idx)
@@ -479,7 +479,6 @@ def _mla_ragged_paged_attention_kernel(
                 [attention_sinks_ref[...] for _ in range(bq_sz)])[..., None]
             exp_attention_sinks = jnp.exp(attention_sinks - m_ref[...])
             l_sum = l_ref[...] + exp_attention_sinks
-            l_sum = broadcast_minor(l_sum, acc.shape)
             out = (lax.div(acc, l_sum) if q_dtype == jnp.float32 else
                    (acc * pl.reciprocal(l_sum, approx=True)).astype(q_dtype))
 
@@ -767,7 +766,7 @@ def mla_ragged_paged_attention(
         )
 
         l_scratch = pltpu.VMEM(
-            (bq_sz * num_q_heads, 128),
+            (bq_sz * num_q_heads, 1),
             jnp.float32,
         )
         m_scratch = l_scratch

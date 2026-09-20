@@ -93,8 +93,8 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
     bl_x2_ref,  # [2, bq_sz, num_l_heads]
     bm_x2_ref,  # [2, bq_sz, num_l_heads]
     sems,  # [6, 2]
-    l_ref,  # [bq_sz * num_q_heads, 128],
-    m_ref,  # [bq_sz * num_q_heads, 128],
+    l_ref,  # [bq_sz * num_q_heads, 1],
+    m_ref,  # [bq_sz * num_q_heads, 1],
     acc_ref,  # [bq_sz * num_q_heads, head_dim],
     *,
     static_q_len: int,
@@ -199,11 +199,14 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
 
             # q_span is per-row (identical across the bkv columns and across the
             # num_q_heads rows of one query).
-            q_span = (
-                kv_len - q_len + bq_idx * bq_sz +
-                (start_row + lax.broadcasted_iota(jnp.int32,
-                                                  (chunk_size, 1), 0)) //
-                num_q_heads)
+            if chunk_sz == 1:
+                q_span = kv_len - q_len + bq_idx * bq_sz + c
+            else:
+                q_span = (
+                    kv_len - q_len + bq_idx * bq_sz +
+                    (start_row + lax.broadcasted_iota(jnp.int32,
+                                                      (chunk_size, 1), 0)) //
+                    num_q_heads)
             # A key is valid iff 0 <= q_span - k_span < sliding_window (causal +
             # within window).
             # When int32 -> uint32, negative values become large positive values.
@@ -216,7 +219,7 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
             m_prev = load_with_init(cm_ref, jnp.finfo(jnp.float32).min)
             m_curr = jnp.maximum(m_prev, s_rowmax)
             cm_ref[...] = m_curr
-            p = jnp.exp(s - broadcast_minor(m_curr, s.shape))
+            p = jnp.exp(s - m_curr)
 
             pv = jnp.einsum("nm,md->nd",
                             p,
@@ -229,7 +232,7 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
             l_curr = exp_m_diff * l_prev + p_rowsum
             cl_ref[...] = l_curr
             o_prev = load_with_init(cacc_ref, 0.0)
-            o_curr = broadcast_minor(exp_m_diff, o_prev.shape) * o_prev + pv
+            o_curr = exp_m_diff * o_prev + pv
             cacc_ref[...] = o_curr
 
     def _async_copy(src, dst, sem, wait):
@@ -716,7 +719,6 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
             acc = acc_ref[...]
 
             if unnormalized_output:
-                l_sum = broadcast_minor(l_ref[...], acc.shape)  # noqa
                 out = acc.astype(q_dtype)
             else:
                 attention_sinks = jnp.concat(
@@ -724,7 +726,6 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
                                                                       None]
                 exp_attention_sinks = jnp.exp(attention_sinks - m_ref[...])
                 l_sum = l_ref[...] + exp_attention_sinks
-                l_sum = broadcast_minor(l_sum, acc.shape)
                 out = (lax.div(acc, l_sum) if q_dtype == jnp.float32 else
                        (acc *
                         pl.reciprocal(l_sum, approx=True)).astype(q_dtype))
@@ -740,9 +741,9 @@ def _mla_sliding_window_ragged_paged_attention_kernel(
                 head_dim,
             )[...] = pltpu.bitcast(out, jnp.int32)
             bl_x2_ref.at[bo_sem_idx][:bq_sz, :num_q_heads] = l_ref[
-                ..., 0].reshape(bq_sz, num_q_heads)
+                ...].reshape(bq_sz, num_q_heads)
             bm_x2_ref.at[bo_sem_idx][:bq_sz, :num_q_heads] = m_ref[
-                ..., 0].reshape(bq_sz, num_q_heads)
+                ...].reshape(bq_sz, num_q_heads)
 
             # Send cur bo
             start_send_bo(seq_idx, bq_idx, bo_sem_idx)
@@ -1019,7 +1020,7 @@ def mla_sliding_window_ragged_paged_attention(
         bm_double_buf = bl_double_buf
 
         l_scratch = pltpu.VMEM(
-            (bq_sz * num_q_heads, 128),
+            (bq_sz * num_q_heads, 1),
             jnp.float32,
         )
         m_scratch = l_scratch
