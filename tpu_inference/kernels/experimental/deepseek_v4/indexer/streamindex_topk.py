@@ -506,7 +506,7 @@ def streamindex_topk(
     num_kv_pages_per_block: tuple[int, int, int] | int | None = None,
     num_queries_per_block: tuple[int, int, int] | int | None = None,
     vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
-    decode_req_batch_size: int = 4,
+    decode_req_batch_size: int = 8,
 ) -> jax.Array:
     """StreamIndex Top-K retrieval.
 
@@ -716,57 +716,61 @@ def streamindex_topk(
     # sequences in one batch have similar lengths to reduce waste of compute.
     # With the same batch size, the longest sequence will determine number of
     # blocks to run computation for.
+    def maybe_run_topk(scores_in, s_idx, e_idx, kv_p, q_p, static_q, sbs, case):
+        return lax.cond(
+            s_idx < e_idx,
+            lambda sc: run_topk_kernel(
+                q,
+                prepared_indexer_weights,
+                cache_kv,
+                sc,
+                seq_lens,
+                page_indices,
+                cu_q_lens,
+                num_kv_pages_per_block=kv_p,
+                num_queries_per_block=q_p,
+                start_seq_idx=s_idx,
+                end_seq_idx=e_idx,
+                static_q_len=static_q,
+                seq_batch_size=sbs,
+                case=case,
+            ),
+            lambda sc: sc,
+            scores_in,
+        )
+
     decode_batch_end = (distribution[0] // decode_req_batch_size *
                         decode_req_batch_size)
-    scores = run_topk_kernel(
-        q,
-        prepared_indexer_weights,
-        cache_kv,
+    scores = maybe_run_topk(
         scores_init,
-        seq_lens,
-        page_indices,
-        cu_q_lens,
-        num_kv_pages_per_block=num_kv_pages_per_blocks[0],
-        num_queries_per_block=num_queries_per_blocks[0],
-        start_seq_idx=jnp.array(0),
-        end_seq_idx=decode_batch_end,
-        static_q_len=1,
-        seq_batch_size=decode_req_batch_size,
-        case=MlaCase.DECODE,
+        jnp.int32(0),
+        decode_batch_end,
+        num_kv_pages_per_blocks[0],
+        num_queries_per_blocks[0],
+        1,
+        decode_req_batch_size,
+        MlaCase.DECODE,
     )
     # Handle num_decode_seqs % decode_req_batch_size != 0 case.
-    scores = run_topk_kernel(
-        q,
-        prepared_indexer_weights,
-        cache_kv,
+    scores = maybe_run_topk(
         scores,
-        seq_lens,
-        page_indices,
-        cu_q_lens,
-        num_kv_pages_per_block=num_kv_pages_per_blocks[0],
-        num_queries_per_block=num_queries_per_blocks[0],
-        start_seq_idx=decode_batch_end,
-        end_seq_idx=distribution[1],
-        static_q_len=1,
-        seq_batch_size=1,
-        case=MlaCase.DECODE,
+        decode_batch_end,
+        distribution[1],
+        num_kv_pages_per_blocks[0],
+        num_queries_per_blocks[0],
+        1,
+        1,
+        MlaCase.DECODE,
     )
-
-    scores = run_topk_kernel(
-        q,
-        prepared_indexer_weights,
-        cache_kv,
+    scores = maybe_run_topk(
         scores,
-        seq_lens,
-        page_indices,
-        cu_q_lens,
-        num_kv_pages_per_block=num_kv_pages_per_blocks[2],
-        num_queries_per_block=num_queries_per_blocks[2],
-        start_seq_idx=distribution[1],
-        end_seq_idx=distribution[2],
-        static_q_len=None,
-        seq_batch_size=1,
-        case=MlaCase.MIXED,
+        distribution[1],
+        distribution[2],
+        num_kv_pages_per_blocks[2],
+        num_queries_per_blocks[2],
+        None,
+        1,
+        MlaCase.MIXED,
     )
 
     scores = scores.reshape(q.shape[0], -1)

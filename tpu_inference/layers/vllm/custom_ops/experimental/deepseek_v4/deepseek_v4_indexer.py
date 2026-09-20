@@ -181,9 +181,9 @@ class VllmDeepseekV4Indexer(DeepseekV4Indexer):
                 distribution=distribution,
                 k=self.topk_tokens,
                 compression_ratio=self.compress_ratio,
-                # TODO(hwanginho): Tune num_kv_pages_per_block, num_queries_per_block
-                num_kv_pages_per_block=(3, 2, 2),
+                num_kv_pages_per_block=(8, 2, 2),
                 num_queries_per_block=(1, 128, 128),
+                decode_req_batch_size=8,
             )
 
         topk_indices = jax.shard_map(
