@@ -1110,6 +1110,49 @@ class TestKVCacheManager:
         finally:
             _get_mamba_cache_allocator.cache_clear()
 
+    def test_reinitialize_kv_cache_rewires_input_batch_mamba_state(self):
+        """Reinit must re-apply the input batch's mamba wiring.
+
+        `maybe_reinitialize_input_batch` hands back a fresh `InputBatch` on
+        every `initialize_kv_cache` for a hybrid model, and that batch comes up
+        with `has_mamba_layers=False` and a slot pool sized from the
+        `max_num_reqs` estimate rather than the pool that was just allocated.
+        """
+        num_blocks = 100
+        page_size_bytes = 16 * 1024
+        layer_names = ['layer.0', 'layer.1']
+        kv_cache_config = self._create_mamba_kv_cache_config(
+            num_blocks, page_size_bytes, layer_names)
+
+        if not hasattr(self.runner.vllm_config, 'sharding_config'
+                       ) or self.runner.vllm_config.sharding_config is None:
+            self.runner.vllm_config.sharding_config = MagicMock()
+            self.runner.vllm_config.sharding_config.total_dp_size = 1
+
+        with patch('dataclasses.replace') as mock_replace:
+            mock_replaced_spec = MagicMock()
+            mock_replaced_spec.page_size_bytes = page_size_bytes
+            mock_replace.return_value = mock_replaced_spec
+
+            self.runner.initialize_kv_cache(kv_cache_config)
+            actual_blocks = self.runner.kv_cache_manager.actual_mamba_num_blocks
+            assert actual_blocks is not None
+            expected_slots = actual_blocks // self.runner.dp_size
+            assert self.runner.input_batch.has_mamba_layers
+            assert self.runner.input_batch._mamba_local_slots == expected_slots
+
+            # Stand in for the fresh InputBatch the manager builds on reinit.
+            self.runner.input_batch.has_mamba_layers = False
+            self.runner.input_batch.init_mamba_pools(actual_blocks +
+                                                     self.runner.dp_size)
+            assert self.runner.input_batch._mamba_local_slots != expected_slots
+
+            self.runner.delete_kv_cache()
+            self.runner.reinitialize_kv_cache()
+
+        assert self.runner.input_batch.has_mamba_layers
+        assert self.runner.input_batch._mamba_local_slots == expected_slots
+
     def test_initialize_kv_cache_no_duplicate_shared_layers(self):
         block_size = self.runner.vllm_config.cache_config.block_size
         num_kv_heads = 8
