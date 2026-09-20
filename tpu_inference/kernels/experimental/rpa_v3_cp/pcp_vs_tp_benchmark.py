@@ -409,11 +409,35 @@ def _run_variant(mp,
                 pcp_qp[r, 2 * i] = r * C
                 pcp_qp[r, 2 * i + 1] = toff
         pcp_spec = P(ShardingAxisName.PREFILL_CONTEXT, None)
+        # Which virtual sequence writes this rank's share of the current
+        # KV back. Every piece here is full, so it is always the tail.
+        pcp_write = np.zeros((pcp, max_seq), bool)
+        pcp_write[:, 1:2 * num_reqs:2] = True
+        # Page table for the all-gathered current KV: chunk c of request i is
+        # rank c's head for c < P and rank 2P-1-c's tail otherwise, and a rank
+        # holds each request's head then tail in request order. A request's two
+        # sequences address the same chunk, so they share a row.
+        req_pages = C // page
+        local_len = 2 * C * num_reqs
+        _table = np.zeros((max_seq, two_p * req_pages), np.int32)
+        for i in range(num_reqs):
+            for c in range(two_p):
+                rank = c if c < pcp else two_p - 1 - c
+                base = (rank * local_len + 2 * C * i +
+                        (C if c >= pcp else 0)) // page
+                cols = slice(c * req_pages, (c + 1) * req_pages)
+                _table[2 * i, cols] = base + np.arange(req_pages)
+                _table[2 * i + 1, cols] = base + np.arange(req_pages)
+        pcp_table = jnp.asarray(_table.reshape(-1))
+        pcp_write = put(jnp.asarray(pcp_write), pcp_spec)
         pcp_cu = put(jnp.asarray(pcp_cu), pcp_spec)
         pcp_qp = put(jnp.asarray(pcp_qp), pcp_spec)
-        chunk_sizes = ({} if not batched else {
-            "pcp_chunk_sizes": (C, ) * num_reqs,
-            "kv_layout": kv_layout,
+        # rpa_v3_cp reorders the gathered KV instead of paging it, and takes
+        # the write flag as a plain bool.
+        extra = ({
+            "kv_layout": kv_layout
+        } if batched else {
+            "update_kv_cache": True
         })
         fns = {}
 
@@ -440,6 +464,8 @@ def _run_variant(mp,
                         pcp=PCPMetadata(query_start_loc=pcp_cu,
                                         kv_cache_lens=kvcl,
                                         q_pos_offsets=pcp_qp,
+                                        new_kv_page_indices=pcp_table,
+                                        update_kv_cache=pcp_write,
                                         cache_pages=_cp),
                     )
                     cache, out = forward(mesh,
@@ -449,9 +475,8 @@ def _run_variant(mp,
                                          cache,
                                          md,
                                          sm_scale=sm_scale,
-                                         update_kv_cache=True,
                                          use_causal_mask=True,
-                                         **chunk_sizes)
+                                         **extra)
                     if _co:
                         # Heads are sharded over the model axis; all-reduce.
                         out = jax.shard_map(functools.partial(

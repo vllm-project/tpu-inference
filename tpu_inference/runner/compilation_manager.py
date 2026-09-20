@@ -428,6 +428,18 @@ class CompilationManager:
                                            np.zeros((pcp_size, n_reqs),
                                                     dtype=np.int32),
                                            sharding=pcp_spec),
+                # The page table's width follows this bucket's chunk size, so
+                # it is part of the compiled shape, like num_tokens itself.
+                new_kv_page_indices=device_array(
+                    self.runner.mesh,
+                    np.zeros(n_reqs *
+                             (num_tokens // dp_size // self.runner.block_size),
+                             dtype=np.int32),
+                    sharding=repl),
+                update_kv_cache=device_array(self.runner.mesh,
+                                             np.zeros((pcp_size, n_reqs),
+                                                      dtype=bool),
+                                             sharding=pcp_spec),
                 cache_pages=pcp_cache_pages,
             )
         # Dummy mamba_state_indices for compile-cache pre-tracing. Only

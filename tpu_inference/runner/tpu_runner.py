@@ -1067,8 +1067,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pcp_size = self.vllm_config.sharding_config.prefill_cp_size
         pcp_quantum = 2 * pcp_size * self.block_size * self.dp_size
         if pcp_size > 1:
-            min_token_size = max(min_token_size,
-                                 next_power_of_2(pcp_quantum))
+            min_token_size = max(min_token_size, next_power_of_2(pcp_quantum))
         self.num_tokens_paddings = runner_utils.get_token_paddings(
             min_token_size=min_token_size,
             max_token_size=scheduler_config.max_num_batched_tokens *
@@ -2916,6 +2915,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             n_off = np.asarray(seq_lens_view).shape[0]  # max_num_reqs
             pcp_cu_np = np.zeros((pcp_size, n_off + 1), np.int32)
             pcp_qpos_np = np.zeros((pcp_size, n_off), np.int32)
+            # Which virtual sequence writes this rank's share of the current
+            # KV back. Normally the tail, but a tail that is entirely padding
+            # has no Q blocks, so the kernel would never walk the KV and this
+            # rank's pages would stay stale -- fall back to the head.
+            pcp_write_np = np.zeros((pcp_size, n_off), bool)
             for rank in range(pcp_size):
                 tail_off = (two_p - 1 - rank) * pcp_chunk_size
                 tail_real = int(
@@ -2925,6 +2929,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                           2:] = pcp_chunk_size + tail_real  # seq 1 (tail) end
                 pcp_qpos_np[rank, 0] = rank * pcp_chunk_size
                 pcp_qpos_np[rank, 1] = tail_off
+                pcp_write_np[rank, 1 if tail_real else 0] = True
+
+            # Page table for the all-gathered current KV: chunk c of the
+            # request lives on rank c as a head for c < P and on rank 2P-1-c
+            # as a tail otherwise, and a rank stores its head then its tail.
+            # The request's two sequences address the same chunk, so they
+            # share a row.
+            page_sz = self.block_size
+            req_pages = pcp_chunk_size // page_sz
+            local_len = 2 * pcp_chunk_size
+            pcp_table_np = np.zeros((n_off, two_p * req_pages), np.int32)
+            for c in range(two_p):
+                rank = c if c < pcp_size else two_p - 1 - c
+                base = (rank * local_len +
+                        (pcp_chunk_size if c >= pcp_size else 0)) // page_sz
+                cols = slice(c * req_pages, (c + 1) * req_pages)
+                pcp_table_np[0, cols] = base + np.arange(req_pages)
+                pcp_table_np[1, cols] = base + np.arange(req_pages)
 
             # logits_indices
             inv_row = np.empty(two_p, np.int64)
@@ -2939,16 +2961,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, PartitionSpec(ShardingAxisName.PREFILL_CONTEXT,
                                          None))
             repl = NamedSharding(self.mesh, PartitionSpec())
-            (pcp_query_start_loc,
-             pcp_q_pos_offsets) = device_array(self.mesh,
-                                               (pcp_cu_np, pcp_qpos_np),
-                                               sharding=pcp_spec)
+            (pcp_query_start_loc, pcp_q_pos_offsets,
+             pcp_update_kv_cache) = device_array(
+                 self.mesh, (pcp_cu_np, pcp_qpos_np, pcp_write_np),
+                 sharding=pcp_spec)
             pcp_metadata = PCPMetadata(
                 query_start_loc=pcp_query_start_loc,
                 kv_cache_lens=device_array(self.mesh,
                                            kv_cache_lens_np,
                                            sharding=repl),
                 q_pos_offsets=pcp_q_pos_offsets,
+                new_kv_page_indices=device_array(self.mesh,
+                                                 pcp_table_np.reshape(-1),
+                                                 sharding=repl),
+                update_kv_cache=pcp_update_kv_cache,
                 # Snap the request's live cached-page count up to the shared
                 # ladder that precompilation warms (0 == nothing cached, which
                 # elides the cache phase entirely).

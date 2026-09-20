@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import functools
 import math
 import os
@@ -37,9 +38,8 @@ from tpu_inference.kernels.mla.v2.tuned_params import (TuningKey,
                                                        get_tuned_params)
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
-from tpu_inference.layers.common.cp_attention import (dcp_forward,
-                                                       pcp_forward,
-                                                       pcp_forward_batched)
+from tpu_inference.layers.common.cp_attention import (dcp_forward, pcp_forward,
+                                                      pcp_forward_batched)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_megacore, get_mesh_shape_product
@@ -561,25 +561,34 @@ def attention(
             v_scale=v_scale,
         )
     if 'pcp' in mesh.shape and mesh.shape['pcp'] > 1:
+        common = dict(sm_scale=sm_scale,
+                      q_scale=q_scale,
+                      k_scale=k_scale,
+                      v_scale=v_scale,
+                      use_causal_mask=use_causal_mask)
         # PCP_BATCHED_RPA=1 routes the same two-phase decomposition through the
         # batched RPA kernel (in-kernel ring) instead of rpa_v3_cp.
-        forward = (pcp_forward_batched
-                   if os.environ.get('PCP_BATCHED_RPA') == '1' else
-                   pcp_forward)
-        return forward(
-            mesh,
-            q,
-            k,
-            v,
-            kv_cache,
-            md,
-            sm_scale=sm_scale,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
-            update_kv_cache=update_kv_cache,
-            use_causal_mask=use_causal_mask,
-        )
+        if os.environ.get('PCP_BATCHED_RPA') == '1':
+            # The batched path takes the writers from `pcp.update_kv_cache`,
+            # which says *which* virtual sequence writes on each rank -- a
+            # property of the layout. `update_kv_cache` here says whether this
+            # layer writes at all (KV-share reads without writing), so combine
+            # them at the boundary rather than pushing the layer's concern down.
+            if not update_kv_cache and md.pcp.update_kv_cache is not None:
+                md = dataclasses.replace(md,
+                                         pcp=dataclasses.replace(
+                                             md.pcp,
+                                             update_kv_cache=jnp.zeros_like(
+                                                 md.pcp.update_kv_cache)))
+            return pcp_forward_batched(mesh, q, k, v, kv_cache, md, **common)
+        return pcp_forward(mesh,
+                           q,
+                           k,
+                           v,
+                           kv_cache,
+                           md,
+                           update_kv_cache=update_kv_cache,
+                           **common)
 
     # (T, N, H)
     output, kv_cache = sharded_ragged_paged_attention(

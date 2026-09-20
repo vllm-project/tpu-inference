@@ -15,7 +15,6 @@
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import lax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
@@ -434,11 +433,9 @@ def pcp_forward_batched(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
-    update_kv_cache: bool = True,
     use_causal_mask: bool = True,
     kv_layout: batched_rpa_configs.KVLayout = (
         batched_rpa_configs.KVLayout.HEAD_ALONG_SUBLANE),
-    pcp_chunk_sizes: tuple[int, ...] | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """PCP attention forward on the batched RPA kernel.
 
@@ -454,80 +451,28 @@ def pcp_forward_batched(
       3. merge_attn_states
 
     Multiple requests are supported: request i is split into its own `two_p`
-    chunks of `pcp_chunk_sizes[i]` tokens and owns virtual sequences 2i (head)
-    and 2i+1 (tail). A rank's local Q holds them in request order.
+    chunks and owns virtual sequences 2i (head) and 2i+1 (tail), which a rank's
+    local Q holds in request order. `query_start_loc` defines that layout, so
+    every piece must occupy its full stride even when only part of it is real
+    -- a short piece would otherwise shift every later request. Only the final
+    piece may be truncated, since nothing follows it. Padded query slots
+    produce discarded output; they never reach the KV cache, whose write
+    extent comes from `seq_lens - kv_cache_lens`.
 
-    `query_start_loc` defines that layout, so every piece must occupy its full
-    `pcp_chunk_sizes[i]` stride even when only part of it is real -- a short
-    piece would otherwise shift every later request. Only the final piece may
-    be truncated, since nothing follows it. Padded query slots produce
-    discarded output; they never reach the KV cache, whose write extent comes
-    from `seq_lens - kv_cache_lens`.
+    The caller owns the layout-dependent metadata: `pcp.new_kv_page_indices`
+    maps each sequence's token order onto the gathered current KV, and
+    `pcp.update_kv_cache` picks the per-rank writer. Both follow from how the
+    caller padded and split the batch, which is not something this function
+    should be reconstructing.
     """
     pcp_axis = ShardingAxisName.PREFILL_CONTEXT
     pcp_size = get_mesh_shape_product(mesh, pcp_axis)
-    two_p = 2 * pcp_size
-    padded_q_len = q.shape[0]
-    # The pcp ranks stripe the pages of a sequence, so a global page spans
-    # `pcp_size` per-rank pages.
-    if kv_layout == batched_rpa_configs.KVLayout.SEQ_ALONG_LANE:
-        page_size = kv_cache.shape[4] // pcp_size
-    else:
-        page_size = kv_cache.shape[1] // pcp_size
     num_seqs = md.seq_lens.shape[0]
-
-    # Every request is split into its own `two_p` chunks, so each keeps its own
-    # head-tail balance instead of inheriting the batch's. `pcp_chunk_sizes[i]`
-    # is request i's padded chunk size; the default is one request covering all
-    # of `q`. Request i owns virtual sequences 2i (head) and 2i+1 (tail).
-    if pcp_chunk_sizes is None:
-        pcp_chunk_sizes = (padded_q_len // two_p, )
-    num_reqs = len(pcp_chunk_sizes)
-    if two_p * sum(pcp_chunk_sizes) != padded_q_len:
+    if md.pcp.new_kv_page_indices is None or md.pcp.update_kv_cache is None:
         raise ValueError(
-            f"{pcp_chunk_sizes=} span {two_p * sum(pcp_chunk_sizes)} tokens "
-            f"but q has {padded_q_len}.")
-    if 2 * num_reqs > num_seqs:
-        raise ValueError(
-            f"{num_reqs} requests need {2 * num_reqs} virtual sequences, but "
-            f"the metadata holds only {num_seqs}.")
-    if bad := [c for c in pcp_chunk_sizes if c % page_size]:
-        raise NotImplementedError(
-            f"PCP chunk sizes {bad} must be a multiple of the page size "
-            f"{page_size} to address the gathered current KV by page.")
-
-    # Page table for the all-gathered current KV, so the kernel can read it in
-    # its natural rank order. `all_gather` concatenates the per-rank blocks, and
-    # within its block a rank holds each request's head chunk then its tail
-    # chunk, in request order. So chunk c of request i sits on rank c (as a
-    # head) for c < pcp_size and on rank 2P-1-c (as a tail) otherwise. A
-    # request's two sequences both address its whole chunk, so they share a row.
-    local_len = 2 * sum(pcp_chunk_sizes)  # tokens per rank
-    pages_per_seq = two_p * max(pcp_chunk_sizes) // page_size
-    _table = np.zeros((num_seqs, pages_per_seq), np.int32)
-    _prefix = 0
-    for _i, _chunk in enumerate(pcp_chunk_sizes):
-        _req_pages = _chunk // page_size
-        for _c in range(two_p):
-            _rank = _c if _c < pcp_size else two_p - 1 - _c
-            _base = (_rank * local_len + _prefix +
-                     (_chunk if _c >= pcp_size else 0)) // page_size
-            _cols = slice(_c * _req_pages, (_c + 1) * _req_pages)
-            _table[2 * _i, _cols] = _base + np.arange(_req_pages)
-            _table[2 * _i + 1, _cols] = _base + np.arange(_req_pages)
-        _prefix += 2 * _chunk
-    new_kv_page_indices = jnp.asarray(_table.reshape(-1))
-
-    # The cache phase merges each request's head and tail into one sequence:
-    # they are adjacent in the local Q, share a cache, and no token of either
-    # is masked against it, so one Q walk per request covers both.
-    _cu_cache = np.zeros(num_seqs + 1, np.int32)
-    _run = 0
-    for _i, _chunk in enumerate(pcp_chunk_sizes):
-        _run += 2 * _chunk
-        _cu_cache[_i + 1:] = _run
-    cu_cache = jnp.asarray(_cu_cache)
-    dist_cache = jnp.asarray(np.array([0, 0, num_reqs], np.int32))
+            "pcp_forward_batched needs pcp.new_kv_page_indices and "
+            "pcp.update_kv_cache; they describe the caller's own padding and "
+            "request split.")
 
     q_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.ATTN_HEAD, None)
     kv_spec = P(ShardingAxisName.ATTN_DATA, ShardingAxisName.KV_HEAD, None)
@@ -550,8 +495,10 @@ def pcp_forward_batched(
 
     def _shard_fn(q_local, k_local, v_local, kv_cache_local, kv_lens_local,
                   kv_cache_lens_local, page_indices_local, distribution_local,
-                  pcp_cu_q_lens_local, pcp_q_pos_offsets_local):
-        cp_rank = jnp.reshape(lax.axis_index(pcp_axis), (1, )).astype(jnp.int32)
+                  new_kv_page_indices, pcp_cu_q_lens_local,
+                  pcp_q_pos_offsets_local, pcp_update_kv_cache_local):
+        cp_rank = jnp.reshape(lax.axis_index(pcp_axis),
+                              (1, )).astype(jnp.int32)
         # The all-gathered current chunk is what every sequence of the request
         # contributes as new KV, in both phases; the kernel derives the cache
         # length from it.
@@ -570,6 +517,17 @@ def pcp_forward_batched(
             heads = x[::2]
             pad = [(0, num_seqs - heads.shape[0])] + [(0, 0)] * (x.ndim - 1)
             return jnp.pad(heads, pad)
+
+        # The cache phase merges each request's head and tail into one
+        # sequence: they are adjacent in the local Q, share a cache, and no
+        # token of either is masked against it, so one Q walk per request
+        # covers both. Every other cumulative bound is a request boundary, so
+        # the merged cu_q_lens is exactly that stride.
+        cu_cache = pcp_cu_q_lens_local[0][::2]
+        cu_cache = jnp.pad(cu_cache, (0, num_seqs + 1 - cu_cache.shape[0]),
+                           mode="edge")
+        dist_cache = jnp.array([0, 0, 0],
+                               jnp.int32).at[2].set(distribution_local[2] // 2)
 
         # ---- Cache phase --------------------------------------------------
         if cache_pages == 0:
@@ -611,20 +569,6 @@ def pcp_forward_batched(
         # writes the current KV back; the kernel extends that sequence's last Q
         # block over the full chunk, since its own causal range does not reach.
         q_positions = kv_cache_lens_local + pcp_q_pos_offsets_local[0]
-        seq_ids = jnp.arange(num_seqs, dtype=jnp.int32)
-        # A rank writes back the pages of the current KV that it owns, driven
-        # by one designated sequence per request whose last Q block the kernel
-        # extends over the whole chunk. Normally that is the tail, but a tail
-        # made entirely of padding has no Q blocks at all, and this rank's
-        # share of the pages would silently never be written -- so fall back to
-        # the head. `q_lens` is this rank's own, so the choice is per rank.
-        q_lens = pcp_cu_q_lens_local[0][1:] - pcp_cu_q_lens_local[0][:-1]
-        tail_is_empty = jnp.repeat(q_lens[1::2] == 0, 2)[:num_seqs]
-        writes = jnp.logical_and(
-            update_kv_cache,
-            jnp.logical_and(
-                jnp.logical_and(seq_ids < distribution_local[2], q_lens > 0),
-                jnp.logical_or(seq_ids % 2 == 1, tail_is_empty)))
         # The gathered current KV keeps its natural rank order; the page
         # table maps global token order onto it.
         k_curr = all_gather_tokens(k_local)
@@ -641,10 +585,9 @@ def pcp_forward_batched(
             cp_rank=cp_rank,
             kv_new_lens=kv_new_lens,
             q_positions=q_positions,
-            update_kv_cache=writes,
+            update_kv_cache=pcp_update_kv_cache_local[0],
             new_kv_page_indices=new_kv_page_indices,
-            attention_scope=batched_rpa_configs.AttentionScope.
-            NEW_TOKENS_ONLY,
+            attention_scope=batched_rpa_configs.AttentionScope.NEW_TOKENS_ONLY,
             use_causal_mask=use_causal_mask,
             **common)
 
@@ -668,10 +611,13 @@ def pcp_forward_batched(
             P(),  # pcp.kv_cache_lens: replicated
             P(),  # page_indices: replicated
             P(),  # distribution: replicated
+            P(),  # pcp.new_kv_page_indices: replicated
             P(pcp_axis, None),  # pcp.query_start_loc: per-rank cu_q_lens
             P(pcp_axis, None),  # pcp.q_pos_offsets: per-rank position offsets
+            P(pcp_axis, None),  # pcp.update_kv_cache: per-rank writer flags
         ),
         out_specs=(kv_cache_spec, q_spec),
         check_vma=False,
     )(q, k, v, kv_cache, md.seq_lens, md.pcp.kv_cache_lens, md.block_tables,
-      md.request_distribution, md.pcp.query_start_loc, md.pcp.q_pos_offsets)
+      md.request_distribution, md.pcp.new_kv_page_indices,
+      md.pcp.query_start_loc, md.pcp.q_pos_offsets, md.pcp.update_kv_cache)

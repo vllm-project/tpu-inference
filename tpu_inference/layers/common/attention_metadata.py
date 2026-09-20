@@ -22,7 +22,10 @@ from vllm.utils.math_utils import cdiv
 
 @functools.partial(
     jax.tree_util.register_dataclass,
-    data_fields=["query_start_loc", "kv_cache_lens", "q_pos_offsets"],
+    data_fields=[
+        "query_start_loc", "kv_cache_lens", "q_pos_offsets",
+        "new_kv_page_indices", "update_kv_cache"
+    ],
     meta_fields=["cache_pages"],
 )
 @dataclass
@@ -44,6 +47,19 @@ class PCPMetadata:
     # the cache phase is elided entirely.  REQUIRED: a default would silently
     # elide the cache phase for any caller that forgot to set it.
     cache_pages: int
+    # (max_num_reqs * pages_per_seq,) int32 — page table for the all-gathered
+    # current KV, mapping each virtual sequence's own token order onto the
+    # gathered rank order. Replicated (P()). A request's head and tail address
+    # the same chunk, so rows 2i and 2i+1 are equal. Required by the batched
+    # RPA path; rpa_v3_cp reorders the gathered KV instead and ignores it.
+    new_kv_page_indices: jax.Array | None = None
+    # (pcp_size, max_num_reqs) bool — which virtual sequence writes its share
+    # of the current KV back, per rank. Sharded as P('pcp', None). Exactly one
+    # sequence per request should be set, and it must be one with query tokens
+    # on that rank: the kernel extends its last Q block over the whole chunk,
+    # so a sequence that is all padding would write nothing and leave this
+    # rank's pages stale. Required by the batched RPA path.
+    update_kv_cache: jax.Array | None = None
 
 
 @functools.partial(
