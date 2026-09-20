@@ -394,6 +394,7 @@ def test_safe_device_get_uses_addressable_shard_when_replicated():
     shard.data = expected
     fake_arr = MagicMock()
     fake_arr.addressable_shards = [shard]
+    fake_arr.is_fully_addressable = False
     fake_arr.is_fully_replicated = True
 
     with patch("tpu_inference.utils.jax.device_get") as mock_device_get, \
@@ -419,6 +420,7 @@ def test_safe_device_get_gathers_when_sharded():
     partial_shard.data = np.array([1, 2], dtype=np.int32)  # only half
     fake_arr = MagicMock()
     fake_arr.addressable_shards = [partial_shard]
+    fake_arr.is_fully_addressable = False
     fake_arr.is_fully_replicated = False
 
     with patch("tpu_inference.utils.multihost_utils.process_allgather",
@@ -446,3 +448,41 @@ def test_safe_device_get_single_host_jax_array_roundtrips():
     result = safe_device_get(arr)
     assert isinstance(result, np.ndarray)
     np.testing.assert_array_equal(result, np.arange(6, dtype=np.int32))
+
+
+def test_safe_device_get_single_process_uses_device_get_not_gather():
+    """Fully addressable (single-process) array: plain device_get, no collective.
+
+    Even a sharded array is safe to device_get when every shard is local, so the
+    is_fully_addressable fast path must avoid process_allgather entirely.
+    """
+    expected = np.array([4, 5, 6], dtype=np.int32)
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = [MagicMock()]
+    fake_arr.is_fully_addressable = True
+    fake_arr.is_fully_replicated = False
+
+    with patch("tpu_inference.utils.jax.device_get",
+               return_value=expected) as mock_device_get, \
+         patch("tpu_inference.utils.multihost_utils.process_allgather") \
+            as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_device_get.assert_called_once_with(fake_arr)
+    mock_allgather.assert_not_called()
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_safe_device_get_maps_over_pytree():
+    """A tuple/dict of arrays is handled per-leaf, like jax.device_get((a, b))."""
+    a = jnp.arange(3, dtype=jnp.int32)
+    b = jnp.arange(2, dtype=jnp.int32)
+    out_tuple = safe_device_get((a, b))
+    assert isinstance(out_tuple, tuple) and len(out_tuple) == 2
+    np.testing.assert_array_equal(out_tuple[0], np.arange(3, dtype=np.int32))
+    np.testing.assert_array_equal(out_tuple[1], np.arange(2, dtype=np.int32))
+
+    out_dict = safe_device_get({"x": a, "y": b})
+    assert set(out_dict) == {"x", "y"}
+    np.testing.assert_array_equal(out_dict["x"], np.arange(3, dtype=np.int32))
+    np.testing.assert_array_equal(out_dict["y"], np.arange(2, dtype=np.int32))

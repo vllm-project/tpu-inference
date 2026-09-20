@@ -956,7 +956,8 @@ def host_extract_sampled_tokens(
         valid_sampled_token_ids = selected_token_ids.tolist()
     else:
         valid_sampled_token_ids = runner.rejection_sampler.parse_output(
-            next_tokens, runner.input_batch.vocab_size,
+            common_utils.safe_device_get(next_tokens),
+            runner.input_batch.vocab_size,
             spec_decode_metadata.draft_lengths_cpu, num_reqs,
             spec_decode_metadata.final_logits_indices.shape[0], runner.dp_size,
             spec_decode_metadata.req_indices_dp)
