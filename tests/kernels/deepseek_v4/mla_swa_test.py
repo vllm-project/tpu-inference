@@ -355,7 +355,11 @@ class CorrectnessTest(parameterized.TestCase):
                 sm_scale=1.0,
                 sliding_window=self.sliding_window,
                 num_queries_per_block=8,
-                num_kv_pages_per_block=2,
+                num_kv_pages_per_block=(
+                    cdiv(self.sliding_window, self.page_size),
+                    2,
+                    2,
+                ),
                 q_compute_block_size=2,
                 logical_page_size=self.page_size,
             ))

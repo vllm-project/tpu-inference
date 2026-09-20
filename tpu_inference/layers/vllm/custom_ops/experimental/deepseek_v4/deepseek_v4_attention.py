@@ -482,8 +482,11 @@ class VllmDeepseekV4MLAAttention(DeepseekV4Attention):
                     sm_scale=self.scale,
                     sliding_window=self.window_size,
                     logical_page_size=self.swa_cache_layer.block_size,
-                    # TODO: tune num_kv_pages_per_block & num_queries_per_block
-                    num_kv_pages_per_block=(2, 2, 2),
+                    num_kv_pages_per_block=(
+                        cdiv(self.window_size, self.swa_cache_layer.block_size),
+                        2,
+                        2,
+                    ),
                     num_queries_per_block=(1, 32, 32),
                     q_compute_block_size=4,
                     unnormalized_output=False if swa_only else True,
