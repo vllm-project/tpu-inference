@@ -711,16 +711,62 @@ def propagate_mamba_num_blocks(rpc_owner: Any, kv_cache_config: Any,
     return mamba_num_blocks
 
 
+def propagate_attn_num_blocks(rpc_owner: Any, vllm_config: Any) -> int | None:
+    """Publish the worker-planned attention block count in EngineCore.
+
+    Returns None when EngineCore already has a user override or when no worker
+    reports an automatically planned attention pool.
+    """
+    cache_config = vllm_config.cache_config
+    if cache_config.num_gpu_blocks_override is not None:
+        return None
+
+    # Drop None values from workers skipping attention pool sizing
+    reported = [
+        v for v in rpc_owner.collective_rpc("get_attn_num_blocks")
+        if v is not None
+    ]
+
+    if not reported:
+        # Pure-attention, pure-Mamba, and skipped-sizing workers report None.
+        return None
+
+    if len(set(reported)) != 1:
+        raise ValueError(
+            "[tpu_inference] Workers disagree on the attention pool "
+            f"size: {reported}. The scheduler cannot size its attention block "
+            "pool consistently.")
+    attn_num_blocks = int(reported[0])
+
+    # Publish the worker consensus before EngineCore builds KV cache configs.
+    vllm_config.cache_config.num_gpu_blocks_override = attn_num_blocks
+    logger.info(
+        "[tpu_inference] num_gpu_blocks_override=%d propagated from %d worker(s) "
+        "to the engine core.", attn_num_blocks, len(reported))
+    return attn_num_blocks
+
+
 class MambaPoolSyncExecutorMixin:
-    """Publish the workers' allocated mamba pool size in the engine-core
-    process as soon as the caches exist: `initialize_from_config` runs there
-    after every worker has allocated and before the scheduler is built."""
+    """Synchronize worker-computed hybrid KV pool capacities with EngineCore.
+
+    Workers plan the attention block count during KV-cache spec collection. The
+    count is published after `determine_available_memory()` and before EngineCore
+    calls `get_kv_cache_configs()`.
+
+    The allocated Mamba block count is published after the workers initialize
+    their caches in `initialize_from_config()` and before scheduler construction.
+    """
 
     def initialize_from_config(self, kv_cache_configs: Any) -> None:
         super().initialize_from_config(kv_cache_configs)
         if kv_cache_configs:
             propagate_mamba_num_blocks(self, kv_cache_configs[0],
                                        self.vllm_config)
+
+    def determine_available_memory(self) -> list[int]:
+        available_memory = super().determine_available_memory()
+        propagate_attn_num_blocks(self, self.vllm_config)
+        return available_memory
 
 
 def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
