@@ -538,36 +538,66 @@ def _run_variant(mp,
             return np.concatenate(chunks, 0)
 
         def check(nchunk=2):
-            crng = np.random.default_rng(0)
-
-            def cr(shape, dt):
-                x = crng.standard_normal(shape, np.float32) * 0.5
+            # Chunks are regenerated from a per-(request, chunk) seed rather
+            # than held: at a million tokens the history is tens of GB, and
+            # the reference has to walk it a second time anyway.
+            def gen(i, j, which, heads, dt):
+                g = np.random.default_rng((0x9E3779B9, i, j, which))
+                x = g.standard_normal((req_chunk, heads, HD), np.float32) * 0.5
                 return jnp.asarray(x).astype(dt)
 
-            qs = [[cr((req_chunk, NQ, HD), dtype) for _ in range(nchunk)]
-                  for _ in range(num_reqs)]
-            ks = [[cr((req_chunk, NKV, HD), kv_dtype) for _ in range(nchunk)]
-                  for _ in range(num_reqs)]
-            vs = [[cr((req_chunk, NKV, HD), kv_dtype) for _ in range(nchunk)]
-                  for _ in range(num_reqs)]
+            def q_of(i, j):
+                return gen(i, j, 0, NQ, dtype)
 
-            def reference(i, j):
-                qq = np.asarray(qs[i][j], np.float32)
-                kk = np.concatenate(
-                    [np.asarray(x, np.float32) for x in ks[i][:j + 1]])
-                vv = np.concatenate(
-                    [np.asarray(x, np.float32) for x in vs[i][:j + 1]])
-                g = NQ // NKV
-                out = np.zeros_like(qq)
-                pos_q = j * req_chunk + np.arange(req_chunk)[:, None]
-                keep = np.arange(kk.shape[0])[None, :] <= pos_q
-                for h in range(NQ):
-                    s = (qq[:, h] @ kk[:, h // g].T) * sm_scale
-                    s = np.where(keep, s, -np.inf)
-                    s = s - s.max(-1, keepdims=True)
-                    p = np.exp(s)
-                    out[:, h] = (p / p.sum(-1, keepdims=True)) @ vv[:, h // g]
-                return out
+            def k_of(i, j):
+                return gen(i, j, 1, NKV, kv_dtype)
+
+            def v_of(i, j):
+                return gen(i, j, 2, NKV, kv_dtype)
+
+            grp = NQ // NKV
+            final_ctx = nchunk * req_chunk
+            # A dense reference costs chunk x context per request. That is
+            # fine for short runs and hopeless at a million tokens, so past a
+            # threshold check a sample of query positions instead -- still an
+            # exact fp32 reference, just for fewer rows.
+            sample = None
+            if (os.environ.get("PCP_CHECK_FORCE_SAMPLE")
+                    or req_chunk * final_ctx > (1 << 26)):
+                sample = np.unique(
+                    np.linspace(0, req_chunk - 1, 8).astype(np.int64))
+
+            def reference(i, j, rows=None):
+                """Exact fp32 attention for chunk j's queries (or `rows`).
+
+                Streams the history one chunk at a time under an online
+                softmax, so peak memory is one chunk regardless of context.
+                """
+                qq = np.asarray(q_of(i, j), np.float32)
+                if rows is not None:
+                    qq = qq[rows]
+                n = qq.shape[0]
+                qg = qq.reshape(n, NKV, grp, HD)
+                m = np.full((n, NKV, grp), -np.inf, np.float32)
+                den = np.zeros((n, NKV, grp), np.float32)
+                acc = np.zeros((n, NKV, grp, HD), np.float32)
+                # Causal bound in this chunk's own token order.
+                last = (rows if rows is not None else np.arange(req_chunk))
+                for jj in range(j + 1):
+                    kk = np.asarray(k_of(i, jj), np.float32)
+                    vv = np.asarray(v_of(i, jj), np.float32)
+                    sc = np.einsum("sngd,rnd->sngr", qg, kk) * sm_scale
+                    if jj == j:
+                        keep = np.arange(req_chunk)[None, :] <= last[:, None]
+                        sc = np.where(keep[:, None, None, :], sc, -np.inf)
+                    mn = np.maximum(m, sc.max(-1))
+                    corr = np.exp(m - mn)
+                    p = np.exp(sc - mn[..., None])
+                    den = den * corr + p.sum(-1)
+                    acc = acc * corr[..., None] + np.einsum(
+                        "sngr,rnd->sngd", p, vv)
+                    m = mn
+                return (acc / den[..., None]).reshape(n, NQ, HD)
 
             cache = jax.device_put(jnp.zeros(cache_shape, kv_dtype),
                                    NamedSharding(mesh, cache_spec))
@@ -579,18 +609,40 @@ def _run_variant(mp,
                             with_collectives=False)
                 out, cache = fn(
                     cache,
-                    put(jnp.asarray(to_rank_order([x[j] for x in qs])),
+                    put(
+                        jnp.asarray(
+                            to_rank_order(
+                                [q_of(i, j) for i in range(num_reqs)])),
                         q_spec),
-                    put(jnp.asarray(to_rank_order([x[j] for x in ks])),
+                    put(
+                        jnp.asarray(
+                            to_rank_order(
+                                [k_of(i, j) for i in range(num_reqs)])),
                         kv_spec),
-                    put(jnp.asarray(to_rank_order([x[j] for x in vs])),
+                    put(
+                        jnp.asarray(
+                            to_rank_order(
+                                [v_of(i, j) for i in range(num_reqs)])),
                         kv_spec), kvl, kvcl)
+                # Sampling only verifies the last chunk: it is the one that
+                # has the whole cache behind it, and every earlier chunk's
+                # writeback is what builds that cache.
+                if sample is not None and j != nchunk - 1:
+                    jax.block_until_ready(out)
+                    continue
                 out = np.asarray(jax.block_until_ready(out), np.float32)
                 for i in range(num_reqs):
-                    ref = reference(i, j)
-                    err = np.abs(from_rank_order(out, i) - ref).max()
+                    got = from_rank_order(out, i)
+                    ref = reference(i, j, sample)
+                    if sample is not None:
+                        got = got[sample]
+                    err = np.abs(got - ref).max()
                     rel = float(err / max(np.abs(ref).max(), 1e-6))
                     worst[f"req{i}_chunk{j}"] = rel
+                    worst[f"req{i}_chunk{j}_abs"] = float(err)
+                    worst[f"req{i}_chunk{j}_refmax"] = float(np.abs(ref).max())
+                    worst[f"req{i}_chunk{j}_refrms"] = float(
+                        np.sqrt((ref.astype(np.float64)**2).mean()))
             return worst
 
         return measure, check
@@ -613,7 +665,8 @@ def _run_variant(mp,
             # dense reference, so there is nothing to compare it against.
             raise NotImplementedError("correctness check is PCP-only")
         rel = check(check_chunks)
-        worst = max(rel.values())
+        worst = max(v for k, v in rel.items()
+                    if not k.endswith(("_abs", "_refmax", "_refrms")))
         return {
             "check": "OK" if worst < 0.05 else "MISMATCH",
             "worst_rel": round(worst, 5),
@@ -872,20 +925,37 @@ def main():
                 for v in variants:
                     r = results.get(v) or {"check": "FAILED"}
                     if "error" in r:
-                        rows.append([v, r["error"], "-"])
+                        rows.append([v, r["error"], "-", "-", "-", "-"])
                         continue
+                    # Relative error divides by max|ref|, and attention
+                    # over a long context averages many random V rows, so that
+                    # denominator shrinks as context grows. Show the absolute
+                    # error and the reference's own scale beside it.
+                    keys = [
+                        k for k in r
+                        if not k.endswith(("_abs", "_refmax", "_refrms"))
+                        and k not in ("check", "worst_rel")
+                    ]
+                    hot = max(keys, key=lambda k: r[k]) if keys else None
                     rows.append([
                         v,
                         r.get("check", "FAILED"),
                         f"{r.get('worst_rel', float('nan')):.5f}",
+                        f"{r.get(hot + '_abs', float('nan')):.2e}"
+                        if hot else "-",
+                        f"{r.get(hot + '_refmax', float('nan')):.2e}"
+                        if hot else "-",
+                        f"{r.get(hot + '_refrms', float('nan')):.2e}"
+                        if hot else "-",
                     ])
                 title = (f"{model}: {n} devices, {args.requests} request(s), "
                          f"CH={_human(args.chunk_size)}, KV {args.kv_dtype}, "
                          f"{args.kv_layout} -- {args.check}-chunk prefill vs "
                          f"dense fp32 reference")
-                tables.append(
-                    title + "\n\n" +
-                    _box_table(["Layout", "Result", "Worst rel err"], rows))
+                tables.append(title + "\n\n" + _box_table([
+                    "Layout", "Result", "Worst rel", "abs err", "|ref|max",
+                    "|ref|rms"
+                ], rows))
                 print("\n" + tables[-1] + "\n", flush=True)
                 continue
             base = results[variants[0]]
