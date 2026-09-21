@@ -573,6 +573,16 @@ JobSet dennis-test-a1b2c
 - **Per-container termination tracking**: streaming of a container stops when
   *that* container terminates, not when the whole Pod does — which is what makes
   init-container logs (e.g. the on-demand image build) usable.
+- **Survives eviction / requeue**: a Pod can be destroyed mid-run by Kueue
+  (preemption, TAS node failures) or by a Job backoff restart. A missing Pod is
+  *not* treated as the end of the run — only the step's Job condition
+  (`Complete`/`Failed`) is. The streamer waits for the replacement Pod, re-attaches,
+  and appends a `===== [tee] ... pod <name> disappeared ... =====` marker to the
+  log file. Time spent with the Job `Suspended` in the queue is not counted
+  against `--timeout`.
+- **Result resolution**: exit code comes from the container's
+  `terminated.exitCode`, falling back to the Job condition when the Pod has
+  already been garbage-collected (so a finished run still reports correctly).
 - **Log files**: `log/<JOBSET>-<step>.log[N]` for the main container and
   `log/<JOBSET>-<step>.<container>.log[N]` for the others. Existing files are
   never overwritten; the whole run shares one numeric suffix.

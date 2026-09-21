@@ -19,11 +19,11 @@
 # ==============================================================================
 mode: script
 image:
-  registry: us-central1-docker.pkg.dev/cloud-tpu-shared-capacity/tpu-images/dennis-vllm-tpu
-  tpuInferenceCommit: eda7055d27bdd8a5a34b45a067983f4c0d4eb11b
+  registry: us-central1-docker.pkg.dev/cienet-cmcs/lyle-vllm-images/vllm-tpu
+  tpuInferenceCommit: 3a5b4737099fd1ab53aa4e05afcf3576cd30d958
   vllmCommit: 51da0ca66c8065619c79e35dff97aa99aeaf5644
 builder:
-  enabled: false
+  enabled: true
   gitRepo: https://github.com/vllm-project/tpu-inference.git
 tpu:
   accelerator: tpu7x

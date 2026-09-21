@@ -45,6 +45,12 @@
 #      them concurrently, each tagged and teed to its own file -- handy when
 #      the on-demand image build (image-builder) is the part you care about.
 #
+# Pods are not stable: Kueue can evict and requeue the whole JobSet mid-run
+# (preemption, TAS node failures, ...), and a Job can restart a pod on backoff.
+# A missing pod therefore does NOT mean the run is over -- only the step's Job
+# condition (Complete/Failed) does. When a pod disappears the streamer waits for
+# its replacement, re-attaches, and records the switch in the log file.
+#
 # Everything related to the benchmark stack (client / p / d / x / server) and
 # generate_summary.py reporting has been removed, since none of it is ever
 # deployed in script mode.
@@ -106,7 +112,8 @@ Options:
   -l, --list                   List the containers of each step's Pod and exit
   -s, --dump                   Snapshot current logs without following (-f)
   -o, --dir <DIR>              Output directory (default: ${LOG_DIR})
-  -t, --timeout <SEC>          Seconds to wait for each step's pod (default: ${WAIT_TIMEOUT})
+  -t, --timeout <SEC>          Seconds to wait for each step's pod (default: ${WAIT_TIMEOUT});
+                               time spent Suspended in the Kueue queue does not count
   -h, --help                   Show this help message
 
 Log files (the step name is always part of the file name):
@@ -114,6 +121,10 @@ Log files (the step name is always part of the file name):
   other container -> <JOB_NAME>-<step>.<container>.log[N]
   An existing file is never overwritten; the whole run shares one suffix,
   bumped until it is free for every step.
+
+Evictions: if a pod is destroyed mid-run (Kueue preemption, TAS node failures,
+Job backoff), the streamer waits for the replacement pod, re-attaches and marks
+the switch in the log file. Only the step's Job condition ends the wait.
 
 Exit code mirrors the testcase result: the first step whose main container
 exits non-zero aborts the run and its exit code is propagated.
@@ -259,30 +270,52 @@ fi
 TOTAL_STEPS="${#STEPS[@]}"
 
 # ==============================================================================
-# Pod / container introspection helpers
+# Pod / Job / JobSet introspection helpers
 #
-# All of them read $LABEL, which is re-pointed at the current step by
-# select_step() before that step is processed.
+# $LABEL is re-pointed at the current step by select_step(); $POD holds the one
+# pod we are currently reading. Pinning a pod name matters during an eviction:
+# the outgoing pod lingers in Terminating while its replacement is created, and
+# a bare `kubectl logs -l <label>` would happily mix the two.
 # ==============================================================================
 LABEL=""
 STEP=""
+POD=""
 
 select_step() {
     STEP="$1"
     LABEL="jobset.sigs.k8s.io/jobset-name=${JOB_NAME},jobset.sigs.k8s.io/replicatedjob-name=${STEP}"
+    POD=""
 }
 
-pod_exists() {
-    [ -n "$(kubectl get pods -l "$LABEL" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]
+# Newest pod of the current step that is not already being deleted.
+current_pod() {
+    kubectl get pods -l "$LABEL" --sort-by=.metadata.creationTimestamp \
+        -o go-template='{{range .items}}{{.metadata.name}}{{"\t"}}{{if .metadata.deletionTimestamp}}deleting{{else}}live{{end}}{{"\n"}}{{end}}' \
+        2>/dev/null | awk -F'\t' '$2 == "live" { name = $1 } END { if (name != "") print name }' || true
+}
+
+# True once the pinned pod is gone or has been marked for deletion, i.e. the
+# stream we were following will never produce anything again.
+pod_lost() {
+    if [ -z "$POD" ]; then
+        return 0
+    fi
+    local state
+    state="$(kubectl get pod "$POD" \
+        -o go-template='{{if .metadata.deletionTimestamp}}deleting{{else}}live{{end}}' 2>/dev/null || true)"
+    [ "$state" != "live" ]
 }
 
 pod_phase() {
-    kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true
+    if [ -z "$POD" ]; then
+        return 0
+    fi
+    kubectl get pod "$POD" -o jsonpath='{.status.phase}' 2>/dev/null || true
 }
 
 pod_terminal() {
     case "$(pod_phase)" in
-        Succeeded|Failed|"") return 0 ;;
+        Succeeded|Failed) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -290,19 +323,22 @@ pod_terminal() {
 # Container names straight from the Pod spec: init containers first (in the
 # order they run), then the regular containers.
 pod_init_containers() {
-    kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].spec.initContainers[*].name}' 2>/dev/null || true
+    kubectl get pod "$POD" -o jsonpath='{.spec.initContainers[*].name}' 2>/dev/null || true
 }
 
 pod_main_containers() {
-    kubectl get pods -l "$LABEL" -o jsonpath='{.items[0].spec.containers[*].name}' 2>/dev/null || true
+    kubectl get pod "$POD" -o jsonpath='{.spec.containers[*].name}' 2>/dev/null || true
 }
 
 # Read one status field of a container, regardless of whether it is an init
 # container or a regular one (only one of the two lookups can ever match).
 container_field() {
     local name="$1" field="$2"
-    kubectl get pods -l "$LABEL" -o \
-        jsonpath="{.items[0].status.initContainerStatuses[?(@.name=='${name}')].${field}}{.items[0].status.containerStatuses[?(@.name=='${name}')].${field}}" \
+    if [ -z "$POD" ]; then
+        return 0
+    fi
+    kubectl get pod "$POD" -o \
+        jsonpath="{.status.initContainerStatuses[?(@.name=='${name}')].${field}}{.status.containerStatuses[?(@.name=='${name}')].${field}}" \
         2>/dev/null || true
 }
 
@@ -316,6 +352,43 @@ container_started() {
 
 container_exit_code() {
     container_field "$1" 'state.terminated.exitCode'
+}
+
+# --- Job / JobSet: the only sources that survive a pod being destroyed ---
+#
+# A pod can vanish for reasons that have nothing to do with the test finishing
+# (Kueue preemption, TAS node failures, Job backoff). The step's Job condition
+# is what actually says "this step is over".
+job_condition() {
+    kubectl get jobs -l "$LABEL" \
+        -o jsonpath="{.items[0].status.conditions[?(@.type=='$1')].status}" 2>/dev/null || true
+}
+
+job_complete()  { [ "$(job_condition Complete)" = "True" ]; }
+job_failed()    { [ "$(job_condition Failed)" = "True" ]; }
+job_suspended() { [ "$(job_condition Suspended)" = "True" ]; }
+step_finished() { job_complete || job_failed; }
+
+job_state() {
+    if job_complete; then
+        printf 'Complete'
+    elif job_failed; then
+        printf 'Failed'
+    elif job_suspended; then
+        printf 'Suspended'
+    else
+        printf 'Running'
+    fi
+}
+
+jobset_exists() {
+    [ -n "$(kubectl get jobset "$JOB_NAME" -o jsonpath='{.metadata.name}' 2>/dev/null)" ]
+}
+
+# JobSet-wide brake: once the JobSet itself is Failed, no replacement pod is
+# ever coming for any step.
+jobset_failed() {
+    [ "$(kubectl get jobset "$JOB_NAME" -o jsonpath='{.status.terminalState}' 2>/dev/null || true)" = "Failed" ]
 }
 
 # The container whose exit code decides the step's result: the conventional
@@ -409,10 +482,10 @@ summary() {
 # ==============================================================================
 # Per-step setup
 # ==============================================================================
-# Fills MAIN_CONTAINER / INIT_CONTAINERS / MAIN_CONTAINERS / TARGETS for the
-# step selected by select_step(). Returns 1 if the pod does not exist.
+# Fills MAIN_CONTAINER / INIT_CONTAINERS / MAIN_CONTAINERS / TARGETS from the
+# pod currently pinned in $POD. Returns 1 when there is no live pod.
 resolve_step_containers() {
-    if ! pod_exists; then
+    if [ -z "$POD" ]; then
         return 1
     fi
     INIT_CONTAINERS="$(pod_init_containers)"
@@ -438,21 +511,48 @@ resolve_step_containers() {
     exit 2
 }
 
-# Waits for the step's pod, counting the timeout only from the moment the step
-# is reached (earlier steps may legitimately run for hours before this one).
+# Waits for the step's pod and pins it in $POD.
+#
+# Exit codes:
+#   0 - a live pod is available
+#   1 - timed out (or the JobSet vanished)
+#   2 - the step already finished and its pod has been reclaimed
+#
+# The timeout is only counted from the moment the step is reached, and it is not
+# counted at all while the Job is Suspended: with Kueue a workload can sit in the
+# queue for far longer than WAIT_TIMEOUT before it is admitted.
 wait_for_step_pod() {
-    if pod_exists; then
+    POD="$(current_pod)"
+    if [ -n "$POD" ]; then
         return 0
     fi
-    echo "⏳ Waiting for the ${STEP} pod (timeout ${WAIT_TIMEOUT}s)..."
-    local waited=0
-    while ! pod_exists; do
-        if [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
+    if step_finished; then
+        return 2
+    fi
+
+    echo "⏳ Waiting for the ${STEP} pod (timeout ${WAIT_TIMEOUT}s; time spent Suspended in the queue is not counted)..."
+    local waited=0 announced_suspend=false
+    while [ -z "$POD" ]; do
+        if job_suspended; then
+            if [ "$announced_suspend" = false ]; then
+                echo "   ⏸️  Job is Suspended (queued / requeued by Kueue) -- waiting without a deadline."
+                announced_suspend=true
+            fi
+            waited=0
+        elif [ "$waited" -ge "$WAIT_TIMEOUT" ]; then
             echo "❌ Error: timed out waiting for the ${STEP} pod." >&2
+            return 1
+        fi
+        if ! jobset_exists; then
+            echo "❌ Error: JobSet '${JOB_NAME}' disappeared while waiting for the ${STEP} pod." >&2
             return 1
         fi
         sleep 2
         waited=$((waited + 2))
+        POD="$(current_pod)"
+        if [ -z "$POD" ] && step_finished; then
+            return 2
+        fi
     done
     return 0
 }
@@ -460,58 +560,110 @@ wait_for_step_pod() {
 # ==============================================================================
 # Streaming
 # ==============================================================================
-# Streams ONE container until that container terminates.
+# Streams ONE container until that container terminates for good.
 #
-# Two things the previous single-container version got wrong and that matter a
-# lot once init containers are involved:
-#   1. The retry loop used to exit only when the whole Pod reached a terminal
-#      phase. An init container finishes long before that, so `kubectl logs -f`
-#      returned immediately and the same log got re-appended every 2s forever.
-#      We now poll the *container's own* terminated state.
-#   2. `kubectl logs` fails with "is waiting to start: PodInitializing" until
-#      the container actually starts, and that error used to be teed into the
-#      log file on every retry. We now wait for the container to start first
-#      and keep stderr out of the file.
+# Three things matter here:
+#   1. An init container finishes long before the Pod reaches a terminal phase,
+#      so the retry loop polls the *container's own* terminated state instead of
+#      the Pod phase. Otherwise `kubectl logs -f` returns immediately once the
+#      init container is done and the same log gets re-appended every 2s.
+#   2. `kubectl logs` fails with "is waiting to start: PodInitializing" until the
+#      container actually starts, and that error must not be teed into the log
+#      file, hence the wait-for-start phase and the discarded stderr.
+#   3. The Pod can be destroyed and recreated underneath us -- Kueue preemption,
+#      TAS node failures ("Workload eviction triggered due to ... node
+#      failures"), or a Job backoff restart. That is NOT the end of the run: the
+#      JobSet gets suspended, requeued and resumed minutes later with a brand
+#      new Pod. We therefore re-attach to the replacement Pod and keep going,
+#      and only stop when the step's Job reports Complete/Failed (or the JobSet
+#      as a whole fails / disappears).
+stream_once() {
+    local container="$1" outfile="$2" tag="$3" color="$4"
+    if [ -n "$tag" ]; then
+        kubectl logs "$POD" -c "$container" --tail=-1 -f 2>/dev/null \
+            | tee -a "$outfile" \
+            | awk -v col="$color" -v tag="$tag" -v rst="$CLR_RESET" \
+                '{ printf "%s[%-16s]%s %s\n", col, tag, rst, $0; fflush() }' || true
+    else
+        kubectl logs "$POD" -c "$container" --tail=-1 -f 2>/dev/null \
+            | tee -a "$outfile" || true
+    fi
+}
+
+# Records a pod replacement both on screen and inside the log file, so the file
+# never silently mixes the output of two different pods.
+note_pod_replacement() {
+    local container="$1" outfile="$2" attempt="$3" old_pod="$4"
+    local ts marker suffix=""
+    ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    if job_suspended; then
+        suffix=", job is Suspended -- evicted/requeued (Kueue)"
+    fi
+    marker="===== [tee] ${STEP}/${container}: pod ${old_pod} disappeared${suffix}; waiting for its replacement (attempt ${attempt}, ${ts}) ====="
+    printf '%s\n' "$marker" >> "$outfile"
+    echo "⚠️  $marker" >&2
+}
+
 stream_container() {
     local container="$1"
     local outfile="$2"
     local tag="$3"     # empty => no prefix, print raw to stdout
     local color="$4"
+    local attempt=1 old_pod=""
 
     : > "$outfile"
 
-    # Phase 1: wait until the container starts (or is already done).
-    while ! container_started "$container" && ! container_terminated "$container"; do
-        if pod_terminal; then
-            break
-        fi
-        sleep 2
-    done
-
-    # Phase 2: stream until THIS container terminates.
     while true; do
-        if [ -n "$tag" ]; then
-            kubectl logs -l "$LABEL" -c "$container" --tail=-1 -f 2>/dev/null \
-                | tee -a "$outfile" \
-                | awk -v col="$color" -v tag="$tag" -v rst="$CLR_RESET" \
-                    '{ printf "%s[%-16s]%s %s\n", col, tag, rst, $0; fflush() }' || true
-        else
-            kubectl logs -l "$LABEL" -c "$container" --tail=-1 -f 2>/dev/null \
-                | tee -a "$outfile" || true
-        fi
+        # --- Attach: make sure we are pinned to a live pod of this step. ---
+        POD="$(current_pod)"
+        while [ -z "$POD" ]; do
+            # No pod: either the step is genuinely over, or it is being
+            # rescheduled. Only the Job / JobSet can tell us which.
+            if step_finished || jobset_failed || ! jobset_exists; then
+                return 0
+            fi
+            sleep 3
+            POD="$(current_pod)"
+        done
 
-        if container_terminated "$container" || pod_terminal; then
-            break
+        # Phase 1: wait until the container starts (or is already done).
+        while ! container_started "$container" && ! container_terminated "$container"; do
+            if pod_lost || pod_terminal; then
+                break
+            fi
+            sleep 2
+        done
+
+        # Phase 2: stream until THIS container terminates, or the pod vanishes.
+        while true; do
+            stream_once "$container" "$outfile" "$tag" "$color"
+            if container_terminated "$container"; then
+                return 0
+            fi
+            if pod_lost; then
+                break
+            fi
+            if pod_terminal; then
+                return 0
+            fi
+            sleep 2
+        done
+
+        # --- The pod we were pinned to is gone. ---
+        if step_finished || jobset_failed || ! jobset_exists; then
+            return 0
         fi
-        sleep 2
+        old_pod="$POD"
+        attempt=$((attempt + 1))
+        note_pod_replacement "$container" "$outfile" "$attempt" "$old_pod"
+        POD=""
     done
-    return 0
 }
 
 dump_container() {
     local container="$1"
     local outfile="$2"
-    kubectl logs -l "$LABEL" -c "$container" --tail=-1 > "$outfile" 2>&1 || true
+    kubectl logs "$POD" -c "$container" --tail=-1 > "$outfile" 2>&1 || true
 }
 
 # The container whose result we report: in 'all' mode that is the main
@@ -524,6 +676,26 @@ exit_target() {
     fi
 }
 
+# Result of the current step, most precise source first:
+#   1. the container's own terminated.exitCode (needs the pod to still exist);
+#   2. the step's Job condition (survives pod deletion / Kueue requeue);
+#   3. nothing -- the caller reports "unknown" and treats it as a failure.
+step_exit_code() {
+    local target="$1" code=""
+    if [ -n "$POD" ] && [ -n "$target" ]; then
+        code="$(container_exit_code "$target")"
+    fi
+    if [ -n "$code" ]; then
+        printf '%s' "$code"
+        return 0
+    fi
+    if job_complete; then
+        printf '0'
+    elif job_failed; then
+        printf '1'
+    fi
+}
+
 step_banner() {
     local idx="$1"
     echo ""
@@ -531,7 +703,8 @@ step_banner() {
     echo " ⚡ TPU Testcase Log Streamer & Tee Utility"
     echo " Step        : [${idx}/${TOTAL_STEPS}] ${STEP}"
     echo " JobSet Name : ${JOB_NAME}"
-    echo " Pod Phase   : $(pod_phase)"
+    echo " Pod / Phase : ${POD:-none} ($(pod_phase))"
+    echo " Job State   : $(job_state)"
     echo " Mode        : $([ "$FOLLOW" = true ] && echo stream || echo dump) (container: ${CONTAINER})"
     echo " Target Logs :"
     local c
@@ -547,11 +720,13 @@ step_banner() {
 if [ "$LIST_ONLY" = true ]; then
     for STEP_NAME in "${STEPS[@]}"; do
         select_step "$STEP_NAME"
-        echo "Containers of ${JOB_NAME} (step: ${STEP_NAME}):"
-        if ! pod_exists; then
-            echo "  (pod not created yet)"
+        POD="$(current_pod)"
+        echo "Containers of ${JOB_NAME} (step: ${STEP_NAME}, job: $(job_state)):"
+        if [ -z "$POD" ]; then
+            echo "  (no live pod)"
             continue
         fi
+        echo "  pod: ${POD}"
         INIT_CONTAINERS="$(pod_init_containers)"
         MAIN_CONTAINERS="$(pod_main_containers)"
         MAIN_CONTAINER="$(pick_main_container "$MAIN_CONTAINERS")"
@@ -570,7 +745,7 @@ if [ "$LIST_ONLY" = true ]; then
 fi
 
 # ==============================================================================
-# --- DUMP MODE: one-shot snapshot of every step that already has a pod ---
+# --- DUMP MODE: one-shot snapshot of every step that still has a live pod ---
 # ==============================================================================
 if [ "$FOLLOW" = false ]; then
     trap summary EXIT INT TERM
@@ -580,8 +755,9 @@ if [ "$FOLLOW" = false ]; then
     for STEP_NAME in "${STEPS[@]}"; do
         STEP_IDX=$((STEP_IDX + 1))
         select_step "$STEP_NAME"
+        POD="$(current_pod)"
         if ! resolve_step_containers; then
-            echo "⏭️  Step '${STEP_NAME}' has no pod yet, skipping."
+            echo "⏭️  Step '${STEP_NAME}' has no live pod (job: $(job_state)), skipping."
             continue
         fi
         step_banner "$STEP_IDX"
@@ -592,15 +768,15 @@ if [ "$FOLLOW" = false ]; then
         done
         DUMPED=$((DUMPED + 1))
         TARGET="$(exit_target)"
-        CODE="$(container_exit_code "$TARGET")"
-        echo "🏁 ${STEP_NAME}/${TARGET} exit code: ${CODE:-unknown} (pod phase: $(pod_phase))"
+        CODE="$(step_exit_code "$TARGET")"
+        echo "🏁 ${STEP_NAME}/${TARGET} exit code: ${CODE:-unknown} (job: $(job_state))"
         if [ -z "$FIRST_FAILURE" ] && [ "${CODE:-1}" -ne 0 ]; then
             FIRST_FAILURE="${CODE:-1}"
         fi
     done
 
     if [ "$DUMPED" -eq 0 ]; then
-        echo "❌ Error: none of the steps of '${JOB_NAME}' has a pod to snapshot." >&2
+        echo "❌ Error: none of the steps of '${JOB_NAME}' has a live pod to snapshot." >&2
         exit 1
     fi
     exit "${FIRST_FAILURE:-0}"
@@ -628,39 +804,54 @@ for STEP_NAME in "${STEPS[@]}"; do
     STEP_IDX=$((STEP_IDX + 1))
     select_step "$STEP_NAME"
 
-    if ! wait_for_step_pod; then
+    WAIT_RC=0
+    wait_for_step_pod || WAIT_RC=$?
+    if [ "$WAIT_RC" -eq 1 ]; then
         exit 1
     fi
-    resolve_step_containers
-    step_banner "$STEP_IDX"
 
-    for c in $TARGETS; do
-        WRITTEN_LOGS+=("$(log_path_for "$c")")
-    done
+    TARGET=""
+    if [ "$WAIT_RC" -eq 0 ]; then
+        resolve_step_containers
+        step_banner "$STEP_IDX"
 
-    if [ "$CONTAINER" != "all" ]; then
-        # Single container: plain, untagged output in the foreground.
-        echo "📡 Streaming & teeing ${STEP_NAME}/${CONTAINER} -> $(basename "$(log_path_for "$CONTAINER")")..."
-        stream_container "$CONTAINER" "$(log_path_for "$CONTAINER")" "" ""
-    else
-        # All containers concurrently, each tagged with its own color and file.
-        echo "📺 Streaming ${STEP_NAME}: ${TARGETS} concurrently (Ctrl+C to stop)..."
-        PIDS=()
-        i=0
         for c in $TARGETS; do
-            color="${PALETTE[$(( i % ${#PALETTE[@]} ))]}"
-            stream_container "$c" "$(log_path_for "$c")" "$c" "$color" &
-            PIDS+=("$!")
-            i=$((i + 1))
+            WRITTEN_LOGS+=("$(log_path_for "$c")")
         done
-        wait ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
-        PIDS=()
+
+        if [ "$CONTAINER" != "all" ]; then
+            # Single container: plain, untagged output in the foreground.
+            echo "📡 Streaming & teeing ${STEP_NAME}/${CONTAINER} -> $(basename "$(log_path_for "$CONTAINER")")..."
+            stream_container "$CONTAINER" "$(log_path_for "$CONTAINER")" "" ""
+        else
+            # All containers concurrently, each tagged with its own color and file.
+            echo "📺 Streaming ${STEP_NAME}: ${TARGETS} concurrently (Ctrl+C to stop)..."
+            PIDS=()
+            i=0
+            for c in $TARGETS; do
+                color="${PALETTE[$(( i % ${#PALETTE[@]} ))]}"
+                stream_container "$c" "$(log_path_for "$c")" "$c" "$color" &
+                PIDS+=("$!")
+                i=$((i + 1))
+            done
+            wait ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null || true
+            PIDS=()
+        fi
+        TARGET="$(exit_target)"
+    else
+        # WAIT_RC == 2: the step finished before we got here and its pod has
+        # already been reclaimed, so there is nothing left to stream.
+        echo ""
+        echo "⏭️  Step [${STEP_IDX}/${TOTAL_STEPS}] '${STEP_NAME}' already finished and its pod is gone; nothing to stream."
     fi
 
-    TARGET="$(exit_target)"
-    CODE="$(container_exit_code "$TARGET")"
+    # The pod we streamed may have been replaced or deleted in the meantime, so
+    # re-pin before reading the result.
+    POD="$(current_pod)"
+    CODE="$(step_exit_code "$TARGET")"
+    PHASE="$(pod_phase)"
     echo ""
-    echo "🏁 Step [${STEP_IDX}/${TOTAL_STEPS}] '${STEP_NAME}' -> ${TARGET} exit code: ${CODE:-unknown} (pod phase: $(pod_phase))"
+    echo "🏁 Step [${STEP_IDX}/${TOTAL_STEPS}] '${STEP_NAME}' -> ${TARGET:-job status} exit code: ${CODE:-unknown} (pod phase: ${PHASE:-none}, job: $(job_state))"
     if [ "${CODE:-1}" -ne 0 ]; then
         echo "❌ Step '${STEP_NAME}' failed! Aborting the remaining steps." >&2
         exit "${CODE:-1}"
