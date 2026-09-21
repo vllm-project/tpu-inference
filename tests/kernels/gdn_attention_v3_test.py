@@ -319,6 +319,16 @@ class GDNAttentionTest(parameterized.TestCase):
             distribution=[64, 64, 64],
         ),
         dict(
+            # 15 tokens => mixed_tile_size == 15, an odd chunk. The block
+            # forward-substitution in `solve_triangular` splits the chunk in
+            # half, and the two halves are not the same length here.
+            testcase_name="prefill_odd_tokens",
+            max_reqs=2,
+            lengths=[9, 6],
+            q_loc=[0, 9, 15],
+            distribution=[0, 2, 2],
+        ),
+        dict(
             testcase_name="prefill_fused",
             max_reqs=1,
             lengths=[8192],
@@ -444,6 +454,120 @@ class GDNAttentionTest(parameterized.TestCase):
                                    new_states_ref[1],
                                    rtol=2e-2,
                                    atol=2e-2)
+
+    @parameterized.named_parameters(
+        dict(
+            testcase_name="prefill_only",
+            lengths=[256, 128, 128],
+            q_loc=[0, 256, 384, 512],
+            distribution=[0, 3, 3],
+            has_decode_seqs=False,
+            has_prefill_seqs=True,
+            bit_identical=True,
+        ),
+        dict(
+            testcase_name="prefill_with_1token_seqs",
+            lengths=[1, 1, 128],
+            q_loc=[0, 1, 2, 130],
+            distribution=[2, 2, 3],
+            has_decode_seqs=False,
+            has_prefill_seqs=True,
+            bit_identical=False,
+        ),
+        dict(
+            testcase_name="decode_only",
+            lengths=[1] * 64,
+            q_loc=list(range(65)),
+            distribution=[64, 64, 64],
+            has_decode_seqs=True,
+            has_prefill_seqs=False,
+            bit_identical=True,
+        ),
+    )
+    def test_segment_hints_match_unhinted(self, lengths, q_loc, distribution,
+                                          has_decode_seqs, has_prefill_seqs,
+                                          bit_identical):
+        """Dropping the launch for an empty segment must change nothing.
+
+        Under prefill/decode disaggregation a worker declares statically that
+        one of the two batch segments is always empty, and the kernel for it is
+        not emitted. This must be bit-identical to emitting it, *including* the
+        state cache slots that neither kernel writes: those have to survive
+        in place, which is exactly what a `jax.lax.cond` around the
+        `pallas_call` would break by dropping `input_output_aliases`.
+        """
+        kq_head_dim = 128
+        v_head_dim = 128
+        n_kq = 2
+        n_v = 8
+        kernel_size = 4
+        max_reqs = len(lengths)
+        num_tokens = sum(lengths)
+        num_blocks = max_reqs + 1
+
+        rngs = iter(jax.random.split(jax.random.key(3), 12))
+        dim = n_kq * kq_head_dim * 2 + n_v * v_head_dim
+
+        # Seed the caches with noise rather than zeros so that a slot which is
+        # wrongly left uninitialized shows up as a mismatch.
+        common_kwargs = dict(
+            qkv=jax.random.normal(next(rngs), (num_tokens, dim)),
+            b=jax.random.normal(next(rngs), (num_tokens, n_v)),
+            a=jax.random.normal(next(rngs), (num_tokens, n_v)),
+            conv_state=jax.random.normal(next(rngs),
+                                         (num_blocks, kernel_size - 1, dim)),
+            recurrent_state=jax.random.normal(
+                next(rngs), (num_blocks, n_v, kq_head_dim, v_head_dim)),
+            conv_weight=jax.random.normal(next(rngs), (dim, 1, kernel_size)),
+            conv_bias=jax.random.normal(next(rngs), (dim, )),
+            a_log=jax.random.normal(next(rngs), (n_v, )),
+            dt_bias=jax.random.normal(next(rngs), (n_v, )),
+            query_start_loc=jnp.array(q_loc),
+            state_indices=jnp.arange(1, max_reqs + 1),
+            distribution=jnp.array(distribution, dtype=jnp.int32),
+            seq_lens=jnp.asarray(jnp.array(q_loc)[1:max_reqs + 1] -
+                                 jnp.array(q_loc)[:max_reqs],
+                                 dtype=jnp.int32),
+            read_state_indices=jnp.arange(1, max_reqs + 1),
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=kq_head_dim,
+            d_v=v_head_dim,
+            kernel_size=kernel_size,
+        )
+
+        jitted = jax.jit(
+            wrapper.fused_conv1d_gdn,
+            static_argnames=[
+                "n_kq", "n_v", "d_k", "d_v", "kernel_size", "has_decode_seqs",
+                "has_prefill_seqs"
+            ],
+        )
+
+        both_states, both_out = jitted(**common_kwargs)
+        hinted_states, hinted_out = jitted(
+            **common_kwargs,
+            has_decode_seqs=has_decode_seqs,
+            has_prefill_seqs=has_prefill_seqs,
+        )
+
+        if bit_identical:
+            np.testing.assert_array_equal(hinted_out, both_out)
+            np.testing.assert_array_equal(hinted_states[0], both_states[0])
+            np.testing.assert_array_equal(hinted_states[1], both_states[1])
+        else:
+            np.testing.assert_allclose(hinted_out,
+                                       both_out,
+                                       rtol=1e-2,
+                                       atol=1e-2)
+            np.testing.assert_allclose(hinted_states[0],
+                                       both_states[0],
+                                       rtol=1e-2,
+                                       atol=1e-2)
+            np.testing.assert_allclose(hinted_states[1],
+                                       both_states[1],
+                                       rtol=1e-2,
+                                       atol=1e-2)
 
     @parameterized.named_parameters(
         dict(
