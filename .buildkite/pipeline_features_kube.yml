@@ -1,0 +1,1041 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The feature-matrix suites on the Kueue fleet: every TPU step under
+# features/ that a v6e shape can run. Step keys match the bare-metal files' so
+# the lanes read side by side.
+#
+# features/multi-host.yml is not here: its two steps are fixed to
+# tpu_v7x_16_queue, and a two-host v7x slice is not a v6e shape. Five more files
+# have no TPU step to migrate at all - their work sits on cpu behind a TODO.
+#
+# Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
+# profile registry in ci-infra; a step names only a shape and a command.
+#
+# Everything uploads as one file because build_docker_kube's key is not
+# parameterised: two uploads into the same build collide on it.
+#
+# Do not add a pipeline-level `env:` block: a name set there wins over one
+# passed to `bk build create --env` and could no longer be overridden per
+# build.
+
+x-shape-single: &shape_single "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
+
+# Carries the launcher and the service account that may submit a workload.
+# Repeated per step rather than merged in, because a step's `plugins:` is a list
+# and a YAML merge key would replace it wholesale.
+x-kube-plugin: &kube_plugin
+  kubernetes:
+    podTemplate: tpu-launcher
+
+# The timeout covers queueing for chips as well as running, so it is sized to
+# the fleet's worst case; a hung test is bounded by activeDeadlineSeconds.
+.tpu_step: &tpu_step
+  depends_on: "build_docker_kube"
+  timeout_in_minutes: 1440
+  agents:
+    queue: "kube"
+  plugins:
+    - *kube_plugin
+
+steps:
+  # Publishes the tag it pushed as `ci-image` metadata, which run.sh reads back.
+  # Exits early when the build names its own image; Buildkite treats a
+  # satisfied-but-skipped dependency as met, so the TPU steps still run.
+  - label: ":docker: Build and push CI image"
+    key: "build_docker_kube"
+    timeout_in_minutes: 90
+    agents:
+      queue: "cpu_64_core"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      # This pipeline and pipeline_build.yml write the same tag for the same
+      # commit, so their build args must match or whichever pushes second
+      # replaces the image with one missing google-cloud-cli.
+      BM_INFRA: "true"
+    commands:
+      - |
+        if [[ -n "$${CI_IMAGE:-}" ]]; then
+          buildkite-agent meta-data set ci-image "$$CI_IMAGE"
+          exit 0
+        fi
+        # setup_docker_env.sh refuses to build without VLLM_COMMIT_HASH, and
+        # bootstrap.sh - which sets it for the pipelines it uploads - is not in
+        # the path of this one.
+        source .buildkite/scripts/configs/pipeline_config.sh
+        VLLM_COMMIT_HASH="$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
+        buildkite-agent meta-data set "VLLM_COMMIT_HASH" "$$VLLM_COMMIT_HASH"
+        source .buildkite/scripts/setup_docker_env.sh
+        setup_environment "vllm-tpu" "false" "true"
+        buildkite-agent meta-data set ci-image "$$EXPORTED_CI_CACHE_IMAGE"
+
+  # The bare-metal files mark every test soft_fail so the record step after it
+  # is still reached. That is not needed here: allow_failure on the record
+  # step's own dependency reaches it just the same, and `buildkite-agent step
+  # get outcome` reports hard_failed where it used to report soft_failed, which
+  # record_step_result.sh already treats alike. The build goes red either way -
+  # the recorder exits non-zero on anything but a pass - but the test itself now
+  # reads as failed rather than tolerated, which is the question this lane asks.
+  #
+  # Eight chips, because the offload tests shard across a whole node.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_V6E8_QUEUE: "True"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "KV Cache Offload"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_V6E8_QUEUE: "True"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "KV Cache Offload"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest
+
+  # ---- Collective_Communication_Matmul ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/kernels/collectives/all_gather_matmul_kernel_test.py"
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Collective Communication Matmul"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest"
+
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_CorrectnessTest"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - "buildkite-agent meta-data set \"${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest\" \"unverified\""
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Collective Communication Matmul"
+    key: "${TPU_VERSION:-tpu6e}_record_Collective_Communication_Matmul_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Collective Communication Matmul"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "kernel support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_PerformanceTest"
+  # ---- DCN-Based_P-D_disaggregation ----
+  #
+  # Not run_disagg.sh, which the bare-metal file calls: that builds an image,
+  # reads Secret Manager and sudo's. The fleet's counterpart is
+  # kubernetes/disagg_multi_host.sh, which brings the same two engines up as
+  # processes and which the jax lane already runs for the benchmark half. Its
+  # correctness half is what TEST_MODE selects.
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: "100"
+      OUTPUT_LEN: "20"
+      NUM_PROMPTS: "20"
+      TEST_MODE: "2"
+    # Exit 75 is disagg_multi_host.sh saying the TPU runtime refused to open
+    # a session - never that the test failed - and it exits so expecting one
+    # retry, as the jax lane gives it.
+    retry:
+      automatic:
+        - exit_status: 75
+          limit: 1
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/disagg_multi_host.sh
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "DCN-based P/D disaggregation"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      MODEL: "Qwen/Qwen3-0.6B"
+      INPUT_LEN: "1024"
+      OUTPUT_LEN: "1024"
+      NUM_PROMPTS: "20"
+      RANDOM_SEED: "10"
+      MAX_CONCURRENCY: "10"
+      TEST_MODE: "1"
+    # Exit 75 is disagg_multi_host.sh saying the TPU runtime refused to open
+    # a session - never that the test failed - and it exits so expecting one
+    # retry, as the jax lane gives it.
+    retry:
+      automatic:
+        - exit_status: 75
+          limit: 1
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/disagg_multi_host.sh
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for DCN-based P/D disaggregation"
+    key: "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "DCN-based P/D disaggregation"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest
+
+  # ---- Hybrid_kvcache ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for hybrid kv cache allocation"
+    key: "${TPU_VERSION:-tpu6e}_hybrid_kvcache_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache \
+          /workspace/tpu_inference/tests/e2e/test_hybrid_kvcache.py::test_hybrid_kv_cache_correctness
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for hybrid kv cache allocation"
+    key: "${TPU_VERSION:-tpu6e}_record_hybrid_kvcache_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_hybrid_kvcache_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "hybrid kv cache"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_hybrid_kvcache_CorrectnessTest"
+  # ---- LoRA_Torch ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for LoRA_Torch"
+    key: "${TPU_VERSION:-tpu6e}_LoRA_Torch_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py'
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for LoRA_Torch"
+    key: "${TPU_VERSION:-tpu6e}_record_LoRA_Torch_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_LoRA_Torch_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "LoRA_Torch"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_LoRA_Torch_CorrectnessTest"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for LoRA_Torch"
+    key: "${TPU_VERSION:-tpu6e}_LoRA_Torch_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_LoRA_Torch_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'MODEL_IMPL_TYPE=vllm TPU_BACKEND_TYPE=jax python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora_perf.py'
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for LoRA_Torch"
+    key: "${TPU_VERSION:-tpu6e}_record_LoRA_Torch_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_LoRA_Torch_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "LoRA_Torch"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_LoRA_Torch_PerformanceTest"
+  # ---- Multimodal_Inputs ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Multimodal Inputs"
+    key: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_multi_modal_inference.py"
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Multimodal Inputs"
+    key: "${TPU_VERSION:-tpu6e}_record_Multimodal_Inputs_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Multimodal Inputs"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Multimodal_Inputs_CorrectnessTest"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Multimodal Inputs"
+    key: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_Multimodal_Inputs_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench.sh"
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Multimodal Inputs"
+    key: "${TPU_VERSION:-tpu6e}_record_Multimodal_Inputs_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Multimodal Inputs"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Multimodal_Inputs_PerformanceTest"
+  # ---- Out_Of_Tree_Model_Support ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_register_model_success \
+          /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_registered_model_passes_vllm_interface_check
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Out-of-tree model support"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_model_loader.py::test_flax_nnx_vs_vllm_performance
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Out-of-tree model support"
+    key: "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Out-of-tree model support"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
+  # ---- Speculative_Decoding-_DFlash ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: DFlash"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          echo "DFlash on the vllm (torchax) path is not integrated yet:" \
+               "DFlashTorchaxProposer is not wired into the runner and the" \
+               "generic torchax draft step does not match the vLLM DFlash" \
+               "model contract. Recording as unverified."
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_CorrectnessTest" "unverified"
+        else
+          .buildkite/kubernetes/run.sh \
+            python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_dflash_correctness
+        fi
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Speculative Decoding: DFlash"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_DFlash_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Speculative Decoding: DFlash"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_CorrectnessTest"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: DFlash"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_DFlash_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          echo "DFlash on the vllm (torchax) path is not integrated yet." \
+               "Recording as unverified."
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_PerformanceTest" "unverified"
+        else
+          .buildkite/kubernetes/run.sh \
+            python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_dflash_performance
+        fi
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Speculative Decoding: DFlash"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_DFlash_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Speculative Decoding: DFlash"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_PerformanceTest"
+  # ---- Speculative_Decoding-_Eagle3 ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_correctness
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Speculative Decoding: Eagle3"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_eagle3_performance
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Speculative Decoding: Eagle3"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Speculative Decoding: Eagle3"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
+  # ---- Speculative_Decoding-_Ngram ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_greedy \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_correctness_random
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Ngram_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Speculative Decoding: Ngram"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Ngram_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_greedy \
+          /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py::test_ngram_performance_random
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Speculative Decoding: Ngram"
+    key: "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Ngram_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Speculative Decoding: Ngram"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_PerformanceTest"
+  # ---- Step_Pooling_Embedding ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Step Pooling (Embedding)"
+    key: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_step_pooling.py"
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for Step Pooling (Embedding)"
+    key: "${TPU_VERSION:-tpu6e}_record_Step_Pooling_Embedding_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Step Pooling (Embedding)"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_CorrectnessTest"
+
+  - label: "${TPU_VERSION:-tpu6e} Performance tests for Step Pooling (Embedding)"
+    key: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_PerformanceTest"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Step_Pooling_Embedding_CorrectnessTest"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - "buildkite-agent meta-data set \"${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_PerformanceTest\" \"unverified\""
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for Step Pooling (Embedding)"
+    key: "${TPU_VERSION:-tpu6e}_record_Step_Pooling_Embedding_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Step Pooling (Embedding)"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_PerformanceTest"
+  # ---- Structured_Decoding ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for structured_decoding"
+    key: "${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_structured_decoding.py::test_structured_decoding"
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for structured_decoding"
+    key: "${TPU_VERSION:-tpu6e}_record_structured_decoding_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "structured_decoding"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
+  # ---- async_scheduler ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_async_scheduler.py::test_async_correctness"
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "async scheduler"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
+    depends_on:
+      - "build_docker_kube"
+      - "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_async_scheduler.py::test_performance"
+
+  - label: "${TPU_VERSION:-tpu6e} Record performance test result for async scheduler"
+    key: "${TPU_VERSION:-tpu6e}_record_async_scheduler_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "async scheduler"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
+  # ---- runai_model_streamer_loader ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor"
+
+  - label: "${TPU_VERSION:-tpu6e} Record Result | Runai Model Streamer JAX UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_record_runai_model_streamer_loader_jax_uniproc"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "runai_model_streamer_loader"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_uni_proc_executor"
+
+  - label: "${TPU_VERSION:-tpu6e} Record Result | Runai Model Streamer Torchax UniProcExecutor"
+    key: "${TPU_VERSION:-tpu6e}_record_runai_model_streamer_loader_torchax_uniproc"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "runai_model_streamer_loader"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
+    key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor"
+
+  - label: "${TPU_VERSION:-tpu6e} Record Result | Runai Model Streamer Torchax RayDistributedExecutor"
+    key: "${TPU_VERSION:-tpu6e}_record_runai_model_streamer_loader_torchax_ray_distributed"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "runai_model_streamer_loader"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
+  # ---- sampling_params ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for sampling_params"
+    key: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
+    depends_on: "build_docker_kube"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_sampling_params.py"
+
+  - label: "${TPU_VERSION:-tpu6e} Record correctness test result for sampling_params"
+    key: "${TPU_VERSION:-tpu6e}_record_sampling_params_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "sampling_params"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
