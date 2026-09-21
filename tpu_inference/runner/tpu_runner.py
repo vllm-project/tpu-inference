@@ -34,6 +34,8 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
+    get_routed_experts_attn_gid
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
@@ -63,7 +65,8 @@ from tpu_inference.layers.jax.sample.rejection_sampler import RejectionSampler
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap,
     _jax_logprobs_copy_to_host_async, compute_and_gather_logprobs,
-    compute_prompt_logprobs, distributed_sampling_allowed, sample)
+    compute_prompt_logprobs, distributed_sampling_allowed,
+    logprobs_use_processed_logits, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
@@ -143,16 +146,34 @@ def _compute_active_mask(
     return active_mask
 
 
-def _extract_valid_tokens_host(
-    tokens: np.ndarray,
+def _extract_valid_lengths_host(
+    generated_tokens: np.ndarray,
     eos_token_id: Union[int, List[int], np.ndarray],
-) -> List[int]:
-    """Trim 1D array of generated token IDs at the first EOS token (inclusive)."""
-    is_eos = np.isin(tokens, eos_token_id)
-    eos_indices = np.where(is_eos)[0]
-    if len(eos_indices) > 0:
-        return tokens[:eos_indices[0] + 1].tolist()
-    return tokens.tolist()
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-row valid lengths after trimming at the first EOS, for a whole
+    ``[num_reqs, num_steps]`` decode window.
+
+    Returns ``(lengths, has_eos)``: ``lengths[i]`` is the token count of row
+    ``i`` up to and including its first EOS (or the full row width when the
+    row has none), and ``has_eos[i]`` flags whether the row reached an EOS.
+    A single ``np.isin`` over the window plus one ``argmax`` replaces the
+    per-request ``np.isin`` / ``np.where`` scan that previously ran once per
+    row on the host critical path.
+    """
+    num_reqs, num_steps = (generated_tokens.shape
+                           if generated_tokens.ndim == 2 else (0, 0))
+    # No rows, or zero-width rows: nothing to scan (argmax over an empty axis
+    # would otherwise raise). Every row keeps its (zero) width and hits no EOS.
+    if num_reqs == 0 or num_steps == 0:
+        return (np.zeros(num_reqs,
+                         dtype=np.int64), np.zeros(num_reqs, dtype=bool))
+    is_eos = np.isin(generated_tokens, np.atleast_1d(eos_token_id))
+    has_eos = is_eos.any(axis=1)
+    # argmax returns the first True column, or 0 for rows with no EOS -- those
+    # rows are overwritten with the full width by the where().
+    first_eos_col = is_eos.argmax(axis=1)
+    lengths = np.where(has_eos, first_eos_col + 1, num_steps).astype(np.int64)
+    return lengths, has_eos
 
 
 REASON_EOS_HIT = "eos_hit"
@@ -199,6 +220,7 @@ def _process_continue_decode_outputs(
     enable_return_routed_experts: bool = False,
     requests: Optional[Dict[str, Any]] = None,
     block_size: int = 0,
+    routed_experts_attn_gid: int = 0,
     scheduler_output: Optional["VllmSchedulerOutput"] = None,
     input_batch: Optional[Any] = None,
     max_num_reqs: int = 0,
@@ -262,22 +284,19 @@ def _process_continue_decode_outputs(
     lp_token_ids_list = []
     lp_vals_list = []
     lp_ranks_list = []
-    num_eos_hits = 0
-    eos_arr = np.atleast_1d(eos_token_id)
+    # One vectorized EOS scan for the whole window; the per-request work
+    # below is then a slice + tolist instead of np.isin/np.where per row.
+    valid_lens, has_eos = _extract_valid_lengths_host(generated_tokens_cpu,
+                                                      eos_token_id)
+    num_eos_hits = int(has_eos.sum())
     requests_dict = requests if requests is not None and hasattr(
         requests, "get") else None
 
     for req_idx, req_id in enumerate(req_ids):
         req_state = requests_dict.get(
             req_id) if requests_dict is not None else None
-        tokens = generated_tokens_cpu[req_idx]
-
-        valid_tokens = _extract_valid_tokens_host(tokens, eos_token_id)
-        if len(valid_tokens) < len(tokens) or (valid_tokens and
-                                               valid_tokens[-1] in eos_arr):
-            num_eos_hits += 1
-
-        actual_len = len(valid_tokens)
+        actual_len = int(valid_lens[req_idx])
+        valid_tokens = generated_tokens_cpu[req_idx, :actual_len].tolist()
         sampled_token_ids.append(valid_tokens)
 
         if scheduler_output is not None:
@@ -297,7 +316,7 @@ def _process_continue_decode_outputs(
 
             if (all_expert_indices_cpu is not None and actual_len > 0):
                 slots_arr = _reconstruct_slots_for_request(
-                    req_state,
+                    _block_ids_for_group(req_state, routed_experts_attn_gid),
                     actual_len,
                     block_size,
                     start_pos=req_state.num_computed_tokens)
@@ -376,6 +395,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                  scheduler_output: Optional["VllmSchedulerOutput"] = None,
                  req_ids_dp: Optional[Dict] = None,
                  padded_num_scheduled_tokens_per_dp_rank: int = 0,
+                 routed_experts_block_ids: Optional[Dict[str,
+                                                         List[int]]] = None,
                  runner=None):
         self._model_runner_output = model_runner_output
         self._next_tokens = next_tokens
@@ -390,6 +411,9 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._scheduler_output = scheduler_output
         self._req_ids_dp = req_ids_dp
         self._padded_num_scheduled_tokens_per_dp_rank = padded_num_scheduled_tokens_per_dp_rank
+        # Snapshotted at dispatch: `runner.requests` may no longer hold these
+        # requests by the time `get_output` runs.
+        self._routed_experts_block_ids = routed_experts_block_ids or {}
         self._runner = runner
         self._is_continue_decode = False
         self._actual_steps_future = None
@@ -417,6 +441,8 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                 False) if self._runner else False,
             requests=getattr(self._runner, "requests", None),
             block_size=getattr(self._runner, "block_size", 0),
+            routed_experts_attn_gid=getattr(self._runner,
+                                            "routed_experts_attn_gid", 0),
             is_async=True,
         )
 
@@ -477,6 +503,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                     req_ids_dp=self._req_ids_dp,
                     padded_num_scheduled_tokens_per_dp_rank=self.
                     _padded_num_scheduled_tokens_per_dp_rank,
+                    block_ids_by_req=self._routed_experts_block_ids,
                 )
                 self._model_runner_output.routed_experts = routed_experts
 
@@ -652,8 +679,49 @@ def _jax_logprobs_materialize(
     )
 
 
-def _reconstruct_slots_for_request(
+def _snapshot_block_ids_for_routed_experts(
+    runner,
+    req_ids: List[str],
+    kv_cache_group_id: int,
+) -> Dict[str, List[int]]:
+    """Copies the block IDs that routed-experts slot reconstruction needs.
+
+    Must be called while the step is being *dispatched*, not when its output is
+    resolved. ``_update_states`` for a later step pops finished requests out of
+    ``runner.requests`` (see ``persistent_batch_manager``), and with the engine's
+    batch queue that happens before the previous step's async output is
+    resolved -- so the reconstruction can outlive the request it describes.
+    Copying the list also keeps the snapshot stable if the request's block list
+    is mutated afterwards.
+
+    ``kv_cache_group_id`` must be the full-attention group, the one the
+    scheduler reads back with (see
+    :func:`TPUModelRunner.initialize_kv_cache`).
+    """
+    snapshot: Dict[str, List[int]] = {}
+    for req_id in req_ids:
+        req_state = runner.requests.get(req_id)
+        snapshot[req_id] = ([] if req_state is None else _block_ids_for_group(
+            req_state, kv_cache_group_id))
+    return snapshot
+
+
+def _block_ids_for_group(
     req_state: CachedRequestState,
+    kv_cache_group_id: int,
+) -> List[int]:
+    """Copy of one KV-cache group's block IDs for a request."""
+    if not req_state.block_ids:
+        return []
+    assert kv_cache_group_id < len(req_state.block_ids), (
+        f"[routed-experts] kv_cache_group_id={kv_cache_group_id} is out "
+        f"of range for a request with {len(req_state.block_ids)} "
+        "KV-cache group(s)")
+    return list(req_state.block_ids[kv_cache_group_id])
+
+
+def _reconstruct_slots_for_request(
+    block_ids: List[int],
     num_tokens: int,
     block_size: int,
     start_pos: int,
@@ -670,6 +738,9 @@ def _reconstruct_slots_for_request(
     ``num_computed_tokens``, so it passes ``num_computed_tokens``). The slots
     must match the scheduler-side read (``RoutedExpertsManager.get``, which is
     block-relative from position 0).
+
+    ``block_ids`` is the full-attention group's block list, resolved and copied
+    by :func:`_snapshot_block_ids_for_routed_experts`.
     """
     if num_tokens <= 0:
         return np.array([], dtype=np.int32)
@@ -678,7 +749,6 @@ def _reconstruct_slots_for_request(
         f"[routed-experts] start_pos must be non-negative, got {start_pos} "
         f"(num_tokens={num_tokens}); slots would be wrong via numpy negative "
         f"indexing")
-    block_ids = req_state.block_ids[0] if req_state.block_ids else []
 
     pos = np.arange(start_pos, start_pos + num_tokens, dtype=np.int32)
     block_idx = pos // block_size
@@ -704,6 +774,7 @@ def _reconstruct_routed_experts(
     req_ids: List[str],
     req_ids_dp: Dict,
     padded_num_scheduled_tokens_per_dp_rank: int,
+    block_ids_by_req: Dict[str, List[int]],
 ) -> RoutedExpertsLists:
     """Reconstructs physical slot mappings and performs DP-rank reordering for MoE routed expert indices."""
     num_layers, _, top_k = expert_indices_cpu.shape
@@ -765,11 +836,10 @@ def _reconstruct_routed_experts(
             # pre-step chunk start from scheduler_output (see chunk_start above);
             # the slots must match the scheduler-side block-relative read
             # (RoutedExpertsManager.get, from position 0).
-            req_state = runner.requests[req_id]
             if n > 0:
                 global_slots[
                     global_start:global_end] = _reconstruct_slots_for_request(
-                        req_state,
+                        block_ids_by_req.get(req_id, []),
                         n,
                         block_size,
                         start_pos=chunk_start[req_id])
@@ -814,6 +884,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.rank = rank
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
+        self.routed_experts_attn_gid = 0
 
         self._init_random()
         self._init_mesh()
@@ -1327,6 +1398,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
+        self.routed_experts_attn_gid = (
+            get_routed_experts_attn_gid(kv_cache_config)
+            if self.model_config.enable_return_routed_experts else 0)
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
 
@@ -1470,18 +1544,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 generated_tokens_cpu = generated_tokens_cpu[
                     pre_logits_indices_selector]
 
+            valid_lens, _ = _extract_valid_lengths_host(
+                generated_tokens_cpu, self.eos_token_id)
             for pre_req_idx, req_state, _ in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
                 req_idx = self.input_batch.req_id_to_index[req_id]
 
-                tokens = generated_tokens_cpu[pre_req_idx]
-                valid_tokens = _extract_valid_tokens_host(
-                    tokens, self.eos_token_id)
+                actual_len = int(valid_lens[pre_req_idx])
+                valid_tokens = generated_tokens_cpu[
+                    pre_req_idx, :actual_len].tolist()
 
                 start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-                actual_len = len(valid_tokens)
 
                 self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
                                                actual_len] = valid_tokens
@@ -1989,6 +2064,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 False),
             requests=self.requests,
             block_size=self.block_size,
+            routed_experts_attn_gid=self.routed_experts_attn_gid,
             scheduler_output=scheduler_output,
             input_batch=self.input_batch,
             max_num_reqs=self.max_num_reqs,
@@ -2100,26 +2176,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         logits = logits.astype(jnp.float32)
         if full_logits is not None:
             full_logits = full_logits.astype(jnp.float32)
-        with self.maybe_forbid_compile:
+        # Provide mesh context for out_shardings=P() on logprobs jits.
+        with self.maybe_forbid_compile, jax.set_mesh(self.mesh):
             if tpu_sampling_metadata.logprobs:
                 if spec_decode_metadata is not None:
-                    with jax.set_mesh(self.mesh):
-                        if (self.model_config.logprobs_mode
-                                == "processed_logprobs"
-                                and tpu_sampling_metadata.do_sampling):
-                            extended_logits = process_and_extend_logits(
-                                self.mesh, target_logits,
-                                processed_bonus_logits, spec_decode_metadata,
-                                tpu_sampling_metadata)
-                        else:
-                            extended_logits = extend_logits_simple(
-                                target_logits, bonus_logits, self.mesh)
+                    if (self.model_config.logprobs_mode == "processed_logprobs"
+                            and tpu_sampling_metadata.do_sampling):
+                        extended_logits = process_and_extend_logits(
+                            self.mesh, target_logits, processed_bonus_logits,
+                            spec_decode_metadata, tpu_sampling_metadata)
+                    else:
+                        extended_logits = extend_logits_simple(
+                            target_logits, bonus_logits, self.mesh)
 
-                        logprobs_logits = extended_logits
+                    logprobs_logits = extended_logits
                 else:
-                    logprobs_logits = (processed_logits
-                                       if self.model_config.logprobs_mode
-                                       == "processed_logprobs" else logits)
+                    logprobs_logits = (
+                        processed_logits if logprobs_use_processed_logits(
+                            self.model_config.logprobs_mode) else logits)
                 logprobs = compute_and_gather_logprobs(
                     logprobs_logits, next_tokens,
                     self.model_config.max_logprobs)
@@ -2262,6 +2336,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
+                routed_experts_block_ids=(
+                    _snapshot_block_ids_for_routed_experts(
+                        self, model_runner_output.req_ids,
+                        self.routed_experts_attn_gid) if
+                    self.model_config.enable_return_routed_experts else None),
                 runner=self)
             return async_model_runner_output
 
@@ -2323,6 +2402,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
+                block_ids_by_req=_snapshot_block_ids_for_routed_experts(
+                    self, self.input_batch.req_ids[:num_reqs],
+                    self.routed_experts_attn_gid),
             )
             model_runner_output.routed_experts = routed_experts
 

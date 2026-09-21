@@ -38,6 +38,9 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
+from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
+    DEFAULT_MAMBA_CACHE_MULTIPLIER, mamba_blocks_per_request, mamba_pool_size,
+    set_mamba_num_blocks)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -60,12 +63,6 @@ logger = init_logger(__name__)
 # default layout (order) used by kv cache manager
 # N=num_blocks, H=num_heads and D=head_size
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
-
-# Mamba blocks reserved per request in align mode (prefix caching): one for
-# the state a request generates from, the rest for the prefix checkpoints it
-# leaves behind for later requests to resume from. Override per-run with
-# `--additional-config '{"custom_mamba_cache_multiplier": N}'`.
-DEFAULT_MAMBA_CACHE_MULTIPLIER = 8
 
 
 def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
@@ -370,28 +367,13 @@ class KVCacheManager:
         # defensive against an empty mesh shape that produces 0.
         divisor = max(divisor, 1)
 
-        def round_up(blocks: int) -> int:
-            return ((blocks + divisor - 1) // divisor) * divisor
-
         def round_down(blocks: int) -> int:
             return (blocks // divisor) * divisor
 
         # max_num_reqs already includes the DP multiplier
         max_num_reqs = self.runner.max_num_reqs
-        num_spec = 0
-        if self.runner.vllm_config.speculative_config is not None:
-            num_spec = (self.runner.vllm_config.speculative_config.
-                        num_speculative_tokens)
-        mamba_slot_stride = num_spec + 1
-        min_blocks_per_req = mamba_slot_stride + (1 if is_align_mode else 0)
-        if is_align_mode:
-            multiplier = int(
-                self.runner.vllm_config.additional_config.get(
-                    "custom_mamba_cache_multiplier",
-                    DEFAULT_MAMBA_CACHE_MULTIPLIER))
-            mamba_blocks_per_req = max(multiplier, min_blocks_per_req)
-        else:
-            mamba_blocks_per_req = min_blocks_per_req
+        min_blocks_per_req, mamba_blocks_per_req = mamba_blocks_per_request(
+            self.runner.vllm_config, is_align_mode)
         attn_blocks_per_req = max(
             1,
             cdiv(self.runner.model_config.max_model_len,
@@ -405,8 +387,10 @@ class KVCacheManager:
 
         # Minimum mamba pool: every persistent-batch slot resident, plus the
         # null block. Below this the runner cannot hold the active batch.
-        min_mamba_blocks = round_up(max_num_reqs * min_blocks_per_req + 1)
-        mamba_num_blocks = round_up(max_num_reqs * mamba_blocks_per_req + 1)
+        min_mamba_blocks = mamba_pool_size(max_num_reqs, min_blocks_per_req,
+                                           divisor)
+        mamba_num_blocks = mamba_pool_size(max_num_reqs, mamba_blocks_per_req,
+                                           divisor)
 
         if pinned_attn_blocks is not None:
             # The attention pool size is the user's explicit choice
@@ -444,7 +428,8 @@ class KVCacheManager:
                     avail // (attn_bytes_per_req + mamba_bytes_per_req))
                 mamba_num_blocks = max(
                     min_mamba_blocks,
-                    round_up(servable_reqs * mamba_blocks_per_req + 1))
+                    mamba_pool_size(servable_reqs, mamba_blocks_per_req,
+                                    divisor))
                 attn_num_blocks = round_down(
                     max(avail - mamba_num_blocks * mamba_bytes_per_block, 0) //
                     attn_bytes_per_block)
@@ -472,7 +457,6 @@ class KVCacheManager:
 
         self._mamba_num_blocks = int(mamba_num_blocks)
         cache_config.mamba_num_blocks = int(mamba_num_blocks)
-        from tpu_inference.core.hybrid_coordinator import set_mamba_num_blocks
         set_mamba_num_blocks(int(mamba_num_blocks))
 
         attn_bytes = num_attn_layers * attn_num_blocks * attn_page_size_bytes
@@ -904,15 +888,10 @@ class KVCacheManager:
                 # thousands of unused mamba slots and OOM on HBM.  Cap at
                 # max_num_reqs (+1 for the null block), matching the logic
                 # in _maybe_set_compact_mamba_num_blocks_override.
-                num_spec = 0
-                if self.runner.vllm_config.speculative_config is not None:
-                    num_spec = (self.runner.vllm_config.speculative_config.
-                                num_speculative_tokens)
-                mamba_slot_stride = num_spec + 1
-                mamba_num_blocks = (
-                    self.runner.max_num_reqs * mamba_slot_stride + 1)
-                mamba_num_blocks = (
-                    (mamba_num_blocks + divisor - 1) // divisor) * divisor
+                _, mamba_slot_stride = mamba_blocks_per_request(
+                    self.runner.vllm_config, is_align_mode=False)
+                mamba_num_blocks = mamba_pool_size(self.runner.max_num_reqs,
+                                                   mamba_slot_stride, divisor)
                 logger.info(
                     "Compact-mamba sizing was not set; defaulting "
                     "mamba_num_blocks to %d (max_num_reqs=%d, "

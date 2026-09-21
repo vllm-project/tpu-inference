@@ -135,6 +135,22 @@ def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
 
 
+def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
+    """DP_SCHED_ROUTING defaults to least_loaded and only accepts known policies."""
+    monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)
+    assert envs.DP_SCHED_ROUTING == "least_loaded"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "round_robin")
+    assert envs.DP_SCHED_ROUTING == "round_robin"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "Round_Robin")
+    assert envs.DP_SCHED_ROUTING.lower() == "round_robin"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "random")
+    with pytest.raises(ValueError, match="DP_SCHED_ROUTING"):
+        _ = envs.DP_SCHED_ROUTING
+
+
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):
     """Test that boolean env vars accept string values like 'True' and 'False'"""
 
