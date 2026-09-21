@@ -248,42 +248,28 @@ def _scores_kernel(
         return _fetch_bq(seq_idx, bq_idx, bq_sem_idx, wait=True)
 
     def load_bq(bq_sem_idx):
-        data = bq_x2_ref.at[bq_sem_idx, :, :bq_sz][...].reshape(
+        return bq_x2_ref.at[bq_sem_idx, :, :bq_sz][...].reshape(
             seq_batch_size, bq_sz * num_q_heads, head_dim)
-        bqs = []
-        for batch_idx in range(seq_batch_size):
-            bqs.append(data[batch_idx])
-        return bqs
 
     def load_bq_weights(bq_sem_idx):
-        data = bq_weights_x2_ref.at[bq_sem_idx, :, :bq_sz][...]
-        bq_weights = []
-        for batch_idx in range(seq_batch_size):
-            bq_weights.append(data[batch_idx])
-        return bq_weights
+        return bq_weights_x2_ref.at[bq_sem_idx, :, :bq_sz][...]
 
     def load_bkv(bkv_sem_idx):
-        bkvs = []
-        bkv_scales = []
-        for batch_idx in range(seq_batch_size):
-            bkv = bkv_x2_ref.at[bkv_sem_idx,
-                                batch_idx, :bkv_sz_per_kv_packing][...]
-
-            # Unpack quantized values and scales from the DSv4 FP8 cache format.
-            flat_bkv = bkv.reshape(-1, bkv.shape[-1])
-            fp8_val = flat_bkv[:, :head_dim]
-            fp8_val = pltpu.bitcast(fp8_val, jnp.float8_e4m3fn)
-            scale_val = pltpu.bitcast(flat_bkv[:, head_dim:head_dim + 1].T,
-                                      jnp.float8_e8m0fnu).astype(jnp.bfloat16)
-
-            # NOTE: Do NOT multiply the scales here. Return them separately.
-            bkvs.append(fp8_val.reshape(bkv_sz, head_dim))
-            bkv_scales.append(scale_val)
-        return bkvs, bkv_scales
+        bkv = bkv_x2_ref.at[bkv_sem_idx, :, :bkv_sz_per_kv_packing][...]
+        flat_bkv = bkv.reshape(seq_batch_size, -1, bkv.shape[-1])
+        fp8_val = flat_bkv[:, :, :head_dim]
+        fp8_val = pltpu.bitcast(fp8_val, jnp.float8_e4m3fn)
+        scale_val = pltpu.bitcast(
+            flat_bkv[:, :, head_dim:head_dim + 1].swapaxes(1, 2),
+            jnp.float8_e8m0fnu).astype(jnp.bfloat16)
+        return fp8_val.reshape(seq_batch_size, bkv_sz, head_dim), scale_val
 
     def process():
         # num_bkv is determined by the longest sequence length in the batch.
-        kv_len_max = jnp.max(jnp.array(kv_lens))
+        kv_lens_arr = jnp.array(kv_lens)
+        seq_lens_arr = jnp.array(seq_lens)
+        q_lens_arr = jnp.array(q_lens)
+        kv_len_max = jnp.max(kv_lens_arr)
         num_bkv = jnp.maximum(1, cdiv(kv_len_max, bkv_sz))
         if static_q_len is None:
             assert seq_batch_size == 1
@@ -313,46 +299,31 @@ def _scores_kernel(
             return next_seq_idx, next_bq_idx, next_bkv_idx, next_bkv_sem_idx
 
         def compute_scores(
-            bq_vec,
-            bkv_vec,
-            scale_val_vec,
-            bq_weights_vec,
-            bq_pos_compressed_vec,
+            bq,
+            bkv,
+            scale_val,
+            bq_weights,
+            bq_pos_compressed,
             bkv_idx,
         ):
-            assert len(bq_vec) == seq_batch_size
-            assert len(bkv_vec) == seq_batch_size
-            assert len(scale_val_vec) == seq_batch_size
-            assert len(bq_weights_vec) == seq_batch_size
-            assert len(bq_pos_compressed_vec) == seq_batch_size
-            ret = []
-
-            for batch_idx in range(seq_batch_size):
-                bq = bq_vec[batch_idx].reshape(-1, head_dim)
-                bkv = bkv_vec[batch_idx]
-                scale_val = scale_val_vec[batch_idx]
-                bq_weights = bq_weights_vec[batch_idx]
-                bq_pos_compressed = bq_pos_compressed_vec[batch_idx]
-
-                s = jnp.einsum(
-                    "nd,md->nm",
-                    bq,
-                    bkv,
-                    preferred_element_type=jnp.float32,
-                )
-                s = s.reshape(-1, num_q_heads, s.shape[-1])
-                s = jnp.maximum(s, 0.0)
-                s = s * bq_weights.astype(jnp.float32)[:, :, None]
-                s_summed = s.sum(axis=1)
-                s_summed = s_summed * scale_val
-                k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
-                    jnp.int32, s_summed.shape, 1)
-                valid_mask = k_span < kv_lens[batch_idx]
-                causal_mask = k_span <= bq_pos_compressed[:, None]
-                mask = jnp.logical_and(valid_mask, causal_mask)
-                s_summed = jnp.where(mask, s_summed, -jnp.inf)
-                ret.append(s_summed.reshape(-1, num_sublanes_bkv, 128))
-            return jnp.concatenate(ret, axis=0)
+            s = jnp.einsum(
+                "bnd,bmd->bnm",
+                bq,
+                bkv,
+                preferred_element_type=jnp.float32,
+            )
+            s = s.reshape(seq_batch_size, bq_sz, num_q_heads, bkv_sz)
+            s = jnp.maximum(s, 0.0)
+            s = s * bq_weights.astype(jnp.float32)[:, :, :, None]
+            s_summed = s.sum(axis=2)
+            s_summed = s_summed * scale_val
+            k_span = bkv_idx * bkv_sz + lax.broadcasted_iota(
+                jnp.int32, (1, 1, bkv_sz), 2)
+            valid_mask = k_span < kv_lens_arr[:, None, None]
+            causal_mask = k_span <= bq_pos_compressed[:, :, None]
+            mask = jnp.logical_and(valid_mask, causal_mask)
+            s_summed = jnp.where(mask, s_summed, -jnp.inf)
+            return s_summed.reshape(-1, num_sublanes_bkv, 128)
 
         def compute_with_bq(bq_idx, _):
 
@@ -366,16 +337,14 @@ def _scores_kernel(
                 sem_ids_ref[0] = next_bq_sem_idx
                 start_fetch_bq(next_seq_idx, next_bq_idx, next_bq_sem_idx)
 
-            bq_pos_compressed_vec = []
-            for batch_idx in range(seq_batch_size):
-                q_pos = (seq_lens[batch_idx] - q_lens[batch_idx] +
-                         bq_idx * bq_sz + jnp.arange(bq_sz, dtype=jnp.int32))
-                bq_pos_compressed_vec.append(q_pos // compression_ratio)
+            q_pos = ((seq_lens_arr - q_lens_arr)[:, None] + bq_idx * bq_sz +
+                     jnp.arange(bq_sz, dtype=jnp.int32)[None, :])
+            bq_pos_compressed = q_pos // compression_ratio
 
             # Wait for cur bq if not ready yet
             wait_fetch_bq(batch_start_seq_idx, bq_idx, bq_sem_idx)
-            bq_vec = load_bq(bq_sem_idx)
-            bq_weights_vec = load_bq_weights(bq_sem_idx)
+            bq = load_bq(bq_sem_idx)
+            bq_weights = load_bq_weights(bq_sem_idx)
 
             # If seq_batch_size > 1, static_q_len is always 1, therefore sz is always
             # 1 for all sequences within the batch.
@@ -397,14 +366,14 @@ def _scores_kernel(
 
                 # Wait for cur bkv
                 wait_fetch_bkv(batch_start_seq_idx, bkv_idx, bkv_sem_idx)
-                bkv_vec, scale_val_vec = load_bkv(bkv_sem_idx)
+                bkv, scale_val = load_bkv(bkv_sem_idx)
 
                 scores = compute_scores(
-                    bq_vec,
-                    bkv_vec,
-                    scale_val_vec,
-                    bq_weights_vec,
-                    bq_pos_compressed_vec,
+                    bq,
+                    bkv,
+                    scale_val,
+                    bq_weights,
+                    bq_pos_compressed,
                     bkv_idx,
                 )
 
