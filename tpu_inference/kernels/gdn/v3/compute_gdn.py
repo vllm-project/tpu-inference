@@ -332,6 +332,7 @@ def recurrent_gdn_per_seq(
     q_compact: jax.Array,  # [num_kq_heads, chunk, 1, kq_head_dim]
     k_compact: jax.Array,  # [num_kq_heads, chunk, 1, kq_head_dim]
     k_compact_t: jax.Array,  # [num_kq_heads, chunk, kq_head_dim, 1]
+    qk_dot: jax.Array,  # [num_kq_heads, chunk, 1, 1]
     v_compact: jax.Array,  # [num_v_heads, chunk, 1, v_head_dim]
     gating_log: jax.Array,  # [num_v_heads, chunk, 1, 1]
     beta: jax.Array,  # [num_v_heads, chunk, 1, 1]
@@ -350,32 +351,33 @@ def recurrent_gdn_per_seq(
     state_list = []
     for c_idx in range(cfgs.chunk_size):
         # [num_v_heads, 1, kq_head_dim]
-        q_curr = q_compact[:, c_idx]
-        q_curr = jnp.repeat(q_curr, cfgs.v_per_kq_head, axis=0)
-        k_curr = k_compact[:, c_idx]
-        k_curr = jnp.repeat(k_curr, cfgs.v_per_kq_head, axis=0)
+        q_curr = jnp.repeat(q_compact[:, c_idx], cfgs.v_per_kq_head, axis=0)
+        k_curr = jnp.repeat(k_compact[:, c_idx], cfgs.v_per_kq_head, axis=0)
 
         # [num_v_heads, 1, v_head_dim]
         v_curr = v_compact[:, c_idx]
 
         # [num_v_heads, kq_head_dim, 1]
-        k_curr_t = k_compact_t[:, c_idx]
-        k_curr_t = jnp.repeat(k_curr_t, cfgs.v_per_kq_head, axis=0)
+        k_curr_t = jnp.repeat(k_compact_t[:, c_idx],
+                              cfgs.v_per_kq_head,
+                              axis=0)
 
         # [num_v_heads, 1, 1]
+        qk_dot_curr = jnp.repeat(qk_dot[:, c_idx], cfgs.v_per_kq_head, axis=0)
         beta_curr = beta[:, c_idx]
         gating_curr = gating_log[:, c_idx]
 
         # [num_v_heads, kq_head_dim, v_head_dim]
         state_updated = state * gating_curr
 
-        # [num_v_heads, 1, v_head_dim]
-        v_updated = jax.lax.dot(
-            k_curr,
+        # Merge `k @ state` and `q @ state` into one 2-row matmul sharing `state_updated`.
+        kq_state = jax.lax.dot(
+            jnp.concatenate([k_curr, q_curr], axis=1),
             state_updated,
             dimension_numbers=(((2, ), (1, )), ((0, ), (0, ))),
             preferred_element_type=jnp.float32,
         ).astype(cfgs.dtypes.compute)
+        v_updated, q_state_updated = kq_state[:, 0:1, :], kq_state[:, 1:2, :]
 
         # [num_v_heads, 1, v_head_dim]
         v_diff = v_curr - v_updated
@@ -384,17 +386,9 @@ def recurrent_gdn_per_seq(
         # [num_v_heads, kq_head_dim, v_head_dim]
         # NOTE: Multiplication with k_curr_t needs to be deferred as much as
         # possible as it expands the dimension size by kq_head_dim.
-        state_new = k_curr_t * v_new
-        # [num_v_heads, kq_head_dim, v_head_dim]
-        state = state_updated + state_new
-
-        # [num_v_heads, 1, v_head_dim]
-        out = jax.lax.dot(
-            q_curr,
-            state,
-            dimension_numbers=(((2, ), (1, )), ((0, ), (0, ))),
-            preferred_element_type=jnp.float32,
-        ).astype(cfgs.dtypes.compute)
+        state = state_updated + k_curr_t * v_new
+        out = (q_state_updated + qk_dot_curr * v_new).astype(
+            cfgs.dtypes.compute)
 
         out_list.append(out[:, 0, :])
         # NOTE: Rows past real_sizes are masked out by the caller, so the state
@@ -444,11 +438,18 @@ def recurrent_gdn(
     a_log = a_log.reshape(1, 1, 1, 1, -1).astype(cfg.dtypes.compute)
     dt_bias = dt_bias.reshape(1, 1, 1, 1, -1).astype(cfg.dtypes.compute)
 
-    # [seqs, num_kq_heads, chunk, 1, kq_head_dim]
-    q_compact = l2_norm(q_compact)
-    q_scale = cfg.kq_head_dim**-0.5
-    q_compact *= q_scale
-    k_compact = l2_norm(k_compact)
+    qk_shape = q_compact.shape
+    q_packed = l2_norm(q_compact.reshape(
+        -1, cfg.kq_head_dim)) * (cfg.kq_head_dim**-0.5)
+    k_packed = l2_norm(k_compact.reshape(-1, cfg.kq_head_dim))
+    qk_dot = jnp.sum(q_packed * k_packed,
+                     axis=-1,
+                     keepdims=True,
+                     dtype=jnp.float32).astype(cfg.dtypes.compute).reshape(
+                         cfg.seq_tile_size, cfg.num_kq_heads, cfg.chunk_size,
+                         1, 1)
+    q_compact, k_compact = q_packed.reshape(qk_shape), k_packed.reshape(
+        qk_shape)
     k_compact_t = fused_transpose_broadcast(k_compact, src_dim=4, dst_dim=3)
 
     beta = jax.nn.sigmoid(b_compact)
@@ -474,6 +475,7 @@ def recurrent_gdn(
             q_compact[idx],
             k_compact[idx],
             k_compact_t[idx],
+            qk_dot[idx],
             v_compact[idx],
             gating_log[idx],
             beta[idx],
