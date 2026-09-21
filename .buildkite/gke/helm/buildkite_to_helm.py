@@ -57,7 +57,7 @@ Key Concepts & Things to Know
 
 6. Base Values Inheritance:
    - Base settings (image registry, commit hashes, storage, resources, secrets)
-     are automatically inherited from `values-llama8b-ci.yaml` or `values.yaml`
+     are automatically inherited from `values-transfer-template.yaml` or `values.yaml`
      in the chart directory.
 
 ================================================================================
@@ -82,7 +82,7 @@ Usage Examples
        -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \\
        --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark \\
        --tensor-parallel-size 2 \\
-       -o values-llama8b-ci.yaml
+       -o values-llama8b-bench.yaml
 
 5. Preview generated YAML on stdout without writing to file:
    $ python3 buildkite_to_helm.py \\
@@ -499,7 +499,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   1. Convert all qualifying steps in Buildkite pipeline to multi-job Helm values:
-     python3 buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml -o values-llama8b-ci.yaml
+     python3 buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml -o values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml
 
   2. Extract a specific step by matching its step key:
      python3 buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark -o values-llama8b-bench.yaml
@@ -528,7 +528,7 @@ def main():
         default="",
         help=(
             "Path to base Helm values.yaml to inherit settings from (default:"
-            " auto-detect values-llama8b-ci.yaml or values.yaml)"),
+            " auto-detect values-transfer-template.yaml or values.yaml)"),
     )
     parser.add_argument(
         "--step",
@@ -626,7 +626,7 @@ def main():
     # Auto-detect base values if not provided
     base_values_path = args.base_values
     if not base_values_path:
-        candidate = os.path.join(script_dir, "values-llama8b-ci.yaml")
+        candidate = os.path.join(script_dir, "values-transfer-template.yaml")
         if os.path.isfile(candidate):
             base_values_path = candidate
         else:

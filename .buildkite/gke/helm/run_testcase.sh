@@ -32,7 +32,7 @@ usage() {
     echo "  -r <name>   Helm release name (default: auto-generated)"
     echo "  -h          Show this help message"
     echo
-    echo "Example: $0 -f values-llama8b-ci.yaml -r my-helm-test"
+    echo "Example: $0 -f values-transfer-template.yaml -r my-helm-test"
 }
 
 
@@ -217,20 +217,26 @@ if [[ "$BUILDER_ENABLED" == "true" ]]; then
         "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME} -c image-builder -f"
 fi
 
-step "Stream & Tee every step into log/${JOBSET_NAME}-<step>.log:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}" \
-    "# Or follow every container (build + setup + test) side by side:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}" \
-    "# Or follow a single step only:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -r <step> ${JOBSET_NAME}"
-
 if [[ "$MODE" == "script" ]]; then
+    step "Stream & Tee every step into log/${JOBSET_NAME}-<step>.log:" \
+        "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}" \
+        "# Or follow every container (build + setup + test) side by side:" \
+        "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}" \
+        "# Or follow a single step only:" \
+        "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -r <step> ${JOBSET_NAME}"
     step "Stream testcase runner logs:" \
         "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},role=test-runner -f"
 elif [[ "$MODE" == "aggregated" ]]; then
+    # tee_testcase_logs.sh walks the replicatedJobs sequentially, which would
+    # block on the long-running server job of a benchmark stack, so the
+    # concurrent streamer is the right tool for aggregated / disaggregated.
+    step "Stream & Tee benchmark logs into log/:" \
+        "${SCRIPT_DIR}/../bin/tee_logs.sh ${JOBSET_NAME}"
     step "Stream server logs (vLLM / XLA compilation):" \
         "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=server -f"
 else
+    step "Stream & Tee benchmark logs into log/:" \
+        "${SCRIPT_DIR}/../bin/tee_logs.sh ${JOBSET_NAME}"
     step "Stream Prefill logs:" \
         "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=p -c vllm-tpu -f"
     step "Stream Decode logs:" \

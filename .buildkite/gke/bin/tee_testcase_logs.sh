@@ -16,10 +16,21 @@
 # ==============================================================================
 # TPU Testcase Log Streaming & Tee Utility
 #
-# Companion to tee_logs.sh, dedicated to Helm charts deployed by
-# .buildkite/gke/helm/run_testcase.sh (mode: "script").
+# ⚠️  FOR `mode: "script"` RELEASES ONLY.
 #
-# Such a chart has TWO dimensions that both need to be followed:
+# This script only understands Helm releases deployed by
+# .buildkite/gke/helm/run_testcase.sh with `mode: "script"` in the values file.
+# For `mode: "aggregated"` / `mode: "disaggregated"` benchmark releases use the
+# companion bin/tee_logs.sh instead, because:
+#   * JobSet auto-detection keys off the `role: test-runner` pod label, which
+#     the chart only renders in the script branch of templates/jobset.yaml;
+#   * the default container is `test-runner`, not `vllm-tpu` / `proxy`;
+#   * the steps are walked one after another, which suits script mode's
+#     `startupPolicyOrder: InOrder` + fail-fast policy, but would hang forever
+#     on the long-running `server` job of a benchmark stack and never reach the
+#     `client` results.
+#
+# A script-mode chart has TWO dimensions that both need to be followed:
 #
 #   1. Steps (replicatedJobs) -- one per entry of `scriptJobs` in the values
 #      file, e.g. unittest / accuracy / benchmark. The JobSet runs them

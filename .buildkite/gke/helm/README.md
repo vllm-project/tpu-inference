@@ -41,7 +41,7 @@ gke/helm/
 ├── buildkite_to_helm.py                # Buildkite CI pipeline to Helm values converter
 ├── run_benchmark.sh                    # Automated Helm benchmark deployment script
 ├── values-llama8b.yaml                 # Monolithic Llama-3.1-8B (2x2x1, 1 VM)
-├── values-llama8b-ci.yaml              # Llama-3.1-8B CI Benchmark runner (Buildkite Parity Test)
+├── values-transfer-template.yaml       # Base template inherited by buildkite_to_helm.py (script mode)
 ├── values-llama70b.yaml                # Monolithic Llama-3.1-70B (2x2x4, 4 VMs via Ray)
 ├── values-qwen4b.yaml                  # Monolithic Qwen3.5-4B (2x2x1, 1 VM)
 ├── values-disagg-llama8b.yaml          # Disaggregated 8B (Prefill 2x2x1, Decode 2x2x2)
@@ -180,7 +180,7 @@ Configured via `storage.type` in values:
 | :--- | :--- | :--- | :--- | :--- |
 | [`values.yaml`](./values.yaml) | Monolithic | Llama-3.1-8B | `2x2x1` (1 VM, 4 chips) | Base default values |
 | [`values-llama8b.yaml`](./values-llama8b.yaml) | Monolithic | Llama-3.1-8B | `2x2x1` (1 VM, 4 chips) | Monolithic baseline |
-| [`values-llama8b-ci.yaml`](./values-llama8b-ci.yaml) | Script Runner (`mode: "script"`) | Llama-3.1-8B | `2x1x1` (1 VM, 2 chips, `tpu7x-2`) | Direct Buildkite CI test runner (executes `benchmark.sh`, sonnet dataset, TP=2, threshold >= 10.77 req/s) |
+| [`values-transfer-template.yaml`](./values-transfer-template.yaml) | Script Runner (`mode: "script"`) | Llama-3.1-8B | `2x2x1` (1 VM, 4 chips, `tpu7x`) | Base template auto-detected by `buildkite_to_helm.py` (image registry, commits, builder, storage, secrets are inherited from here). Also deployable as-is: runs `benchmark.sh`, sonnet dataset, TP=2, threshold >= 10.77 req/s |
 | [`values-llama70b.yaml`](./values-llama70b.yaml) | Monolithic | Llama-3.1-70B | `2x2x4` (4 VMs, 16 chips via Ray) | Multi-host monolithic benchmark |
 | [`values-qwen4b.yaml`](./values-qwen4b.yaml) | Monolithic | Qwen3.5-4B | `2x2x1` (1 VM, 4 chips) | Lightweight 4B test |
 | [`values-disagg-symmetric.yaml`](./values-disagg-symmetric.yaml) | Disaggregated | Llama-3.1-8B | Prefill `2x2x1`, Decode `2x2x1` | 1:1 symmetric serving (10 RPS) |
@@ -523,7 +523,7 @@ Converts any Buildkite model pipeline YAML (from `.buildkite/models/*.yml`) into
 - **RFC 1123 Compliant Job Naming**: ReplicatedJob names are cleanly derived from the substring after the last `_` of the Buildkite step key (e.g. `benchmark`, `unittest`, `accuracy`), lowercased, and length-bounded to guarantee full compliance with Kubernetes DNS label and Pod naming limits.
 - **Dynamic Accelerator Replacement**: Dynamically resolves `${TPU_VERSION:-...}` to the `--accelerator` parameter (defaults to `tpu7x`).
 - **Target Step Key Filtering (`--step <step_key>`)**: Matches against target step keys, sanitized names, or stages with validation and provides a list of available steps if unmatched.
-- **Base Values Inheritance**: Directly inherits `image.tpuInferenceCommit`, `image.vllmCommit`, storage, and secrets from the base values template.
+- **Base Values Inheritance**: Directly inherits `image.tpuInferenceCommit`, `image.vllmCommit`, storage, and secrets from the base values template ([`values-transfer-template.yaml`](./values-transfer-template.yaml), falling back to [`values.yaml`](./values.yaml); override with `--base-values`).
 - **Environment Variable Resolution**: Automatically parses Bash expansions (e.g. `${TENSOR_PARALLEL_SIZE_SINGLE:-1}`) and supports `--tensor-parallel-size` overrides.
 
 ### Usage Examples
@@ -532,14 +532,14 @@ Converts any Buildkite model pipeline YAML (from `.buildkite/models/*.yml`) into
 # 1. Convert all qualifying steps in Buildkite pipeline to multi-job Helm values:
 python3 gke/helm/buildkite_to_helm.py \
   -b /path/to/tpu-inference/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \
-  -o gke/helm/values-llama8b-ci.yaml
+  -o gke/helm/values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml
 
 # 2. Extract only a specific step by matching its step key:
 python3 gke/helm/buildkite_to_helm.py \
   -b /path/to/tpu-inference/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \
   --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark \
   --tensor-parallel-size 2 \
-  -o gke/helm/values-llama8b-ci.yaml
+  -o gke/helm/values-llama8b-bench.yaml
 
 # 3. Preview generated YAML on stdout:
 python3 gke/helm/buildkite_to_helm.py \

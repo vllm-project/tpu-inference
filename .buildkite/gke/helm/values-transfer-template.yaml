@@ -13,10 +13,18 @@
 # limitations under the License.
 
 # ==============================================================================
-# Llama-3.1-8B CI Benchmark Configuration (Buildkite Parity Test)
-# Executes the exact same benchmark.sh script from tpu-inference in GKE TPU.
-# Corresponds to .buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml:
-# - TPU: tpu7x-2 (Topology: 2x1x1, TP=2, 2 TPU chips)
+# Base Values Template for buildkite_to_helm.py (Buildkite -> Helm transfer)
+#
+# buildkite_to_helm.py auto-detects this file (falling back to values.yaml) and
+# inherits its image registry, commit hashes, builder, TPU / resources, storage
+# and secret settings into every generated values-<model>-ci.yaml. Edit here to
+# change the defaults of every converted pipeline; use --base-values to point at
+# a different file.
+#
+# It is also a valid, deployable script-mode values file on its own:
+# a Llama-3.1-8B CI benchmark that mirrors
+# .buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml:
+# - TPU: tpu7x (Topology: 2x2x1, TP=2, 4 TPU chips)
 # - Script: /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
 # - Dataset: sonnet (benchmarks/sonnet.txt)
 # - Input/Output: 1800 / 128
