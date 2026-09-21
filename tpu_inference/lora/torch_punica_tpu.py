@@ -278,14 +278,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
                 indicating which adapters have a saved full linear module.
         """
         indices = self._get_sampler_indices(x)
-        safe_indices = indices.clamp_min(0).long()
-
         adapter_y = bgmv_shrink(x, weight_stacked, indices, 1.0)
-        adapter_y = adapter_y.to(y.dtype) + bias_stacked[safe_indices].to(
-            y.dtype)
-
-        use_full = (indices >= 0) & module_enabled[safe_indices]
-        return torch.where(use_full.unsqueeze(-1), adapter_y, y)
+        return self._select_full_linear_output(y, adapter_y, bias_stacked,
+                                               module_enabled)
 
     @property
     def token_lora_indices(self) -> torch.Tensor:
