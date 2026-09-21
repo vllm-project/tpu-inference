@@ -109,15 +109,11 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
     def setUp(self):
         super().setUp()
         try:
-            tpu_info = pltpu.get_tpu_info()
-            sc_info = tpu_info.sparse_core
+            sc_info = pltpu.get_tpu_info().sparse_core
         except ValueError:
-            tpu_info = None
             sc_info = None
         if sc_info is None:
             self.skipTest("SparseCore is not available")
-        if tpu_info.generation == 6:
-            self.skipTest("dense_gather_reduce is not supported on TPUv6e")
 
     @parameterized.parameters(*_test_cases)
     def test_sc_dense_gather_reduce(self, out_size, hidden_size, dtype,
@@ -247,7 +243,7 @@ class IsCompatibleTest(parameterized.TestCase):
     These mock get_tpu_info() so they run on any platform, unlike
     DenseGatherReduceTest which needs SparseCore hardware. They target the
     output-block packing gate: the kernel's output BlockSpec row dim is
-    (num_lanes // reduce_group_size) // packing, which must be >= 1.
+    (num_lanes // reduce_group_size) // out_packing, which must be >= 1.
     """
 
     def _fake_tpu_info(self, num_lanes, num_cores=1, num_subcores=1):
