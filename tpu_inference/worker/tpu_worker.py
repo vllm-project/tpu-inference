@@ -180,6 +180,7 @@ class TPUWorker(WorkerBase):
     _weight_update_active: bool = False
     _kv_cache_freed: bool = False
     _raiden_rl_weight_sync: Any = None
+    _gcs_rl_weight_sync: Any = None
 
     def __init__(
         self,
@@ -864,6 +865,53 @@ class TPUWorker(WorkerBase):
 
     def raiden_metrics(self) -> dict:
         return self._require_raiden_sync("raiden_metrics").metrics()
+
+    def bind_gcs_sync(
+        self,
+        worker_index: int = 0,
+        job_name: str = "rollout",
+        staging_dir: Optional[str] = None,
+    ) -> dict:
+        """Binds this worker's live weights to GCSWeightSync and returns wire-safe registration metadata."""
+        from tunix.experimental.weight_sync import \
+            gcs_weight_sync  # pylint: disable=g-import-not-at-top
+
+        return gcs_weight_sync.tpu_worker_bind_gcs_sync(
+            self,
+            worker_index=worker_index,
+            job_name=job_name,
+            staging_dir=staging_dir,
+        )
+
+    def get_gcs_metadata(self) -> dict:
+        """Re-fetches the current GCSWeightSync binding's wire-safe metadata."""
+        from tunix.experimental.weight_sync import \
+            gcs_weight_sync  # pylint: disable=g-import-not-at-top
+
+        return gcs_weight_sync.tpu_worker_get_gcs_metadata(self)
+
+    def gcs_h2d(
+        self,
+        checkpoint_path: str,
+        source_checksums: Optional[dict] = None,
+    ) -> dict:
+        """Restores sharded Orbax weights into model_runner and verifies checksums when VERIFY_WEIGHTS=true."""
+        from tunix.experimental.weight_sync import \
+            gcs_weight_sync  # pylint: disable=g-import-not-at-top
+
+        return gcs_weight_sync.tpu_worker_gcs_h2d(
+            self,
+            checkpoint_path=checkpoint_path,
+            source_checksums=source_checksums,
+        )
+
+    def gcs_metrics(self) -> dict:
+        """Returns GCSWeightSync metrics for this worker."""
+        from tunix.experimental.weight_sync import \
+            gcs_weight_sync  # pylint: disable=g-import-not-at-top
+
+        return gcs_weight_sync.tpu_worker_gcs_metrics(self)
+
 
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
