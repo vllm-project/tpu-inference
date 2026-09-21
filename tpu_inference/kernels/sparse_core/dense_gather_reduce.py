@@ -28,23 +28,29 @@ from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
 
 
-def _get_kernel_dtype(
+def _get_kernel_out_dtype(
     dtype: jnp.dtype,
     num_lanes: int,
     reduce_group_size: int,
 ) -> jnp.dtype:
-    """Returns the dtype the kernel should run in to emit a valid output block.
+    """Returns the dtype of the kernel's *output* buffer.
 
-  The kernel's output block has ``(num_lanes // reduce_group_size) // packing``
-  rows, where ``packing = 32 // bits(dtype)``. When a SIMD step produces fewer
-  rows than the packing factor (e.g. 8 lanes on v6e with topk=8 produces 1 row,
-  while bf16 has packing=2), integer division floors that to 0 rows, which
-  Mosaic cannot lower. Running the kernel in FP32 gives packing=1 and a valid
-  1-row block.
+  The kernel's output block has ``(num_lanes // reduce_group_size) //
+  out_packing`` rows, where ``out_packing = 32 // bits(out_dtype)``. When a
+  SIMD step produces fewer rows than the packing factor (e.g. 8 lanes on v6e
+  with topk=8 produces 1 row, while bf16 has packing=2), integer division
+  floors that to 0 rows, which Mosaic cannot lower. Writing the output buffer
+  as FP32 gives ``out_packing = 1`` and a valid 1-row block.
+
+  Only the output is widened. The operand keeps its native dtype: the gather
+  side already addresses HBM in 32-bit words (a bf16 gather fetches the whole
+  word and selects a half by index parity), so upcasting the operand would not
+  save any gather bytes while materialising a full FP32 copy of an array that
+  is ``reduce_group_size`` times larger than the output.
 
   ``is_compatible`` and ``dense_gather_reduce`` must agree on this decision:
-  the former predicts the packing the kernel will use, the latter performs the
-  matching operand upcast. Keep them driven by this single helper.
+  the former predicts the output packing the kernel will use, the latter
+  requests the matching output dtype. Keep them driven by this single helper.
 
   Args:
     dtype: dtype of the operand as supplied by the caller.
@@ -52,8 +58,8 @@ def _get_kernel_dtype(
     reduce_group_size: Number of gathered rows summed per output row.
 
   Returns:
-    The dtype for kernel execution (jnp.float32 if an upcast is required,
-    otherwise dtype).
+    The dtype for the kernel output buffer (jnp.float32 when the native dtype
+    would floor the output block to zero rows, otherwise dtype).
   """
     native_packing = 32 // jax.dtypes.itemsize_bits(dtype)
     simd_rows = num_lanes // reduce_group_size
@@ -82,12 +88,12 @@ def is_compatible(
     if sc_info.num_lanes % reduce_group_size != 0:
         return False
 
-    kernel_dtype = _get_kernel_dtype(op.dtype, sc_info.num_lanes,
-                                     reduce_group_size)
-    packing = 32 // jax.dtypes.itemsize_bits(kernel_dtype)
+    out_dtype = _get_kernel_out_dtype(op.dtype, sc_info.num_lanes,
+                                      reduce_group_size)
+    out_packing = 32 // jax.dtypes.itemsize_bits(out_dtype)
     # Unreachable for the bf16/f32 operands allowed above, but kept as a guard
     # for narrower dtypes (e.g. fp8 -> packing=4) or future lane geometries.
-    if (sc_info.num_lanes // reduce_group_size) // packing < 1:
+    if (sc_info.num_lanes // reduce_group_size) // out_packing < 1:
         return False
 
     num_cores = 1 if single_sc else sc_info.num_cores
@@ -105,6 +111,7 @@ def _sc_gather_reduce(
     topk_weights: jax.Array | None = None,
     *,
     reduce_group_size: int,
+    out_dtype: jnp.dtype | None = None,
     single_sc: bool = False,
     col_chunk_size: int = int(3.5 * 1024),
     row_chunk_size: int = 512,
@@ -114,7 +121,7 @@ def _sc_gather_reduce(
 
   This kernel groups rows of the operand ``op`` based on ``idx``, sums them
   up, and scatters the results. The gather and add operations are performed
-  in fp32, and the results are written back in bf16.
+  in fp32, and the results are written back in ``out_dtype``.
 
   Equivalent JAX code::
 
@@ -123,7 +130,7 @@ def _sc_gather_reduce(
       flat_weights = topk_weights.flatten()
       gathered = gathered * flat_weights[:, None].astype(jnp.float32)
     gathered = jnp.reshape(gathered, (-1, reduce_group_size, op.shape[1]))
-    output = jnp.sum(gathered.astype(jnp.float32), axis=1).astype(jnp.bfloat16)
+    output = jnp.sum(gathered.astype(jnp.float32), axis=1).astype(out_dtype)
 
   Args:
     op: The operand matrix [B, K] in f32 or bf16 to gather from and reduce.
@@ -131,6 +138,11 @@ def _sc_gather_reduce(
     topk_weights: Optional weights [M // 128, 128] in bf16 to apply to the
       gathered rows before reduction.
     reduce_group_size: The number of gathered rows to sum per output row.
+    out_dtype: dtype of the output buffer. Defaults to ``op.dtype``. This is
+      independent of the operand dtype: the operand dtype sets the gather
+      packing while ``out_dtype`` sets the output block packing. Widening only
+      the output (see ``_get_kernel_out_dtype``) is what makes 8-lane
+      SparseCore viable at ``reduce_group_size == num_lanes``.
     single_sc: Whether to use a single SparseCore.
     col_chunk_size: The size of column chunks to process.
     row_chunk_size: The size of row chunks for internal processing. Must be ``2
@@ -139,8 +151,9 @@ def _sc_gather_reduce(
       during multiplication, resulting in zero output.
 
   Returns:
-    The reduced result as a bf16 matrix [M / reduce_group_size, K].
+    The reduced result as an ``out_dtype`` matrix [M / reduce_group_size, K].
   """
+    out_dtype = op.dtype if out_dtype is None else jnp.dtype(out_dtype)
 
     sc_info = pltpu.get_tpu_info().sparse_core
     if sc_info is None:
@@ -155,7 +168,7 @@ def _sc_gather_reduce(
 
     @jax.jit
     @pl.kernel(
-        out_type=jax.ShapeDtypeStruct((M_out, K), op.dtype),
+        out_type=jax.ShapeDtypeStruct((M_out, K), out_dtype),
         mesh=plsc.VectorSubcoreMesh(
             core_axis_name="core",
             subcore_axis_name="subcore",
@@ -176,7 +189,13 @@ def _sc_gather_reduce(
             )
         num_row_chunks = M // row_wave_size
         num_col_chunks = K // col_chunk_size
-        packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
+        # The gather side and the output side pack independently. ``in_packing``
+        # is how many operand rows share one 32-bit word in HBM (it drives the
+        # indirect gather addressing); ``out_packing`` is how many output rows
+        # share one 32-bit word (it drives the output block row count). Only the
+        # latter can floor to a zero-row block, so only the latter is widened.
+        in_packing = 32 // jax.dtypes.itemsize_bits(op.dtype)
+        out_packing = 32 // jax.dtypes.itemsize_bits(out_dtype)
 
         subcore_first_row_chunk = (lax.axis_index(
             ("core", "subcore")) * num_row_chunks)
@@ -209,19 +228,19 @@ def _sc_gather_reduce(
                         lax.div(
                             idx_ref[pl.ds(r * row_subchunk_size,
                                           row_subchunk_size)],
-                            packing,
+                            in_packing,
                         ),
                         c,
                     ),
                 ),
                 out_specs=pl.BlockSpec(
-                    (out_rows_per_step // packing, col_chunk_size),
+                    (out_rows_per_step // out_packing, col_chunk_size),
                     lambda r, c: (row_chunk_idx * num_row_subchunks + r, c),
                 ),
             )
             def data_pipeline(gather_ref, out_ref):
                 gather_ref = gather_ref.bitcast(op.dtype)
-                out_ref = out_ref.bitcast(op.dtype)
+                out_ref = out_ref.bitcast(out_dtype)
 
                 row_slice = pl.ds(
                     pl.program_id(0) * row_subchunk_size, row_subchunk_size)
@@ -239,13 +258,13 @@ def _sc_gather_reduce(
                         for row_in_group in range(reduce_group_size):
                             row = reduce_group * reduce_group_size + row_in_group
                             row_data = gather_ref[
-                                pl.ds(row * packing, packing),
+                                pl.ds(row * in_packing, in_packing),
                                 pl.ds(col_base, unpack_col_chunk),
                             ].astype(jnp.float32)
-                            if packing == 1:
+                            if in_packing == 1:
                                 row_data = row_data[0]
                             else:
-                                assert packing == 2
+                                assert in_packing == 2
                                 row_data = jnp.where(
                                     lax.bitwise_and(subchunk_idxs[row],
                                                     1) == 0,
@@ -271,7 +290,7 @@ def _sc_gather_reduce(
                                     next_level.append(row_datas[i])
                             row_datas = next_level
                         accs.append(row_datas[0])
-                    out = jnp.stack(accs, axis=0).astype(op.dtype)
+                    out = jnp.stack(accs, axis=0).astype(out_dtype)
                     out_ref[:, pl.ds(col_base, unpack_col_chunk)] = out
 
             data_pipeline(in_hbm_ref.bitcast(jnp.int32),
@@ -350,21 +369,28 @@ def dense_gather_reduce(
                 break
             col_chunk_size -= 128
         if col_chunk_size > 0:
-            # Same decision is_compatible() used to pick packing; the upcast
-            # must match it or the kernel emits a zero-row output block.
-            kernel_dtype = _get_kernel_dtype(x.dtype, sc_info.num_lanes,
-                                             reduce_group_size)
-            kernel_x = x.astype(kernel_dtype) if kernel_dtype != x.dtype else x
+            # Same decision is_compatible() used to pick the output packing;
+            # the two must match or the kernel emits a zero-row output block.
+            # Note this widens the *output buffer only*. The operand is passed
+            # through untouched: the gather addresses HBM in 32-bit words, so a
+            # bf16 gather already fetches the whole word and upcasting x would
+            # cost a full fp32 copy of an array reduce_group_size times larger
+            # than the output while fetching exactly the same bytes.
+            out_dtype = _get_kernel_out_dtype(x.dtype, sc_info.num_lanes,
+                                              reduce_group_size)
             # Pallas kernel expects 1D weights
             res = _sc_gather_reduce(
-                kernel_x,
+                x,
                 indices,
                 topk_weights.reshape(-1),
                 reduce_group_size=reduce_group_size,
+                out_dtype=out_dtype,
                 col_chunk_size=col_chunk_size,
                 topk_wgt_zero_nan=topk_wgt_zero_nan,
             )
-            return res.astype(x.dtype)
+            # Cheap elementwise convert on the small output; XLA generally
+            # fuses it into the consumer. No-op when out_dtype == x.dtype.
+            return res.astype(x.dtype) if res.dtype != x.dtype else res
     # Fallback to JAX baseline
     return _jax_fallback(x, indices, topk_weights, reduce_group_size,
                          topk_wgt_zero_nan)
