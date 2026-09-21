@@ -25,7 +25,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.common.sharding import ShardingAxisName, is_attn_dp
 from tpu_inference.utils import get_mesh_shape_product
 
 from .gmm_fused_rs_nodedup import _select_fused_rs_block_sizes
@@ -64,6 +64,40 @@ def get_moe_expert_axis(mesh, default_axis=EXPERT):
     axes = tuple(a for a in ("attn_dp", "attn_dp_expert", "expert", "model")
                  if a in mesh.shape)
     return _flatten_partition_axes(*axes) if axes else default_axis
+
+
+def get_sp_regather_axes(mesh, expert_axis):
+    """EP axes the MoE consumer does *not* keep tokens sharded on.
+
+    Under attention data-parallelism the layer after the MoE consumes tokens
+    sharded on ``ATTN_DATA`` -- that is what ``expert_parallel_gmm`` emits when
+    ``scatter_results`` is set (``fused_moe_gmm.py``, and
+    ``layers/vllm/interface/moe.py`` sets it to ``is_attn_dp(mesh)``). The
+    sequence-parallel exit here instead scatters over the whole EP axis, which
+    is ``ATTN_DATA`` *plus* the tensor-parallel axes (``expert``, ``model``) --
+    an over-shard by exactly their product.
+
+    Returns those extra axes so the body can all-gather just them, turning the
+    EP-wide scatter back into the ``ATTN_DATA`` scatter the consumer expects.
+    Empty when there is nothing to undo, i.e. on a mesh without attention DP,
+    where the EP-wide scatter already is the right layout.
+
+    Order matters and is preserved from ``expert_axis``: the gathered axes are
+    the *inner* (fastest-varying) ones, so concatenating their shards rebuilds a
+    contiguous token range within each attention-data group rather than an
+    interleaving.
+    """
+    if not is_attn_dp(mesh):
+        return ()
+    axes = _flatten_partition_axes(expert_axis)
+    if isinstance(axes, str):
+        axes = (axes, )
+    # Read through the lazy proxy at call time: the module-level constants above
+    # are bound at import and can predate the sharding class being chosen.
+    keep = _flatten_partition_axes(ShardingAxisName.ATTN_DATA)
+    keep = {keep} if isinstance(keep, str) else set(keep or ())
+    return tuple(a for a in (axes or ())
+                 if a not in keep and mesh.shape.get(a, 1) > 1)
 
 
 def apply_scoring_fn(scoring_fn: str, x: jax.Array) -> jax.Array:
@@ -213,6 +247,7 @@ def moe_gmm_local_rs_nodedup(
     ep_axis_name=EXPERT,
     has_post_norm: bool = False,
     sp_enabled: bool = True,
+    sp_regather_axes: tuple = (),
     fp8_post_gather: bool = False,
 ) -> jax.Array:
     """Per-chip MoE body: ICI direct-write per row, then weighted top_k reduce."""
@@ -327,6 +362,15 @@ def moe_gmm_local_rs_nodedup(
     token_hidden = jnp.sum(out_3d * local_topk_weights[:, :, None], axis=1)
 
     if sp_enabled:
+        if sp_regather_axes:
+            # Under attention DP the EP-wide scatter over-shards the output;
+            # gather back the axes the consumer does not shard on so the result
+            # lands on ATTN_DATA. See get_sp_regather_axes.
+            return _all_gather_token_hidden(
+                token_hidden,
+                axis_name=sp_regather_axes,
+                fp8_enabled=fp8_post_gather,
+            )
         # Kernel reduce-scatter is the SP exit; output stays token-sharded.
         return token_hidden
     # SP off: gather the per-chip token shard back to the replicated batch.
@@ -363,9 +407,20 @@ def expert_parallel_gmm_rs(
     data_p_spec = P(MLP_DATA)
     # SP off: hidden replicated in/out with an explicit all-gather in the body.
     sp_enabled = enabled_tpu_sp()
+    # Attention-DP meshes need a narrower exit than either default: the SP
+    # scatter is EP-wide and the SP-off gather is total, while the consumer
+    # wants ATTN_DATA. Gather only the difference.
+    sp_regather_axes = (get_sp_regather_axes(mesh, expert_axis)
+                        if sp_enabled else ())
     hidden_in_spec = data_p_spec if sp_enabled else P()
-    moe_out_spec = (P(combine_partition_axes(MLP_DATA, expert_axis))
-                    if sp_enabled else P())
+    if not sp_enabled:
+        moe_out_spec = P()
+    elif sp_regather_axes:
+        # Same spec expert_parallel_gmm emits under scatter_results.
+        moe_out_spec = P(
+            combine_partition_axes(MLP_DATA, ShardingAxisName.ATTN_DATA))
+    else:
+        moe_out_spec = P(combine_partition_axes(MLP_DATA, expert_axis))
     fp8_post_gather = ((not sp_enabled) and w1_scale is not None
                        and w2_scale is not None and
                        (fp8_post_gather or _enable_fp8_output_comm_from_env()))
@@ -396,6 +451,7 @@ def expert_parallel_gmm_rs(
             ep_axis_name=expert_axis,
             has_post_norm=_has_pn_rs,
             sp_enabled=sp_enabled,
+            sp_regather_axes=sp_regather_axes,
             fp8_post_gather=fp8_post_gather,
         ),
         mesh=mesh,
