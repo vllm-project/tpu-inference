@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     NUM_PRECOMPILE_WORKERS: int = 1
     DP_SCHED_BATCH_PREFILL: bool = False
     DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS: int = 10000
+    DP_SCHED_ROUTING: str = "least_loaded"
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
     PROFILE_SINGLE_DEVICE: bool = False
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
     VERIFY_WEIGHTS: bool = False
+    SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     RAIDEN_H2D_SETTLE: bool = True
 
@@ -460,6 +462,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # DP scheduler: timeout (ms) to force flush pending requests.
     "DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS":
     lambda: int(os.getenv("DP_SCHED_BATCH_PREFILL_FLUSH_TIMEOUT_MS", "30000")),
+    # DP scheduler: how new requests are assigned to DP ranks.
+    # "least_loaded" (default) routes each request to the rank with the
+    # best prefix-cache overlap and lowest projected load, querying every
+    # rank.
+    # "round_robin" cycles ranks with no per-request query: always cheaper,
+    # but it equalizes request COUNT, not load, and ignores prefix-cache
+    # locality. Count matches load only for uniform requests submitted as
+    # one batch to idle ranks -- use it for bulk homogeneous workloads
+    # (e.g. RL rollouts, where the per-request all-rank query dominates).
+    # Keep least_loaded for heterogeneous or streaming traffic, or
+    # shared-prefix (system-prompt / few-shot / multi-turn) workloads.
+    "DP_SCHED_ROUTING":
+    env_with_choices("DP_SCHED_ROUTING",
+                     "least_loaded", ["least_loaded", "round_robin"],
+                     case_sensitive=False),
     "MLA_XPOSE_N_TILE_SIZE":
     lambda: int(os.getenv("MLA_XPOSE_N_TILE_SIZE", "160")),
     "VLLM_MOE_CHUNK_SIZE":
@@ -531,6 +548,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # RL weight sync: verify tensor checksums after each Raiden H2D transfer.
     "VERIFY_WEIGHTS":
     env_bool("VERIFY_WEIGHTS", default=False),
+    # Microbatch size for sampling block. Set to 0 to disable microbatching (disabled by default).
+    "SAMPLING_MICROBATCH_SIZE":
+    lambda: int(os.getenv("SAMPLING_MICROBATCH_SIZE", "0")),
     # Largest runtime top-k handled by distributed candidate sampling. This is
     # read at trace time so candidate tensor shapes remain static.
     "DISTRIBUTED_SAMPLING_MAX_TOP_K":
