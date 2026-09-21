@@ -22,14 +22,26 @@ OUTPUT_LEN="${OUTPUT_LEN:-1024}"
 NUM_PROMPTS="${NUM_PROMPTS:-128}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-8}"
 
-# --fail-with-body, not plain -sS: curl exits 0 on an HTTP 500, which on build
-# tc#940 let a dead engine report the job as passed.
-echo "--- smoke test (triggers first-request compilation) ---"
-time curl -sS --fail-with-body --max-time 5400 "http://localhost:${PORT}/v1/completions" \
-  -X POST -H 'Content-Type: application/json' \
-  -d "{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 32, \"temperature\": 0}" \
-  | tee "${ART}/smoke.json"
-echo
+# SKIP_SMOKE / CLIENT_SMOKE_ONLY let the two halves of this script be scheduled
+# separately, so a build can put the accuracy legs between them: run once with
+# CLIENT_SMOKE_ONLY=1 to take the first-request hit and prove the engine is
+# alive, then the evals, then again with SKIP_SMOKE=1 for the sweep. Both unset
+# is the normal single-pass behaviour and nothing changes.
+if [ "${SKIP_SMOKE:-0}" != "1" ]; then
+  # --fail-with-body, not plain -sS: curl exits 0 on an HTTP 500, which on build
+  # tc#940 let a dead engine report the job as passed.
+  echo "--- smoke test (triggers first-request compilation) ---"
+  time curl -sS --fail-with-body --max-time 5400 "http://localhost:${PORT}/v1/completions" \
+    -X POST -H 'Content-Type: application/json' \
+    -d "{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 32, \"temperature\": 0}" \
+    | tee "${ART}/smoke.json"
+  echo
+fi
+
+if [ "${CLIENT_SMOKE_ONLY:-0}" = "1" ]; then
+  echo "--- client leg: smoke only, sweep deferred (CLIENT_SMOKE_ONLY=1)"
+  exit 0
+fi
 
 # --num-warmups: build tc#947 ran with 0 and the means were unusable -- mean TTFT
 # 44.5s against a 1.35s median, because the first few requests absorbed

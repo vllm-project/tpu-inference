@@ -145,8 +145,70 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # Retry of #34 with sequence-parallel MoE off and the token ladder's
-        # bottom rung raised.
+        # #37: retry of #36 with the fused-RS kernel's output layout FIXED IN
+        # CODE, and with the accuracy legs moved ahead of the perf sweep.
+        #
+        # #36 ran the kernel cleanly and scored at chance: GSM8K 0.0106 against
+        # 0.9788 (98.7% of generations never terminated) and MMLU 0.2443 on a
+        # 4-way multiple choice where chance is 0.25. It also posted temp 0.835
+        # GiB at aggregate 16384 against path A's 5.43 and +42% saturated
+        # throughput -- all of it measured on a broken forward pass and all of
+        # it void.
+        #
+        # THE DEFECT: the kernel's SP exit emits the wrong sharding for this
+        # mesh. Three layouts are in play, and the two the kernel can produce
+        # are both wrong:
+        #
+        #   path A (expert_parallel_gmm, known good, #26/#30)
+        #       scatter_results = is_attn_dp(mesh) = True on our mesh
+        #       (layers/vllm/interface/moe.py:116-120), so it emits
+        #       P(ATTN_DATA)                                 ->  4-way
+        #   RS kernel, SP on (what #36 ran)
+        #       P(combine(MLP_DATA, expert_axis))            -> 32-way
+        #   RS kernel, SP off
+        #       P()                                          ->  1-way
+        #
+        # SP on over-shards by 8x; SP off collapses the attn_dp split the next
+        # layer is built to consume. There is no env var that produces the
+        # 4-way layout, which is why #35's TPU_MOE_ENABLE_SP=0 was abandoned:
+        # it swaps one wrong layout for another.
+        #
+        # THE FIX (fused_moe_rs.py, this branch): a new get_sp_regather_axes()
+        # returns the EP axes the consumer does NOT shard tokens on -- the EP
+        # axis minus ATTN_DATA, which is ('model',) here, product 8. When that
+        # is non-empty the SP exit all-gathers just those axes before
+        # returning, turning the 32-way scatter into 32/8 = 4-way, and
+        # moe_out_spec is set to the same P(ATTN_DATA) path A emits. Order is
+        # safe: get_moe_expert_axis builds the EP tuple as
+        # ('attn_dp','attn_dp_expert','expert','model'), so the gathered axes
+        # are the INNER ones and their shards concatenate into a contiguous
+        # token range inside each attn_dp group rather than an interleaving.
+        #
+        # Verified offline against four mesh shapes before launch: ours (4-way
+        # out, matches path A), data=2 x attn_dp=4 x model=4 (8-way, matches),
+        # and two non-attn_dp meshes where is_attn_dp is False, the regather
+        # set is empty and behaviour is byte-identical to today. The fix cannot
+        # affect a mesh without attention DP.
+        #
+        # The gather is 1/8 the traffic of SP-off's full all-gather and leaves
+        # the result attn_dp-sharded, so most of the memory win should survive
+        # -- roughly 64 MiB rather than 256 MiB at aggregate 16384.
+        #
+        # ⚠️ NOT PROVEN that the layout is what produced the chance-level
+        # output. It is a verified mismatch against a known-good reference,
+        # which is a much better-founded change than #35's flag flip, but if
+        # GSM8K does not come back the defect is in the kernel's compute or its
+        # ICI peer-write and no spec change will reach it.
+        #
+        # Also noted, deliberately NOT changed: on a plain-DP mesh (data>1,
+        # attn_dp=1) path A emits P(MLP_DATA) while the SP exit still emits the
+        # EP-wide scatter, i.e. the same class of mismatch exists there.
+        # is_attn_dp is False so this patch is a no-op for it. Generalising is
+        # a two-line change but there is no test for it on this slice, and
+        # silently altering an untested path to fix a bug we cannot observe is
+        # how #36's numbers happened. Left for whoever owns that mesh.
+        #
+        # The #34/#36 analysis that led here follows.
         #
         # #34 proved the kernel engages on this mesh -- "fused_moe_rs kernel in
         # use" at fused_moe_gmm.py:597 -- and then died tracing the backbone.
@@ -310,7 +372,12 @@ steps:
         #      the kernel has been tested.
         #   2. Init model / Init kv-cache. Predicted 75.87 / 88.34.
         #   3. Whether the 16384 bucket compiled at all.
-        #   4. GSM8K and MMLU against 0.9788 / 0.8928.
+        #   4. GSM8K, ~8 min after the smoke test. THIS IS THE GATE.
+        #      0.978 -> the layout fix worked, let the run finish.
+        #      ~0.01 -> it did not. Kill the job; MMLU and the sweep are
+        #      another ~1h30m of slice time spent measuring a broken model,
+        #      which is exactly what #36 did.
+        #   5. MMLU against 0.8928, then the sweep against #26/#36.
         #
         # Everything else is #30's, reverted from cb893a152 rather than
         # retyped: model=8 x attn_dp=4, fp8 attn/GDN at block 512, the stock
@@ -382,13 +449,22 @@ steps:
         echo "--- effective MULTIHOST_ENV_VARS"; printf '%s\n' "$$MULTIHOST_ENV_VARS"
         echo "--- effective MULTIHOST_DOCKER_ARGS: $$MULTIHOST_DOCKER_ARGS"
 
-        # Three client legs against one server: perf, then each accuracy
-        # harness. `&&`, not `;` -- if the perf leg cannot get a completion out
-        # of the server there is nothing for the evals to score, and each eval
-        # leg records its own per-dataset failures internally rather than
-        # aborting on the first. The fork-based leg stays in the chain even
-        # though EVAL_SUITE=none makes it a no-op here: it exits 0 immediately,
-        # and leaving it wired up means flipping one variable brings the old
+        # ACCURACY BEFORE PERF on this build, which is the reverse of every run
+        # up to #36. #36 posted a 42% throughput gain on a model scoring at
+        # chance, so the perf numbers were void before they were measured and
+        # the ~35 min spent on the sweep bought nothing. Here the smoke test
+        # still goes first (CLIENT_SMOKE_ONLY=1 -- it takes the first-request
+        # hit and proves the engine is alive), then GSM8K, which returns a
+        # verdict in ~8 min: 0.978 means the patch worked, ~0.01 means it did
+        # not and the job should be killed on the spot rather than left to run
+        # MMLU and a two-leg sweep for another hour and a half.
+        #
+        # `&&`, not `;` -- each eval leg records its own per-dataset failures
+        # internally rather than aborting on the first, so reaching the sweep
+        # means the evals ran, not that they passed. Read GSM8K, do not wait
+        # for the exit code. The fork-based leg stays in the chain even though
+        # EVAL_SUITE=none makes it a no-op here: it exits 0 immediately, and
+        # leaving it wired up means flipping one variable brings the old
         # harness back for a side-by-side without editing the command.
         #
         # The run's exit status is stashed instead of propagated so the artifact
@@ -398,7 +474,7 @@ steps:
         set +e
         .buildkite/scripts/run_multihost.sh \
           "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_serve.sh" \
-          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval_std.sh"
+          "CLIENT_SMOKE_ONLY=1 bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval_std.sh && SKIP_SMOKE=1 bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval.sh"
         echo $$? > "$$PWD/dev_artifacts/.run_rc"
         set -e
       - sudo -n chown -R "$$(id -u):$$(id -g)" dev_artifacts 2>/dev/null || sudo -n chmod -R a+rX dev_artifacts || true
