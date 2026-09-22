@@ -224,7 +224,7 @@ Disaggregated Architecture Topology Helpers (mode == "disaggregated")
 {{- define "tpu-vllm-benchmark.kvConnector" -}}
 {{- if .Values.disaggregated.kvConnector -}}
 {{- .Values.disaggregated.kvConnector -}}
-{{- else if contains "torchtpu" (.Values.image | default "") -}}
+{{- else if contains "torchtpu" (include "tpu-vllm-benchmark.computedImage" .) -}}
 TPURaidenConnector
 {{- else -}}
 TPUConnector
@@ -234,7 +234,7 @@ TPUConnector
 {{- define "tpu-vllm-benchmark.kvConnectorModule" -}}
 {{- if .Values.disaggregated.kvConnectorModule -}}
 {{- .Values.disaggregated.kvConnectorModule -}}
-{{- else if contains "torchtpu" (.Values.image | default "") -}}
+{{- else if contains "torchtpu" (include "tpu-vllm-benchmark.computedImage" .) -}}
 vllm_torchtpu.distributed.kv_transfer.tpu_connector
 {{- else -}}
 {{- $connector := include "tpu-vllm-benchmark.kvConnector" . -}}
@@ -364,10 +364,28 @@ Advanced Inference & Serving Feature Flags Helper
 ================================================================================
 Container Image Determination Helper
 ================================================================================
-Tag format is strictly: <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion>
-Never uses any other tag format. If commit hashes are empty (""), they default to "latest".
+`image` accepts two forms:
+
+  1. A string -- a complete image reference, used verbatim. This is what
+     run_benchmark.sh writes into its generated values file and what the
+     `-i torchtpu` style shortcuts rely on. The on-demand builder cannot be
+     used with this form because there is nothing to derive a build tag from.
+  2. A map (registry / tpuInferenceCommit / vllmCommit) -- the reference is
+     composed as <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion>,
+     which is exactly the tag the image builder produces and pushes.
+
+For the map form the tag layout is strict: no other tag format is ever used.
 */}}
 {{- define "tpu-vllm-benchmark.computedImage" -}}
+  {{- if kindIs "string" .Values.image -}}
+    {{- if not .Values.image -}}
+      {{- fail "image is empty. Set it to a full image reference, or to a map with registry/tpuInferenceCommit/vllmCommit." -}}
+    {{- end -}}
+    {{- if and .Values.builder .Values.builder.enabled -}}
+      {{- fail "builder.enabled=true requires the map form of `image` (registry/tpuInferenceCommit/vllmCommit) so the build tag can be derived. A string `image` is a fixed reference and cannot be built; either drop builder.enabled or switch `image` to the map form." -}}
+    {{- end -}}
+    {{- .Values.image -}}
+  {{- else -}}
   {{- $registry := "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu" -}}
   {{- $tpuCommit := "" -}}
   {{- $vllmCommit := "" -}}
@@ -389,6 +407,7 @@ Never uses any other tag format. If commit hashes are empty (""), they default t
   {{- end -}}
   {{- $tpuVer := .Values.tpu.accelerator | default "tpu7x" -}}
   {{- printf "%s:%s-%s-%s" $registry $tpuCommit $vllmCommit $tpuVer -}}
+  {{- end -}}
 {{- end }}
 
 {{/*

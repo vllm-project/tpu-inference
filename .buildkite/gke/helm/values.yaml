@@ -122,7 +122,11 @@ tpu:
 
 # Disaggregated Architecture Configuration (Active when mode == "disaggregated")
 disaggregated:
-  kvConnector: "TPUConnector"               # "TPUConnector" (vllm-tpu) or "TPURaidenConnector" (torchtpu)
+  # Both default to auto-detection from the resolved container image: a torchtpu
+  # image selects TPURaidenConnector + vllm_torchtpu..., anything else selects
+  # TPUConnector + tpu_inference.... Set them explicitly to override, but set
+  # both -- pinning only one produces a connector/module pair that do not match.
+  kvConnector: ""                           # Auto-detected if empty: "TPUConnector" (vllm-tpu) or "TPURaidenConnector" (torchtpu)
   kvConnectorModule: ""                     # Auto-detected if empty
 
   # Prefill Slice (KV Producer)
