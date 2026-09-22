@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -11,7 +12,8 @@ from vllm.v1.core.kv_cache_coordinator import \
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager, get_manager_for_kv_cache_spec)
+    CrossAttentionManager, MambaManager, SingleTypeKVCacheManager,
+    get_manager_for_kv_cache_spec)
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
@@ -179,6 +181,103 @@ class MirrorMambaBlockPool:
     def cache_full_blocks(self, *args, **kwargs) -> None:
         # The primary group cached these blocks under the shared key already
         return None
+
+
+class TPUMambaManager(MambaManager):
+    """A Mamba manager for TPU that only caches checkpoints the GDN kernel wrote.
+
+    The GDN kernel emits exactly one checkpoint per forward pass, at
+    `(seq_len - 1) // block_size`. Intermediate blocks allocated during
+    a chunked prefill are never written by the kernel and still hold uninitialized
+    memory.
+    """
+
+    def __init__(
+        self,
+        kv_cache_spec: MambaSpec,
+        block_pool: BlockPool,
+        **kwargs,
+    ) -> None:
+        # Compatibility across vLLM versions: SingleTypeKVCacheManager.__init__
+        # does not take arbitrary kwargs (e.g. max_in_flight_tokens, max_model_len).
+        kwargs.pop("max_in_flight_tokens", None)
+        kwargs.pop("max_model_len", None)
+        valid_params = inspect.signature(
+            SingleTypeKVCacheManager.__init__).parameters
+        has_var_keyword = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD
+            for p in valid_params.values())
+        if not has_var_keyword:
+            kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+        super().__init__(kv_cache_spec, block_pool, **kwargs)
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int] = (),
+        **kwargs,
+    ) -> None:
+        if num_tokens <= 0:
+            return
+
+        if self.mamba_cache_mode != "align":
+            super().cache_blocks(
+                request,
+                num_tokens,
+                retention_interval=retention_interval,
+            )
+            return
+
+        if not self.kv_cache_spec.prefix_cacheable:
+            return
+
+        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
+        num_full_blocks = num_tokens // self.block_size
+
+        if num_cached_blocks < num_full_blocks:
+            # The GDN kernel writes exactly one checkpoint per forward pass, at
+            # token `num_tokens - 1`. Only this block holds valid state;
+            # intermediate blocks were never checkpointed.
+            written_block_idx = (num_tokens - 1) // self.block_size
+            block_mask = [
+                (num_cached_blocks + i) == written_block_idx
+                for i in range(num_full_blocks - num_cached_blocks)
+            ]
+
+            self.block_pool.cache_full_blocks(
+                request=request,
+                blocks=self.req_to_blocks[request.request_id],
+                num_cached_blocks=num_cached_blocks,
+                num_full_blocks=num_full_blocks,
+                block_size=self.block_size,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_mask=block_mask,
+            )
+
+            blocks = self.req_to_blocks[request.request_id]
+            for idx in range(num_cached_blocks, num_full_blocks):
+                block = blocks[idx]
+                if block.is_null or block.block_hash is None:
+                    continue
+                self.cached_blocks_this_step.add(block.block_hash)
+                if block.block_hash_num_tokens is not None:
+                    self._pending_boundary_state_offloads.append(
+                        (
+                            request.request_id,
+                            self.kv_cache_group_id,
+                            block,
+                            block.block_hash_num_tokens,
+                        )
+                    )
+
+            self.num_cached_block[request.request_id] = num_full_blocks
+
+        partial_hash = self._cache_partial_tail_block(request, num_tokens)
+        if partial_hash is not None:
+            self.cached_blocks_this_step.add(partial_hash)
 
 
 class TPUDualBlockPool(BlockPool):
@@ -381,11 +480,8 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             pool = self.mamba_block_pool
             if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
                 pool = self._mirror_pool
-            new_managers[i] = get_manager_for_kv_cache_spec(
-                kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
-                max_in_flight_tokens=getattr(old_mgr, "max_in_flight_tokens",
-                                             128),
-                max_model_len=self.max_model_len,
+            spec = kv_cache_config.kv_cache_groups[i].kv_cache_spec
+            manager_kwargs = dict(
                 block_pool=pool,
                 enable_caching=self.enable_caching,
                 kv_cache_group_id=i,
@@ -395,6 +491,24 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 needs_kv_cache_zeroing=self.kv_cache_config.
                 needs_kv_cache_zeroing,
             )
+            if is_mamba_spec(spec):
+                # Use TPU-specific MambaManager that only indexes written checkpoints
+                manager = TPUMambaManager(
+                    kv_cache_spec=spec,
+                    **manager_kwargs,
+                )
+                logger.info(
+                    "[TPUHybridKVCacheCoordinator] group %d uses "
+                    "checkpoint-aware TPUMambaManager", i)
+            else:
+                max_in_flight = getattr(old_mgr, "max_in_flight_tokens", 128)
+                manager = get_manager_for_kv_cache_spec(
+                    kv_cache_spec=spec,
+                    max_in_flight_tokens=max_in_flight,
+                    max_model_len=self.max_model_len,
+                    **manager_kwargs,
+                )
+            new_managers[i] = manager
         self.single_type_managers = tuple(new_managers)
 
         for i in self.mamba_group_ids:
