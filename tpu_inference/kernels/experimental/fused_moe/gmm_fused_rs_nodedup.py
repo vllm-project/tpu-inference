@@ -902,6 +902,12 @@ def kernel_main_fused_rs(
                 scatter_meta,
             )
 
+            # Buffer 0 is reused inside this gm whenever the tiles do not all
+            # fit, so the early cross-gm prefetch into it is only safe when
+            # they do. When they do not, it is deferred to the post-loop block
+            # below, which then has to start from buffer 0 rather than 1.
+            prefetch_next_gm_early = total_w1_steps <= num_w1_bufs
+
             # GMM1 loop.
             for step in range(total_w1_steps):
                 _n1 = step // num_k1
@@ -914,12 +920,18 @@ def kernel_main_fused_rs(
                 def _():
                     wait_w1_dma(buf_id)
 
+                compute_gmm1_tile(buf_id, _n1, _k1, gm_id)
+
+                # Refill AFTER the compute that reads this buffer. The tile
+                # `step + num_w1_bufs` maps to `buf_id` by construction
+                # ((step + N) % N == step % N), so issuing the copy before the
+                # compute overwrites the operand being read. Placing it here
+                # still overlaps the DMA with the following steps' computes.
                 if step + num_w1_bufs < total_w1_steps:
                     ns = step + num_w1_bufs
                     start_w1_dma(ns % num_w1_bufs, expert_id, ns // num_k1,
                                  ns % num_k1)
-                compute_gmm1_tile(buf_id, _n1, _k1, gm_id)
-                if step == 0:
+                if step == 0 and prefetch_next_gm_early:
 
                     @pl.when(gm_id + 1 < local_num_gm)
                     def _():
@@ -941,7 +953,8 @@ def kernel_main_fused_rs(
 
                 @pl.when(jnp.logical_not(next_same))
                 def _():
-                    for _i in range(1, min(num_w1_bufs, total_w1_steps)):
+                    for _i in range(0 if not prefetch_next_gm_early else 1,
+                                    min(num_w1_bufs, total_w1_steps)):
                         start_w1_dma(_i, next_e, _i // num_k1, _i % num_k1)
 
             with jax.named_scope("interlude"):
@@ -972,11 +985,14 @@ def kernel_main_fused_rs(
                 def _():
                     wait_w2_dma(buf_id)
 
+                compute_gmm2_tile(buf_id, _n2, _k2, gm_id)
+
+                # Refill after the compute -- same aliasing as the GMM1 loop:
+                # (step + num_w2_bufs) % num_w2_bufs == buf_id.
                 if step + num_w2_bufs < total_w2_steps:
                     ns = step + num_w2_bufs
                     start_w2_dma(ns % num_w2_bufs, expert_id, ns // num_k2,
                                  ns % num_k2)
-                compute_gmm2_tile(buf_id, _n2, _k2, gm_id)
 
             # Finish zero-init on first tile.
             @jax.named_scope("zero_out_end")
