@@ -137,6 +137,52 @@ def create_mamba_cache(cache_shape: tuple, cache_dtype: jnp.dtype,
     return _get_mamba_cache_allocator(cache_shape, cache_dtype, sharding)()
 
 
+# A step allocates a handful of mamba slots, but the exact count varies. Round
+# the scatter's index array up to one of these sizes so the count does not
+# retrigger compilation every step.
+_ZERO_ROWS_BUCKETS = (8, 32, 128, 512)
+
+
+def _bucket_num_rows(num_rows: int) -> int:
+    for bucket in _ZERO_ROWS_BUCKETS:
+        if num_rows <= bucket:
+            return bucket
+    last = _ZERO_ROWS_BUCKETS[-1]
+    return -(-num_rows // last) * last
+
+
+@cache
+def _get_mamba_block_zeroer(
+    sharding: NamedSharding,
+) -> Callable[[jax.Array, jax.Array], jax.Array]:
+
+    @partial(jax.jit, donate_argnums=(0, ), out_shardings=sharding)
+    def _zero(state: jax.Array, rows: jax.Array) -> jax.Array:
+        return state.at[rows].set(0)
+
+    return _zero
+
+
+def zero_mamba_blocks(state: jax.Array, rows: np.ndarray) -> jax.Array:
+    """Zeros whole rows of a mamba state array.
+
+    The GDN kernel writes one checkpoint per forward pass, at
+    ``(seq_len - 1) // mamba_block_size``, so every other slot a request owns
+    still holds whatever its previous owner left there. Zeroing a slot when it
+    is handed out means a resume that lands on a slot no pass ever
+    checkpointed reads a fresh-sequence state instead of unrelated state.
+
+    ``state`` is donated. ``rows`` is padded up to a bucket size by repeating
+    its first entry; the scatter then writes the same zeros twice, which is
+    harmless and keeps the shape off the recompilation path.
+    """
+    if rows.size == 0:
+        return state
+    padded = np.full(_bucket_num_rows(rows.size), rows[0], dtype=np.int32)
+    padded[:rows.size] = rows
+    return _get_mamba_block_zeroer(state.sharding)(state, jnp.asarray(padded))
+
+
 def create_kv_caches(
     num_blocks: int,
     block_size: int,

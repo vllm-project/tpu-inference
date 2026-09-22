@@ -18,7 +18,7 @@ import random
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -77,6 +77,8 @@ from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
+from tpu_inference.core.hybrid_coordinator import is_mamba_group
+from tpu_inference.runner.kv_cache import zero_mamba_blocks
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
@@ -1430,6 +1432,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.kv_cache_manager.actual_mamba_num_blocks is not None:
             self.input_batch.init_mamba_pools(
                 self.kv_cache_manager.actual_mamba_num_blocks)
+        self._wire_mamba_block_zeroing(kv_cache_config)
+
+    def _wire_mamba_block_zeroing(self,
+                                  kv_cache_config: KVCacheConfig) -> None:
+        """Tell the batch manager which group's block ids name mamba slots.
+
+        Only align mode: without it the kernel indexes mamba state by the
+        per-request `mamba_state_indices` slot rather than by the block table,
+        so the group's block ids would name the wrong rows.
+        """
+        pbm = self.persistent_batch_manager
+        pbm.mamba_kv_cache_group_id = None
+        pbm.mamba_block_size = 0
+        if not envs.MAMBA_ZERO_NEW_BLOCKS:
+            return
+        if getattr(self.cache_config, "mamba_cache_mode", "none") != "align":
+            return
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            if is_mamba_group(group):
+                pbm.mamba_kv_cache_group_id = gid
+                pbm.mamba_block_size = group.kv_cache_spec.block_size
+                break
 
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
@@ -2798,6 +2822,65 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_subtract_indices, positions_subtract_indices)
         return seq_lens, positions
 
+    def _zero_new_mamba_blocks(self, req_indices_dp, dp_size: int) -> None:
+        """Zero the mamba slots the scheduler handed out this step.
+
+        vLLM caches -- and so advertises as resume points -- every block
+        boundary its retention mask keeps, but the GDN kernel writes exactly
+        one checkpoint per forward pass, at `(seq_len - 1) // block_size`
+        (`kernels/gdn/v3/memory_ref.py`, gated on `is_last_tile` with
+        `window_size=1`). Every other slot a request owns is left holding
+        whatever its previous owner wrote, and a later request that resumes
+        there reads that state as its own. Zeroing a slot when it is handed
+        out turns such a resume into a fresh-sequence start.
+
+        Fresh requests are unaffected either way: the kernel gates the state
+        read on `has_initial_state = (seq_lens - query_lens) > 0`, so at
+        `num_computed == 0` the DMA is length-zero and the masked VMEM value
+        is selected away.
+        """
+        pbm = self.persistent_batch_manager
+        if not pbm.new_mamba_blocks:
+            return
+        # Consume the record: a dummy or profiling forward never runs
+        # `update_states`, and re-zeroing a slot a real request has since
+        # checkpointed would throw that checkpoint away.
+        new_blocks = pbm.new_mamba_blocks
+        pbm.new_mamba_blocks = {}
+
+        mamba_indices = [
+            i for i, c in enumerate(self.kv_caches) if isinstance(c, tuple)
+        ]
+        if not mamba_indices:
+            return
+
+        # Slot ids are rank-local -- each DP rank's scheduler owns a shard of
+        # the pool and hands out ids in [0, num_blocks // dp_size) -- so lift
+        # them into the global row space of the state arrays.
+        local_rows = max(
+            self.kv_caches[mamba_indices[0]][0].shape[0] // dp_size, 1)
+        rank_of_req_index: Dict[int, int] = {}
+        for dp_rank in range(dp_size):
+            for req_index in req_indices_dp[dp_rank]:
+                rank_of_req_index[int(req_index)] = dp_rank
+
+        rows: Set[int] = set()
+        for req_id, block_ids in new_blocks.items():
+            req_index = self.input_batch.req_id_to_index.get(req_id)
+            if req_index is None:
+                continue
+            base = rank_of_req_index.get(req_index, 0) * local_rows
+            # Block 0 is the shared null block, never allocated to a request.
+            rows.update(base + b for b in block_ids if 0 < b < local_rows)
+        if not rows:
+            return
+
+        rows_arr = np.fromiter(sorted(rows), dtype=np.int32, count=len(rows))
+        for i in mamba_indices:
+            self.kv_caches[i] = tuple(
+                zero_mamba_blocks(state, rows_arr)
+                for state in self.kv_caches[i])
+
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -3210,6 +3293,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups):
                 build_block_table_host(gid)
+
+        self._zero_new_mamba_blocks(req_indices_dp, dp_size)
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
