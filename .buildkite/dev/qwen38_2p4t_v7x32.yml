@@ -145,316 +145,66 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # #39: SECOND fused-RS code fix. #38's config exactly, plus a fix to a
-        # double-buffer race inside the kernel itself.
+        # #40: first run on branch qwen38-2p4t-09222026, rebased onto current
+        # main. Rebuild-and-validate, not an experiment.
         #
-        # #38 (the output-layout fix, still in) took the model from chance back
-        # to coherent -- GSM8K 0.0106 -> 0.9128, MMLU 0.2443 -> 0.8282, and
-        # truncation from 1302/1319 to 3/1319. But both scores sat ~0.065 below
-        # path A's 0.9788 / 0.8928, which is ~6 sigma on GSM8K and ~18 on MMLU.
-        # MMLU is a loglikelihood task with 0/14042 truncated, so that residual
-        # was a per-token logit error, not a generation problem.
+        # WHY: the load-time bf16->fp8 requantization we had been carrying
+        # locally merged upstream as #3562, so the old branch (90 commits behind
+        # main) was retired and the harness moved onto main. This build answers
+        # one question: does the same config still produce the same numbers on
+        # the new base?
         #
-        # ROOT CAUSE, found by single-layer numerical diff on the local 8-chip
-        # v7x rather than by another full-model build (see
-        # experiments/.../moe_kernel_diff/FINDINGS.md). Both pipeline loops in
-        # gmm_fused_rs_nodedup.py issued the next weight-tile DMA BEFORE the
-        # compute that reads the current tile:
+        # CONFIG IS #30's, byte for byte, with exactly two deliberate
+        # differences:
         #
-        #     buf_id = step % num_bufs
-        #     wait_dma(buf_id)
-        #     if step + num_bufs < total_steps:
-        #         start_dma((step + num_bufs) % num_bufs, ...)  # == buf_id !!
-        #     compute_tile(buf_id, ...)                         # reads buf_id
+        #   1. The requantization env vars are renamed. #3562 merged under
+        #      different names, so the old ones are now dead strings that would
+        #      silently disable requantization -- no error, just 2.72 GiB/chip
+        #      more weights and HBM that stops matching the capacity model:
         #
-        # (step + N) % N == step % N, so the refill overwrites the operand being
-        # read. The branch only fires when total_steps > num_bufs, which is why
-        # it is invisible at small hidden/intermediate sizes and why every shape
-        # in the repo's kernel tests passes against the broken code. Qwen3.8
-        # (hidden 8192, moe_intermediate 2048) gets num_n1=4 against
-        # num_w1_bufs=2 at EVERY compiled token bucket, so #38 ran entirely
-        # inside the defect.
+        #        QUANTIZE_BF16_LINEAR_PATTERNS   -> BF16_LINEAR_REQUANTIZE_PATTERNS
+        #        QUANTIZE_BF16_LINEAR_BLOCK_SIZE -> BF16_LINEAR_REQUANTIZE_BLOCK_SIZE
         #
-        # Second collision: the cross-gm prefetch at step 0 also targets buffer
-        # 0, and its guard is `next_same = (next_e == expert_id) AND
-        # can_cache_w1`. can_cache_w1 is false exactly when buffers are reused,
-        # so in the broken case the guard never holds and a second unrelated
-        # DMA lands in a buffer that step num_bufs will read.
+        #      Values are unchanged, and upstream kept the semantics: `re:`
+        #      prefixes, fused_mapping expansion, and the _check_block_size
+        #      guard all behave as before.
         #
-        # THE FIX (59e60e854, +20/-4): move both refills after their compute
-        # (overlap is preserved, just one step later) and defer the early
-        # cross-gm buffer-0 prefetch when buffers are reused.
+        #   2. GPQA is skipped. STD_EVAL_SUITE=gsm8k,mmlu rather than #30's
+        #      gpqa,gsm8k,mmlu -- GPQA costs ~52 min and its +-0.035 noise floor
+        #      cannot resolve a regression that GSM8K (+-0.004) and full-MMLU
+        #      (+-0.0025) would both catch. Saves ~1h.
         #
-        # Validated 11/11 on one MoE layer, rel_l2 vs an fp32 dense reference:
+        # Everything else is #30: model=8 x attn_dp=4, MAX_NUM_SEQS=64, pool
+        # 19456, MAX_NUM_BATCHED_TOKENS=2048 (aggregate 8192), BENCH_SWEEP=8:32,
+        # fp8 attn/GDN at block 512, stock shared expert, MAX_MODEL_LEN=40960.
+        # The fused-RS MoE kernel is NOT in this build -- both its correctness
+        # fixes are a separate workstream, and USE_GMM_FUSED_RS_KERNEL and
+        # MIN_TOKEN_BUCKET are gone from the env block entirely.
         #
-        #   H     I      before     after    path A
-        #   3072  2048   5.05e-01  3.21e-02  4.09e-03   fixed
-        #   4096  2048   5.11e-01  4.50e-03  4.08e-03   fixed
-        #   8192  2048   4.76e-01  4.54e-03  4.04e-03   fixed
-        #   2048  4096   4.95e-01  1.67e-02  1.66e-02   fixed
-        #   1024  8192   5.12e-01  4.42e-03  4.13e-03   fixed
-        #   (4 previously-passing shapes: bit-identical before and after)
+        # Also carried and worth knowing about if something looks odd:
+        #   - prompt-logprob targets are now built on the host rather than by
+        #     rolling the packed ids, which fixes MMLU 500s on any prompt longer
+        #     than max_num_batched_tokens. MMLU is the leg that exercises it.
+        #   - compiles now log XLA's own memory_analysis, so `temp` per bucket
+        #     is readable directly from the job log.
         #
-        #   Qwen3.8 proportions, 64 experts / topk 10:
-        #     bf16  6.51e-01 -> 2.18e-02   (path A 1.23e-02)
-        #     fp8   7.39e-01 -> 5.08e-02   (path A 4.90e-02)
+        # PASS CRITERIA, against #30:
+        #   GSM8K flexible 0.9788, MMLU 0.8928, Init model 75.87,
+        #   Init kv-cache 86.98, kv_cache_config.num_blocks 19456.
+        # Accuracy inside noise and HBM within ~0.05 GiB means the new base is
+        # good and we can resume experiments on it.
         #
-        # WHAT THIS BUILD DECIDES: whether the kernel is now usable. Pass is
-        # GSM8K ~0.9788 and MMLU ~0.8928, i.e. #30 parity. Anything still ~0.065
-        # low means a second, independent defect and the single-layer rig did
-        # not capture it -- most likely because it cannot reach ep_size 32.
+        # WHAT TO READ FIRST:
+        #   1. Init model. 75.87 means requantization ran. ~78.2 means the
+        #      rename did not take and the patterns matched nothing -- that is
+        #      the specific failure this build is most likely to hit.
+        #   2. GSM8K, ~8 min after the smoke test.
+        #   3. MMLU, and specifically whether any request 500s.
         #
-        # ⚠️ NOT PROVEN that this race is what produced #38's numbers. A
-        # per-layer rel_l2 of 0.5 across 92 layers should have destroyed the
-        # model, yet #38 scored 0.9128; residual-stream dilution is the likely
-        # reconciliation but it is unshown. This build is the test of it.
-        #
-        # Still unfixed, deliberately out of scope here: the max_num_gm
-        # disagreement between fused_moe_rs.py:309 (global experts) and
-        # gmm_fused_rs_nodedup.py:1612 (local experts), and the four dispatch
-        # arguments dropped by the RS early return at fused_moe_gmm.py:594
-        # (num_valid_tokens is the one that matters for this model -- padding
-        # tokens route on their gating row instead of to expert 0).
-        #
-        # ---- #38's rationale, still in force, follows ----
-        #
-        # #37/#38: retry of #36 with the fused-RS kernel's output layout FIXED
-        # IN CODE, and with the accuracy legs moved ahead of the perf sweep.
-        #
-        # #36 ran the kernel cleanly and scored at chance: GSM8K 0.0106 against
-        # 0.9788 (98.7% of generations never terminated) and MMLU 0.2443 on a
-        # 4-way multiple choice where chance is 0.25. It also posted temp 0.835
-        # GiB at aggregate 16384 against path A's 5.43 and +42% saturated
-        # throughput -- all of it measured on a broken forward pass and all of
-        # it void.
-        #
-        # THE DEFECT: the kernel's SP exit emits the wrong sharding for this
-        # mesh. Three layouts are in play, and the two the kernel can produce
-        # are both wrong:
-        #
-        #   path A (expert_parallel_gmm, known good, #26/#30)
-        #       scatter_results = is_attn_dp(mesh) = True on our mesh
-        #       (layers/vllm/interface/moe.py:116-120), so it emits
-        #       P(ATTN_DATA)                                 ->  4-way
-        #   RS kernel, SP on (what #36 ran)
-        #       P(combine(MLP_DATA, expert_axis))            -> 32-way
-        #   RS kernel, SP off
-        #       P()                                          ->  1-way
-        #
-        # SP on over-shards by 8x; SP off collapses the attn_dp split the next
-        # layer is built to consume. There is no env var that produces the
-        # 4-way layout, which is why #35's TPU_MOE_ENABLE_SP=0 was abandoned:
-        # it swaps one wrong layout for another.
-        #
-        # THE FIX (fused_moe_rs.py, this branch): a new get_sp_regather_axes()
-        # returns the EP axes the consumer does NOT shard tokens on -- the EP
-        # axis minus ATTN_DATA, which is ('model',) here, product 8. When that
-        # is non-empty the SP exit all-gathers just those axes before
-        # returning, turning the 32-way scatter into 32/8 = 4-way, and
-        # moe_out_spec is set to the same P(ATTN_DATA) path A emits. Order is
-        # safe: get_moe_expert_axis builds the EP tuple as
-        # ('attn_dp','attn_dp_expert','expert','model'), so the gathered axes
-        # are the INNER ones and their shards concatenate into a contiguous
-        # token range inside each attn_dp group rather than an interleaving.
-        #
-        # Verified offline against four mesh shapes before launch: ours (4-way
-        # out, matches path A), data=2 x attn_dp=4 x model=4 (8-way, matches),
-        # and two non-attn_dp meshes where is_attn_dp is False, the regather
-        # set is empty and behaviour is byte-identical to today. The fix cannot
-        # affect a mesh without attention DP.
-        #
-        # The gather is 1/8 the traffic of SP-off's full all-gather and leaves
-        # the result attn_dp-sharded, so most of the memory win should survive
-        # -- roughly 64 MiB rather than 256 MiB at aggregate 16384.
-        #
-        # ⚠️ NOT PROVEN that the layout is what produced the chance-level
-        # output. It is a verified mismatch against a known-good reference,
-        # which is a much better-founded change than #35's flag flip, but if
-        # GSM8K does not come back the defect is in the kernel's compute or its
-        # ICI peer-write and no spec change will reach it.
-        #
-        # Also noted, deliberately NOT changed: on a plain-DP mesh (data>1,
-        # attn_dp=1) path A emits P(MLP_DATA) while the SP exit still emits the
-        # EP-wide scatter, i.e. the same class of mismatch exists there.
-        # is_attn_dp is False so this patch is a no-op for it. Generalising is
-        # a two-line change but there is no test for it on this slice, and
-        # silently altering an untested path to fix a bug we cannot observe is
-        # how #36's numbers happened. Left for whoever owns that mesh.
-        #
-        # The #34/#36 analysis that led here follows.
-        #
-        # #34 proved the kernel engages on this mesh -- "fused_moe_rs kernel in
-        # use" at fused_moe_gmm.py:597 -- and then died tracing the backbone.
-        # The visible error was an AssertionError in vLLM's shared-expert
-        # mailbox, but that was the third symptom, not the cause. Chronological
-        # order in the log:
-        #
-        #   19:22:58  ValueError: shard_map applied to moe_gmm_local_rs_nodedup
-        #             ... was given argument arrays with axis sizes that are not
-        #             evenly divisible by the corresponding mesh axis sizes.
-        #             The mesh given has shape (1, 4, 1, 1, 8, 1, 1) ...
-        #             the passed args[10] of shape bfloat16[16,10]
-        #   19:23:00  AssertionError in shared_experts.py:182
-        #   19:23:28  ray ActorHandleNotFoundError (teardown)
-        #
-        # args[10] is `topk_weights` -- count the in_specs tuple at
-        # fused_moe_rs.py:401-414 -- and bf16[16,10] is [num_tokens, top_k] for
-        # the SMALLEST precompile bucket, 16 tokens. With sequence-parallel MoE
-        # on, that argument's spec is
-        #
-        #   topk_w_spec = P(combine_partition_axes(MLP_DATA, expert_axis), None)
-        #
-        # whose axis product is 1 x 4 x 1 x 1 x 8 = 32. 16 does not divide by
-        # 32, so shard_map refuses. Every bucket from 32 up divides; only the
-        # bottom rung is bad.
-        #
-        # The AssertionError is a consequence. vLLM's shared expert hands its
-        # result through a one-slot mailbox
-        # (vllm/.../fused_moe/runner/shared_experts.py:55), written by
-        # `forward` behind `assert self._output[...] is None` (:182) and
-        # cleared by the `output` property (:164). Write and read are paired
-        # inside one call -- moe_runner.py:631 then :643 -- so the slot is
-        # always emptied. The shard_map ValueError unwound the trace between
-        # them, leaving the mailbox dirty, and the next trace attempt asserted.
-        # One cause, three layers of symptom.
-        #
-        # ONE CHANGE: MIN_TOKEN_BUCKET=32.
-        #
-        # It raises the ladder's floor so the 16-token bucket is never built
-        # (tpu_runner.py:1060-1062 takes
-        # max(MIN_TOKEN_BUCKET, next_power_of_2(dp_size * kv_packing)), and both
-        # terms are 16 today). Every remaining bucket -- 32, 64, ... 16384 -- is
-        # a power of two at or above 32, so all of them divide the 32-way
-        # topk_weights split. The cost is that a 16-token step pads to 32.
-        #
-        # SEQUENCE-PARALLEL MoE IS LEFT AT ITS DEFAULT, which is ON
-        # (fused_moe_rs.py:77-79, `os.environ.get("TPU_MOE_ENABLE_SP", "1") !=
-        # "0"`). A first attempt at this run set TPU_MOE_ENABLE_SP=0, which also
-        # fixes the error -- with SP off every routing spec becomes P(),
-        # replicated, and the body slices its own chunk (:372) -- but that is
-        # the wrong experiment. SP off makes moe_out_spec P() instead of a
-        # 32-way scatter, i.e. it turns off the reduce-scatter this kernel
-        # exists to fuse. Testing the default is what tells us whether the
-        # kernel is usable as intended; the SP-off variant remains as a
-        # fallback if the default does not work.
-        #
-        # ⚠️ Consequence worth expecting. With SP on the kernel's output IS
-        # reduce-scattered, and that is precisely the case
-        # `_fused_output_is_reduced` (custom_ops/fused_moe.py:78-110) does not
-        # know about: it keys on the BACKEND, and USE_GMM_FUSED_RS_KERNEL does
-        # not change the backend -- select_moe_backend_from_fused_moe_config
-        # still returns GMM_EP while fused_moe_gmm.py:594 swaps the kernel
-        # underneath. So the shared-expert AssertionError that appeared in #34
-        # as a cascade behind the shard_map error may reappear here as a
-        # genuine failure. If it does, the fix is an RS-kernel case in that
-        # property, modelled on torchtpu's patch of the same upstream property
-        # (vllm_torchtpu/__init__.py:235-258) -- a code change, not a flag.
-        #
-        # Checked while here, so neither is a hidden variable:
-        #   - TPU_MOE_FP8_OUTPUT_COMM is unset and defaults to "" (:136-138).
-        #   - vLLM-level sequence parallelism is not set anywhere in
-        #     qwen38_2p4t_serve.sh.
-        #
-        # Everything below is #34's, which is #30's plus the kernel and the
-        # token budget.
-        #
-        # Original #34 rationale follows.
-        #
-        # Sample run: does the fused reduce-scatter MoE kernel work here, and
-        # what does it do to activation memory?
-        #
-        # #31 measured the problem exactly. Forward-pass scratch at aggregate
-        # 8192 is 2.04 GiB, of which 1856 MiB is three MoE buffers, and the
-        # dominant one is bf16[81920, 8192] = 1280 MiB -- the expert-sorted
-        # token permutation, materialised in HBM by ragged_gather at
-        # fused_moe_gmm.py:709. Scratch fits `0.404 GiB + 0.3144 MiB per
-        # aggregate token`, and that slope is what stops the token budget going
-        # up: #27 and #28 both died compiling the 65536 bucket.
-        #
-        # USE_GMM_FUSED_RS_KERNEL=1 is the in-tree escape and it has never been
-        # run on this model. fused_moe_gmm.py:594 early-returns into
-        # kernels/experimental/fused_moe/fused_moe_rs.py, whose single Pallas
-        # call does gather -> GMM1 -> activation -> GMM2 -> ICI reduce-scatter.
-        # It is handed `hidden_states_local` UNPERMUTED plus `lhs_indices` /
-        # `output_indices`, so the gather happens tile-by-tile inside the kernel
-        # and the 1280 MiB slab is never built.
-        #
-        # It should run on this mesh, unlike the other fused kernel. It takes
-        # its EP axis as ShardingAxisName.EXPERT on the model's own mesh
-        # (fused_moe_rs.py:213, :360-361), product 32 for us, exactly as
-        # expert_parallel_gmm does. The v1 kernel behind USE_MOE_EP_KERNEL=1
-        # cannot: it demands a 2-D mesh with every non-EP axis of size 1
-        # (kernels/fused_moe/v1/kernel.py:1276-1285), and ours is 7 axes with
-        # attn_dp=4 and model=8.
-        #
-        # MAX_NUM_BATCHED_TOKENS=4096 -> aggregate 4 x 4096 = 16384, double
-        # #26/#30. That is the point of pairing it with the kernel: at
-        # 2048/rank the slab is affordable and there is nothing to prove.
-        #
-        # The kernel's own caps are clear at this size.
-        # _FUSED_RS_MAX_SAFE_SIZE_M = 262144 is asserted against tokens x top_k,
-        # and 16384 x 10 = 163840 passes with room; 32768 would not, so 16384 is
-        # also near the largest budget this kernel can serve. `(num_tokens *
-        # topk) % 16 == 0` holds for every bucket, and chunk_size =
-        # num_tokens // ep_size = 512 divides.
-        #
-        # MAX_NUM_SEQS=72 -> 288 concurrent. NOT the 448 that was asked for:
-        # 448 does not fit, and the reason is recurrent state rather than
-        # anything to do with the kernel. Per device, with the measured
-        # per-unit costs (376,832 B per global attention block, 18,352,896 B
-        # per global mamba slot):
-        #
-        #   conc  pool   slots   KV GiB   resident   scratch left
-        #    256  18944    260    11.09      86.96        7.78
-        #    288  21312    292    12.47      88.34        6.40   <- this build
-        #    320  23680    324    13.85      89.72        5.02
-        #    384  28416    388    16.60      92.47        2.27
-        #    448  33152    452    19.36      95.23       -0.49   <- over the wall
-        #
-        # 448 needs 19.36 GiB of KV against a ceiling of 94.74 - 75.87 = 18.87
-        # GiB with ZERO scratch. The mamba term is what does it: 452 slots at
-        # 17.5 MiB is 7.73 GiB on its own. No pool tuning recovers that.
-        #
-        # 288 rather than 320 or 384 because the scratch profile of this kernel
-        # is unknown -- that is what the build measures. 6.40 GiB of headroom
-        # covers the case where the kernel refuses or silently falls back and
-        # the run executes path A instead, whose scratch at aggregate 16384 is
-        # 5.43 GiB by #31's fit. Sizing for the fallback means a refusal shows
-        # up as a number to read rather than as an OOM at 40 minutes.
-        #
-        # NUM_GPU_BLOCKS_OVERRIDE=21312: per rank 5328 against a peak demand of
-        # 72 x 74 = 5328. Exactly matched, so preemption is impossible by
-        # construction -- no rank can admit a 73rd request. kv-fit will report
-        # 288 x 72 = 20736 of 21312, i.e. 97%.
-        #
-        # BENCH_SWEEP="8:128 288:576". conc 8 is the control, directly
-        # comparable to every build since tc#953, and it is what makes any
-        # change attributable -- the kernel fuses the output collective as well
-        # as the gather, so decode latency could move in either direction.
-        # conc 288 with 576 prompts is 2 full waves.
-        #
-        # STD_EVAL_SUITE=gsm8k,mmlu -- sanity only, GPQA skipped. A kernel swap
-        # is a numerical change and both legs are tight enough to catch one:
-        # GSM8K 0.9788 and MMLU 0.8928 on this exact serve config from #30,
-        # with MMLU at +-0.0025 over 14042 questions. GPQA costs ~52 min and
-        # its +-0.035 noise floor could not resolve a small regression anyway.
-        #
-        # WHAT TO READ FIRST, in order:
-        #   1. "fused_moe_rs kernel in use" (fused_moe_gmm.py:597). Without it
-        #      the run is path A at a doubled token budget and nothing about
-        #      the kernel has been tested.
-        #   2. Init model / Init kv-cache. Predicted 75.87 / 88.34.
-        #   3. Whether the 16384 bucket compiled at all.
-        #   4. GSM8K, ~8 min after the smoke test. THIS IS THE GATE.
-        #      0.978 -> the layout fix worked, let the run finish.
-        #      ~0.01 -> it did not. Kill the job; MMLU and the sweep are
-        #      another ~1h30m of slice time spent measuring a broken model,
-        #      which is exactly what #36 did.
-        #   5. MMLU against 0.8928, then the sweep against #26/#36.
-        #
-        # Everything else is #30's, reverted from cb893a152 rather than
-        # retyped: model=8 x attn_dp=4, fp8 attn/GDN at block 512, the stock
-        # shared expert (this is NOT #33's pattern), MAX_MODEL_LEN=40960.
+        # Leg order is accuracy-then-perf, kept from #38: the smoke test runs
+        # first (CLIENT_SMOKE_ONLY=1), then the evals, then the sweep. #30 ran
+        # perf first, but its perf leg is a single conc-8 control and the
+        # ordering does not affect it.
         #
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -470,8 +220,6 @@ steps:
           'USE_BATCHED_RPA_KERNEL=1' \
           'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
           'USE_MOE_EP_KERNEL=0' \
-          'USE_GMM_FUSED_RS_KERNEL=1' \
-          'MIN_TOKEN_BUCKET=32' \
           'VLLM_INCREMENTAL_FP8_LOADING=1' \
           'MOE_STAGE_WEIGHTS_ON_HOST=1' \
           'VLLM_XLA_CHECK_RECOMPILATION=0' \
@@ -487,17 +235,17 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=4' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=72' \
-          'NUM_GPU_BLOCKS_OVERRIDE=21312' \
-          'MAX_NUM_BATCHED_TOKENS=4096' \
+          'MAX_NUM_SEQS=64' \
+          'NUM_GPU_BLOCKS_OVERRIDE=19456' \
+          'MAX_NUM_BATCHED_TOKENS=2048' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=128' \
+          'NUM_PROMPTS=32' \
           'MAX_CONCURRENCY=8' \
-          'BENCH_SWEEP=8:128 288:576' \
+          'BENCH_SWEEP=8:32' \
           'NUM_WARMUPS=32' \
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gsm8k,mmlu' \
