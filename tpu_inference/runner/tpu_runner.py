@@ -1378,6 +1378,14 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.state_leaves = (tuple(jax.tree_util.tree_leaves(self.state)) if
                              isinstance(self.state, nnx.State) else self.state)
 
+    def get_model(self):
+        # TPUWorker.get_model delegates here, and vLLM reaches that through
+        # collective_rpc - WorkerBase.apply_model and LLM's own repr among
+        # others. Without it the AttributeError surfaces wherever the caller
+        # happened to be, which for a failing test is while pytest renders the
+        # llm fixture, on top of whatever actually failed.
+        return self.model
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         runner_type = self.model_config.runner_type
         if runner_type == "generate":
