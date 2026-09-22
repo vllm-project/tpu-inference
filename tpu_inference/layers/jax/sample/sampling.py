@@ -344,6 +344,14 @@ def sample(
         ret_logits = logits
     else:
         is_greedy = tpu_sampling_metadata.temperature < _SAMPLING_EPS
+        # top_k=1 admits one token, so the draw is the argmax whatever the
+        # temperature or the seed. Taken here rather than left to the mask and
+        # the categorical: topk_mask documents that ties return more than k
+        # values, and two tokens whose logits tie - exactly, or once rounded to
+        # the logits dtype - leave a coin flip behind a parameter that promises
+        # none. Separate from is_greedy because it says nothing about which
+        # logits to report, only which token wins.
+        is_argmax = is_greedy | (tpu_sampling_metadata.top_k == 1)
 
         def sample_full_vocab(_):
             full_logits = jax.lax.with_sharding_constraint(
@@ -352,7 +360,7 @@ def sample(
             processed_logits = _apply_sampling_transforms_microbatched(
                 full_logits, tpu_sampling_metadata)
             sampled_tokens = jax.random.categorical(rng, processed_logits)
-            tokens = jnp.where(is_greedy, greedy_tokens, sampled_tokens)
+            tokens = jnp.where(is_argmax, greedy_tokens, sampled_tokens)
             output_logits = jnp.where(is_greedy[:, None], full_logits,
                                       processed_logits)
             return tokens, output_logits
@@ -377,7 +385,7 @@ def sample(
                     ))
 
                 def use_candidate_result(_):
-                    tokens = jnp.where(is_greedy, greedy_tokens,
+                    tokens = jnp.where(is_argmax, greedy_tokens,
                                        sampled_tokens)
                     # Processed-logit modes disable this path. Returning the
                     # raw input supports raw logprobs without materializing
