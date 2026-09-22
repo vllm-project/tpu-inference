@@ -1,0 +1,555 @@
+# Bring up Qwen/Qwen3.8-2.4T-A95B-FP8 on a v7x-32 slice (4 hosts, 32 devices).
+#
+# Weights: 2469 GB of parameters (2371 GB of that is the 512 routed experts in
+# block-wise fp8) loaded with runai_streamer. At model=8/attn_dp=4 with the
+# attention and gated-delta-net projections quantized to fp8 at load time, that
+# is ~75.5 GB per device against the 94.74 GB each v7x JAX device reports, i.e.
+# ~80% of HBM before any KV cache.
+#
+# The source is chosen at runtime: qwen38_2p4t_preflight.sh looks for a copy of
+# the checkpoint mounted on every host of the slice and, finding one, bind
+# mounts it read-only and points MODEL_PATH at it; otherwise the run streams
+# from object storage as before.
+#
+# One server, several legs: a smoke test and a perf benchmark
+# (qwen38_2p4t_client.sh), then GPQA/GSM8K/MMLU through either accuracy
+# harness -- qwen38_2p4t_eval.sh for this repo's benchmark_serving.py fork, or
+# qwen38_2p4t_eval_std.sh for stock lm-evaluation-harness. Loading and
+# precompiling costs ~55 min, so everything that needs this model runs against
+# the one instance. BENCH_SWEEP selects the perf legs, EVAL_SUITE the fork's
+# accuracy ones and STD_EVAL_SUITE lm_eval's; any of the three can be narrowed
+# to isolate a variable, and set to "none" to skip that harness entirely.
+#
+# Each perf leg is bracketed by a /metrics scrape, because the client-visible
+# TTFT is `queue_time + prefill_time` fused and cannot attribute a slow first
+# token to either. The server splits them, and also exports an exact prefill
+# token counter and the per-step token histogram that says whether
+# MAX_NUM_BATCHED_TOKENS is actually the binding constraint. METRICS_ENABLE=0
+# turns it off; METRICS_SAMPLE_S=0 keeps the endpoints but drops the timeseries.
+#
+# Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_v7x32.yml
+#
+# tpu_v7x_32_queue has exactly one agent, so this monopolises the org's only
+# 32-chip slice for the duration. No depends_on and no USE_PREBUILT_IMAGE:
+# run_multihost.sh builds and pushes its own image and would double the registry
+# prefix if setup_environment had already run.
+steps:
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, fused-RS MoE kernel, SP default)"
+    key: qwen38_2p4t_v7x32
+    agents:
+      queue: tpu_v7x_32_queue
+    timeout_in_minutes: 360
+    env:
+      TPU_VERSION: "tpu7x"        # run_multihost.sh exits 0 silently without this
+      MODEL_IMPL_TYPE: "vllm"     # no flax_nnx impl for Qwen3_5MoeForCausalLM
+      NEW_MODEL_DESIGN: "1"       # required: sharding.validate() rejects attn_dp>1 without it
+      # Health-wait budget. Build tc#943 was killed by the 7200s default with the
+      # runai streamer at 63% (180271/287119 tensors) after 1:58:40 and still
+      # advancing. MOE_STAGE_WEIGHTS_ON_HOST since cut the load from 3h34m to
+      # 33m (tc#951), and AOT precompilation adds ~20 min ahead of /health now
+      # that SKIP_JAX_PRECOMPILE is off, so ~55 min is the expectation.
+      # Deliberately left at 5h rather than trimmed to fit: the budget exists to
+      # bound a pathological run, and a load regression is far more useful as a
+      # slow progress tail than as a killed job. timeout_in_minutes above has to
+      # exceed it or Buildkite kills the job first.
+      # 500 min. This build runs all three lm_eval tasks and the xhigh GPQA
+      # leg is the long pole at ~3100-3900 s measured (#25 3116, #24 3837),
+      # plus ~500 s GSM8K and ~1100 s MMLU against a ~60 min bring-up. The
+      # budget covers serve for the whole job, not just bring-up, so it has to
+      # span every leg; timeout_in_minutes above has to exceed it.
+      VLLM_ENGINE_READY_TIMEOUT_S: "18000"
+      # Mirror engine stats into the Buildkite log during the eval leg. Read by
+      # run_multihost.sh on the host, so it belongs here rather than in
+      # MULTIHOST_ENV_VARS. 120s is coarse enough not to bloat the log over a
+      # multi-hour eval and fine enough to pin down when an engine stops
+      # retiring requests -- tc#960 sat wedged for two hours indistinguishably
+      # from a slow tail because nothing but the client progress bar was visible.
+      SERVE_LOG_TAIL_INTERVAL_S: "120"
+      # Tail /root/vllm_serve.log into the Buildkite log every 60s while waiting
+      # for /health. Read by wait_for_server in run_multihost.sh (on the host,
+      # not inside the container, so it belongs here and not in
+      # MULTIHOST_ENV_VARS). Without it a multi-hour weight load is
+      # indistinguishable from a hang until the job ends.
+      VLLM_SERVER_WAIT_LOG_EVERY_S: "60"
+      # Append-only build output. The default tty progress renderer redraws the
+      # whole step table on every update, which produced 4.9 MB of log in under
+      # five minutes on the first attempt and would bury a real serve failure.
+      BUILDKIT_PROGRESS: "plain"
+    commands:
+      - |
+        set -euo pipefail
+        ART="$$PWD/dev_artifacts"; mkdir -p "$$ART"
+        export EXTRA_DOCKER_ARGS="-v $$ART:/workspace/artifacts"
+
+        # Persistent JAX compilation cache on each host's local disk.
+        # run_multihost.sh sets up no cache at all (unlike run_in_docker.sh,
+        # which rsyncs gs://ullm-ci-cache/jax_cache onto /mnt/disks/persist),
+        # so without this every build recompiles from scratch. /tmp is the same
+        # disk run_multihost.sh already puts HOST_HF_HOME on, so it is known to
+        # exist on all four hosts; /mnt/disks/persist is not assumed here.
+        # Bind-mounted rather than left inside the container because the `node`
+        # containers are torn down at the end of every build.
+        # --ulimit: libstreamer wants ~64 file descriptors per reader thread and
+        # aborts with "Increase process fd limit or decrease the concurrency
+        # level" if it cannot get them. At RUNAI_STREAMER_CONCURRENCY=64 that is
+        # ~4096; 65536 leaves headroom. The serve script raises its own soft
+        # limit too, but that only covers the head -- the three Ray workers load
+        # weights as well and only get what `docker run` gives them.
+        MULTIHOST_DOCKER_ARGS="-v /tmp/jax_cache_tpu7x:/root/jax_cache --ulimit nofile=65536:65536"
+
+        # Ask every host in the slice two questions before committing to a
+        # three-hour load: is there a locally-mounted copy of the checkpoint,
+        # and is there room for the compilation cache. Both answers are
+        # all-or-nothing across the slice -- see the script for why. It only
+        # ever prints these three assignments, and defaults here cover the case
+        # where it cannot run at all.
+        CKPT_MOUNT=""; CACHE_MIN_FREE_MB=0; CACHE_WRITABLE=0
+        eval "$$(bash .buildkite/dev/qwen38_2p4t_preflight.sh || true)"
+
+        # A local copy of the weights is bind-mounted read-only at the same path
+        # it has on the host, so every rank resolves the same MODEL_PATH. The
+        # path is discovered, not written down: this file is public and the disk
+        # is attached wherever the operator likes.
+        CKPT_ENV=""
+        if [ -n "$$CKPT_MOUNT" ]; then
+          MULTIHOST_DOCKER_ARGS="$$MULTIHOST_DOCKER_ARGS -v $$CKPT_MOUNT:$$CKPT_MOUNT:ro"
+          CKPT_ENV="MODEL_PATH=$$CKPT_MOUNT"
+          echo "--- weights: local mount on all hosts ($$CKPT_MOUNT)"
+        else
+          echo "--- weights: no usable local mount, streaming from object storage"
+        fi
+
+        # Compilation-cache disk guard. SKIP_JAX_PRECOMPILE is off from this
+        # build on, so the cache now takes an entry per shape bucket instead of
+        # the handful the lazy path produced (tc#947: 8 entries, 90 MB). The
+        # checkpoint disks are read-only, so the cache has nowhere to live but
+        # the host root filesystem, which had 54 GB free on tc#947.
+        #
+        # MAX_GB makes JAX evict LRU entries itself -- its default is -1,
+        # unlimited. MIN_FREE_GB is the point at which caching is abandoned
+        # rather than risked: a cold recompile costs minutes, an ENOSPC three
+        # hours into a load costs the build. The serve script re-checks both
+        # from inside the container and runs a watchdog during the run.
+        JAX_CACHE_MAX_GB=20
+        JAX_CACHE_MIN_FREE_GB=25
+        CACHE_ENV="$$(printf '%s\n' \
+          'VLLM_XLA_CACHE_PATH=/root/jax_cache' \
+          'JAX_COMPILATION_CACHE_DIR=/root/jax_cache' \
+          "JAX_COMPILATION_CACHE_MAX_SIZE=$$((JAX_CACHE_MAX_GB * 1024 * 1024 * 1024))")"
+        if [ "$$CACHE_WRITABLE" != "1" ] || [ "$$CACHE_MIN_FREE_MB" -lt "$$((JAX_CACHE_MIN_FREE_GB * 1024))" ]; then
+          echo "--- :warning: persistent JAX cache DISABLED cluster-wide (writable=$$CACHE_WRITABLE min_free=$${CACHE_MIN_FREE_MB}MB floor=$$((JAX_CACHE_MIN_FREE_GB * 1024))MB)"
+          CACHE_ENV="VLLM_DISABLE_COMPILE_CACHE=1"
+        else
+          echo "--- jax cache: enabled, cap $${JAX_CACHE_MAX_GB}GB, min free across slice $${CACHE_MIN_FREE_MB}MB"
+        fi
+
+        export MULTIHOST_DOCKER_ARGS
+
+        # #39: SECOND fused-RS code fix. #38's config exactly, plus a fix to a
+        # double-buffer race inside the kernel itself.
+        #
+        # #38 (the output-layout fix, still in) took the model from chance back
+        # to coherent -- GSM8K 0.0106 -> 0.9128, MMLU 0.2443 -> 0.8282, and
+        # truncation from 1302/1319 to 3/1319. But both scores sat ~0.065 below
+        # path A's 0.9788 / 0.8928, which is ~6 sigma on GSM8K and ~18 on MMLU.
+        # MMLU is a loglikelihood task with 0/14042 truncated, so that residual
+        # was a per-token logit error, not a generation problem.
+        #
+        # ROOT CAUSE, found by single-layer numerical diff on the local 8-chip
+        # v7x rather than by another full-model build (see
+        # experiments/.../moe_kernel_diff/FINDINGS.md). Both pipeline loops in
+        # gmm_fused_rs_nodedup.py issued the next weight-tile DMA BEFORE the
+        # compute that reads the current tile:
+        #
+        #     buf_id = step % num_bufs
+        #     wait_dma(buf_id)
+        #     if step + num_bufs < total_steps:
+        #         start_dma((step + num_bufs) % num_bufs, ...)  # == buf_id !!
+        #     compute_tile(buf_id, ...)                         # reads buf_id
+        #
+        # (step + N) % N == step % N, so the refill overwrites the operand being
+        # read. The branch only fires when total_steps > num_bufs, which is why
+        # it is invisible at small hidden/intermediate sizes and why every shape
+        # in the repo's kernel tests passes against the broken code. Qwen3.8
+        # (hidden 8192, moe_intermediate 2048) gets num_n1=4 against
+        # num_w1_bufs=2 at EVERY compiled token bucket, so #38 ran entirely
+        # inside the defect.
+        #
+        # Second collision: the cross-gm prefetch at step 0 also targets buffer
+        # 0, and its guard is `next_same = (next_e == expert_id) AND
+        # can_cache_w1`. can_cache_w1 is false exactly when buffers are reused,
+        # so in the broken case the guard never holds and a second unrelated
+        # DMA lands in a buffer that step num_bufs will read.
+        #
+        # THE FIX (59e60e854, +20/-4): move both refills after their compute
+        # (overlap is preserved, just one step later) and defer the early
+        # cross-gm buffer-0 prefetch when buffers are reused.
+        #
+        # Validated 11/11 on one MoE layer, rel_l2 vs an fp32 dense reference:
+        #
+        #   H     I      before     after    path A
+        #   3072  2048   5.05e-01  3.21e-02  4.09e-03   fixed
+        #   4096  2048   5.11e-01  4.50e-03  4.08e-03   fixed
+        #   8192  2048   4.76e-01  4.54e-03  4.04e-03   fixed
+        #   2048  4096   4.95e-01  1.67e-02  1.66e-02   fixed
+        #   1024  8192   5.12e-01  4.42e-03  4.13e-03   fixed
+        #   (4 previously-passing shapes: bit-identical before and after)
+        #
+        #   Qwen3.8 proportions, 64 experts / topk 10:
+        #     bf16  6.51e-01 -> 2.18e-02   (path A 1.23e-02)
+        #     fp8   7.39e-01 -> 5.08e-02   (path A 4.90e-02)
+        #
+        # WHAT THIS BUILD DECIDES: whether the kernel is now usable. Pass is
+        # GSM8K ~0.9788 and MMLU ~0.8928, i.e. #30 parity. Anything still ~0.065
+        # low means a second, independent defect and the single-layer rig did
+        # not capture it -- most likely because it cannot reach ep_size 32.
+        #
+        # ⚠️ NOT PROVEN that this race is what produced #38's numbers. A
+        # per-layer rel_l2 of 0.5 across 92 layers should have destroyed the
+        # model, yet #38 scored 0.9128; residual-stream dilution is the likely
+        # reconciliation but it is unshown. This build is the test of it.
+        #
+        # Still unfixed, deliberately out of scope here: the max_num_gm
+        # disagreement between fused_moe_rs.py:309 (global experts) and
+        # gmm_fused_rs_nodedup.py:1612 (local experts), and the four dispatch
+        # arguments dropped by the RS early return at fused_moe_gmm.py:594
+        # (num_valid_tokens is the one that matters for this model -- padding
+        # tokens route on their gating row instead of to expert 0).
+        #
+        # ---- #38's rationale, still in force, follows ----
+        #
+        # #37/#38: retry of #36 with the fused-RS kernel's output layout FIXED
+        # IN CODE, and with the accuracy legs moved ahead of the perf sweep.
+        #
+        # #36 ran the kernel cleanly and scored at chance: GSM8K 0.0106 against
+        # 0.9788 (98.7% of generations never terminated) and MMLU 0.2443 on a
+        # 4-way multiple choice where chance is 0.25. It also posted temp 0.835
+        # GiB at aggregate 16384 against path A's 5.43 and +42% saturated
+        # throughput -- all of it measured on a broken forward pass and all of
+        # it void.
+        #
+        # THE DEFECT: the kernel's SP exit emits the wrong sharding for this
+        # mesh. Three layouts are in play, and the two the kernel can produce
+        # are both wrong:
+        #
+        #   path A (expert_parallel_gmm, known good, #26/#30)
+        #       scatter_results = is_attn_dp(mesh) = True on our mesh
+        #       (layers/vllm/interface/moe.py:116-120), so it emits
+        #       P(ATTN_DATA)                                 ->  4-way
+        #   RS kernel, SP on (what #36 ran)
+        #       P(combine(MLP_DATA, expert_axis))            -> 32-way
+        #   RS kernel, SP off
+        #       P()                                          ->  1-way
+        #
+        # SP on over-shards by 8x; SP off collapses the attn_dp split the next
+        # layer is built to consume. There is no env var that produces the
+        # 4-way layout, which is why #35's TPU_MOE_ENABLE_SP=0 was abandoned:
+        # it swaps one wrong layout for another.
+        #
+        # THE FIX (fused_moe_rs.py, this branch): a new get_sp_regather_axes()
+        # returns the EP axes the consumer does NOT shard tokens on -- the EP
+        # axis minus ATTN_DATA, which is ('model',) here, product 8. When that
+        # is non-empty the SP exit all-gathers just those axes before
+        # returning, turning the 32-way scatter into 32/8 = 4-way, and
+        # moe_out_spec is set to the same P(ATTN_DATA) path A emits. Order is
+        # safe: get_moe_expert_axis builds the EP tuple as
+        # ('attn_dp','attn_dp_expert','expert','model'), so the gathered axes
+        # are the INNER ones and their shards concatenate into a contiguous
+        # token range inside each attn_dp group rather than an interleaving.
+        #
+        # Verified offline against four mesh shapes before launch: ours (4-way
+        # out, matches path A), data=2 x attn_dp=4 x model=4 (8-way, matches),
+        # and two non-attn_dp meshes where is_attn_dp is False, the regather
+        # set is empty and behaviour is byte-identical to today. The fix cannot
+        # affect a mesh without attention DP.
+        #
+        # The gather is 1/8 the traffic of SP-off's full all-gather and leaves
+        # the result attn_dp-sharded, so most of the memory win should survive
+        # -- roughly 64 MiB rather than 256 MiB at aggregate 16384.
+        #
+        # ⚠️ NOT PROVEN that the layout is what produced the chance-level
+        # output. It is a verified mismatch against a known-good reference,
+        # which is a much better-founded change than #35's flag flip, but if
+        # GSM8K does not come back the defect is in the kernel's compute or its
+        # ICI peer-write and no spec change will reach it.
+        #
+        # Also noted, deliberately NOT changed: on a plain-DP mesh (data>1,
+        # attn_dp=1) path A emits P(MLP_DATA) while the SP exit still emits the
+        # EP-wide scatter, i.e. the same class of mismatch exists there.
+        # is_attn_dp is False so this patch is a no-op for it. Generalising is
+        # a two-line change but there is no test for it on this slice, and
+        # silently altering an untested path to fix a bug we cannot observe is
+        # how #36's numbers happened. Left for whoever owns that mesh.
+        #
+        # The #34/#36 analysis that led here follows.
+        #
+        # #34 proved the kernel engages on this mesh -- "fused_moe_rs kernel in
+        # use" at fused_moe_gmm.py:597 -- and then died tracing the backbone.
+        # The visible error was an AssertionError in vLLM's shared-expert
+        # mailbox, but that was the third symptom, not the cause. Chronological
+        # order in the log:
+        #
+        #   19:22:58  ValueError: shard_map applied to moe_gmm_local_rs_nodedup
+        #             ... was given argument arrays with axis sizes that are not
+        #             evenly divisible by the corresponding mesh axis sizes.
+        #             The mesh given has shape (1, 4, 1, 1, 8, 1, 1) ...
+        #             the passed args[10] of shape bfloat16[16,10]
+        #   19:23:00  AssertionError in shared_experts.py:182
+        #   19:23:28  ray ActorHandleNotFoundError (teardown)
+        #
+        # args[10] is `topk_weights` -- count the in_specs tuple at
+        # fused_moe_rs.py:401-414 -- and bf16[16,10] is [num_tokens, top_k] for
+        # the SMALLEST precompile bucket, 16 tokens. With sequence-parallel MoE
+        # on, that argument's spec is
+        #
+        #   topk_w_spec = P(combine_partition_axes(MLP_DATA, expert_axis), None)
+        #
+        # whose axis product is 1 x 4 x 1 x 1 x 8 = 32. 16 does not divide by
+        # 32, so shard_map refuses. Every bucket from 32 up divides; only the
+        # bottom rung is bad.
+        #
+        # The AssertionError is a consequence. vLLM's shared expert hands its
+        # result through a one-slot mailbox
+        # (vllm/.../fused_moe/runner/shared_experts.py:55), written by
+        # `forward` behind `assert self._output[...] is None` (:182) and
+        # cleared by the `output` property (:164). Write and read are paired
+        # inside one call -- moe_runner.py:631 then :643 -- so the slot is
+        # always emptied. The shard_map ValueError unwound the trace between
+        # them, leaving the mailbox dirty, and the next trace attempt asserted.
+        # One cause, three layers of symptom.
+        #
+        # ONE CHANGE: MIN_TOKEN_BUCKET=32.
+        #
+        # It raises the ladder's floor so the 16-token bucket is never built
+        # (tpu_runner.py:1060-1062 takes
+        # max(MIN_TOKEN_BUCKET, next_power_of_2(dp_size * kv_packing)), and both
+        # terms are 16 today). Every remaining bucket -- 32, 64, ... 16384 -- is
+        # a power of two at or above 32, so all of them divide the 32-way
+        # topk_weights split. The cost is that a 16-token step pads to 32.
+        #
+        # SEQUENCE-PARALLEL MoE IS LEFT AT ITS DEFAULT, which is ON
+        # (fused_moe_rs.py:77-79, `os.environ.get("TPU_MOE_ENABLE_SP", "1") !=
+        # "0"`). A first attempt at this run set TPU_MOE_ENABLE_SP=0, which also
+        # fixes the error -- with SP off every routing spec becomes P(),
+        # replicated, and the body slices its own chunk (:372) -- but that is
+        # the wrong experiment. SP off makes moe_out_spec P() instead of a
+        # 32-way scatter, i.e. it turns off the reduce-scatter this kernel
+        # exists to fuse. Testing the default is what tells us whether the
+        # kernel is usable as intended; the SP-off variant remains as a
+        # fallback if the default does not work.
+        #
+        # ⚠️ Consequence worth expecting. With SP on the kernel's output IS
+        # reduce-scattered, and that is precisely the case
+        # `_fused_output_is_reduced` (custom_ops/fused_moe.py:78-110) does not
+        # know about: it keys on the BACKEND, and USE_GMM_FUSED_RS_KERNEL does
+        # not change the backend -- select_moe_backend_from_fused_moe_config
+        # still returns GMM_EP while fused_moe_gmm.py:594 swaps the kernel
+        # underneath. So the shared-expert AssertionError that appeared in #34
+        # as a cascade behind the shard_map error may reappear here as a
+        # genuine failure. If it does, the fix is an RS-kernel case in that
+        # property, modelled on torchtpu's patch of the same upstream property
+        # (vllm_torchtpu/__init__.py:235-258) -- a code change, not a flag.
+        #
+        # Checked while here, so neither is a hidden variable:
+        #   - TPU_MOE_FP8_OUTPUT_COMM is unset and defaults to "" (:136-138).
+        #   - vLLM-level sequence parallelism is not set anywhere in
+        #     qwen38_2p4t_serve.sh.
+        #
+        # Everything below is #34's, which is #30's plus the kernel and the
+        # token budget.
+        #
+        # Original #34 rationale follows.
+        #
+        # Sample run: does the fused reduce-scatter MoE kernel work here, and
+        # what does it do to activation memory?
+        #
+        # #31 measured the problem exactly. Forward-pass scratch at aggregate
+        # 8192 is 2.04 GiB, of which 1856 MiB is three MoE buffers, and the
+        # dominant one is bf16[81920, 8192] = 1280 MiB -- the expert-sorted
+        # token permutation, materialised in HBM by ragged_gather at
+        # fused_moe_gmm.py:709. Scratch fits `0.404 GiB + 0.3144 MiB per
+        # aggregate token`, and that slope is what stops the token budget going
+        # up: #27 and #28 both died compiling the 65536 bucket.
+        #
+        # USE_GMM_FUSED_RS_KERNEL=1 is the in-tree escape and it has never been
+        # run on this model. fused_moe_gmm.py:594 early-returns into
+        # kernels/experimental/fused_moe/fused_moe_rs.py, whose single Pallas
+        # call does gather -> GMM1 -> activation -> GMM2 -> ICI reduce-scatter.
+        # It is handed `hidden_states_local` UNPERMUTED plus `lhs_indices` /
+        # `output_indices`, so the gather happens tile-by-tile inside the kernel
+        # and the 1280 MiB slab is never built.
+        #
+        # It should run on this mesh, unlike the other fused kernel. It takes
+        # its EP axis as ShardingAxisName.EXPERT on the model's own mesh
+        # (fused_moe_rs.py:213, :360-361), product 32 for us, exactly as
+        # expert_parallel_gmm does. The v1 kernel behind USE_MOE_EP_KERNEL=1
+        # cannot: it demands a 2-D mesh with every non-EP axis of size 1
+        # (kernels/fused_moe/v1/kernel.py:1276-1285), and ours is 7 axes with
+        # attn_dp=4 and model=8.
+        #
+        # MAX_NUM_BATCHED_TOKENS=4096 -> aggregate 4 x 4096 = 16384, double
+        # #26/#30. That is the point of pairing it with the kernel: at
+        # 2048/rank the slab is affordable and there is nothing to prove.
+        #
+        # The kernel's own caps are clear at this size.
+        # _FUSED_RS_MAX_SAFE_SIZE_M = 262144 is asserted against tokens x top_k,
+        # and 16384 x 10 = 163840 passes with room; 32768 would not, so 16384 is
+        # also near the largest budget this kernel can serve. `(num_tokens *
+        # topk) % 16 == 0` holds for every bucket, and chunk_size =
+        # num_tokens // ep_size = 512 divides.
+        #
+        # MAX_NUM_SEQS=72 -> 288 concurrent. NOT the 448 that was asked for:
+        # 448 does not fit, and the reason is recurrent state rather than
+        # anything to do with the kernel. Per device, with the measured
+        # per-unit costs (376,832 B per global attention block, 18,352,896 B
+        # per global mamba slot):
+        #
+        #   conc  pool   slots   KV GiB   resident   scratch left
+        #    256  18944    260    11.09      86.96        7.78
+        #    288  21312    292    12.47      88.34        6.40   <- this build
+        #    320  23680    324    13.85      89.72        5.02
+        #    384  28416    388    16.60      92.47        2.27
+        #    448  33152    452    19.36      95.23       -0.49   <- over the wall
+        #
+        # 448 needs 19.36 GiB of KV against a ceiling of 94.74 - 75.87 = 18.87
+        # GiB with ZERO scratch. The mamba term is what does it: 452 slots at
+        # 17.5 MiB is 7.73 GiB on its own. No pool tuning recovers that.
+        #
+        # 288 rather than 320 or 384 because the scratch profile of this kernel
+        # is unknown -- that is what the build measures. 6.40 GiB of headroom
+        # covers the case where the kernel refuses or silently falls back and
+        # the run executes path A instead, whose scratch at aggregate 16384 is
+        # 5.43 GiB by #31's fit. Sizing for the fallback means a refusal shows
+        # up as a number to read rather than as an OOM at 40 minutes.
+        #
+        # NUM_GPU_BLOCKS_OVERRIDE=21312: per rank 5328 against a peak demand of
+        # 72 x 74 = 5328. Exactly matched, so preemption is impossible by
+        # construction -- no rank can admit a 73rd request. kv-fit will report
+        # 288 x 72 = 20736 of 21312, i.e. 97%.
+        #
+        # BENCH_SWEEP="8:128 288:576". conc 8 is the control, directly
+        # comparable to every build since tc#953, and it is what makes any
+        # change attributable -- the kernel fuses the output collective as well
+        # as the gather, so decode latency could move in either direction.
+        # conc 288 with 576 prompts is 2 full waves.
+        #
+        # STD_EVAL_SUITE=gsm8k,mmlu -- sanity only, GPQA skipped. A kernel swap
+        # is a numerical change and both legs are tight enough to catch one:
+        # GSM8K 0.9788 and MMLU 0.8928 on this exact serve config from #30,
+        # with MMLU at +-0.0025 over 14042 questions. GPQA costs ~52 min and
+        # its +-0.035 noise floor could not resolve a small regression anyway.
+        #
+        # WHAT TO READ FIRST, in order:
+        #   1. "fused_moe_rs kernel in use" (fused_moe_gmm.py:597). Without it
+        #      the run is path A at a doubled token budget and nothing about
+        #      the kernel has been tested.
+        #   2. Init model / Init kv-cache. Predicted 75.87 / 88.34.
+        #   3. Whether the 16384 bucket compiled at all.
+        #   4. GSM8K, ~8 min after the smoke test. THIS IS THE GATE.
+        #      0.978 -> the layout fix worked, let the run finish.
+        #      ~0.01 -> it did not. Kill the job; MMLU and the sweep are
+        #      another ~1h30m of slice time spent measuring a broken model,
+        #      which is exactly what #36 did.
+        #   5. MMLU against 0.8928, then the sweep against #26/#36.
+        #
+        # Everything else is #30's, reverted from cb893a152 rather than
+        # retyped: model=8 x attn_dp=4, fp8 attn/GDN at block 512, the stock
+        # shared expert (this is NOT #33's pattern), MAX_MODEL_LEN=40960.
+        #
+        # Container environment for the head *and* all three workers. Env vars
+        # inlined into the serve command would only reach the head process;
+        # USE_BATCHED_RPA_KERNEL in particular is read at import time by
+        # runner/kv_cache.py to pick the kernel module, so it has to be in the
+        # environment of every Ray worker container. USE_BATCHED_RPA_SEQ_ON_LANE
+        # matters doubly here: it selects KVLayout.SEQ_ALONG_LANE, which is what
+        # makes the per-device page 65,536 B instead of 131,072 B, and it is
+        # also the flag that tells the attn_dp heuristic to divide by 8.
+        export MULTIHOST_ENV_VARS="$$(printf '%s\n' \
+          'MODEL_IMPL_TYPE=vllm' \
+          'NEW_MODEL_DESIGN=1' \
+          'USE_BATCHED_RPA_KERNEL=1' \
+          'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
+          'USE_MOE_EP_KERNEL=0' \
+          'USE_GMM_FUSED_RS_KERNEL=1' \
+          'MIN_TOKEN_BUCKET=32' \
+          'VLLM_INCREMENTAL_FP8_LOADING=1' \
+          'MOE_STAGE_WEIGHTS_ON_HOST=1' \
+          'VLLM_XLA_CHECK_RECOMPILATION=0' \
+          'SKIP_JAX_PRECOMPILE=0' \
+          'RUNAI_STREAMER_CONCURRENCY=64' \
+          'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
+          'RUNAI_STREAMER_LOG_LEVEL=INFO' \
+          'RUNAI_STREAMER_LOG_TO_STDERR=1' \
+          'TPU_WEIGHT_LOAD_PROFILE=1' \
+          'TPU_WEIGHT_LOAD_PROFILE_EVERY=10000' \
+          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
+          'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512' \
+          'TENSOR_PARALLEL_SIZE=32' \
+          'ATTN_DP_SIZE=4' \
+          'MAX_MODEL_LEN=40960' \
+          'MAX_NUM_SEQS=72' \
+          'NUM_GPU_BLOCKS_OVERRIDE=21312' \
+          'MAX_NUM_BATCHED_TOKENS=4096' \
+          'GPU_MEMORY_UTILIZATION=0.92' \
+          'BLOCK_SIZE=128' \
+          'KV_CACHE_DTYPE=fp8' \
+          'INPUT_LEN=8192' \
+          'OUTPUT_LEN=1024' \
+          'NUM_PROMPTS=128' \
+          'MAX_CONCURRENCY=8' \
+          'BENCH_SWEEP=8:128 288:576' \
+          'NUM_WARMUPS=32' \
+          'EVAL_SUITE=none' \
+          'STD_EVAL_SUITE=gsm8k,mmlu' \
+          'GPQA_REASONING_EFFORT=xhigh' \
+          'GPQA_SAMPLING=greedy' \
+          'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
+          'GPQA_MAX_GEN_TOKS=32768' \
+          'GPQA_CONCURRENCY=32' \
+          'GPQA_TIMEOUT_S=10800' \
+          'GSM8K_REASONING_EFFORT=low' \
+          'GSM8K_CONCURRENCY=64' \
+          'GSM8K_MAX_TOKENS=1024' \
+          'GSM8K_TIMEOUT_S=7200' \
+          'MMLU_BATCH_SIZE=8' \
+          'MMLU_CONCURRENCY=8' \
+          'MMLU_TIMEOUT_S=10800' \
+          'BENCH_REQUEST_TIMEOUT_S=7200' \
+          "JAX_CACHE_MAX_GB=$$JAX_CACHE_MAX_GB" \
+          "JAX_CACHE_MIN_FREE_GB=$$JAX_CACHE_MIN_FREE_GB" \
+          $$CACHE_ENV \
+          $$CKPT_ENV)"
+        echo "--- effective MULTIHOST_ENV_VARS"; printf '%s\n' "$$MULTIHOST_ENV_VARS"
+        echo "--- effective MULTIHOST_DOCKER_ARGS: $$MULTIHOST_DOCKER_ARGS"
+
+        # ACCURACY BEFORE PERF on this build, which is the reverse of every run
+        # up to #36. #36 posted a 42% throughput gain on a model scoring at
+        # chance, so the perf numbers were void before they were measured and
+        # the ~35 min spent on the sweep bought nothing. Here the smoke test
+        # still goes first (CLIENT_SMOKE_ONLY=1 -- it takes the first-request
+        # hit and proves the engine is alive), then GSM8K, which returns a
+        # verdict in ~8 min: 0.978 means the patch worked, ~0.01 means it did
+        # not and the job should be killed on the spot rather than left to run
+        # MMLU and a two-leg sweep for another hour and a half.
+        #
+        # `&&`, not `;` -- each eval leg records its own per-dataset failures
+        # internally rather than aborting on the first, so reaching the sweep
+        # means the evals ran, not that they passed. Read GSM8K, do not wait
+        # for the exit code. The fork-based leg stays in the chain even though
+        # EVAL_SUITE=none makes it a no-op here: it exits 0 immediately, and
+        # leaving it wired up means flipping one variable brings the old
+        # harness back for a side-by-side without editing the command.
+        #
+        # The run's exit status is stashed instead of propagated so the artifact
+        # upload below still happens; without that, a failure here means no
+        # serve log, no bench.json and no eval output to diagnose it with. The
+        # last command in this step re-raises it.
+        set +e
+        .buildkite/scripts/run_multihost.sh \
+          "bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_serve.sh" \
+          "CLIENT_SMOKE_ONLY=1 bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval_std.sh && SKIP_SMOKE=1 bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_client.sh && bash /workspace/tpu_inference/.buildkite/dev/qwen38_2p4t_eval.sh"
+        echo $$? > "$$PWD/dev_artifacts/.run_rc"
+        set -e
+      - sudo -n chown -R "$$(id -u):$$(id -g)" dev_artifacts 2>/dev/null || sudo -n chmod -R a+rX dev_artifacts || true
+      - buildkite-agent artifact upload "dev_artifacts/**/*"
+      - exit "$$(cat dev_artifacts/.run_rc 2>/dev/null || echo 1)"

@@ -23,7 +23,12 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 logger = logging.getLogger(__name__)
 
-AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+# The per-request ceiling. It is also the ceiling on how long a single stuck
+# request can hold its slot in the concurrency semaphore, so on a long eval an
+# oversized value turns a handful of hung requests into hours of dead time with
+# an idle server. Default is unchanged; set BENCH_REQUEST_TIMEOUT_S to bound it.
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(
+    total=float(os.environ.get("BENCH_REQUEST_TIMEOUT_S", 6 * 60 * 60)))
 
 
 async def start_stop_profile(base_url: str, action: Literal["start", "stop"]):

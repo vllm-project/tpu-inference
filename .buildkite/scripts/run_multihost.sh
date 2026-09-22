@@ -193,9 +193,27 @@ wait_for_server() {
 
   echo "   -> Found PID: $pid"
 
+  # Periodic progress tail. Until now the server log was only ever shown on
+  # failure, so a long bring-up (a 2.4T checkpoint streaming from GCS takes
+  # hours) looked identical in Buildkite to a hang: thousands of `sleep 5`
+  # lines and nothing else. Emitting the tail every LOG_EVERY_S makes the
+  # loader's progress bar visible while it is still actionable -- and the rate
+  # it prints is the only way to tell "slow but converging" from "stuck"
+  # without waiting out the whole timeout. `tr` because tqdm separates updates
+  # with CR, so a plain tail returns one enormous line.
+  local log_every=${VLLM_SERVER_WAIT_LOG_EVERY_S:-60}
+  local log_every_iters=$(( log_every / 5 ))
+  [[ $log_every_iters -lt 1 ]] && log_every_iters=1
+  local start_time=$SECONDS
+
   local end_time=$((SECONDS + timeout))
   local loop_count=0
   while [[ $SECONDS -lt $end_time ]]; do
+    if [[ $((loop_count % log_every_iters)) -eq 0 ]]; then
+      echo "--- [$service_name +$((SECONDS - start_time))s / ${timeout}s] $log_path"
+      docker exec "$container_name" tail -c 8192 "$log_path" 2>/dev/null \
+        | tr '\r' '\n' | grep -v '^[[:space:]]*$' | tail -5 | sed 's/^/    /' || true
+    fi
     # 2. Check health
     # max-time 10 is crucial to prevent curl from hanging indefinitely if the server 
     # accepts the TCP connection but is deadlocked or blocked from sending an HTTP response.
@@ -272,6 +290,27 @@ VLLM_SERVE_CMD=""
 CLIENT_BENCH_CMD=""
 DOCKER_ENV_ARGS=()
 DOCKER_ENV_STR=""
+
+# Optional extra container environment for BOTH the head and the worker nodes.
+# MULTIHOST_ENV_VARS is a newline-separated list of KEY=VALUE pairs. Values may
+# contain spaces. Env vars inlined into the serve command only reach the head
+# process; anything a Ray worker reads at import time has to be in its
+# container environment instead, which is what this provides.
+if [ -n "${MULTIHOST_ENV_VARS:-}" ]; then
+    while IFS= read -r env_item; do
+        [ -z "${env_item}" ] && continue
+        DOCKER_ENV_ARGS+=("-e" "${env_item}")
+    done <<< "${MULTIHOST_ENV_VARS}"
+fi
+
+# Optional extra raw `docker run` args for BOTH the head and the worker nodes,
+# space-separated. EXTRA_DOCKER_ARGS is head-only; this is the every-host
+# equivalent, for things like a bind mount that each host needs its own copy of
+# (e.g. a persistent JAX compilation cache directory).
+if [ -n "${MULTIHOST_DOCKER_ARGS:-}" ]; then
+    eval "declare -a _MH_DOCKER_ARGS=(${MULTIHOST_DOCKER_ARGS})"
+    DOCKER_ENV_ARGS+=("${_MH_DOCKER_ARGS[@]}")
+fi
 
 if [ "$#" -ge 1 ]; then
     if [[ "$1" == *.json ]]; then
@@ -477,7 +516,12 @@ docker exec \
   node bash -c "${VLLM_SERVE_CMD} > /root/vllm_serve.log 2>&1"
 
 # 4. Wait for the server to be healthy
-SERVER_TIMEOUT=""
+# Seed from the ambient environment so string-command mode can raise the health
+# budget too; JSON-config mode still overrides it below. Models whose weights
+# stream from GCS can need well over the 7200s default just to load -- a 2.4T
+# fp8 checkpoint reaches only ~60% in two hours -- and the default silently
+# kills a run that was making steady progress.
+SERVER_TIMEOUT="${VLLM_ENGINE_READY_TIMEOUT_S:-}"
 if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
     for env_item in "${SERVER_CMD_ENVS[@]}"; do
         if [[ "$env_item" == VLLM_ENGINE_READY_TIMEOUT_S=* ]]; then
@@ -485,7 +529,40 @@ if [[ -n "${SERVER_CMD_ENVS:-}" ]]; then
         fi
     done
 fi
-wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "$SERVER_TIMEOUT"
+# xtrace off for the poll loop only: it emits three lines per 5s tick, which on
+# a multi-hour bring-up is thousands of `+ sleep 5` that bury the progress tail
+# the loop now prints. Restored immediately after.
+set +x
+_WAIT_RC=0
+wait_for_server "$VLLM_PORT" "node" "vllm serve" "/root/vllm_serve.log" "$SERVER_TIMEOUT" || _WAIT_RC=$?
+set -x
+[[ $_WAIT_RC -eq 0 ]] || exit "$_WAIT_RC"
+
+# The serve log only reaches the Buildkite log at cleanup, which leaves the
+# entire benchmark/eval phase blind: an engine that wedges mid-eval looks
+# identical to a slow one -- a frozen client progress bar and nothing else --
+# and a cancelled job never reaches the cleanup dump at all, so the evidence is
+# lost exactly when it is most wanted. When SERVE_LOG_TAIL_INTERVAL_S is set,
+# mirror the engine's own stats and error lines into the Buildkite log while the
+# client runs. Unset by default, so no other pipeline changes behaviour.
+_SERVE_TAIL_PID=""
+if [[ -n "${SERVE_LOG_TAIL_INTERVAL_S:-}" ]]; then
+  echo "--- Mirroring vllm serve stats every ${SERVE_LOG_TAIL_INTERVAL_S}s"
+  # xtrace off for the same reason as the health poll above: this loop would
+  # otherwise emit a few lines of trace per tick for the whole eval leg.
+  set +x
+  (
+    while true; do
+      sleep "${SERVE_LOG_TAIL_INTERVAL_S}"
+      docker exec node tail -c 20000 /root/vllm_serve.log 2>/dev/null \
+        | tr '\r' '\n' \
+        | grep -aE "Running:.*Waiting:|EngineDeadError|EngineCore|Traceback|IndexError|RESOURCE_EXHAUSTED" \
+        | tail -3 | sed 's/^/[serve] /' || true
+    done
+  ) &
+  _SERVE_TAIL_PID=$!
+  set -x
+fi
 
 # 5. Run Benchmarks / Validation
 if [[ "${CASE_FILE:-}" == *.json ]]; then
@@ -513,6 +590,11 @@ else
     -H 'Content-Type: application/json' \
     -d '{\"model\": \"${MODEL}\", \"prompt\": \"San Francisco is a\", \"max_tokens\": 50}'
   "
+fi
+
+if [[ -n "${_SERVE_TAIL_PID}" ]]; then
+  kill "${_SERVE_TAIL_PID}" >/dev/null 2>&1 || true
+  wait "${_SERVE_TAIL_PID}" >/dev/null 2>&1 || true
 fi
 
 echo "--- Tests completed successfully"
