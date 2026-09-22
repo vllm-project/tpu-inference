@@ -243,6 +243,73 @@ class TestTpuPlatform:
 
         assert mm_cfg.mm_device_do_normalize == expected_flag
 
+    @pytest.mark.parametrize("retention,accepted", [
+        (0, True),
+        (256, False),
+        (2048, False),
+        (None, False),
+    ])
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_mamba_prefix_caching_requires_semantic_retention(
+            self, mock_update, mock_sharding, vllm_config, retention,
+            accepted):
+        """Only `prefix_cache_retention_interval=0` is servable in align mode.
+
+        The GDN kernel checkpoints once per forward pass, at
+        `(seq_len - 1) // mamba_block_size`. Those pass ends are chunk
+        boundaries the scheduler picks out of a token budget it shares with
+        concurrent decodes, so no fixed interval coincides with them and a
+        retained-but-never-written boundary is a resume onto stale state.
+        """
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = True
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        vllm_config.cache_config.mamba_block_size = 256
+        vllm_config.cache_config.prefix_cache_retention_interval = retention
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+        vllm_config.speculative_config = None
+        vllm_config.additional_config = {}
+
+        if accepted:
+            TpuPlatform.check_and_update_config(vllm_config)
+        else:
+            with pytest.raises(NotImplementedError, match="retention"):
+                TpuPlatform.check_and_update_config(vllm_config)
+
+    @patch("tpu_inference.platforms.tpu_platform.envs.TPU_MULTIHOST_BACKEND",
+           "")
+    @patch("tpu_inference.platforms.tpu_platform.ShardingConfigManager")
+    @patch(
+        "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
+    )
+    def test_retention_is_unconstrained_without_mamba_prefix_caching(
+            self, mock_update, mock_sharding, vllm_config):
+        """No mamba checkpoints, nothing to retain -- the knob is inert."""
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.scheduler_config.is_multimodal_model = False
+        vllm_config.compilation_config.mode = "dummy"
+        vllm_config.compilation_config.backend = ""
+        vllm_config.model_config.is_hybrid = False
+        vllm_config.model_config.max_model_len = 4096
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        vllm_config.cache_config.prefix_cache_retention_interval = 256
+        mock_sharding.from_vllm_config.return_value.total_dp_size = 1
+        vllm_config.speculative_config = None
+        vllm_config.additional_config = {}
+
+        TpuPlatform.check_and_update_config(vllm_config)
+
     @pytest.mark.parametrize("is_hybrid,unsupported,expected_prefix_caching", [
         (True, None, True),
         (True, "dp", True),
