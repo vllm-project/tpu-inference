@@ -123,7 +123,7 @@ def _get_mamba_cache_allocator(
 
     @partial(jax.jit, out_shardings=sharding)
     def _allocate() -> jax.Array:
-        return jnp.empty(
+        return jnp.zeros(
             shape=cache_shape,
             dtype=cache_dtype,
         )
