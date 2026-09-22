@@ -145,8 +145,81 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # #37: retry of #36 with the fused-RS kernel's output layout FIXED IN
-        # CODE, and with the accuracy legs moved ahead of the perf sweep.
+        # #39: SECOND fused-RS code fix. #38's config exactly, plus a fix to a
+        # double-buffer race inside the kernel itself.
+        #
+        # #38 (the output-layout fix, still in) took the model from chance back
+        # to coherent -- GSM8K 0.0106 -> 0.9128, MMLU 0.2443 -> 0.8282, and
+        # truncation from 1302/1319 to 3/1319. But both scores sat ~0.065 below
+        # path A's 0.9788 / 0.8928, which is ~6 sigma on GSM8K and ~18 on MMLU.
+        # MMLU is a loglikelihood task with 0/14042 truncated, so that residual
+        # was a per-token logit error, not a generation problem.
+        #
+        # ROOT CAUSE, found by single-layer numerical diff on the local 8-chip
+        # v7x rather than by another full-model build (see
+        # experiments/.../moe_kernel_diff/FINDINGS.md). Both pipeline loops in
+        # gmm_fused_rs_nodedup.py issued the next weight-tile DMA BEFORE the
+        # compute that reads the current tile:
+        #
+        #     buf_id = step % num_bufs
+        #     wait_dma(buf_id)
+        #     if step + num_bufs < total_steps:
+        #         start_dma((step + num_bufs) % num_bufs, ...)  # == buf_id !!
+        #     compute_tile(buf_id, ...)                         # reads buf_id
+        #
+        # (step + N) % N == step % N, so the refill overwrites the operand being
+        # read. The branch only fires when total_steps > num_bufs, which is why
+        # it is invisible at small hidden/intermediate sizes and why every shape
+        # in the repo's kernel tests passes against the broken code. Qwen3.8
+        # (hidden 8192, moe_intermediate 2048) gets num_n1=4 against
+        # num_w1_bufs=2 at EVERY compiled token bucket, so #38 ran entirely
+        # inside the defect.
+        #
+        # Second collision: the cross-gm prefetch at step 0 also targets buffer
+        # 0, and its guard is `next_same = (next_e == expert_id) AND
+        # can_cache_w1`. can_cache_w1 is false exactly when buffers are reused,
+        # so in the broken case the guard never holds and a second unrelated
+        # DMA lands in a buffer that step num_bufs will read.
+        #
+        # THE FIX (59e60e854, +20/-4): move both refills after their compute
+        # (overlap is preserved, just one step later) and defer the early
+        # cross-gm buffer-0 prefetch when buffers are reused.
+        #
+        # Validated 11/11 on one MoE layer, rel_l2 vs an fp32 dense reference:
+        #
+        #   H     I      before     after    path A
+        #   3072  2048   5.05e-01  3.21e-02  4.09e-03   fixed
+        #   4096  2048   5.11e-01  4.50e-03  4.08e-03   fixed
+        #   8192  2048   4.76e-01  4.54e-03  4.04e-03   fixed
+        #   2048  4096   4.95e-01  1.67e-02  1.66e-02   fixed
+        #   1024  8192   5.12e-01  4.42e-03  4.13e-03   fixed
+        #   (4 previously-passing shapes: bit-identical before and after)
+        #
+        #   Qwen3.8 proportions, 64 experts / topk 10:
+        #     bf16  6.51e-01 -> 2.18e-02   (path A 1.23e-02)
+        #     fp8   7.39e-01 -> 5.08e-02   (path A 4.90e-02)
+        #
+        # WHAT THIS BUILD DECIDES: whether the kernel is now usable. Pass is
+        # GSM8K ~0.9788 and MMLU ~0.8928, i.e. #30 parity. Anything still ~0.065
+        # low means a second, independent defect and the single-layer rig did
+        # not capture it -- most likely because it cannot reach ep_size 32.
+        #
+        # ⚠️ NOT PROVEN that this race is what produced #38's numbers. A
+        # per-layer rel_l2 of 0.5 across 92 layers should have destroyed the
+        # model, yet #38 scored 0.9128; residual-stream dilution is the likely
+        # reconciliation but it is unshown. This build is the test of it.
+        #
+        # Still unfixed, deliberately out of scope here: the max_num_gm
+        # disagreement between fused_moe_rs.py:309 (global experts) and
+        # gmm_fused_rs_nodedup.py:1612 (local experts), and the four dispatch
+        # arguments dropped by the RS early return at fused_moe_gmm.py:594
+        # (num_valid_tokens is the one that matters for this model -- padding
+        # tokens route on their gating row instead of to expert 0).
+        #
+        # ---- #38's rationale, still in force, follows ----
+        #
+        # #37/#38: retry of #36 with the fused-RS kernel's output layout FIXED
+        # IN CODE, and with the accuracy legs moved ahead of the perf sweep.
         #
         # #36 ran the kernel cleanly and scored at chance: GSM8K 0.0106 against
         # 0.9788 (98.7% of generations never terminated) and MMLU 0.2443 on a
