@@ -149,6 +149,46 @@ else:
     PromptType = None
     ProcessorInputs = None
 
+from vllm.config import ModelConfig as _VllmModelConfig
+from vllm.config import VllmConfig as _VllmConfig
+
+if not hasattr(_VllmModelConfig, "enable_return_routed_experts"):
+    _VllmModelConfig.enable_return_routed_experts = False
+
+if hasattr(_VllmConfig, "_verify_aux_output_compatibility"):
+
+    def _tpu_verify_aux_output_compatibility(self: "_VllmConfig") -> None:
+        if not self.aux_output_config.enabled:
+            return
+        if self.model_config.runner_type != "generate":
+            raise ValueError(
+                "AuxOutput Connector only supports generate runners.")
+        if not self.model_config.is_moe:
+            raise ValueError("AuxOutput Connector only supports MoE models.")
+        if (self.speculative_config is not None
+                and self.speculative_config.enable_adaptive_verification):
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "adaptive speculative verification.")
+        if self.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "pipeline parallelism (PP > 1).")
+        if (self.parallel_config.decode_context_parallel_size > 1
+                or self.parallel_config.prefill_context_parallel_size > 1):
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "context parallelism (DCP/PCP > 1).")
+        kv_transfer_config = self.kv_transfer_config
+        if (kv_transfer_config is not None
+                and kv_transfer_config.is_kv_transfer_instance):
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with KV "
+                "connectors (PD disaggregation and KV cache offload).")
+
+    _VllmConfig._verify_aux_output_compatibility = (
+        _tpu_verify_aux_output_compatibility)
+
 logger = init_logger(__name__)
 
 
@@ -320,6 +360,15 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+
+        aux_output_config = getattr(vllm_config, "aux_output_config", None)
+        if aux_output_config is not None and vllm_config.model_config is not None:
+            if getattr(aux_output_config, "enable_return_routed_experts",
+                       False):
+                vllm_config.model_config.enable_return_routed_experts = True
+            elif getattr(vllm_config.model_config,
+                         "enable_return_routed_experts", False):
+                aux_output_config.enable_return_routed_experts = True
 
         cls._resolve_multiprocess_dp(vllm_config)
 

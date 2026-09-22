@@ -40,8 +40,17 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, ModelRunnerOutput,
-                             RoutedExpertsLists)
+from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
+
+try:
+    from vllm.v1.outputs import RoutedExpertsLists
+except ImportError:
+
+    class RoutedExpertsLists(NamedTuple):
+        routing_data: np.ndarray
+        slot_mapping: np.ndarray
+
+
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1029,6 +1038,29 @@ class DPScheduler(SchedulerInterface):
             getattr(o, "pending_structured_output_tokens", False)
             for o in rank_outputs)
 
+        combined_aux_metadata = None
+        aux_metas = [
+            getattr(o, "aux_output_connector_metadata", None)
+            for o in rank_outputs
+            if getattr(o, "aux_output_connector_metadata", None) is not None
+        ]
+        if aux_metas:
+            from vllm.distributed.aux_output_connector.connector import \
+                AuxOutputConnectorMetadata
+            combined_requests = {}
+            combined_block_hashes = {}
+            combined_finished = []
+            for m in aux_metas:
+                combined_requests.update(m.requests)
+                combined_block_hashes.update(m.block_hashes)
+                combined_finished.extend(m.finished_requests)
+            combined_aux_metadata = AuxOutputConnectorMetadata(
+                generation=max(m.generation for m in aux_metas),
+                requests=combined_requests,
+                block_hashes=combined_block_hashes,
+                finished_requests=tuple(combined_finished),
+            )
+
         return DPSchedulerOutput(
             scheduled_new_reqs=all_new_reqs,
             scheduled_cached_reqs=combined_cached_data,
@@ -1043,6 +1075,7 @@ class DPScheduler(SchedulerInterface):
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
             kv_connector_metadata=combined_kv_connector_metadata,
+            aux_output_connector_metadata=combined_aux_metadata,
             has_structured_output_requests=has_structured_output_requests,
             pending_structured_output_tokens=pending_structured_output_tokens,
         )
@@ -1366,6 +1399,12 @@ class DPScheduler(SchedulerInterface):
                     for rid in req_ids if rid in g.num_nans_in_logits
                 } if g.num_nans_in_logits else None),
                 kv_connector_output=g.kv_connector_output,
+                aux_output_connector_output=({
+                    rid:
+                    g.aux_output_connector_output[rid]
+                    for rid in req_ids if rid in g.aux_output_connector_output
+                } if getattr(g, "aux_output_connector_output", None)
+                                             is not None else None),
             )
 
             if routed_experts is not None:

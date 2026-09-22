@@ -41,6 +41,7 @@ def _run_inference_and_return_outputs(
         enable_export: bool = True):
     os.environ['MODEL_IMPL_TYPE'] = config.impl_type
 
+    enable_routed_experts = enable_export and "MoE" in config.model_name
     llm = LLM(
         model=config.model_name,
         max_model_len=config.max_model_len,
@@ -51,6 +52,7 @@ def _run_inference_and_return_outputs(
         max_num_batched_tokens=config.max_num_batched_tokens,
         max_num_seqs=config.max_num_seqs,
         enable_expert_parallel=config.enable_expert_parallel,
+        enable_return_routed_experts=enable_routed_experts,
         additional_config=config.additional_config,
         async_scheduling=config.async_scheduling,
     )

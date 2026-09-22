@@ -18,7 +18,7 @@ import random
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -34,8 +34,6 @@ from vllm.config.parallel import ParallelConfig
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import \
-    get_routed_experts_attn_gid
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import GrammarOutput
@@ -43,8 +41,80 @@ from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, KVConnectorOutput, LogprobsLists,
-                             LogprobsTensors, ModelRunnerOutput,
-                             RoutedExpertsLists)
+                             LogprobsTensors, ModelRunnerOutput)
+
+try:
+    from vllm.v1.outputs import RoutedExpertsLists
+except ImportError:
+
+    class RoutedExpertsLists(NamedTuple):
+        routing_data: np.ndarray
+        slot_mapping: np.ndarray
+
+
+try:
+    from vllm.distributed.aux_output_connector.connector import \
+        AuxRequestOutput
+except ImportError:
+    AuxRequestOutput = None
+
+try:
+    from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+        RoutedExpertsManager, get_routed_experts_attn_gid)
+except ImportError:
+    from vllm.v1.kv_cache_interface import is_full_attention_spec
+
+    def get_routed_experts_attn_gid(kv_cache_config: KVCacheConfig) -> int:
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            if is_full_attention_spec(group.kv_cache_spec):
+                return gid
+        raise ValueError(
+            "Routed-experts capture requires a full-attention KV cache group.")
+
+    class RoutedExpertsManager:
+
+        def __init__(
+            self,
+            vllm_config: VllmConfig,
+            kv_cache_config: KVCacheConfig,
+        ) -> None:
+            self.attn_gid = get_routed_experts_attn_gid(kv_cache_config)
+            attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
+            self.block_size = attn_group.kv_cache_spec.block_size
+            model_config = vllm_config.model_config
+            num_layers = model_config.get_total_num_hidden_layers()
+            num_experts = model_config.get_num_experts()
+            num_experts_per_tok = model_config.get_num_experts_per_tok()
+            max_num_slots = kv_cache_config.num_blocks * self.block_size
+            dtype = np.uint8 if num_experts <= 256 else np.uint16
+            self.routed_experts_by_slot = np.zeros(
+                (max_num_slots, num_layers, num_experts_per_tok),
+                dtype=dtype,
+            )
+
+        def store_batch(
+            self,
+            routing_data: np.ndarray,
+            slot_mapping: np.ndarray,
+        ) -> None:
+            self.routed_experts_by_slot[slot_mapping] = routing_data
+
+        def get(
+            self,
+            block_ids: list[int],
+            num_tokens: int,
+            token_start: int = 0,
+        ) -> np.ndarray:
+            bs = self.block_size
+            block_ids_array = np.array(block_ids, dtype=np.int32)
+            block_offsets = np.arange(bs)
+            slot_mapping = (
+                block_ids_array.reshape(-1, 1) * bs +
+                block_offsets.reshape(1, -1)).flatten()[:num_tokens]
+            slot_mapping = slot_mapping[token_start:]
+            return self.routed_experts_by_slot[slot_mapping]
+
+
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import \
@@ -443,6 +513,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
             block_size=getattr(self._runner, "block_size", 0),
             routed_experts_attn_gid=getattr(self._runner,
                                             "routed_experts_attn_gid", 0),
+            scheduler_output=self._scheduler_output,
             is_async=True,
         )
 
@@ -461,7 +532,14 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
         if logprobs is not None:
             self._model_runner_output.logprobs = logprobs
         if routed_experts is not None:
-            self._model_runner_output.routed_experts = routed_experts
+            _attach_routed_experts_to_output(
+                runner=self._runner,
+                model_runner_output=self._model_runner_output,
+                routed_experts=routed_experts,
+                scheduler_output=self._scheduler_output,
+                block_ids_by_req=self._routed_experts_block_ids,
+                is_continue_decode=True,
+            )
 
         return self._model_runner_output
 
@@ -505,7 +583,14 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                     _padded_num_scheduled_tokens_per_dp_rank,
                     block_ids_by_req=self._routed_experts_block_ids,
                 )
-                self._model_runner_output.routed_experts = routed_experts
+                _attach_routed_experts_to_output(
+                    runner=self._runner,
+                    model_runner_output=self._model_runner_output,
+                    routed_experts=routed_experts,
+                    scheduler_output=self._scheduler_output,
+                    block_ids_by_req=self._routed_experts_block_ids,
+                    is_continue_decode=False,
+                )
 
         return self._model_runner_output
 
@@ -854,6 +939,119 @@ def _reconstruct_routed_experts(
     return routed_experts
 
 
+def _attach_routed_experts_to_output(
+    runner,
+    model_runner_output: ModelRunnerOutput,
+    routed_experts: Optional[RoutedExpertsLists],
+    scheduler_output: Optional["VllmSchedulerOutput"] = None,
+    block_ids_by_req: Optional[Dict[str, List[int]]] = None,
+    is_continue_decode: bool = False,
+) -> None:
+    """Attach both RoutedExpertsLists and AuxRequestOutput to ModelRunnerOutput."""
+    if routed_experts is None:
+        return
+    model_runner_output.routed_experts = routed_experts
+    if AuxRequestOutput is None or runner is None:
+        return
+
+    mgr = getattr(runner, "routed_experts_mgr", None)
+    if mgr is not None:
+        mgr.store_batch(routed_experts.routing_data,
+                        routed_experts.slot_mapping)
+        routing_data = routed_experts.routing_data.astype(
+            mgr.routed_experts_by_slot.dtype, copy=False)
+    else:
+        routing_data = routed_experts.routing_data
+
+    emit_cursors = getattr(runner, "_routed_experts_emit_cursor", None)
+    if emit_cursors is None:
+        emit_cursors = {}
+        runner._routed_experts_emit_cursor = emit_cursors
+    num_prompt_map = getattr(runner, "_routed_experts_num_prompt_tokens", None)
+    if num_prompt_map is None:
+        num_prompt_map = {}
+        runner._routed_experts_num_prompt_tokens = num_prompt_map
+
+    chunk_start: Dict[str, int] = {}
+    if scheduler_output is not None:
+        for new_req in getattr(scheduler_output, "scheduled_new_reqs", ()):
+            chunk_start[new_req.req_id] = new_req.num_computed_tokens
+            if getattr(new_req, "prompt_token_ids", None) is not None:
+                num_prompt_map[new_req.req_id] = len(new_req.prompt_token_ids)
+            sp = getattr(new_req, "sampling_params", None)
+            p_start = (getattr(sp, "routed_experts_prompt_start", 0)
+                       if sp is not None else 0) or 0
+            emit_cursors[new_req.req_id] = p_start
+        cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+        if cached_reqs is not None:
+            for i, rid in enumerate(cached_reqs.req_ids):
+                chunk_start[rid] = cached_reqs.num_computed_tokens[i]
+        meta = getattr(scheduler_output, "aux_output_connector_metadata", None)
+        if meta is not None and hasattr(meta, "requests"):
+            resumed_ids = getattr(cached_reqs, "resumed_req_ids",
+                                  ()) if cached_reqs is not None else ()
+            for rid, meta_emit_start in meta.requests.items():
+                if rid not in emit_cursors or rid in resumed_ids:
+                    emit_cursors[rid] = meta_emit_start
+
+    requests_dict = getattr(runner, "requests", {}) or {}
+    aux_output: Dict[str, Any] = {}
+    offset = 0
+    for req_idx, req_id in enumerate(model_runner_output.req_ids):
+        if req_id not in num_prompt_map:
+            req_state = requests_dict.get(req_id)
+            if req_state is not None and hasattr(req_state,
+                                                 "num_prompt_tokens"):
+                num_prompt_map[req_id] = req_state.num_prompt_tokens
+
+        sampled_ids = (model_runner_output.sampled_token_ids[req_idx]
+                       if req_idx < len(model_runner_output.sampled_token_ids)
+                       else [])
+        num_sampled = len(sampled_ids)
+        if is_continue_decode or scheduler_output is None:
+            n = num_sampled
+        else:
+            n = scheduler_output.num_scheduled_tokens.get(req_id, num_sampled)
+
+        req_rows = routing_data[offset:offset + n]
+        offset += n
+
+        emit_start = emit_cursors.get(req_id, 0)
+        num_prompt_tokens = num_prompt_map.get(req_id, 0)
+        start_pos = chunk_start.get(req_id, emit_start)
+
+        if emit_start < num_prompt_tokens:
+            if start_pos <= emit_start:
+                rows = req_rows[emit_start - start_pos:]
+            else:
+                b_ids = (block_ids_by_req or {}).get(req_id)
+                if b_ids is None:
+                    req_state = requests_dict.get(req_id)
+                    b_ids = (_block_ids_for_group(
+                        req_state, getattr(runner, "routed_experts_attn_gid",
+                                           0))
+                             if req_state is not None else [])
+                if mgr is not None and b_ids:
+                    prefix_rows = mgr.get(b_ids,
+                                          start_pos,
+                                          token_start=emit_start)
+                    rows = np.concatenate([prefix_rows, req_rows], axis=0)
+                else:
+                    rows = req_rows
+            aux_output[req_id] = AuxRequestOutput(token_start=emit_start,
+                                                  rows=rows)
+            if num_sampled > 0:
+                emit_cursors[req_id] = num_prompt_tokens + num_sampled - 1
+        else:
+            token_start = emit_start
+            aux_output[req_id] = AuxRequestOutput(token_start=token_start,
+                                                  rows=req_rows)
+            if num_sampled > 0:
+                emit_cursors[req_id] = token_start + num_sampled
+
+    model_runner_output.aux_output_connector_output = aux_output
+
+
 class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def __init__(
@@ -885,6 +1083,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.is_first_rank = is_first_rank
         self.is_last_rank = is_last_rank
         self.routed_experts_attn_gid = 0
+        self.routed_experts_mgr: Optional[RoutedExpertsManager] = None
+        self._routed_experts_emit_cursor: Dict[str, int] = {}
+        self._routed_experts_num_prompt_tokens: Dict[str, int] = {}
 
         self._init_random()
         self._init_mesh()
@@ -1398,9 +1599,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.topology_order_id = topology_order_id
         self.kv_cache_config = kv_cache_config
         self.use_hybrid_kvcache = len(kv_cache_config.kv_cache_groups) > 1
-        self.routed_experts_attn_gid = (
-            get_routed_experts_attn_gid(kv_cache_config)
-            if self.model_config.enable_return_routed_experts else 0)
+        if self.model_config.enable_return_routed_experts:
+            self.routed_experts_attn_gid = get_routed_experts_attn_gid(
+                kv_cache_config)
+            self.routed_experts_mgr = RoutedExpertsManager(
+                vllm_config=self.vllm_config,
+                kv_cache_config=kv_cache_config,
+            )
+        else:
+            self.routed_experts_attn_gid = 0
+            self.routed_experts_mgr = None
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
         self._wire_input_batch_mamba_state(kv_cache_config)
 
@@ -2097,7 +2305,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
         if routed_experts is not None:
-            output.routed_experts = routed_experts
+            _attach_routed_experts_to_output(
+                runner=self,
+                model_runner_output=output,
+                routed_experts=routed_experts,
+                scheduler_output=scheduler_output,
+                is_continue_decode=True,
+            )
 
         self._continue_decode_output = output
         return None
@@ -2397,6 +2611,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         if self.model_config.enable_return_routed_experts and expert_indices is not None:
             expert_indices_cpu = np.asarray(jax.device_get(expert_indices))
+            block_ids_by_req = _snapshot_block_ids_for_routed_experts(
+                self, self.input_batch.req_ids[:num_reqs],
+                self.routed_experts_attn_gid)
 
             routed_experts = _reconstruct_routed_experts(
                 runner=self,
@@ -2406,11 +2623,16 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 req_ids_dp=req_ids_dp,
                 padded_num_scheduled_tokens_per_dp_rank=
                 padded_num_scheduled_tokens_per_dp_rank,
-                block_ids_by_req=_snapshot_block_ids_for_routed_experts(
-                    self, self.input_batch.req_ids[:num_reqs],
-                    self.routed_experts_attn_gid),
+                block_ids_by_req=block_ids_by_req,
             )
-            model_runner_output.routed_experts = routed_experts
+            _attach_routed_experts_to_output(
+                runner=self,
+                model_runner_output=model_runner_output,
+                routed_experts=routed_experts,
+                scheduler_output=scheduler_output,
+                block_ids_by_req=block_ids_by_req,
+                is_continue_decode=False,
+            )
 
         return model_runner_output
 
