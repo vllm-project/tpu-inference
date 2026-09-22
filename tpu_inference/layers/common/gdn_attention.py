@@ -48,6 +48,7 @@ def run_jax_gdn_attention(
     kernel_size: int,
     mesh: jax.sharding.Mesh,
     read_state_indices: Optional[jnp.ndarray] = None,
+    has_prior_state: Optional[jnp.ndarray] = None,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -98,6 +99,10 @@ def run_jax_gdn_attention(
     """
     if read_state_indices is None:
         read_state_indices = state_indices
+    # `None` would change the shard_map signature, so pass an all-true mask
+    # when the caller has nothing to suppress.
+    if has_prior_state is None:
+        has_prior_state = jnp.ones_like(read_state_indices, dtype=jnp.bool_)
 
     in_specs = (
         P(ShardingAxisName.ATTN_DATA,
@@ -118,6 +123,8 @@ def run_jax_gdn_attention(
         P(ShardingAxisName.ATTN_DATA),  # distribution
         P(ShardingAxisName.ATTN_DATA),  # seq_lens
         P(ShardingAxisName.ATTN_DATA),  # read_state_indices
+        P(ShardingAxisName.ATTN_DATA),  # read_offsets
+        P(ShardingAxisName.ATTN_DATA),  # has_prior_state
     )
 
     out_specs = (
@@ -164,6 +171,10 @@ def run_jax_gdn_attention(
         distribution,
         seq_lens,
         read_state_indices,
+        # `read_offsets` sits before `has_prior_state` in the kernel
+        # signature, so pass its default explicitly rather than by omission.
+        jnp.zeros_like(read_state_indices, dtype=jnp.int32),
+        has_prior_state,
     )
 
     (new_conv_state, new_recurrent_state), output = mapped_fn(*mapped_args)
