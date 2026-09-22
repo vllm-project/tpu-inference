@@ -150,6 +150,14 @@ def gdn_attention_core_tpu(
             block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
         state_indices_sliced = jnp.clip(
             block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
+        # False where no forward pass has checkpointed the slot at `read_col`.
+        # The kernel then starts the sequence from a zero state rather than
+        # reading whatever the slot's previous owner left there.
+        has_prior_state_sliced = None
+        if attn_metadata.mamba_has_prior_state is not None:
+            has_prior_state_sliced = truncate_sharded_tensor(
+                attn_metadata.mamba_has_prior_state.astype(jnp.int32),
+                padded_num_reqs_per_dp, dp_size).astype(jnp.bool_)
     else:
         # Index mamba state by the per-request slot id from
         # `InputBatch.mamba_state_indices_cpu`, not by `block_tables[:, 0]`
@@ -169,6 +177,9 @@ def gdn_attention_core_tpu(
                                                        padded_num_reqs_per_dp,
                                                        dp_size)
         read_state_indices_sliced = state_indices_sliced
+        # Non-align mode keeps one resident slot per request, written before
+        # it is ever read, so there is nothing to suppress.
+        has_prior_state_sliced = None
 
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
@@ -192,6 +203,7 @@ def gdn_attention_core_tpu(
          kernel_size,
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
+         has_prior_state=has_prior_state_sliced,
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]

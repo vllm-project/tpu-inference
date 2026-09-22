@@ -78,7 +78,6 @@ from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.core.hybrid_coordinator import is_mamba_group
-from tpu_inference.runner.kv_cache import zero_mamba_blocks
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
@@ -921,6 +920,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.batch_counter = 0
 
         self.kv_caches: list[jax.Array] = []
+        # Global mamba rows this runner has written a checkpoint into.
+        # See `_resolve_mamba_prior_state`.
+        self._written_mamba_slots: Set[int] = set()
         self.layer_name_to_kvcache_index: dict[str, int] = {}
 
         self.is_pooling_model: bool = self.model_config.runner_type == "pooling"
@@ -1457,6 +1459,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.kv_cache_manager.delete_kv_cache()
 
     def reinitialize_kv_cache(self) -> None:
+        self._written_mamba_slots.clear()
         self.kv_cache_manager.reinitialize_kv_cache()
         self._wire_input_batch_mamba_state(self.kv_cache_config)
 
@@ -2820,64 +2823,74 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_subtract_indices, positions_subtract_indices)
         return seq_lens, positions
 
-    def _zero_new_mamba_blocks(self, req_indices_dp, dp_size: int) -> None:
-        """Zero the mamba slots the scheduler handed out this step.
+    def _resolve_mamba_prior_state(
+            self, req_indices_dp, scheduled_tokens_per_dp_rank, dp_size: int,
+            max_num_reqs_per_dp_rank: int) -> Optional[np.ndarray]:
+        """Which scheduled requests may read the mamba slot they resume from.
 
-        vLLM caches -- and so advertises as resume points -- every block
+        vLLM advertises -- and so lets a request resume at -- every block
         boundary its retention mask keeps, but the GDN kernel writes exactly
         one checkpoint per forward pass, at `(seq_len - 1) // block_size`
         (`kernels/gdn/v3/memory_ref.py`, gated on `is_last_tile` with
-        `window_size=1`). Every other slot a request owns is left holding
-        whatever its previous owner wrote, and a later request that resumes
-        there reads that state as its own. Zeroing a slot when it is handed
-        out turns such a resume into a fresh-sequence start.
+        `window_size=1`). Every other slot a request owns still holds
+        whatever its previous owner left there.
 
-        Fresh requests are unaffected either way: the kernel gates the state
-        read on `has_initial_state = (seq_lens - query_lens) > 0`, so at
-        `num_computed == 0` the DMA is length-zero and the masked VMEM value
-        is selected away.
+        So track the slots this runner has actually written and clear the
+        kernel's `has_initial_state` for any request whose `read_col` slot is
+        not among them: it then starts from a zero state instead of reading
+        unrelated state. This is the same outcome as scrubbing the slot, but
+        without a device scatter -- and the record is exact, because it is
+        kept where the writes happen rather than inferred from the
+        scheduler's intent.
+
+        Returns a per-request mask laid out per DP rank like the other
+        attention metadata, or None when the model has no mamba prefix cache.
         """
         pbm = self.persistent_batch_manager
-        if not pbm.new_mamba_blocks:
-            return
-        # Consume the record: a dummy or profiling forward never runs
-        # `update_states`, and re-zeroing a slot a real request has since
-        # checkpointed would throw that checkpoint away.
-        new_blocks = pbm.new_mamba_blocks
+        gid = pbm.mamba_kv_cache_group_id
+        block_size = pbm.mamba_block_size
+        if gid is None or not block_size:
+            return None
+
+        # A slot handed to a request no longer holds anyone's checkpoint.
+        for block_ids in pbm.new_mamba_blocks.values():
+            self._written_mamba_slots.difference_update(block_ids)
         pbm.new_mamba_blocks = {}
 
-        mamba_indices = [
-            i for i, c in enumerate(self.kv_caches) if isinstance(c, tuple)
-        ]
-        if not mamba_indices:
-            return
+        table = self.input_batch.block_table[gid].get_cpu_tensor()
+        ncols = table.shape[1]
+        mask = np.ones(self.max_num_reqs, dtype=np.int32)
+        written_now: List[int] = []
 
-        # Slot ids are rank-local -- each DP rank's scheduler owns a shard of
-        # the pool and hands out ids in [0, num_blocks // dp_size) -- so lift
-        # them into the global row space of the state arrays.
-        local_rows = max(
-            self.kv_caches[mamba_indices[0]][0].shape[0] // dp_size, 1)
-        rank_of_req_index: Dict[int, int] = {}
         for dp_rank in range(dp_size):
-            for req_index in req_indices_dp[dp_rank]:
-                rank_of_req_index[int(req_index)] = dp_rank
+            req_offset = dp_rank * max_num_reqs_per_dp_rank
+            for pos, req_index in enumerate(req_indices_dp[dp_rank]):
+                req_index = int(req_index)
+                num_computed = int(
+                    self.input_batch.num_computed_tokens_cpu[req_index])
+                # The pass ends at the end of *this step's* chunk, which for
+                # a chunked prefill is not the end of the request. That end is
+                # the column the kernel checkpoints.
+                num_scheduled = int(scheduled_tokens_per_dp_rank[dp_rank][pos])
+                if num_scheduled <= 0:
+                    continue
+                seq_len = num_computed + num_scheduled
+                read_col = max(num_computed - 1, 0) // block_size
+                write_col = max(seq_len - 1, 0) // block_size
+                # Slot ids are rank-local; make them global rows so ranks
+                # cannot alias each other's entries in the record.
+                base = dp_rank * (1 << 24)
+                if num_computed > 0 and read_col < ncols:
+                    slot = base + int(table[req_index, read_col])
+                    if slot not in self._written_mamba_slots:
+                        mask[req_offset + pos] = 0
+                if write_col < ncols:
+                    written_now.append(base + int(table[req_index, write_col]))
 
-        rows: Set[int] = set()
-        for req_id, block_ids in new_blocks.items():
-            req_index = self.input_batch.req_id_to_index.get(req_id)
-            if req_index is None:
-                continue
-            base = rank_of_req_index.get(req_index, 0) * local_rows
-            # Block 0 is the shared null block, never allocated to a request.
-            rows.update(base + b for b in block_ids if 0 < b < local_rows)
-        if not rows:
-            return
-
-        rows_arr = np.fromiter(sorted(rows), dtype=np.int32, count=len(rows))
-        for i in mamba_indices:
-            self.kv_caches[i] = tuple(
-                zero_mamba_blocks(state, rows_arr)
-                for state in self.kv_caches[i])
+        # This step's forward writes these, so they are readable from the next
+        # step onwards.
+        self._written_mamba_slots.update(written_now)
+        return mask
 
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -3292,7 +3305,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     self.kv_cache_config.kv_cache_groups):
                 build_block_table_host(gid)
 
-        self._zero_new_mamba_blocks(req_indices_dp, dp_size)
+        mamba_has_prior_state_cpu = self._resolve_mamba_prior_state(
+            req_indices_dp, scheduled_tokens_per_dp_rank, dp_size,
+            max_num_reqs_per_dp_rank)
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
@@ -3320,13 +3335,22 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices_cpu[req_offset:req_offset +
                                         _num_reqs] = (global_slots %
                                                       local_slots)
+            mamba_has_prior_state = None
             (request_distribution, mamba_state_indices,
              dev_arrays_payload) = device_array(
                  self.mesh, (request_distribution, mamba_state_indices_cpu,
                              metadata_blob),
                  sharding=metadata_attn_sharding)
+        elif mamba_has_prior_state_cpu is not None:
+            mamba_state_indices = None
+            (request_distribution, mamba_has_prior_state,
+             dev_arrays_payload) = device_array(
+                 self.mesh, (request_distribution, mamba_has_prior_state_cpu,
+                             metadata_blob),
+                 sharding=metadata_attn_sharding)
         else:
             mamba_state_indices = None
+            mamba_has_prior_state = None
             (request_distribution, dev_arrays_payload) = device_array(
                 self.mesh, (request_distribution, metadata_blob),
                 sharding=metadata_attn_sharding)
@@ -3353,6 +3377,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                mamba_has_prior_state=mamba_has_prior_state,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
             )
@@ -3366,6 +3391,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 query_start_loc=query_start_loc,
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
+                mamba_has_prior_state=mamba_has_prior_state,
                 padded_num_reqs=attn_padded_num_reqs,
             )
 

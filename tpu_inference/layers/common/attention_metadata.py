@@ -66,6 +66,7 @@ class PCPMetadata:
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "mamba_has_prior_state",
         "pcp",
     ],
     meta_fields=["padded_num_reqs", "pcp_cache_pages"],
@@ -91,6 +92,11 @@ class AttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (max_num_seqs,) bool — False where the slot this request would resume
+    # from was never checkpointed by any forward pass, so the GDN kernel must
+    # start it from a zero state instead of reading the slot. None disables
+    # the check (every resume is trusted).
+    mamba_has_prior_state: jax.Array | None = None
 
     # PCP-specific metadata. None when not running prefill context parallelism.
     pcp: PCPMetadata | None = None
@@ -114,6 +120,7 @@ class AttentionMetadata(object):
         "query_start_loc",
         "request_distribution",
         "mamba_state_indices",
+        "mamba_has_prior_state",
     ],
     meta_fields=["padded_num_reqs"],
 )
@@ -135,6 +142,11 @@ class SharedAttentionMetadata(object):
     # None for models without mamba layers; pure-mamba models would also
     # use this field, only hybrid models exercise it today.
     mamba_state_indices: jax.Array | None = None
+    # (max_num_seqs,) bool — False where the slot this request would resume
+    # from was never checkpointed by any forward pass, so the GDN kernel must
+    # start it from a zero state instead of reading the slot. None disables
+    # the check (every resume is trusted).
+    mamba_has_prior_state: jax.Array | None = None
 
     # The actual number of requests padded to the compiled buckets. The bucket
     # contains only max_reqs by default to reduce model precompilation time.
