@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -426,17 +427,46 @@ def compute_and_gather_logprobs(
 @jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
-    input_ids: jax.Array,
+    prompt_target_ids: jax.Array,
     max_logprobs: int,
 ) -> LogprobsTensors:
-    """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
-    prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
+    """Compute logprobs from full logits and gather the requested top-k for prompt tokens.
+
+    `prompt_target_ids[i]` must already be the token that follows row `i` of
+    `logits` within that row's own request; see `_build_prompt_target_ids`. It
+    is deliberately not derived here by rolling the packed input ids, because
+    the last row of a non-final prefill chunk would then target the next
+    request's first token rather than the next token of its own prompt.
+    """
     return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
+
+
+def _build_prompt_target_ids(
+    total_padded_tokens: int,
+    req_snaps: List[PromptLogprobsReqSnap],
+) -> jax.Array:
+    """Build the next-token target for every row of the packed logits buffer.
+
+    The host already holds the correct token across a chunk boundary --
+    `req_state.prompt_token_ids[start_idx + 1 : ...]` -- so assemble the whole
+    vector here rather than deriving it on device. Rows no request claims
+    (padding, and requests that did not ask for prompt logprobs) stay 0; their
+    gathered values are never read back.
+    """
+    targets = np.zeros((total_padded_tokens, ), dtype=np.int32)
+    for snap in req_snaps:
+        if snap.num_logits <= 0:
+            continue
+        s = snap.start_idx + 1
+        o = snap.req_offset
+        targets[o:o + snap.num_logits] = np.asarray(
+            snap.req_state.prompt_token_ids[s:s + snap.num_logits],
+            dtype=np.int32)
+    return jnp.asarray(targets)
 
 
 def compute_prompt_logprobs(
     full_logits: Optional[jax.Array],
-    input_ids: Optional[jax.Array],
     num_prompt_logprobs: Dict[str, int],
     requests: Dict[str, "CachedRequestState"],
     scheduler_output: "VllmSchedulerOutput",
@@ -448,16 +478,8 @@ def compute_prompt_logprobs(
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
     the snapshotted state needed to safely slice them in get_output().
     """
-    if (not num_prompt_logprobs or full_logits is None or input_ids is None):
+    if not num_prompt_logprobs or full_logits is None:
         return None
-
-    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
-    # start async transfer to host (overlaps with next step's execute_model).
-    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
-    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
-    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
-        full_logits, input_ids, max_logprobs)
-    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     # Snapshot all mutable per-request state before update_states(N+1) runs.
     padded_tokens_per_dp = full_logits.shape[0] // dp_size
@@ -491,6 +513,17 @@ def compute_prompt_logprobs(
                             num_k=num_k,
                         ))
                 local_token_offset += num_scheduled
+
+    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
+    # start async transfer to host (overlaps with next step's execute_model).
+    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
+    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
+    # Runs after the loop above because the targets are built from req_snaps.
+    prompt_target_ids = _build_prompt_target_ids(full_logits.shape[0],
+                                                 req_snaps)
+    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
+        full_logits, prompt_target_ids, max_logprobs)
+    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     return PromptLogprobsAsyncData(tensors=prompt_lp_tensors,
                                    req_snaps=req_snaps)
