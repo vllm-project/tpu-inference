@@ -9,11 +9,11 @@ from vllm.v1.core.kv_cache_coordinator import (HybridKVCacheCoordinator,
 from vllm.v1.core.kv_cache_coordinator import \
     get_kv_cache_coordinator as orig_get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashList,
-                                         KVCacheBlock)
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager, MambaManager, get_manager_for_kv_cache_spec)
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, MambaSpec
+    CrossAttentionManager, get_manager_for_kv_cache_spec)
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference.logger import init_logger
@@ -135,11 +135,6 @@ class MambaBlockPool(BlockPool):
         # A one-slot buffer holding the block the
         # primary mamba group most recently pulled off the free queue
         self._last_allocation: list[KVCacheBlock] = []
-        # Slots the GDN kernel has actually checkpointed. `cache_blocks`
-        # registers every boundary the retention mask keeps, but the kernel
-        # writes one checkpoint per forward pass, so the two sets differ;
-        # see TPUMambaManager.
-        self.written_block_ids: set[int] = set()
 
     def replay_last_allocation(self, num_blocks: int) -> list[KVCacheBlock]:
         """Hand a mirrored group the ids the primary group just allocated."""
@@ -161,14 +156,7 @@ class MambaBlockPool(BlockPool):
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         blocks = super().get_new_blocks(num_blocks)
         self._last_allocation = list(blocks)
-        # A slot leaving the free queue belongs to a new request now; whatever
-        # checkpoint it held is no longer anyone's to resume from.
-        self.written_block_ids.difference_update(b.block_id for b in blocks)
         return blocks
-
-    def reset_prefix_cache(self) -> bool:
-        self.written_block_ids.clear()
-        return super().reset_prefix_cache()
 
     def get_cached_block(self, block_hash: BlockHash,
                          kv_cache_group_ids: list[int]):
@@ -192,96 +180,6 @@ class MirrorMambaBlockPool:
     def cache_full_blocks(self, *args, **kwargs) -> None:
         # The primary group cached these blocks under the shared key already
         return None
-
-
-class TPUMambaManager(MambaManager):
-    """A mamba manager that only resumes from checkpoints the kernel wrote.
-
-    The GDN kernel emits exactly one checkpoint per forward pass, at
-    ``(seq_len - 1) // block_size``
-    (``kernels/gdn/v3/memory_ref.py``, gated on ``is_last_tile`` with
-    ``window_size=1``). ``cache_blocks`` meanwhile registers every boundary
-    the retention mask keeps, which for a chunked prefill is many more blocks
-    than that: the interiors of each chunk were allocated to the request but
-    never written, and still hold their previous owner's state.
-
-    So record the one block per step the kernel does write, and refuse a hit
-    that lands anywhere else. A request whose longest hit is unwritten falls
-    back to the nearest earlier boundary that is and recomputes the rest --
-    correct output at the cost of some reuse, rather than fluent output
-    conditioned on another request's state.
-    """
-
-    # How many hits have been refused, for the log below.
-    _clamped: int = 0
-
-    def cache_blocks(self,
-                     request: Request,
-                     num_tokens: int,
-                     retention_interval: int | None = None) -> None:
-        super().cache_blocks(request,
-                             num_tokens,
-                             retention_interval=retention_interval)
-        if self.mamba_cache_mode != "align" or num_tokens <= 0:
-            return
-        written = getattr(self.block_pool, "written_block_ids", None)
-        if written is None:
-            return
-        # The forward pass this allocation scheduled ends at `num_tokens`, so
-        # it checkpoints the block holding token `num_tokens - 1`.
-        blocks = self.req_to_blocks.get(request.request_id)
-        if not blocks:
-            return
-        idx = (num_tokens - 1) // self.block_size
-        if idx >= len(blocks):
-            return
-        block = blocks[idx]
-        if not block.is_null:
-            written.add(block.block_id)
-
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        written = getattr(block_pool, "written_block_ids", None)
-        limit = max_length
-        while limit > 0:
-            computed_blocks, hit_length = super().find_longest_cache_hit(
-                block_hashes,
-                limit,
-                kv_cache_group_ids,
-                block_pool,
-                kv_cache_spec,
-                drop_eagle_block,
-                alignment_tokens,
-                dcp_world_size,
-                pcp_world_size,
-            )
-            if hit_length == 0 or written is None:
-                return computed_blocks, hit_length
-            # The match is the last entry; the ones before it are null
-            # placeholders that make the caller's length arithmetic work.
-            if computed_blocks[0][-1].block_id in written:
-                return computed_blocks, hit_length
-            # No pass ever checkpointed this boundary. Step back one block
-            # and look again; `limit` strictly decreases, so this terminates.
-            cls._clamped += 1
-            if cls._clamped in (1, 100, 10000):
-                logger.info(
-                    "[TPUMambaManager] refused an unwritten mamba boundary at "
-                    "%d tokens (%d so far); falling back to an earlier one.",
-                    hit_length, cls._clamped)
-            limit = hit_length - kv_cache_spec.block_size
-        return tuple([] for _ in kv_cache_group_ids), 0
 
 
 class TPUDualBlockPool(BlockPool):
@@ -319,16 +217,6 @@ class TPUDualBlockPool(BlockPool):
         self.cached_block_hash_to_block = attention_pool.cached_block_hash_to_block
         self.cached_block_hashes_by_block = attention_pool.cached_block_hashes_by_block
         self.kv_event_queue = attention_pool.kv_event_queue
-
-    @property
-    def written_block_ids(self) -> set[int]:
-        """The mamba pool's record of checkpointed slots.
-
-        `find_longest_cache_hit` is handed the coordinator's `block_pool`,
-        which is this composite rather than the mamba pool, so TPUMambaManager
-        would not see the record without this.
-        """
-        return self.mamba_pool.written_block_ids
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         attn_blocks: list[KVCacheBlock] = []
@@ -412,11 +300,37 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        max_in_flight_tokens: int,
+        use_eagle: bool,
+        enable_caching: bool,
+        enable_kv_cache_events: bool,
+        dcp_world_size: int,
+        pcp_world_size: int,
+        scheduler_block_size: int,
+        hash_block_size: int,
+        metrics_collector: KVCacheMetricsCollector | None = None,
+        num_prefill_lookahead: int = 0,
         *args,
         mamba_num_blocks: int | None = None,
         **kwargs,
     ):
-        super().__init__(kv_cache_config, *args, **kwargs)
+        super().__init__(
+            kv_cache_config,
+            max_model_len,
+            max_in_flight_tokens,
+            use_eagle,
+            enable_caching,
+            enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+            num_prefill_lookahead=num_prefill_lookahead,
+            *args,
+            **kwargs,
+        )
 
         # Base __init__ initialized self.block_pool with kv_cache_config.num_blocks (Attention pool)
         self.attention_block_pool = self.block_pool
@@ -464,7 +378,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Allocate dedicated Mamba block pool
         self.mamba_block_pool = MambaBlockPool(
             num_gpu_blocks=self.mamba_num_blocks,
-            enable_caching=self.enable_caching,
+            enable_caching=enable_caching,
             hash_block_size=self.hash_block_size,
             enable_kv_cache_events=self.attention_block_pool.
             enable_kv_cache_events,
@@ -490,35 +404,22 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Re-bind Mamba managers to mamba_block_pool
         new_managers = list(self.single_type_managers)
         for i in self.mamba_group_ids:
-            old_mgr = self.single_type_managers[i]
             pool = self.mamba_block_pool
             if self.mirror_mamba_groups and i != self.primary_mamba_group_id:
                 pool = self._mirror_pool
-            spec = kv_cache_config.kv_cache_groups[i].kv_cache_spec
-            manager_kwargs = dict(
+            new_managers[i] = get_manager_for_kv_cache_spec(
+                kv_cache_spec=kv_cache_config.kv_cache_groups[i].kv_cache_spec,
+                max_in_flight_tokens=max_in_flight_tokens,
+                max_model_len=max_model_len,
                 block_pool=pool,
-                enable_caching=self.enable_caching,
+                enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=getattr(self, "dcp_world_size", 1),
-                pcp_world_size=getattr(self, "pcp_world_size", 1),
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.
                 needs_kv_cache_zeroing,
             )
-            manager = get_manager_for_kv_cache_spec(
-                kv_cache_spec=spec,
-                max_in_flight_tokens=getattr(old_mgr, "max_in_flight_tokens",
-                                             128),
-                max_model_len=self.max_model_len,
-                **manager_kwargs,
-            )
-            if type(manager) is MambaManager:
-                # Only resume from boundaries the GDN kernel checkpointed.
-                manager = TPUMambaManager(spec, **manager_kwargs)
-                logger.info(
-                    "[TPUHybridKVCacheCoordinator] group %d resumes only from "
-                    "checkpointed mamba boundaries (TPUMambaManager)", i)
-            new_managers[i] = manager
         self.single_type_managers = tuple(new_managers)
 
         for i in self.mamba_group_ids:

@@ -502,11 +502,6 @@ class TestTPUHybridKVCacheCoordinator:
                 make_block_hash_with_group_id(hashes[i], 1),
                 b,
                 num_tokens=(i + 1) * 16)
-            # These hashes are inserted by hand rather than through
-            # `cache_blocks`, so mark the slots checkpointed too: a cached
-            # mamba boundary the kernel never wrote is exactly what
-            # TPUMambaManager refuses to resume from.
-            coord.mamba_block_pool.written_block_ids.add(b.block_id)
 
         hit_blocks, hit_length, uncached = coord.find_longest_cache_hit(
             block_hashes=hashes,
