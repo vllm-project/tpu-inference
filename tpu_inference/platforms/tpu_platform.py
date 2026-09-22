@@ -346,6 +346,20 @@ class TpuPlatform(Platform):
                 "pool is sized for resident state only. Use 'align' (the "
                 "default when prefix caching is enabled) or 'none'.")
 
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "align"):
+            retention = getattr(cache_config,
+                                "prefix_cache_retention_interval", 0)
+            if retention != 0:
+                raise NotImplementedError(
+                    "prefix_cache_retention_interval="
+                    f"{'dense' if retention is None else retention} is not "
+                    "supported with mamba prefix caching on TPU: the GDN "
+                    "kernel checkpoints once per forward pass, not on a fixed "
+                    "token interval, so the retained boundaries would not all "
+                    "exist. Use 0 (the default).")
+
+
         # Hybrid (mamba/linear-attention) models cannot use prefix caching with
         # speculative decoding because verify windows need consecutive state slots.
         if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
