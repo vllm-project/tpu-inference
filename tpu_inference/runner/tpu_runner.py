@@ -1445,8 +1445,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         pbm = self.persistent_batch_manager
         pbm.mamba_kv_cache_group_id = None
         pbm.mamba_block_size = 0
-        if not envs.MAMBA_ZERO_NEW_BLOCKS:
-            return
         if getattr(self.cache_config, "mamba_cache_mode", "none") != "align":
             return
         for gid, group in enumerate(kv_cache_config.kv_cache_groups):

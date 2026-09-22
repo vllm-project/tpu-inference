@@ -16,7 +16,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
-import tpu_inference.envs as envs
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -513,8 +512,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 max_model_len=self.max_model_len,
                 **manager_kwargs,
             )
-            if (envs.MAMBA_WRITTEN_BOUNDARY_CLAMP
-                    and type(manager) is MambaManager):
+            if type(manager) is MambaManager:
                 # Only resume from boundaries the GDN kernel checkpointed.
                 manager = TPUMambaManager(spec, **manager_kwargs)
                 logger.info(

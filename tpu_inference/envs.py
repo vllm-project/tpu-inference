@@ -54,9 +54,6 @@ if TYPE_CHECKING:
     RPA_V3_PREFILL_BLOCK_SIZES: list[int] = []
     RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
     FORCE_MOE_RANDOM_ROUTING: bool = False
-    MAMBA_ZERO_NEW_BLOCKS: bool = True
-    MAMBA_CACHE_POISON: str = ""
-    MAMBA_WRITTEN_BOUNDARY_CLAMP: bool = True
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
     MOE_ALL_GATHER_ACTIVATION_DTYPE: str = ""
@@ -292,22 +289,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NOTE: this is a naive implementation and should not be used in production
     "USE_DENSE_MOE":
     env_bool("USE_DENSE_MOE", default=False),
-    # Zero a mamba state slot when the scheduler hands it to a request. The
-    # GDN kernel writes one checkpoint per forward pass, so every other slot a
-    # request owns still holds its previous owner's state; without this a
-    # resume that lands on one reads unrelated state (or, on a pool that was
-    # never touched, uninitialised memory).
-    "MAMBA_ZERO_NEW_BLOCKS":
-    env_bool("MAMBA_ZERO_NEW_BLOCKS", default=True),
-    # Refuse a mamba prefix-cache hit on a block the GDN kernel never
-    # checkpointed, falling back to the nearest earlier boundary it did.
-    "MAMBA_WRITTEN_BOUNDARY_CLAMP":
-    env_bool("MAMBA_WRITTEN_BOUNDARY_CLAMP", default=True),
-    # Repro-only: how to fill the mamba state pool at creation. "" keeps the
-    # production `jnp.empty`; "nan" forces every unwritten-slot read to show
-    # up as `!`; "zeros" mimics a zero-filled pool.
-    "MAMBA_CACHE_POISON":
-    lambda: os.getenv("MAMBA_CACHE_POISON", ""),
     # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),
