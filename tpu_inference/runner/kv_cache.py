@@ -121,8 +121,19 @@ def _get_mamba_cache_allocator(
         cache_shape: tuple, cache_dtype: jnp.dtype,
         sharding: NamedSharding) -> Callable[[], jax.Array]:
 
+    # `MAMBA_CACHE_POISON` exists for the repro in
+    # tools/mamba_prefix_cache_repro: `jnp.empty` hands back recycled HBM, so
+    # on a fresh boot it is usually clean and the bug hides. Filling the pool
+    # with NaN instead makes any read of an unwritten slot show up
+    # immediately, as `!`.
+    poison = envs.MAMBA_CACHE_POISON
+
     @partial(jax.jit, out_shardings=sharding)
     def _allocate() -> jax.Array:
+        if poison == "nan":
+            return jnp.full(cache_shape, jnp.nan, dtype=cache_dtype)
+        if poison == "zeros":
+            return jnp.zeros(shape=cache_shape, dtype=cache_dtype)
         return jnp.empty(
             shape=cache_shape,
             dtype=cache_dtype,

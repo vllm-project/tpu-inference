@@ -213,6 +213,9 @@ class TPUMambaManager(MambaManager):
     conditioned on another request's state.
     """
 
+    # How many hits have been refused, for the log below.
+    _clamped: int = 0
+
     def cache_blocks(self,
                      request: Request,
                      num_tokens: int,
@@ -272,6 +275,12 @@ class TPUMambaManager(MambaManager):
                 return computed_blocks, hit_length
             # No pass ever checkpointed this boundary. Step back one block
             # and look again; `limit` strictly decreases, so this terminates.
+            cls._clamped += 1
+            if cls._clamped in (1, 100, 10000):
+                logger.info(
+                    "[TPUMambaManager] refused an unwritten mamba boundary at "
+                    "%d tokens (%d so far); falling back to an earlier one.",
+                    hit_length, cls._clamped)
             limit = hit_length - kv_cache_spec.block_size
         return tuple([] for _ in kv_cache_group_ids), 0
 
@@ -311,6 +320,16 @@ class TPUDualBlockPool(BlockPool):
         self.cached_block_hash_to_block = attention_pool.cached_block_hash_to_block
         self.cached_block_hashes_by_block = attention_pool.cached_block_hashes_by_block
         self.kv_event_queue = attention_pool.kv_event_queue
+
+    @property
+    def written_block_ids(self) -> set[int]:
+        """The mamba pool's record of checkpointed slots.
+
+        `find_longest_cache_hit` is handed the coordinator's `block_pool`,
+        which is this composite rather than the mamba pool, so TPUMambaManager
+        would not see the record without this.
+        """
+        return self.mamba_pool.written_block_ids
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         attn_blocks: list[KVCacheBlock] = []
@@ -498,6 +517,9 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     and type(manager) is MambaManager):
                 # Only resume from boundaries the GDN kernel checkpointed.
                 manager = TPUMambaManager(spec, **manager_kwargs)
+                logger.info(
+                    "[TPUHybridKVCacheCoordinator] group %d resumes only from "
+                    "checkpointed mamba boundaries (TPUMambaManager)", i)
             new_managers[i] = manager
         self.single_type_managers = tuple(new_managers)
 

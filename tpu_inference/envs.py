@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     RPA_V3_MIXED_BLOCK_SIZES: list[int] = []
     FORCE_MOE_RANDOM_ROUTING: bool = False
     MAMBA_ZERO_NEW_BLOCKS: bool = True
+    MAMBA_CACHE_POISON: str = ""
     MAMBA_WRITTEN_BOUNDARY_CLAMP: bool = True
     JITTED_MM_MODULE_KEYS: list[str] = []
     REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES: list[str] = []
@@ -302,6 +303,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # checkpointed, falling back to the nearest earlier boundary it did.
     "MAMBA_WRITTEN_BOUNDARY_CLAMP":
     env_bool("MAMBA_WRITTEN_BOUNDARY_CLAMP", default=True),
+    # Repro-only: how to fill the mamba state pool at creation. "" keeps the
+    # production `jnp.empty`; "nan" forces every unwritten-slot read to show
+    # up as `!`; "zeros" mimics a zero-filled pool.
+    "MAMBA_CACHE_POISON":
+    lambda: os.getenv("MAMBA_CACHE_POISON", ""),
     # Number of TPU slices for multi-slice mesh
     "NUM_SLICES":
     lambda: int(os.getenv("NUM_SLICES") or "1"),
