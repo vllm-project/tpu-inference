@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.runner.decode_loop import (TpuSamplingState,
@@ -594,6 +595,12 @@ def test_continue_decode_exit_on_eos_interval():
     assert int(final_state.step_counter) == 3
 
 
+def _single_device_mesh():
+    shape = (1, ) * len(MESH_AXIS_NAMES)
+    return jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(shape), MESH_AXIS_NAMES)
+
+
 def _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top):
     """Run one fused decode step and return its top-1 logprob token ids.
 
@@ -620,42 +627,47 @@ def _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top):
         return next_tokens, processed_logits
 
     step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), 1, 1)
-    outputs = _decode_core_impl(
-        state={},
-        kv_caches=[jnp.zeros((2, 10))],
-        step_rngs=step_rngs,
-        sampling_metadata=TPUSupportedSamplingMetadata(logprobs=True),
-        inputs_embeds=None,
-        lora_metadata=None,
-        intermediate_tensors=None,
-        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
-        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
-        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
-        mamba_state_indices=None,
-        current_tokens=jnp.array([10, 20], dtype=jnp.int32),
-        active_mask=jnp.array([True, True], dtype=jnp.bool_),
-        input_positions=jnp.array([0, 0], dtype=jnp.int32),
-        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
-        model_fn=mock_model_fn,
-        compute_logits_fn=mock_compute_logits_fn,
-        sample_fn=mock_sample_fn,
-        mesh=None,
-        max_decode_steps=1,
-        static_max_decode_steps=1,
-        eos_token_id=(99, ),
-        padding_token_id=-1,
-        dp_size=1,
-        pad_len=0,
-        has_experts=False,
-        expert_shape=None,
-        expert_dtype=None,
-        layer_name_to_kvcache_index=(),
-        is_first_rank=True,
-        is_last_rank=True,
-        max_logprobs=1,
-        logprobs_mode=logprobs_mode,
-        continue_decode_eos_check_interval=-1,
-    )
+    # The logprobs jits pin out_shardings=P(), so they need a mesh in context.
+    # The runner always enters one (see TPUModelRunner.execute_model); mirror
+    # that here instead of tracing the loop with an empty mesh.
+    mesh = _single_device_mesh()
+    with jax.set_mesh(mesh):
+        outputs = _decode_core_impl(
+            state={},
+            kv_caches=[jnp.zeros((2, 10))],
+            step_rngs=step_rngs,
+            sampling_metadata=TPUSupportedSamplingMetadata(logprobs=True),
+            inputs_embeds=None,
+            lora_metadata=None,
+            intermediate_tensors=None,
+            block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+            query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+            request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+            mamba_state_indices=None,
+            current_tokens=jnp.array([10, 20], dtype=jnp.int32),
+            active_mask=jnp.array([True, True], dtype=jnp.bool_),
+            input_positions=jnp.array([0, 0], dtype=jnp.int32),
+            seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+            model_fn=mock_model_fn,
+            compute_logits_fn=mock_compute_logits_fn,
+            sample_fn=mock_sample_fn,
+            mesh=mesh,
+            max_decode_steps=1,
+            static_max_decode_steps=1,
+            eos_token_id=(99, ),
+            padding_token_id=-1,
+            dp_size=1,
+            pad_len=0,
+            has_experts=False,
+            expert_shape=None,
+            expert_dtype=None,
+            layer_name_to_kvcache_index=(),
+            is_first_rank=True,
+            is_last_rank=True,
+            max_logprobs=1,
+            logprobs_mode=logprobs_mode,
+            continue_decode_eos_check_interval=-1,
+        )
     # logprob_token_ids buffer is (steps, batch, max_logprobs + 1); column 0 is
     # the sampled token, column 1 the top-1 index.
     return np.asarray(outputs[8])[0, :, 1]

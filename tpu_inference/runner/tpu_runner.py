@@ -1402,11 +1402,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             get_routed_experts_attn_gid(kv_cache_config)
             if self.model_config.enable_return_routed_experts else 0)
         self.kv_cache_manager.initialize_kv_cache(kv_cache_config)
-        self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
-
-        if self.kv_cache_manager.actual_mamba_num_blocks is not None:
-            self.input_batch.init_mamba_pools(
-                self.kv_cache_manager.actual_mamba_num_blocks)
+        self._wire_input_batch_mamba_state(kv_cache_config)
 
         # This buffer grows dynamically to accommodate metadata and block tables.
         # We re-initialize with a precise capacity now that kv_cache_config is known.
@@ -1428,11 +1424,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_runner(self)
 
+    def _wire_input_batch_mamba_state(self,
+                                      kv_cache_config: KVCacheConfig) -> None:
+        self.input_batch.has_mamba_layers = kv_cache_config.has_mamba_layers
+        if self.kv_cache_manager.actual_mamba_num_blocks is not None:
+            self.input_batch.init_mamba_pools(
+                self.kv_cache_manager.actual_mamba_num_blocks)
+
     def delete_kv_cache(self) -> None:
         self.kv_cache_manager.delete_kv_cache()
 
     def reinitialize_kv_cache(self) -> None:
         self.kv_cache_manager.reinitialize_kv_cache()
+        self._wire_input_batch_mamba_state(self.kv_cache_config)
 
     def reset_encoder_cache(self) -> None:
         self.encoder_cache.clear()
