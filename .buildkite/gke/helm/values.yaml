@@ -31,12 +31,47 @@ image:
   vllmCommit: "51da0ca66c8065619c79e35dff97aa99aeaf5644"          # vLLM commit hash (from .buildkite/vllm_lkg.version)
 imagePullSecrets: []                      # Optional: Kubernetes imagePullSecrets for private registries (e.g. [{"name": "my-regcred"}])
 
-# On-Demand Image Builder (Docker-in-Docker in initContainer)
+# On-Demand Image Builder (Docker-in-Docker, CPU-only Helm pre-install hook Job)
 # If enabled, checks if <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion> exists in GAR.
 # If already present (e.g. prebuilt by CI with USE_PREBUILT_IMAGE=1), skips build in 2s. If missing, builds and pushes.
+#
+# The build runs as a Helm pre-install hook (templates/image-builder-job.yaml), NOT as an
+# initContainer on the TPU pods. A JobSet is admitted by Kueue as a single Workload, so every
+# step's TPU quota would be held -- and exposed to TPU node evictions -- for the whole build.
+# The hook completes before the JobSet is created, so no TPU capacity is reserved while building.
+#
+# Consequence: `helm install` blocks until the build finishes. run_testcase.sh checks the
+# registry first and disables the builder on a cache hit so the common case stays instant.
 builder:
   enabled: false
   gitRepo: "https://github.com/vllm-project/tpu-inference.git"
+  image: "docker:dind"          # Builder container image
+  queueName: "default"          # Kueue LocalQueue; must exist or the Job stays suspended forever
+  timeout: "90m"                # Passed to `helm install --timeout` by run_testcase.sh
+  backoffLimit: 2               # Job-level retries; cheap once the shared cache is warm
+  activeDeadlineSeconds: 4800   # Running-time cap (Kueue queueing time does not count)
+  cache:
+    enabled: true               # false falls back to emptyDir (cpu-np has only ~43.8 GiB free)
+    claimName: "vllm-build-cache"  # Created from extras/build-cache-pvc.yaml, shared by all releases
+    # Garbage collection, evaluated once per build right before `docker build` and
+    # only when the registry fast-path missed (a cache hit prunes nothing).
+    # Measured with `df /var/lib/docker`, i.e. real filesystem usage -- that, not
+    # `docker system df`, is the number that makes a build fail with ENOSPC.
+    # Above highWatermarkPercent: delete images/containers first (free, they are
+    # already pushed to the registry), and only if that is not enough, trim the
+    # BuildKit cache down to lowWatermarkPercent. Set highWatermarkPercent to 0
+    # to disable pruning entirely.
+    highWatermarkPercent: 70
+    lowWatermarkPercent: 50
+  resources:
+    # cpu-np nodes are 64 vCPU / 256 GB. Requests stay modest so several builds can
+    # coexist, while the limit lets the compile phase burst.
+    requests:
+      cpu: "8"
+      memory: "32Gi"
+    limits:
+      cpu: "32"
+      memory: "64Gi"
 
 # Model Configuration
 model:

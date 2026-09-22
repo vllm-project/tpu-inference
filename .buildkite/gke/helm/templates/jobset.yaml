@@ -104,9 +104,6 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
-            {{- if and $root.Values.builder $root.Values.builder.enabled }}
-            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" $root | nindent 12 }}
-            {{- end }}
             - name: tpu-node-setup
               image: busybox
               command: ["/bin/sh", "-c"]
@@ -266,9 +263,6 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
-            {{- if and .Values.builder .Values.builder.enabled }}
-            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
-            {{- end }}
             - name: tpu-node-setup
               image: busybox
               command: ["/bin/sh", "-c"]
@@ -502,9 +496,6 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
-            {{- if and .Values.builder .Values.builder.enabled }}
-            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
-            {{- end }}
             - name: tpu-node-setup
               image: busybox
               command: ["/bin/sh", "-c"]
@@ -827,9 +818,6 @@ spec:
               effect: "NoSchedule"
 
             initContainers:
-            {{- if and .Values.builder .Values.builder.enabled }}
-            {{- include "tpu-vllm-benchmark.imageBuilderInitContainer" . | nindent 12 }}
-            {{- end }}
             - name: tpu-node-setup
               image: busybox
               command: ["/bin/sh", "-c"]
