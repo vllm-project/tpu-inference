@@ -2143,8 +2143,8 @@ class CompilationManager:
                 self.runner.is_first_rank,
                 self.runner.is_last_rank,
                 self.runner.dp_size,
-                getattr(self.runner.vllm_config.model_config,
-                        "enable_return_routed_experts", False),
+                self.runner.vllm_config.aux_output_config.
+                enable_return_routed_experts,
                 self.runner.continue_decode_eos_check_interval,
                 warmup_handler=continue_decode_warmup,
             )

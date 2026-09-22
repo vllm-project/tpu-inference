@@ -31,7 +31,8 @@ def llm_enabled():
         gpu_memory_utilization=0.95,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
-        enable_prefix_caching=False,
+        # Routed-experts output requires prefix caching (vLLM #45635).
+        enable_prefix_caching=True,
         kv_cache_dtype="auto",
         enable_expert_parallel=False,
         enable_return_routed_experts=True,
@@ -82,7 +83,8 @@ def llm_enabled_sync():
         gpu_memory_utilization=0.95,
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
-        enable_prefix_caching=False,
+        # Routed-experts output requires prefix caching (vLLM #45635).
+        enable_prefix_caching=True,
         kv_cache_dtype="auto",
         enable_expert_parallel=False,
         enable_return_routed_experts=True,

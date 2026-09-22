@@ -419,7 +419,7 @@ def continue_decode(
       dp_size: Data parallel size.
       collect_expert_indices: Whether model_fn returns routed-expert indices
         (caller derives this from
-        vllm_config.model_config.enable_return_routed_experts). When True the
+        vllm_config.aux_output_config.enable_return_routed_experts). When True the
         expert-indices shape is discovered via jax.eval_shape (no execution)
         to presize the accumulation buffer.
       max_logprobs: Minimum number of logprobs to retain per token.
