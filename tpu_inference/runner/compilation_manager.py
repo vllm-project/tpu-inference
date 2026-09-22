@@ -67,6 +67,36 @@ def _describe_signature(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _log_memory_analysis(name: str, compiled: Any) -> None:
+    """Log XLA's own accounting for a compiled executable.
+
+    `temp` is the forward pass's scratch -- the peak of everything XLA has to
+    allocate beyond the arguments -- and it is the number that decides whether a
+    larger token budget will compile at all. Reading it here is exact, where
+    inferring it from an OOM message or a peak-HBM delta is not. `argument`
+    covers resident weights plus KV, and `alias` the donated KV buffers.
+
+    Diagnostics must never break a compile, hence the bare except.
+    """
+    try:
+        stats = compiled.memory_analysis()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("memory_analysis unavailable for %s: %r", name, e)
+        return
+    if stats is None:
+        return
+    fields = ("temp_size_in_bytes", "argument_size_in_bytes",
+              "output_size_in_bytes", "alias_size_in_bytes",
+              "host_temp_size_in_bytes", "generated_code_size_in_bytes")
+    parts = [
+        f"{f[:-len('_size_in_bytes')]}={v / (1 << 30):.3f}GiB"
+        for f in fields if isinstance(v := getattr(stats, f, None),
+                                      (int, float))
+    ]
+    if parts:
+        logger.info("Memory analysis of %s | %s", name, " | ".join(parts))
+
+
 class CompilationManager:
 
     def __init__(self, runner: "TPUModelRunner"):
@@ -199,6 +229,7 @@ class CompilationManager:
                 elapsed = time.perf_counter() - start
                 logger.info("Compilation of %s finished in %.2f [secs].", name,
                             elapsed)
+                _log_memory_analysis(name, compiled)
                 return compiled
 
         if self._compile_executor is None:
