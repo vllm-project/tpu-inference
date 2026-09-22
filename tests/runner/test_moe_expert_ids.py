@@ -18,9 +18,20 @@ from vllm import LLM, SamplingParams
 
 LLM.__repr__ = lambda self: "LLM"
 
+# TODO(#3636): unskip once the vLLM LKG carries a platform-aware
+# _verify_aux_output_compatibility. At LKG 0b7f11a1ee the gate requires Model
+# Runner V2 on every platform and MRV2 requires Triton, so constructing an
+# engine with enable_return_routed_experts=True raises ValueError inside
+# VllmConfig.__post_init__ before any tpu-inference code runs. Only the
+# enabled engines are affected; llm_disabled still builds and runs.
+ROUTED_EXPERTS_GATED_ON_TPU = (
+    "TODO(#3636): AuxOutput gate rejects enable_return_routed_experts on TPU "
+    "until the Model-Runner-V2 requirement is CUDA-only upstream.")
+
 
 @pytest.fixture(scope="function")
 def llm_enabled():
+    pytest.skip(ROUTED_EXPERTS_GATED_ON_TPU)
     engine = LLM(
         model="Qwen/Qwen1.5-MoE-A2.7B",
         load_format="dummy",
@@ -68,6 +79,7 @@ def llm_disabled():
 
 @pytest.fixture(scope="function")
 def llm_enabled_sync():
+    pytest.skip(ROUTED_EXPERTS_GATED_ON_TPU)
     # async_scheduling=False routes generation through the sync sampler path
     # (_sample_from_logits), which reconstructs routed experts differently than
     # the async get_output path. continue_decode requires async_scheduling=False,
