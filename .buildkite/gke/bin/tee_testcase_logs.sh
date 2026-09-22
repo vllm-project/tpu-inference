@@ -38,12 +38,15 @@
 #      script walks them in the same order and aborts as soon as one fails.
 #
 #   2. Containers inside each step's Pod:
-#        initContainers : [image-builder], tpu-node-setup, [git-sync]
+#        initContainers : tpu-node-setup, [git-sync]
 #        containers     : test-runner (+ [gke-gcsfuse-sidecar] on GCS storage)
 #      The container list is discovered from the live Pod spec, so optional
 #      containers are picked up automatically. '-c all' streams every one of
-#      them concurrently, each tagged and teed to its own file -- handy when
-#      the on-demand image build (image-builder) is the part you care about.
+#      them concurrently, each tagged and teed to its own file.
+#
+#      NOTE: the on-demand image build is NOT here. It runs before the JobSet
+#      exists, as a CPU-only Helm pre-install hook Job, and run_testcase.sh
+#      tees it to log/<release>.image-builder.log.
 #
 # Pods are not stable: Kueue can evict and requeue the whole JobSet mid-run
 # (preemption, TAS node failures, ...), and a Job can restart a pod on backoff.
@@ -105,9 +108,10 @@ Options:
   -c, --container <C>          Container to read (default: ${DEFAULT_MAIN_CONTAINER}).
                                Use 'all' (or -a) to stream every container of
                                each step concurrently, tagged and teed to its
-                               own file. Individual names: image-builder,
-                               tpu-node-setup, git-sync, test-runner
-                               (whichever the Pod actually has).
+                               own file. Individual names: tpu-node-setup,
+                               git-sync, test-runner (whichever the Pod
+                               actually has). The image build is not part of
+                               the JobSet; see run_testcase.sh.
   -a, --all                    Shorthand for '-c all'
   -l, --list                   List the containers of each step's Pod and exit
   -s, --dump                   Snapshot current logs without following (-f)
@@ -127,25 +131,24 @@ Job backoff), the streamer waits for the replacement pod, re-attaches and marks
 the switch in the log file. Only the step's Job condition ends the wait.
 
 Exit code mirrors the testcase result: the first step whose main container
-exits non-zero aborts the run and its exit code is propagated.
+exits non-zero aborts the run and its exit code is propagated. If the JobSet is
+deleted mid-run (helm uninstall, cleanup.sh) the run is reported as cancelled
+and the exit code is 130.
 
 Examples:
   1. Stream the main test-runner of every step of the newest run:
      $0
 
-  2. Stream EVERY container side by side (build + setup + test):
+  2. Stream EVERY container side by side (setup + test):
      $0 -c all
 
   3. Follow only the benchmark step of a given release:
      $0 -r benchmark dennis-test-a1b2c
 
-  4. Watch only the on-demand image build of the first step:
-     $0 -c image-builder
-
-  5. Snapshot all logs of a finished run:
+  4. Snapshot all logs of a finished run:
      $0 -c all --dump dennis-test-a1b2c
 
-  6. See which containers each step's Pod has:
+  5. See which containers each step's Pod has:
      $0 --list
 ==================================================================
 EOF
@@ -544,7 +547,9 @@ wait_for_step_pod() {
             return 1
         fi
         if ! jobset_exists; then
-            echo "❌ Error: JobSet '${JOB_NAME}' disappeared while waiting for the ${STEP} pod." >&2
+            # Neutral wording on purpose: the caller decides whether this is a
+            # cancellation (helm uninstall) or a genuine error.
+            echo "   ℹ️  JobSet '${JOB_NAME}' no longer exists; stopping the wait." >&2
             return 1
         fi
         sleep 2
@@ -807,6 +812,12 @@ for STEP_NAME in "${STEPS[@]}"; do
     WAIT_RC=0
     wait_for_step_pod || WAIT_RC=$?
     if [ "$WAIT_RC" -eq 1 ]; then
+        # wait_for_step_pod also returns 1 on a plain timeout, so only claim
+        # cancellation when the JobSet really is gone.
+        if ! jobset_exists; then
+            echo "🛑 JobSet '${JOB_NAME}' was deleted (helm uninstall?) - run cancelled." >&2
+            exit 130
+        fi
         exit 1
     fi
 
@@ -843,6 +854,16 @@ for STEP_NAME in "${STEPS[@]}"; do
         # already been reclaimed, so there is nothing left to stream.
         echo ""
         echo "⏭️  Step [${STEP_IDX}/${TOTAL_STEPS}] '${STEP_NAME}' already finished and its pod is gone; nothing to stream."
+    fi
+
+    # A vanished JobSet means someone tore the run down (helm uninstall,
+    # cleanup.sh, kubectl delete) rather than the step actually failing. Report
+    # that distinctly, and with the conventional "interrupted" exit code, so it
+    # is not mistaken for a red test result.
+    if ! jobset_exists; then
+        echo ""
+        echo "🛑 JobSet '${JOB_NAME}' was deleted (helm uninstall?) - run cancelled." >&2
+        exit 130
     fi
 
     # The pod we streamed may have been replaced or deleted in the meantime, so
