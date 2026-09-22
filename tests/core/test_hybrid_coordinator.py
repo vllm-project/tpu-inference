@@ -799,7 +799,8 @@ class _FakePool:
         block_mask=None,
     ):
         for i in range(num_cached_blocks, num_full_blocks):
-            if block_mask is not None and not block_mask[i - num_cached_blocks]:
+            if block_mask is not None and not block_mask[i -
+                                                         num_cached_blocks]:
                 continue
             block = blocks[i]
             block_hash = BlockHash(f"hash_{i}".encode())
@@ -825,7 +826,8 @@ def _make_test_mamba_spec(block_size: int = 256) -> MambaSpec:
     return spec
 
 
-def _make_test_mamba_manager(spec: MambaSpec, pool: _FakePool) -> TPUMambaManager:
+def _make_test_mamba_manager(spec: MambaSpec,
+                             pool: _FakePool) -> TPUMambaManager:
     return TPUMambaManager(
         kv_cache_spec=spec,
         block_pool=pool,
@@ -852,7 +854,8 @@ class TestTPUMambaManager:
         )
         groups = [
             KVCacheGroupSpec(kv_cache_spec=attn_spec, layer_names=["attn_0"]),
-            KVCacheGroupSpec(kv_cache_spec=mamba_spec, layer_names=["mamba_0"]),
+            KVCacheGroupSpec(kv_cache_spec=mamba_spec,
+                             layer_names=["mamba_0"]),
         ]
         set_mamba_num_blocks(50)
         cfg = KVCacheConfig(
@@ -952,7 +955,8 @@ class TestTPUMambaManager:
         assert BlockHash(b"hash_15") in pool.cached_block_hash_to_block
         # Intermediate blocks 8..14 must NOT be indexed
         for i in range(8, 15):
-            assert BlockHash(f"hash_{i}".encode()) not in pool.cached_block_hash_to_block
+            assert BlockHash(
+                f"hash_{i}".encode()) not in pool.cached_block_hash_to_block
 
     def test_find_longest_cache_hit_rejects_unwritten_boundaries(self):
         """Subsequent request of length 512 matches blocks 0 and 1, neither of which
@@ -1007,7 +1011,8 @@ class TestTPUMambaManager:
         assert hit_length == 2048
         assert computed[0][-1].block_id == 107
 
-    def test_find_longest_cache_hit_falls_back_to_earlier_written_checkpoint(self):
+    def test_find_longest_cache_hit_falls_back_to_earlier_written_checkpoint(
+            self):
         """Subsequent request of length 3000 (after 2048 and 4096 were written)
         falls back cleanly to token 2048 (block 7), without hitting unwritten
         blocks 8..10."""

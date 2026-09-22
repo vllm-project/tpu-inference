@@ -205,9 +205,8 @@ class TPUMambaManager(MambaManager):
         kwargs.pop("max_model_len", None)
         valid_params = inspect.signature(
             SingleTypeKVCacheManager.__init__).parameters
-        has_var_keyword = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in valid_params.values())
+        has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD
+                              for p in valid_params.values())
         if not has_var_keyword:
             kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
         super().__init__(kv_cache_spec, block_pool, **kwargs)
@@ -217,13 +216,13 @@ class TPUMambaManager(MambaManager):
             self._pending_boundary_state_offloads = []
 
     def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundaries: Sequence[int] = (),
-        **kwargs,
+            self,
+            request: Request,
+            num_tokens: int,
+            retention_interval: int | None = None,
+            *,
+            replay_boundaries: Sequence[int] = (),
+            **kwargs,
     ) -> None:
         if num_tokens <= 0:
             return
@@ -247,10 +246,8 @@ class TPUMambaManager(MambaManager):
             # token `num_tokens - 1`. Only this block holds valid state;
             # intermediate blocks were never checkpointed.
             written_block_idx = (num_tokens - 1) // self.block_size
-            block_mask = [
-                (num_cached_blocks + i) == written_block_idx
-                for i in range(num_full_blocks - num_cached_blocks)
-            ]
+            block_mask = [(num_cached_blocks + i) == written_block_idx
+                          for i in range(num_full_blocks - num_cached_blocks)]
 
             self.block_pool.cache_full_blocks(
                 request=request,
@@ -269,14 +266,12 @@ class TPUMambaManager(MambaManager):
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
                 if block.block_hash_num_tokens is not None:
-                    self._pending_boundary_state_offloads.append(
-                        (
-                            request.request_id,
-                            self.kv_cache_group_id,
-                            block,
-                            block.block_hash_num_tokens,
-                        )
-                    )
+                    self._pending_boundary_state_offloads.append((
+                        request.request_id,
+                        self.kv_cache_group_id,
+                        block,
+                        block.block_hash_num_tokens,
+                    ))
 
             self.num_cached_block[request.request_id] = num_full_blocks
 
