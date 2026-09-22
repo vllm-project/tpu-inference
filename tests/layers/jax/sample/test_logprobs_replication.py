@@ -62,11 +62,10 @@ def test_outputs_are_replicated_under_dp_attention(fn):
     for name in ("logprob_token_ids", "logprobs", "selected_token_ranks"):
         assert getattr(got, name).sharding.is_fully_replicated, name
 
-    if fn is compute_and_gather_logprobs:
-        want = _unconstrained(logits, token_ids)
-        for name in ("logprob_token_ids", "logprobs", "selected_token_ranks"):
-            assert np.allclose(np.asarray(getattr(got, name)),
-                               np.asarray(getattr(want, name))), name
+    want = _unconstrained(logits, token_ids)
+    for name in ("logprob_token_ids", "logprobs", "selected_token_ranks"):
+        assert np.allclose(np.asarray(getattr(got, name)),
+                           np.asarray(getattr(want, name))), name
 
 
 @pytest.mark.skipif(len(jax.devices()) < 2, reason="needs a sharded mesh")
