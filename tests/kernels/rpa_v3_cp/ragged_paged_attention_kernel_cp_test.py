@@ -28,6 +28,7 @@ from tpu_inference.kernels.experimental.rpa_v3_cp.kernel import (
     merge_kv, ragged_paged_attention, ref_ragged_paged_attention)
 from tpu_inference.kernels.ragged_paged_attention.v3.util import (
     align_to, cdiv, get_dtype_packing)
+from tpu_inference.runner.pcp_utils import pcp_page_order
 
 jax.config.parse_flags_with_absl()
 
@@ -412,18 +413,20 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 self.assertArraysEqual(flat[slot], kv_merged[g])
 
     # --------------------- multi-request PCP (R > 1) -------------------------
-    def _multireq_layout(self, P, reqs):
+    def _multireq_layout(self, P, reqs, align=1):
         """Host-side metadata for R requests fused as 2R seqs.
 
         Mirrors the layout `_prepare_inputs` builds: request
         i is zigzag-chunked on its own into 2P chunks of C_i, and occupies seq
-        2i (head) and 2i+1 (tail). `reqs` is a list of (n_i, L_i).
+        2i (head) and 2i+1 (tail). `reqs` is a list of (n_i, L_i). `align`
+        rounds each chunk up to that multiple (the production layout uses the
+        KV page size, which the kv_page_order fetch requires).
         """
         two_p = 2 * P
         n = [r[0] for r in reqs]
         L = [r[1] for r in reqs]
         R = len(reqs)
-        C = [cdiv(ni, two_p) for ni in n]
+        C = [align_to(cdiv(ni, two_p), align) for ni in n]
         W = [2 * ci for ci in C]
         off = [sum(W[:i]) for i in range(R)]
         S = sum(W)  # live tokens per rank
@@ -484,8 +487,39 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             q += [r * lay["C"][i], (lay["two_p"] - 1 - r) * lay["C"][i]]
         return self._pad1(q)
 
-    @parameterized.product(P=[2, 4])
-    def test_pcp_multirequest_fused_write(self, P):
+    def _kv_operands(self, lay, page_order, kv_buf_k, kv_buf_v, dtype):
+        """The kernel's K/V operands: with `page_order` (the production
+        path), the rank-order all_gather buffer plus the kv_page_order map
+        the kernel unshuffles it through; without, the pre-gathered
+        token-order buffer and no map."""
+        if not page_order:
+            return jnp.array(kv_buf_k, dtype), jnp.array(kv_buf_v, dtype), None
+        ro_k, ro_v, order = self._rank_order_kv(lay, kv_buf_k, kv_buf_v)
+        return jnp.array(ro_k, dtype), jnp.array(ro_v, dtype), order
+
+    def _rank_order_kv(self, lay, kv_buf_k, kv_buf_v):
+        """The token-order new-KV buffers scattered into the rank-order layout
+        the all_gather produces (t_pad = P * S rows), plus the per-page map the
+        kernel unshuffles them through."""
+        two_p, C, off, S = lay["two_p"], lay["C"], lay["off"], lay["S"]
+        P = two_p // 2
+        t_pad = P * S
+        ro_k = np.zeros((t_pad, *kv_buf_k.shape[1:]), kv_buf_k.dtype)
+        ro_v = np.zeros_like(ro_k)
+        for i in range(lay["R"]):
+            s = lay["kv_starts"][i]
+            for t in range(two_p * C[i]):
+                ch = t // C[i]
+                rr = ch if ch < P else two_p - 1 - ch
+                h = 0 if ch < P else 1
+                g = rr * S + off[i] + h * C[i] + t % C[i]
+                ro_k[g] = kv_buf_k[s + t]
+                ro_v[g] = kv_buf_v[s + t]
+        order = pcp_page_order(C, off, P, S, t_pad, self.PAGE)
+        return ro_k, ro_v, jnp.asarray(order)
+
+    @parameterized.product(P=[2, 4], page_order=[False, True])
+    def test_pcp_multirequest_fused_write(self, P, page_order):
         """R requests in one launch: each writes its OWN strided share, once.
 
         The whole cache is pre-filled with random values and compared against a
@@ -493,13 +527,20 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
         wrong request's pages, writes twice, or spills outside its range --
         which is the failure mode `kv_write_seq_mask` and `kv_new_starts` exist
         to prevent.
+
+        page_order=True feeds the kernel the rank-order all_gather buffer plus
+        the kv_page_order map (the production path: the write must consume the
+        map-unshuffled VMEM window); False feeds a pre-gathered token-order
+        buffer.
         """
         dtype = jnp.float32
         self.PAGE = 16
         nq, nkv, hd = 8, 2, 128
         # Ragged lengths, mixed cache state, incl. a first-chunk request (L=0).
         reqs = [(70, 0), (33, 48), (16, 96)]
-        lay = self._multireq_layout(P, reqs)
+        lay = self._multireq_layout(P,
+                                    reqs,
+                                    align=self.PAGE if page_order else 1)
         R = lay["R"]
         c = self._cfg(dtype)
         rng = np.random.default_rng(7)
@@ -516,8 +557,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
             kv_buf_v[s:s + lay["n"][i]] = vi
             per_req_kv.append(
                 merge_kv(jnp.array(ki, dtype), jnp.array(vi, dtype)))
-        k = jnp.array(kv_buf_k, dtype)
-        v = jnp.array(kv_buf_v, dtype)
+        k, v, order = self._kv_operands(lay, page_order, kv_buf_k, kv_buf_v,
+                                        dtype)
         q = self._rand(rng, (lay["S"], nq, hd), dtype)
 
         # Pre-fill the entire cache so any stray write shows up. Keep it on the
@@ -543,6 +584,7 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 q_pos_offsets=self._qpos_multi(lay, r),
                 kv_new_starts=lay["kv_new_starts"],
                 kv_write_seq_mask=lay["kv_write_seq_mask"],
+                kv_page_order=order,
                 update_kv_cache=True,
                 skip_cache_attn=True,
                 use_causal_mask=True)
@@ -570,20 +612,30 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                                 atol=self._tol(dtype),
                                 rtol=self._tol(dtype))
 
-    @parameterized.product(P=[2, 4])
-    def test_pcp_multirequest_current_phase_output(self, P):
+    @parameterized.product(P=[2, 4], page_order=[False, True])
+    def test_pcp_multirequest_current_phase_output(self, P, page_order):
         """R requests in one launch: every chunk's attention output is right.
 
         Exercises per-seq cu_q_lens, q_pos_offsets, kv_cache_lens and
         kv_new_starts together. A wrong kv_new_starts makes a request attend
         another request's K/V -- shapes stay valid, values do not, which is
         exactly what this catches.
+
+        page_order=True is the production path: the K/V buffer stays in the
+        rank order the all_gather produced and the kernel unshuffles it
+        through the kv_page_order map during its fetch. Small KV windows
+        (m_block_sizes below) split each seq's fetch across several bkv
+        windows; with the L=48 request's kv_cache_len_local not a page
+        multiple, later windows' new-KV runs start mid-page, which the map
+        fetch must handle (partial first piece).
         """
         dtype = jnp.float32
         self.PAGE = 16
         nq, nkv, hd = 8, 2, 128
         reqs = [(70, 0), (33, 48), (16, 96)]
-        lay = self._multireq_layout(P, reqs)
+        lay = self._multireq_layout(P,
+                                    reqs,
+                                    align=self.PAGE if page_order else 1)
         R, C, off, two_p = lay["R"], lay["C"], lay["off"], lay["two_p"]
         rng = np.random.default_rng(11)
 
@@ -612,8 +664,8 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                                               self._padcu([0, ni]),
                                               jnp.array([0, 0, 1], jnp.int32))
             exp.append(e[:ni])
-        k = jnp.array(kv_buf_k, dtype)
-        v = jnp.array(kv_buf_v, dtype)
+        k, v, order = self._kv_operands(lay, page_order, kv_buf_k, kv_buf_v,
+                                        dtype)
 
         checked = 0
         for r in range(P):
@@ -641,6 +693,10 @@ class RaggedPagedAttentionPcpTest(jtu.JaxTestCase):
                 q_pos_offsets=self._qpos_multi(lay, r),
                 kv_new_starts=lay["kv_new_starts"],
                 kv_write_seq_mask=lay["kv_write_seq_mask"],
+                kv_page_order=order,
+                # Tiny KV windows: several bkv windows per seq, so new-KV
+                # runs start at unaligned offsets (see docstring).
+                m_block_sizes=(64, 32, 64, 32),
                 update_kv_cache=False,
                 skip_cache_attn=True,
                 use_causal_mask=True)
