@@ -34,6 +34,10 @@ OUTPUT_LEN=${OUTPUT_LEN:=20}
 NUM_PROMPTS=${NUM_PROMPTS:=100}
 RANDOM_SEED=${RANDOM_SEED:=10}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:=10}
+# 1 benchmark, 2 correctness, 3 both - the same three the bare-metal
+# examples/disagg/run_disagg_multi_host.sh takes. Defaults to the benchmark,
+# which is what this script did before it could do anything else.
+TEST_MODE=${TEST_MODE:=1}
 
 LOG_DIR=${LOG_DIR:-$HOME/logs}
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
@@ -241,14 +245,35 @@ PROXY_PID=$!
 PIDS+=($PROXY_PID)
 wait_for_server "$PROXY_PORT" "$PROXY_PID" "toy_proxy_server" "$LOG_DIR/proxy.txt"
 
-echo "--- benchmark ---"
-vllm bench serve \
-  --backend vllm --host 127.0.0.1 --port "$PROXY_PORT" --model "$MODEL" \
-  --dataset-name random --random-input-len "$INPUT_LEN" \
-  --random-output-len "$OUTPUT_LEN" --num-prompts "$NUM_PROMPTS" \
-  --request-rate inf --max-concurrency "$MAX_CONCURRENCY" \
-  --trust-remote-code --seed "$RANDOM_SEED" \
-  >"$LOG_DIR/benchmark.txt" 2>&1
-check_failed_requests "$LOG_DIR/benchmark.txt"
+if [ "$TEST_MODE" = "1" ] || [ "$TEST_MODE" = "3" ]; then
+  echo "--- benchmark ---"
+  vllm bench serve \
+    --backend vllm --host 127.0.0.1 --port "$PROXY_PORT" --model "$MODEL" \
+    --dataset-name random --random-input-len "$INPUT_LEN" \
+    --random-output-len "$OUTPUT_LEN" --num-prompts "$NUM_PROMPTS" \
+    --request-rate inf --max-concurrency "$MAX_CONCURRENCY" \
+    --trust-remote-code --seed "$RANDOM_SEED" \
+    >"$LOG_DIR/benchmark.txt" 2>&1
+  check_failed_requests "$LOG_DIR/benchmark.txt"
+fi
+
+# The baseline is the decode engine answered directly, which is already serving
+# on DECODE_VLLM_PORT - the comparison is the proxy's disaggregated path against
+# the same weights without it, so there is no second server to start.
+if [ "$TEST_MODE" = "2" ] || [ "$TEST_MODE" = "3" ]; then
+  echo "--- correctness ---"
+  python3 "$SCRIPT_DIR/../../examples/disagg/test_disagg_correctness.py" \
+    --baseline_url "http://127.0.0.1:${DECODE_VLLM_PORT}/v1/completions" \
+    --disagg_url "http://127.0.0.1:${PROXY_PORT}/v1/completions" \
+    --model "$MODEL" \
+    --num_requests "$NUM_PROMPTS" \
+    --input_length "$INPUT_LEN" \
+    --output_length "$OUTPUT_LEN" \
+    >"$LOG_DIR/correctness.txt" 2>&1
+  # Unlike the benchmark, whose failures are counted out of its output, this
+  # exits non-zero on a mismatch - so the log is only worth printing on the way
+  # past.
+  tail -n 40 "$LOG_DIR/correctness.txt"
+fi
 
 echo "--- done ---"

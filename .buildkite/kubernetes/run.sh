@@ -76,6 +76,8 @@ FORWARD=(
   # default set below.
   JAX_COMPILATION_CACHE_DIR VLLM_XLA_CACHE_PATH
   TEST_MODEL TEST_LORA_TP TENSOR_PARALLEL_SIZE TPU_CORES
+  # Which half of the disagg script to run - benchmark, correctness or both.
+  TEST_MODE
   # Without these the MoE weights land in bfloat16 instead of the requantized
   # dtype, which is 300GiB more HBM on DeepSeek-R1 - over the cap on a 4-chip
   # slice, and merely wrong on anything that still fits.
