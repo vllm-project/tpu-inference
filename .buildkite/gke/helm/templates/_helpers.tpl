@@ -17,48 +17,6 @@ Create a default fully qualified app name directly from Release.Name.
 {{- end }}
 
 {{/*
-Determine served model name
-*/}}
-{{- define "tpu-vllm-benchmark.servedModelName" -}}
-{{- if .Values.model.servedName -}}
-{{- .Values.model.servedName -}}
-{{- else -}}
-{{- .Values.model.name -}}
-{{- end -}}
-{{- end }}
-
-{{/*
-Determine runtime model path: If storage.type is gcs-direct, resolve to /gcs-models/<subpath>
-*/}}
-{{- define "tpu-vllm-benchmark.modelPath" -}}
-{{- if eq .Values.storage.type "gcs-direct" -}}
-{{- if .Values.storage.cacheSubpath -}}
-/gcs-models/{{ .Values.storage.cacheSubpath | trimPrefix "/" }}
-{{- else -}}
-/gcs-models
-{{- end -}}
-{{- else -}}
-{{ .Values.model.name }}
-{{- end -}}
-{{- end }}
-
-{{/*
-Generalized helper: Calculate number of VMs from any topology string (e.g. 2x2x1 -> 1, 2x2x2 -> 2, 2x2x4 -> 4)
-*/}}
-{{- define "tpu-vllm-benchmark.numVmsForTopo" -}}
-{{- $parts := splitList "x" . -}}
-{{- $x := index $parts 0 | int -}}
-{{- $y := index $parts 1 | int -}}
-{{- $z := index $parts 2 | int -}}
-{{- $chips := mul $x $y $z -}}
-{{- if lt $chips 4 -}}
-1
-{{- else -}}
-{{- div $chips 4 -}}
-{{- end -}}
-{{- end }}
-
-{{/*
 Calculate TPU chips per VM from topology string (e.g. 2x1x1 -> 2, 2x2x1 -> 4, 2x2x2 -> 4 per VM)
 */}}
 {{- define "tpu-vllm-benchmark.chipsPerVmForTopo" -}}
@@ -72,178 +30,6 @@ Calculate TPU chips per VM from topology string (e.g. 2x1x1 -> 2, 2x2x1 -> 4, 2x
 {{- else -}}
 4
 {{- end -}}
-{{- end }}
-
-{{/*
-Generalized helper: Calculate Tensor Parallel Size from any topology string (cores = chips * 2)
-*/}}
-{{- define "tpu-vllm-benchmark.tpSizeForTopo" -}}
-{{- $parts := splitList "x" . -}}
-{{- $x := index $parts 0 | int -}}
-{{- $y := index $parts 1 | int -}}
-{{- $z := index $parts 2 | int -}}
-{{- $chips := mul $x $y $z -}}
-{{- mul $chips 2 -}}
-{{- end }}
-
-{{/*
-Generalized helper: Calculate TPU chips per process bounds (default: 2,2,1)
-*/}}
-{{- define "tpu-vllm-benchmark.chipsPerProcessBoundsForTopo" -}}
-2,2,1
-{{- end }}
-
-{{/*
-Generalized helper: Calculate TPU process bounds from any topology string
-*/}}
-{{- define "tpu-vllm-benchmark.processBoundsForTopo" -}}
-{{- $parts := splitList "x" . -}}
-{{- $x := index $parts 0 | int -}}
-{{- $y := index $parts 1 | int -}}
-{{- $z := index $parts 2 | int -}}
-{{- $px := div (add $x 1) 2 -}}
-{{- $py := div (add $y 1) 2 -}}
-{{- $pz := div (add $z 0) 1 -}}
-{{- printf "%d,%d,%d" $px $py $pz -}}
-{{- end }}
-
-{{/*
-Generalized helper: Calculate total TPU cores from any topology string
-*/}}
-{{- define "tpu-vllm-benchmark.totalCoresForTopo" -}}
-{{- $parts := splitList "x" . -}}
-{{- $x := index $parts 0 | int -}}
-{{- $y := index $parts 1 | int -}}
-{{- $z := index $parts 2 | int -}}
-{{- $chips := mul $x $y $z -}}
-{{- mul $chips 2 -}}
-{{- end }}
-
-{{/*
-Generalized helper: Calculate TPU accelerator type name from topology
-*/}}
-{{- define "tpu-vllm-benchmark.acceleratorTypeForTopo" -}}
-{{- $cores := include "tpu-vllm-benchmark.totalCoresForTopo" . -}}
-{{- printf "tpu7x-%s" $cores -}}
-{{- end }}
-
-{{/*
-================================================================================
-Monolithic / Aggregated Topology Helpers (mode == "aggregated")
-================================================================================
-*/}}
-{{- define "tpu-vllm-benchmark.numVms" -}}
-{{- include "tpu-vllm-benchmark.numVmsForTopo" .Values.tpu.topology -}}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.tpSize" -}}
-{{- if gt (int .Values.tpu.tensorParallelSize) 0 -}}
-{{- .Values.tpu.tensorParallelSize -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.tpSizeForTopo" .Values.tpu.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.chipsPerProcessBounds" -}}
-{{- if .Values.tpu.chipsPerProcessBounds -}}
-{{- .Values.tpu.chipsPerProcessBounds -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.chipsPerProcessBoundsForTopo" .Values.tpu.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.processBounds" -}}
-{{- if .Values.tpu.processBounds -}}
-{{- .Values.tpu.processBounds -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.processBoundsForTopo" .Values.tpu.topology -}}
-{{- end }}
-{{- end }}
-
-{{/*
-================================================================================
-Disaggregated Architecture Topology Helpers (mode == "disaggregated")
-================================================================================
-*/}}
-{{- define "tpu-vllm-benchmark.prefillNumVms" -}}
-{{- include "tpu-vllm-benchmark.numVmsForTopo" .Values.disaggregated.prefill.topology -}}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.prefillTpSize" -}}
-{{- if and .Values.disaggregated.prefill.tensorParallelSize (gt (int .Values.disaggregated.prefill.tensorParallelSize) 0) -}}
-{{- .Values.disaggregated.prefill.tensorParallelSize -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.tpSizeForTopo" .Values.disaggregated.prefill.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.prefillChipsBounds" -}}
-{{- if .Values.disaggregated.prefill.chipsPerProcessBounds -}}
-{{- .Values.disaggregated.prefill.chipsPerProcessBounds -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.chipsPerProcessBoundsForTopo" .Values.disaggregated.prefill.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.prefillProcessBounds" -}}
-{{- if .Values.disaggregated.prefill.processBounds -}}
-{{- .Values.disaggregated.prefill.processBounds -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.processBoundsForTopo" .Values.disaggregated.prefill.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.decodeNumVms" -}}
-{{- include "tpu-vllm-benchmark.numVmsForTopo" .Values.disaggregated.decode.topology -}}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.decodeTpSize" -}}
-{{- if and .Values.disaggregated.decode.tensorParallelSize (gt (int .Values.disaggregated.decode.tensorParallelSize) 0) -}}
-{{- .Values.disaggregated.decode.tensorParallelSize -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.tpSizeForTopo" .Values.disaggregated.decode.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.decodeChipsBounds" -}}
-{{- if .Values.disaggregated.decode.chipsPerProcessBounds -}}
-{{- .Values.disaggregated.decode.chipsPerProcessBounds -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.chipsPerProcessBoundsForTopo" .Values.disaggregated.decode.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.decodeProcessBounds" -}}
-{{- if .Values.disaggregated.decode.processBounds -}}
-{{- .Values.disaggregated.decode.processBounds -}}
-{{- else -}}
-{{- include "tpu-vllm-benchmark.processBoundsForTopo" .Values.disaggregated.decode.topology -}}
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.kvConnector" -}}
-{{- if .Values.disaggregated.kvConnector -}}
-{{- .Values.disaggregated.kvConnector -}}
-{{- else if contains "torchtpu" (include "tpu-vllm-benchmark.computedImage" .) -}}
-TPURaidenConnector
-{{- else -}}
-TPUConnector
-{{- end }}
-{{- end }}
-
-{{- define "tpu-vllm-benchmark.kvConnectorModule" -}}
-{{- if .Values.disaggregated.kvConnectorModule -}}
-{{- .Values.disaggregated.kvConnectorModule -}}
-{{- else if contains "torchtpu" (include "tpu-vllm-benchmark.computedImage" .) -}}
-vllm_torchtpu.distributed.kv_transfer.tpu_connector
-{{- else -}}
-{{- $connector := include "tpu-vllm-benchmark.kvConnector" . -}}
-{{- if eq $connector "TPURaidenConnector" -}}
-tpu_inference.distributed.tpu_raiden_connector
-{{- else -}}
-tpu_inference.distributed.tpu_connector
-{{- end -}}
-{{- end }}
 {{- end }}
 
 {{/*
@@ -304,88 +90,14 @@ gke-gcsfuse/cpu-limit: {{ .Values.storage.gcsFuse.cpuLimit | default "8" | quote
 
 {{/*
 ================================================================================
-Advanced Inference & Serving Feature Flags Helper
-================================================================================
-*/}}
-{{- define "tpu-vllm-benchmark.featureFlags" -}}
-{{- if .Values.features -}}
-{{- if hasKey .Values.features "asyncScheduling" -}}
-{{- if .Values.features.asyncScheduling }}
---async-scheduling \
-{{- else }}
---no-async-scheduling \
-{{- end -}}
-{{- end -}}
-{{- if hasKey .Values.features "prefixCaching" -}}
-{{- if .Values.features.prefixCaching }}
---enable-prefix-caching \
-{{- else }}
---no-enable-prefix-caching \
-{{- end -}}
-{{- end -}}
-{{- if .Values.features.chunkedPrefill -}}
-{{- if .Values.features.chunkedPrefill.enabled }}
---enable-chunked-prefill \
---max-num-batched-tokens={{ .Values.features.chunkedPrefill.maxNumBatchedTokens | default 2048 }} \
-{{- else }}
---no-enable-chunked-prefill \
-{{- end -}}
-{{- end -}}
-{{- if .Values.features.wideEP -}}
-{{- if .Values.features.wideEP.enabled }}
---enable-expert-parallel \
-{{- end -}}
-{{- end -}}
-{{- if .Values.features.speculativeDecoding -}}
-{{- if .Values.features.speculativeDecoding.enabled -}}
-{{- if .Values.features.speculativeDecoding.draftModel }}
---speculative-model={{ .Values.features.speculativeDecoding.draftModel }} \
---num-speculative-tokens={{ .Values.features.speculativeDecoding.numSpeculativeTokens | default 3 }} \
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if .Values.features.structuredOutput -}}
-{{- if .Values.features.structuredOutput.enabled }}
---structured-outputs-config='{"backend":"{{ .Values.features.structuredOutput.backend | default "auto" }}"}' \
-{{- end -}}
-{{- end -}}
-{{- if and .Values.features.kvCacheOffload .Values.features.kvCacheOffload.enabled -}}
-{{- if ne .Values.mode "disaggregated" }}
---kv-transfer-config='{"kv_connector":"{{ .Values.features.kvCacheOffload.connector | default "RaidenOffloadConnector" }}"}' \
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- if and .Values.model .Values.model.maxNumSeqs -}}
---max-num-seqs={{ .Values.model.maxNumSeqs }} \
-{{- end -}}
-{{- end -}}
-
-{{/*
-================================================================================
 Container Image Determination Helper
 ================================================================================
-`image` accepts two forms:
-
-  1. A string -- a complete image reference, used verbatim. This is what
-     run_benchmark.sh writes into its generated values file and what the
-     `-i torchtpu` style shortcuts rely on. The on-demand builder cannot be
-     used with this form because there is nothing to derive a build tag from.
-  2. A map (registry / tpuInferenceCommit / vllmCommit) -- the reference is
-     composed as <registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion>,
-     which is exactly the tag the image builder produces and pushes.
-
-For the map form the tag layout is strict: no other tag format is ever used.
+`image` is a map of registry / tpuInferenceCommit / vllmCommit, composed into
+<registry>:<tpuInferenceCommit>-<vllmCommit>-<tpuVersion>. That is exactly the
+tag the image builder produces and pushes, so the chart and the builder can
+never disagree about what to run. No other tag format is ever used.
 */}}
 {{- define "tpu-vllm-benchmark.computedImage" -}}
-  {{- if kindIs "string" .Values.image -}}
-    {{- if not .Values.image -}}
-      {{- fail "image is empty. Set it to a full image reference, or to a map with registry/tpuInferenceCommit/vllmCommit." -}}
-    {{- end -}}
-    {{- if and .Values.builder .Values.builder.enabled -}}
-      {{- fail "builder.enabled=true requires the map form of `image` (registry/tpuInferenceCommit/vllmCommit) so the build tag can be derived. A string `image` is a fixed reference and cannot be built; either drop builder.enabled or switch `image` to the map form." -}}
-    {{- end -}}
-    {{- .Values.image -}}
-  {{- else -}}
   {{- $registry := "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu" -}}
   {{- $tpuCommit := "" -}}
   {{- $vllmCommit := "" -}}
@@ -407,7 +119,6 @@ For the map form the tag layout is strict: no other tag format is ever used.
   {{- end -}}
   {{- $tpuVer := .Values.tpu.accelerator | default "tpu7x" -}}
   {{- printf "%s:%s-%s-%s" $registry $tpuCommit $vllmCommit $tpuVer -}}
-  {{- end -}}
 {{- end }}
 
 {{/*

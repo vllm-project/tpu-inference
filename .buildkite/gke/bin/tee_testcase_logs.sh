@@ -16,19 +16,10 @@
 # ==============================================================================
 # TPU Testcase Log Streaming & Tee Utility
 #
-# ⚠️  FOR `mode: "script"` RELEASES ONLY.
-#
-# This script only understands Helm releases deployed by
-# .buildkite/gke/helm/run_testcase.sh with `mode: "script"` in the values file.
-# For `mode: "aggregated"` / `mode: "disaggregated"` benchmark releases use the
-# companion bin/tee_logs.sh instead, because:
-#   * JobSet auto-detection keys off the `role: test-runner` pod label, which
-#     the chart only renders in the script branch of templates/jobset.yaml;
-#   * the default container is `test-runner`, not `vllm-tpu` / `proxy`;
-#   * the steps are walked one after another, which suits script mode's
-#     `startupPolicyOrder: InOrder` + fail-fast policy, but would hang forever
-#     on the long-running `server` job of a benchmark stack and never reach the
-#     `client` results.
+# Reads Helm releases deployed by .buildkite/gke/helm/run_testcase.sh. JobSet
+# auto-detection keys off the `role: test-runner` pod label, and steps are
+# walked one after another to match the chart's `startupPolicyOrder: InOrder`
+# plus fail-fast policy.
 #
 # A script-mode chart has TWO dimensions that both need to be followed:
 #
@@ -53,10 +44,6 @@
 # A missing pod therefore does NOT mean the run is over -- only the step's Job
 # condition (Complete/Failed) does. When a pod disappears the streamer waits for
 # its replacement, re-attaches, and records the switch in the log file.
-#
-# Everything related to the benchmark stack (client / p / d / x / server) and
-# generate_summary.py reporting has been removed, since none of it is ever
-# deployed in script mode.
 # ==============================================================================
 set -eu
 
@@ -85,7 +72,7 @@ CLR_RESET=$'\033[0m'
 usage() {
     cat <<EOF
 ==================================================================
- TPU Testcase Log Streamer & Tee Utility (helm mode: script)
+ TPU Testcase Log Streamer & Tee Utility
 ==================================================================
 Usage: $0 [options] [JOB_NAME] [LOG_NUMBER]
 

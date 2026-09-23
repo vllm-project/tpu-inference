@@ -17,7 +17,6 @@
 # Source Buildkite YAML: /usr/local/google/home/dennisyeh/tpu-inference/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml
 # Script Jobs Count:     3
 # ==============================================================================
-mode: script
 image:
   registry: us-central1-docker.pkg.dev/cienet-cmcs/lyle-vllm-images/vllm-tpu
   tpuInferenceCommit: 3a5b4737099fd1ab53aa4e05afcf3576cd30d958

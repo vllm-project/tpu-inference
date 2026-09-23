@@ -31,8 +31,6 @@
 # - Min Throughput: 10.77 req/s
 # ==============================================================================
 
-mode: "script"
-
 image:
   registry: "us-central1-docker.pkg.dev/cienet-cmcs/lyle-vllm-images/vllm-tpu"
   tpuInferenceCommit: "eda7055d27bdd8a5a34b45a067983f4c0d4eb11b"  # Existing prebuilt image in GAR

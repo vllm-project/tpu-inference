@@ -43,7 +43,7 @@ Key Concepts & Things to Know
      resource naming rules.
 
 4. Unified `scriptJobs` Architecture:
-   - Values are always structured as a `scriptJobs` list under `mode: "script"`.
+   - Values are always structured as a `scriptJobs` list.
    - Full pipeline conversion outputs all qualifying steps as independent
      ReplicatedJobs.
    - Single-step extraction (`--step <key>`) outputs a `scriptJobs` list with
@@ -335,7 +335,6 @@ def load_base_values(base_path: Optional[str]) -> Dict[str, Any]:
 
     # Default fallback template
     return {
-        "mode": "script",
         "image": {
             "registry":
             ("us-central1-docker.pkg.dev/cloud-tpu-shared-capacity/tpu-images/dennis-vllm-tpu"
@@ -381,7 +380,6 @@ def generate_helm_values(
 ) -> Dict[str, Any]:
     """Assembles final Helm values dictionary."""
     values = dict(base_values)
-    values["mode"] = "script"
 
     # Image overrides
     if "image" not in values or not isinstance(values["image"], dict):

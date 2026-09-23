@@ -564,28 +564,26 @@ if check_target:
             import yaml
             with open(check_target, "r") as f:
                 v_data = yaml.safe_load(f)
-            v_mode = v_data.get("mode", "aggregated")
-            if v_mode == "disaggregated":
-                p_topo = v_data.get("prefill", {}).get("tpu", {}).get("topology", "2x2x1")
-                p_reps = int(v_data.get("prefill", {}).get("replicas", 1))
-                d_topo = v_data.get("decode", {}).get("tpu", {}).get("topology", "2x2x1")
-                d_reps = int(v_data.get("decode", {}).get("replicas", 1))
-                
-                dims_p = [int(x) for x in p_topo.split("x") if x.isdigit()]
-                p_chips = 1
-                for d in dims_p: p_chips *= d
-                components.append({"role": "Prefill", "topo": p_topo, "count": p_reps, "chips_per_slice": p_chips})
-                
-                dims_d = [int(x) for x in d_topo.split("x") if x.isdigit()]
-                d_chips = 1
-                for d in dims_d: d_chips *= d
-                components.append({"role": "Decode", "topo": d_topo, "count": d_reps, "chips_per_slice": d_chips})
-            else:
-                m_topo = v_data.get("tpu", {}).get("topology", "2x2x1")
-                dims_m = [int(x) for x in m_topo.split("x") if x.isdigit()]
-                m_chips = 1
-                for d in dims_m: m_chips *= d
-                components.append({"role": "Monolithic", "topo": m_topo, "count": 1, "chips_per_slice": m_chips})
+            v_tpu = v_data.get("tpu", {}) or {}
+            default_topo = v_tpu.get("topology", "2x2x1")
+
+            def chips_of(topo):
+                n = 1
+                for d in topo.split("x"):
+                    if d.isdigit():
+                        n *= int(d)
+                return n
+
+            # A JobSet is a single Kueue workload: every step's podSet needs a
+            # flavor assigned before any of them starts, even though the chart
+            # runs them InOrder. So the figure that decides admission is the SUM
+            # over all steps, not the largest one.
+            for job in (v_data.get("scriptJobs") or []):
+                j_topo = ((job.get("tpu") or {}).get("topology")) or default_topo
+                components.append({"role": job.get("name", "step"),
+                                   "topo": j_topo,
+                                   "count": 1,
+                                   "chips_per_slice": chips_of(j_topo)})
         except Exception as e:
             components = []
             

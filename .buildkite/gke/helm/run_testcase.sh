@@ -164,8 +164,6 @@ fi
 
 
 JOBSET_NAME="$RELEASE_NAME"
-MODE="$(awk -F: '/^[[:space:]]*mode[[:space:]]*:/ { gsub(/[[:space:]"'\'' ]/, "", $2); print $2; exit }' "$VALUES_PATH")"
-MODE="${MODE:-aggregated}"
 
 
 cd "$SCRIPT_DIR"
@@ -401,7 +399,7 @@ fi
 
 # --- Print post-install monitoring and cleanup commands ---
 # Steps are numbered by a counter so the list stays contiguous no matter which
-# mode-specific branches below are taken.
+# branches below are taken.
 STEP=0
 step() {
     local title="$1"
@@ -420,7 +418,7 @@ step() {
 
 echo ""
 echo "============================================================"
-echo " 📋 Useful Commands to Monitor Benchmark:"
+echo " 📋 Useful Commands to Monitor the Testcase Run:"
 echo "============================================================"
 
 step "Check JobSet status:" \
@@ -444,39 +442,15 @@ if [[ "$BUILDER_ENABLED" == "true" ]]; then
     fi
 fi
 
-if [[ "$MODE" == "script" ]]; then
-    step "Stream & Tee every step into log/${JOBSET_NAME}-<step>.log:" \
-        "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}" \
-        "# Or follow every container (build + setup + test) side by side:" \
-        "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}" \
-        "# Or follow a single step only:" \
-        "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -r <step> ${JOBSET_NAME}"
-    step "Stream testcase runner logs:" \
-        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},role=test-runner -f"
-elif [[ "$MODE" == "aggregated" ]]; then
-    # tee_testcase_logs.sh walks the replicatedJobs sequentially, which would
-    # block on the long-running server job of a benchmark stack, so the
-    # concurrent streamer is the right tool for aggregated / disaggregated.
-    step "Stream & Tee benchmark logs into log/:" \
-        "${SCRIPT_DIR}/../bin/tee_logs.sh ${JOBSET_NAME}"
-    step "Stream server logs (vLLM / XLA compilation):" \
-        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=server -f"
-else
-    step "Stream & Tee benchmark logs into log/:" \
-        "${SCRIPT_DIR}/../bin/tee_logs.sh ${JOBSET_NAME}"
-    step "Stream Prefill logs:" \
-        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=p -c vllm-tpu -f"
-    step "Stream Decode logs:" \
-        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=d -c vllm-tpu -f"
-    step "Stream Proxy logs:" \
-        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=x -f"
-fi
+step "Stream & Tee every step into log/${JOBSET_NAME}-<step>.log:" \
+    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}" \
+    "# Or follow every container (build + setup + test) side by side:" \
+    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}" \
+    "# Or follow a single step only:" \
+    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -r <step> ${JOBSET_NAME}"
 
-
-if [[ "$MODE" != "script" ]]; then
-    step "Stream client benchmark results:" \
-        "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},jobset.sigs.k8s.io/replicatedjob-name=client -f"
-fi
+step "Stream testcase runner logs:" \
+    "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},role=test-runner -f"
 
 
 step "Teardown / Cleanup:" \
