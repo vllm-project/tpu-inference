@@ -57,8 +57,7 @@ spec:
   {{- if hasKey $job "backoffLimit" -}}
   {{- $jobBackoff = $job.backoffLimit -}}
   {{- end -}}
-  {{- $jobWorkingDir := $job.workingDir | default "/workspace/vllm" -}}
-  {{- $jobGit := $job.git }}
+  {{- $jobWorkingDir := $job.workingDir | default "/workspace/vllm" }}
 
   # ============================================================================
   # SCRIPT TEST RUNNER: {{ $jobName }}
@@ -94,36 +93,6 @@ spec:
             - key: "google.com/tpu"
               operator: "Exists"
               effect: "NoSchedule"
-
-            initContainers:
-            - name: tpu-node-setup
-              image: busybox
-              command: ["/bin/sh", "-c"]
-              args:
-              - |
-                sysctl -w vm.max_map_count=33554432 || true
-                if [ -f /sys/module/vfio_iommu_type1/parameters/dma_entry_limit ]; then
-                  echo 8000000 > /sys/module/vfio_iommu_type1/parameters/dma_entry_limit || true
-                fi
-                if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
-                  echo always > /sys/kernel/mm/transparent_hugepage/enabled || true
-                fi
-              securityContext:
-                privileged: true
-            {{- if and $jobGit $jobGit.enabled }}
-            - name: git-sync
-              image: alpine/git:latest
-              command: ["/bin/sh", "-c"]
-              args:
-              - |
-                set -e
-                echo "Cloning {{ $jobGit.repo }} (branch: {{ $jobGit.branch | default "main" }})..."
-                mkdir -p {{ $jobGit.dest | default "/workspace/tpu_inference" }}
-                git clone --depth 1 -b {{ $jobGit.branch | default "main" }} {{ $jobGit.repo }} {{ $jobGit.dest | default "/workspace/tpu_inference" }}
-              volumeMounts:
-              - name: workspace-volume
-                mountPath: /workspace
-            {{- end }}
 
             containers:
             - name: test-runner
@@ -184,20 +153,12 @@ spec:
               volumeMounts:
               - name: dshm
                 mountPath: /dev/shm
-              {{- if and $jobGit $jobGit.enabled }}
-              - name: workspace-volume
-                mountPath: /workspace
-              {{- end }}
               {{- include "tpu-vllm-benchmark.storageVolumeMounts" $root | nindent 14 }}
 
             volumes:
             - name: dshm
               emptyDir:
                 medium: Memory
-            {{- if and $jobGit $jobGit.enabled }}
-            - name: workspace-volume
-              emptyDir: {}
-            {{- end }}
             {{- include "tpu-vllm-benchmark.storageVolumes" $root | nindent 12 }}
             restartPolicy: Never
   {{- end }}

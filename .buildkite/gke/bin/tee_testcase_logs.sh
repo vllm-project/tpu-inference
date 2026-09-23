@@ -29,8 +29,7 @@
 #      script walks them in the same order and aborts as soon as one fails.
 #
 #   2. Containers inside each step's Pod:
-#        initContainers : tpu-node-setup, [git-sync]
-#        containers     : test-runner (+ [gke-gcsfuse-sidecar] on GCS storage)
+#        test-runner (+ [gke-gcsfuse-sidecar] on GCS storage)
 #      The container list is discovered from the live Pod spec, so optional
 #      containers are picked up automatically. '-c all' streams every one of
 #      them concurrently, each tagged and teed to its own file.
@@ -95,8 +94,8 @@ Options:
   -c, --container <C>          Container to read (default: ${DEFAULT_MAIN_CONTAINER}).
                                Use 'all' (or -a) to stream every container of
                                each step concurrently, tagged and teed to its
-                               own file. Individual names: tpu-node-setup,
-                               git-sync, test-runner (whichever the Pod
+                               own file. Individual names: test-runner,
+                               gke-gcsfuse-sidecar (whichever the Pod
                                actually has). The image build is not part of
                                the JobSet; see run_testcase.sh.
   -a, --all                    Shorthand for '-c all'

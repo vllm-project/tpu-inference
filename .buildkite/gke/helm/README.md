@@ -94,8 +94,6 @@ Helm release  dennis-e2e
 ├── Job     dennis-e2e-image-builder             (pre-install hook, CPU node; skipped on a registry hit)
 └── JobSet  dennis-e2e
     ├── replicatedJob unittest  → Job dennis-e2e-unittest-0  → 1 Pod
-    │     ├── initContainer tpu-node-setup       (sysctl / hugepages, privileged)
-    │     ├── initContainer git-sync             (only when the step sets git.enabled)
     │     └── container     test-runner          (the TPU workload; + gke-gcsfuse-sidecar with gcs storage)
     ├── replicatedJob accuracy  → Job dennis-e2e-accuracy-0  → 1 Pod
     └── replicatedJob benchmark → Job dennis-e2e-benchmark-0 → 1 Pod
@@ -295,7 +293,7 @@ its log went).
 `helm install` returns as soon as the JobSet is created, so open a second terminal:
 
 ```bash
-# every step, every container (setup + test), colour-tagged
+# every step, every container the Pod has, colour-tagged
 ../bin/tee_testcase_logs.sh -c all -j dennis-e2e
 ```
 
@@ -304,9 +302,9 @@ Produces one file per step and container, never overwriting an existing file:
 ```text
 log/dennis-e2e.image-builder.log        # only when a build actually ran
 log/dennis-e2e-unittest.log             # test-runner (main container)
-log/dennis-e2e-unittest.tpu-node-setup.log
 log/dennis-e2e-accuracy.log
 log/dennis-e2e-benchmark.log
+log/dennis-e2e-benchmark.gke-gcsfuse-sidecar.log   # only with gcs storage
 ```
 
 The streamer survives Kueue preemption and TPU node failures: it waits for the replacement Pod,
@@ -371,11 +369,6 @@ scriptJobs:
     tpu: 4
     cpu: '32'
     memory: 100Gi
-  git:                      # optional; adds a git-sync initContainer
-    enabled: true
-    repo: https://github.com/vllm-project/tpu-inference.git
-    branch: main
-    dest: /workspace/tpu_inference
 ```
 
 Resolution order for hardware settings is **step → global → built-in default**:
@@ -529,9 +522,9 @@ Behaviour worth knowing:
   aborts the run and its exit code is propagated, matching the chart's
   `startupPolicyOrder: InOrder` + `FailJobSet` policy.
 - **Container discovery**: the container list comes from the live Pod spec, so optional
-  containers (`git-sync`, gcsfuse) appear automatically.
+  containers (the gcsfuse sidecar) appear automatically.
 - **Per-container termination tracking**: streaming of a container stops when *that* container
-  terminates, not when the whole Pod does — which is what makes init-container logs usable.
+  terminates, not when the whole Pod does, so one long-lived sidecar cannot hold the run open.
 - **Survives eviction / requeue**: a Pod can be destroyed mid-run by Kueue (preemption, TAS node
   failures) or by a Job backoff restart. A missing Pod is *not* treated as the end of the run —
   only the step's Job condition (`Complete`/`Failed`) is. The streamer waits for the replacement

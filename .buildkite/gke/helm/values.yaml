@@ -108,10 +108,5 @@ scriptJobs:
     command: "bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh"
     workingDir: "/workspace/vllm"             # Working directory for script execution
     backoffLimit: 1                           # Number of retries on failure (0 = fail-fast, 1 = retry once)
-    git:
-      enabled: false                         # Optional: Clone a fresh repo branch at Pod startup
-      repo: "https://github.com/vllm-project/tpu-inference.git"
-      branch: "main"
-      dest: "/workspace/tpu_inference"
     env: {}                                  # Environment variables passed as key-value pairs (e.g. TEST_MODEL: "...", INPUT_LEN: 1800)
 
