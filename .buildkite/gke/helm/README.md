@@ -9,10 +9,10 @@ It exists so you can find out whether CI will pass **before** you open a PR, usi
 
 ```bash
 # The whole flow, once the prerequisites below are in place:
-python3 buildkite_to_helm.py -b ../../models/meta-llama_Llama-3_1-8B-Instruct.yml
-./run_testcase.sh -f values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -r my-run
-../bin/tee_testcase_logs.sh -c all my-run
-../bin/cleanup.sh my-run
+python3 bin/buildkite_to_helm.py -b ../../models/meta-llama_Llama-3_1-8B-Instruct.yml
+bin/run_testcase.sh -f values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -r my-run
+bin/tee_testcase_logs.sh -c all my-run
+bin/cleanup.sh my-run
 ```
 
 > 📖 **Cluster reference**: everything here runs on the shared GKE TPU v7x cluster
@@ -42,9 +42,9 @@ python3 buildkite_to_helm.py -b ../../models/meta-llama_Llama-3_1-8B-Instruct.ym
 - [Troubleshooting](#troubleshooting)
 - [Tooling reference](#tooling-reference)
   - [Buildkite pipeline converter (`buildkite_to_helm.py`)](#buildkite-pipeline-converter-buildkite_to_helmpy)
-  - [Testcase log streamer (`../bin/tee_testcase_logs.sh`)](#testcase-log-streamer-bintee_testcase_logssh)
-  - [Cluster capacity & admission diagnostics (`../bin/cluster_status.sh`)](#cluster-capacity--admission-diagnostics-bincluster_statussh)
-  - [Teardown (`../bin/cleanup.sh`)](#teardown-bincleanupsh)
+  - [Testcase log streamer (`bin/tee_testcase_logs.sh`)](#testcase-log-streamer-bintee_testcase_logssh)
+  - [Cluster capacity & admission diagnostics (`bin/cluster_status.sh`)](#cluster-capacity--admission-diagnostics-bincluster_statussh)
+  - [Teardown (`bin/cleanup.sh`)](#teardown-bincleanupsh)
 - [Image builder (CPU-only pre-install hook)](#image-builder-cpu-only-pre-install-hook)
 
 ---
@@ -105,26 +105,28 @@ Steps start in declaration order and the first failure aborts the rest
 ### Directory layout
 
 ```text
-.buildkite/gke/
-├── helm/
-│   ├── Chart.yaml                                    # Chart metadata
-│   ├── values.yaml                                   # Base defaults; every key below is documented inline
-│   ├── values-transfer-template.yaml                 # Base template inherited by buildkite_to_helm.py
-│   ├── values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml  # Example converter output: 3 CI steps on tpu7x
+.buildkite/gke/helm/                                  # chart root; run every command from here
+├── Chart.yaml                                        # Chart metadata
+├── values.yaml                                       # Base defaults; every key below is documented inline
+├── values-transfer-template.yaml                     # Base template inherited by bin/buildkite_to_helm.py
+├── values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml   # Example converter output: 3 CI steps on tpu7x
+├── bin/
 │   ├── buildkite_to_helm.py                          # Buildkite pipeline → Helm values converter
 │   ├── run_testcase.sh                               # Deployment runner (registry check, build, helm install)
-│   ├── extras/
-│   │   └── build-cache-pvc.yaml                      # Shared Docker build cache claim (created by run_testcase.sh, not by Helm)
-│   └── templates/
-│       ├── _helpers.tpl                              # Topology maths, image reference, storage volumes, builder script
-│       ├── image-builder-job.yaml                    # CPU-only pre-install hook that builds & pushes the image
-│       └── jobset.yaml                               # One replicatedJob per scriptJobs entry
-├── bin/
 │   ├── tee_testcase_logs.sh                          # Per-step / per-container log streamer; its exit code is the result
 │   ├── cluster_status.sh                             # Cluster capacity, Kueue quota, pre-flight admission check
 │   └── cleanup.sh                                    # helm uninstall + kubectl sweep
+├── extras/
+│   └── build-cache-pvc.yaml                          # Shared Docker build cache claim (created by run_testcase.sh, not by Helm)
+├── templates/
+│   ├── _helpers.tpl                                  # Topology maths, image reference, storage volumes, builder script
+│   ├── image-builder-job.yaml                        # CPU-only pre-install hook that builds & pushes the image
+│   └── jobset.yaml                                   # One replicatedJob per scriptJobs entry
 └── log/                                              # Streamed logs land here (git-ignored)
 ```
+
+Every script resolves the chart root from its own location, so they also work when
+invoked by absolute path from anywhere.
 
 ---
 
@@ -183,22 +185,22 @@ Both the hook Job and the JobSet are submitted to the LocalQueue in `builder.que
 
 ```bash
 # Cluster capacity dashboard, reservation headroom, queue status:
-../bin/cluster_status.sh
+bin/cluster_status.sh
 
 # Will this values file be admitted right now?
-../bin/cluster_status.sh -c values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -q default
+bin/cluster_status.sh -c values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -q default
 ```
 
 ---
 
 ## Step 1 — Generate a values file from the Buildkite pipeline
 
-[`buildkite_to_helm.py`](./buildkite_to_helm.py) reads a Buildkite model pipeline and keeps only
+[`buildkite_to_helm.py`](./bin/buildkite_to_helm.py) reads a Buildkite model pipeline and keeps only
 the steps that actually run in a container (`.buildkite/scripts/run_in_docker.sh`), dropping
 bookkeeping steps such as `record_step_result.sh`.
 
 ```bash
-python3 buildkite_to_helm.py \
+python3 bin/buildkite_to_helm.py \
   -b ../../models/meta-llama_Llama-3_1-8B-Instruct.yml \
   -o values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml
 ```
@@ -248,7 +250,7 @@ Everything that is not step-specific — `image.registry`, `image.tpuInferenceCo
 ## Step 2 — Deploy with `run_testcase.sh`
 
 ```bash
-./run_testcase.sh -f values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -r dennis-e2e
+bin/run_testcase.sh -f values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -r dennis-e2e
 ```
 
 | Option | Meaning |
@@ -294,7 +296,7 @@ its log went).
 
 ```bash
 # every step, every container the Pod has, colour-tagged
-../bin/tee_testcase_logs.sh -c all -j dennis-e2e
+bin/tee_testcase_logs.sh -c all -j dennis-e2e
 ```
 
 Produces one file per step and container, never overwriting an existing file:
@@ -331,7 +333,7 @@ values file, failed build hook, `helm install` timeout); it does not wait for th
 ## Step 5 — Tear down
 
 ```bash
-../bin/cleanup.sh dennis-e2e
+bin/cleanup.sh dennis-e2e
 ```
 
 This is `helm uninstall` **plus** a `kubectl` sweep of a leftover JobSet and
@@ -419,7 +421,7 @@ Configured via `storage.type`:
 helm template test . -f values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml | less
 
 # Run only one step: delete the other entries from scriptJobs, or stream just one step
-../bin/tee_testcase_logs.sh -r benchmark -j dennis-e2e
+bin/tee_testcase_logs.sh -r benchmark -j dennis-e2e
 
 # Test another commit: edit image.tpuInferenceCommit (the tag changes => a build is triggered)
 sed -i 's/^  tpuInferenceCommit:.*/  tpuInferenceCommit: <new-sha>/' values-...-ci.yaml
@@ -434,7 +436,7 @@ gcloud artifacts docker images delete <registry>:<tpuCommit>-<vllmCommit>-tpu7x 
 #   scriptJobs[].resources.memory: 200Gi
 
 # Longer build budget (cold cache, slow network)
-BUILD_TIMEOUT=3h ./run_testcase.sh -f values-...-ci.yaml -r dennis-e2e
+BUILD_TIMEOUT=3h bin/run_testcase.sh -f values-...-ci.yaml -r dennis-e2e
 ```
 
 ---
@@ -444,11 +446,11 @@ BUILD_TIMEOUT=3h ./run_testcase.sh -f values-...-ci.yaml -r dennis-e2e
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
 | `❌ Error: Kubernetes secret '<user>-test-token' does not exist` | The secret name comes from your OS username, not the values file | Create it with the command the script prints |
-| `Error: cannot re-use a name that is still in use` | A previous release with that name still exists (possibly with no JobSet left) | `helm uninstall <release>` or `../bin/cleanup.sh <release>` |
+| `Error: cannot re-use a name that is still in use` | A previous release with that name still exists (possibly with no JobSet left) | `helm uninstall <release>` or `bin/cleanup.sh <release>` |
 | `helm install` hangs at `⏳ Waiting for the image-builder pod` | Kueue has not admitted the build Job (missing LocalQueue, or no CPU quota) | `kubectl get workload`; check `builder.queueName` exists |
 | Build fails with `denied: Permission ... artifactregistry` | The pod's KSA is not mapped to a GSA with write access to the registry | Fix `.Values.serviceAccount` / its `iam.gke.io/gcp-service-account` annotation |
 | Build pod stays `Pending` with an unbound volume | The `ReadWriteOncePod` cache PVC is still mounted by another build | Wait, or `kubectl get pods -l app.kubernetes.io/component=image-builder` |
-| Step Pod stays `Pending` / JobSet `SUSPENDED: true` | Waiting for TPU capacity in Kueue | `../bin/cluster_status.sh`; consider fewer steps or a smaller topology |
+| Step Pod stays `Pending` / JobSet `SUSPENDED: true` | Waiting for TPU capacity in Kueue | `bin/cluster_status.sh`; consider fewer steps or a smaller topology |
 | Test steps never start, `helm install` timed out | Helm does **not** stop the hook Job on timeout; the build is still running | `kubectl get job <release>-image-builder`, then retry with a bigger `BUILD_TIMEOUT` |
 | Streamer exits `130` unexpectedly | Someone deleted the JobSet (`helm uninstall` / `cleanup.sh`) | Not a test failure; re-deploy |
 | Second step never ran | `failurePolicy: FailJobSet` — the previous step failed | Read that step's log |
@@ -480,19 +482,19 @@ and derives an RFC 1123 job name from the substring after the last `_` of the st
 
 ```bash
 # Convert every qualifying step into a multi-step values file:
-python3 buildkite_to_helm.py \
+python3 bin/buildkite_to_helm.py \
   -b ../../models/meta-llama_Llama-3_1-8B-Instruct.yml \
   -o values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml
 
 # Extract one step only, with a TP override:
-python3 buildkite_to_helm.py \
+python3 bin/buildkite_to_helm.py \
   -b ../../models/meta-llama_Llama-3_1-8B-Instruct.yml \
   --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark \
   --tensor-parallel-size 2 \
   -o values-llama8b-bench.yaml
 ```
 
-### Testcase log streamer (`../bin/tee_testcase_logs.sh`)
+### Testcase log streamer (`bin/tee_testcase_logs.sh`)
 
 Follows a release along **both** of its dimensions: every step (`scriptJobs` → replicatedJob)
 in the order the JobSet runs them, and every container inside each step's Pod — see
@@ -511,7 +513,7 @@ in the order the JobSet runs them, and every container inside each step's Pod �
 | `-a, --all` | Shorthand for `-c all` |
 | `-l, --list` | List the containers of each step's Pod and exit |
 | `-s, --dump` | Snapshot current logs without following |
-| `-o, --dir <dir>` | Output directory (default `../log`) |
+| `-o, --dir <dir>` | Output directory (default `<chart>/log`) |
 | `-n, --number <n>` | Numeric suffix for the log files |
 | `-t, --timeout <sec>` | Seconds to wait for each step's Pod; time spent `Suspended` in the queue does not count |
 
@@ -542,14 +544,14 @@ Behaviour worth knowing:
   overwritten; the whole run shares one numeric suffix.
 
 ```bash
-../bin/tee_testcase_logs.sh                                   # newest run, test-runner of every step
-../bin/tee_testcase_logs.sh -c all dennis-test-a1b2c          # every container, colour-tagged
-../bin/tee_testcase_logs.sh -r benchmark dennis-test-a1b2c    # one step only
-../bin/tee_testcase_logs.sh --dump -c all dennis-test-a1b2c   # snapshot a finished run
-../bin/tee_testcase_logs.sh --list                            # which containers does each step have?
+bin/tee_testcase_logs.sh                                   # newest run, test-runner of every step
+bin/tee_testcase_logs.sh -c all dennis-test-a1b2c          # every container, colour-tagged
+bin/tee_testcase_logs.sh -r benchmark dennis-test-a1b2c    # one step only
+bin/tee_testcase_logs.sh --dump -c all dennis-test-a1b2c   # snapshot a finished run
+bin/tee_testcase_logs.sh --list                            # which containers does each step have?
 ```
 
-### Cluster capacity & admission diagnostics (`../bin/cluster_status.sh`)
+### Cluster capacity & admission diagnostics (`bin/cluster_status.sh`)
 
 A seven-section dashboard: physical TPU hardware by topology (allocated vs free), GCE
 reservation headroom, Kueue quota per flavor (nominal / used / borrowed / remaining), a
@@ -567,14 +569,14 @@ nodes, `ExitCode 137` / `CrashLoopBackOff` pods, broken multi-host slices).
 
 ```bash
 # Full dashboard:
-../bin/cluster_status.sh
+bin/cluster_status.sh
 
 # Single topology, or a raw chip count:
-../bin/cluster_status.sh -c 2x2x1 -q default
-../bin/cluster_status.sh -c 64    -q default
+bin/cluster_status.sh -c 2x2x1 -q default
+bin/cluster_status.sh -c 64    -q default
 
 # A whole testcase values file — sums every scriptJobs step:
-../bin/cluster_status.sh -c values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -q default
+bin/cluster_status.sh -c values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml -q default
 ```
 
 Sample output for a three-step testcase:
@@ -596,17 +598,17 @@ Sample output for a three-step testcase:
 > one at a time. If the total does not fit, the whole run queues — a three-step testcase on a
 > cluster with 4 free chips waits, even though each individual step would fit.
 
-### Teardown (`../bin/cleanup.sh`)
+### Teardown (`bin/cleanup.sh`)
 
 ```bash
 # Clean up one release (helm uninstall + JobSet + ConfigMap sweep):
-../bin/cleanup.sh dennis-e2e
+bin/cleanup.sh dennis-e2e
 
 # Every JobSet/ConfigMap matching the '<user>-test-' prefix (does NOT call helm):
-../bin/cleanup.sh --all
+bin/cleanup.sh --all
 
 # Only orphaned '<user>-test-*-scripts' ConfigMaps:
-../bin/cleanup.sh --configmaps
+bin/cleanup.sh --configmaps
 ```
 
 ---
@@ -651,7 +653,7 @@ not exist yet while building, so **no TPU capacity is reserved at all**.
   streaming the build to `log/<release>.image-builder.log`.
 - On failure it reports the log path and reminds you to `helm uninstall <release>` before
   retrying (a failed release keeps the name reserved).
-- `BUILD_TIMEOUT=3h ./run_testcase.sh ...` overrides `builder.timeout`.
+- `BUILD_TIMEOUT=3h bin/run_testcase.sh ...` overrides `builder.timeout`.
 
 ### Managing the shared cache
 

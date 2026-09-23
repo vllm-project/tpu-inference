@@ -4,15 +4,15 @@
 #  Author: Advanced Agentic Assistant for TPU vLLM Inference
 # ==============================================================================
 # Usage:
-#   ./gke/bin/cluster_status.sh [OPTIONS]
+#   ./gke/helm/bin/cluster_status.sh [OPTIONS]
 #
 # Examples:
-#   ./gke/bin/cluster_status.sh                         # Full cluster & queue status + Admission Guide
-#   ./gke/bin/cluster_status.sh -c 2x2x4                # Pre-flight check: Can I run a 2x2x4 job now?
-#   ./gke/bin/cluster_status.sh -c 32 -q default        # Pre-flight check for 32 chips in default queue
-#   ./gke/bin/cluster_status.sh -w                      # Watch mode (live refresh every 10s)
-#   ./gke/bin/cluster_status.sh -q default              # Filter by queue name
-#   ./gke/bin/cluster_status.sh -a                      # Anomalies and warnings only
+#   ./gke/helm/bin/cluster_status.sh                         # Full cluster & queue status + Admission Guide
+#   ./gke/helm/bin/cluster_status.sh -c 2x2x4                # Pre-flight check: Can I run a 2x2x4 job now?
+#   ./gke/helm/bin/cluster_status.sh -c 32 -q default        # Pre-flight check for 32 chips in default queue
+#   ./gke/helm/bin/cluster_status.sh -w                      # Watch mode (live refresh every 10s)
+#   ./gke/helm/bin/cluster_status.sh -q default              # Filter by queue name
+#   ./gke/helm/bin/cluster_status.sh -a                      # Anomalies and warnings only
 # ==============================================================================
 
 set -eo pipefail

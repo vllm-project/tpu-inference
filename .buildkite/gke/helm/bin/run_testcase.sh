@@ -95,8 +95,10 @@ fi
 
 
 # --- Resolve the Helm chart and selected values file ---
+# This script lives in <chart>/bin/, so the chart root is one level up.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VALUES_PATH="$SCRIPT_DIR/$VALUES_FILE"
+CHART_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+VALUES_PATH="$CHART_DIR/$VALUES_FILE"
 
 
 if [[ ! -f "$VALUES_PATH" ]]; then
@@ -166,7 +168,7 @@ fi
 JOBSET_NAME="$RELEASE_NAME"
 
 
-cd "$SCRIPT_DIR"
+cd "$CHART_DIR"
 
 
 # Read a scalar declared directly under the top-level "builder:" block of the
@@ -218,7 +220,7 @@ BUILDER_ENABLED="$(builder_value enabled false)"
 # Precedence: BUILD_TIMEOUT env > builder.timeout in the values file > 90m.
 BUILD_TIMEOUT="${BUILD_TIMEOUT:-$(builder_value timeout 90m)}"
 
-LOG_DIR="${SCRIPT_DIR}/../log"
+LOG_DIR="${CHART_DIR}/log"
 BUILD_LOG="${LOG_DIR}/${RELEASE_NAME}.image-builder.log"
 BUILDER_JOB="${RELEASE_NAME}-image-builder"
 
@@ -274,7 +276,7 @@ if [[ "$BUILDER_ENABLED" == "true" ]]; then
                 # be undone, so a size change in the manifest is reported rather
                 # than applied.
                 WANT_SIZE="$(awk '/^[[:space:]]*storage:/ { print $2; exit }' \
-                    "${SCRIPT_DIR}/extras/build-cache-pvc.yaml")"
+                    "${CHART_DIR}/extras/build-cache-pvc.yaml")"
                 HAVE_SIZE="$(kubectl get pvc "$CACHE_CLAIM" \
                     -o jsonpath='{.spec.resources.requests.storage}' 2>/dev/null || true)"
                 if [[ -n "$WANT_SIZE" && -n "$HAVE_SIZE" ]] &&
@@ -287,7 +289,7 @@ if [[ "$BUILDER_ENABLED" == "true" ]]; then
                 fi
             else
                 echo "📦 Creating build cache '${CACHE_CLAIM}' from extras/build-cache-pvc.yaml..."
-                kubectl create -f "${SCRIPT_DIR}/extras/build-cache-pvc.yaml"
+                kubectl create -f "${CHART_DIR}/extras/build-cache-pvc.yaml"
             fi
         fi
         HELM_ARGS+=(--timeout "$BUILD_TIMEOUT")
@@ -443,18 +445,18 @@ if [[ "$BUILDER_ENABLED" == "true" ]]; then
 fi
 
 step "Stream & Tee every step into log/${JOBSET_NAME}-<step>.log:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh ${JOBSET_NAME}" \
+    "${SCRIPT_DIR}/tee_testcase_logs.sh ${JOBSET_NAME}" \
     "# Or follow every container (build + setup + test) side by side:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -c all ${JOBSET_NAME}" \
+    "${SCRIPT_DIR}/tee_testcase_logs.sh -c all ${JOBSET_NAME}" \
     "# Or follow a single step only:" \
-    "${SCRIPT_DIR}/../bin/tee_testcase_logs.sh -r <step> ${JOBSET_NAME}"
+    "${SCRIPT_DIR}/tee_testcase_logs.sh -r <step> ${JOBSET_NAME}"
 
 step "Stream testcase runner logs:" \
     "kubectl logs -l jobset.sigs.k8s.io/jobset-name=${JOBSET_NAME},role=test-runner -f"
 
 
 step "Teardown / Cleanup:" \
-    "${SCRIPT_DIR}/../bin/cleanup.sh ${RELEASE_NAME}" \
+    "${SCRIPT_DIR}/cleanup.sh ${RELEASE_NAME}" \
     "# Or via helm directly:" \
     "helm uninstall ${RELEASE_NAME}"
 

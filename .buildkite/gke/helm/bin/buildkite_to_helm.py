@@ -64,28 +64,28 @@ Key Concepts & Things to Know
 Usage Examples
 ================================================================================
 1. Convert all qualifying steps in a pipeline (outputs values-<model>-ci.yaml):
-   $ python3 buildkite_to_helm.py \\
+   $ python3 bin/buildkite_to_helm.py \\
        -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml
 
 2. Extract a single benchmark step by step key:
-   $ python3 buildkite_to_helm.py \\
+   $ python3 bin/buildkite_to_helm.py \\
        -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \\
        --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark
 
 3. Target a different TPU accelerator (e.g. tpu6e):
-   $ python3 buildkite_to_helm.py \\
+   $ python3 bin/buildkite_to_helm.py \\
        -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \\
        --accelerator tpu6e
 
 4. Override Tensor Parallel size and specify custom output file:
-   $ python3 buildkite_to_helm.py \\
+   $ python3 bin/buildkite_to_helm.py \\
        -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \\
        --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark \\
        --tensor-parallel-size 2 \\
        -o values-llama8b-bench.yaml
 
 5. Preview generated YAML on stdout without writing to file:
-   $ python3 buildkite_to_helm.py \\
+   $ python3 bin/buildkite_to_helm.py \\
        -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml \\
        -v
 
@@ -497,13 +497,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   1. Convert all qualifying steps in Buildkite pipeline to multi-job Helm values:
-     python3 buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml -o values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml
+     python3 bin/buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml -o values-meta-llama_Llama-3_1-8B-Instruct-ci.yaml
 
   2. Extract a specific step by matching its step key:
-     python3 buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark -o values-llama8b-bench.yaml
+     python3 bin/buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml --step tpu7x_meta-llama_Llama-3_1-8B-Instruct_Benchmark -o values-llama8b-bench.yaml
 
   3. Preview generated YAML on stdout:
-     python3 buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml -v
+     python3 bin/buildkite_to_helm.py -b /path/to/.buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml -v
 """,
     )
 
@@ -619,16 +619,19 @@ def main():
             " pipeline.\n")
         sys.exit(1)
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # This script lives in <chart>/bin/, so the chart root is one level up.
+    # Values files and the chart itself are addressed from there.
+    chart_dir = os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))
 
     # Auto-detect base values if not provided
     base_values_path = args.base_values
     if not base_values_path:
-        candidate = os.path.join(script_dir, "values-transfer-template.yaml")
+        candidate = os.path.join(chart_dir, "values-transfer-template.yaml")
         if os.path.isfile(candidate):
             base_values_path = candidate
         else:
-            candidate = os.path.join(script_dir, "values.yaml")
+            candidate = os.path.join(chart_dir, "values.yaml")
             if os.path.isfile(candidate):
                 base_values_path = candidate
 
@@ -674,7 +677,7 @@ def main():
     if not out_path:
         base_file = os.path.splitext(os.path.basename(bk_path))[0]
         suffix = f"-{args.step}" if args.step else "-ci"
-        out_path = os.path.join(script_dir, f"values-{base_file}{suffix}.yaml")
+        out_path = os.path.join(chart_dir, f"values-{base_file}{suffix}.yaml")
 
     out_path = os.path.abspath(out_path)
     with open(out_path, "w") as f:
@@ -687,7 +690,7 @@ def main():
     print("\nTo deploy this JobSet onto GKE TPU with Helm, run:")
     rel_name = os.path.splitext(os.path.basename(out_path))[0].replace(
         "values-", "")
-    print(f"  helm install {rel_name} {script_dir} -f {out_path}")
+    print(f"  helm install {rel_name} {chart_dir} -f {out_path}")
 
 
 if __name__ == "__main__":

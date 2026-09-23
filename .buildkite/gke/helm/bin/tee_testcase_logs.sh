@@ -16,7 +16,7 @@
 # ==============================================================================
 # TPU Testcase Log Streaming & Tee Utility
 #
-# Reads Helm releases deployed by .buildkite/gke/helm/run_testcase.sh. JobSet
+# Reads Helm releases deployed by .buildkite/gke/helm/bin/run_testcase.sh. JobSet
 # auto-detection keys off the `role: test-runner` pod label, and steps are
 # walked one after another to match the chart's `startupPolicyOrder: InOrder`
 # plus fail-fast policy.
@@ -47,12 +47,13 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GKE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# This script lives in <chart>/bin/, so the chart root is one level up.
+CHART_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 DEFAULT_MAIN_CONTAINER="test-runner"
 
-# Resolve default log directory (gke/log)
-LOG_DIR="${GKE_ROOT}/log"
+# Resolve default log directory (<chart>/log)
+LOG_DIR="${CHART_DIR}/log"
 
 CURRENT_USER="${USER:-$(whoami)}"
 CLEAN_USER="$(printf '%s' "$CURRENT_USER" | tr '[:upper:]' '[:lower:]' | tr -dc 'a-z0-9')"
