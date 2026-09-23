@@ -1,1 +1,0 @@
-tee_logs.sh
