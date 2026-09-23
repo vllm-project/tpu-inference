@@ -616,6 +616,18 @@ class PhasedBasedProfiler:
         self.track_concurrency: bool = os.getenv(
             "PHASED_PROFILER_TRACK_CONCURRENCY",
             str(PHASED_PROFILER_TRACK_CONCURRENCY)).lower() in ("1", "true")
+        # Narrow what gets captured. Both default to off, i.e. today's
+        # behaviour. They exist because track_concurrency on its own is
+        # unbounded: it keys captures on (phase, num_reqs), and `should_profile`
+        # then stays true for the whole run, so every concurrency the ramp
+        # passes through produces its own trace -- hundreds of them.
+        self.only_phases: set[str] = {
+            p.strip().lower()
+            for p in os.getenv("PHASED_PROFILER_ONLY_PHASES", "").split(",")
+            if p.strip()
+        }
+        self.target_concurrency: int = int(
+            os.getenv("PHASED_PROFILER_TARGET_CONCURRENCY", "0"))
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phases_profiled: set = set()
@@ -648,6 +660,12 @@ class PhasedBasedProfiler:
         if self.decode_kv_len_threshold >= 0:
             logger.info("Will skip decode-only steps until min KV len >= %d.",
                         self.decode_kv_len_threshold)
+        if self.only_phases:
+            logger.info("Will only profile phases: %s.",
+                        ", ".join(sorted(self.only_phases)))
+        if self.target_concurrency:
+            logger.info("Will only profile at concurrency %d.",
+                        self.target_concurrency)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -688,6 +706,15 @@ class PhasedBasedProfiler:
             profile_key = (phase, concurrency) if concurrency > 0 else phase
             if (profile_key in self.inference_phases_profiled
                     or phase != current_determined_phase):
+                continue
+
+            # Narrowing filters. Neither consumes the step -- they `continue`
+            # without marking the key profiled, so a later step that does match
+            # is still eligible.
+            if self.only_phases and phase.name.lower() not in self.only_phases:
+                continue
+            if (self.target_concurrency
+                    and concurrency != self.target_concurrency):
                 continue
 
             # Skip a configurable number of decode-heavy steps before profiling
