@@ -70,7 +70,7 @@ install. Note that Helm does not track hook resources in the release manifest, s
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "tpu-vllm-benchmark.fullname" . }}-image-builder
+  name: {{ include "tpu-testcase.fullname" . }}-image-builder
   namespace: {{ .Release.Namespace | default "default" }}
   labels:
     app.kubernetes.io/component: image-builder
@@ -115,7 +115,7 @@ spec:
         command: ["/bin/sh", "-c"]
         args:
         - |
-          {{- include "tpu-vllm-benchmark.imageBuilderScript" . | nindent 10 }}
+          {{- include "tpu-testcase.imageBuilderScript" . | nindent 10 }}
         resources:
           requests:
             cpu: {{ $req.cpu | default "8" | quote }}

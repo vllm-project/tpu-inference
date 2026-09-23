@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{ $fullName := include "tpu-vllm-benchmark.fullname" . -}}
+{{ $fullName := include "tpu-testcase.fullname" . -}}
 {{- $namespace := .Release.Namespace | default "default" }}
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
@@ -49,7 +49,7 @@ spec:
   {{- $jobName := $job.name -}}
   {{- $jobTopo := ($job.tpu | default dict).topology | default $root.Values.tpu.topology | default "1x2x1" -}}
   {{- $jobAccelerator := ($job.tpu | default dict).accelerator | default $root.Values.tpu.accelerator | default "tpu7x" -}}
-  {{- $chips := include "tpu-vllm-benchmark.chipsPerVmForTopo" $jobTopo | int -}}
+  {{- $chips := include "tpu-testcase.chipsPerVm" $jobTopo | int -}}
   {{- $tpuLimit := (($job.resources | default dict).tpu | default $root.Values.resources.tpu) | default $chips -}}
   {{- $cpuLimit := (($job.resources | default dict).cpu | default $root.Values.resources.cpu) | default "32" -}}
   {{- $memLimit := (($job.resources | default dict).memory | default $root.Values.resources.memory) | default "100Gi" -}}
@@ -77,7 +77,7 @@ spec:
             annotations:
               kueue.x-k8s.io/podset-unconstrained-topology: "true"
               {{- if or (eq $root.Values.storage.type "gcs-cache") (eq $root.Values.storage.type "gcs-direct") }}
-              {{- include "tpu-vllm-benchmark.gcsFuseAnnotations" $root | nindent 14 }}
+              {{- include "tpu-testcase.gcsFuseAnnotations" $root | nindent 14 }}
               {{- end }}
           spec:
             serviceAccountName: {{ $root.Values.serviceAccount }}
@@ -96,7 +96,7 @@ spec:
 
             containers:
             - name: test-runner
-              image: {{ include "tpu-vllm-benchmark.computedImage" $root }}
+              image: {{ include "tpu-testcase.imageRef" $root }}
               securityContext:
                 privileged: true
               command: ["/bin/bash", "-c"]
@@ -153,12 +153,12 @@ spec:
               volumeMounts:
               - name: dshm
                 mountPath: /dev/shm
-              {{- include "tpu-vllm-benchmark.storageVolumeMounts" $root | nindent 14 }}
+              {{- include "tpu-testcase.storageVolumeMounts" $root | nindent 14 }}
 
             volumes:
             - name: dshm
               emptyDir:
                 medium: Memory
-            {{- include "tpu-vllm-benchmark.storageVolumes" $root | nindent 12 }}
+            {{- include "tpu-testcase.storageVolumes" $root | nindent 12 }}
             restartPolicy: Never
   {{- end }}

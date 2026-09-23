@@ -1,14 +1,8 @@
 {{/*
-Expand the name of the chart.
+Name every resource after the Helm release, so `helm uninstall <release>` and
+the log/cleanup scripts can all key off the same string.
 */}}
-{{- define "tpu-vllm-benchmark.name" -}}
-{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
-{{- end }}
-
-{{/*
-Create a default fully qualified app name directly from Release.Name.
-*/}}
-{{- define "tpu-vllm-benchmark.fullname" -}}
+{{- define "tpu-testcase.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -19,7 +13,7 @@ Create a default fully qualified app name directly from Release.Name.
 {{/*
 Calculate TPU chips per VM from topology string (e.g. 2x1x1 -> 2, 2x2x1 -> 4, 2x2x2 -> 4 per VM)
 */}}
-{{- define "tpu-vllm-benchmark.chipsPerVmForTopo" -}}
+{{- define "tpu-testcase.chipsPerVm" -}}
 {{- $parts := splitList "x" . -}}
 {{- $x := index $parts 0 | int -}}
 {{- $y := index $parts 1 | int -}}
@@ -37,13 +31,13 @@ Calculate TPU chips per VM from topology string (e.g. 2x1x1 -> 2, 2x2x1 -> 4, 2x
 Shared Storage & Caching Snippets
 ================================================================================
 */}}
-{{- define "tpu-vllm-benchmark.gcsFuseAnnotations" -}}
+{{- define "tpu-testcase.gcsFuseAnnotations" -}}
 gke-gcsfuse/volumes: "true"
 gke-gcsfuse/memory-limit: {{ .Values.storage.gcsFuse.memoryLimit | default "72Gi" | quote }}
 gke-gcsfuse/cpu-limit: {{ .Values.storage.gcsFuse.cpuLimit | default "8" | quote }}
 {{- end }}
 
-{{- define "tpu-vllm-benchmark.storageVolumeMounts" -}}
+{{- define "tpu-testcase.storageVolumeMounts" -}}
 {{- if eq .Values.storage.type "gcs-cache" }}
 - name: hf-gcs-cache
   mountPath: /root/.cache/huggingface
@@ -57,7 +51,7 @@ gke-gcsfuse/cpu-limit: {{ .Values.storage.gcsFuse.cpuLimit | default "8" | quote
 {{- end }}
 {{- end }}
 
-{{- define "tpu-vllm-benchmark.storageVolumes" -}}
+{{- define "tpu-testcase.storageVolumes" -}}
 {{- if eq .Values.storage.type "gcs-cache" }}
 - name: hf-gcs-cache
   csi:
@@ -97,7 +91,7 @@ Container Image Determination Helper
 tag the image builder produces and pushes, so the chart and the builder can
 never disagree about what to run. No other tag format is ever used.
 */}}
-{{- define "tpu-vllm-benchmark.computedImage" -}}
+{{- define "tpu-testcase.imageRef" -}}
   {{- $registry := "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu" -}}
   {{- $tpuCommit := "" -}}
   {{- $vllmCommit := "" -}}
@@ -140,7 +134,7 @@ though startupPolicy: InOrder runs them one at a time. Building inside the JobSe
 therefore holds TPU quota for the entire build and exposes it to TPU node failures.
 Running the build before the JobSet exists is the only way to decouple the two.
 */}}
-{{- define "tpu-vllm-benchmark.imageBuilderScript" -}}
+{{- define "tpu-testcase.imageBuilderScript" -}}
 {{- $registry := "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/vllm-tpu" -}}
 {{- $tpuCommit := "" -}}
 {{- $vllmCommit := "" -}}
@@ -164,7 +158,7 @@ Running the build before the JobSet exists is the only way to decouple the two.
 {{- if hasKey $cacheCfg "highWatermarkPercent" -}}{{- $highPct = $cacheCfg.highWatermarkPercent -}}{{- end -}}
 {{- if hasKey $cacheCfg "lowWatermarkPercent" -}}{{- $lowPct = $cacheCfg.lowWatermarkPercent -}}{{- end -}}
 set -euo pipefail
-TARGET_IMAGE="{{ include "tpu-vllm-benchmark.computedImage" . }}"
+TARGET_IMAGE="{{ include "tpu-testcase.imageRef" . }}"
 REGISTRY_HOST="{{ (splitList "/" $registry) | first }}"
 echo "============================================================"
 echo " Image Builder"
