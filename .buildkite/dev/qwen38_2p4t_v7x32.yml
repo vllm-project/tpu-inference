@@ -145,87 +145,95 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # #41: new mesh -- tp=4 x attn_dp=8 (ep still 32) -- at global
-        # concurrency 368, plus a decode-phase profile.
+        # #42: retry of #41 -- tp=4 x attn_dp=8 (ep still 32) -- at the
+        # concurrency this mesh can actually hold, 176, plus a decode profile.
         #
-        # ⚠️ THIS MESH HAS LESS CAPACITY THAN model=8 x attn_dp=4, not more.
-        # Halving `model` halves the per-device attention KV (each device still
-        # holds exactly 1 kv head either way, so the saving comes from the block
-        # pool splitting 8 ways instead of 4), but attention and GDN projections
-        # shard on `model` and REPLICATE over attn_dp, so their per-device cost
-        # doubles. Calibrated on two measured points, both requantized at block
-        # 512: #19 attn_dp=2 -> Init model 73.02, #26/#30/#40 attn_dp=4 -> 75.87.
-        # The 2.85 GiB step is the attn+GDN share at model=16, so:
+        # #41 asked for 368 and was REJECTED by vLLM's KV sizing gate in 36 min,
+        # before allocating anything:
         #
-        #   model=16 attn_dp=2   weights 73.02   free 21.72   (measured)
-        #   model=8  attn_dp=4   weights 75.87   free 18.87   (measured)
-        #   model=4  attn_dp=8   weights 81.57   free 13.17   (EXTRAPOLATED)
+        #   attention (27232 blocks) requires 152.91 GiB and the minimum mamba
+        #   pool (376 blocks, 1 per request) requires 205.66 GiB, together more
+        #   than the 178.29 GiB available.
         #
-        # At C=368 that is KV 11.21 GiB here against 15.92 on model=8 -- 4.7
-        # saved -- but 5.70 more spent on weights. Net ~1.0 GiB worse. The
-        # crossover where model=4 wins is around C=533, which does not fit
-        # anyway. Run this for what the mesh does to compute and collectives,
-        # not for capacity.
+        # THE CORRECTION. The per-device KV arithmetic was right -- 152.91 +
+        # 205.66 is exactly 11.21 GiB/device x 32 -- and so was the weight
+        # extrapolation. What was wrong was treating "ceiling minus weights" as
+        # available for KV. **vLLM reserves ~7.60 GiB/device for peak activation
+        # when it sizes the cache**, and that reserve is nothing like the
+        # forward-pass scratch fit (1.03 GiB at aggregate 2048). Two independent
+        # confirmations of the same constant:
         #
-        # SIZING. Per device, mamba costs 18,352,896 B per GLOBAL slot and is
-        # invariant to the model/attn_dp split (slots shard on attn_dp, heads on
-        # model, product always 32). Attention costs 23 x 65,536 / attn_dp =
-        # 188,416 B per GLOBAL block. Scratch is #31's path-A fit,
-        # 0.404 GiB + 0.3144 MiB per aggregate token.
+        #   #30/#40 model=8: 94.74 - 75.87 - 11.27 (KV used)      = 7.60
+        #   #41     model=4: 94.74 - 81.57 -  5.57 (KV available) = 7.60
         #
-        #   C    seqs/rank   KV GiB   scratch budget   max aggregate tokens
-        #   368     46        11.21        1.96              5083
-        #   352     44        10.72        2.45              6651
-        #   336     42        10.24        2.93              8218
-        #   320     40         9.76        3.41              9785
+        # So the budget is    KV/device = 94.74 - weights - 7.60
+        # and it retro-predicts every run: max C = 260 at model=8 path A (we ran
+        # 256 in #26/#30/#40), and 288 with the fused-RS kernel, whose smaller
+        # scratch drops the reserve to 6.40 -- exactly #34/#39.
         #
-        # C=368 is the target and it fits, but only at a small token budget.
-        # MAX_NUM_BATCHED_TOKENS=256/rank -> aggregate 2048, scratch 1.03, total
-        # 12.24 of 13.17, margin +0.93 GiB. The alternative that also reaches
-        # 368 is MNBT=512 (aggregate 4096) at margin +0.30, and that is too thin
-        # for a mesh never run before: the weight figure is an extrapolation,
-        # and #31 measured only 89% of scratch as the (split-invariant) MoE
-        # slab, so the other 11% may itself double at model=4. The cost of 256
-        # is prefill chunking -- an 8k prompt takes 32 chunks -- which inflates
-        # TTFT but does not touch the decode steps this build exists to profile.
+        # 368 IS NOT REACHABLE AT 8k/1k ON ANY MESH HERE. The wall is the mamba
+        # recurrent state, not attention KV: 368 concurrent costs 6.43 GiB/device
+        # in slots alone, more than this mesh's entire 5.57 GiB budget before a
+        # single attention block.
         #
-        # NUM_GPU_BLOCKS_OVERRIDE=27232 = 368 x 74. The gate needs
-        # ceil(9216/128)=72, so this leaves 2 blocks per request of headroom;
-        # preemption should be impossible and kv-fit will report 97%.
-        # Mamba slots = 8 x (46+1) = 376.
+        #                       budget   max C @ 8k/1k
+        #   model=8 attn_dp=4    11.27       256
+        #   model=4 attn_dp=8     5.57       176   <- this build
+        #   model=8 + fused-RS   12.47       288
         #
-        # PROFILE. One wave (BENCH_SWEEP=368:368, NUM_PROMPTS=368) so the run
-        # has a clean shape: everything prefills, everything decodes together,
-        # then drains. The phased profiler is asked for exactly the middle of
-        # that decode plateau:
+        # SIZING, solved directly against the gate's own 178.29 GiB using
+        # 188,416 B per global attention block (23 x 65,536 / attn_dp) and
+        # 18,352,896 B per global mamba slot (split-invariant):
+        #
+        #   seqs/rank  C    pool    slots   need    verdict
+        #      20     160   11840    168   158.37   ok, margin +19.92
+        #      21     168   12432    176   166.07   ok, margin +12.22
+        #      22     176   13024    184   173.77   ok, margin  +4.52  <- chosen
+        #      23     184   13616    192   181.47   REJECTED
+        #
+        # 22 is the maximum; 23 is refused. Taking the maximum is safe here
+        # because the gate is deterministic arithmetic on a number we now know
+        # exactly, not a profile-dependent OOM risk.
+        #
+        # MAX_NUM_BATCHED_TOKENS stays at 256/rank (aggregate 2048), unchanged
+        # from #41 on purpose: that is the shape under which the 178.29 GiB
+        # figure was measured, and the reserve is profile-dependent. Raising it
+        # would invalidate the number the sizing above is solved against. An 8k
+        # prompt therefore takes 32 chunks, which inflates TTFT and does not
+        # touch the decode steps this build exists to profile.
+        #
+        # ⚠️ This mesh is worse than model=8 x attn_dp=4 and that is now
+        # measured, not predicted. Halving `model` halves per-device attention
+        # KV, but attention and GDN projections shard on `model` and REPLICATE
+        # over attn_dp, so weights go 75.87 -> 81.57 and the KV budget more than
+        # halves, 11.27 -> 5.57. Run this for what the mesh does to compute and
+        # collectives, not for capacity.
+        #
+        # PROFILE, unchanged from #41. One wave (BENCH_SWEEP=176:176) so
+        # everything prefills, decodes together, then drains:
         #
         #   PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8704
-        #     DECODE_ONLY is the phase with prefill_ratio == 0.0 exactly
-        #     (runner/utils.py:438), i.e. no prefill token in the batch at all,
-        #     so these steps carry none of the prefill-decode mixing. The
-        #     threshold then skips decode-only steps until min_kv_len -- which
-        #     is num_already_computed, so 8192 prompt + tokens generated --
-        #     reaches 8704, i.e. 512 of the 1024 output tokens done. Halfway
-        #     through generation: past the mixed region, well before draining.
+        #     DECODE_ONLY is prefill_ratio == 0.0 exactly (runner/utils.py:438),
+        #     so no prefill token is in the batch at all. The threshold then
+        #     skips decode-only steps until min_kv_len -- num_already_computed,
+        #     so 8192 prompt + tokens generated -- reaches 8704, i.e. 512 of the
+        #     1024 outputs done. Halfway: past the mixed region, before draining.
         #   PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5
-        #     Default is 15. These steps are near-identical, so 5 is enough to
-        #     see one and check it against its neighbours, and it keeps the
-        #     xplane small enough to download and open.
+        #     Default 15. These steps are near-identical, so 5 is enough to check
+        #     one against its neighbours and keeps the xplane small.
         #
-        # Other phases (prefill_only, decode_heavy, ...) are still captured once
-        # each into their own directories; only profiles/decode_only is wanted.
-        #
-        # Everything else is #30/#40: fp8 attn/GDN at block 512, the renamed
-        # BF16_LINEAR_REQUANTIZE_* vars, MAX_MODEL_LEN=40960, GPQA skipped.
+        # Other phases are still captured once each into their own dirs; only
+        # profiles/decode_only is wanted.
         #
         # WHAT TO READ FIRST:
-        #   1. Init kv-cache hbm. Predicted 81.57 + 11.21 = 92.78 of 94.74.
-        #      Much above that and the weight extrapolation was wrong.
-        #   2. "Starting profiling for decode_only phase" and the batch
-        #      composition logged beside it -- num_reqs should be 368 and
-        #      num_prefill_tokens 0.
-        #   3. GSM8K 0.9788 / MMLU 0.8928, i.e. the mesh did not change accuracy.
-        #   4. median ITL at conc 368, against #40 and #26.
+        #   1. That the sizing gate passes at all -- #41 died here.
+        #      Init kv-cache hbm predicted 81.57 + 5.43 = 87.00 of 94.74.
+        #   2. num_blocks 13024, kv-fit ~97%.
+        #   3. "Starting profiling for decode_only phase" WITH a utils.py
+        #      prefix (this comment block contains the bare string), and the
+        #      batch composition beside it: num_reqs 176, num_prefill_tokens 0.
+        #   4. GSM8K 0.9788 / MMLU 0.8928 -- the mesh should not move accuracy.
+        #   5. median ITL at conc 176, against #40 and #26.
 
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -256,18 +264,18 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=8' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=46' \
-          'NUM_GPU_BLOCKS_OVERRIDE=27232' \
+          'MAX_NUM_SEQS=22' \
+          'NUM_GPU_BLOCKS_OVERRIDE=13024' \
           'MAX_NUM_BATCHED_TOKENS=256' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=368' \
-          'MAX_CONCURRENCY=368' \
-          'BENCH_SWEEP=368:368' \
-          'NUM_WARMUPS=368' \
+          'NUM_PROMPTS=176' \
+          'MAX_CONCURRENCY=176' \
+          'BENCH_SWEEP=176:176' \
+          'NUM_WARMUPS=176' \
           'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
           'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8704' \
           'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
