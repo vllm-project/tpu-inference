@@ -581,6 +581,15 @@ class MLAEinsum(JaxEinsum):
         delattr(self, 'weight')
         delattr(self, 'weight_scale_inv')
         delattr(self, 'quant_method')
+        # `mla_layer` was only needed to perform the k/v split above; keeping
+        # it creates a permanent reference cycle (mla_layer.kv_b_proj.mla_layer
+        # is mla_layer). nnx's own graph traversal is cycle-safe (see
+        # `named_children` override above), but raw `jax.jit`/`jax.tree_util`
+        # pytree flattening (e.g. qwix's quantization path, or any other code
+        # that passes the model through a plain `jax.jit` instead of
+        # `nnx.jit`) is not, and recurses infinitely over this cycle until it
+        # hits `RecursionError`. Drop it now that it's unused.
+        delattr(self, 'mla_layer')
 
 
 @dataclass(kw_only=True)

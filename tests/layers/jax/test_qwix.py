@@ -221,12 +221,30 @@ class TestApplyQwixQuantization(unittest.TestCase):
                       "Model should be returned as-is.")
         mock_nnx.jit.assert_not_called()
 
-    @patch('tpu_inference.models.common.model_loader.jax.jit')
-    def test_quantization_applied_from_dict(self, mock_jit):
+    def test_quantization_applied_from_dict(self):
         """
         Test that quantization is applied correctly when the config is a dictionary.
+
+        Quantization for the concrete-model path is dispatched to
+        `qwix_quantize_nnx_model_streaming`, which quantizes one submodule
+        (embed_tokens / each decoder layer / norm) at a time via its own
+        `jax.jit` call rather than one `jax.jit` over the whole model -- see
+        that function's docstring for why (avoiding a peak-HBM blowup on
+        large models). This test asserts dispatch happens, not the specific
+        jit call count, since that's an implementation detail of the
+        streaming function itself (covered separately).
+
+        NOTE: this class is decorated with `@patch.dict('sys.modules',
+        module_mocks)`, which replaces
+        `sys.modules['...qwix_utils']` with a bare `MagicMock` for the
+        duration of every test here. A string-path `@patch(...)` on a
+        `qwix_utils` attribute would re-resolve the module through that
+        mocked `sys.modules` entry and silently patch the mock instead of
+        the real module `apply_qwix_quantization` actually runs in -- use
+        `patch.object` on the real, already-imported `quantize_qwix` module
+        object instead, which bypasses that re-resolution.
         """
-        qwix_rules = {"weights": "int8", "activations": None}
+        qwix_rules = [{"module_path": ".*", "weight_qtype": "int8"}]
         self.mock_vllm_config.additional_config = {
             "quantization": {
                 "qwix": {
@@ -235,14 +253,17 @@ class TestApplyQwixQuantization(unittest.TestCase):
             }
         }
 
-        with patch('tpu_inference.utils.get_padded_num_heads',
+        with patch.object(quantize_qwix,
+                          'qwix_quantize_nnx_model_streaming',
+                          return_value=self.mock_model) as mock_quantize_streaming, \
+             patch('tpu_inference.utils.get_padded_num_heads',
                    return_value=128):
             apply_qwix_quantization(self.mock_vllm_config,
                                     self.mock_model,
                                     self.mock_rng,
                                     self.mock_mesh,
                                     apply_to_abstract_model=False)
-        mock_jit.assert_called_once()
+        mock_quantize_streaming.assert_called_once()
 
 
 class TestQuantizationConfigFileToDict(unittest.TestCase):
