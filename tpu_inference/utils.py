@@ -131,9 +131,15 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
         # Assume all the devices have similar memory usage for now.
         # TODO(ranlihao): find a proper way to get the memory usage of each device.
         for device in devices:
+            if hasattr(device, "is_addressable") and not device.is_addressable:
+                continue
             try:
-                hbm_used = device.memory_stats()["bytes_in_use"]
-                hbm_limit = device.memory_stats()["bytes_limit"]
+                stats = device.memory_stats()
+                hbm_used = max(
+                    stats.get("peak_bytes_in_use", 0),
+                    stats.get("bytes_in_use", 0),
+                )
+                hbm_limit = stats["bytes_limit"]
                 logger.info(
                     "Get memory stats for device %s. Assuming all devices have the same usage.",
                     device)
@@ -145,9 +151,24 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                     e)
     else:
         for device in devices:
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
-            usage.append((hbm_used, hbm_limit))
+            if hasattr(device, "is_addressable") and not device.is_addressable:
+                continue
+            try:
+                stats = device.memory_stats()
+                hbm_used = max(
+                    stats.get("peak_bytes_in_use", 0),
+                    stats.get("bytes_in_use", 0),
+                )
+                hbm_limit = stats["bytes_limit"]
+                usage.append((hbm_used, hbm_limit))
+            except Exception as e:
+                logger.warning(
+                    "Failed to get memory stats for device %s: %s. ", device,
+                    e)
+
+        if len(usage) < len(devices) and usage:
+            fallback_used, fallback_limit = usage[0]
+            usage.extend([(fallback_used, fallback_limit)] * (len(devices) - len(usage)))
 
     return usage
 

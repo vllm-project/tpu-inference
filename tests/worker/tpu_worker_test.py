@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds
 
 # The class we are testing
+from tpu_inference import utils
 from tpu_inference.worker.tpu_worker import PPConfig, TPUWorker
 
 
@@ -353,6 +354,51 @@ class TestTPUWorker:
         # Total free = 1800 - 300 = 1500 GiB
         expected_mem = 1500 * 1024**3
         assert available_mem == expected_mem
+
+    def test_hbm_usage_bytes_with_peak_memory(self):
+        """Tests that hbm_usage_bytes accounts for peak_bytes_in_use to prevent OOM."""
+        mock_dev1 = MagicMock()
+        mock_dev1.is_addressable = True
+        # peak_bytes_in_use is higher than bytes_in_use due to XLA workspace
+        mock_dev1.memory_stats.return_value = {
+            "bytes_in_use": 10 * 1024**3,
+            "peak_bytes_in_use": 25 * 1024**3,
+            "bytes_limit": 32 * 1024**3,
+        }
+
+        mock_dev2 = MagicMock()
+        mock_dev2.is_addressable = True
+        mock_dev2.memory_stats.return_value = {
+            "bytes_in_use": 12 * 1024**3,
+            "peak_bytes_in_use": 20 * 1024**3,
+            "bytes_limit": 32 * 1024**3,
+        }
+
+        usage = utils.hbm_usage_bytes([mock_dev1, mock_dev2])
+        assert len(usage) == 2
+        # Verify peak_bytes_in_use was chosen
+        assert usage[0] == (25 * 1024**3, 32 * 1024**3)
+        assert usage[1] == (20 * 1024**3, 32 * 1024**3)
+
+    def test_hbm_usage_bytes_with_non_addressable_devices(self):
+        """Tests that non-addressable devices in multi-host setups fallback gracefully without raising errors."""
+        mock_dev1 = MagicMock()
+        mock_dev1.is_addressable = True
+        mock_dev1.memory_stats.return_value = {
+            "bytes_in_use": 8 * 1024**3,
+            "peak_bytes_in_use": 15 * 1024**3,
+            "bytes_limit": 32 * 1024**3,
+        }
+
+        mock_dev2 = MagicMock()
+        mock_dev2.is_addressable = False  # Remote host device
+
+        usage = utils.hbm_usage_bytes([mock_dev1, mock_dev2])
+        assert len(usage) == 2
+        # Addressable device
+        assert usage[0] == (15 * 1024**3, 32 * 1024**3)
+        # Non-addressable device fell back to addressable device stats
+        assert usage[1] == (15 * 1024**3, 32 * 1024**3)
 
     #
     # --- Core Logic Tests ---
