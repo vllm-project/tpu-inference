@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, fused-RS MoE kernel, SP default)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,67 +145,88 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # #40: first run on branch qwen38-2p4t-09222026, rebased onto current
-        # main. Rebuild-and-validate, not an experiment.
+        # #41: new mesh -- tp=4 x attn_dp=8 (ep still 32) -- at global
+        # concurrency 368, plus a decode-phase profile.
         #
-        # WHY: the load-time bf16->fp8 requantization we had been carrying
-        # locally merged upstream as #3562, so the old branch (90 commits behind
-        # main) was retired and the harness moved onto main. This build answers
-        # one question: does the same config still produce the same numbers on
-        # the new base?
+        # ⚠️ THIS MESH HAS LESS CAPACITY THAN model=8 x attn_dp=4, not more.
+        # Halving `model` halves the per-device attention KV (each device still
+        # holds exactly 1 kv head either way, so the saving comes from the block
+        # pool splitting 8 ways instead of 4), but attention and GDN projections
+        # shard on `model` and REPLICATE over attn_dp, so their per-device cost
+        # doubles. Calibrated on two measured points, both requantized at block
+        # 512: #19 attn_dp=2 -> Init model 73.02, #26/#30/#40 attn_dp=4 -> 75.87.
+        # The 2.85 GiB step is the attn+GDN share at model=16, so:
         #
-        # CONFIG IS #30's, byte for byte, with exactly two deliberate
-        # differences:
+        #   model=16 attn_dp=2   weights 73.02   free 21.72   (measured)
+        #   model=8  attn_dp=4   weights 75.87   free 18.87   (measured)
+        #   model=4  attn_dp=8   weights 81.57   free 13.17   (EXTRAPOLATED)
         #
-        #   1. The requantization env vars are renamed. #3562 merged under
-        #      different names, so the old ones are now dead strings that would
-        #      silently disable requantization -- no error, just 2.72 GiB/chip
-        #      more weights and HBM that stops matching the capacity model:
+        # At C=368 that is KV 11.21 GiB here against 15.92 on model=8 -- 4.7
+        # saved -- but 5.70 more spent on weights. Net ~1.0 GiB worse. The
+        # crossover where model=4 wins is around C=533, which does not fit
+        # anyway. Run this for what the mesh does to compute and collectives,
+        # not for capacity.
         #
-        #        QUANTIZE_BF16_LINEAR_PATTERNS   -> BF16_LINEAR_REQUANTIZE_PATTERNS
-        #        QUANTIZE_BF16_LINEAR_BLOCK_SIZE -> BF16_LINEAR_REQUANTIZE_BLOCK_SIZE
+        # SIZING. Per device, mamba costs 18,352,896 B per GLOBAL slot and is
+        # invariant to the model/attn_dp split (slots shard on attn_dp, heads on
+        # model, product always 32). Attention costs 23 x 65,536 / attn_dp =
+        # 188,416 B per GLOBAL block. Scratch is #31's path-A fit,
+        # 0.404 GiB + 0.3144 MiB per aggregate token.
         #
-        #      Values are unchanged, and upstream kept the semantics: `re:`
-        #      prefixes, fused_mapping expansion, and the _check_block_size
-        #      guard all behave as before.
+        #   C    seqs/rank   KV GiB   scratch budget   max aggregate tokens
+        #   368     46        11.21        1.96              5083
+        #   352     44        10.72        2.45              6651
+        #   336     42        10.24        2.93              8218
+        #   320     40         9.76        3.41              9785
         #
-        #   2. GPQA is skipped. STD_EVAL_SUITE=gsm8k,mmlu rather than #30's
-        #      gpqa,gsm8k,mmlu -- GPQA costs ~52 min and its +-0.035 noise floor
-        #      cannot resolve a regression that GSM8K (+-0.004) and full-MMLU
-        #      (+-0.0025) would both catch. Saves ~1h.
+        # C=368 is the target and it fits, but only at a small token budget.
+        # MAX_NUM_BATCHED_TOKENS=256/rank -> aggregate 2048, scratch 1.03, total
+        # 12.24 of 13.17, margin +0.93 GiB. The alternative that also reaches
+        # 368 is MNBT=512 (aggregate 4096) at margin +0.30, and that is too thin
+        # for a mesh never run before: the weight figure is an extrapolation,
+        # and #31 measured only 89% of scratch as the (split-invariant) MoE
+        # slab, so the other 11% may itself double at model=4. The cost of 256
+        # is prefill chunking -- an 8k prompt takes 32 chunks -- which inflates
+        # TTFT but does not touch the decode steps this build exists to profile.
         #
-        # Everything else is #30: model=8 x attn_dp=4, MAX_NUM_SEQS=64, pool
-        # 19456, MAX_NUM_BATCHED_TOKENS=2048 (aggregate 8192), BENCH_SWEEP=8:32,
-        # fp8 attn/GDN at block 512, stock shared expert, MAX_MODEL_LEN=40960.
-        # The fused-RS MoE kernel is NOT in this build -- both its correctness
-        # fixes are a separate workstream, and USE_GMM_FUSED_RS_KERNEL and
-        # MIN_TOKEN_BUCKET are gone from the env block entirely.
+        # NUM_GPU_BLOCKS_OVERRIDE=27232 = 368 x 74. The gate needs
+        # ceil(9216/128)=72, so this leaves 2 blocks per request of headroom;
+        # preemption should be impossible and kv-fit will report 97%.
+        # Mamba slots = 8 x (46+1) = 376.
         #
-        # Also carried and worth knowing about if something looks odd:
-        #   - prompt-logprob targets are now built on the host rather than by
-        #     rolling the packed ids, which fixes MMLU 500s on any prompt longer
-        #     than max_num_batched_tokens. MMLU is the leg that exercises it.
-        #   - compiles now log XLA's own memory_analysis, so `temp` per bucket
-        #     is readable directly from the job log.
+        # PROFILE. One wave (BENCH_SWEEP=368:368, NUM_PROMPTS=368) so the run
+        # has a clean shape: everything prefills, everything decodes together,
+        # then drains. The phased profiler is asked for exactly the middle of
+        # that decode plateau:
         #
-        # PASS CRITERIA, against #30:
-        #   GSM8K flexible 0.9788, MMLU 0.8928, Init model 75.87,
-        #   Init kv-cache 86.98, kv_cache_config.num_blocks 19456.
-        # Accuracy inside noise and HBM within ~0.05 GiB means the new base is
-        # good and we can resume experiments on it.
+        #   PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8704
+        #     DECODE_ONLY is the phase with prefill_ratio == 0.0 exactly
+        #     (runner/utils.py:438), i.e. no prefill token in the batch at all,
+        #     so these steps carry none of the prefill-decode mixing. The
+        #     threshold then skips decode-only steps until min_kv_len -- which
+        #     is num_already_computed, so 8192 prompt + tokens generated --
+        #     reaches 8704, i.e. 512 of the 1024 output tokens done. Halfway
+        #     through generation: past the mixed region, well before draining.
+        #   PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5
+        #     Default is 15. These steps are near-identical, so 5 is enough to
+        #     see one and check it against its neighbours, and it keeps the
+        #     xplane small enough to download and open.
+        #
+        # Other phases (prefill_only, decode_heavy, ...) are still captured once
+        # each into their own directories; only profiles/decode_only is wanted.
+        #
+        # Everything else is #30/#40: fp8 attn/GDN at block 512, the renamed
+        # BF16_LINEAR_REQUANTIZE_* vars, MAX_MODEL_LEN=40960, GPQA skipped.
         #
         # WHAT TO READ FIRST:
-        #   1. Init model. 75.87 means requantization ran. ~78.2 means the
-        #      rename did not take and the patterns matched nothing -- that is
-        #      the specific failure this build is most likely to hit.
-        #   2. GSM8K, ~8 min after the smoke test.
-        #   3. MMLU, and specifically whether any request 500s.
-        #
-        # Leg order is accuracy-then-perf, kept from #38: the smoke test runs
-        # first (CLIENT_SMOKE_ONLY=1), then the evals, then the sweep. #30 ran
-        # perf first, but its perf leg is a single conc-8 control and the
-        # ordering does not affect it.
-        #
+        #   1. Init kv-cache hbm. Predicted 81.57 + 11.21 = 92.78 of 94.74.
+        #      Much above that and the weight extrapolation was wrong.
+        #   2. "Starting profiling for decode_only phase" and the batch
+        #      composition logged beside it -- num_reqs should be 368 and
+        #      num_prefill_tokens 0.
+        #   3. GSM8K 0.9788 / MMLU 0.8928, i.e. the mesh did not change accuracy.
+        #   4. median ITL at conc 368, against #40 and #26.
+
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
         # USE_BATCHED_RPA_KERNEL in particular is read at import time by
@@ -233,20 +254,23 @@ steps:
           'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
           'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512' \
           'TENSOR_PARALLEL_SIZE=32' \
-          'ATTN_DP_SIZE=4' \
+          'ATTN_DP_SIZE=8' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=64' \
-          'NUM_GPU_BLOCKS_OVERRIDE=19456' \
-          'MAX_NUM_BATCHED_TOKENS=2048' \
+          'MAX_NUM_SEQS=46' \
+          'NUM_GPU_BLOCKS_OVERRIDE=27232' \
+          'MAX_NUM_BATCHED_TOKENS=256' \
           'GPU_MEMORY_UTILIZATION=0.92' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=32' \
-          'MAX_CONCURRENCY=8' \
-          'BENCH_SWEEP=8:32' \
-          'NUM_WARMUPS=32' \
+          'NUM_PROMPTS=368' \
+          'MAX_CONCURRENCY=368' \
+          'BENCH_SWEEP=368:368' \
+          'NUM_WARMUPS=368' \
+          'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
+          'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8704' \
+          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gsm8k,mmlu' \
           'GPQA_REASONING_EFFORT=xhigh' \
