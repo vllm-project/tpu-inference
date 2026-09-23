@@ -2143,8 +2143,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             step_rng = self.rng_params_for_sampling
 
         processed_bonus_logits = None
+        is_vocab_sharded = self.mesh.shape.get(ShardingAxisName.MODEL, 1) > 1
         allow_distributed_sampling = distributed_sampling_allowed(
-            tpu_sampling_metadata.logprobs, self.model_config.logprobs_mode)
+            tpu_sampling_metadata.logprobs,
+            self.model_config.logprobs_mode,
+            is_vocab_sharded=is_vocab_sharded)
         if spec_decode_metadata is None:
             logits = logits.astype(jnp.float32)
             with self.maybe_forbid_compile:

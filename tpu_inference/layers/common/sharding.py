@@ -53,6 +53,8 @@ class ShardingAxisNameBase:
     EXPERT_DATA = ('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model',
                    'dcp', 'pcp')
     VOCAB = ('attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp', 'pcp')
+    LOGITS_BATCH = ('data', 'pcp', 'attn_dp', 'attn_dp_expert')
+    LOGITS_VOCAB = ('model', 'expert', 'dcp')
     MODEL_1 = 'model'
     MODEL_2 = 'expert'
 
@@ -88,6 +90,8 @@ class ShardingAxisName2D:
     EXPERT = 'model'
     EXPERT_DATA = ('data', 'model')
     VOCAB = ('data', 'model')
+    LOGITS_BATCH = 'data'
+    LOGITS_VOCAB = 'model'
     BATCH = 'data'
     KV_CONTEXT = None
     PREFILL_CONTEXT = None
