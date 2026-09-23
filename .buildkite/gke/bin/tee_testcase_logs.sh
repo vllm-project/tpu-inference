@@ -384,8 +384,41 @@ job_state() {
     fi
 }
 
+# Whether the JobSet is still there.
+#
+# The naive version of this -- `[ -n "$(kubectl get jobset ... 2>/dev/null)" ]`
+# -- conflates four situations, because all of them leave stdout empty: the
+# JobSet really was deleted, the API server throttled us, the request timed out,
+# or credentials needed refreshing. Every caller treats "gone" as a reason to
+# stop, so one unlucky poll used to abort a perfectly healthy wait -- and it
+# looked exactly like a deliberate `helm uninstall`, which made it hard to spot.
+#
+# So: only the API positively reporting NotFound counts as proof of deletion.
+# Anything else is an inconclusive poll, which we report and tolerate for
+# JOBSET_MISS_LIMIT rounds (~10s at the 2s poll interval) before giving up.
+JOBSET_MISSES=0
+JOBSET_MISS_LIMIT="${JOBSET_MISS_LIMIT:-5}"
+
 jobset_exists() {
-    [ -n "$(kubectl get jobset "$JOB_NAME" -o jsonpath='{.metadata.name}' 2>/dev/null)" ]
+    # `|| rc=$?` keeps the assignment out of `set -e`'s reach no matter how this
+    # function is called; reading $? after a bare assignment would only be safe
+    # from inside an `if`, which is how every current caller happens to invoke
+    # it -- but that is not a property worth depending on.
+    local out rc=0
+    out="$(kubectl get jobset "$JOB_NAME" -o jsonpath='{.metadata.name}' 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$out" ]; then
+        JOBSET_MISSES=0
+        return 0
+    fi
+    case "$out" in
+        *NotFound*|*'not found'*)
+            return 1
+            ;;
+    esac
+    JOBSET_MISSES=$((JOBSET_MISSES + 1))
+    echo "   ⚠️  Could not determine whether JobSet '${JOB_NAME}' still exists" \
+         "(${JOBSET_MISSES}/${JOBSET_MISS_LIMIT}): ${out}" >&2
+    [ "$JOBSET_MISSES" -lt "$JOBSET_MISS_LIMIT" ]
 }
 
 # JobSet-wide brake: once the JobSet itself is Failed, no replacement pod is
