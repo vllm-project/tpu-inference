@@ -1,0 +1,176 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The set of tests that must pass for a vLLM commit to become the LKG.
+#
+# The integration pipeline used to upload the whole of pipeline_jax.yml for
+# both TPU generations -- ~48 jobs and ~545 job-minutes per run, half of it on
+# the scarce 8- and 16-chip queues. In practice those runs never caught a perf
+# or accuracy regression. Every integration failure between Sep 5 and Sep 22
+# was a Python-level break against upstream vLLM (a missing attribute, an
+# unimplemented abstract method, a moved symbol), and the lm_eval and perf
+# steps "failed" only because the engine could not start.
+#
+# So this gate keeps the steps that actually detect upstream drift -- a CPU
+# API-surface sweep plus the cheapest TPU steps that exercise both the JAX and
+# the vLLM model paths -- and drops everything that needs a multi-chip host.
+# The accuracy, perf-regression, DeepSeek, Llama4, multi-host P/D and MMLU
+# steps still run nightly against the pinned LKG, which is where a real
+# regression is legible anyway: no upstream API churn to drown the signal.
+#
+# Adding a step here costs TPU capacity on every integration run. Add one only
+# if it catches a class of breakage the rest of this file misses.
+
+# Soft-fail so one flaky step does not abort its siblings; gate_check below
+# aggregates the outcomes and is what actually blocks promotion.
+.gate_tpu_template: &gate_tpu_template
+  soft_fail: true
+
+steps:
+  - group: "LKG Promotion Gate"
+    key: "lkg_gate"
+    depends_on: "build_docker"
+    steps:
+      # ---------------------------------------------------------------
+      # CPU: catches the whole "upstream moved a symbol" family in
+      # seconds, before a single TPU is provisioned.
+      # ---------------------------------------------------------------
+      - label: ":microscope: vLLM API surface (CPU)"
+        key: "gate_api_surface"
+        soft_fail: true
+        agents:
+          queue: cpu_64_core
+        env:
+          TPU_VERSION: "tpu6e"
+        commands:
+          - .buildkite/scripts/run_api_surface_gate.sh
+
+      # ---------------------------------------------------------------
+      # tpu6e, single chip.
+      # ---------------------------------------------------------------
+      - label: "tpu6e E2E MLPerf tests for JAX models"
+        key: "gate_tpu6e_mlperf_jax"
+        <<: *gate_tpu_template
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "tpu6e"
+        agents:
+          queue: tpu_v6e_queue
+        commands:
+          - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+      - label: "tpu6e E2E MLPerf tests for JAX + vLLM models on single chip"
+        key: "gate_tpu6e_mlperf_vllm"
+        <<: *gate_tpu_template
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          MODEL_IMPL_TYPE: "vllm"
+          TPU_VERSION: "tpu6e"
+        agents:
+          queue: tpu_v6e_queue
+        commands:
+          - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+      # Mirrors pipeline_jax.yml's unit test part1/part2 split, minus the
+      # coverage plumbing: coverage is a code-health metric tracked on PRs and
+      # nightly, not a condition for trusting an upstream vLLM commit.
+      - label: "tpu6e JAX unit tests part1"
+        key: "gate_tpu6e_unit_1"
+        <<: *gate_tpu_template
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "tpu6e"
+        agents:
+          queue: tpu_v6e_queue
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py /workspace/tpu_inference/tests/layers/vllm/test_awq.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py /workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py"
+
+      - label: "tpu6e JAX unit tests part2"
+        key: "gate_tpu6e_unit_2"
+        <<: *gate_tpu_template
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "tpu6e"
+        agents:
+          queue: tpu_v6e_queue
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh bash -c "python3 -m pytest -s -v -x /workspace/tpu_inference/tests/ --ignore=/workspace/tpu_inference/tests/layers/vllm/backends/test_flash_attn.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_awq.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_moe.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_fp8.py --ignore=/workspace/tpu_inference/tests/layers/vllm/test_compressed_tensors_w8a8_int8.py --ignore=/workspace/tpu_inference/tests/kernels --ignore=/workspace/tpu_inference/tests/lora --ignore=/workspace/tpu_inference/tests/e2e --ignore=/workspace/tpu_inference/tpu_inference/mock --ignore=/workspace/tpu_inference/tests/models/jax/test_deepseek_v3.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_multi_request_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py --ignore=/workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py --ignore=/workspace/tpu_inference/tests/core/test_dp_group_sampling_prefix_cache.py --ignore=/workspace/tpu_inference/tests/runner/test_async_logprobs.py --ignore=/workspace/tpu_inference/tests/runner/test_processed_logprobs.py --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py"
+
+      # LoRA subclasses several vLLM ABCs directly, which is how upstream
+      # adding an abstract method shows up on a real device.
+      - label: "tpu6e lora unit tests on single chip"
+        key: "gate_tpu6e_lora_unit"
+        <<: *gate_tpu_template
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "tpu6e"
+        agents:
+          queue: tpu_v6e_queue
+        commands:
+          - |
+            .buildkite/scripts/run_in_docker.sh \
+              bash -c ' python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
+              python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
+
+      # ---------------------------------------------------------------
+      # tpu7x, two chips. Every upstream break observed so far hit both
+      # generations identically, so tpu7x only needs to prove the engine
+      # still comes up on it; nightly covers the rest.
+      # ---------------------------------------------------------------
+      - label: "tpu7x E2E MLPerf tests for JAX models"
+        key: "gate_tpu7x_mlperf_jax"
+        <<: *gate_tpu_template
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          TPU_VERSION: "tpu7x"
+        agents:
+          queue: tpu_v7x_2_queue
+        commands:
+          - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+      - label: "tpu7x E2E MLPerf tests for JAX + vLLM models on single chip"
+        key: "gate_tpu7x_mlperf_vllm"
+        <<: *gate_tpu_template
+        env:
+          USE_PREBUILT_IMAGE: "1"
+          MODEL_IMPL_TYPE: "vllm"
+          TPU_VERSION: "tpu7x"
+        agents:
+          queue: tpu_v7x_2_queue
+        commands:
+          - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
+
+      # ---------------------------------------------------------------
+      # The gate itself. Hard-fails, which is what stops the promote step
+      # in integration_promote.yml from running.
+      # ---------------------------------------------------------------
+      - label: ":lock: LKG Gate Result"
+        key: "gate_check"
+        depends_on:
+          - "gate_api_surface"
+          - "gate_tpu6e_mlperf_jax"
+          - "gate_tpu6e_mlperf_vllm"
+          - "gate_tpu6e_unit_1"
+          - "gate_tpu6e_unit_2"
+          - "gate_tpu6e_lora_unit"
+          - "gate_tpu7x_mlperf_jax"
+          - "gate_tpu7x_mlperf_vllm"
+        agents:
+          queue: cpu
+        commands:
+          - |
+            .buildkite/scripts/check_results.sh \
+              "LKG Gate Failed" gate_api_surface gate_tpu6e_mlperf_jax gate_tpu6e_mlperf_vllm gate_tpu6e_unit_1 gate_tpu6e_unit_2 gate_tpu6e_lora_unit gate_tpu7x_mlperf_jax gate_tpu7x_mlperf_vllm
