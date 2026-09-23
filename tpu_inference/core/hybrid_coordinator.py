@@ -157,12 +157,37 @@ class MambaBlockPool(BlockPool):
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         blocks = super().get_new_blocks(num_blocks)
         self._last_allocation = list(blocks)
+        logger.info(
+            "[KV_TRACE:MAMBA_POOL:ALLOC] gid=%s requested=%d allocated_bids=%s free_remaining=%d/%d",
+            self.primary_group_id, num_blocks, [b.block_id for b in blocks],
+            self.get_num_free_blocks(), len(self.blocks))
         return blocks
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        ordered_list = list(ordered_blocks)
+        bids = [b.block_id for b in ordered_list]
+        super().free_blocks(ordered_list)
+        logger.info(
+            "[KV_TRACE:MAMBA_POOL:FREE] gid=%s freed_bids=%s free_now=%d/%d",
+            self.primary_group_id, bids, self.get_num_free_blocks(), len(self.blocks))
+
+    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
+        had_hash = block.block_hash is not None or bool(self.cached_block_hashes_by_block.get(block.block_id))
+        evicted = super()._maybe_evict_cached_block(block)
+        if evicted or had_hash:
+            logger.warning(
+                "[KV_TRACE:MAMBA_POOL:EVICT_FROM_CACHE] bid=%d had_hash=%s evicted=%s",
+                block.block_id, had_hash, evicted)
+        return evicted
 
     def get_cached_block(self, block_hash: BlockHash,
                          kv_cache_group_ids: list[int]):
-        return super().get_cached_block(
+        res = super().get_cached_block(
             block_hash, self._canonical_group_ids(kv_cache_group_ids))
+        logger.info(
+            "[KV_TRACE:MAMBA_POOL:LOOKUP] hash=%s gids=%s -> hit_bids=%s",
+            block_hash, kv_cache_group_ids, [b.block_id for b in res] if res else None)
+        return res
 
 
 class MirrorMambaBlockPool:
@@ -237,6 +262,7 @@ class TPUMambaManager(MambaManager):
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
+        all_bids = [b.block_id for b in self.req_to_blocks.get(request.request_id, [])]
         if num_cached_blocks < num_full_blocks:
             # The GDN kernel writes exactly one checkpoint per forward pass, at
             # token `num_tokens - 1`. Only this block holds valid state;
@@ -246,6 +272,10 @@ class TPUMambaManager(MambaManager):
                 (num_cached_blocks + i) == written_block_idx
                 for i in range(num_full_blocks - num_cached_blocks)
             ]
+            logger.info(
+                "[KV_TRACE:MAMBA_MGR:CACHE] req=%s gid=%d tokens=%d cached_blks=%d full_blks=%d written_idx=%d mask=%s all_bids=%s",
+                request.request_id, self.kv_cache_group_id, num_tokens, num_cached_blocks,
+                num_full_blocks, written_block_idx, block_mask, all_bids)
 
             self.block_pool.cache_full_blocks(
                 request=request,
@@ -274,6 +304,11 @@ class TPUMambaManager(MambaManager):
                     )
 
             self.num_cached_block[request.request_id] = num_full_blocks
+        else:
+            logger.info(
+                "[KV_TRACE:MAMBA_MGR:NO_NEW_CACHE] req=%s gid=%d tokens=%d cached_blks=%d full_blks=%d all_bids=%s",
+                request.request_id, self.kv_cache_group_id, num_tokens, num_cached_blocks,
+                num_full_blocks, all_bids)
 
         partial_hash = self._cache_partial_tail_block(request, num_tokens)
         if partial_hash is not None:
@@ -324,6 +359,9 @@ class TPUDualBlockPool(BlockPool):
                 mamba_blocks.append(block)
             else:
                 attn_blocks.append(block)
+        logger.info(
+            "[KV_TRACE:DUAL_POOL:FREE] freeing attn_bids=%s mamba_bids=%s",
+            [b.block_id for b in attn_blocks], [b.block_id for b in mamba_blocks])
         if attn_blocks:
             self.attention_pool.free_blocks(attn_blocks)
         if mamba_blocks:
@@ -364,6 +402,7 @@ class TPUDualBlockPool(BlockPool):
         Note: Block IDs are assumed to belong to attention_pool, as external
         KV transfer load failures only apply to Attention KV cache.
         """
+        logger.warning("[KV_TRACE:DUAL_POOL:EVICT] block_ids=%s", block_ids)
         attn_ids = {
             bid
             for bid in block_ids if bid < len(self.attention_pool.blocks)
@@ -532,6 +571,27 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Re-verify and split groups so attention_groups binds to updated managers
         self.verify_and_split_kv_cache_groups()
 
+    def find_longest_cache_hit(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int, int]:
+        cache_hit_blocks, hit_length, num_uncached = super().find_longest_cache_hit(
+            block_hashes, max_cache_hit_length)
+        logger.info(
+            "[KV_TRACE:COORD:CACHE_HIT] hashes=%d max_len=%d -> hit_len=%d uncached=%d hit_blks=%s",
+            len(block_hashes), max_cache_hit_length, hit_length, num_uncached,
+            [[b.block_id for b in blist] for blist in cache_hit_blocks])
+        return cache_hit_blocks, hit_length, num_uncached
+
+    def free(self, request_id: str) -> None:
+        all_blocks = self.get_blocks(request_id)
+        if any(all_blocks):
+            all_bids = [[b.block_id for b in blist] for blist in all_blocks]
+            logger.info("[KV_TRACE:COORD:FREE_REQ] req=%s freed_blocks_per_group=%s",
+                        request_id, all_bids)
+        super().free(request_id)
+
     def can_allocate_tokens(
         self,
         request: Request,
@@ -582,13 +642,16 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         avail_attn = (self.attention_block_pool.get_num_free_blocks() -
                       reserved_blocks)
+        avail_mamba = self.mamba_block_pool.get_num_free_blocks()
+        can_fit = (attn_blocks_needed + watermark_blocks <= avail_attn) and (mamba_blocks_needed <= avail_mamba)
+        if not can_fit or mamba_blocks_needed > 0:
+            logger.info(
+                "[KV_TRACE:COORD:CAN_ALLOC] req=%s tokens=%d attn_need=%d (avail=%d) mamba_need=%d (avail=%d) -> can_fit=%s",
+                request.request_id, num_tokens, attn_blocks_needed, avail_attn, mamba_blocks_needed, avail_mamba, can_fit)
         if attn_blocks_needed + watermark_blocks > avail_attn:
             return False
-
-        avail_mamba = self.mamba_block_pool.get_num_free_blocks()
         if mamba_blocks_needed > avail_mamba:
             return False
-
         return True
 
     def get_num_blocks_to_allocate(
@@ -686,6 +749,10 @@ class TPUKVCacheManager(KVCacheManager):
         ):
             watermark_blocks = self.watermark_blocks
 
+        logger.info(
+            "[KV_TRACE:COORD:ALLOC_SLOTS] req=%s status=%s new_tokens=%d computed_tokens=%d new_computed_blks=%s",
+            request.request_id, request.status, num_new_tokens, num_new_computed_tokens,
+            [[b.block_id for b in blist] for blist in new_computed_block_list] if new_computed_block_list else [])
         if full_sequence_must_fit:
             full_num_tokens = min(request.num_tokens, self.max_model_len)
             can_fit = self.coordinator.can_allocate_tokens(
@@ -744,6 +811,12 @@ class TPUKVCacheManager(KVCacheManager):
             num_tokens_main_model,
             num_encoder_tokens,
         )
+        all_blocks = self.coordinator.get_blocks(request.request_id)
+        logger.info(
+            "[KV_TRACE:COORD:ALLOC_RESULT] req=%s new_blocks_per_group=%s all_blocks_per_group=%s",
+            request.request_id,
+            [[b.block_id for b in blist] for blist in new_blocks],
+            [[b.block_id for b in blist] for blist in all_blocks])
 
         if not self.enable_caching or delay_cache_blocks:
             return self.create_kv_cache_blocks(new_blocks)

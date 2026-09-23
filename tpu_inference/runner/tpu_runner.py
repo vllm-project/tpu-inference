@@ -1,3 +1,4 @@
+from tpu_inference.core.hybrid_coordinator import is_mamba_group
 # Copyright 2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -3210,6 +3211,34 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups):
                 build_block_table_host(gid)
+
+        # Log scheduled requests and their mamba block table state
+        mamba_gid = None
+        mamba_bs = 256
+        for gid, g in enumerate(self.kv_cache_config.kv_cache_groups):
+            if is_mamba_group(g):
+                mamba_gid = gid
+                mamba_bs = getattr(g.kv_cache_spec, "block_size", 256)
+                break
+
+        for dp_rank in range(dp_size):
+            for pos, req_index in enumerate(req_indices_dp[dp_rank]):
+                req_index = int(req_index)
+                req_id = req_ids_dp[dp_rank][pos]
+                num_comp = int(self.input_batch.num_computed_tokens_cpu[req_index])
+                num_sched = int(scheduled_tokens_per_dp_rank[dp_rank][pos])
+                seq_len = num_comp + num_sched
+                if mamba_gid is not None and mamba_gid in self.input_batch.block_table:
+                    tbl = self.input_batch.block_table[mamba_gid].get_cpu_tensor()
+                    row = tbl[req_index, :10].tolist()
+                    read_col = max(num_comp - 1, 0) // mamba_bs
+                    write_col = max(seq_len - 1, 0) // mamba_bs
+                    read_slot = row[read_col] if read_col < len(row) else -1
+                    write_slot = row[write_col] if write_col < len(row) else -1
+                    logger.info(
+                        "[KV_TRACE:RUNNER_STEP] dp=%d req=%s (idx=%d) comp=%d sched=%d seq_len=%d | read_col=%d slot=%d | write_col=%d slot=%d | mamba_table=%s",
+                        dp_rank, req_id, req_index, num_comp, num_sched, seq_len,
+                        read_col, read_slot, write_col, write_slot, row[:max(write_col + 2, 4)])
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
