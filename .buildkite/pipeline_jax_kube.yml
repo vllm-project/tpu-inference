@@ -68,6 +68,36 @@ steps:
         setup_environment "vllm-tpu" "false" "true"
         buildkite-agent meta-data set ci-image "$$EXPORTED_CI_CACHE_IMAGE"
 
+  # The only step here that spans two hosts. Everything else is one pod holding
+  # every chip on a node, which is what run.sh asks the launcher for by
+  # default; this needs a slice, so it names a manifest instead and the shape
+  # comes from that manifest's nodeSelector.
+  #
+  # soft_fail and the tpu7x gate both match the bare-metal step: v7x-16 is the
+  # whole fleet, and on v6e there is nothing to run this on.
+  #
+  # It runs ahead of the rest of the lane because Kueue admits a smaller
+  # workload past an 8-chip one that doesn't fit: released alongside the
+  # single-chip steps, it waits until the whole lane drains. The wait below
+  # holds them back until it is done, pass or fail.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Ray-based multi-host"
+    soft_fail: true
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      # Read by run.sh on the agent, not forwarded: it selects the JobSet.
+      MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+      TENSOR_PARALLEL_SIZE: "16"
+    <<: *tpu_step
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/ray_multihost_e2e.sh
+
+  - wait: ~
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    continue_on_failure: true
+
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
     env:
       SHAPE: *shape_single
@@ -402,27 +432,6 @@ steps:
     <<: *tpu_step
     commands:
       - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_torchax_ray_distributed_executor
-
-  # The only step here that spans two hosts. Everything else is one pod holding
-  # every chip on a node, which is what run.sh asks the launcher for by
-  # default; this needs a slice, so it names a manifest instead and the shape
-  # comes from that manifest's nodeSelector.
-  #
-  # soft_fail and the tpu7x gate both match the bare-metal step: v7x-16 is the
-  # whole fleet, and on v6e there is nothing to run this on.
-  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Ray-based multi-host"
-    soft_fail: true
-    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      USE_PREBUILT_IMAGE: "1"
-      # Read by run.sh on the agent, not forwarded: it selects the JobSet.
-      MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
-      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
-      TENSOR_PARALLEL_SIZE: "16"
-    <<: *tpu_step
-    commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/ray_multihost_e2e.sh
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Single Host DCN-based P/D disaggregation"
     env:
