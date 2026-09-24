@@ -432,7 +432,7 @@ class Llama4ForCausalLM(nnx.Module):
         self.mesh = mesh
         self.is_verbose = getattr(self.vllm_config.additional_config,
                                   "is_verbose", False)
-        self.enable_return_routed_experts = self.vllm_config.model_config.enable_return_routed_experts
+        self.enable_return_routed_experts = self.vllm_config.aux_output_config.enable_return_routed_experts
 
         # Currently the runner will always set a mesh, so the custom default sharding (when
         #  no sharding is set in vllm config) doesn't take effect.
