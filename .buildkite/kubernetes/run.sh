@@ -55,7 +55,17 @@ elif [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
   exit 2
 fi
 
-WORKLOAD_IMAGE="${WORKLOAD_IMAGE:-$(buildkite-agent meta-data get ci-image 2>/dev/null || true)}"
+# setup_docker_env.sh records the tag it pushed for each generation.
+if [[ -z "${WORKLOAD_IMAGE:-}" ]]; then
+  WORKLOAD_IMAGE=$(buildkite-agent meta-data get "ci-image-${TPU_VERSION:-tpu6e}" \
+    --default "" 2>/dev/null || true)
+fi
+if [[ -z "${WORKLOAD_IMAGE}" ]]; then
+  echo "$0: no ci-image-${TPU_VERSION:-tpu6e} metadata and no WORKLOAD_IMAGE." \
+       "build_docker_${TPU_VERSION:-tpu6e} has to run before this step, or the" \
+       "step has to name an image." >&2
+  exit 2
+fi
 export WORKLOAD_IMAGE
 
 # A name the step has not set is skipped rather than injected empty -
@@ -83,11 +93,21 @@ FORWARD=(
   # slice, and merely wrong on anything that still fits.
   VLLM_MLA_DISABLE MOE_REQUANTIZE_BLOCK_SIZE MOE_REQUANTIZE_WEIGHT_DTYPE
   MINIMUM_ACCURACY_THRESHOLD MINIMUM_THROUGHPUT_THRESHOLD
+  # Read by mlperf.sh and mmlu.sh in the model and rl suites. EXTRA_SERVE_ARGS
+  # is left out, as run_in_docker.sh leaves it out: the one step that sets it,
+  # rl continue_decode, would replace the --additional_config mmlu.sh gives
+  # DeepSeek-R1 and serve it without dp-attention.
+  DEVICE_COUNT
+  # Read by ray_multihost_e2e.sh.
+  ASYNC_SCHEDULING
   MODEL INPUT_LEN OUTPUT_LEN PREFIX_LEN MAX_MODEL_LEN
   MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS NUM_PROMPTS RANDOM_SEED
   MAX_CONCURRENCY REQUEST_RATE TIMEOUT_SECONDS COMPILATION_CONFIG
   USE_CHAT_TEMPLATE BENCH_DATASET USE_BATCHED_RPA_KERNEL
   GPU_MEMORY_UTILIZATION GCS_BUCKET HOST_NAME
+  # Files to upload as artifacts; see the end of this file and
+  # multihost_entry.sh.
+  ARTIFACTS_DIR
 )
 
 # The BUILDKITE_* the agent set are swept by the launcher itself, so only the
@@ -133,6 +153,30 @@ if [[ -n "${MULTIHOST_MANIFEST:-}" ]]; then
   exec /opt/launcher/launch \
     --manifest "${here}/manifests/workloads/${MULTIHOST_MANIFEST}" \
     "${env_args[@]}"
+fi
+
+# A step that wants files out of the pod names a directory in ARTIFACTS_DIR,
+# relative to the image's WORKDIR, and writes into it; everything under it is
+# uploaded when the command exits, named by its path. The pod is deleted when
+# the step ends, so it uploads its own. A lost upload fails the step but never
+# masks a failure from the command itself. Other steps run their command
+# unwrapped.
+#
+# Single-quoted on purpose: this is a program for the pod shell, so $@ and $?
+# have to arrive unexpanded.
+# shellcheck disable=SC2016
+if [[ -n "${ARTIFACTS_DIR:-}" ]]; then
+  set -- bash -c '
+    mkdir -p "$ARTIFACTS_DIR"
+    "$@"
+    rc=$?
+    if [ -n "$(ls -A "$ARTIFACTS_DIR" 2>/dev/null)" ] &&
+       ! buildkite-agent artifact upload "$ARTIFACTS_DIR/**/*"; then
+      echo "ERROR: artifacts were produced but could not be uploaded" >&2
+      [ "$rc" -eq 0 ] && rc=1
+    fi
+    exit "$rc"
+  ' -- "$@"
 fi
 
 exec /opt/launcher/launch \
