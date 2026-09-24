@@ -526,6 +526,74 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     )(hidden_states_q, scale)
 
 
+def _as_axes(spec) -> tuple[str, ...]:
+    if spec is None:
+        return ()
+    return (spec, ) if isinstance(spec, str) else tuple(spec)
+
+
+def _two_step_dispatch_axes(
+        mesh: Mesh) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Axes for the two-step dispatch gather, or None if it does not apply.
+
+    Step 1 runs over the attention-data axes the tokens are sharded on (minus
+    the MLP-data axis, which stays sharded); step 2 over every remaining mesh
+    axis, i.e. the ones the hidden states are replicated across within an
+    attention-data rank. Axes of size 1 are dropped.
+    """
+    mlp = set(_as_axes(ShardingAxisName.MLP_DATA))
+    attn = [a for a in _as_axes(ShardingAxisName.ATTN_DATA) if a not in mlp]
+    step1 = tuple(a for a in attn if mesh.shape.get(a, 1) > 1)
+    step2 = tuple(a for a in mesh.axis_names
+                  if a not in mlp and a not in attn and mesh.shape[a] > 1)
+    if not step1 or not step2:
+        return None
+    return step1, step2
+
+
+def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
+                                    mesh: Mesh) -> jax.Array:
+    """Replicate attention-data-sharded hidden states in two gathers.
+
+    The routed experts need every token on every device. Left to itself XLA
+    inserts one all-gather over the attention-data axes, and every model shard
+    of a rank runs it on identical rows -- an M-fold redundant transfer. Here
+    each model shard gathers only its 1/M of the hidden columns over the
+    attention-data axes, and a second gather over the model axes restores the
+    full width. Column rather than row slices: the row order comes out exactly
+    as the one-step gather's, so routing needs no permutation, and H/M stays
+    lane-aligned where R/M need not be sublane-aligned.
+
+    Pure data movement: the result is bitwise identical to the one-step gather.
+    Falls back to returning the input unchanged (XLA then does the one-step
+    gather) when the mesh has no model axis to split over or H does not divide.
+    """
+    axes = _two_step_dispatch_axes(mesh)
+    hidden = hidden_states.shape[-1]
+    if axes is None:
+        return hidden_states
+    step1, step2 = axes
+    m_size = get_mesh_shape_product(mesh, step2)
+    if hidden % m_size:
+        return hidden_states
+    cols = hidden // m_size
+    mlp = ShardingAxisName.MLP_DATA
+
+    def _gather(x):
+        m = jax.lax.axis_index(step2)
+        part = jax.lax.dynamic_slice_in_dim(x, m * cols, cols, axis=1)
+        part = jax.lax.all_gather(part, step1, axis=0, tiled=True)
+        return jax.lax.all_gather(part, step2, axis=1, tiled=True)
+
+    return jax.shard_map(
+        _gather,
+        mesh=mesh,
+        in_specs=P(tuple(_as_axes(mlp)) + step1, None),
+        out_specs=P(mlp, None),
+        check_vma=False,
+    )(hidden_states)
+
+
 @jax.jit(static_argnames=(
     "topk",
     "renormalize",
@@ -719,6 +787,8 @@ def fused_moe_func(
 
     if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+    elif use_ep and envs.MOE_TWO_STEP_DISPATCH:
+        hidden_states = _apply_two_step_dispatch_gather(hidden_states, mesh)
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,

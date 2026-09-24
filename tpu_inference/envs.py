@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     HASH_TABLE_ROW_MAJOR: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    MOE_TWO_STEP_DISPATCH: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -527,6 +528,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is interleaved per rank and a single valid-token count cannot describe it.
     "MOE_ROUTE_PADDING_TO_EXPERT0":
     env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    # Replace the MoE dispatch all-gather over the attention-data axes with a
+    # two-step gather: each model shard gathers 1/M of the hidden columns over
+    # the attention-data axes, then the model axes reassemble them. Removes the
+    # M-fold redundancy of every model shard gathering identical rows, and puts
+    # part of the traffic on the intra-chip link. See fused_moe_gmm.py.
+    "MOE_TWO_STEP_DISPATCH":
+    env_bool("MOE_TWO_STEP_DISPATCH", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
