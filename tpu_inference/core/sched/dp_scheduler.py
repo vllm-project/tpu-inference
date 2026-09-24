@@ -30,6 +30,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 import cloudpickle
 import numpy as np
 import torch
+from vllm import envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.distributed.aux_output_connector.connector import \
     AuxOutputConnectorMetadata
@@ -505,6 +506,7 @@ class DPScheduler(SchedulerInterface):
         self._routing_policy = self.RoutingPolicy(
             envs.DP_SCHED_ROUTING.lower())
         self._round_robin_next_rank: int = 0
+        self._last_dp_balance_log_time: float = 0.0
 
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
@@ -1113,6 +1115,51 @@ class DPScheduler(SchedulerInterface):
             num_output_tokens=combined_num_output_tokens,
         )
 
+    def _log_dp_rank_balance(
+        self,
+        rank_stats_list: List[Optional[SchedulerStats]],
+        total_running_reqs: int,
+        total_waiting_reqs: int,
+    ) -> None:
+        """Log per-rank request distribution and KV cache usage to detect DP imbalance."""
+        if self.dp_size <= 1 or not self.log_stats:
+            return
+
+        now = time()
+        interval = getattr(vllm_envs, "VLLM_LOG_STATS_INTERVAL", 10.0)
+        if now - self._last_dp_balance_log_time < interval:
+            return
+
+        self._last_dp_balance_log_time = now
+
+        rank_running = [
+            rs.num_running_reqs if rs is not None else 0
+            for rs in rank_stats_list
+        ]
+        rank_waiting = [
+            rs.num_waiting_reqs if rs is not None else 0
+            for rs in rank_stats_list
+        ]
+        rank_kv = [
+            rs.kv_cache_usage if rs is not None else 0.0
+            for rs in rank_stats_list
+        ]
+        kv_str = ", ".join(f"{u * 100:.1f}%" for u in rank_kv)
+
+        log_fn = (logger.info if (total_running_reqs > 0
+                                  or total_waiting_reqs > 0) else logger.debug)
+        log_fn(
+            "[DP Rank Balance] Running: %s (total=%d, min=%d, max=%d) | "
+            "Waiting: %s (total=%d) | KV: [%s]",
+            rank_running,
+            total_running_reqs,
+            min(rank_running) if rank_running else 0,
+            max(rank_running) if rank_running else 0,
+            rank_waiting,
+            total_waiting_reqs,
+            kv_str,
+        )
+
     def _combine_scheduler_stats(
         self,
         rank_stats_list: List[Optional[SchedulerStats]],
@@ -1189,6 +1236,9 @@ class DPScheduler(SchedulerInterface):
         num_ranks = len(rank_stats_list)
         avg_kv_cache_usage = (total_kv_cache_usage /
                               num_ranks if num_ranks else 0.0)
+
+        self._log_dp_rank_balance(rank_stats_list, total_running_reqs,
+                                  total_waiting_reqs)
 
         return SchedulerStats(
             num_running_reqs=total_running_reqs,
@@ -1548,8 +1598,10 @@ class DPScheduler(SchedulerInterface):
             self._send_command(rank, SchedulerCommand.MAKE_STATS,
                                (spec_decoding_stats, kv_connector_stats))
 
+        rank_stats_list = []
         for rank in range(self.dp_size):
             rank_stats = self._get_result(rank, SchedulerCommand.MAKE_STATS)
+            rank_stats_list.append(rank_stats)
             if rank_stats is None:
                 continue
 
@@ -1575,6 +1627,9 @@ class DPScheduler(SchedulerInterface):
 
         # Average KV cache usage across ranks
         avg_kv_cache_usage = total_kv_cache_usage / self.dp_size if self.dp_size else 0.0
+
+        self._log_dp_rank_balance(rank_stats_list, total_running_reqs,
+                                  total_waiting_reqs)
 
         return SchedulerStats(
             num_running_reqs=total_running_reqs,
