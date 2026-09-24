@@ -16,9 +16,7 @@ bin/cleanup.sh my-run
 ```
 
 > 📖 **Cluster reference**: everything here runs on the shared GKE TPU v7x cluster
-> (`bodaborg-tpu7x-nap` in project `cloud-tpu-shared-capacity`, region `us-central1`), as
-> documented in the
-> [TPU v7x Shared Cluster User Guide](https://docs.google.com/document/d/1qgrT8aW0MlPCcCqtQNlr7HqOn3wpv9BaFGFr0H7ynbU/).
+> (`bodaborg-tpu7x-nap` in project `cloud-tpu-shared-capacity`, region `us-central1`).
 
 ---
 
