@@ -518,6 +518,13 @@ def maybe_create_mm_encoder_jit_manager(
         return None
     if not supports_encoder_cudagraph(vllm_model):
         return None
+    if vllm_model.get_encoder_cudagraph_config().capture_axes:
+        # Budget templates are keyed by token budget alone, so per-axis
+        # shapes would replay the wrong template.
+        logger.warning(
+            "MM encoder JIT does not support encoder capture axes yet; "
+            "running the vision encoder eagerly.")
+        return None
     return MMEncoderJITManager(
         vllm_config=vllm_config,
         vllm_runner=vllm_runner,
