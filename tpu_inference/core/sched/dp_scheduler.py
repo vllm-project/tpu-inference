@@ -31,6 +31,8 @@ import cloudpickle
 import numpy as np
 import torch
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.connector import \
+    AuxOutputConnectorMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
@@ -40,8 +42,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, ModelRunnerOutput,
-                             RoutedExpertsLists)
+from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1022,6 +1023,9 @@ class DPScheduler(SchedulerInterface):
                     combined_kv_connector_metadata.reqs_to_load.update(
                         meta.reqs_to_load)
 
+        combined_aux_output_metadata = self._combine_aux_output_metadata(
+            rank_outputs)
+
         has_structured_output_requests = any(
             getattr(o, "has_structured_output_requests", False)
             for o in rank_outputs)
@@ -1043,8 +1047,37 @@ class DPScheduler(SchedulerInterface):
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
             kv_connector_metadata=combined_kv_connector_metadata,
+            aux_output_connector_metadata=combined_aux_output_metadata,
             has_structured_output_requests=has_structured_output_requests,
             pending_structured_output_tokens=pending_structured_output_tokens,
+        )
+
+    @staticmethod
+    def _combine_aux_output_metadata(
+        rank_outputs: List[SchedulerOutput]
+    ) -> Optional[AuxOutputConnectorMetadata]:
+        metas = [
+            o.aux_output_connector_metadata for o in rank_outputs
+            if o.aux_output_connector_metadata is not None
+        ]
+        if not metas:
+            return None
+        # Request IDs are unique across ranks; every rank resets its
+        # generation together on a prefix-cache reset.
+        return AuxOutputConnectorMetadata(
+            generation=max(m.generation for m in metas),
+            requests={
+                rid: start
+                for m in metas
+                for rid, start in m.requests.items()
+            },
+            block_hashes={
+                rid: hashes
+                for m in metas
+                for rid, hashes in m.block_hashes.items()
+            },
+            finished_requests=tuple(rid for m in metas
+                                    for rid in m.finished_requests),
         )
 
     def _combine_cached_request_data(
@@ -1325,21 +1358,9 @@ class DPScheduler(SchedulerInterface):
             global_model_output: ModelRunnerOutput) -> List[ModelRunnerOutput]:
         """Split the model runner output by DP rank for individual scheduler updates."""
         g = global_model_output  # short alias
+        aux_output = g.aux_output_connector_output
 
         outputs = []
-
-        routed_experts = getattr(g, "routed_experts", None)
-        req_id_to_routed_experts_range = {}
-        if routed_experts is not None:
-            current_token_offset = 0
-            for req_id in g.req_ids:
-                num_tokens_scheduled = scheduler_output.num_scheduled_tokens[
-                    req_id]
-                start_idx = current_token_offset
-                end_idx = start_idx + num_tokens_scheduled
-                current_token_offset = end_idx
-                req_id_to_routed_experts_range[req_id] = (start_idx, end_idx)
-
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
@@ -1366,29 +1387,11 @@ class DPScheduler(SchedulerInterface):
                     for rid in req_ids if rid in g.num_nans_in_logits
                 } if g.num_nans_in_logits else None),
                 kv_connector_output=g.kv_connector_output,
+                aux_output_connector_output=(None if aux_output is None else {
+                    rid: aux_output[rid]
+                    for rid in req_ids if rid in aux_output
+                }),
             )
-
-            if routed_experts is not None:
-                rank_routing_data = []
-                rank_slot_mapping = []
-                for rid in req_ids:
-                    if rid in req_id_to_routed_experts_range:
-                        start_idx, end_idx = req_id_to_routed_experts_range[
-                            rid]
-                        rank_routing_data.append(routed_experts.routing_data[
-                            start_idx:end_idx, :, :])
-                        rank_slot_mapping.append(
-                            routed_experts.slot_mapping[start_idx:end_idx])
-
-                if rank_routing_data:
-                    rank_model_runner_output.routed_experts = RoutedExpertsLists(
-                        routing_data=np.concatenate(rank_routing_data, axis=0),
-                        slot_mapping=np.concatenate(rank_slot_mapping, axis=0))
-                else:
-                    rank_model_runner_output.routed_experts = None
-            else:
-                rank_model_runner_output.routed_experts = None
-
             outputs.append(rank_model_runner_output)
 
         return outputs
