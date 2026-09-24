@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,58 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #45: #44 with one change -- COMPILATION_SIZES=384, i.e. an extra
+        # aggregate token bucket of 384 (48 per attn_dp rank).
+        #
+        # WHY. #44's decode steps carry 368 real tokens, 46 per rank, but the
+        # default buckets are powers of two, so each rank pads 46 -> 64 and the
+        # batch runs at 512 rows: 144 of them padding (28%). #44's profile shows
+        # every routed-expert op sized for 512:
+        #
+        #   dispatch all-gather   bf16[64,8192] -> [512,8192]   92 x 182 us  16.8 ms/step
+        #   combine reduce-scatter bf16[512,8192] -> [64,8192]  92 x 268 us  24.7 ms/step
+        #   routed matmuls        m = 5120 (512 x top-10)                    21.2 ms/step
+        #
+        # of a 108.7 ms step. The padding is not neutralized: the route-padding-
+        # to-expert-0 option is disabled under attn_dp (interface/moe.py:143),
+        # so padding rows are routed and multiplied like real tokens.
+        #
+        # With a 384 bucket each rank pads 46 -> 48, total 384 rows, 16 padding
+        # (4%). 48 rather than an exact 46 because the per-rank minimum is tied
+        # to fp8 KV packing (4) and 46 is not a multiple of it; 48 is a multiple
+        # of both 4 and 16. Verified offline with build_token_paddings:
+        #   aggregate [32, 64, 128, 256, 384, 512, 1024, 2048, 4096]
+        #   per rank  [4, 8, 16, 32, 48, 64, 128, 256, 512]
+        #
+        # EXPECTED, from #43 (256 rows) vs #44 (512 rows) on this mesh: the
+        # all-gather scales ~0.36 us/row, the routed matmuls weakly, the
+        # reduce-scatter weakly. Estimated saving ~7-8 ms/step (~7%), i.e.
+        # median ITL ~106 ms against #44's 113.7. That is an estimate from two
+        # points; this build measures it.
+        #
+        # serve.sh gained COMPILATION_SIZES to carry this: it is appended to
+        # the single --additional-config JSON, because a second
+        # --additional-config would replace the sharding config.
+        #
+        # Everything else is #44: tp=4 x attn_dp=8, C=368, util 0.98, MNBT
+        # 512/rank, pool 27232, same decode-profile target (decode_only,
+        # concurrency 368, min_kv_len >= 8250, 5 steps). Memory is unaffected:
+        # the new bucket is smaller than the 512 and 4096 buckets already
+        # compiled, and the KV cache sizing does not depend on buckets.
+        #
+        # WHAT TO READ FIRST:
+        #   1. "[serve] additional-config:" shows compilation_sizes [384], and
+        #      "Prepared token paddings" includes 384.
+        #   2. The capture's batch_composition_stats shows
+        #      padded_total_num_scheduled_tokens 384 (was 512), num_reqs 368,
+        #      num_prefill_tokens 0.
+        #   3. In the profile: all-gather bf16[48,8192] -> [384,8192], and the
+        #      routed matmul at m=3840.
+        #   4. Step time and median ITL against #44 (108.7 ms / 113.7 ms).
+        #   5. GSM8K / MMLU unchanged.
+        #
+        # ---- #44's rationale, still in force, follows ----
+        #
         # #44: #43 at concurrency 368, enabled by gpu_memory_utilization 0.98.
         # Same mesh (tp=4 x attn_dp=8, ep 32), same decode-profile target.
         #
@@ -247,6 +299,7 @@ steps:
           'MAX_NUM_SEQS=46' \
           'NUM_GPU_BLOCKS_OVERRIDE=27232' \
           'MAX_NUM_BATCHED_TOKENS=512' \
+          'COMPILATION_SIZES=384' \
           'GPU_MEMORY_UTILIZATION=0.98' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \

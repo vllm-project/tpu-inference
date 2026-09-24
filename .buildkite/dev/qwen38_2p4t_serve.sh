@@ -350,6 +350,20 @@ fi
 # would pick attn_dp=4 / model=8, which doubles the replication of the 80 GB of
 # attention+GDN projection weights for no KV-cache benefit that the extra
 # batch-split does not already provide.
+#
+# COMPILATION_SIZES: extra aggregate token buckets, comma-separated, passed as
+# additional_config.compilation_sizes (tpu_runner.py). The default buckets are
+# powers of two, so a decode batch that is not one pads up to the next --
+# 368 concurrent over attn_dp=8 is 46 per rank, padded to 64, and 28% of every
+# per-rank op and every MoE collective is then padding. 384 adds a 48-per-rank
+# bucket. It has to go into this one JSON: a second --additional-config would
+# replace the sharding config above rather than merge with it.
+ADDITIONAL_CONFIG="{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true, \"attn_dp_size\": ${ATTN_DP}}}"
+if [ -n "${COMPILATION_SIZES:-}" ]; then
+  ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG}, \"compilation_sizes\": [${COMPILATION_SIZES}]"
+fi
+ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG}}"
+echo "[serve] additional-config: ${ADDITIONAL_CONFIG}"
 exec vllm serve "${MODEL_PATH}" \
   --served-model-name "${SERVED_NAME}" \
   --tokenizer "${TOKENIZER}" \
@@ -358,7 +372,7 @@ exec vllm serve "${MODEL_PATH}" \
   --seed 42 \
   --tensor-parallel-size "${TP}" \
   --enable-expert-parallel \
-  --additional-config "{\"sharding\": {\"sharding_strategy\": {\"enable_dp_attention\": true, \"attn_dp_size\": ${ATTN_DP}}}}" \
+  --additional-config "${ADDITIONAL_CONFIG}" \
   --max-model-len "${MAX_MODEL_LEN}" \
   --max-num-seqs "${MAX_NUM_SEQS}" \
   --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
