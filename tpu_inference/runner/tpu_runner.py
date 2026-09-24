@@ -242,8 +242,7 @@ def _process_continue_decode_outputs(
 
     all_expert_indices_cpu = None
     if expert_indices is not None:
-        all_expert_indices_cpu = common_utils.safe_device_get(
-            expert_indices)
+        all_expert_indices_cpu = common_utils.safe_device_get(expert_indices)
 
     lp_token_ids_cpu = None
     lp_vals_cpu = None

@@ -85,7 +85,10 @@ def _leaf_device_get(leaf: Any) -> Any:
     if getattr(leaf, "is_fully_addressable", False):
         return np.asarray(jax.device_get(leaf))
     if getattr(leaf, "is_fully_replicated", False):
-        return np.asarray(leaf.addressable_shards[0].data)
+        if leaf.addressable_shards:
+            return np.asarray(leaf.addressable_shards[0].data)
+        return np.asarray(multihost_utils.process_allgather(leaf,
+                                                            tiled=False))[0]
     return np.asarray(multihost_utils.process_allgather(leaf, tiled=True))
 
 
