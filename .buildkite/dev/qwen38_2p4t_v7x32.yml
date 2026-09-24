@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,78 +145,75 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # #43: retake #42's decode profile, this time pinned to the actual
-        # 176-wide saturation plateau. Serve config is #42's, unchanged.
+        # #44: #43 at concurrency 368, enabled by gpu_memory_utilization 0.98.
+        # Same mesh (tp=4 x attn_dp=8, ep 32), same decode-profile target.
         #
-        # WHY #42's PROFILE MISSED. It used
-        # DECODE_ONLY_KV_LEN_THRESHOLD=8704 -- "halfway through generation" --
-        # and captured 120-128 requests instead of 176, during the DRAIN.
-        # min_kv_len is the MINIMUM over the batch, i.e. the least-advanced
-        # request. Admission was spread over ~150 s while one request's whole
-        # decode is ~88 s, so by the time the straggler reached 8704 the
-        # earliest requests had finished and left. The condition can only be
-        # met after the batch starts shrinking.
+        # WHY 368 FITS NOW. After #41 I reported a ~7.6 GiB/device "activation
+        # reserve" and concluded 368 was unreachable. That was wrong. vLLM's
+        # available KV cache memory is just
+        #     HBM limit x gpu_memory_utilization - HBM used      (tpu_worker.py:512)
+        # with no activation profiling, so the 7.6 GiB was the unused 8% at
+        # 0.92 (0.08 x 94.74 = 7.58). Raising the setting gives more of that
+        # to the KV cache and leaves less for activation memory. Physical HBM
+        # does not change: 13.15 GiB/device after weights on this mesh.
         #
-        # The plateau we wanted is visible in #42's own server log:
+        #   util  available KV   max C   KV cache   left for activations
+        #   0.92      5.57        176      5.43          7.72
+        #   0.98     11.26        368     11.21          1.95   <- this build
         #
-        #   08:30:58  prompt 12287  gen 1027  Running 176  Waiting 0  prefilling
-        #   08:31:08  prompt     0  gen 2059  Running 176  Waiting 0  <- want this
-        #   08:31:18  prompt     0  gen 2042  Running 176  Waiting 0  <- and this
-        #   08:31:28  prompt     0  gen 1984  Running 160  Waiting 0  draining
+        # Cluster-wide, the request #41 was REJECTED for -- 27232 blocks +
+        # 376 mamba slots = 358.57 GiB -- now fits: 0.98 x 3031.62 - 2610.80
+        # = 360.19 GiB available, margin +1.62.
         #
-        # There the straggler had only just finished prefill, so min_kv_len was
-        # ~8290-8480. A LOWER threshold catches the full batch; 8704 was above
-        # the window entirely.
+        # MAX_NUM_BATCHED_TOKENS 256 -> 512/rank, AND THIS IS REQUIRED.
+        # A pure-decode plateau at full width only exists if every request is
+        # admitted before the first one finishes. Step-count model: each step
+        # spends one token per decoding request and the rest of the aggregate
+        # budget A on prefill, so admitting C x 8192 prompt tokens takes about
+        # C x 8192 / (A - C/2) steps, against 1024 steps to finish a request.
         #
-        # WHAT CHANGED. Three profiler knobs, and a small code change to make
-        # one of them usable:
+        #   C    MNBT/rank  aggregate  prefill steps  plateau steps
+        #   176     256       2048          736            288   (#42/#43)
+        #   368     256       2048         1617              0   <- no plateau
+        #   368     512       4096          771            253   <- this build
         #
+        # Validated against #42: predicted 288 steps, observed ~25 s at 86 ms.
+        # At 256 the first requests would finish before the last are admitted,
+        # the batch would never reach 368, and the profiler would never fire.
+        #
+        # ACTIVATION MEMORY IS THE RISK. #42 measured backbone temp 0.629 GiB at
+        # aggregate 1024 and 0.903 at 2048 (~0.27 per 1024 tokens), so ~1.45 at
+        # 4096, a little more for 368 requests instead of 176: call it ~1.5
+        # against 1.95 left. Every other compiled program is far smaller
+        # (sampler 0.10, prompt logprobs 0.04) and they run sequentially. Peak
+        # resident would be ~94.3 of 94.74, beyond anything run so far (#29
+        # peaked ~92.0). If it does not fit it fails in precompile, loudly.
+        # Fallback: C=360 (45 seqs/rank) frees ~0.24 GiB/device.
+        #
+        # PROFILE, same recipe as #43 with the target moved:
         #   PHASED_PROFILER_TRACK_CONCURRENCY=1
-        #     keys each capture on (phase, num_reqs) instead of phase alone, so
-        #     batch width can be targeted directly rather than inferred.
-        #   PHASED_PROFILER_TARGET_CONCURRENCY=176   (NEW)
-        #   PHASED_PROFILER_ONLY_PHASES=decode_only  (NEW)
-        #     Both default off. They exist because track_concurrency alone is
-        #     UNBOUNDED: with it set, should_profile is true for the whole run
-        #     (runner/utils.py:901), so every concurrency the ramp passes
-        #     through gets its own 5-step trace -- of order a thousand captures,
-        #     hundreds of GB, and a start/stop every 5 steps. With both filters
-        #     the run produces exactly ONE capture.
+        #   PHASED_PROFILER_TARGET_CONCURRENCY=368       (branch-only flag)
+        #   PHASED_PROFILER_ONLY_PHASES=decode_only      (branch-only flag)
         #   PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250
-        #     Now a floor rather than the targeting mechanism. 8192 is "prompt
-        #     done, nothing generated", so 8250 fires ~58 steps into a plateau
-        #     that lasted ~290 steps in #42. Far enough in to skip the
-        #     prefill-to-decode transition, far short of the end.
+        #   PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5
+        # 8250 is ~58 steps into a ~253-step plateau. The two branch-only flags
+        # are e0a11010b; without them TRACK_CONCURRENCY is unbounded.
         #
-        # num_reqs is the global count across DP ranks, not per-rank -- #42's
-        # capture read 128 while Running was 144->120, and max_num_seqs is 22.
-        # So TARGET_CONCURRENCY=176 is the right comparison.
+        # Sizing: MAX_NUM_SEQS 46/rank x 8 = 368, NUM_GPU_BLOCKS_OVERRIDE
+        # 27232 = 368 x 74 (kv-fit needs 72), mamba slots 8 x 47 = 376. One wave,
+        # BENCH_SWEEP=368:368. Everything else is #43's.
         #
-        # EXPECT: one directory, profiles/decode_only_concur_176/, roughly
-        # 550 MiB for 5 steps at 8 chips (#42's decode_only was 551 MiB). The
-        # other five phases are no longer captured at all, so total profile
-        # output drops from ~4.7 GiB to ~0.6 GiB. PROFILE_SINGLE_DEVICE is
-        # deliberately NOT set: all 8 chips per host are kept so collectives
-        # are visible, and parity with #42 is preserved for comparison.
-        #
-        # It may well fire during the client's 176 warmups rather than the
-        # timed leg. That is fine and slightly preferable -- identical shape,
-        # and it keeps tracing overhead out of the measured numbers.
-        #
-        # VERIFY BEFORE TRUSTING THE TRACE -- read the batch_composition_stats
-        # json next to it and confirm all five steps have phase DECODE_ONLY,
-        # num_prefill_tokens 0, num_reqs 176, and min_kv_len advancing by 1.
-        #
-        # Serve config, unchanged from #42 and NOT to be retuned here: tp=4 x
-        # attn_dp=8, ep 32, C=176 (22 seqs/rank, the max the KV gate allows),
-        # pool 13024, 184 mamba slots, MNBT=256/rank. #42 measured Init
-        # kv-cache 87.12 against 87.00 predicted, GSM8K 0.9788, MMLU 0.8943,
-        # median ITL 85.97 ms, 0 preemptions.
-        #
-        # MNBT stays 256 even though it is what stretched the ramp: it is the
-        # shape under which the KV gate's 178.29 GiB available figure was
-        # measured, and C=176 already uses 173.77 of it. Raising it raises the
-        # activation reserve and would likely push the gate to reject.
+        # WHAT TO READ FIRST:
+        #   1. The KV cache check passes (#41 died there). Memory statistics
+        #      should show total_hbm_avail_gb=360.19. Init kv-cache ~92.8 of
+        #      94.74 per device.
+        #   2. Precompile completes, in particular the 4096-token backbone
+        #      bucket. Its logged temp is the number the margin rests on.
+        #   3. Exactly one "Starting profiling for decode_only_concur_368
+        #      phase" with a utils.py prefix. Its batch composition must show
+        #      num_reqs 368 and num_prefill_tokens 0.
+        #   4. GSM8K ~0.979, MMLU ~0.894.
+        #   5. Plateau generation throughput at Running=368, prompt=0.
 
         # Container environment for the head *and* all three workers. Env vars
         # inlined into the serve command would only reach the head process;
@@ -247,23 +244,23 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=8' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=22' \
-          'NUM_GPU_BLOCKS_OVERRIDE=13024' \
-          'MAX_NUM_BATCHED_TOKENS=256' \
-          'GPU_MEMORY_UTILIZATION=0.92' \
+          'MAX_NUM_SEQS=46' \
+          'NUM_GPU_BLOCKS_OVERRIDE=27232' \
+          'MAX_NUM_BATCHED_TOKENS=512' \
+          'GPU_MEMORY_UTILIZATION=0.98' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=176' \
-          'MAX_CONCURRENCY=176' \
-          'BENCH_SWEEP=176:176' \
-          'NUM_WARMUPS=176' \
+          'NUM_PROMPTS=368' \
+          'MAX_CONCURRENCY=368' \
+          'BENCH_SWEEP=368:368' \
+          'NUM_WARMUPS=368' \
           'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
           'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
           'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
           'PHASED_PROFILER_TRACK_CONCURRENCY=1' \
-          'PHASED_PROFILER_TARGET_CONCURRENCY=176' \
+          'PHASED_PROFILER_TARGET_CONCURRENCY=368' \
           'PHASED_PROFILER_ONLY_PHASES=decode_only' \
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gsm8k,mmlu' \
