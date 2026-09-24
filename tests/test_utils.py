@@ -486,3 +486,19 @@ def test_safe_device_get_maps_over_pytree():
     assert set(out_dict) == {"x", "y"}
     np.testing.assert_array_equal(out_dict["x"], np.arange(3, dtype=np.int32))
     np.testing.assert_array_equal(out_dict["y"], np.arange(2, dtype=np.int32))
+
+
+def test_safe_device_get_replicated_on_submesh_without_local_shards():
+    """Replicated on a sub-mesh where a host has no local shards falls back to process_allgather."""
+    expected = np.array([7, 8, 9], dtype=np.int32)
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = []
+    fake_arr.is_fully_addressable = False
+    fake_arr.is_fully_replicated = True
+
+    with patch("tpu_inference.utils.multihost_utils.process_allgather",
+               return_value=np.stack([expected, expected])) as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_allgather.assert_called_once_with(fake_arr, tiled=False)
+    np.testing.assert_array_equal(result, expected)
