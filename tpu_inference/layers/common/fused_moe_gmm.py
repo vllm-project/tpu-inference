@@ -16,6 +16,7 @@ import functools
 from typing import Literal
 
 import jax
+import numpy as np
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -532,23 +533,45 @@ def _as_axes(spec) -> tuple[str, ...]:
     return (spec, ) if isinstance(spec, str) else tuple(spec)
 
 
-def _two_step_dispatch_axes(
-        mesh: Mesh) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
-    """Axes for the two-step dispatch gather, or None if it does not apply.
+def _two_step_dispatch_plan(mesh: Mesh):
+    """Plan for the two-step dispatch gather, or None if it does not apply.
 
-    Step 1 runs over the attention-data axes the tokens are sharded on (minus
-    the MLP-data axis, which stays sharded); step 2 over every remaining mesh
-    axis, i.e. the ones the hidden states are replicated across within an
-    attention-data rank. Axes of size 1 are dropped.
+    Returns (step1_axes, pair_axis, pair_perm). Step 1 gathers over the
+    attention-data axes the tokens are sharded on (minus the MLP-data axis,
+    which stays sharded). Step 2 swaps halves between the two cores of each
+    chip along `pair_axis`, the single remaining axis the hidden states are
+    replicated across.
+
+    Applies only when that axis pairs up the two cores of every chip at
+    adjacent indices (2k, 2k+1), consistently across all attention-data ranks.
+    That is how mesh_utils.create_device_mesh lays out v7x meshes, but it is
+    checked here from the devices' coords/core_on_chip rather than assumed.
     """
     mlp = set(_as_axes(ShardingAxisName.MLP_DATA))
     attn = [a for a in _as_axes(ShardingAxisName.ATTN_DATA) if a not in mlp]
     step1 = tuple(a for a in attn if mesh.shape.get(a, 1) > 1)
-    step2 = tuple(a for a in mesh.axis_names
-                  if a not in mlp and a not in attn and mesh.shape[a] > 1)
-    if not step1 or not step2:
+    rest = [
+        a for a in mesh.axis_names
+        if a not in mlp and a not in attn and mesh.shape[a] > 1
+    ]
+    if not step1 or len(rest) != 1:
         return None
-    return step1, step2
+    pair_axis = rest[0]
+    size = mesh.shape[pair_axis]
+    if size % 2:
+        return None
+    devs = np.moveaxis(np.asarray(mesh.devices),
+                       mesh.axis_names.index(pair_axis), -1).reshape(-1, size)
+    for row in devs:
+        for k in range(0, size, 2):
+            a, b = row[k], row[k + 1]
+            ca, cb = getattr(a, "coords", None), getattr(b, "coords", None)
+            if (ca is None or cb is None or list(ca) != list(cb)
+                    or getattr(a, "core_on_chip", None) == getattr(
+                        b, "core_on_chip", None)):
+                return None
+    perm = [(k + d, k + 1 - d) for k in range(0, size, 2) for d in (0, 1)]
+    return step1, pair_axis, perm
 
 
 def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
@@ -556,34 +579,40 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
     """Replicate attention-data-sharded hidden states in two gathers.
 
     The routed experts need every token on every device. Left to itself XLA
-    inserts one all-gather over the attention-data axes, and every model shard
-    of a rank runs it on identical rows -- an M-fold redundant transfer. Here
-    each model shard gathers only its 1/M of the hidden columns over the
-    attention-data axes, and a second gather over the model axes restores the
-    full width. Column rather than row slices: the row order comes out exactly
-    as the one-step gather's, so routing needs no permutation, and H/M stays
-    lane-aligned where R/M need not be sublane-aligned.
+    inserts one all-gather over the attention-data axes, which every model
+    shard of a rank runs on identical rows, and which never touches the
+    intra-chip link because a chip's two cores both sit on the model axis.
+
+    Here the two cores of a chip split the work: each gathers half of the
+    hidden columns over the attention-data axes, then they swap halves with a
+    ppermute, which stays on the chip. Cross-chip traffic halves; the second
+    step costs ~9 us at 384 rows on v7x against ~56 us for a 4-way gather over
+    the model axis (see the TODO in the experiments folder). Column halves keep
+    the row order identical to the one-step gather, so routing is unaffected.
 
     Pure data movement: the result is bitwise identical to the one-step gather.
-    Falls back to returning the input unchanged (XLA then does the one-step
-    gather) when the mesh has no model axis to split over or H does not divide.
+    Returns the input unchanged -- XLA then does the one-step gather -- when the
+    mesh does not have the expected core pairing or H is odd.
     """
-    axes = _two_step_dispatch_axes(mesh)
+    plan = _two_step_dispatch_plan(mesh)
     hidden = hidden_states.shape[-1]
-    if axes is None:
+    if plan is None or hidden % 2:
         return hidden_states
-    step1, step2 = axes
-    m_size = get_mesh_shape_product(mesh, step2)
-    if hidden % m_size:
-        return hidden_states
-    cols = hidden // m_size
+    step1, pair_axis, perm = plan
+    half = hidden // 2
     mlp = ShardingAxisName.MLP_DATA
 
     def _gather(x):
-        m = jax.lax.axis_index(step2)
-        part = jax.lax.dynamic_slice_in_dim(x, m * cols, cols, axis=1)
-        part = jax.lax.all_gather(part, step1, axis=0, tiled=True)
-        return jax.lax.all_gather(part, step2, axis=1, tiled=True)
+        core = jax.lax.axis_index(pair_axis) % 2
+        mine = jax.lax.dynamic_slice_in_dim(x, core * half, half, axis=1)
+        mine = jax.lax.all_gather(mine, step1, axis=0, tiled=True)
+        theirs = jax.lax.ppermute(mine, pair_axis, perm)
+        first = core == 0
+        return jnp.concatenate([
+            jnp.where(first, mine, theirs),
+            jnp.where(first, theirs, mine),
+        ],
+                               axis=1)
 
     return jax.shard_map(
         _gather,

@@ -529,10 +529,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOE_ROUTE_PADDING_TO_EXPERT0":
     env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
     # Replace the MoE dispatch all-gather over the attention-data axes with a
-    # two-step gather: each model shard gathers 1/M of the hidden columns over
-    # the attention-data axes, then the model axes reassemble them. Removes the
-    # M-fold redundancy of every model shard gathering identical rows, and puts
-    # part of the traffic on the intra-chip link. See fused_moe_gmm.py.
+    # two-step gather: the two cores of each chip each gather half the hidden
+    # columns over the attention-data axes, then swap halves on-chip. Halves
+    # the cross-chip traffic. Applies only when the model axis pairs a chip's
+    # two cores at adjacent indices; otherwise the one-step gather is kept.
+    # See fused_moe_gmm.py.
     "MOE_TWO_STEP_DISPATCH":
     env_bool("MOE_TWO_STEP_DISPATCH", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
