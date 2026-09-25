@@ -1,0 +1,145 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{/*
+================================================================================
+Image Builder Job (Helm pre-install hook)
+================================================================================
+Builds and pushes the target vLLM TPU image BEFORE the JobSet is created.
+
+Why this is a hook and not a replicatedJob inside jobset.yaml
+------------------------------------------------------------
+A JobSet is admitted by Kueue as a single Workload. Every replicatedJob's podSet
+receives a ResourceFlavor assignment and TAS node assignments at admission time,
+even though `startupPolicy: InOrder` means only one of them actually runs at a
+time. Consequently a build that lives inside the JobSet:
+
+  * holds the TPU quota of every other step for the entire build, and
+  * is evicted whenever any of those pre-assigned TPU nodes goes unhealthy,
+    which discards the whole build and starts over.
+
+Both failure modes were observed in practice. Running the build as a pre-install
+hook means Helm blocks until the build finishes and only then applies the rest of
+the chart, so no TPU Workload exists at all while the image is being built.
+
+Scheduling
+----------
+This Job must NOT request google.com/tpu. Kueue then assigns it the `cpu-user`
+ResourceFlavor, which already carries the nodeSelector and toleration for the
+`cpu-np` node pool, so no manual nodeSelector/toleration is needed here.
+The `check-capacity-prov` AdmissionCheck only applies to `tpu7x-flavor`, so this
+Job is not gated on a ProvisioningRequest either.
+
+Registry credentials
+--------------------
+Every node pool in this cluster runs with `GKE_METADATA`, i.e. Workload Identity.
+The metadata server therefore hands out the *Kubernetes* service account's
+federated identity, NOT the node service account. The build must run under the
+same service account as the JobSet pods (`.Values.serviceAccount`, annotated with
+the GSA that can read and write the target repository); running as the namespace
+default service account yields
+`Permission 'artifactregistry.repositories.downloadArtifacts' denied`, which the
+script would silently interpret as "image missing" and rebuild from scratch, only
+to fail on the final push.
+
+Lifecycle
+---------
+`hook-delete-policy` is deliberately `before-hook-creation` only: a FAILED build
+Job is left behind so its logs can be inspected, and is replaced on the next
+install. Note that Helm does not track hook resources in the release manifest, so
+`helm uninstall` will not remove this Job.
+*/}}
+{{- if and .Values.builder .Values.builder.enabled }}
+{{- $builder := .Values.builder }}
+{{- $cache := $builder.cache | default dict }}
+{{- $cacheEnabled := ne ($cache.enabled | toString) "false" }}
+{{- $res := $builder.resources | default dict }}
+{{- $req := $res.requests | default dict }}
+{{- $lim := $res.limits | default dict }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "tpu-testcase.fullname" . }}-image-builder
+  namespace: {{ .Release.Namespace | default "default" }}
+  labels:
+    app.kubernetes.io/component: image-builder
+    # Kueue defaults Jobs without this label to the LocalQueue named "default",
+    # but the cluster runs with manageJobsWithoutQueueName=true, so being
+    # explicit avoids relying on that defaulting behaviour.
+    kueue.x-k8s.io/queue-name: {{ $builder.queueName | default "default" }}
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: {{ $builder.backoffLimit | default 2 }}
+  # Counts only time spent running: Kubernetes resets .status.startTime when a
+  # suspended Job is resumed, so queueing in Kueue does not burn this budget.
+  activeDeadlineSeconds: {{ $builder.activeDeadlineSeconds | default 4800 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: image-builder
+    spec:
+      restartPolicy: Never
+      # Must match the JobSet pods: Workload Identity derives the registry
+      # credentials from this service account, not from the node.
+      serviceAccountName: {{ $builder.serviceAccountName | default .Values.serviceAccount | default "default" }}
+      containers:
+      - name: image-builder
+        image: {{ $builder.image | default "docker:dind" }}
+        securityContext:
+          # Required by dockerd (docker-in-docker).
+          privileged: true
+        env:
+        - name: DOCKER_TLS_CERTDIR
+          value: ""
+        # Surfaced purely for diagnostics: a registry 403 is almost always a
+        # Workload Identity mapping problem, so the error message names the
+        # service account that was actually used.
+        - name: K8S_SERVICE_ACCOUNT
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.serviceAccountName
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          {{- include "tpu-testcase.imageBuilderScript" . | nindent 10 }}
+        resources:
+          requests:
+            cpu: {{ $req.cpu | default "8" | quote }}
+            memory: {{ $req.memory | default "32Gi" | quote }}
+          limits:
+            cpu: {{ $lim.cpu | default "32" | quote }}
+            memory: {{ $lim.memory | default "64Gi" | quote }}
+        volumeMounts:
+        - name: docker-cache
+          mountPath: /var/lib/docker
+      volumes:
+      - name: docker-cache
+      {{- if $cacheEnabled }}
+        # Shared across every release so that image layers and the BuildKit pip
+        # cache survive between runs. The claim is NOT managed by this chart (a
+        # Helm hook resource would be deleted and recreated on every install,
+        # wiping the cache); run_testcase.sh creates it on demand from
+        # extras/build-cache-pvc.yaml.
+        persistentVolumeClaim:
+          claimName: {{ $cache.claimName | default "vllm-build-cache" }}
+      {{- else }}
+        # Fallback when the shared volume is unavailable. Beware: cpu-np nodes
+        # only have ~43.8 GiB of allocatable ephemeral storage, which a cold
+        # build can exhaust.
+        emptyDir: {}
+      {{- end }}
+{{- end }}

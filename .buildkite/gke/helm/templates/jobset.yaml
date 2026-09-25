@@ -1,0 +1,164 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+{{ $fullName := include "tpu-testcase.fullname" . -}}
+{{- $namespace := .Release.Namespace | default "default" }}
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $namespace }}
+  labels:
+    kueue.x-k8s.io/priority-class: {{ .Values.job.priorityClass | default "medium" }}
+spec:
+  network:
+    enableDNSHostnames: true
+    publishNotReadyAddresses: true
+
+  # Every step has to succeed for the run to count as a pass.
+  successPolicy:
+    operator: All
+    targetReplicatedJobs:
+    {{- range .Values.scriptJobs }}
+    - {{ .name }}
+    {{- end }}
+
+  # Steps run one after another, and the first failure stops the rest so that no
+  # TPU time is spent on steps whose prerequisite already failed.
+  startupPolicy:
+    startupPolicyOrder: InOrder
+  failurePolicy:
+    rules:
+    - action: FailJobSet
+
+  replicatedJobs:
+
+  {{- $root := . -}}
+  {{- range $job := .Values.scriptJobs }}
+  {{- $jobName := $job.name -}}
+  {{- $jobTopo := ($job.tpu | default dict).topology | default $root.Values.tpu.topology | default "1x2x1" -}}
+  {{- $jobAccelerator := ($job.tpu | default dict).accelerator | default $root.Values.tpu.accelerator | default "tpu7x" -}}
+  {{- $chips := include "tpu-testcase.chipsPerVm" $jobTopo | int -}}
+  {{- $tpuLimit := (($job.resources | default dict).tpu | default $root.Values.resources.tpu) | default $chips -}}
+  {{- $cpuLimit := (($job.resources | default dict).cpu | default $root.Values.resources.cpu) | default "32" -}}
+  {{- $memLimit := (($job.resources | default dict).memory | default $root.Values.resources.memory) | default "100Gi" -}}
+  {{- $jobBackoff := 1 -}}
+  {{- if hasKey $job "backoffLimit" -}}
+  {{- $jobBackoff = $job.backoffLimit -}}
+  {{- end -}}
+  {{- $jobWorkingDir := $job.workingDir | default "/workspace/vllm" }}
+
+  # ============================================================================
+  # SCRIPT TEST RUNNER: {{ $jobName }}
+  # ============================================================================
+  - name: {{ $jobName }}
+    replicas: 1
+    template:
+      spec:
+        parallelism: 1
+        completions: 1
+        backoffLimit: {{ $jobBackoff }}
+        template:
+          metadata:
+            labels:
+              declared-duration-minutes: "{{ $root.Values.job.declaredDurationMinutes | default 90 }}"
+              role: test-runner
+            annotations:
+              kueue.x-k8s.io/podset-unconstrained-topology: "true"
+              {{- if or (eq $root.Values.storage.type "gcs-cache") (eq $root.Values.storage.type "gcs-direct") }}
+              {{- include "tpu-testcase.gcsFuseAnnotations" $root | nindent 14 }}
+              {{- end }}
+          spec:
+            serviceAccountName: {{ $root.Values.serviceAccount }}
+            {{- if $root.Values.imagePullSecrets }}
+            imagePullSecrets:
+              {{- toYaml $root.Values.imagePullSecrets | nindent 14 }}
+            {{- end }}
+            nodeSelector:
+              cloud.google.com/gke-tpu-accelerator: {{ $jobAccelerator }}
+              cloud.google.com/gke-tpu-topology: {{ $jobTopo }}
+              # cloud.google.com/reservation-affinity: specific
+            tolerations:
+            - key: "google.com/tpu"
+              operator: "Exists"
+              effect: "NoSchedule"
+
+            containers:
+            - name: test-runner
+              image: {{ include "tpu-testcase.imageRef" $root }}
+              securityContext:
+                privileged: true
+              command: ["/bin/bash", "-c"]
+              args:
+              - |
+                set -e
+                export VLLM_TARGET_DEVICE="tpu"
+                export PJRT_DEVICE="TPU"
+                export TPU_VERSION="{{ $jobAccelerator }}"
+                export HF_HUB_DISABLE_DISK_LOCK="1"
+                export HF_TOKEN="${HUGGING_FACE_HUB_TOKEN:-$HF_TOKEN}"
+
+                {{- if $jobWorkingDir }}
+                cd {{ $jobWorkingDir }} 2>/dev/null || cd /workspace 2>/dev/null || true
+                {{- end }}
+
+                echo "============================================================"
+                echo " Starting Custom Test Execution: {{ $jobName }}"
+                echo " Script Command: {{ $job.command }}"
+                echo " Working Dir:    $(pwd)"
+                echo " Timestamp:      $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "============================================================"
+
+                exec {{ $job.command }}
+
+              env:
+              - name: HUGGING_FACE_HUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ $root.Values.hfTokenSecret.name }}
+                    key: {{ $root.Values.hfTokenSecret.key }}
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: {{ $root.Values.hfTokenSecret.name }}
+                    key: {{ $root.Values.hfTokenSecret.key }}
+              {{- if $job.env }}
+              {{- range $k, $v := $job.env }}
+              - name: {{ $k | quote }}
+                value: {{ $v | quote }}
+              {{- end }}
+              {{- end }}
+
+              resources:
+                limits:
+                  google.com/tpu: {{ $tpuLimit }}
+                  cpu: {{ $cpuLimit | quote }}
+                  memory: {{ $memLimit | quote }}
+                requests:
+                  google.com/tpu: {{ $tpuLimit }}
+                  cpu: {{ $cpuLimit | quote }}
+                  memory: {{ $memLimit | quote }}
+
+              volumeMounts:
+              - name: dshm
+                mountPath: /dev/shm
+              {{- include "tpu-testcase.storageVolumeMounts" $root | nindent 14 }}
+
+            volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+            {{- include "tpu-testcase.storageVolumes" $root | nindent 12 }}
+            restartPolicy: Never
+  {{- end }}
