@@ -364,21 +364,68 @@ if [ -n "${COMPILATION_SIZES:-}" ]; then
 fi
 ADDITIONAL_CONFIG="${ADDITIONAL_CONFIG}}"
 echo "[serve] additional-config: ${ADDITIONAL_CONFIG}"
-exec vllm serve "${MODEL_PATH}" \
-  --served-model-name "${SERVED_NAME}" \
-  --tokenizer "${TOKENIZER}" \
-  --load-format runai_streamer \
-  --port "${PORT}" \
-  --seed 42 \
-  --tensor-parallel-size "${TP}" \
-  --enable-expert-parallel \
-  --additional-config "${ADDITIONAL_CONFIG}" \
-  --max-model-len "${MAX_MODEL_LEN}" \
-  --max-num-seqs "${MAX_NUM_SEQS}" \
-  --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
-  --block-size "${BLOCK_SIZE}" \
-  --kv-cache-dtype "${KV_CACHE_DTYPE}" \
-  --gpu-memory-utilization "${GPU_MEM_UTIL}" \
-  --no-enable-prefix-caching \
-  --async-scheduling \
-  ${VLLM_EXTRA_ARGS[@]+"${VLLM_EXTRA_ARGS[@]}"}
+SERVE_CMD=(vllm serve "${MODEL_PATH}"
+  --served-model-name "${SERVED_NAME}"
+  --tokenizer "${TOKENIZER}"
+  --load-format runai_streamer
+  --port "${PORT}"
+  --seed 42
+  --tensor-parallel-size "${TP}"
+  --enable-expert-parallel
+  --additional-config "${ADDITIONAL_CONFIG}"
+  --max-model-len "${MAX_MODEL_LEN}"
+  --max-num-seqs "${MAX_NUM_SEQS}"
+  --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}"
+  --block-size "${BLOCK_SIZE}"
+  --kv-cache-dtype "${KV_CACHE_DTYPE}"
+  --gpu-memory-utilization "${GPU_MEM_UTIL}"
+  --no-enable-prefix-caching
+  --async-scheduling
+  ${VLLM_EXTRA_ARGS[@]+"${VLLM_EXTRA_ARGS[@]}"})
+
+# Record the exact command and the environment it runs with, as a runnable
+# script in the artifacts, so a build's manifest can quote what actually ran
+# instead of reconstructing it from these scripts. Written from the same array
+# that is exec'd below, so the two cannot drift. Environment is selected by
+# prefix; anything that looks like a credential is left out. Never fatal.
+# Shell-quote one word for humans: bare if it is plainly safe, single-quoted if
+# it has no single quote, printf %q otherwise. Always a valid bash word.
+repro_quote() {
+  if [[ "$1" =~ ^[A-Za-z0-9_./:=,+@%-]+$ ]]; then printf '%s' "$1"
+  elif [[ "$1" != *"'"* ]]; then printf "'%s'" "$1"
+  else printf '%q' "$1"; fi
+}
+
+write_repro_serve() {
+  local out="${ART_DIR:-/workspace/artifacts}/repro_serve.sh"
+  mkdir -p "$(dirname "${out}")" 2>/dev/null || return 0
+  {
+    echo "#!/bin/bash"
+    echo "# Written by qwen38_2p4t_serve.sh on $(hostname) at $(date -u +%FT%TZ)."
+    echo "# Environment as seen by the vllm serve process (selected by prefix),"
+    echo "# then the exact command it exec'd. Set the same environment in the"
+    echo "# container on every host: Ray workers read some of it at import time."
+    env | LC_ALL=C sort \
+      | grep -E '^(MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_[A-Z_]+|VLLM_[A-Z_]+|MOE_[A-Z_]+|RUNAI_STREAMER_[A-Z_]+|BF16_LINEAR_[A-Z_]+|PHASED_[A-Z_]+|PROFILE_[A-Z_]+|JAX_[A-Z_]+|SKIP_JAX_[A-Z_]+|XLA_[A-Z_]+|LIBTPU_[A-Z_]+|MIN_TOKEN_BUCKET|DISTRIBUTED_SAMPLING_[A-Z_]+|SAMPLING_[A-Z_]+)=' \
+      | grep -vE '^[^=]*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[^=]*=' \
+      | while IFS='=' read -r k v; do echo "export ${k}=$(repro_quote "${v}")"; done
+    echo "ulimit -n $(ulimit -n)"
+    echo
+    # `vllm serve <model>` on the first line, then one flag per line with its
+    # value beside it.
+    printf '%s %s %s' "${SERVE_CMD[0]}" "${SERVE_CMD[1]}" "$(repro_quote "${SERVE_CMD[2]}")"
+    local i=3 n=${#SERVE_CMD[@]}
+    while (( i < n )); do
+      printf ' \\\n  %s' "$(repro_quote "${SERVE_CMD[i]}")"
+      if (( i + 1 < n )) && [[ "${SERVE_CMD[i]}" == --* && "${SERVE_CMD[i+1]}" != --* ]]; then
+        printf ' %s' "$(repro_quote "${SERVE_CMD[i+1]}")"; i=$((i + 2))
+      else
+        i=$((i + 1))
+      fi
+    done
+    echo
+  } > "${out}" 2>/dev/null && echo "[serve] wrote ${out}" || true
+}
+write_repro_serve
+
+exec "${SERVE_CMD[@]}"

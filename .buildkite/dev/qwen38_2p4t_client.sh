@@ -14,6 +14,14 @@ ART="${ART_DIR:-/workspace/artifacts}"
 DEV_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "${ART}"
 
+# Shell-quote one word for humans (same as serve.sh): bare if plainly safe,
+# single-quoted if it has no single quote, printf %q otherwise.
+repro_quote() {
+  if [[ "$1" =~ ^[A-Za-z0-9_./:=,+@%-]+$ ]]; then printf '%s' "$1"
+  elif [[ "$1" != *"'"* ]]; then printf "'%s'" "$1"
+  else printf '%q' "$1"; fi
+}
+
 # RandomDataset defaults range_ratio to 0.0, so every request is exactly
 # INPUT_LEN in and, with --ignore-eos, exactly OUTPUT_LEN out. The shape is
 # therefore identical across runs and the only variance left is the server's.
@@ -142,20 +150,37 @@ for leg in ${BENCH_SWEEP}; do
   snap_metrics "${ART}/metrics_c${conc}_pre.prom"
   start_sampler "${ART}/metrics_c${conc}_series.prom"
   metrics_t0="$(date +%s.%N)"
-  vllm bench serve \
-    --backend vllm \
-    --model "${MODEL}" \
-    --host 127.0.0.1 --port "${PORT}" \
-    --dataset-name random \
-    --random-input-len "${INPUT_LEN}" \
-    --random-output-len "${OUTPUT_LEN}" \
-    --num-prompts "${prompts}" \
-    --max-concurrency "${conc}" \
-    --num-warmups "${warmups}" \
-    --request-rate inf --seed 42 --ignore-eos \
-    --percentile-metrics ttft,tpot,itl,e2el \
-    --save-result --result-dir "${ART}" --result-filename "bench_c${conc}.json" \
-    2>&1 | tee "${ART}/bench_c${conc}.log"
+  BENCH_CMD=(vllm bench serve
+    --backend vllm
+    --model "${MODEL}"
+    --host 127.0.0.1 --port "${PORT}"
+    --dataset-name random
+    --random-input-len "${INPUT_LEN}"
+    --random-output-len "${OUTPUT_LEN}"
+    --num-prompts "${prompts}"
+    --max-concurrency "${conc}"
+    --num-warmups "${warmups}"
+    --request-rate inf --seed 42 --ignore-eos
+    --percentile-metrics ttft,tpot,itl,e2el
+    --save-result --result-dir "${ART}" --result-filename "bench_c${conc}.json")
+  # Same idea as serve.sh's repro_serve.sh: record exactly what runs, from the
+  # array that runs, so the manifest can quote it.
+  {
+    echo "#!/bin/bash"
+    echo "# Written by qwen38_2p4t_client.sh at $(date -u +%FT%TZ): benchmark leg conc=${conc}."
+    printf '%s %s %s' "${BENCH_CMD[0]}" "${BENCH_CMD[1]}" "${BENCH_CMD[2]}"
+    i=3; n=${#BENCH_CMD[@]}
+    while (( i < n )); do
+      printf ' \\\n  %s' "$(repro_quote "${BENCH_CMD[i]}")"
+      if (( i + 1 < n )) && [[ "${BENCH_CMD[i]}" == --* && "${BENCH_CMD[i+1]}" != --* ]]; then
+        printf ' %s' "$(repro_quote "${BENCH_CMD[i+1]}")"; i=$((i + 2))
+      else
+        i=$((i + 1))
+      fi
+    done
+    echo
+  } > "${ART}/repro_bench_c${conc}.sh" 2>/dev/null || true
+  "${BENCH_CMD[@]}" 2>&1 | tee "${ART}/bench_c${conc}.log"
 
   # Snapshot and report before the pass/fail check below, so a leg that dies
   # still leaves its server-side metrics behind -- that is exactly the leg
