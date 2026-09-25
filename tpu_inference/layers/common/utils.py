@@ -157,7 +157,7 @@ def general_device_put(tensor: jax.Array,
         # `source_mesh`.
         with ctx:
             global_array = jax.make_array_from_callback(
-                t.shape, sharding, lambda index: t[index])
+                t.shape, sharding, lambda index: t[index], dtype=t.dtype)
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):

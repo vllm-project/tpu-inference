@@ -51,17 +51,18 @@ def test_enable_and_get_megacore():
 
 
 @patch.dict(os.environ, {"TPU_MULTIHOST_BACKEND": "ray"})
-def test_hbm_usage_bytes_ray_backend():
-    """Tests hbm_usage_bytes when TPU_MULTIHOST_BACKEND is ray."""
-    mock_device1 = MagicMock()
-    mock_device1.memory_stats.return_value = {
+@patch("jax.local_devices")
+def test_hbm_usage_bytes_ray_backend_leader(mock_local_devices):
+    """Tests hbm_usage_bytes on leader host when TPU_MULTIHOST_BACKEND is ray."""
+    mock_local_dev = MagicMock()
+    mock_local_dev.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
-    mock_device2 = MagicMock()
-    mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
+    mock_local_devices.return_value = [mock_local_dev]
 
-    devices = [mock_device1, mock_device2]
+    mock_remote_dev = MagicMock()
+    devices = [mock_local_dev, mock_remote_dev]
     usage = hbm_usage_bytes(devices)
 
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
@@ -69,9 +70,48 @@ def test_hbm_usage_bytes_ray_backend():
     assert usage == expected_usage
 
 
+@patch.dict(os.environ, {"TPU_MULTIHOST_BACKEND": "ray"})
+@patch("jax.local_devices")
+def test_hbm_usage_bytes_ray_backend_worker_host(mock_local_devices):
+    """Tests hbm_usage_bytes on worker host where global devices[0] is remote and throws."""
+    mock_remote_dev = MagicMock()
+    mock_remote_dev.memory_stats.side_effect = Exception(
+        "INVALID_ARGUMENT: MemoryStats is only supported for addressable PjRt devices."
+    )
+
+    mock_local_dev = MagicMock()
+    mock_local_dev.memory_stats.return_value = {
+        "bytes_in_use": 80 * GBYTES,
+        "bytes_limit": 128 * GBYTES
+    }
+    # On worker host, local devices are local to this worker
+    mock_local_devices.return_value = [mock_local_dev]
+
+    # Global device list has remote devices from leader first
+    global_devices = [mock_remote_dev, mock_remote_dev, mock_local_dev, mock_local_dev]
+    usage = hbm_usage_bytes(global_devices)
+
+    expected_usage = [(80 * GBYTES, 128 * GBYTES)] * 4
+    assert usage == expected_usage
+
+
+@patch.dict(os.environ, {"TPU_MULTIHOST_BACKEND": "ray"})
+@patch("jax.local_devices")
+def test_hbm_usage_bytes_ray_backend_all_local_fail(mock_local_devices):
+    """Tests hbm_usage_bytes on ray backend when all local devices fail."""
+    mock_local_dev = MagicMock()
+    mock_local_dev.memory_stats.side_effect = Exception("PjRt error")
+    mock_local_devices.return_value = [mock_local_dev]
+
+    devices = [mock_local_dev, mock_local_dev]
+    usage = hbm_usage_bytes(devices)
+    assert usage == []
+
+
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
-def test_hbm_usage_bytes_pathways_disabled():
-    """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is False."""
+@patch("tpu_inference.envs.TPU_MULTIHOST_BACKEND", None)
+def test_hbm_usage_bytes_single_host_success():
+    """Tests hbm_usage_bytes when TPU_MULTIHOST_BACKEND is not ray (single-host)."""
     mock_device1 = MagicMock()
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
@@ -88,6 +128,26 @@ def test_hbm_usage_bytes_pathways_disabled():
 
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (50 * GBYTES, 128 * GBYTES)]
+    assert usage == expected_usage
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("tpu_inference.envs.TPU_MULTIHOST_BACKEND", None)
+def test_hbm_usage_bytes_single_host_partial_failure():
+    """Tests hbm_usage_bytes when one device fails in single-host mode."""
+    mock_device1 = MagicMock()
+    mock_device1.memory_stats.return_value = {
+        "bytes_in_use": 100 * GBYTES,
+        "bytes_limit": 128 * GBYTES
+    }
+    mock_device2 = MagicMock()
+    mock_device2.memory_stats.side_effect = Exception("Device disconnected")
+
+    devices = [mock_device1, mock_device2]
+    usage = hbm_usage_bytes(devices)
+
+    # Device 1 succeeds, device 2 logs a warning and is skipped
+    expected_usage = [(100 * GBYTES, 128 * GBYTES)]
     assert usage == expected_usage
 
 
