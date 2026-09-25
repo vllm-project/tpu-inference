@@ -51,7 +51,22 @@ def safe_device_get(arr: Any) -> Any:
     drop-in for ``jax.device_get((a, b))``. See ``_leaf_device_get`` for the
     per-array logic.
     """
+    leaves = jax.tree_util.tree_leaves(arr)
+    if all(_is_host_fetchable(leaf) for leaf in leaves):
+        # Single-process fast path: one batched ``jax.device_get`` over the
+        # whole pytree, identical to the original (non multi-host) behavior.
+        out = jax.device_get(arr)
+        if isinstance(arr, (tuple, list, dict)):
+            return out
+        return np.asarray(out)
     return jax.tree_util.tree_map(_leaf_device_get, arr)
+
+
+def _is_host_fetchable(leaf: Any) -> bool:
+    """True if ``jax.device_get(leaf)`` is safe (non-jax or fully addressable)."""
+    if not hasattr(leaf, "addressable_shards"):
+        return True
+    return bool(getattr(leaf, "is_fully_addressable", False))
 
 
 def _leaf_device_get(leaf: Any) -> Any:
