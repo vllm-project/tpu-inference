@@ -284,6 +284,12 @@ setup_environment() {
     docker tag "${IMAGE_NAME}:${CACHE_TAG}" "${CI_IMAGE_REPO}:${CACHE_TAG}"
     docker push "${CI_IMAGE_REPO}:${CACHE_TAG}"
     export EXPORTED_CI_CACHE_IMAGE="${CI_IMAGE_REPO}:${CACHE_TAG}"
+    # The kube lanes' run.sh names its workload image from this rather than
+    # composing the tag a second time. Keyed by generation because
+    # pipeline_build.yml builds tpu6e and tpu7x in the same build.
+    if [[ -n "${BUILDKITE:-}" ]]; then
+      buildkite-agent meta-data set "ci-image-${LOCAL_TPU_VERSION}" "${EXPORTED_CI_CACHE_IMAGE}"
+    fi
   fi
 
   # Push logic if requested

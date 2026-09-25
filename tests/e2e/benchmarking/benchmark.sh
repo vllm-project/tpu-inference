@@ -30,7 +30,10 @@ fi
 root_dir=/workspace
 dataset_name=sonnet
 dataset_path="benchmarks/sonnet.txt"
-vllm_download_dir=/tmp/hf_home
+# The HF hub cache, where transformers already looks for this model's config
+# and tokenizer, so the weights land beside them and are shared with every other
+# test instead of kept as a second copy.
+vllm_download_dir="${HF_HUB_CACHE:-${HF_HOME:-/tmp/hf_home}/hub}"
 input_len=1024
 output_len=1024
 prefix_len=0
@@ -45,7 +48,7 @@ helpFunction()
     echo -e "\t-r, --root-dir-path\tThe path to your root directory (default: /workspace/, which is used in the Dockerfile)"
     echo -e "\t-d, --dataset-name\tThe name of the dataset to use (default: sonnet)"
     echo -e "\t-p, --dataset-path\tThe path to the processed dataset. This is required when using a custom model (default: benchmarks/sonnet.txt)"
-    echo -e "\t-v, --vllm-download-dir\tThe directory to download vLLM into (default: /tmp/hf_home)"
+    echo -e "\t-v, --vllm-download-dir\tWhere vLLM downloads model weights (default: the HF hub cache, \$HF_HUB_CACHE or \$HF_HOME/hub)"
     echo -e "\t-h, --help\tShow this help message"
     echo ""
     echo "================================================================"

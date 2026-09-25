@@ -1,0 +1,2018 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The model suites on the Kueue fleet: every TPU step under models/, as the
+# bare-metal nightly uploads them through upload_models_and_features.sh. Step
+# keys match the bare-metal files' so the lanes read side by side. Thirteen
+# files have no TPU step to migrate - their work sits on cpu behind a TODO.
+#
+# A build is one generation. The defaults are v6e; a v7x build sets
+# TPU_VERSION=tpu7x, KUBE_SHAPE_SINGLE/KUBE_SHAPE_MULTI to tpu7x shapes and
+# TENSOR_PARALLEL_SIZE_SINGLE=2, the values the uploader exports for its v7x
+# group. Several models run only on v7x: on v6e their steps record themselves
+# unverified, as they do on bare metal.
+#
+# Tests are not soft_fail here; each record step depends on its test with
+# allow_failure instead. See pipeline_features_kube.yml.
+#
+# Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
+# profile registry in ci-infra; a step names only a shape and a command.
+#
+# Do not add a pipeline-level `env:` block: a name set there wins over one
+# passed to `bk build create --env` and could no longer be overridden per
+# build.
+
+x-shape-single: &shape_single "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
+
+# Carries the launcher and the service account that may submit a workload.
+# Repeated per step rather than merged in, because a step's `plugins:` is a list
+# and a YAML merge key would replace it wholesale.
+x-kube-plugin: &kube_plugin
+  kubernetes:
+    podTemplate: tpu-launcher
+
+steps:
+  # The image comes from pipeline_build.yml, as on bare metal. There bootstrap.sh
+  # uploads it after publishing the vLLM pin that setup_docker_env.sh reads from
+  # build metadata; this pipeline does not run bootstrap.sh, so this step does
+  # both. Each build there records its pushed tag as ci-image-<generation>,
+  # which run.sh reads back.
+  - label: ":pipeline: Upload the image build"
+    agents:
+      queue: "cpu"
+    commands:
+      - |
+        source .buildkite/scripts/configs/pipeline_config.sh
+        buildkite-agent meta-data set VLLM_COMMIT_HASH \
+          "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
+        buildkite-agent pipeline upload .buildkite/pipeline_build.yml
+
+  # ---- Qwen_Qwen2_5-VL-7B-Instruct ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen2_5_vl.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen2.5-VL-7B-Instruct"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "Qwen/Qwen2.5-VL-7B-Instruct"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.72"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen2.5-VL-7B-Instruct"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      COMPILATION_CONFIG: "{\"cudagraph_mm_encoder\": true}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          echo "Qwen2.5-VL-7B benchmarks are not supported on the vllm (torchax)" \
+               "path. Its vision tower has no compiled route there -- the model is" \
+               "not in vision_tower_jit's JITTABLE_ARCHS and vLLM's Qwen2_5_VL does" \
+               "not declare supports_encoder_cudagraph, so MMEncoderJitManager" \
+               "declines it -- and the encoder runs eager: 0.04 req/s on tpu7x" \
+               "(vs 2.03 req/s on the JAX path) and an HBM OOM inside the ViT" \
+               "attention on tpu6e. Recording as unverified until the torchax" \
+               "multimodal path gets a compiled vision tower."
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark" "unverified"
+        else
+          .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen2.5-VL-7B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen2.5-VL-7B-Instruct"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen2_5-VL-7B-Instruct_Benchmark
+
+  # ---- Qwen_Qwen3-30B-A3B ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-30B-A3B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-30B-A3B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-30B-A3B"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-30B-A3B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "Qwen/Qwen3-30B-A3B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.89"
+      MODEL_IMPL_TYPE: "vllm"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-30B-A3B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-30B-A3B"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-30B-A3B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "Qwen/Qwen3-30B-A3B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "7.2"
+      INPUT_LEN: "1800"
+      OUTPUT_LEN: "128"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "94"
+      MAX_NUM_BATCHED_TOKENS: "1024"
+      MODEL_IMPL_TYPE: "vllm"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-30B-A3B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-30B-A3B_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-30B-A3B"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-30B-A3B_Benchmark
+
+  # ---- Qwen_Qwen3-32B ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-32B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-32B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-32B"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-32B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "Qwen/Qwen3-32B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.74"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-32B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-32B"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-32B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "Qwen/Qwen3-32B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "12.46"
+      INPUT_LEN: "1800"
+      OUTPUT_LEN: "128"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "512"
+      MAX_NUM_BATCHED_TOKENS: "4096"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-32B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-32B_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-32B"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-32B_Benchmark
+
+  # ---- Qwen_Qwen3-4B ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_qwen3.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-4B"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "Qwen/Qwen3-4B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.85"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy test result for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-4B"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "Qwen/Qwen3-4B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "11.0"
+      INPUT_LEN: "1800"
+      OUTPUT_LEN: "128"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "94"
+      MAX_NUM_BATCHED_TOKENS: "4096"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-4B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-4B_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-4B"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-4B_Benchmark
+
+  # ---- Qwen_Qwen3-Coder-480B-A35B-Instruct ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-Coder-480B-A35B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash -c 'SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 MODEL_IMPL_TYPE=vllm python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tensor-parallel-size 8 --enable-expert-parallel  --max-num-batched-tokens 256 --max-num-seqs 256'
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-Coder-480B-A35B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-Coder-480B-A35B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.85 --strict_threshold 0.70
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record integration test result for Qwen/Qwen3-Coder-480B-A35B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-Coder-480B-A35B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Benchmark" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8 --tp 8 --req_tput_limit 0.16  --output_token_tput_limit 1226 --total_token_tput_limit 1378 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0 --block_size 256
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-Coder-480B-A35B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Coder-480B-A35B-Instruct_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Coder-480B-A35B-Instruct_Benchmark
+
+  # ---- Qwen_Qwen3-Embedding-8B ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3-Embedding-8B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/models/jax/test_qwen3.py::TestQwen3ForCausalLM::test_vocab_padding_for_sharding
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3-Embedding-8B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-Embedding-8B"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "embedding"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3-Embedding-8B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "Qwen/Qwen3-Embedding-8B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_step_pooling.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3-Embedding-8B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-Embedding-8B"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "embedding"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3-Embedding-8B"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_Accuracy"
+    agents:
+      queue: "kube"
+    env:
+      TEST_MODEL: "Qwen/Qwen3-Embedding-8B"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Benchmark" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3-Embedding-8B"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3-Embedding-8B_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3-Embedding-8B"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "embedding"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3-Embedding-8B_Benchmark
+
+  # ---- Qwen_Qwen3_5-397B-A17B ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash -c 'SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 MODEL_IMPL_TYPE=vllm python /workspace/tpu_inference/examples/offline_inference.py --model Qwen/Qwen3.5-397B-A17B-FP8 --tensor-parallel-size 8 --enable-expert-parallel  --max-num-batched-tokens 256 --max-num-seqs 256  --limit-mm-per-prompt "{\"image\": 0, \"video\": 0}" --chat-template-kwargs="{\"enable_thinking\": false}"'
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen3.5-397B-A17B-FP8" --use_moe_ep_kernel 0 --tensor_parallel_size 8 --max_model_len 4096 --max_num_batched_tokens 4096 --max_gen_toks 2048 --enable_expert_parallel 1 --flex_threshold 0.63 --strict_threshold 0.63 --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --limit 100 --enable_thinking false
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record integration test result for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark" "not enough HBM"
+        else
+              .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3.5-397B-A17B-FP8 --tp 8 --req_tput_limit 0.04  --output_token_tput_limit 300 --total_token_tput_limit 345 --input_len 1024 --output_len 8192 --use_moe_ep_kernel 0 --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --num_prompts 64 --timeout 52 --gpu-memory-utilization 0.88
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3.5-397B-A17B-FP8"
+    key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_5-397B-A17B_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "Qwen/Qwen3.5-397B-A17B"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_5-397B-A17B_Benchmark
+
+  # ---- deepseek-ai_DeepSeek-R1 ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for deepseek-ai/DeepSeek-R1"
+    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      NEW_MODEL_DESIGN: "1"
+      SKIP_ACCURACY_TESTS: "True"
+      VLLM_MLA_DISABLE: "0"
+      USE_V6E8_QUEUE: "False"
+      TPU_VERSION: "tpu7x"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "flax_nnx"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m "gs://tpu-commons-ci/deepseek/r1"
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for deepseek-ai/DeepSeek-R1"
+    key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "deepseek-ai/DeepSeek-R1"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for deepseek-ai/DeepSeek-R1"
+    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      NEW_MODEL_DESIGN: "1"
+      USE_V6E8_QUEUE: "False"
+      TPU_VERSION: "tpu7x"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "vllm"
+      MINIMUM_ACCURACY_THRESHOLD: "0.84"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Accuracy" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek/r1" -n 14042 -l 4
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for deepseek-ai/DeepSeek-R1"
+    key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "deepseek-ai/DeepSeek-R1"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for deepseek-ai/DeepSeek-R1"
+    key: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_Accuracy"
+    agents:
+      queue: "kube"
+    env:
+      TEST_MODEL: "deepseek-ai/DeepSeek-R1"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "0"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Benchmark" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for deepseek-ai/DeepSeek-R1"
+    key: "${TPU_VERSION:-tpu6e}_record_deepseek-ai_DeepSeek-R1_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "deepseek-ai/DeepSeek-R1"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_deepseek-ai_DeepSeek-R1_Benchmark
+
+  # ---- google_gemma-3-27b-it ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python3 /workspace/tpu_inference/examples/offline_inference.py --model=google/gemma-3-27b-it --tensor_parallel_size=8 --max_model_len=1024 --max_num_seqs=1'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-3-27b-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "google/gemma-3-27b-it"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.56"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-3-27b-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "google/gemma-3-27b-it"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "21"
+      INPUT_LEN: "1000"
+      OUTPUT_LEN: "100"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "1280"
+      MAX_NUM_SEQS: "512"
+      MAX_NUM_BATCHED_TOKENS: "2048"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-3-27b-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-3-27b-it_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-3-27b-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-3-27b-it_Benchmark
+
+  # ---- google_gemma-4-26B-A4B-it ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-26B-A4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_UnitTest" "not enough HBM"
+          exit 0
+        fi
+        .buildkite/kubernetes/run.sh \
+          bash -c 'USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-26B-A4B-it --tensor-parallel-size 8 --max-num-batched-tokens 4096 --max-model-len 4096'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-26B-A4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-26B-A4B-it_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-26B-A4B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-26B-A4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-26B-A4B-it_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "google/gemma-4-26B-A4B-it"
+      TENSOR_PARALLEL_SIZE: "8"
+      MINIMUM_ACCURACY_THRESHOLD: "0.41"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Accuracy" "not enough HBM"
+          exit 0
+        fi
+        .buildkite/kubernetes/run.sh bash -c 'USE_BATCHED_RPA_KERNEL=1 bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-26B-A4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-26B-A4B-it_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-26B-A4B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-26B-A4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-26B-A4B-it_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "google/gemma-4-26B-A4B-it"
+      TENSOR_PARALLEL_SIZE: "8"
+      MINIMUM_THROUGHPUT_THRESHOLD: "2"
+      GPU_MEMORY_UTILIZATION: "0.90"
+      COMPILATION_CONFIG: "{\"cudagraph_mm_encoder\": true}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Benchmark" "not enough HBM"
+          exit 0
+        fi
+        # The torchax (MODEL_IMPL_TYPE=vllm) path is currently ~8-10% below
+        # the jax-native throughput bar (dev 899: 26B 1.86 vs 2, 31B 1.62
+        # vs 1.80). Hold it to measured x ~0.85 until optimized.
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          export MINIMUM_THROUGHPUT_THRESHOLD=1.55
+        fi
+        .buildkite/kubernetes/run.sh bash -c 'TIMEOUT_SECONDS=2400 BLOCK_SIZE=256 USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-26B-A4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-26B-A4B-it_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-26B-A4B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-26B-A4B-it_Benchmark
+
+  # ---- google_gemma-4-31B-it ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-31B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-31B-it --tensor-parallel-size 8 --max-num-batched-tokens 4096 --max-model-len 4096'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-31B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-31B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-31B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "google/gemma-4-31B-it"
+      TENSOR_PARALLEL_SIZE: "8"
+      MINIMUM_ACCURACY_THRESHOLD: "0.56"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'USE_BATCHED_RPA_KERNEL=1 bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-31B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-31B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-31B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "google/gemma-4-31B-it"
+      TENSOR_PARALLEL_SIZE: "8"
+      MINIMUM_THROUGHPUT_THRESHOLD: "1.8"
+      GPU_MEMORY_UTILIZATION: "0.90"
+      COMPILATION_CONFIG: "{\"cudagraph_mm_encoder\": true}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Benchmark" "not enough HBM"
+          exit 0
+        fi
+        # The torchax (MODEL_IMPL_TYPE=vllm) path is currently ~8-10% below
+        # the jax-native throughput bar (dev 899: 26B 1.86 vs 2, 31B 1.62
+        # vs 1.80). Hold it to measured x ~0.85 until optimized.
+        if [ "${MODEL_IMPL_TYPE:-auto}" = "vllm" ]; then
+          export MINIMUM_THROUGHPUT_THRESHOLD=1.35
+        fi
+        .buildkite/kubernetes/run.sh bash -c 'TIMEOUT_SECONDS=2400 BLOCK_SIZE=256 USE_BATCHED_RPA_KERNEL=1 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-31B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-31B-it_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-31B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-31B-it_Benchmark
+
+  # ---- google_gemma-4-E2B-it ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E2B-it --tensor-parallel-size 1 --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "google/gemma-4-E2B-it"
+      TENSOR_PARALLEL_SIZE: "1"
+      USE_CHAT_TEMPLATE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: "0.35"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "google/gemma-4-E2B-it"
+      TENSOR_PARALLEL_SIZE: "1"
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "64"
+      GPU_MEMORY_UTILIZATION: "0.94"
+      MINIMUM_THROUGHPUT_THRESHOLD: "0.0"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E2B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E2B-it_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E2B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E2B-it_Benchmark
+
+  # ---- google_gemma-4-E4B-it ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" SKIP_JAX_PRECOMPILE=1 VLLM_XLA_CHECK_RECOMPILATION=0 python /workspace/tpu_inference/examples/offline_inference.py --model google/gemma-4-E4B-it --tensor-parallel-size ${TENSOR_PARALLEL_SIZE_SINGLE:-1} --max-num-batched-tokens 4096 --max-model-len 4096 --use-chat-template'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E4B-it"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "google/gemma-4-E4B-it"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      USE_CHAT_TEMPLATE: "1"
+      MINIMUM_ACCURACY_THRESHOLD: "0.65"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record integration test result for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E4B-it"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "google/gemma-4-E4B-it"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MAX_MODEL_LEN: "4096"
+      MAX_NUM_SEQS: "64"
+      GPU_MEMORY_UTILIZATION: "0.85"
+      MINIMUM_THROUGHPUT_THRESHOLD: "0.0"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'TIMEOUT_SECONDS=960 JITTED_MM_MODULE_KEYS="model.vision_tower.encoder" REGISTER_MM_MODULE_CUSTOM_PYTREE_CLASSES="transformers.modeling_outputs.BaseModelOutputWithPast" /workspace/tpu_inference/tests/e2e/benchmarking/mm_bench_recipe.sh'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for google/gemma-4-E4B-it"
+    key: "${TPU_VERSION:-tpu6e}_record_google_gemma-4-E4B-it_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "google/gemma-4-E4B-it"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "multimodal"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_google_gemma-4-E4B-it_Benchmark
+
+  # ---- meta-llama_Llama-3_1-8B-Instruct ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-3.1-8B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_llama3.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for meta-llama/Llama-3.1-8B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_1-8B-Instruct_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "meta-llama/Llama-3.1-8B-Instruct"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for meta-llama/Llama-3.1-8B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_1-8B-Instruct_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.75"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for meta-llama/Llama-3.1-8B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_1-8B-Instruct_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "meta-llama/Llama-3.1-8B-Instruct"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_1-8B-Instruct_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TEST_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "10.77"
+      INPUT_LEN: "1800"
+      OUTPUT_LEN: "128"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "256"
+      MAX_NUM_BATCHED_TOKENS: "1024"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for meta-llama/Llama-3.1-8B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "meta-llama/Llama-3.1-8B-Instruct"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_1-8B-Instruct_Benchmark
+
+  # ---- meta-llama_Llama-3_3-70B-Instruct ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for meta-llama/Llama-3.3-70B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/models/jax/test_llama3.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for meta-llama/Llama-3.3-70B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "meta-llama/Llama-3.3-70B-Instruct"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for meta-llama/Llama-3.3-70B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "meta-llama/Llama-3.3-70B-Instruct"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_ACCURACY_THRESHOLD: "0.9"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/test_accuracy.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for meta-llama/Llama-3.3-70B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "meta-llama/Llama-3.3-70B-Instruct"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for meta-llama/Llama-3.3-70B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_Accuracy"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "meta-llama/Llama-3.3-70B-Instruct"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "7.0"
+      INPUT_LEN: "1800"
+      OUTPUT_LEN: "128"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "256"
+      MAX_NUM_BATCHED_TOKENS: "4096"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for meta-llama/Llama-3.3-70B-Instruct"
+    key: "${TPU_VERSION:-tpu6e}_record_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "meta-llama/Llama-3.3-70B-Instruct"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_meta-llama_Llama-3_3-70B-Instruct_Benchmark
+
+  # ---- mistralai_Mistral-Small-4-119B-2603_text-only ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness for mistralai/Mistral-Small-4-119B-2603/text-only"
+    key: "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TEST_MODEL: "mistralai/Mistral-Small-4-119B-2603"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_MULTI:-8}"
+      MINIMUM_ACCURACY_THRESHOLD: "0"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness" "skipped"
+        else
+          # 1. Run the fast correctness test
+          .buildkite/kubernetes/run.sh \
+            bash -c 'python3 /workspace/tpu_inference/tests/e2e/mistral_small_4_correctness.py'
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness result for mistralai/Mistral-Small-4-119B-2603/text-only"
+    key: "${TPU_VERSION:-tpu6e}_record_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "mistralai/Mistral-Small-4-119B-2603/text-only"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_mistralai_Mistral-Small-4-119B-2603_text-only_Correctness
+
+  # ---- moonshotai_Kimi-K2_6 ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      NEW_MODEL_DESIGN: "1"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "vllm"
+      USE_V7X8_QUEUE: "True"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m "gs://tpu-commons-ci/moonshootai/kimi/2.6" -t 2750
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for moonshotai/Kimi-K2_6"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-K2.6"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      NEW_MODEL_DESIGN: "1"
+      USE_V6E8_QUEUE: "False"
+      TPU_VERSION: "tpu7x"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      DEVICE_COUNT: "8"
+      MODEL_IMPL_TYPE: "vllm"
+      USE_V7X8_QUEUE: "True"
+      MINIMUM_ACCURACY_THRESHOLD: "0.86"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/moonshootai/kimi/2.6" -n 14042 -l 4
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for moonshotai/Kimi-K2_6"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-K2.6"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Accuracy"
+    agents:
+      queue: "kube"
+    env:
+      TEST_MODEL: "moonshotai/Kimi-K2.6"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "0"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-K2.6"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark
+
+  # ---- openai_gpt-oss-120b ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "openai/gpt-oss-120b" --use_moe_ep_kernel 1 --tensor_parallel_size 8 --max_model_len 2048 --max_num_batched_tokens 2048 --max_gen_toks 256 --enable_expert_parallel 1 --flex_threshold 0.50 --strict_threshold 0.0
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-120b"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_UnitTest"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Accuracy" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-120b"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Accuracy"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for openai/gpt-oss-120b"
+    key: "${TPU_VERSION:-tpu6e}_record_openai_gpt-oss-120b_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "openai/gpt-oss-120b"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_openai_gpt-oss-120b_Benchmark

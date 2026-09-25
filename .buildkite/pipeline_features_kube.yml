@@ -13,18 +13,20 @@
 # limitations under the License.
 
 # The feature-matrix suites on the Kueue fleet: every TPU step under
-# features/ that a v6e shape can run. Step keys match the bare-metal files' so
-# the lanes read side by side.
+# features/. Step keys match the bare-metal files' so the lanes read side by
+# side. Five files have no TPU step to migrate at all - their work sits on cpu
+# behind a TODO.
 #
-# features/multi-host.yml is not here: its two steps are fixed to
-# tpu_v7x_16_queue, and a two-host v7x slice is not a v6e shape. Five more files
-# have no TPU step to migrate at all - their work sits on cpu behind a TODO.
+# A build is one generation. The defaults are v6e; a v7x build sets
+# TPU_VERSION=tpu7x and KUBE_SHAPE_SINGLE/KUBE_SHAPE_MULTI to tpu7x shapes. The
+# multi-host steps run only in a v7x build, as on bare metal, where the
+# uploader leaves features/multi-host.yml out of the v6e group.
 #
 # Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
 # profile registry in ci-infra; a step names only a shape and a command.
 #
-# Everything uploads as one file because build_docker_kube's key is not
-# parameterised: two uploads into the same build collide on it.
+# Everything uploads as one file because every upload brings in
+# pipeline_build.yml again, and a second copy collides on its keys.
 #
 # Do not add a pipeline-level `env:` block: a name set there wins over one
 # passed to `bk build create --env` and could no longer be overridden per
@@ -43,7 +45,7 @@ x-kube-plugin: &kube_plugin
 # The timeout covers queueing for chips as well as running, so it is sized to
 # the fleet's worst case; a hung test is bounded by activeDeadlineSeconds.
 .tpu_step: &tpu_step
-  depends_on: "build_docker_kube"
+  depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
   timeout_in_minutes: 1440
   agents:
     queue: "kube"
@@ -51,35 +53,20 @@ x-kube-plugin: &kube_plugin
     - *kube_plugin
 
 steps:
-  # Publishes the tag it pushed as `ci-image` metadata, which run.sh reads back.
-  # Exits early when the build names its own image; Buildkite treats a
-  # satisfied-but-skipped dependency as met, so the TPU steps still run.
-  - label: ":docker: Build and push CI image"
-    key: "build_docker_kube"
-    timeout_in_minutes: 90
+  # The image comes from pipeline_build.yml, as on bare metal. There bootstrap.sh
+  # uploads it after publishing the vLLM pin that setup_docker_env.sh reads from
+  # build metadata; this pipeline does not run bootstrap.sh, so this step does
+  # both. Each build there records its pushed tag as ci-image-<generation>,
+  # which run.sh reads back.
+  - label: ":pipeline: Upload the image build"
     agents:
-      queue: "cpu_64_core"
-    env:
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      # This pipeline and pipeline_build.yml write the same tag for the same
-      # commit, so their build args must match or whichever pushes second
-      # replaces the image with one missing google-cloud-cli.
-      BM_INFRA: "true"
+      queue: "cpu"
     commands:
       - |
-        if [[ -n "$${CI_IMAGE:-}" ]]; then
-          buildkite-agent meta-data set ci-image "$$CI_IMAGE"
-          exit 0
-        fi
-        # setup_docker_env.sh refuses to build without VLLM_COMMIT_HASH, and
-        # bootstrap.sh - which sets it for the pipelines it uploads - is not in
-        # the path of this one.
         source .buildkite/scripts/configs/pipeline_config.sh
-        VLLM_COMMIT_HASH="$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
-        buildkite-agent meta-data set "VLLM_COMMIT_HASH" "$$VLLM_COMMIT_HASH"
-        source .buildkite/scripts/setup_docker_env.sh
-        setup_environment "vllm-tpu" "false" "true"
-        buildkite-agent meta-data set ci-image "$$EXPORTED_CI_CACHE_IMAGE"
+        buildkite-agent meta-data set VLLM_COMMIT_HASH \
+          "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
+        buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
   # The bare-metal files mark every test soft_fail so the record step after it
   # is still reached. That is not needed here: allow_failure on the record
@@ -124,7 +111,7 @@ steps:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_V6E8_QUEUE: "True"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -156,7 +143,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Collective Communication Matmul"
     key: "${TPU_VERSION:-tpu6e}_Collective_Communication_Matmul_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -220,7 +207,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -264,7 +251,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for DCN-based P/D disaggregation"
     key: "${TPU_VERSION:-tpu6e}_DCN_based_P-D_disaggregation_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_DCN_based_P-D_disaggregation_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -312,7 +299,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for hybrid kv cache allocation"
     key: "${TPU_VERSION:-tpu6e}_hybrid_kvcache_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -346,7 +333,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for LoRA_Torch"
     key: "${TPU_VERSION:-tpu6e}_LoRA_Torch_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -379,7 +366,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for LoRA_Torch"
     key: "${TPU_VERSION:-tpu6e}_LoRA_Torch_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_LoRA_Torch_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -413,7 +400,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Multimodal Inputs"
     key: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -445,7 +432,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Multimodal Inputs"
     key: "${TPU_VERSION:-tpu6e}_Multimodal_Inputs_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_Multimodal_Inputs_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -477,7 +464,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Out-of-tree model support"
     key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -511,7 +498,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Out-of-tree model support"
     key: "${TPU_VERSION:-tpu6e}_out_of_tree_model_support_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_out_of_tree_model_support_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -546,7 +533,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: DFlash"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -588,7 +575,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: DFlash"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_DFlash_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_DFlash_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -629,7 +616,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Eagle3"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -663,7 +650,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: Eagle3"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Eagle3_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Eagle3_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -698,7 +685,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Speculative Decoding: Ngram"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -733,7 +720,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for Speculative Decoding: Ngram"
     key: "${TPU_VERSION:-tpu6e}_Speculative_Decoding-_Ngram_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_Speculative_Decoding-_Ngram_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -769,7 +756,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for Step Pooling (Embedding)"
     key: "${TPU_VERSION:-tpu6e}_Step_Pooling_Embedding_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -827,7 +814,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for structured_decoding"
     key: "${TPU_VERSION:-tpu6e}_structured_decoding_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -858,7 +845,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for async scheduler"
     key: "${TPU_VERSION:-tpu6e}_async_scheduler_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -889,7 +876,7 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for async scheduler"
     key: "${TPU_VERSION:-tpu6e}_async_scheduler_PerformanceTest"
     depends_on:
-      - "build_docker_kube"
+      - "build_docker_${TPU_VERSION:-tpu6e}"
       - "${TPU_VERSION:-tpu6e}_record_async_scheduler_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -921,7 +908,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
     key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_jax_uniproc"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -951,7 +938,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
     key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_uniproc"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -981,7 +968,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
     key: "${TPU_VERSION:-tpu6e}_runai_model_streamer_loader_torchax_ray_distributed"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -1012,7 +999,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for sampling_params"
     key: "${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
-    depends_on: "build_docker_kube"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
     timeout_in_minutes: 1440
     agents:
       queue: "kube"
@@ -1039,3 +1026,78 @@ steps:
       - *kube_plugin
     commands:
       - ".buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_sampling_params_CorrectnessTest"
+
+  # ---- multi-host ----
+
+  # The only step here that spans two hosts. Everything else is one pod holding
+  # every chip on a node; this needs a slice, so it names a manifest instead of
+  # a shape and the shape comes from that manifest's nodeSelector. The slice is
+  # 2x2x2 tpu7x - the whole v7x fleet - so it waits for every chip to be free.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      # Read by run.sh on the agent, not forwarded: it selects the JobSet.
+      MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+      TENSOR_PARALLEL_SIZE: "16"
+      ASYNC_SCHEDULING: "1"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/ray_multihost_e2e.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_record_multi-host_CorrectnessTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "multi-host"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest
+
+  # A placeholder on bare metal too: it records itself unverified and holds no
+  # chips, so it runs as a plain kube step.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on: "${TPU_VERSION:-tpu6e}_record_multi-host_CorrectnessTest"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_record_multi-host_PerformanceTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "multi-host"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest
