@@ -232,9 +232,6 @@ wait_for_server() {
   return 1
 }
 
-PROJECT="$(gcloud config get-value project)"
-GCR_REPO="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference"
-
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 TOP_DIR=$(dirname "$(dirname "$SCRIPT_DIR")")
 
@@ -250,16 +247,24 @@ source "$SCRIPT_DIR/setup_docker_env.sh"
 # progress, so the trace adds nothing; xtrace is on for this whole script, so
 # turn it off across the call and back on after.
 { set +x; } 2>/dev/null
-# Determine the Docker image name and registry path.
-# Use the local image for multi-host benchmarks; otherwise, default to the remote GCR image.
-if [[ "${IS_MULTI_HOST_BENCH:-false}" == "true" ]]; then
+# In CI, run the image the build step already pushed to tpu-inference-ci, and
+# have the workers pull it from there too. Building and pushing from the TPU
+# host would need a registry the agent's service account can write to, and
+# agents in other projects have no such registry.
+if [ -n "${BUILDKITE:-}" ]; then
+  export USE_PREBUILT_IMAGE="${USE_PREBUILT_IMAGE:-1}"
+fi
+if [[ "${IS_MULTI_HOST_BENCH:-false}" == "true" || "${USE_PREBUILT_IMAGE:-0}" == "1" ]]; then
   IMAGE_NAME='vllm-tpu'
   setup_environment "$IMAGE_NAME"
   # Use the exported CI cache image path so Worker Nodes can pull it directly
   DOCKER_IMAGE="${EXPORTED_CI_CACHE_IMAGE:-$IMAGE_NAME:latest}"
 else
-  IMAGE_NAME="${GCR_REPO}/vllm-tpu"
-  # Pass "true" to enable pushing to GCR
+  # Without a CI image (a manual run of uncommitted code, or a step that sets
+  # USE_PREBUILT_IMAGE=0), build it here and push it to the caller's own
+  # project for the workers to pull.
+  PROJECT="$(gcloud config get-value project)"
+  IMAGE_NAME="us-central1-docker.pkg.dev/${PROJECT}/tpu-inference/vllm-tpu"
   setup_environment "${IMAGE_NAME}" "true"
   DOCKER_IMAGE="${IMAGE_NAME}:${BUILDKITE_COMMIT:-latest}"
 fi
