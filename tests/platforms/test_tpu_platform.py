@@ -513,7 +513,7 @@ class TestTpuPlatform:
             torch.bfloat16, torch.float32)
         mock_backend.get_supported_kernel_block_sizes.return_value = [256]
 
-        with patch.object(TpuPlatform, '_find_non_ssm_backend', return_value=mock_backend), \
+        with patch.object(TpuPlatform, '_find_non_ssm_backends', return_value=[mock_backend]), \
              patch('vllm.model_executor.models.ModelRegistry.resolve_model_cls', return_value=(mock_backend, MagicMock())), \
              patch("tpu_inference.envs.USE_BATCHED_RPA_KERNEL", enable_batch_rpa):
             TpuPlatform.update_block_size_for_backend(vllm_config)
