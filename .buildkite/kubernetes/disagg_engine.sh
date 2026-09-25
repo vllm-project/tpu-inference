@@ -43,7 +43,7 @@ export PJRT_DEVICE=TPU
 export TPU_BACKEND_TYPE=jax
 export USE_BATCHED_RPA_KERNEL=0
 export USE_MOE_EP_KERNEL=0
-export VLLM_LOGGING_LEVEL=DEBUG
+export VLLM_LOGGING_LEVEL=INFO
 
 # On the mounted bucket: the default under $HOME does not fit the node's
 # boot disk.
