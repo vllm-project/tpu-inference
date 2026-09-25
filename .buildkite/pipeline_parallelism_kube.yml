@@ -1,0 +1,719 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The parallelism suites on the Kueue fleet: every TPU step under
+# parallelism/, as the bare-metal nightly uploads them through
+# upload_models_and_features.sh. Step keys match the bare-metal files' so the
+# lanes read side by side. CP.yml has no TPU step to migrate - its work sits on
+# cpu behind a TODO.
+#
+# A build is one generation. The defaults are v6e; a v7x build sets
+# TPU_VERSION=tpu7x, KUBE_SHAPE_SINGLE/KUBE_SHAPE_MULTI to tpu7x shapes and
+# TENSOR_PARALLEL_SIZE_SINGLE=2, the values the uploader exports for its v7x
+# group.
+#
+# Tests are not soft_fail here; each record step depends on its test with
+# allow_failure instead. See pipeline_features_kube.yml.
+#
+# Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
+# profile registry in ci-infra; a step names only a shape and a command.
+#
+# Do not add a pipeline-level `env:` block: a name set there wins over one
+# passed to `bk build create --env` and could no longer be overridden per
+# build.
+
+x-shape-single: &shape_single "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
+x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
+
+# Carries the launcher and the service account that may submit a workload.
+# Repeated per step rather than merged in, because a step's `plugins:` is a list
+# and a YAML merge key would replace it wholesale.
+x-kube-plugin: &kube_plugin
+  kubernetes:
+    podTemplate: tpu-launcher
+
+steps:
+  # The image comes from pipeline_build.yml, as on bare metal. There bootstrap.sh
+  # uploads it after publishing the vLLM pin that setup_docker_env.sh reads from
+  # build metadata; this pipeline does not run bootstrap.sh, so this step does
+  # both. Each build there records its pushed tag as ci-image-<generation>,
+  # which run.sh reads back.
+  - label: ":pipeline: Upload the image build"
+    agents:
+      queue: "cpu"
+    commands:
+      - |
+        source .buildkite/scripts/configs/pipeline_config.sh
+        buildkite-agent meta-data set VLLM_COMMIT_HASH \
+          "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
+        buildkite-agent pipeline upload .buildkite/pipeline_build.yml
+
+  # ---- DP ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Single_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      NEW_MODEL_DESIGN: "1"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_correctness'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "DP"
+      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Single_Host"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      NEW_MODEL_DESIGN: "1"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_performance'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for DP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_DP_PerformanceTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "DP"
+      CI_STAGE: "Single-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    agents:
+      queue: "kube"
+    env:
+      NEW_MODEL_DESIGN: "1"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "DP"
+      CI_STAGE: "Multi-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_CorrectnessTest_Multi_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_DP_CorrectnessTest_Multi_Host"
+    agents:
+      queue: "kube"
+    env:
+      NEW_MODEL_DESIGN: "1"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for DP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_DP_PerformanceTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "DP"
+      CI_STAGE: "Multi-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_DP_PerformanceTest_Multi_Host
+
+  # ---- EP ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for EP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    # One workload for both checks: the launcher names its Job after the
+    # Buildkite job, so a second run.sh in the same step collides with the
+    # first.
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c '
+          set -e
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 1 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh  --model_name "Qwen/Qwen1.5-MoE-A2.7B" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 1 --flex_threshold 0.37 --strict_threshold 0.06
+        '
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for EP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "EP"
+      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for EP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Single_Host"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_expert_parallel.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for EP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_EP_PerformanceTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "EP"
+      CI_STAGE: "Single-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "EP"
+      CI_STAGE: "Multi-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_CorrectnessTest_Multi_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_EP_CorrectnessTest_Multi_Host"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for EP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_EP_PerformanceTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "EP"
+      CI_STAGE: "Multi-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_EP_PerformanceTest_Multi_Host
+
+  # ---- PP ----
+
+  # PP runs its stages as libtpu processes on one host that exchange device
+  # buffers - the "(multi-host)" steps too, whose shape is still one node. On a
+  # GKE node libtpu routes that through its tpunetd client (the TPU device
+  # plugin's vbar service), which drops the connection mid-transfer
+  # ("SocketServer: Connection closed"); with the client off libtpu uses the
+  # direct path a bare VM uses. Only these steps turn it off: the Ray slices in
+  # the jax and features lanes span hosts and pass with it on.
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for PP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for PP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "PP"
+      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for PP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Single_Host"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for PP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "PP"
+      CI_STAGE: "Single-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for PP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for PP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "PP"
+      CI_STAGE: "Multi-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Multi_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for PP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_PP_CorrectnessTest_Multi_Host"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
+          python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for PP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_PP_PerformanceTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "PP"
+      CI_STAGE: "Multi-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_PP_PerformanceTest_Multi_Host
+
+  # ---- SP ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for SP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Single_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_sequence_parallelism.py::test_sp_correctness'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for SP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "SP"
+      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for SP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest_Single_Host"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Single_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for SP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_SP_PerformanceTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "SP"
+      CI_STAGE: "Single-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for SP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Multi_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for SP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "SP"
+      CI_STAGE: "Multi-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_SP_CorrectnessTest_Multi_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for SP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_SP_CorrectnessTest_Multi_Host"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for SP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_SP_PerformanceTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "SP"
+      CI_STAGE: "Multi-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_SP_PerformanceTest_Multi_Host
+
+  # ---- TP ----
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Single_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash /workspace/tpu_inference/tests/e2e/check_lm_eval.sh --model_name "meta-llama/Llama-3.1-8B-Instruct" --use_moe_ep_kernel 0 --tensor_parallel_size 4 --max_model_len 1024 --max_num_batched_tokens 128 --max_gen_toks 128 --enable_expert_parallel 0 --flex_threshold 0.3 --strict_threshold 0.2
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "TP"
+      CI_STAGE: "Single-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Single_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Single_Host"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh \
+          bash -c 'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py'
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for TP (single-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest_Single_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Single_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "TP"
+      CI_STAGE: "Single-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Single_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "TP"
+      CI_STAGE: "Multi-Host CorrectnessTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_CorrectnessTest_Multi_Host
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_TP_CorrectnessTest_Multi_Host"
+    agents:
+      queue: "kube"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for TP (multi-host)"
+    key: "${TPU_VERSION:-tpu6e}_record_TP_PerformanceTest_Multi_Host"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "TP"
+      CI_STAGE: "Multi-Host PerformanceTest"
+      CI_CATEGORY: "parallelism support matrix"
+    plugins:
+      - *kube_plugin
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_TP_PerformanceTest_Multi_Host

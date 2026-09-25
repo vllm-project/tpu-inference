@@ -22,6 +22,17 @@ from typing import Any, Dict, List, Set
 
 import yaml
 
+# Kueue shape for each bare-metal queue a case can name, used when
+# BENCHMARK_TARGET=kube. tpu_v7x_16_queue is a two-host slice, which a kube
+# step can only get through a JobSet manifest, and run_job.sh reaches it
+# through run_multihost.sh; cases on it are left out of the kube pipeline.
+KUBE_SHAPES = {
+    "tpu_v6e_queue": "ct6e-standard-1t/1x1",
+    "tpu_v6e_8_queue": "ct6e-standard-8t/2x4",
+    "tpu_v7x_2_queue": "tpu7x-standard-1t/1x1x1",
+    "tpu_v7x_8_queue": "tpu7x-standard-4t/2x2x1",
+}
+
 # List of authorized command types
 ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
 ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
@@ -171,6 +182,18 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
             )
 
 
+def _is_kube_target() -> bool:
+    return os.getenv("BENCHMARK_TARGET") == "kube"
+
+
+def _get_kube_queue_filter() -> Set[str]:
+    """Bare-metal queues whose cases a kube build runs; empty means all."""
+    selected = os.getenv("KUBE_BENCHMARK_QUEUES")
+    if selected:
+        return {s.strip() for s in selected.split(',') if s.strip()}
+    return set()
+
+
 def _get_mlcompass_select_tests() -> Set[str]:
     selected = os.getenv('MLCOMPASS_SELECT_TESTS')
     if selected:
@@ -221,7 +244,13 @@ def create_benchmark_steps(case_data: Dict[str, Any],
     # Construct the Step dictionary
     child_steps = []
     mlcompass_select_tests = _get_mlcompass_select_tests()
+    kube = _is_kube_target()
+    kube_queue_filter = _get_kube_queue_filter()
     for agent in ci_queues:
+        if kube and (agent not in KUBE_SHAPES or
+                     (kube_queue_filter and agent not in kube_queue_filter)):
+            continue
+
         # Determine TPU version from queue name
         tpu_version = "tpu7x" if "v7x" in agent else "tpu6e"
 
@@ -257,18 +286,42 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             "key": step_safe_key,
         }
 
-        if timeout_in_minutes is not None:
-            step["timeout_in_minutes"] = timeout_in_minutes
+        if kube:
+            # The step timeout covers queueing for chips as well as running,
+            # so the case's own budget becomes the workload's deadline, which
+            # starts once the chips are held.
+            step["timeout_in_minutes"] = 1440
+            if timeout_in_minutes is not None:
+                step_env["TPU_MAX_RUNTIME_SECONDS"] = str(
+                    int(timeout_in_minutes) * 60)
+            step_env["SHAPE"] = KUBE_SHAPES[agent]
+            step.update({
+                "env":
+                step_env,
+                "agents": {
+                    "queue": "kube"
+                },
+                "plugins": [{
+                    "kubernetes": {
+                        "podTemplate": "tpu-launcher"
+                    }
+                }],
+                "command":
+                f"bash .buildkite/benchmark/scripts/run_job_kube.sh {case_parameter}",
+            })
+        else:
+            if timeout_in_minutes is not None:
+                step["timeout_in_minutes"] = timeout_in_minutes
 
-        step.update({
-            "env":
-            step_env,
-            "agents": {
-                "queue": agent
-            },
-            "command":
-            f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
-        })
+            step.update({
+                "env":
+                step_env,
+                "agents": {
+                    "queue": agent
+                },
+                "command":
+                f"bash .buildkite/benchmark/scripts/run_job.sh {case_parameter}",
+            })
 
         # Add dependency on global case name validation if it was uploaded in bootstrap
         if os.environ.get("BENCHMARK_VALIDATION_UPLOADED") == "true":
@@ -340,7 +393,17 @@ def main():
         sys.exit(1)
 
     if not all_steps:
-        if _get_mlcompass_select_tests():
+        if _is_kube_target():
+            # Every case in the file is on a queue the kube pipeline leaves
+            # out, or outside KUBE_BENCHMARK_QUEUES.
+            all_steps.append({
+                "label":
+                "⏭️ Benchmark file skipped — no case on a kube-runnable queue.",
+                "command":
+                "echo Benchmark file skipped — no case on a kube-runnable queue.",
+                "skip": True
+            })
+        elif _get_mlcompass_select_tests():
             all_steps.append({
                 "label":
                 "⏭️ Benchmark case skipped — not selected by MLCompass.",

@@ -21,7 +21,9 @@
 # entrypoint runs a single command on the head instead, so the sequence lives
 # here.
 #
-# MODEL and TENSOR_PARALLEL_SIZE come from the step.
+# MODEL, TENSOR_PARALLEL_SIZE and ASYNC_SCHEDULING come from the step. The jax
+# suite's bare-metal step serves without async scheduling and the features
+# suite's with it, so each lane keeps its own.
 set -uo pipefail
 
 MODEL="${MODEL:?MODEL must name the checkpoint to serve}"
@@ -30,6 +32,10 @@ PORT="${PORT:-8000}"
 # The whole slice has to be resident before the server answers, and these
 # weights stream from GCS.
 READY_TIMEOUT_S="${READY_TIMEOUT_S:-3600}"
+async_flag="--no-async-scheduling"
+if [[ "${ASYNC_SCHEDULING:-0}" == "1" ]]; then
+  async_flag="--async-scheduling"
+fi
 
 echo "--- Serving ${MODEL} at tensor-parallel-size ${TP}"
 vllm serve "${MODEL}" \
@@ -37,7 +43,7 @@ vllm serve "${MODEL}" \
   --tensor-parallel-size "${TP}" \
   --trust-remote-code \
   --max-model-len 1024 \
-  --no-async-scheduling \
+  "${async_flag}" \
   --load-format=runai_streamer \
   --no-enable-prefix-caching &
 serve_pid=$!

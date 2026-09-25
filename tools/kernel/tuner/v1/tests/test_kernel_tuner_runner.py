@@ -516,6 +516,7 @@ class BayesianOptimizationValidationTest(absltest.TestCase):
                 tuner_bo.tuner_config.n_bayesian_trials = int(
                     len(param1_vals) * len(param2_vals) *
                     (1 - steps_reduction_ratio))
+                tuner_bo.tuner_config.bayesian_seed = 0
 
                 storage_bo = LocalDbManager(
                     db_path=os.path.join(tmp_dir_bo, "db"))
@@ -606,6 +607,7 @@ class BayesianOptimizationValidationTest(absltest.TestCase):
                 tuner.tuner_config.n_bayesian_trials = 200
                 tuner.tuner_config.bayesian_early_stopping_patience = 5
                 tuner.tuner_config.bayesian_early_stopping_min_delta_ratio = 0.10
+                tuner.tuner_config.bayesian_seed = 0
 
                 storage = LocalDbManager(db_path=os.path.join(tmp_dir, "db"))
 
