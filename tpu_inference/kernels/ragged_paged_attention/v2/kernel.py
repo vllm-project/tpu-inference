@@ -71,8 +71,7 @@ class MultiPageAsyncCopyDescriptor:
 
 def ref_ragged_paged_attention(
     queries: jax.Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
-    kv_pages: jax.
-    Array,  # [total_num_pages, page_size, num_combined_kv_heads, head_dim]
+    kv_pages: jax.Array,  # [total_num_pages, page_size, num_combined_kv_heads, head_dim]
     kv_lens: jax.Array,  # i32[max_num_seqs]
     page_indices: jax.Array,  # i32[max_num_seqs, pages_per_seq]
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
@@ -84,6 +83,7 @@ def ref_ragged_paged_attention(
     mask_value: float | None = DEFAULT_MASK_VALUE,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    is_causal: bool = True,     #decorder-causal
 ):
     static_validate_inputs(
         queries,
@@ -135,9 +135,15 @@ def ref_ragged_paged_attention(
         q_span = (kv_len - q_len) + jax.lax.broadcasted_iota(
             jnp.int32, attn.shape, 1)
         kv_span = jax.lax.broadcasted_iota(jnp.int32, attn.shape, 2)
-        mask = q_span < kv_span
-        if sliding_window is not None:
-            mask = jnp.logical_or(mask, q_span - sliding_window >= kv_span)
+        #causal condition
+        if is_causal:
+            mask = q_span < kv_span
+            if sliding_window is not None:
+                mask = jnp.logical_or(mask, q_span - sliding_window >= kv_span)
+        else:
+            #bidirectional-encoder
+            mask = kv_span >= kv_len
+
         if soft_cap is not None:
             attn = soft_cap * jnp.tanh(attn / soft_cap)
         attn += jnp.where(mask, mask_value, 0.0)
@@ -307,6 +313,7 @@ def ragged_paged_attention_kernel(
     mask_value: float | None = DEFAULT_MASK_VALUE,
     k_scale: float | None = None,
     v_scale: float | None = None,
+    is_causal: bool = True,     #decorder-causal
 ):
     if mask_value is None:
         mask_value = DEFAULT_MASK_VALUE
@@ -450,6 +457,7 @@ def ragged_paged_attention_kernel(
             head_acc_ref,  # [num_q_per_blk, num_q_heads_per_kv_head, head_dim]
             *,
             kv_blk_idx,
+            is_causal,
         ):
             assert q.shape == (
                 num_q_per_blk * num_q_heads_per_kv_head,
@@ -507,9 +515,25 @@ def ragged_paged_attention_kernel(
                 1,
             )
             causal_mask = row_ids < col_ids
-            if sliding_window is not None:
-                causal_mask = jnp.logical_or(
-                    causal_mask, row_ids - sliding_window >= col_ids)
+            if is_causal:
+                row_ids = (
+                    (kv_len - q_len) + q_len_start - q_start +
+                    jax.lax.broadcasted_iota(
+                    jnp.int32,
+                    (num_q_per_blk * num_q_heads_per_kv_head, num_kv_per_blk),
+                    0,
+                ) // num_q_heads_per_kv_head)
+                causal_mask = row_ids < col_ids
+
+                if sliding_window is not None:
+                    causal_mask = jnp.logical_or(
+                        causal_mask, row_ids - sliding_window >= col_ids)
+                mask = causal_mask
+            else:#encoder mask only positions beyonf kv_len (padding)
+                if sliding_window is not None:
+                    raise ValueError("sliding_window is not supported || is_causal = false ")
+                mask = col_ids >= kv_len
+            
             if soft_cap is not None:
                 qk = soft_cap * jnp.tanh(qk / soft_cap)
             qk += jnp.where(causal_mask, mask_value, 0.0)
@@ -624,6 +648,7 @@ def ragged_paged_attention_kernel(
                         acc_ref.at[:, q_head_idx:q_head_idx +
                                    num_q_heads_per_kv_head, :],
                         kv_blk_idx=kv_blk_idx,
+                        is_causal=is_causal,
                     )
             return kv_blk_idx + 1, next_buf_idx
 
@@ -700,6 +725,7 @@ def get_min_heads_per_blk(num_q_heads, num_combined_kv_heads, q_dtype,
     "soft_cap",
     "k_scale",
     "v_scale",
+    "is_causal",
 ])
 def ragged_paged_attention(
     q: jax.Array,  # [max_num_batched_tokens, num_q_heads, head_dim]
@@ -720,6 +746,7 @@ def ragged_paged_attention(
     num_kv_pages_per_block: int | None = None,
     num_queries_per_block: int | None = None,
     vmem_limit_bytes: int | None = None,
+    is_causal: bool = True,
 ):
     """Ragged paged attention that supports mixed prefill and decode.
 
@@ -743,6 +770,7 @@ def ragged_paged_attention(
     num_queries_per_block: number of kv pages to be processed in one flash
       attention block in the pallas kernel.
     vmem_limit_bytes: the vmem limit for the pallas kernel.
+    is_causal: whether to apply causal masking (default True). Set to False for bidirectional (encoder) attention.
 
   Returns:
     The output of the attention.
@@ -849,6 +877,7 @@ def ragged_paged_attention(
             mask_value=mask_value,
             k_scale=k_scale,
             v_scale=v_scale,
+            is_causal=is_causal,
         ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=len(scalar_prefetches),
