@@ -597,8 +597,18 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
     plan = _two_step_dispatch_plan(mesh)
     hidden = hidden_states.shape[-1]
     if plan is None or hidden % 2:
+        logger.warning_once(
+            "MOE_TWO_STEP_DISPATCH is set but does not apply to this mesh "
+            "(%s, hidden=%d): keeping the one-step dispatch all-gather. It "
+            "needs a single model axis whose adjacent indices are the two "
+            "cores of one chip in every attention-data rank.",
+            str(dict(mesh.shape)), hidden)  # *_once caches on args: hashable
         return hidden_states
     step1, pair_axis, perm = plan
+    logger.info_once(
+        "MOE_TWO_STEP_DISPATCH: each chip's two cores gather half of the "
+        "%d hidden columns over %s, then swap halves on-chip along '%s' "
+        "(pairs %s).", hidden, str(step1), pair_axis, str(perm))
     half = hidden // 2
     mlp = ShardingAxisName.MLP_DATA
 

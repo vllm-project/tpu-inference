@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, two-step dispatch, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,60 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #46: #45 with one change -- MOE_TWO_STEP_DISPATCH=1, the two-step MoE
+        # dispatch all-gather. Measured on top of #45's 384-token bucket.
+        #
+        # WHAT IT CHANGES. Before the routed experts every device needs every
+        # token, and XLA inserts one all-gather over attn_dp for it. #45's
+        # profile: bf16[48,8192] -> [384,8192], 92 per step x 129 us = 11.9 ms
+        # of an 89.5 ms step. That gather is redundant -- the 4 model shards of
+        # an attn_dp rank hold identical hidden states and each gathers all of
+        # them -- and it never uses the intra-chip link, because JAX's mesh
+        # builder puts a chip's two cores on the model axis, so every attn_dp
+        # gather group is 8 cores on 8 different chips.
+        #
+        # With the flag, the two cores of each chip (model indices 2k, 2k+1)
+        # each gather HALF the hidden columns over attn_dp, then swap halves
+        # on-chip with a ppermute:
+        #
+        #   step 1  all-gather        bf16[48,4096] -> [384,4096]  over attn_dp
+        #   step 2  collective-permute bf16[384,4096]              on-chip pair
+        #
+        # Cross-chip traffic halves. Output is bitwise identical to the one-step
+        # gather (checked locally on three mesh layouts), so accuracy must not
+        # move at all.
+        #
+        # EXPECTED. Step 2 measured locally at production size: 9.2 us. Step 1
+        # can't be reproduced locally (8-way attn_dp needs 32 devices);
+        # scaling #45's 129 us by half the data gives ~65 us. Total ~74 us vs
+        # 129 us: ~55 us x 92 layers = ~5 ms/step, ~5.6% of #45's 89.5 ms.
+        # Step 1 is the unmeasured part.
+        #
+        # THE PAIRING CHECK. The code reads each device's coords/core_on_chip
+        # from the mesh and only uses the two-step path if adjacent model
+        # indices are the two cores of one chip in every rank. My offline
+        # reproduction of the v7x-32 mesh says they are; this build is the
+        # first real check. The worker log says which way it went:
+        #   applied:  "MOE_TWO_STEP_DISPATCH: each chip's two cores gather half"
+        #   fallback: "MOE_TWO_STEP_DISPATCH is set but does not apply to this mesh"
+        # If it falls back, the build runs #45's code path and measures nothing
+        # new -- kill it.
+        #
+        # Everything else is #45: tp=4 x attn_dp=8, C=368 (46/rank), util 0.98,
+        # MNBT 512/rank, pool 27232, COMPILATION_SIZES=384, same decode-only
+        # profile at concurrency 368 (min_kv_len >= 8250, 5 steps).
+        #
+        # WHAT TO READ FIRST:
+        #   1. The "applied" log line above (utils/fused_moe_gmm logger prefix).
+        #   2. GSM8K / MMLU: must match #45 (0.9765 / 0.8936) up to the usual
+        #      run-to-run noise; the MoE output is bit-identical.
+        #   3. In the profile: bf16[48,4096] all-gather over attn_dp and a
+        #      bf16[384,4096] collective-permute, replacing #45's
+        #      bf16[48,8192] -> [384,8192] gather.
+        #   4. Decode step and median ITL vs #45 (89.5 ms / 94.2 ms).
+        #
+        # ---- #45's rationale, still in force, follows ----
+        #
         # #45: #44 with one change -- COMPILATION_SIZES=384, i.e. an extra
         # aggregate token bucket of 384 (48 per attn_dp rank).
         #
@@ -300,6 +354,7 @@ steps:
           'NUM_GPU_BLOCKS_OVERRIDE=27232' \
           'MAX_NUM_BATCHED_TOKENS=512' \
           'COMPILATION_SIZES=384' \
+          'MOE_TWO_STEP_DISPATCH=1' \
           'GPU_MEMORY_UTILIZATION=0.98' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
