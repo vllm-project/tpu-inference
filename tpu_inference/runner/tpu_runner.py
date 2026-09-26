@@ -2144,7 +2144,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             prompt_logprobs_async = compute_prompt_logprobs(
                 full_logits,
-                input_ids,
                 self.input_batch.num_prompt_logprobs,
                 self.requests,
                 scheduler_output,

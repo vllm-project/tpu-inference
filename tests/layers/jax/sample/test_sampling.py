@@ -395,14 +395,14 @@ class TestComputePromptLogprobs:
             [0.0, 0.0, 1.0],
         ],
                                 dtype=jnp.float32)
-        input_ids = jnp.array([0, 1, 2], dtype=jnp.int32)
-
         num_prompt_logprobs = {"req1": 2}
 
         # Mock CachedRequestState and VllmSchedulerOutput
         mock_req_state = MagicMock()
         mock_req_state.num_computed_tokens = 0
         mock_req_state.num_prompt_tokens = 3
+        # Targets are read from here.
+        mock_req_state.prompt_token_ids = [0, 1, 2]
         requests = {"req1": mock_req_state}
 
         mock_scheduler_output = MagicMock()
@@ -414,7 +414,6 @@ class TestComputePromptLogprobs:
         with jax.set_mesh(TestProcessedLogprobs._get_fake_mesh()):
             res = compute_prompt_logprobs(
                 full_logits=full_logits,
-                input_ids=input_ids,
                 num_prompt_logprobs=num_prompt_logprobs,
                 requests=requests,
                 scheduler_output=mock_scheduler_output,
@@ -434,3 +433,42 @@ class TestComputePromptLogprobs:
         assert snap.start_idx == 0
         assert snap.num_logits == 2
         assert snap.is_last_chunk is False
+
+
+def test_prompt_targets_do_not_cross_a_chunk_boundary():
+    """A boundary row must not look ahead into the request packed after it.
+
+    Two requests back to back. The first is mid-prompt, so every row of its
+    chunk is scored, including the last one -- whose target is the next token
+    of its own prompt, not the first token of the second request.
+    """
+    from unittest.mock import MagicMock
+
+    from tpu_inference.layers.jax.sample.sampling import (
+        PromptLogprobsReqSnap, _build_prompt_target_ids)
+
+    def snap(offset, start_idx, num_logits, prompt_token_ids):
+        st = MagicMock()
+        st.prompt_token_ids = prompt_token_ids
+        return PromptLogprobsReqSnap(req_id="r",
+                                     req_state=st,
+                                     req_offset=offset,
+                                     start_idx=start_idx,
+                                     num_logits=num_logits,
+                                     is_last_chunk=False,
+                                     num_k=1)
+
+    # req A: prompt [10..17], first chunk of 4 rows at offset 0.
+    # req B: prompt [90..93], 2 rows at offset 4.
+    a = list(range(10, 18))
+    b = list(range(90, 94))
+    targets = np.asarray(
+        _build_prompt_target_ids(
+            8, [snap(0, 0, 4, a), snap(4, 0, 2, b)]))
+
+    # Row 3 is the chunk boundary: its target is A's token 4, never B's first.
+    assert targets[:4].tolist() == [11, 12, 13, 14]
+    assert targets[3] != b[0]
+    assert targets[4:6].tolist() == [91, 92]
+    # Rows no request claims stay 0 and are never read back.
+    assert targets[6:].tolist() == [0, 0]
