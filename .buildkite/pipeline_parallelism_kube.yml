@@ -60,7 +60,7 @@ steps:
         buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
   # Diagnostic branch only. Each kube step gets a fresh pod.
-  - label: ":kubernetes: tpu6e TP diag (kube, no runtime metrics)"
+  - label: ":kubernetes: tpu6e TP diag (kube, vLLM TP=8 init first)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -71,9 +71,9 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --no-metrics --diff-writes --runs 2
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --warmup-vllm init8 --runs 1
 
-  - label: ":kubernetes: tpu6e TP diag (kube, no metrics or worker env)"
+  - label: ":kubernetes: tpu6e TP diag (kube, vLLM TP=8 tiny generate first)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -84,4 +84,17 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --no-worker-env --runs 2
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --warmup-vllm tiny8 --runs 1
+
+  - label: ":kubernetes: tpu6e TP diag (kube, vLLM TP=1 tiny generate first)"
+    depends_on: "build_docker_tpu6e"
+    timeout_in_minutes: 240
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "tpu6e"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --warmup-vllm tp1 --runs 1

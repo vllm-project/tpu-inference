@@ -43,11 +43,15 @@ set -u
 # --no-metrics     unset TPU_RUNTIME_METRICS_PORTS, so libtpu serves no runtime
 #                  metrics for GKE's node agent to poll
 # --no-worker-env  also unset TPU_WORKER_HOSTNAMES and TPU_WORKER_ID
+# --warmup-vllm M  a real vLLM run in a separate process first, with the test's
+#                  config: init8 (TP=8 engine, no generate), tiny8 (plus a
+#                  one-prompt generate) or tp1 (TP=1 engine, tiny generate)
 RUNS=2
 NO_TP=0
 WARMUP=
 LOCAL_HF=0
 DIFF_WRITES=0
+VLLM_WARMUP=
 COMPILEALL=0
 PREWARM=0
 SLEEP=0
@@ -72,6 +76,7 @@ while [ $# -gt 0 ]; do
     --compileall) COMPILEALL=1 ;;
     --no-metrics) unset TPU_RUNTIME_METRICS_PORTS ;;
     --no-worker-env) unset TPU_RUNTIME_METRICS_PORTS TPU_WORKER_HOSTNAMES TPU_WORKER_ID ;;
+    --warmup-vllm) VLLM_WARMUP="$2"; shift ;;
   esac
   shift
 done
@@ -227,6 +232,28 @@ writes_since() {
   find / -xdev \( -path /proc -o -path /sys -o -path /dev \) -prune -o \
     -type f -newer "$1" -print 2>/dev/null
 }
+
+if [ -n "$VLLM_WARMUP" ]; then
+  section "vLLM warm-up: $VLLM_WARMUP"
+  MODEL_IMPL_TYPE=vllm SKIP_JAX_PRECOMPILE=0 VLLM_XLA_CHECK_RECOMPILATION=1 \
+    VLLM_WARMUP="$VLLM_WARMUP" python3 - <<'PY'
+import os, time
+from vllm import LLM, SamplingParams
+mode = os.environ["VLLM_WARMUP"]
+tp = 1 if mode == "tp1" else 8
+t0 = time.time()
+llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", tensor_parallel_size=tp,
+          max_model_len=2048, max_num_batched_tokens=2048, max_num_seqs=256,
+          gpu_memory_utilization=0.80, kv_cache_dtype="auto",
+          enable_prefix_caching=False)
+t1 = time.time()
+if mode != "init8":
+    llm.generate(["Hello, my name is"], SamplingParams(temperature=0.0, max_tokens=4))
+t2 = time.time()
+llm.llm_engine.engine_core.shutdown()
+print(f"vLLM warm-up {mode}: init {t1 - t0:.1f}s, generate {t2 - t1:.1f}s")
+PY
+fi
 
 for i in $(seq 1 "$RUNS"); do
   [ "$DIFF_WRITES" = 1 ] && [ "$i" = 1 ] && touch /tmp/.before_run1
