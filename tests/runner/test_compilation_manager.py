@@ -190,18 +190,31 @@ class TestPrecompileUnpackArrays:
     """`_prepare_inputs` splits its metadata blob with an un-jitted
     `jnp.split`, which compiles once per layout. Every layout a step can pack
     has to be split here, or the first step to use it compiles (or reads the
-    persistent cache) mid-request, and raises under VLLM_XLA_CHECK_RECOMPILATION.
+    persistent cache) mid-request, and raises under
+    VLLM_XLA_CHECK_RECOMPILATION.
     """
 
     def test_every_token_and_logits_padding_pair(self):
-        # (8, 16) is skipped: a step never has more logits than tokens.
         sizes = [c.sizes for c in _precompiled_unpacks()]
-        assert sizes == [(8, 8), (16, 8), (16, 16), (32, 8), (32, 16)]
+        assert sizes == [(8, 8), (8, 16), (16, 8), (16, 16), (32, 8), (32, 16)]
+
+    def test_more_logits_than_tokens_is_warmed(self):
+        # Spec decode, dp_size=4, one request with 3 draft tokens: 4 tokens
+        # pad to the 4-token rung, 4 logits to the 8-logit rung, per rank.
+        sizes = [
+            c.sizes
+            for c in _precompiled_unpacks(dp_size=4,
+                                          num_tokens_paddings_per_dp=[4, 8],
+                                          speculative_config=object(),
+                                          num_logits_paddings=[8, 16])
+        ]
+        assert (16, 32) in sizes
 
     def test_per_rank_paddings_are_scaled_by_dp(self):
         # _prepare_inputs pads per rank and packs all ranks into one blob.
         sizes = [c.sizes for c in _precompiled_unpacks(dp_size=2)]
-        assert sizes == [(16, 16), (32, 16), (32, 32), (64, 16), (64, 32)]
+        assert sizes == [(16, 16), (16, 32), (32, 16), (32, 32), (64, 16),
+                         (64, 32)]
 
     def test_continue_decode_pads_tokens_to_request_paddings(self):
         sizes = [
@@ -221,10 +234,10 @@ class TestPrecompileUnpackArrays:
             for c in _precompiled_unpacks(speculative_config=object(),
                                           num_logits_paddings=[8, 16, 32])
         ]
-        assert sizes == [(8, 8), (16, 8), (16, 16), (32, 8), (32, 16),
-                         (32, 32)]
+        assert sizes == [(8, 8), (8, 16), (8, 32), (16, 8), (16, 16), (16, 32),
+                         (32, 8), (32, 16), (32, 32)]
 
-    def test_blob_is_the_one_prepare_inputs_transfers(self):
+    def test_blob_has_the_runtime_shape_dtype_and_sharding(self):
         # The eager split's executable is keyed on the input's shape, dtype
         # and sharding, so all three must match the runtime blob.
         for call in _precompiled_unpacks():

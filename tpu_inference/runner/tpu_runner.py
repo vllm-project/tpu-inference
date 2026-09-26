@@ -2739,12 +2739,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self, padded_total_num_scheduled_tokens: int,
             logits_indices_len: int) -> common_utils.DeviceBufferMetadata:
         """The layout _prepare_inputs packs into device_buffer for a step with
-        these padded sizes: the same segments, sizes and order.
-
-        unpack_arrays is not jitted, so each distinct layout compiles its own
-        split, or loads it from the persistent compilation cache, the first
-        time a step uses it. The compilation manager warms every layout with
-        this so that happens during precompilation instead.
+        these padded sizes: the same segments, sizes and order. The compilation
+        manager precompiles unpack_arrays for each layout this returns.
         """
         keys = ["input_ids", "query_start_loc", "seq_lens", "logits_indices"]
         sizes = [

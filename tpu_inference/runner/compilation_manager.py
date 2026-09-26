@@ -924,12 +924,12 @@ class CompilationManager:
         blob_sharding = NamedSharding(runner.mesh,
                                       PartitionSpec(ShardingAxisName.BATCH))
 
+        # Every pair, including more logits than tokens: the two ladders are
+        # built separately and need not line up. With spec decode and
+        # dp_size=4, one request with 3 draft tokens pads to 16 tokens and
+        # 32 logits.
         for num_tokens in token_sizes:
             for num_logits in logits_sizes:
-                if self._should_skip_padding_combination(num_tokens,
-                                                         num_logits,
-                                                         only_equal=False):
-                    continue
                 layout = runner._metadata_blob_layout(num_tokens, num_logits)
                 blob = device_array(runner.mesh,
                                     np.zeros(sum(layout.sizes),
