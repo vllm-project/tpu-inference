@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     MOE_TWO_STEP_DISPATCH: bool = False
+    MOE_TWO_STEP_DISPATCH_FP8: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -536,6 +537,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See fused_moe_gmm.py.
     "MOE_TWO_STEP_DISPATCH":
     env_bool("MOE_TWO_STEP_DISPATCH", default=False),
+    # With MOE_TWO_STEP_DISPATCH, quantize the dispatched hidden states to fp8
+    # (per-token scale, as MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8 does) before the
+    # two-step gather, so both steps move fp8. Bitwise identical to the one-step
+    # fp8 all-gather; halves the two-step's bytes. See fused_moe_gmm.py.
+    "MOE_TWO_STEP_DISPATCH_FP8":
+    env_bool("MOE_TWO_STEP_DISPATCH_FP8", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which

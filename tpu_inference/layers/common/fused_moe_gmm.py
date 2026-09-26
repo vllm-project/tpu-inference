@@ -574,8 +574,14 @@ def _two_step_dispatch_plan(mesh: Mesh):
     return step1, pair_axis, perm
 
 
+# Lane-aligned tail appended to each row of the fp8 step-1 payload; its first
+# 4 bytes carry the row's f32 dequantization scale.
+_FP8_SCALE_TAIL = 128
+
+
 def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
-                                    mesh: Mesh) -> jax.Array:
+                                    mesh: Mesh,
+                                    fp8: bool = False) -> jax.Array:
     """Replicate attention-data-sharded hidden states in two gathers.
 
     The routed experts need every token on every device. Left to itself XLA
@@ -593,6 +599,12 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
     Pure data movement: the result is bitwise identical to the one-step gather.
     Returns the input unchanged -- XLA then does the one-step gather -- when the
     mesh does not have the expected core pairing or H is odd.
+
+    With fp8=True each core first quantizes its rows exactly as
+    _apply_all_gather_fp8 does (per-token scale over the full row), so both
+    steps move fp8 bytes plus a 128-byte tail carrying the row's scale, and the
+    result is bitwise identical to the one-step fp8 all-gather. Where the plan
+    does not apply it falls back to that one-step fp8 all-gather.
     """
     plan = _two_step_dispatch_plan(mesh)
     hidden = hidden_states.shape[-1]
@@ -603,14 +615,19 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
             "needs a single model axis whose adjacent indices are the two "
             "cores of one chip in every attention-data rank.",
             str(dict(mesh.shape)), hidden)  # *_once caches on args: hashable
+        if fp8:
+            return _apply_all_gather_fp8(hidden_states, mesh,
+                                         hidden_states.dtype)
         return hidden_states
     step1, pair_axis, perm = plan
     logger.info_once(
         "MOE_TWO_STEP_DISPATCH: each chip's two cores gather half of the "
         "%d hidden columns over %s, then swap halves on-chip along '%s' "
-        "(pairs %s).", hidden, str(step1), pair_axis, str(perm))
+        "(pairs %s), in %s.", hidden, str(step1), pair_axis, str(perm),
+        "fp8" if fp8 else str(hidden_states.dtype))
     half = hidden // 2
     mlp = ShardingAxisName.MLP_DATA
+    dtype = hidden_states.dtype
 
     def _gather(x):
         core = jax.lax.axis_index(pair_axis) % 2
@@ -624,8 +641,35 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
         ],
                                axis=1)
 
+    def _gather_fp8(x):
+        q, scale = quantize_tensor(jnp.float8_e4m3fn, x, axis=-1)
+        # Move raw bytes (uint8), not fp8 values, so nothing on the way can
+        # touch the scale bytes that happen to spell fp8 NaNs.
+        q = jax.lax.bitcast_convert_type(q, jnp.uint8)
+        tail = jnp.pad(jax.lax.bitcast_convert_type(scale, jnp.uint8),
+                       ((0, 0), (0, _FP8_SCALE_TAIL - 4)))
+        core = jax.lax.axis_index(pair_axis) % 2
+        mine = jax.lax.dynamic_slice_in_dim(q, core * half, half, axis=1)
+        mine = jax.lax.all_gather(jnp.concatenate([mine, tail], axis=1),
+                                  step1,
+                                  axis=0,
+                                  tiled=True)
+        scale = jax.lax.bitcast_convert_type(mine[:, half:half + 4],
+                                             jnp.float32)
+        mine = mine[:, :half]
+        theirs = jax.lax.ppermute(mine, pair_axis, perm)
+        first = core == 0
+        q = jnp.concatenate([
+            jnp.where(first, mine, theirs),
+            jnp.where(first, theirs, mine),
+        ],
+                            axis=1)
+        q = jax.lax.bitcast_convert_type(q, jnp.float8_e4m3fn)
+        # Same dequantization as _apply_all_gather_fp8.
+        return (q.astype(jnp.float32) * scale[:, None]).astype(dtype)
+
     return jax.shard_map(
-        _gather,
+        _gather_fp8 if fp8 else _gather,
         mesh=mesh,
         in_specs=P(tuple(_as_axes(mlp)) + step1, None),
         out_specs=P(mlp, None),
@@ -824,7 +868,12 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    if all_gather_fp8:
+    if (use_ep and envs.MOE_TWO_STEP_DISPATCH
+            and envs.MOE_TWO_STEP_DISPATCH_FP8):
+        hidden_states = _apply_two_step_dispatch_gather(hidden_states,
+                                                        mesh,
+                                                        fp8=True)
+    elif all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
     elif use_ep and envs.MOE_TWO_STEP_DISPATCH:
         hidden_states = _apply_two_step_dispatch_gather(hidden_states, mesh)
