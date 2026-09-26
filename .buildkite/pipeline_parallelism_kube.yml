@@ -60,7 +60,7 @@ steps:
         buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
   # Diagnostic branch only. Each kube step gets a fresh pod.
-  - label: ":kubernetes: tpu6e TP diag (kube, touch TPUs then idle 360s)"
+  - label: ":kubernetes: tpu6e TP diag (kube, profile run 1 and run 2)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -71,17 +71,14 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --warmup-touch --sleep-after 360 --runs 1 --sample
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --profile --runs 2
 
-  - label: ":kubernetes: tpu6e TP diag (kube, touch TPUs then idle 180s)"
+  - label: "tpu6e TP diag (bare metal, profile)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
-      queue: "kube"
+      queue: "tpu_v6e_8_queue"
     env:
-      SHAPE: *shape_multi
       TPU_VERSION: "tpu6e"
-    plugins:
-      - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --warmup-touch --sleep-after 180 --runs 1 --sample
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --profile --runs 1

@@ -37,6 +37,7 @@ set -u
 #                  before the first run
 # --warmup-touch   one tiny op on every chip, to open the TPUs and nothing more
 # --sleep-after N  idle N seconds after the warm-up, before the first run
+# --profile        run tp8_profile.py (traced TP=8 leg) instead of the test
 # --local-jax-cache  compile into an empty local directory instead of the
 #                  shared cache, so nothing is read through gcsfuse lazily
 # --local-hf       copy the test model to local disk and load it from there
@@ -58,6 +59,7 @@ COMPILEALL=0
 PREWARM=0
 SLEEP=0
 SLEEP_AFTER=0
+PROFILE=0
 SAMPLE=0
 SPIN=0
 while [ $# -gt 0 ]; do
@@ -74,6 +76,7 @@ while [ $# -gt 0 ]; do
     --warmup-hbm) WARMUP=hbm ;;
     --warmup-touch) WARMUP=touch ;;
     --sleep-after) SLEEP_AFTER="$2"; shift ;;
+    --profile) PROFILE=1 ;;
     --local-jax-cache)
       export JAX_COMPILATION_CACHE_DIR=/tmp/jax-cache VLLM_XLA_CACHE_PATH=/tmp/jax-cache ;;
     --local-hf) LOCAL_HF=1 ;;
@@ -271,8 +274,12 @@ fi
 for i in $(seq 1 "$RUNS"); do
   [ "$DIFF_WRITES" = 1 ] && [ "$i" = 1 ] && touch /tmp/.before_run1
   section "test_tp_performance run $i"
-  python3 -m pytest -s -v -x \
-    /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py::test_tp_performance
+  if [ "$PROFILE" = 1 ]; then
+    python3 "$(dirname "$0")/tp8_profile.py" "run$i"
+  else
+    python3 -m pytest -s -v -x \
+      /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py::test_tp_performance
+  fi
   echo "run $i exit $?"
   if [ "$DIFF_WRITES" = 1 ] && [ "$i" = 1 ]; then
     section "files run 1 wrote, by top directory"
