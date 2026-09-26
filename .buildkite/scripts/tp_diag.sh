@@ -31,8 +31,11 @@ set -u
 #                  Any normal thread preempts them, so a woken engine thread
 #                  lands on a running CPU instead of waking a halted one - the
 #                  userspace analogue of booting with idle=poll.
+# --warmup-ici     30s of 8-chip psum (ICI all-reduce) before the first run
+# --warmup-chip    30s of per-chip matmuls, no collectives, before the first run
 RUNS=2
 NO_TP=0
+WARMUP=
 PREWARM=0
 SLEEP=0
 SAMPLE=0
@@ -46,6 +49,8 @@ while [ $# -gt 0 ]; do
     --sleep) SLEEP="$2"; shift ;;
     --sample) SAMPLE=1 ;;
     --spin) SPIN=1 ;;
+    --warmup-ici) WARMUP=ici ;;
+    --warmup-chip) WARMUP=chip ;;
   esac
   shift
 done
@@ -128,6 +133,34 @@ if [ "$PREWARM" = 1 ]; then
   find / -xdev -type f -size -2G -print0 2>/dev/null |
     xargs -0 -P 32 -n 200 cat > /dev/null 2>&1
   echo "read the root filesystem in $(( $(date +%s) - start ))s"
+fi
+
+if [ -n "$WARMUP" ]; then
+  section "warm-up: $WARMUP"
+  WARMUP="$WARMUP" python3 - <<'PY'
+import os, time
+import jax, jax.numpy as jnp
+devs = jax.devices()
+mode = os.environ["WARMUP"]
+end = time.time() + 30
+n = 0
+if mode == "ici":
+    f = jax.pmap(lambda v: jax.lax.psum(v, "i"), axis_name="i")
+    x = jax.device_put_sharded([jnp.ones((1 << 22,), jnp.float32)] * len(devs), devs)
+    while time.time() < end:
+        x = f(x) * (1.0 / len(devs))
+        x.block_until_ready()
+        n += 1
+else:
+    xs = [jax.device_put(jnp.ones((4096, 4096), jnp.bfloat16), d) for d in devs]
+    mm = jax.jit(lambda a: a @ a)
+    while time.time() < end:
+        xs = [mm(a) * (1.0 / 4096) for a in xs]
+        for a in xs:
+            a.block_until_ready()
+        n += 1
+print(f"{mode} warm-up: {n} iterations on {len(devs)} devices")
+PY
 fi
 
 for i in $(seq 1 "$RUNS"); do
