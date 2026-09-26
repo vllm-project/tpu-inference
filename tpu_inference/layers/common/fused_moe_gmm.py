@@ -583,7 +583,9 @@ _FP8_SCALE_TAIL = 128
 
 def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
                                     mesh: Mesh,
-                                    fp8: bool = False) -> jax.Array:
+                                    fp8: bool = False,
+                                    topk: tuple[jax.Array, jax.Array]
+                                    | None = None):
     """Replicate attention-data-sharded hidden states in two gathers.
 
     The routed experts need every token on every device. Left to itself XLA
@@ -607,6 +609,14 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
     steps move fp8 bytes plus a 128-byte tail carrying the row's scale, and the
     result is bitwise identical to the one-step fp8 all-gather. Where the plan
     does not apply it falls back to that one-step fp8 all-gather.
+
+    topk=(topk_indices, topk_weights), fp8 only, rides the routing metadata in
+    the same tail (int32 ids, then f32 weights, after the scale) instead of a
+    separate all_gather_topk_indices_and_weights, and returns
+    (hidden_states, topk_indices, topk_weights[f32]). Step 1 already gathers
+    rows over the axes that metadata gather spans, and the tail has 124 spare
+    bytes (top-k <= 15 fits without growing it), so the metadata costs no
+    extra bytes and one fewer latency-bound collective. Bitwise identical.
     """
     plan = _two_step_dispatch_plan(mesh)
     hidden = hidden_states.shape[-1]
@@ -618,9 +628,15 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
             "cores of one chip in every attention-data rank.",
             str(dict(mesh.shape)), hidden)  # *_once caches on args: hashable
         if fp8:
-            return _apply_all_gather_fp8(hidden_states, mesh,
-                                         hidden_states.dtype)
+            out = _apply_all_gather_fp8(hidden_states, mesh,
+                                        hidden_states.dtype)
+            if topk is not None:
+                ids, w = all_gather_topk_indices_and_weights(
+                    *topk, jnp.float32, mesh)
+                return out, ids, w
+            return out
         return hidden_states
+    assert topk is None or fp8, "topk rides only the fp8 tail"
     step1, pair_axis, perm = plan
     logger.info_once(
         "MOE_TWO_STEP_DISPATCH: each chip's two cores gather half of the "
@@ -643,13 +659,21 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
         ],
                                axis=1)
 
-    def _gather_fp8(x):
+    def _gather_fp8(x, *meta):
         q, scale = quantize_tensor(jnp.float8_e4m3fn, x, axis=-1)
         # Move raw bytes (uint8), not fp8 values, so nothing on the way can
         # touch the scale bytes that happen to spell fp8 NaNs.
         q = jax.lax.bitcast_convert_type(q, jnp.uint8)
-        tail = jnp.pad(jax.lax.bitcast_convert_type(scale, jnp.uint8),
-                       ((0, 0), (0, _FP8_SCALE_TAIL - 4)))
+        tail = [scale] + [
+            m.astype(t) for m, t in zip(meta, (jnp.int32, jnp.float32))
+        ]
+        tail = jnp.concatenate([
+            jax.lax.bitcast_convert_type(t, jnp.uint8).reshape(t.shape[0], -1)
+            for t in tail
+        ],
+                               axis=1)
+        tail_len = -(-tail.shape[1] // _FP8_SCALE_TAIL) * _FP8_SCALE_TAIL
+        tail = jnp.pad(tail, ((0, 0), (0, tail_len - tail.shape[1])))
         core = jax.lax.axis_index(pair_axis) % 2
         mine = jax.lax.dynamic_slice_in_dim(q, core * half, half, axis=1)
         mine = jax.lax.all_gather(jnp.concatenate([mine, tail], axis=1),
@@ -658,6 +682,13 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
                                   tiled=True)
         scale = jax.lax.bitcast_convert_type(mine[:, half:half + 4],
                                              jnp.float32)
+        got = []
+        if meta:
+            k = meta[0].shape[1]
+            for i, t in enumerate((jnp.int32, jnp.float32)):
+                b = mine[:, half + 4 + 4 * k * i:half + 4 + 4 * k * (i + 1)]
+                got.append(
+                    jax.lax.bitcast_convert_type(b.reshape(-1, k, 4), t))
         mine = mine[:, :half]
         theirs = jax.lax.ppermute(mine, pair_axis, perm)
         first = core == 0
@@ -668,15 +699,18 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
                             axis=1)
         q = jax.lax.bitcast_convert_type(q, jnp.float8_e4m3fn)
         # Same dequantization as _apply_all_gather_fp8.
-        return (q.astype(jnp.float32) * scale[:, None]).astype(dtype)
+        out = (q.astype(jnp.float32) * scale[:, None]).astype(dtype)
+        return (out, *got) if meta else out
 
+    args = (hidden_states, ) + (tuple(topk) if topk is not None else ())
+    spec_in, spec_out = P(tuple(_as_axes(mlp)) + step1, None), P(mlp, None)
     return jax.shard_map(
         _gather_fp8 if fp8 else _gather,
         mesh=mesh,
-        in_specs=P(tuple(_as_axes(mlp)) + step1, None),
-        out_specs=P(mlp, None),
+        in_specs=(spec_in, ) * len(args),
+        out_specs=(spec_out, ) * len(args) if topk is not None else spec_out,
         check_vma=False,
-    )(hidden_states)
+    )(*args)
 
 
 @jax.jit(static_argnames=(
@@ -802,7 +836,20 @@ def fused_moe_func(
         topk_indices = jnp.where(token_valid, topk_indices, 0)
         topk_weights = jnp.where(token_valid, topk_weights, 0.0)
     # All gathering topk_indices and topk_weights if attention dp is used.
-    if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
+    # MOE_ROUTING_IN_DISPATCH_TAIL defers it into the fp8 two-step dispatch.
+    fp8_two_step = (use_ep and envs.MOE_TWO_STEP_DISPATCH
+                    and envs.MOE_TWO_STEP_DISPATCH_FP8)
+    routing_in_tail = (fp8_two_step and envs.MOE_ROUTING_IN_DISPATCH_TAIL
+                       and get_mesh_shape_product(
+                           mesh, ShardingAxisName.ATTN_DATA) > 1)
+    if routing_in_tail:
+        hidden_states, topk_indices, topk_weights = (
+            _apply_two_step_dispatch_gather(hidden_states,
+                                            mesh,
+                                            fp8=True,
+                                            topk=(topk_indices,
+                                                  topk_weights)))
+    elif get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
         topk_indices, topk_weights = all_gather_topk_indices_and_weights(
             topk_indices, topk_weights, dtype, mesh)
     topk_weights = topk_weights.astype(dtype)
@@ -876,8 +923,9 @@ def fused_moe_func(
 
         return x, group_sizes_local, topk_argsort_revert_indices
 
-    if (use_ep and envs.MOE_TWO_STEP_DISPATCH
-            and envs.MOE_TWO_STEP_DISPATCH_FP8):
+    if routing_in_tail:
+        pass  # dispatched above, together with the routing metadata
+    elif fp8_two_step:
         hidden_states = _apply_two_step_dispatch_gather(hidden_states,
                                                         mesh,
                                                         fp8=True)
