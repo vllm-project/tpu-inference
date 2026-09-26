@@ -38,10 +38,14 @@ set -u
 # --local-jax-cache  compile into an empty local directory instead of the
 #                  shared cache, so nothing is read through gcsfuse lazily
 # --local-hf       copy the test model to local disk and load it from there
+# --diff-writes    list every file run 1 creates or changes, by directory
+# --compileall     byte-compile the installed Python before the first run
 RUNS=2
 NO_TP=0
 WARMUP=
 LOCAL_HF=0
+DIFF_WRITES=0
+COMPILEALL=0
 PREWARM=0
 SLEEP=0
 SAMPLE=0
@@ -61,6 +65,8 @@ while [ $# -gt 0 ]; do
     --local-jax-cache)
       export JAX_COMPILATION_CACHE_DIR=/tmp/jax-cache VLLM_XLA_CACHE_PATH=/tmp/jax-cache ;;
     --local-hf) LOCAL_HF=1 ;;
+    --diff-writes) DIFF_WRITES=1 ;;
+    --compileall) COMPILEALL=1 ;;
   esac
   shift
 done
@@ -198,10 +204,37 @@ print(f"{mode} warm-up: {n} {'GiB written' if mode == 'hbm' else 'iterations'} o
 PY
 fi
 
+section "bytecode already in the image"
+for d in /workspace/vllm /workspace/tpu_inference /usr/local/lib/python3*/site-packages; do
+  [ -d "$d" ] && echo "$d: $(find "$d" -name '*.py' | wc -l) .py, $(find "$d" -name '*.pyc' | wc -l) .pyc"
+done
+echo "HOME=$HOME XDG_CACHE_HOME=${XDG_CACHE_HOME:-} VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-}"
+ls -la "$HOME/.cache" 2>/dev/null
+
+if [ "$COMPILEALL" = 1 ]; then
+  section "compileall"
+  start=$(date +%s)
+  python3 -m compileall -q -j 0 /workspace /usr/local/lib/python3*/site-packages > /dev/null 2>&1
+  echo "byte-compiled in $(( $(date +%s) - start ))s"
+fi
+
+writes_since() {
+  find / -xdev \( -path /proc -o -path /sys -o -path /dev \) -prune -o \
+    -type f -newer "$1" -print 2>/dev/null
+}
+
 for i in $(seq 1 "$RUNS"); do
+  [ "$DIFF_WRITES" = 1 ] && [ "$i" = 1 ] && touch /tmp/.before_run1
   section "test_tp_performance run $i"
   python3 -m pytest -s -v -x \
     /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py::test_tp_performance
   echo "run $i exit $?"
+  if [ "$DIFF_WRITES" = 1 ] && [ "$i" = 1 ]; then
+    section "files run 1 wrote, by top directory"
+    writes_since /tmp/.before_run1 > /tmp/run1_writes.txt
+    echo "$(wc -l < /tmp/run1_writes.txt) files"
+    awk -F/ '{print "/"$2"/"$3"/"$4}' /tmp/run1_writes.txt | sort | uniq -c | sort -rn | head -40
+    grep -v '\.pyc$' /tmp/run1_writes.txt | head -60
+  fi
 done
 exit 0
