@@ -17,6 +17,8 @@ from typing import Dict
 import jax
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
+from tpu_inference.core.disagg_utils import (assert_batch_matches_gdn_segments,
+                                             get_active_gdn_segment_hints)
 from tpu_inference.logger import init_logger
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 
@@ -25,16 +27,59 @@ logger = init_logger(__name__)
 
 class PersistentBatchManager:
 
-    def __init__(self, requests: Dict[str, CachedRequestState],
-                 input_batch: InputBatch, encoder_cache: Dict[str,
-                                                              'jax.Array'],
-                 uses_mrope: bool, model_config, is_last_rank: bool):
+    def __init__(self,
+                 requests: Dict[str, CachedRequestState],
+                 input_batch: InputBatch,
+                 encoder_cache: Dict[str, 'jax.Array'],
+                 uses_mrope: bool,
+                 model_config,
+                 is_last_rank: bool,
+                 vllm_config=None):
         self.requests = requests
         self.input_batch = input_batch
         self.encoder_cache = encoder_cache
         self.uses_mrope = uses_mrope
         self.model_config = model_config
         self.is_last_rank = is_last_rank
+        self.vllm_config = vllm_config
+
+    def _is_prefill_request(self, req_idx: int) -> bool:
+        num_prompt_arr = getattr(self.input_batch, "num_prompt_tokens", None)
+        num_computed_arr = getattr(self.input_batch, "num_computed_tokens_cpu",
+                                   None)
+        if num_prompt_arr is not None and num_computed_arr is not None:
+            num_prompt = int(num_prompt_arr[req_idx])
+            if num_prompt > 0:
+                return int(num_computed_arr[req_idx]) < num_prompt
+        req_ids = getattr(self.input_batch, "req_ids", None)
+        if req_ids is not None and req_idx < len(req_ids) and self.requests:
+            req_state = self.requests.get(req_ids[req_idx])
+            if req_state is not None and req_state.num_prompt_tokens > 0:
+                return req_state.num_computed_tokens < req_state.num_prompt_tokens
+        return False
+
+    def _set_request_distribution(self, num_decode: int,
+                                  num_reqs: int) -> None:
+        # Checked here rather than in the kernel: a disaggregated worker may be
+        # emitting only one of the two GDN segments, and this is the one place
+        # that knows the split on the host.
+        vllm_cfg = (self.vllm_config if getattr(
+            self.input_batch, "has_mamba_layers", False) else None)
+        hints = get_active_gdn_segment_hints(vllm_cfg)
+        if hints is not None:
+            has_decode_seqs, has_prefill_seqs = hints
+            if not has_decode_seqs and has_prefill_seqs and num_decode > 0:
+                # 1-token prompts, 1-token final prefill chunks, and 1-token
+                # prefix-cache suffixes satisfy num_scheduled_tokens <= 1 in
+                # _reorder_batch, but are still in the prefill phase
+                # (num_computed_tokens < num_prompt_tokens) and are handled by
+                # GDNMode.PER_SEQ when start_seq=0.
+                num_decode = sum(1 for idx in range(num_decode)
+                                 if not self._is_prefill_request(idx))
+        assert_batch_matches_gdn_segments(num_decode, num_reqs, vllm_cfg)
+        self.input_batch.request_distribution = [
+            num_decode, num_decode, num_reqs
+        ]
 
     def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> int:
         """ Reorder the sheduled requests to RPA kernel friendly distribution
@@ -53,10 +98,7 @@ class PersistentBatchManager:
 
         if (max_decode_tokens == 1
                 and scheduler_output.total_num_scheduled_tokens == num_reqs):
-            num_decode = num_reqs
-            self.input_batch.request_distribution = [
-                num_decode, num_decode, num_reqs
-            ]
+            self._set_request_distribution(num_reqs, num_reqs)
             return swap_cnt
 
         # Check if all scheduled requests match the decode threshold
@@ -68,10 +110,7 @@ class PersistentBatchManager:
                 break
 
         if all_decode:
-            num_decode = num_reqs
-            self.input_batch.request_distribution = [
-                num_decode, num_decode, num_reqs
-            ]
+            self._set_request_distribution(num_reqs, num_reqs)
             return swap_cnt
 
         # Use two-pointer approach to reorder the decode requests to front.
@@ -98,9 +137,7 @@ class PersistentBatchManager:
         num_decode = i + int(scheduler_output.num_scheduled_tokens[
             self.input_batch.req_ids[i]] <= max_decode_tokens)
 
-        self.input_batch.request_distribution = [
-            num_decode, num_decode, num_reqs
-        ]
+        self._set_request_distribution(num_decode, num_reqs)
 
         return swap_cnt
 

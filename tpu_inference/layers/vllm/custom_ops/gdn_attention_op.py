@@ -23,6 +23,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
+from tpu_inference.core.disagg_utils import get_gdn_segment_hints
 from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
@@ -170,6 +171,11 @@ def gdn_attention_core_tpu(
                                                        dp_size)
         read_state_indices_sliced = state_indices_sliced
 
+    # Under prefill/decode disaggregation this worker only ever sees one of
+    # the two batch segments, so the kernel for the other one is not emitted.
+    has_decode_seqs, has_prefill_seqs = get_gdn_segment_hints(
+        vllm_context.vllm_config)
+
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
          j_mixed_qkv,
@@ -192,6 +198,8 @@ def gdn_attention_core_tpu(
          kernel_size,
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
+         has_decode_seqs=has_decode_seqs,
+         has_prefill_seqs=has_prefill_seqs,
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]

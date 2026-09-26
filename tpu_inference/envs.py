@@ -253,6 +253,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Slice configuration for disaggregated decode workers
     "DECODE_SLICES":
     lambda: os.getenv("DECODE_SLICES", ""),
+    # Which batch segments the GDN kernel must emit on this worker. "auto"
+    # derives it from the worker's prefill/decode disaggregation role, so a
+    # prefill worker does not emit the decode kernel and vice versa. "both"
+    # disables the optimization; "prefill" / "decode" force a role.
+    "GDN_DISAGG_SEGMENTS":
+    env_with_choices("GDN_DISAGG_SEGMENTS", "auto",
+                     ["auto", "both", "prefill", "decode"]),
     # Skip JAX precompilation step during initialization
     "SKIP_JAX_PRECOMPILE":
     env_bool("SKIP_JAX_PRECOMPILE", default=False),
