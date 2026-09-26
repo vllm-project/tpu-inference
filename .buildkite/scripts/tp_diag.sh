@@ -27,11 +27,16 @@ set -u
 # --sleep N        idle N seconds before the first run, past pod-start work
 #                  such as the gcsfuse sidecar's metadata prefetch
 # --sample         log node-wide CPU busy % and load every 10s in the background
+# --spin           keep every CPU awake with one SCHED_IDLE busy loop per CPU.
+#                  Any normal thread preempts them, so a woken engine thread
+#                  lands on a running CPU instead of waking a halted one - the
+#                  userspace analogue of booting with idle=poll.
 RUNS=2
 NO_TP=0
 PREWARM=0
 SLEEP=0
 SAMPLE=0
+SPIN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-tp) NO_TP=1 ;;
@@ -40,6 +45,7 @@ while [ $# -gt 0 ]; do
     --prewarm-image) PREWARM=1 ;;
     --sleep) SLEEP="$2"; shift ;;
     --sample) SAMPLE=1 ;;
+    --spin) SPIN=1 ;;
   esac
   shift
 done
@@ -62,6 +68,17 @@ for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
   [ -d "$s" ] && echo "$(basename "$s"): $(cat "$s/name") latency=$(cat "$s/latency")us" \
     "usage=$(cat "$s/usage") disable=$(cat "$s/disable")"
 done
+
+SPINNERS=()
+if [ "$SPIN" = 1 ]; then
+  for _ in $(seq 1 "$(nproc)"); do
+    python3 -c 'import os; os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+while True: pass' &
+    SPINNERS+=($!)
+  done
+  trap 'kill ${SPINNERS[*]} ${SAMPLER:-} 2>/dev/null' EXIT
+  echo "started ${#SPINNERS[@]} SCHED_IDLE spinners"
+fi
 
 section "wake-up latency"
 python3 "$(dirname "$0")/wakeup_bench.py"
@@ -98,7 +115,7 @@ node_sampler() {
     sleep 10
   done
 }
-[ "$SAMPLE" = 1 ] && { node_sampler & SAMPLER=$!; trap 'kill $SAMPLER 2>/dev/null' EXIT; }
+[ "$SAMPLE" = 1 ] && { node_sampler & SAMPLER=$!; trap 'kill ${SPINNERS[*]:-} $SAMPLER 2>/dev/null' EXIT; }
 
 if [ "$SLEEP" -gt 0 ]; then
   section "idle ${SLEEP}s"
