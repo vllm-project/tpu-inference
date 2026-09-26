@@ -31,6 +31,15 @@ for f in enabled defrag; do
 done
 grep -H . /sys/devices/system/cpu/vulnerabilities/* 2>/dev/null
 cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null
+echo "cpuidle driver: $(cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null)" \
+  "governor: $(cat /sys/devices/system/cpu/cpuidle/current_governor_ro 2>/dev/null)"
+for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+  [ -d "$s" ] && echo "$(basename "$s"): $(cat "$s/name") latency=$(cat "$s/latency")us" \
+    "usage=$(cat "$s/usage") disable=$(cat "$s/disable")"
+done
+
+section "wake-up latency"
+python3 "$(dirname "$0")/wakeup_bench.py"
 
 section "process"
 ulimit -a
@@ -43,6 +52,8 @@ env | grep -E '^(TPU_|LIBTPU|XLA_|JAX_|VLLM_|MEGASCALE|OMP_|MALLOC)' | sort
 section "load"
 uptime
 ps -eo pcpu,pid,comm --sort=-pcpu 2>/dev/null | head -8
+
+[ "${1:-}" = "--no-tp" ] && exit 0
 
 for i in 1 2; do
   section "test_tp_performance run $i"

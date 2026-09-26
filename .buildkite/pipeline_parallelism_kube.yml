@@ -72,7 +72,21 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh ${TP_DIAG_ARGS:-}
+
+  - label: ":kubernetes: tpu6e wake-up diag (kube 1-chip)"
+    if: build.env("TP_DIAG_ARGS") == "--no-tp"
+    depends_on: "build_docker_tpu6e"
+    timeout_in_minutes: 120
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: *shape_single
+      TPU_VERSION: "tpu6e"
+    plugins:
+      - *kube_plugin
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --no-tp
 
   - label: "tpu6e TP diag (bare metal)"
     depends_on: "build_docker_tpu6e"
@@ -82,4 +96,4 @@ steps:
     env:
       TPU_VERSION: "tpu6e"
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh ${TP_DIAG_ARGS:-}
