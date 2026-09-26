@@ -28,8 +28,9 @@ import time
 os.environ.setdefault("MODEL_IMPL_TYPE", "vllm")
 os.environ.setdefault("SKIP_JAX_PRECOMPILE", "0")
 os.environ.setdefault("VLLM_XLA_CHECK_RECOMPILATION", "1")
-# A Python tracer adds per-call overhead to the host side being measured.
-os.environ.setdefault("PYTHON_TRACER_LEVEL", "0")
+# The Python tracer adds per-call overhead, but it names the JAX functions
+# (compile, cache load) that run inside a slow step.
+os.environ.setdefault("PYTHON_TRACER_LEVEL", "1")
 os.environ.setdefault("PROFILE_SINGLE_DEVICE", "1")
 
 sys.path.insert(0, "/workspace/tpu_inference/tests/e2e")
@@ -102,10 +103,10 @@ for plane in data.planes:
                               key=lambda d: -d["total_ms"])[:12],
             }
     if plane.name.startswith("/host:CPU"):
-        steps = []
+        steps, others = [], []
         for line in plane.lines:
-            steps += [e for e in line.events
-                      if e.name.startswith("execute_model:")]
+            for e in line.events:
+                (steps if e.name.startswith("execute_model:") else others).append(e)
         steps.sort(key=lambda e: e.start_ns)
         if steps:
             dur = [e.duration_ns / 1e6 for e in steps]
@@ -125,4 +126,29 @@ for plane in data.planes:
                                               (i + 1) * len(dur) // 10] or [0]), 2)
                     for i in range(10)],
             }
+            # What runs inside the slow steps: host events nested in them.
+            med = pct(dur, 0.5)
+            spikes = [e for e in steps if e.duration_ns / 1e6 > 2.5 * med]
+            inside = collections.defaultdict(float)
+            for sp in spikes:
+                lo, hi = sp.start_ns, sp.start_ns + sp.duration_ns
+                for e in others:
+                    if lo <= e.start_ns and e.start_ns + e.duration_ns <= hi:
+                        inside[e.name[:90]] += e.duration_ns / 1e6
+            summary["host"]["spikes"] = len(spikes)
+            summary["host"]["spike_total_ms"] = round(
+                sum(e.duration_ns for e in spikes) / 1e6, 1)
+            summary["host"]["inside_spikes_top"] = sorted(
+                ((k, round(v, 2)) for k, v in inside.items()),
+                key=lambda kv: -kv[1])[:30]
+            overall = collections.defaultdict(lambda: [0, 0.0])
+            for e in others:
+                k = e.name[:90]
+                overall[k][0] += 1
+                overall[k][1] += e.duration_ns / 1e6
+            summary["host"]["compile_like"] = sorted(
+                ((k, n, round(t, 2)) for k, (n, t) in overall.items()
+                 if any(w in k.lower() for w in (
+                     "compile", "cache", "deserial", "load", "lower", "trace"))),
+                key=lambda x: -x[2])[:30]
 print("TRACE_SUMMARY " + json.dumps(summary))
