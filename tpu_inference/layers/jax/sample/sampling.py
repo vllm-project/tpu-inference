@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import lax
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -415,7 +416,9 @@ def compute_logprobs(logits: jax.Array) -> jax.Array:
     return jax.nn.log_softmax(logits, axis=-1)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+# Replicate outputs via out_shardings=P() so multi-host device_get() succeeds
+# under DP attention (ATTN_DATA). Callers must run under jax.set_mesh().
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_logprobs(
     logits: jax.Array,
     next_tokens: jax.Array,
@@ -426,20 +429,46 @@ def compute_and_gather_logprobs(
     return gather_logprobs(logprobs, next_tokens, max_logprobs)
 
 
-@jax.jit(static_argnames=("max_logprobs", ))
+@jax.jit(static_argnames=("max_logprobs", ), out_shardings=P())
 def compute_and_gather_prompt_logprobs(
     logits: jax.Array,
-    input_ids: jax.Array,
+    prompt_target_ids: jax.Array,
     max_logprobs: int,
 ) -> LogprobsTensors:
-    """Compute logprobs from full logits and gather the requested top-k for prompt tokens."""
-    prompt_target_ids = jnp.roll(input_ids, -1, axis=0)
+    """Same math as compute_and_gather_logprobs, for prompt positions.
+
+    Kept separate because the second argument means something different here:
+    the next prompt token at each packed position, not the sampled token per
+    request. Build it with `_build_prompt_target_ids` -- get it wrong and you
+    get a plausible logprob back rather than an error.
+    """
     return compute_and_gather_logprobs(logits, prompt_target_ids, max_logprobs)
+
+
+def _build_prompt_target_ids(
+    total_padded_tokens: int,
+    req_snaps: List[PromptLogprobsReqSnap],
+) -> jax.Array:
+    """Build the next-token target for every row of the packed logits buffer.
+
+    The host has the whole prompt, so it can look one token past the end of a
+    chunk; the packed device buffer cannot. Rows no request claims stay 0 and
+    are never read back.
+    """
+    targets = np.zeros((total_padded_tokens, ), dtype=np.int32)
+    for snap in req_snaps:
+        if snap.num_logits <= 0:
+            continue
+        s = snap.start_idx + 1
+        o = snap.req_offset
+        targets[o:o + snap.num_logits] = np.asarray(
+            snap.req_state.prompt_token_ids[s:s + snap.num_logits],
+            dtype=np.int32)
+    return jnp.asarray(targets)
 
 
 def compute_prompt_logprobs(
     full_logits: Optional[jax.Array],
-    input_ids: Optional[jax.Array],
     num_prompt_logprobs: Dict[str, int],
     requests: Dict[str, "CachedRequestState"],
     scheduler_output: "VllmSchedulerOutput",
@@ -451,16 +480,8 @@ def compute_prompt_logprobs(
     Returns PromptLogprobsAsyncData containing the async-copied tensors and
     the snapshotted state needed to safely slice them in get_output().
     """
-    if (not num_prompt_logprobs or full_logits is None or input_ids is None):
+    if not num_prompt_logprobs or full_logits is None:
         return None
-
-    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
-    # start async transfer to host (overlaps with next step's execute_model).
-    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
-    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
-    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
-        full_logits, input_ids, max_logprobs)
-    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     # Snapshot all mutable per-request state before update_states(N+1) runs.
     padded_tokens_per_dp = full_logits.shape[0] // dp_size
@@ -494,6 +515,17 @@ def compute_prompt_logprobs(
                             num_k=num_k,
                         ))
                 local_token_offset += num_scheduled
+
+    # Gather compact [total_padded_tokens, max_logprobs+1] tensors on TPU and
+    # start async transfer to host (overlaps with next step's execute_model).
+    # We use the statically precompiled max_logprobs instead of the dynamic user max_k
+    # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
+    # Must follow the loop: the targets come from req_snaps.
+    prompt_target_ids = _build_prompt_target_ids(full_logits.shape[0],
+                                                 req_snaps)
+    prompt_lp_tensors = compute_and_gather_prompt_logprobs(
+        full_logits, prompt_target_ids, max_logprobs)
+    prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
 
     return PromptLogprobsAsyncData(tensors=prompt_lp_tensors,
                                    req_snaps=req_snaps)

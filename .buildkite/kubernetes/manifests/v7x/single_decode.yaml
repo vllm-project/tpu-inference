@@ -78,7 +78,7 @@ spec:
         - name: HF_HOME
           value: /usr/vllm
         - name: VLLM_LOGGING_LEVEL
-          value: "DEBUG"
+          value: "INFO"
         - name: JAX_PLATFORMS
           value: "tpu,cpu"
         - name: TPU_BACKEND_TYPE

@@ -8,6 +8,13 @@ from tpu_inference.envs import enable_envs_cache, environment_variables
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
+    # A default is only observable if the variable is unset, and the TPU device
+    # plugin injects TPU_ACCELERATOR_TYPE and TPU_NAME into any container
+    # holding a chip.
+    for name in ("JAX_PLATFORMS", "PHASED_PROFILING_DIR", "TPU_NAME",
+                 "TPU_ACCELERATOR_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")
@@ -133,6 +140,22 @@ def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+
+def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
+    """DP_SCHED_ROUTING defaults to least_loaded and only accepts known policies."""
+    monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)
+    assert envs.DP_SCHED_ROUTING == "least_loaded"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "round_robin")
+    assert envs.DP_SCHED_ROUTING == "round_robin"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "Round_Robin")
+    assert envs.DP_SCHED_ROUTING.lower() == "round_robin"
+
+    monkeypatch.setenv("DP_SCHED_ROUTING", "random")
+    with pytest.raises(ValueError, match="DP_SCHED_ROUTING"):
+        _ = envs.DP_SCHED_ROUTING
 
 
 def test_boolean_env_vars_string_values(monkeypatch: pytest.MonkeyPatch):

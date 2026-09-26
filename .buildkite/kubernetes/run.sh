@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Hands a step's command to the launcher as a TPU workload. The launcher owns
+# the pod and its caches, so all this does is resolve the image and decide what
+# environment crosses into it.
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: SHAPE=<machine-type>/<topology> $0 <command> [args...]" >&2
+  exit 2
+fi
+
+# A manifest carries its own nodeSelector, so it answers the shape question
+# that SHAPE answers for a plain Job; asking for both would let them disagree.
+if [[ -z "${MULTIHOST_MANIFEST:-}" ]]; then
+  # From the step's environment, not an argument: every step already sets SHAPE
+  # from one of the shape anchors, and passed the same value straight back in.
+  shape="${SHAPE:-}"
+  machine_type="${shape%%/*}"
+  topology="${shape#*/}"
+  if [[ -z "$shape" || "$machine_type" == "$shape" || -z "$topology" ]]; then
+    echo "$0: SHAPE must be <machine-type>/<topology>, got '${shape}'" >&2
+    exit 2
+  fi
+
+  # TPU_VERSION only labels and gates steps; the hardware comes from the shape.
+  # Setting one without the other runs v7x-gated tests on v6e chips and reports
+  # them as v7x, so refuse rather than produce a mislabelled result.
+  case "${TPU_VERSION:-tpu6e}:${machine_type}" in
+    tpu7x:tpu7x-*|tpu6e:ct6e-*) ;;
+    *)
+      echo "$0: TPU_VERSION=${TPU_VERSION:-tpu6e} does not match shape ${shape}." >&2
+      echo "  A v7x run needs TPU_VERSION=tpu7x with KUBE_SHAPE_SINGLE and" >&2
+      echo "  KUBE_SHAPE_MULTI set to tpu7x shapes." >&2
+      exit 2
+      ;;
+  esac
+elif [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
+  # The only slice manifest here is 2x2x2 tpu7x. Same mislabelling risk as
+  # above, minus the shape to read it from.
+  echo "$0: ${MULTIHOST_MANIFEST} is a tpu7x slice; TPU_VERSION=${TPU_VERSION:-tpu6e}" >&2
+  exit 2
+fi
+
+# setup_docker_env.sh records the tag it pushed for each generation.
+if [[ -z "${WORKLOAD_IMAGE:-}" ]]; then
+  WORKLOAD_IMAGE=$(buildkite-agent meta-data get "ci-image-${TPU_VERSION:-tpu6e}" \
+    --default "" 2>/dev/null || true)
+fi
+if [[ -z "${WORKLOAD_IMAGE}" ]]; then
+  echo "$0: no ci-image-${TPU_VERSION:-tpu6e} metadata and no WORKLOAD_IMAGE." \
+       "build_docker_${TPU_VERSION:-tpu6e} has to run before this step, or the" \
+       "step has to name an image." >&2
+  exit 2
+fi
+export WORKLOAD_IMAGE
+
+# A name the step has not set is skipped rather than injected empty -
+# tpu_inference rejects MODEL_IMPL_TYPE="" where it wants the variable absent.
+FORWARD=(
+  # Left unset on purpose: naming an unset variable is how the launcher is asked
+  # to read it from Secret Manager, so no value appears in this repo. Without
+  # BUILDKITE_ANALYTICS_TOKEN a suite passes and reports nothing to Test Engine.
+  # HF_TOKEN is not here: every pod inherits it from the fleet pod defaults.
+  BUILDKITE_ANALYTICS_TOKEN
+  TPU_VERSION MODEL_IMPL_TYPE TPU_BACKEND_TYPE NEW_MODEL_DESIGN
+  QUANTIZATION USE_PREBUILT_IMAGE SKIP_ACCURACY_TESTS BVT_ONLY
+  # Not queue selectors: mlperf.sh reads them to pick the model list and the
+  # parallelism.
+  USE_V6E8_QUEUE USE_V7X8_QUEUE
+  NUM_PRECOMPILE_WORKERS VLLM_LOG_LEVEL VLLM_XLA_CHECK_RECOMPILATION
+  # --env wins over the manifest, so a step that sets these replaces the
+  # default set below.
+  JAX_COMPILATION_CACHE_DIR VLLM_XLA_CACHE_PATH
+  TEST_MODEL TEST_LORA_TP TENSOR_PARALLEL_SIZE TPU_CORES
+  # Which half of the disagg script to run - benchmark, correctness or both.
+  TEST_MODE
+  # Without these the MoE weights land in bfloat16 instead of the requantized
+  # dtype, which is 300GiB more HBM on DeepSeek-R1 - over the cap on a 4-chip
+  # slice, and merely wrong on anything that still fits.
+  VLLM_MLA_DISABLE MOE_REQUANTIZE_BLOCK_SIZE MOE_REQUANTIZE_WEIGHT_DTYPE
+  MINIMUM_ACCURACY_THRESHOLD MINIMUM_THROUGHPUT_THRESHOLD
+  # Read by mlperf.sh and mmlu.sh in the model and rl suites. EXTRA_SERVE_ARGS
+  # is left out, as run_in_docker.sh leaves it out: the one step that sets it,
+  # rl continue_decode, would replace the --additional_config mmlu.sh gives
+  # DeepSeek-R1 and serve it without dp-attention.
+  DEVICE_COUNT
+  # Read by ray_multihost_e2e.sh.
+  ASYNC_SCHEDULING
+  MODEL INPUT_LEN OUTPUT_LEN PREFIX_LEN MAX_MODEL_LEN
+  MAX_NUM_SEQS MAX_NUM_BATCHED_TOKENS NUM_PROMPTS RANDOM_SEED
+  MAX_CONCURRENCY REQUEST_RATE TIMEOUT_SECONDS COMPILATION_CONFIG
+  USE_CHAT_TEMPLATE BENCH_DATASET USE_BATCHED_RPA_KERNEL
+  GPU_MEMORY_UTILIZATION GCS_BUCKET HOST_NAME
+  # Files to upload as artifacts; see the end of this file and
+  # multihost_entry.sh.
+  ARTIFACTS_DIR
+)
+
+# The BUILDKITE_* the agent set are swept by the launcher itself, so only the
+# ones above that it cannot see - an unset name it resolves from Secret
+# Manager - still have to be named here.
+env_args=()
+for name in "${FORWARD[@]}"; do
+  env_args+=(--env "$name")
+done
+
+# Besides failing a test that recompiles at runtime, this flag is what makes
+# CompilationManager lower jax_persistent_cache_min_compile_time_secs and
+# min_entry_size_bytes to -1; without it anything quick to compile is never
+# cached.
+export VLLM_XLA_CHECK_RECOMPILATION="${VLLM_XLA_CHECK_RECOMPILATION:-1}"
+
+# Chip generation, then the JAX version that produced the entries: an entry is
+# useless to the other generation, and `ls` on the bucket then answers which
+# generation is warm. The version comes from the pin the image installs, so a
+# JAX bump moves the cache with it. Empty is fatal rather than silently naming
+# a namespace nobody has written.
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." &>/dev/null && pwd)
+jax_version=$(sed -n 's/^jax==\([^ #]*\).*/\1/p' "${repo_root}/requirements.txt" | head -1)
+if [[ -z "$jax_version" ]]; then
+  echo "$0: no 'jax==' pin in ${repo_root}/requirements.txt" >&2
+  exit 2
+fi
+export CACHE_NAMESPACE="${CACHE_NAMESPACE:-${TPU_VERSION:-tpu6e}/jax-${jax_version}}"
+export JAX_COMPILATION_CACHE_DIR="/cache/jax/${CACHE_NAMESPACE}"
+export VLLM_XLA_CACHE_PATH="${JAX_COMPILATION_CACHE_DIR}"
+
+# The launcher's built-in Job is one pod holding every chip on one host.
+# Anything more - roles that must find each other, a slice across hosts - needs
+# a JobSet passed with --manifest.
+if [[ -n "${MULTIHOST_MANIFEST:-}" ]]; then
+  here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+  # Passed by name rather than substituted into the manifest, where a quote or
+  # a brace would be a YAML parse error. NUL-delimited so the pod recovers the
+  # argument vector instead of re-splitting a string.
+  MULTIHOST_ARGS_B64="$(printf '%s\0' "$@" | base64 | tr -d '\n')"
+  export MULTIHOST_ARGS_B64
+  env_args+=(--env MULTIHOST_ARGS_B64)
+  exec /opt/launcher/launch \
+    --manifest "${here}/manifests/workloads/${MULTIHOST_MANIFEST}" \
+    "${env_args[@]}"
+fi
+
+# A step that wants files out of the pod names a directory in ARTIFACTS_DIR,
+# relative to the image's WORKDIR, and writes into it; everything under it is
+# uploaded when the command exits, named by its path. The pod is deleted when
+# the step ends, so it uploads its own. A lost upload fails the step but never
+# masks a failure from the command itself. Other steps run their command
+# unwrapped.
+#
+# Single-quoted on purpose: this is a program for the pod shell, so $@ and $?
+# have to arrive unexpanded.
+# shellcheck disable=SC2016
+if [[ -n "${ARTIFACTS_DIR:-}" ]]; then
+  set -- bash -c '
+    mkdir -p "$ARTIFACTS_DIR"
+    "$@"
+    rc=$?
+    if [ -n "$(ls -A "$ARTIFACTS_DIR" 2>/dev/null)" ] &&
+       ! buildkite-agent artifact upload "$ARTIFACTS_DIR/**/*"; then
+      echo "ERROR: artifacts were produced but could not be uploaded" >&2
+      [ "$rc" -eq 0 ] && rc=1
+    fi
+    exit "$rc"
+  ' -- "$@"
+fi
+
+exec /opt/launcher/launch \
+  --machine-type "$machine_type" \
+  --topology "$topology" \
+  "${env_args[@]}" \
+  -- "$@"

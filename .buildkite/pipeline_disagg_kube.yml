@@ -1,0 +1,59 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# P/D disaggregation on the Kueue fleet. Unscheduled and triggered by hand: it
+# shares a reservation with the nightly running the same benchmark, and the two
+# must not run at once.
+
+env:
+  # One immutable tag per build: the tag is read twice, and imagePullPolicy
+  # defaults to IfNotPresent, so a reused tag can benchmark another build's push.
+  WORKLOAD_IMAGE: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/disagg-benchmark:kube-${BUILDKITE_BUILD_NUMBER}"
+
+steps:
+  - label: ":docker: Build Disagg Benchmark Image"
+    key: "build_kube_disagg_image"
+    agents:
+      queue: cpu_64_core
+    commands:
+      - gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      # --pull: the base tag is republished daily, and a copy cached on this
+      # agent would silently measure an older nightly.
+      - docker build --pull -f .buildkite/kubernetes/benchmark.Dockerfile -t "$WORKLOAD_IMAGE" .buildkite/kubernetes
+      - docker push "$WORKLOAD_IMAGE"
+
+  - label: ":kubernetes: :tpu: Kube P/D Disaggregated Benchmark"
+    key: "kube_pd_disagg_benchmark"
+    depends_on: "build_kube_disagg_image"
+    # Mostly queue time: both engines together are the whole v7x reservation,
+    # so this waits out everything else on the fleet before it starts.
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      # Names the cache namespace the engines share with the single-host steps;
+      # disagg_engine.sh refuses to start without it.
+      TPU_VERSION: "tpu7x"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      # --env names the variables the launcher forwards into the pods. HF_TOKEN
+      # is not in this step's environment: naming it is what makes the launcher
+      # fetch it from Secret Manager.
+      - >-
+        /opt/launcher/launch
+        --manifest .buildkite/kubernetes/manifests/workloads/qwen3-coder-480b-1p1d.yaml
+        --env TPU_VERSION
+        --env DISAGG_CONCURRENCIES

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -21,9 +22,12 @@ import pytest
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.distributed.aux_output_connector.connector import \
+    AuxOutputConnectorMetadata
 
 from tpu_inference.models.common.interface import (ModelInterface,
                                                    MultiModalInterface)
+from tpu_inference.runner.routed_experts import TPUAuxOutputWorker
 from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 
@@ -226,10 +230,25 @@ class TestTPUJaxRunner:
         runner.pad_token_id = 0
         runner.layer_name_to_kvcache_index = {}
         runner.block_size = 16
+        # Single KV-cache group, so routing slots key off group 0. Must be a
+        # real int: MagicMock.__index__() returns 1, which would index past
+        # the one-group block_ids below.
+        runner.routed_experts_attn_gid = 0
         runner.requests["req1"].num_computed_tokens = 0
         runner.requests["req1"].block_ids = [[10]]
         runner.requests["req2"].num_computed_tokens = 0
         runner.requests["req2"].block_ids = [[20]]
+        runner.aux_output_worker = TPUAuxOutputWorker(
+            SimpleNamespace(model_config=SimpleNamespace(
+                get_num_experts=lambda: 8)),
+            SimpleNamespace(num_blocks=32),
+            block_size=16,
+            dp_size=1)
+        runner.aux_output_worker.begin_step(
+            AuxOutputConnectorMetadata(0, {
+                "req1": 0,
+                "req2": 0
+            }, {}, ()))
 
         # Mock continue_decode output
         # Unpacks: generated_tokens, final_kv_caches, final_state, final_rng, all_expert_indices
@@ -265,6 +284,7 @@ class TestTPUJaxRunner:
         # Setup scheduler output
         scheduler_output = MagicMock()
         scheduler_output.num_scheduled_tokens = {"req1": 1, "req2": 1}
+        scheduler_output.assigned_dp_rank = {}
 
         runner._prepare_inputs.return_value = (
             np.zeros(8, dtype=np.int32),  # input_ids
@@ -289,23 +309,16 @@ class TestTPUJaxRunner:
         assert mock_continue_decode.call_args.kwargs[
             "static_max_decode_steps"] == 5
 
-        # Verify routed experts are formatted correctly:
-        # routing_data: (num_reqs * actual_steps, num_layers, top_k) -> (10, 3, 2)
-        # slot_mapping: (num_reqs * actual_steps,) -> (10,)
+        # Each request gets its 5 burst rows (num_layers=3, top_k=2) from
+        # position 0, read back through its own block (10 and 20).
         output_runner_output = runner._continue_decode_output
         assert output_runner_output is not None
-        assert output_runner_output.routed_experts is not None
-        assert output_runner_output.routed_experts.routing_data.shape == (10,
-                                                                          3, 2)
-        assert output_runner_output.routed_experts.slot_mapping.shape == (10, )
-        # req1 slots: block 10 * 16 + [0..4] = [160..164]
-        # req2 slots: block 20 * 16 + [0..4] = [320..324]
-        expected_slots = np.concatenate([
-            np.arange(160, 165, dtype=np.int32),
-            np.arange(320, 325, dtype=np.int32)
-        ])
-        np.testing.assert_array_equal(
-            output_runner_output.routed_experts.slot_mapping, expected_slots)
+        aux_output = output_runner_output.aux_output_connector_output
+        assert set(aux_output) == {"req1", "req2"}
+        for req_idx, req_id in enumerate(["req1", "req2"]):
+            assert aux_output[req_id].token_start == 0
+            np.testing.assert_array_equal(aux_output[req_id].rows,
+                                          mock_experts_cpu[:, :, req_idx, :])
 
         # Verify scheduler_output.num_scheduled_tokens is mutated to actual_steps = 5
         assert scheduler_output.num_scheduled_tokens["req1"] == 5

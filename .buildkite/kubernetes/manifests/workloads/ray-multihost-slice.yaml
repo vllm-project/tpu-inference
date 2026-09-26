@@ -1,0 +1,87 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# A command run on a Ray cluster spanning both hosts of a 2x2x2 v7x slice. The
+# step supplies MULTIHOST_ARGS_B64 through run.sh; multihost_entry.sh forms the
+# cluster and runs those arguments on the head.
+#
+# One replicatedJob for both roles, because GKE places a multi-host slice as
+# the pods of a single Job and two Jobs asking for 2x2x2 would get two slices
+# with no interconnect between them. JOB_COMPLETION_INDEX decides the role, and
+# a larger slice means changing topology and parallelism together.
+#
+# Unlike a single-host workload, this one wants the slice environment GKE
+# injects - these pods really are the hosts of one slice.
+#
+# ${WORKLOAD_NAME} and ${IMAGE} are substituted; a literal dollar is $$.
+
+apiVersion: jobset.x-k8s.io/v1alpha2
+kind: JobSet
+metadata:
+  annotations:
+    # The fleet's pod setup - caches, tolerations, retries.
+    tpu-ci.google.com/defaults: standard
+spec:
+  # Gives each pod a DNS name - <jobset>-slice-0-<index> under a headless
+  # service named for the JobSet - which is what HEAD_HOST below is built from.
+  network:
+    enableDNSHostnames: true
+  replicatedJobs:
+    - name: slice
+      replicas: 1
+      template:
+        spec:
+          # One host per node of the slice. Indexed is required both by
+          # enableDNSHostnames and by GKE's multi-host TPU placement.
+          parallelism: 2
+          completions: 2
+          completionMode: Indexed
+          template:
+            spec:
+              nodeSelector:
+                cloud.google.com/gke-tpu-topology: 2x2x2
+                cloud.google.com/gke-tpu-accelerator: tpu7x
+              containers:
+                - name: workload
+                  image: ${IMAGE}
+                  command: ["/bin/bash", "-lc"]
+                  args:
+                    - |
+                      export VLLM_HOST_IP="$${POD_IP}"
+                      readarray -d '' _args < <(printf '%s' "$${MULTIHOST_ARGS_B64}" | base64 -d)
+                      exec bash .buildkite/kubernetes/multihost_entry.sh "$${_args[@]}"
+                  env:
+                    - name: HEAD_HOST
+                      value: ${WORKLOAD_NAME}-slice-0-0.${WORKLOAD_NAME}
+                    # Must match parallelism above: how many Ray nodes the head
+                    # waits for before running the command.
+                    - name: NUM_HOSTS
+                      value: "2"
+                    - name: POD_IP
+                      valueFrom:
+                        fieldRef:
+                          fieldPath: status.podIP
+                    # The pod is deleted when the run ends, so a session log
+                    # directory on its filesystem is unreachable by then.
+                    - name: RAY_LOG_TO_STDERR
+                      value: "1"
+                  ports:
+                    - containerPort: 8000
+                  # Only the chips: the pod holds every chip on the node, and a
+                  # cpu request here can stop the pool scaling up at all.
+                  resources:
+                    limits:
+                      google.com/tpu: "4"
+                    requests:
+                      google.com/tpu: "4"
