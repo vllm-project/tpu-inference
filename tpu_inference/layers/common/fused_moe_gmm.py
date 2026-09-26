@@ -160,6 +160,34 @@ def _permute_tokens_for_chunked_rs(x: jax.Array, dp_size: int,
     return x_transposed.reshape(x.shape)
 
 
+def _two_step_collect(hidden: jax.Array, pair_axis: str, perm: list,
+                      reduce_axes: tuple, scatter_axes: tuple) -> jax.Array:
+    """psum over reduce_axes + psum_scatter over scatter_axes, in two steps.
+
+    The reverse of _apply_two_step_dispatch_gather. The two cores of a chip
+    (adjacent indices on pair_axis, one of reduce_axes) first swap and add
+    column halves on-chip, so the cross-chip reduce-scatter moves half the
+    columns. Each core then holds its half, summed over the pair and the
+    scatter axes, and zeros in the other half; the psum over reduce_axes
+    (pair_axis included) adds the disjoint halves and the remaining chips.
+    XLA merges that psum with the shared expert's TP all-reduce as before.
+    Same sum, different order: not bitwise identical to the one-step path.
+    """
+    half = hidden.shape[1] // 2
+    core = jax.lax.axis_index(pair_axis) % 2
+    mine = jax.lax.dynamic_slice_in_dim(hidden, core * half, half, axis=1)
+    theirs = jax.lax.dynamic_slice_in_dim(hidden, (1 - core) * half, half,
+                                          axis=1)
+    mine = mine + jax.lax.ppermute(theirs, pair_axis, perm)
+    mine = jax.lax.psum_scatter(mine,
+                                axis_name=scatter_axes,
+                                scatter_dimension=0,
+                                tiled=True)
+    out = jnp.zeros((mine.shape[0], 2 * half), mine.dtype)
+    out = jax.lax.dynamic_update_slice_in_dim(out, mine, core * half, axis=1)
+    return jax.lax.psum(out, axis_name=reduce_axes)
+
+
 def moe_gmm_local(x: jax.Array,
                   w1: jax.Array,
                   w1_scale: jax.Array | None,
@@ -179,7 +207,8 @@ def moe_gmm_local(x: jax.Array,
                   onehot_moe_permute_threshold: int = 0,
                   scatter_results: bool = False,
                   moe_chunk_size: int = 0,
-                  defer_all_reduce: bool = False) -> jax.Array:
+                  defer_all_reduce: bool = False,
+                  two_step_collect: tuple | None = None) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -312,6 +341,11 @@ def moe_gmm_local(x: jax.Array,
                 num_devices=scatter_axis_size,
                 axis_name=reduction_axis)
             out = rs_out.astype(x.dtype)
+        elif (scatter_results and two_step_collect is not None
+              and scatter_axes and two_step_collect[0] in reduce_axes
+              and chunk_hidden.shape[1] % 2 == 0):
+            out = _two_step_collect(chunk_hidden, *two_step_collect,
+                                    reduce_axes, scatter_axes).astype(x.dtype)
         elif scatter_results:
             if reduce_axes:
                 chunk_hidden = jax.lax.psum(chunk_hidden,
@@ -456,6 +490,21 @@ def expert_parallel_gmm(
     w2_scale_spec = None if w2_scale is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
 
+    two_step_collect = None
+    if (scatter_results and not enable_rs_kernel
+            and envs.MOE_TWO_STEP_COLLECT):
+        plan = _two_step_dispatch_plan(mesh)
+        if plan is None:
+            logger.warning_once(
+                "MOE_TWO_STEP_COLLECT is set but does not apply to this mesh "
+                "(%s): keeping the one-step collect.", str(dict(mesh.shape)))
+        else:
+            two_step_collect = (plan[1], plan[2])
+            logger.info_once(
+                "MOE_TWO_STEP_COLLECT: each chip's two cores add column "
+                "halves on-chip along '%s', then reduce-scatter half the "
+                "columns over the attention-data axes.", plan[1])
+
     if scatter_results:
         final_out_specs = attn_data_p_spec
     elif enable_rs_kernel:
@@ -474,6 +523,7 @@ def expert_parallel_gmm(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            two_step_collect=two_step_collect,
         ),
         mesh=mesh,
         in_specs=(

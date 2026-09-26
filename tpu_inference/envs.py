@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     MOE_TWO_STEP_DISPATCH_FP8: bool = False
     MOE_LEAN_PERMUTE_GATHER: bool = False
     MOE_ROUTING_IN_DISPATCH_TAIL: bool = False
+    MOE_TWO_STEP_COLLECT: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -556,6 +557,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all-gather. Bitwise identical. See fused_moe_gmm.py.
     "MOE_ROUTING_IN_DISPATCH_TAIL":
     env_bool("MOE_ROUTING_IN_DISPATCH_TAIL", default=False),
+    # EP collect in two steps, the reverse of MOE_TWO_STEP_DISPATCH: the two
+    # cores of a chip add column halves on-chip, then reduce-scatter half the
+    # columns over the attention-data axes. See fused_moe_gmm.py.
+    "MOE_TWO_STEP_COLLECT":
+    env_bool("MOE_TWO_STEP_COLLECT", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which

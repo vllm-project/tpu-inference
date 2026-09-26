@@ -177,6 +177,7 @@ class TpuPlatform(Platform):
         "MOE_TWO_STEP_DISPATCH_FP8",
         "MOE_LEAN_PERMUTE_GATHER",
         "MOE_ROUTING_IN_DISPATCH_TAIL",
+        "MOE_TWO_STEP_COLLECT",
         "TPU_CHIPS_PER_HOST_BOUNDS",
         "TPU_HOST_BOUNDS",
         "TPU_MULTIHOST_BACKEND",
