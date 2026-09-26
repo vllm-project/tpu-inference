@@ -16,7 +16,7 @@ from tpu_inference.utils import (GBYTES, enable_megacore, get_device_hbm_limit,
                                  get_device_name, get_jax_dtype_from_str_dtype,
                                  get_layer_kv_params, get_megacore,
                                  get_padded_head_dim, hbm_usage_bytes,
-                                 hbm_usage_gb)
+                                 hbm_usage_gb, safe_device_get)
 from tpu_inference.utils import t2j as t2j
 
 
@@ -380,3 +380,125 @@ def test_get_layer_kv_params_magicmock_takes_flat_path():
     config.attention_k_eq_v = True
     assert get_layer_kv_params(config, "full_attention") == (512, 4)
     assert get_layer_kv_params(config, "sliding_attention") == (256, 16)
+
+
+def test_safe_device_get_uses_addressable_shard_when_replicated():
+    """Replicated multi-host array: read the local shard, never device_get/gather.
+
+    A fully replicated global jax.Array holds the complete value on every host's
+    first process-local shard, so safe_device_get must read that shard directly
+    and never trigger an illegal cross-host fetch or a collective.
+    """
+    expected = np.array([7, 8, 9], dtype=np.int32)
+    shard = MagicMock()
+    shard.data = expected
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = [shard]
+    fake_arr.is_fully_addressable = False
+    fake_arr.is_fully_replicated = True
+
+    with patch("tpu_inference.utils.jax.device_get") as mock_device_get, \
+         patch("tpu_inference.utils.multihost_utils.process_allgather") \
+            as mock_allgather:
+        mock_device_get.side_effect = AssertionError(
+            "jax.device_get must not be called for a replicated array")
+        result = safe_device_get(fake_arr)
+
+    mock_allgather.assert_not_called()
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_safe_device_get_gathers_when_sharded():
+    """Sharded multi-host array: gather across processes, don't take one shard.
+
+    Taking a single shard of a sharded array would silently return partial data,
+    so safe_device_get must reconstruct the full value via process_allgather.
+    """
+    full = np.array([1, 2, 3, 4], dtype=np.int32)
+    partial_shard = MagicMock()
+    partial_shard.data = np.array([1, 2], dtype=np.int32)  # only half
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = [partial_shard]
+    fake_arr.is_fully_addressable = False
+    fake_arr.is_fully_replicated = False
+
+    with patch("tpu_inference.utils.multihost_utils.process_allgather",
+               return_value=full) as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_allgather.assert_called_once_with(fake_arr, tiled=True)
+    np.testing.assert_array_equal(result, full)
+
+
+def test_safe_device_get_falls_back_without_addressable_shards():
+    """Non-jax / shardless input falls back to jax.device_get."""
+    plain = [1, 2, 3]
+    with patch("tpu_inference.utils.jax.device_get",
+               return_value=np.array(plain)) as mock_device_get:
+        result = safe_device_get(plain)
+
+    mock_device_get.assert_called_once_with(plain)
+    np.testing.assert_array_equal(result, np.array(plain))
+
+
+def test_safe_device_get_single_host_jax_array_roundtrips():
+    """Single-host real jax.Array roundtrips to the correct numpy values."""
+    arr = jnp.arange(6, dtype=jnp.int32)
+    result = safe_device_get(arr)
+    assert isinstance(result, np.ndarray)
+    np.testing.assert_array_equal(result, np.arange(6, dtype=np.int32))
+
+
+def test_safe_device_get_single_process_uses_device_get_not_gather():
+    """Fully addressable (single-process) array: plain device_get, no collective.
+
+    Even a sharded array is safe to device_get when every shard is local, so the
+    is_fully_addressable fast path must avoid process_allgather entirely.
+    """
+    expected = np.array([4, 5, 6], dtype=np.int32)
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = [MagicMock()]
+    fake_arr.is_fully_addressable = True
+    fake_arr.is_fully_replicated = False
+
+    with patch("tpu_inference.utils.jax.device_get",
+               return_value=expected) as mock_device_get, \
+         patch("tpu_inference.utils.multihost_utils.process_allgather") \
+            as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_device_get.assert_called_once_with(fake_arr)
+    mock_allgather.assert_not_called()
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_safe_device_get_maps_over_pytree():
+    """A tuple/dict of arrays is handled per-leaf, like jax.device_get((a, b))."""
+    a = jnp.arange(3, dtype=jnp.int32)
+    b = jnp.arange(2, dtype=jnp.int32)
+    out_tuple = safe_device_get((a, b))
+    assert isinstance(out_tuple, tuple) and len(out_tuple) == 2
+    np.testing.assert_array_equal(out_tuple[0], np.arange(3, dtype=np.int32))
+    np.testing.assert_array_equal(out_tuple[1], np.arange(2, dtype=np.int32))
+
+    out_dict = safe_device_get({"x": a, "y": b})
+    assert set(out_dict) == {"x", "y"}
+    np.testing.assert_array_equal(out_dict["x"], np.arange(3, dtype=np.int32))
+    np.testing.assert_array_equal(out_dict["y"], np.arange(2, dtype=np.int32))
+
+
+def test_safe_device_get_replicated_on_submesh_without_local_shards():
+    """Replicated on a sub-mesh where a host has no local shards falls back to process_allgather."""
+    expected = np.array([7, 8, 9], dtype=np.int32)
+    fake_arr = MagicMock()
+    fake_arr.addressable_shards = []
+    fake_arr.is_fully_addressable = False
+    fake_arr.is_fully_replicated = True
+
+    with patch("tpu_inference.utils.multihost_utils.process_allgather",
+               return_value=np.stack([expected, expected])) as mock_allgather:
+        result = safe_device_get(fake_arr)
+
+    mock_allgather.assert_called_once_with(fake_arr, tiled=False)
+    np.testing.assert_array_equal(result, expected)
