@@ -59,9 +59,8 @@ steps:
           "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
         buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
-  # Diagnostic branch only. Each kube step gets a fresh pod, so its first run
-  # is cold the way every scheduled run is.
-  - label: ":kubernetes: tpu6e TP diag (kube, log compiles)"
+  # Diagnostic branch only. Each kube step gets a fresh pod.
+  - label: ":kubernetes: tpu6e TP diag (kube, immediate)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -72,9 +71,9 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --log-compiles
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --sample
 
-  - label: ":kubernetes: tpu6e TP diag (kube, prewarmed image)"
+  - label: ":kubernetes: tpu6e TP diag (kube, idle 300s first)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -85,9 +84,9 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --prewarm-image
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --sleep 300 --runs 1 --sample
 
-  - label: "tpu6e TP diag (bare metal, log compiles)"
+  - label: "tpu6e TP diag (bare metal)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -95,4 +94,4 @@ steps:
     env:
       TPU_VERSION: "tpu6e"
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --log-compiles
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --sample

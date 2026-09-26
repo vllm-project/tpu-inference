@@ -24,15 +24,22 @@ set -u
 # --log-compiles   log every JAX compile, to see any that land in the timed run
 # --prewarm-image  read the container's root filesystem first, so files the
 #                  image streamer would fetch on first touch are already local
+# --sleep N        idle N seconds before the first run, past pod-start work
+#                  such as the gcsfuse sidecar's metadata prefetch
+# --sample         log node-wide CPU busy % and load every 10s in the background
 RUNS=2
 NO_TP=0
 PREWARM=0
+SLEEP=0
+SAMPLE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-tp) NO_TP=1 ;;
     --runs) RUNS="$2"; shift ;;
     --log-compiles) export JAX_LOG_COMPILES=1 ;;
     --prewarm-image) PREWARM=1 ;;
+    --sleep) SLEEP="$2"; shift ;;
+    --sample) SAMPLE=1 ;;
   esac
   shift
 done
@@ -72,6 +79,31 @@ uptime
 ps -eo pcpu,pid,comm --sort=-pcpu 2>/dev/null | head -8
 
 [ "$NO_TP" = 1 ] && exit 0
+
+# /proc/stat is not namespaced, so this sees the whole node, sidecars included.
+node_sampler() {
+  local prev_busy=0 prev_total=0
+  while true; do
+    read -r _ user nice system idle iowait irq softirq steal _ < /proc/stat
+    local busy=$((user + nice + system + irq + softirq + steal))
+    local total=$((busy + idle + iowait))
+    if [ "$prev_total" -gt 0 ]; then
+      echo "[sample $(date +%H:%M:%S)] node cpu busy" \
+        "$(( 100 * (busy - prev_busy) / (total - prev_total) ))%" \
+        "load $(cut -d' ' -f1-3 /proc/loadavg)" \
+        "| node psi $(head -1 /proc/pressure/cpu 2>/dev/null | cut -d' ' -f2)" \
+        "| pod psi $(head -1 /sys/fs/cgroup/cpu.pressure 2>/dev/null | cut -d' ' -f2)"
+    fi
+    prev_busy=$busy prev_total=$total
+    sleep 10
+  done
+}
+[ "$SAMPLE" = 1 ] && { node_sampler & SAMPLER=$!; trap 'kill $SAMPLER 2>/dev/null' EXIT; }
+
+if [ "$SLEEP" -gt 0 ]; then
+  section "idle ${SLEEP}s"
+  sleep "$SLEEP"
+fi
 
 if [ "$PREWARM" = 1 ]; then
   section "prewarm image"
