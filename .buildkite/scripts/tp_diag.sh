@@ -221,6 +221,10 @@ else:
         n += 1
 print(f"{mode} warm-up: {n} {'GiB written' if mode == 'hbm' else 'iterations'} on {len(devs)} devices")
 PY
+  if [ "$SLEEP_AFTER" -gt 0 ]; then
+    section "idle ${SLEEP_AFTER}s after the warm-up"
+    sleep "$SLEEP_AFTER"
+  fi
 fi
 
 section "bytecode already in the image"
