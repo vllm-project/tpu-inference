@@ -242,8 +242,11 @@ class TestTPUJaxRunnerDPInputsLightweight:
         """The compilation manager warms unpack_arrays with
         _metadata_blob_layout, so it has to describe the blob _prepare_inputs
         really packs."""
-        # Every rank pads to 16 tokens and 16 requests.
-        mock_runner_utils.get_padded_token_len.return_value = 16
+        # Every rank pads to 16 tokens and 8 requests, so a layout with the
+        # two sizes swapped does not match.
+        mock_runner_utils.get_padded_token_len.side_effect = (
+            lambda paddings, n: 8
+            if paddings is self.runner.num_reqs_paddings_per_dp else 16)
         mock_sampling_metadata.from_input_batch.return_value = MagicMock()
         if hybrid_kvcache:
             self._create_mock_hybrid_kv_cache_config()
@@ -272,7 +275,7 @@ class TestTPUJaxRunnerDPInputsLightweight:
                           side_effect=record_layout):
             self.runner._prepare_inputs(scheduler_output)
 
-        assert packed == [self.runner._metadata_blob_layout(32, 32)]
+        assert packed == [self.runner._metadata_blob_layout(32, 16)]
 
     def test_prepare_inputs_dp_error_conditions(self):
         """Test error handling in DP input preparation."""
