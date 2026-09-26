@@ -35,6 +35,8 @@ set -u
 # --warmup-chip    30s of per-chip matmuls, no collectives, before the first run
 # --warmup-hbm     write ~85% of every chip's HBM once, in a separate process,
 #                  before the first run
+# --warmup-touch   one tiny op on every chip, to open the TPUs and nothing more
+# --sleep-after N  idle N seconds after the warm-up, before the first run
 # --local-jax-cache  compile into an empty local directory instead of the
 #                  shared cache, so nothing is read through gcsfuse lazily
 # --local-hf       copy the test model to local disk and load it from there
@@ -55,6 +57,7 @@ VLLM_WARMUP=
 COMPILEALL=0
 PREWARM=0
 SLEEP=0
+SLEEP_AFTER=0
 SAMPLE=0
 SPIN=0
 while [ $# -gt 0 ]; do
@@ -69,6 +72,8 @@ while [ $# -gt 0 ]; do
     --warmup-ici) WARMUP=ici ;;
     --warmup-chip) WARMUP=chip ;;
     --warmup-hbm) WARMUP=hbm ;;
+    --warmup-touch) WARMUP=touch ;;
+    --sleep-after) SLEEP_AFTER="$2"; shift ;;
     --local-jax-cache)
       export JAX_COMPILATION_CACHE_DIR=/tmp/jax-cache VLLM_XLA_CACHE_PATH=/tmp/jax-cache ;;
     --local-hf) LOCAL_HF=1 ;;
@@ -191,6 +196,10 @@ if mode == "ici":
         x = f(x)
         x.block_until_ready()
         n += 1
+elif mode == "touch":
+    for d in devs:
+        jnp.ones((8,), jnp.float32, device=d).block_until_ready()
+    n = 1
 elif mode == "hbm":
     chunk = 1 << 30  # bytes per array
     for d in devs:
