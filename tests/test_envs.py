@@ -236,6 +236,24 @@ def test_model_impl_type_choices(monkeypatch: pytest.MonkeyPatch):
     assert envs.DRAFT_MODEL_IMPL_TYPE == "vllm"
 
 
+def test_jina_bert_megakernel_env_vars(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("USE_JINA_BERT_MEGAKERNEL", raising=False)
+    monkeypatch.delenv("JINA_BERT_MEGAKERNEL_PRECISION", raising=False)
+    assert envs.USE_JINA_BERT_MEGAKERNEL is True
+    assert envs.JINA_BERT_MEGAKERNEL_PRECISION == "default"
+
+    monkeypatch.setenv("USE_JINA_BERT_MEGAKERNEL", "0")
+    assert envs.USE_JINA_BERT_MEGAKERNEL is False
+    monkeypatch.setenv("USE_JINA_BERT_MEGAKERNEL", "true")
+    assert envs.USE_JINA_BERT_MEGAKERNEL is True
+
+    monkeypatch.setenv("JINA_BERT_MEGAKERNEL_PRECISION", "highest")
+    assert envs.JINA_BERT_MEGAKERNEL_PRECISION == "highest"
+    monkeypatch.setenv("JINA_BERT_MEGAKERNEL_PRECISION", "bf16")
+    with pytest.raises(ValueError, match="JINA_BERT_MEGAKERNEL_PRECISION"):
+        _ = envs.JINA_BERT_MEGAKERNEL_PRECISION
+
+
 def test_string_env_vars_defaults(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JAX_PLATFORMS", raising=False)
     monkeypatch.delenv("PREFILL_SLICES", raising=False)

@@ -66,17 +66,21 @@ process — needed because the API-server process validates ModelConfig before
 pytest tests/kernels/encoder_alibi_kernel_test.py -v  # ALiBi kernel vs dense reference; expect 5 passed
 pytest tests/models/jax/test_jina_bert.py -v -rs   # parity vs official ONNX export; expect 3 passed
 pytest tests/e2e/test_jina_embeddings.py -v -rs    # full engine path
+pytest tests/models/jax/test_jina_bert_megakernel.py -v -rs -s  # vs XLA path
+pytest tests/kernels/jina_bert_megakernel_test.py -v -rs  # vs dense reference
 ```
 
 The parity test compares per-token hidden states and mean-pooled embeddings
 against the model repo's official ONNX export (same weights, float32, no
-remote code) and requires cosine similarity > 0.999.
+remote code) and requires cosine similarity > 0.999. The megakernel tests
+compare the encoder megakernel against the per-layer XLA path and a dense
+reference (see the kernel README).
 
 ## 6. Serve
 
 ```bash
 vllm serve jinaai/jina-embeddings-v2-small-en --runner pooling --convert embed \
-  --trust-remote-code --max-model-len 8192 --max-num-batched-tokens 8192 \
+  --trust-remote-code --max-model-len 2048 --max-num-batched-tokens 2048 \
   --dtype float32
 ```
 
@@ -85,8 +89,9 @@ for prompts longer than the 2048 default. Two reasons: (1) pooling models
 cannot chunk prefill — an encoder has no KV cache and every token attends to
 the full sequence in a single pass, so the whole prompt must fit in one
 scheduling step's token budget; (2) the runner derives its precompiled shape
-buckets from this value, so shapes above it are never compiled. Setting both
-flags to 8192 also lets several short requests batch into one forward pass
+buckets from this value, so shapes above it are never compiled. With the
+per-layer path ("Long context" below), setting both flags to 8192 also lets
+several short requests batch into one forward pass
 (e.g. four 2000-token documents in a single step), which is the main
 embedding-throughput lever.
 
@@ -94,6 +99,26 @@ embedding-throughput lever.
 architecture string as masked-LM and gates the embeddings API otherwise. No
 pooler flag is needed — vLLM auto-detects mean pooling from the repo's
 sentence-transformers configuration.
+
+The encoder runs as one Pallas megakernel by default
+(`tpu_inference/kernels/jina_bert_megakernel/README.md`). It accepts at most
+2048 tokens per step, hence `--max-num-batched-tokens 2048`.
+`USE_JINA_BERT_MEGAKERNEL=0` selects the per-layer XLA path.
+`JINA_BERT_MEGAKERNEL_PRECISION=highest` selects full-fp32 matmuls; the
+default feeds bf16 operands to the MXU with fp32 accumulation, as the XLA
+path does.
+
+**Long context (up to 8192 tokens).** The megakernel rejects steps above 2048
+tokens. For longer inputs, serve with the per-layer path, whose
+flash-attention kernel computes the symmetric ALiBi bias in-kernel
+(`docs/developer_guides/encoder_alibi_kernel.md`), so long context costs no
+extra HBM:
+
+```bash
+USE_JINA_BERT_MEGAKERNEL=0 vllm serve jinaai/jina-embeddings-v2-small-en \
+  --runner pooling --convert embed --trust-remote-code \
+  --max-model-len 8192 --max-num-batched-tokens 8192 --dtype float32
+```
 
 Query:
 
@@ -104,7 +129,7 @@ curl localhost:8000/v1/embeddings -H 'Content-Type: application/json' \
 
 Expect a 512-dimensional embedding.
 
-Long-context smoke test (~6300 tokens, exercises the >2048 path):
+Long-context smoke test (~6300 tokens; needs the long-context server above):
 
 ```bash
 python3 - <<'PY'
@@ -122,12 +147,16 @@ PY
 
 ## Known limitations / follow-ups
 
-- Full 8192 context supported (validated on v6e): the symmetric ALiBi bias
-  is computed inside the flash-attention kernel per tile from the
-  [num_heads] slopes — no O(heads × T²) tensor is materialized. Design and
-  validation methodology:
-  `docs/developer_guides/encoder_alibi_kernel.md`; kernel tests:
-  `tests/kernels/encoder_alibi_kernel_test.py`.
+- The megakernel (default) accepts at most 2048 tokens per step (so
+  `max_model_len` <= 2048): it keeps the whole step in VMEM and raises on
+  longer steps. For the full 8192 context, use the per-layer path
+  (`USE_JINA_BERT_MEGAKERNEL=0`, see "Long context" in section 6): its
+  flash-attention kernel computes the symmetric ALiBi bias per tile from the
+  [num_heads] slopes, so no O(heads × T²) tensor is materialized. Design and
+  validation methodology: `docs/developer_guides/encoder_alibi_kernel.md`;
+  kernel tests: `tests/kernels/encoder_alibi_kernel_test.py`. Automatic
+  per-step selection (megakernel up to 2048 tokens, per-layer above) is not
+  implemented.
 - float32 only (validated); bf16 pending validation against the fp32 baseline.
 - TP=1 (model is ~33M params); slopes already shard with heads for TP > 1.
 - The sitecustomize hook is a workaround; an upstream vLLM registration hook

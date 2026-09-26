@@ -25,11 +25,18 @@ Module attribute names deliberately mirror the HF checkpoint tensor names
 (`embeddings.word_embeddings.weight`,
 `encoder.layer.N.attention.self.query.weight`, `...mlp.gated_layers.weight`,
 etc.) so that `JaxAutoWeightsLoader` matches them without a rename table.
+
+By default the whole encoder stack runs as one Pallas TPU megakernel
+(`tpu_inference/kernels/jina_bert_megakernel`, see its README for the design
+and matmul precision). `USE_JINA_BERT_MEGAKERNEL=0` selects the per-layer XLA
+path (XLA matmuls and the encoder flash-attention kernel), which is also used
+wherever the megakernel does not apply (more than one device, a non-float32
+dtype, other head/MLP geometries, or models too large for its VMEM budget).
 """
 
 import functools
 import math
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -37,7 +44,11 @@ from flax import nnx
 from jax.sharding import Mesh
 from vllm.config import VllmConfig
 
-from tpu_inference import utils
+from tpu_inference import envs, utils
+from tpu_inference.kernels.jina_bert_megakernel import (
+    MAX_TOKENS, JinaBertPackedWeights, jina_bert_encoder_megakernel,
+    pack_jina_bert_weights, unsupported_geometry_reason,
+    unsupported_vmem_reason)
 from tpu_inference.layers.common.attention_interface import \
     encoder_only_attention
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
@@ -319,7 +330,52 @@ class JinaBertLayer(JaxModule):
         return self.mlp(x)
 
 
+class JinaBertMegakernelWeight(nnx.Variable):
+    """Derived, re-laid-out encoder weights consumed by the megakernel.
+
+    Built from the loaded params by `JinaBertEncoder.pack_megakernel_weights`.
+    Deliberately not an `nnx.Param`: it is not a checkpoint tensor, and
+    checkpoint loaders (and vLLM's "weights not initialized from checkpoint"
+    check) only look at `nnx.Param`s.
+    """
+
+
+def _megakernel_unsupported_reason(config, dtype: Any, mesh: Mesh,
+                                   precision: str) -> Optional[str]:
+    """Why the encoder megakernel can't serve this model (None if it can)."""
+    if mesh.size != 1:
+        return (f"it runs on a single chip (TP=1) but the mesh has "
+                f"{mesh.size} devices")
+    if utils.to_jax_dtype(dtype) != jnp.float32:
+        return (f"it is float32-only but the model dtype is "
+                f"{utils.to_jax_dtype(dtype)}")
+    head_dim = config.hidden_size // config.num_attention_heads
+    if utils.get_padded_head_dim(head_dim) != head_dim:
+        return f"head_dim={head_dim} is padded to a different size"
+    reason = unsupported_geometry_reason(
+        hidden_size=config.hidden_size,
+        num_heads=config.num_attention_heads,
+        intermediate_size=config.intermediate_size)
+    if reason is not None:
+        return reason
+    # VMEM use grows with the step size: check the largest step accepted.
+    return unsupported_vmem_reason(MAX_TOKENS,
+                                   hidden_size=config.hidden_size,
+                                   num_heads=config.num_attention_heads,
+                                   intermediate_size=config.intermediate_size,
+                                   num_layers=config.num_hidden_layers,
+                                   precision=precision)
+
+
 class JinaBertEncoder(JaxModule):
+    """The encoder layer stack.
+
+    Runs as a single Pallas megakernel covering every layer (default), or
+    layer by layer with XLA + the encoder flash-attention kernel when
+    `USE_JINA_BERT_MEGAKERNEL=0` or the megakernel does not apply. Both paths
+    use the same per-layer params; the megakernel additionally uses a packed
+    copy built after loading (`pack_megakernel_weights`).
+    """
 
     def __init__(self, config, dtype: jnp.dtype, rng: nnx.Rngs, mesh: Mesh,
                  prefix: str):
@@ -333,12 +389,98 @@ class JinaBertEncoder(JaxModule):
                           prefix=f"{prefix}.layer.{i}")
             for i in range(config.num_hidden_layers)
         ])
+        self.mesh = mesh
+        self.alibi_slopes = tuple(get_alibi_slopes(config.num_attention_heads))
+        self.layer_norm_eps = float(config.layer_norm_eps)
+        self.megakernel_precision = envs.JINA_BERT_MEGAKERNEL_PRECISION
+        self.use_megakernel = False
+        if envs.USE_JINA_BERT_MEGAKERNEL:
+            reason = _megakernel_unsupported_reason(config, dtype, mesh,
+                                                    self.megakernel_precision)
+            if reason is None:
+                self.use_megakernel = True
+                logger.info_once(
+                    "JinaBert encoder: using the Pallas megakernel (matmul "
+                    f"precision={self.megakernel_precision!r}).")
+            else:
+                logger.warning_once(
+                    f"JinaBert encoder megakernel not used: {reason}. "
+                    "Falling back to the per-layer XLA path.")
 
     def __call__(self, x: jax.Array,
                  attention_metadata: AttentionMetadata) -> jax.Array:
+        if self.use_megakernel:
+            # Raises (at trace time) if x has more than MAX_TOKENS rows.
+            return jina_bert_encoder_megakernel(
+                x,
+                attention_metadata.seq_lens,
+                self._megakernel_weights(),
+                alibi_slopes=self.alibi_slopes,
+                eps=self.layer_norm_eps,
+                precision=self.megakernel_precision,
+                mesh=self.mesh,
+            )
         for layer in self.layer:
             x = layer(x, attention_metadata)
         return x
+
+    def _layer_params(self) -> List[Dict[str, jax.Array]]:
+        """Per-layer params, keyed as `pack_jina_bert_weights` expects."""
+        params = []
+        for layer in self.layer:
+            attn = getattr(layer.attention, "self")
+            out = layer.attention.output
+            mlp = layer.mlp
+            params.append({
+                "q_w": attn.query.weight.value,
+                "q_b": attn.query.bias.value,
+                "k_w": attn.key.weight.value,
+                "k_b": attn.key.bias.value,
+                "v_w": attn.value.weight.value,
+                "v_b": attn.value.bias.value,
+                "o_w": out.dense.weight.value,
+                "o_b": out.dense.bias.value,
+                "ln1_g": out.LayerNorm.weight.value,
+                "ln1_b": out.LayerNorm.bias.value,
+                "gate_w": mlp.gated_layers.weight.value,
+                "down_w": mlp.wo.weight.value,
+                "down_b": mlp.wo.bias.value,
+                "ln2_g": mlp.layernorm.weight.value,
+                "ln2_b": mlp.layernorm.bias.value,
+            })
+        return params
+
+    def pack_megakernel_weights(self) -> None:
+        """Builds the megakernel weight layout from the loaded params.
+
+        Called once after checkpoint loading. The per-layer params are left
+        as loaded; this adds a derived copy with Q/K/V fused, the
+        1/sqrt(head_dim) softmax scale folded into Q (exact: a power of two),
+        layers stacked, and matmul weights cast to the MXU operand dtype of
+        the selected precision (bf16 for "default", fp32 for "highest").
+        """
+        if not self.use_megakernel:
+            return
+        packed = pack_jina_bert_weights(self._layer_params(),
+                                        precision=self.megakernel_precision)
+        for name, value in packed._asdict().items():
+            setattr(self, f"megakernel_{name}",
+                    JinaBertMegakernelWeight(value))
+
+    def _megakernel_weights(self) -> JinaBertPackedWeights:
+        variables = [
+            getattr(self, f"megakernel_{name}", None)
+            for name in JinaBertPackedWeights._fields
+        ]
+        if all(v is not None for v in variables):
+            return JinaBertPackedWeights(*(v.value for v in variables))
+        # Weights did not go through JinaBertForMaskedLM.load_weights (e.g.
+        # --load-format dummy): re-lay them out inside the step instead.
+        logger.warning_once(
+            "JinaBert megakernel weights were not packed at load time; "
+            "packing them inside every step instead (extra HBM traffic).")
+        return pack_jina_bert_weights(self._layer_params(),
+                                      precision=self.megakernel_precision)
 
 
 class JinaBertModel(JaxModule):
@@ -399,7 +541,8 @@ class JinaBertForMaskedLM(JaxModule, LoadableWithIterator):
 
     def load_weights(self, weights):
         """Strip optional 'bert.' prefixes and drop MLM-head/pooler weights,
-        then delegate to the standard JAX auto-loader."""
+        then delegate to the standard JAX auto-loader. Afterwards, build the
+        encoder megakernel's packed weight layout (if the megakernel is on)."""
         from tpu_inference.models.jax.utils.weight_utils import \
             JaxAutoWeightsLoader
         from tpu_inference.utils import to_torch_dtype
@@ -417,4 +560,6 @@ class JinaBertForMaskedLM(JaxModule, LoadableWithIterator):
                 yield name, weight.to(torch_dtype)
 
         loader = JaxAutoWeightsLoader(self, skip_prefixes=None)
-        return loader.load_weights(_filtered(weights))
+        loaded = loader.load_weights(_filtered(weights))
+        self.model.encoder.pack_megakernel_weights()
+        return loaded

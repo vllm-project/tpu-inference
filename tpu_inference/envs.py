@@ -80,6 +80,8 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
+    USE_JINA_BERT_MEGAKERNEL: bool = True
+    JINA_BERT_MEGAKERNEL_PRECISION: str = "default"
 
 
 def env_with_choices(
@@ -472,6 +474,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when initializing large FP8 models on smaller RAM TPUs such as TPU8i.
     "VLLM_INCREMENTAL_FP8_LOADING":
     env_bool("VLLM_INCREMENTAL_FP8_LOADING", default=False),
+    # JinaBert (jina-embeddings-v2) encoder: run all encoder layers as one
+    # Pallas TPU megakernel (tpu_inference/kernels/jina_bert_megakernel).
+    # Set to 0 to use the per-layer XLA + flash-attention path instead.
+    "USE_JINA_BERT_MEGAKERNEL":
+    env_bool("USE_JINA_BERT_MEGAKERNEL", default=True),
+    # Matmul precision of the JinaBert megakernel. "default": bf16 MXU
+    # operands, one pass, fp32 accumulation (what lax.Precision.DEFAULT does
+    # to float32 matmuls on TPU, i.e. the XLA path's precision). "highest":
+    # full-fp32 matmuls (lax.Precision.HIGHEST). Everything else (params,
+    # activations, softmax, LayerNorm, GELU, accumulation) is float32 in both.
+    "JINA_BERT_MEGAKERNEL_PRECISION":
+    env_with_choices("JINA_BERT_MEGAKERNEL_PRECISION", "default",
+                     ["default", "highest"]),
 }
 
 

@@ -51,6 +51,9 @@ def test_jina_embeddings_e2e():
             convert="embed",
             max_num_seqs=4,
             max_model_len=max_model_len,
+            # As served (--max-num-batched-tokens 2048): the encoder
+            # megakernel rejects steps of more than 2048 tokens.
+            max_num_batched_tokens=2048,
             dtype="float32",
             trust_remote_code=True,
             tensor_parallel_size=1,
