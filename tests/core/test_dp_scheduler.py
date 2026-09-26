@@ -901,6 +901,41 @@ class TestDPScheduler:
         stats = scheduler.make_stats()
         assert stats is None
 
+    def test_log_dp_rank_balance(self, mock_vllm_config, mock_kv_cache_config,
+                                 mock_structured_output_manager):
+        """Test _log_dp_rank_balance logs rank breakdown and respects log interval."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager,
+                                           log_stats=True)
+
+        stats_0 = SchedulerStats(num_running_reqs=2,
+                                 num_waiting_reqs=1,
+                                 kv_cache_usage=0.2)
+        stats_1 = SchedulerStats(num_running_reqs=4,
+                                 num_waiting_reqs=0,
+                                 kv_cache_usage=0.6)
+
+        with patch(
+                "tpu_inference.core.sched.dp_scheduler.logger") as mock_logger:
+            # First call should log info because running reqs > 0
+            scheduler._log_dp_rank_balance([stats_0, stats_1], 6, 1)
+            mock_logger.info.assert_called_once()
+            args = mock_logger.info.call_args[0]
+            assert "[DP Rank Balance]" in args[0]
+            assert args[1] == [2, 4]
+            assert args[2] == 6
+            assert args[3] == 2
+            assert args[4] == 4
+            assert args[5] == [1, 0]
+            assert args[6] == 1
+            assert args[7] == "20.0%, 60.0%"
+
+            mock_logger.reset_mock()
+            # Immediate second call within interval should be throttled
+            scheduler._log_dp_rank_balance([stats_0, stats_1], 6, 1)
+            mock_logger.info.assert_not_called()
+
     def test_update_draft_token_ids(self, mock_vllm_config,
                                     mock_kv_cache_config,
                                     mock_structured_output_manager):
