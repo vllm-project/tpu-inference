@@ -13,11 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Prints what the container sees, then times test_tp_performance twice in the
+# Prints what the container sees, then times test_tp_performance in the
 # same container. Run inside the test image on kube and on bare metal to find
 # why TP=8 generation is slower on kube while TP=1 is not.
 
 set -u
+
+# --no-tp          facts and wake-up latency only
+# --runs N         test_tp_performance runs in this container (default 2)
+# --log-compiles   log every JAX compile, to see any that land in the timed run
+# --prewarm-image  read the container's root filesystem first, so files the
+#                  image streamer would fetch on first touch are already local
+RUNS=2
+NO_TP=0
+PREWARM=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-tp) NO_TP=1 ;;
+    --runs) RUNS="$2"; shift ;;
+    --log-compiles) export JAX_LOG_COMPILES=1 ;;
+    --prewarm-image) PREWARM=1 ;;
+  esac
+  shift
+done
 
 section() { echo "--- $*"; }
 
@@ -53,9 +71,17 @@ section "load"
 uptime
 ps -eo pcpu,pid,comm --sort=-pcpu 2>/dev/null | head -8
 
-[ "${1:-}" = "--no-tp" ] && exit 0
+[ "$NO_TP" = 1 ] && exit 0
 
-for i in 1 2; do
+if [ "$PREWARM" = 1 ]; then
+  section "prewarm image"
+  start=$(date +%s)
+  find / -xdev -type f -size -2G -print0 2>/dev/null |
+    xargs -0 -P 32 -n 200 cat > /dev/null 2>&1
+  echo "read the root filesystem in $(( $(date +%s) - start ))s"
+fi
+
+for i in $(seq 1 "$RUNS"); do
   section "test_tp_performance run $i"
   python3 -m pytest -s -v -x \
     /workspace/tpu_inference/tests/e2e/test_tensor_parallel.py::test_tp_performance

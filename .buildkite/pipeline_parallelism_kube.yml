@@ -59,9 +59,9 @@ steps:
           "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
         buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
-  # Diagnostic branch only: the same script on the kube 8-chip pool and on a
-  # bare-metal v6e-8 agent, from the same image, to compare TP=8 timings.
-  - label: ":kubernetes: tpu6e TP diag (kube)"
+  # Diagnostic branch only. Each kube step gets a fresh pod, so its first run
+  # is cold the way every scheduled run is.
+  - label: ":kubernetes: tpu6e TP diag (kube, log compiles)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -72,23 +72,22 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh ${TP_DIAG_ARGS:-}
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --log-compiles
 
-  - label: ":kubernetes: tpu6e wake-up diag (kube 1-chip)"
-    if: build.env("TP_DIAG_ARGS") == "--no-tp"
+  - label: ":kubernetes: tpu6e TP diag (kube, prewarmed image)"
     depends_on: "build_docker_tpu6e"
-    timeout_in_minutes: 120
+    timeout_in_minutes: 240
     agents:
       queue: "kube"
     env:
-      SHAPE: *shape_single
+      SHAPE: *shape_multi
       TPU_VERSION: "tpu6e"
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --no-tp
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --prewarm-image
 
-  - label: "tpu6e TP diag (bare metal)"
+  - label: "tpu6e TP diag (bare metal, log compiles)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -96,4 +95,4 @@ steps:
     env:
       TPU_VERSION: "tpu6e"
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh ${TP_DIAG_ARGS:-}
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1 --log-compiles
