@@ -153,14 +153,19 @@ def gather_cos_sin(
     )(positions, cos_sin_cache)
 
 
-def _rope_heads(x, cos_sin, *, head_dim):
-    """apply RoPE to the last rope dim of head dim of ``x``."""
+def _rope_heads(x, cos_sin, *, head_dim, heads_per_group):
+    """apply RoPE to the last rope dim of head dim of ``x`` (already flattened to 2D)."""
     cos = cos_sin[:, :LANE]
     sin = cos_sin[:, LANE:]
     lo = head_dim - LANE
-    tail = x[:, :, lo:].astype(jnp.float32)
-    roped = tail * cos[:, None, :] + _rotate_gptj(tail) * sin[:, None, :]
-    return jnp.concatenate([x[:, :, :lo], roped.astype(x.dtype)], axis=-1)
+    pieces = []
+    for h in range(heads_per_group):
+        base = h * head_dim
+        pieces.append(x[:, base:base + lo])
+        tail = x[:, base + lo:base + head_dim].astype(jnp.float32)
+        roped = tail * cos + _rotate_gptj(tail) * sin
+        pieces.append(roped.astype(x.dtype))
+    return jnp.concatenate(pieces, axis=-1)
 
 
 def _kernel(
@@ -176,6 +181,7 @@ def _kernel(
     num_sub_t: int,
     quantize_activations: bool,
     head_dim: int,
+    heads_per_group: int,
 ):
     rhs = w_ref[...]
     scale = scale_ref[...]
@@ -186,8 +192,11 @@ def _kernel(
         # Subchunk the tile to allow more Instruction level parallelism
         # opportunities to be exploited by the LLO compiler.
         rows = slice(s * sub_t, (s + 1) * sub_t)
-        x = _rope_heads(x_ref[rows], cos_sin[rows], head_dim=head_dim)
-        x = x.reshape(sub_t, -1)
+        flat = x_ref[rows].reshape(sub_t, -1)
+        x = _rope_heads(flat,
+                        cos_sin[rows],
+                        head_dim=head_dim,
+                        heads_per_group=heads_per_group)
         inv = None
         if quantize_activations:
             amax = jnp.max(jnp.abs(x), axis=1, keepdims=True)
@@ -290,6 +299,7 @@ def wo_a_projection(
             num_sub_t=tile_t // sub_t,
             quantize_activations=quantize_activations,
             head_dim=head_dim,
+            heads_per_group=heads_per_group,
         ),
         out_shape=jax.ShapeDtypeStruct((num_tokens, out_features), x.dtype),
         grid=(num_groups, num_t_tiles, num_r_tiles),
