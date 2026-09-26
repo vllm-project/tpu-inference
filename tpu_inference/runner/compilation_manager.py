@@ -46,8 +46,9 @@ from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
     extract_last_sampled_tokens, process_and_extend_logits)
-from tpu_inference.utils import (device_array, get_mesh_shape_product,
-                                 time_function, to_jax_dtype)
+from tpu_inference.utils import (DeviceBuffer, device_array,
+                                 get_mesh_shape_product, time_function,
+                                 to_jax_dtype)
 
 if TYPE_CHECKING:
     from tpu_inference.runner.tpu_runner import TPUModelRunner
@@ -252,6 +253,10 @@ class CompilationManager:
             with self.runner.maybe_setup_dummy_loras(
                     self.runner.lora_config), jax.set_mesh(self.runner.mesh):
                 self._precompile_backbone_text_only()
+                self._flush_compilations()
+                # Every rank unpacks its inputs, so this sits before the
+                # last-rank-only steps below.
+                self._precompile_unpack_arrays()
                 self._flush_compilations()
                 if self.runner.is_multimodal_model:
                     if self.runner.precompile_vision_encoder_fn is not None:
@@ -887,6 +892,57 @@ class CompilationManager:
         we drop args[0] and forward the rest.
         """
         return fn(*args[1:], **call_kwargs)
+
+    def _precompile_unpack_arrays(self) -> None:
+        """Split every padded metadata layout once, ahead of serving.
+
+        _prepare_inputs packs its per-step metadata into one blob and
+        DeviceBuffer.unpack_arrays splits it on device. That split is not
+        jitted, so JAX dispatches a small split program per distinct
+        (blob length, split points) - one per (token padding, logits padding)
+        pair - and the first step to use a pair pays for lowering it and for
+        compiling it or reading it from the persistent compilation cache. On
+        a cold cache that is tens of milliseconds per pair inside a request.
+        Running each split here puts it in the in-process cache instead.
+        """
+        logger.info("Compiling unpack_arrays with different input shapes.")
+        runner = self.runner
+        dp_size = runner.dp_size
+        per_dp_token_paddings = set(runner.num_tokens_paddings_per_dp)
+        if runner.enable_continue_decode:
+            # Decode-only steps pad tokens with the request paddings.
+            per_dp_token_paddings |= set(runner.num_reqs_paddings_per_dp)
+        token_sizes = sorted(p * dp_size for p in per_dp_token_paddings)
+        if runner.speculative_config:
+            logits_sizes = [p * dp_size for p in runner.num_logits_paddings]
+        else:
+            logits_sizes = [
+                p * dp_size for p in runner.num_reqs_paddings_per_dp
+            ]
+        # The same sharding _prepare_inputs gives the blob; a different one
+        # would warm a different executable.
+        blob_sharding = NamedSharding(runner.mesh,
+                                      PartitionSpec(ShardingAxisName.BATCH))
+
+        # Every pair, including more logits than tokens: the two ladders are
+        # built separately and need not line up. With spec decode and
+        # dp_size=4, one request with 3 draft tokens pads to 16 tokens and
+        # 32 logits.
+        for num_tokens in token_sizes:
+            for num_logits in logits_sizes:
+                layout = runner._metadata_blob_layout(num_tokens, num_logits)
+                blob = device_array(runner.mesh,
+                                    np.zeros(sum(layout.sizes),
+                                             dtype=np.int32),
+                                    sharding=blob_sharding)
+                self._run_compilation(
+                    "unpack_arrays",
+                    DeviceBuffer.unpack_arrays,
+                    blob,
+                    layout,
+                    num_tokens=num_tokens,
+                    num_logits=num_logits,
+                )
 
     def _precompile_select_from_array(self) -> None:
         logger.info("Compiling select_from_array with different input shapes.")

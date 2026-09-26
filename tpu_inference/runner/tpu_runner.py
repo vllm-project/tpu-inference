@@ -2735,6 +2735,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_subtract_indices, positions_subtract_indices)
         return seq_lens, positions
 
+    def _metadata_blob_layout(
+            self, padded_total_num_scheduled_tokens: int,
+            logits_indices_len: int) -> common_utils.DeviceBufferMetadata:
+        """The layout _prepare_inputs packs into device_buffer for a step with
+        these padded sizes: the same segments, sizes and order. The compilation
+        manager precompiles unpack_arrays for each layout this returns.
+        """
+        keys = ["input_ids", "query_start_loc", "seq_lens", "logits_indices"]
+        sizes = [
+            padded_total_num_scheduled_tokens,
+            self.attn_max_num_seqs + self.dp_size,
+            self.attn_max_num_seqs,
+            logits_indices_len,
+        ]
+        for gid in range(len(self.kv_cache_config.kv_cache_groups)):
+            keys.append(f"block_tables_gid_{gid}")
+            sizes.append(
+                self.attn_max_num_seqs *
+                self.input_batch.block_table[gid].max_num_blocks_per_req)
+        return common_utils.DeviceBufferMetadata(keys=tuple(keys),
+                                                 sizes=tuple(sizes))
+
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2782,6 +2804,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         self.device_buffer.reset()
 
+        # The segments packed below, in this order, are what
+        # _metadata_blob_layout reproduces so unpack_arrays can be precompiled;
+        # a segment added or resized here has to be added or resized there.
         input_ids_view = self.device_buffer.get_view(
             (padded_total_num_scheduled_tokens, ), key="input_ids")
         query_start_loc_view = self.device_buffer.get_view(
@@ -3078,8 +3103,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 self.mesh, (request_distribution, metadata_blob),
                 sharding=metadata_attn_sharding)
 
-        metadata = common_utils.DeviceBuffer.unpack_arrays(
-            dev_arrays_payload, metadata_layout)
+        # The compilation manager splits every padded layout once, so a split
+        # compiled here is a layout precompilation missed.
+        with self.maybe_forbid_compile:
+            metadata = common_utils.DeviceBuffer.unpack_arrays(
+                dev_arrays_payload, metadata_layout)
         input_ids = metadata["input_ids"]
         query_start_loc = metadata["query_start_loc"]
         seq_lens = metadata["seq_lens"]

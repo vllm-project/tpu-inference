@@ -16,6 +16,8 @@ from tpu_inference.layers.jax.sample.sampling import \
     logprobs_use_processed_logits
 from tpu_inference.runner.compilation_manager import (CompilationManager,
                                                       _describe_signature)
+from tpu_inference.runner.utils import ForbidCompile
+from tpu_inference.utils import DeviceBuffer, DeviceBufferMetadata
 
 
 class TestDescribeSignature:
@@ -144,3 +146,124 @@ class TestPrecompileGatherLogprobsSharding:
         spec = _precompiled_logits_specs(logprobs_mode)[0]
         assert (spec == PartitionSpec(ShardingAxisName.ATTN_DATA,
                                       None)) is uses_processed
+
+
+def _two_segment_layout(num_tokens, num_logits):
+    return DeviceBufferMetadata(keys=("input_ids", "logits_indices"),
+                                sizes=(num_tokens, num_logits))
+
+
+def _precompiled_unpacks(**runner_overrides):
+    """The `_run_compilation` calls `_precompile_unpack_arrays` makes."""
+    # One device, every axis named: see _precompiled_logits_specs.
+    devices = np.array(jax.devices()[:1]).reshape((1, ) * len(MESH_AXIS_NAMES))
+    runner = SimpleNamespace(
+        mesh=Mesh(devices, MESH_AXIS_NAMES),
+        dp_size=1,
+        num_tokens_paddings_per_dp=[8, 16, 32],
+        num_reqs_paddings_per_dp=[8, 16],
+        num_logits_paddings=None,
+        enable_continue_decode=False,
+        speculative_config=None,
+        _metadata_blob_layout=_two_segment_layout,
+    )
+    vars(runner).update(runner_overrides)
+    manager = CompilationManager.__new__(CompilationManager)
+    manager.runner = runner
+
+    calls = []
+
+    def record(name, fn, blob, layout, **kwargs):
+        calls.append(
+            SimpleNamespace(fn=fn,
+                            blob=blob,
+                            layout=layout,
+                            sizes=(kwargs["num_tokens"],
+                                   kwargs["num_logits"])))
+
+    manager._run_compilation = record
+    CompilationManager._precompile_unpack_arrays(manager)
+    return calls
+
+
+class TestPrecompileUnpackArrays:
+    """`_prepare_inputs` splits its metadata blob with an un-jitted
+    `jnp.split`, which compiles once per layout. Every layout a step can pack
+    has to be split here, or the first step to use it compiles (or reads the
+    persistent cache) mid-request, and raises under
+    VLLM_XLA_CHECK_RECOMPILATION.
+    """
+
+    def test_every_token_and_logits_padding_pair(self):
+        sizes = [c.sizes for c in _precompiled_unpacks()]
+        assert sizes == [(8, 8), (8, 16), (16, 8), (16, 16), (32, 8), (32, 16)]
+
+    def test_more_logits_than_tokens_is_warmed(self):
+        # Spec decode, dp_size=4, one request with 3 draft tokens: 4 tokens
+        # pad to the 4-token rung, 4 logits to the 8-logit rung, per rank.
+        sizes = [
+            c.sizes
+            for c in _precompiled_unpacks(dp_size=4,
+                                          num_tokens_paddings_per_dp=[4, 8],
+                                          speculative_config=object(),
+                                          num_logits_paddings=[8, 16])
+        ]
+        assert (16, 32) in sizes
+
+    def test_per_rank_paddings_are_scaled_by_dp(self):
+        # _prepare_inputs pads per rank and packs all ranks into one blob.
+        sizes = [c.sizes for c in _precompiled_unpacks(dp_size=2)]
+        assert sizes == [(16, 16), (16, 32), (32, 16), (32, 32), (64, 16),
+                         (64, 32)]
+
+    def test_continue_decode_pads_tokens_to_request_paddings(self):
+        sizes = [
+            c.sizes
+            for c in _precompiled_unpacks(num_tokens_paddings_per_dp=[16, 32],
+                                          enable_continue_decode=True)
+        ]
+        assert (8, 8) in sizes
+        assert (8, 8) not in [
+            c.sizes
+            for c in _precompiled_unpacks(num_tokens_paddings_per_dp=[16, 32])
+        ]
+
+    def test_spec_decode_pads_logits_to_logits_paddings(self):
+        sizes = [
+            c.sizes
+            for c in _precompiled_unpacks(speculative_config=object(),
+                                          num_logits_paddings=[8, 16, 32])
+        ]
+        assert sizes == [(8, 8), (8, 16), (8, 32), (16, 8), (16, 16), (16, 32),
+                         (32, 8), (32, 16), (32, 32)]
+
+    def test_blob_has_the_runtime_shape_dtype_and_sharding(self):
+        # The eager split's executable is keyed on the input's shape, dtype
+        # and sharding, so all three must match the runtime blob.
+        for call in _precompiled_unpacks():
+            assert call.fn is DeviceBuffer.unpack_arrays
+            assert call.layout == _two_segment_layout(*call.sizes)
+            assert call.blob.shape == (sum(call.layout.sizes), )
+            assert call.blob.dtype == jnp.int32
+            assert call.blob.sharding.spec == PartitionSpec(
+                ShardingAxisName.BATCH)
+
+    def test_a_warmed_layout_does_not_compile_when_serving(self):
+        calls = _precompiled_unpacks(num_tokens_paddings_per_dp=[40],
+                                     num_reqs_paddings_per_dp=[24])
+        for call in calls:
+            call.fn(call.blob, call.layout)
+        (call, ) = calls
+
+        fresh_blob = jax.device_put(np.arange(64, dtype=np.int32),
+                                    call.blob.sharding)
+        with ForbidCompile():
+            parts = DeviceBuffer.unpack_arrays(fresh_blob, call.layout)
+        assert parts["logits_indices"].tolist() == list(range(40, 64))
+
+        # The guard in _prepare_inputs only means something if an unwarmed
+        # layout trips it.
+        with pytest.raises(RuntimeError, match="forbidden"):
+            with ForbidCompile():
+                DeviceBuffer.unpack_arrays(fresh_blob,
+                                           _two_segment_layout(41, 23))

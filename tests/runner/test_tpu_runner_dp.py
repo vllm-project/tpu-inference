@@ -22,6 +22,7 @@ from jax.sharding import Mesh
 
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.runner.tpu_runner import TPUModelRunner
+from tpu_inference.utils import DeviceBuffer
 
 
 class TestTPUJaxRunnerDPInputsLightweight:
@@ -227,6 +228,54 @@ class TestTPUJaxRunnerDPInputsLightweight:
 
         # Verify utility functions were called
         mock_runner_utils.get_padded_token_len.assert_called()
+
+    @pytest.mark.parametrize("hybrid_kvcache", [False, True])
+    @patch('jax.device_put', side_effect=lambda x, y: x)
+    @patch('tpu_inference.runner.tpu_runner.NamedSharding')
+    @patch('tpu_inference.runner.tpu_runner.runner_utils')
+    @patch('tpu_inference.runner.tpu_runner.device_array',
+           side_effect=lambda mesh, tensors, **kwargs: tensors)
+    @patch('tpu_inference.runner.tpu_runner.TPUSupportedSamplingMetadata')
+    def test_prepare_inputs_packs_the_precompiled_layout(
+            self, mock_sampling_metadata, mock_device_array, mock_runner_utils,
+            mock_named_sharding, mock_device_put, hybrid_kvcache):
+        """The compilation manager warms unpack_arrays with
+        _metadata_blob_layout, so it has to describe the blob _prepare_inputs
+        really packs."""
+        # Every rank pads to 16 tokens and 8 requests, so a layout with the
+        # two sizes swapped does not match.
+        mock_runner_utils.get_padded_token_len.side_effect = (
+            lambda paddings, n: 8
+            if paddings is self.runner.num_reqs_paddings_per_dp else 16)
+        mock_sampling_metadata.from_input_batch.return_value = MagicMock()
+        if hybrid_kvcache:
+            self._create_mock_hybrid_kv_cache_config()
+            self.runner.input_batch.block_table = (
+                self.runner.input_batch.block_table * 2)
+        self.runner._metadata_blob_layout = TPUModelRunner._metadata_blob_layout.__get__(
+            self.runner)
+        scheduler_output = self._create_mock_scheduler_output(
+            {
+                "req1": 5,
+                "req2": 3
+            }, {
+                "req1": 0,
+                "req2": 1
+            })
+
+        unpack_arrays = DeviceBuffer.unpack_arrays
+        packed = []
+
+        def record_layout(blob, layout):
+            packed.append(layout)
+            return unpack_arrays(blob, layout)
+
+        with patch.object(DeviceBuffer,
+                          "unpack_arrays",
+                          side_effect=record_layout):
+            self.runner._prepare_inputs(scheduler_output)
+
+        assert packed == [self.runner._metadata_blob_layout(32, 16)]
 
     def test_prepare_inputs_dp_error_conditions(self):
         """Test error handling in DP input preparation."""
