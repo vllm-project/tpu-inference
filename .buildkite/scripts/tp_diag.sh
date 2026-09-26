@@ -33,9 +33,13 @@ set -u
 #                  userspace analogue of booting with idle=poll.
 # --warmup-ici     30s of 8-chip psum (ICI all-reduce) before the first run
 # --warmup-chip    30s of per-chip matmuls, no collectives, before the first run
+# --local-jax-cache  compile into an empty local directory instead of the
+#                  shared cache, so nothing is read through gcsfuse lazily
+# --local-hf       copy the test model to local disk and load it from there
 RUNS=2
 NO_TP=0
 WARMUP=
+LOCAL_HF=0
 PREWARM=0
 SLEEP=0
 SAMPLE=0
@@ -51,6 +55,9 @@ while [ $# -gt 0 ]; do
     --spin) SPIN=1 ;;
     --warmup-ici) WARMUP=ici ;;
     --warmup-chip) WARMUP=chip ;;
+    --local-jax-cache)
+      export JAX_COMPILATION_CACHE_DIR=/tmp/jax-cache VLLM_XLA_CACHE_PATH=/tmp/jax-cache ;;
+    --local-hf) LOCAL_HF=1 ;;
   esac
   shift
 done
@@ -135,6 +142,16 @@ if [ "$PREWARM" = 1 ]; then
   echo "read the root filesystem in $(( $(date +%s) - start ))s"
 fi
 
+if [ "$LOCAL_HF" = 1 ]; then
+  section "copy the test model to local disk"
+  src="${HF_HOME:-$HOME/.cache/huggingface}/hub/models--meta-llama--Llama-3.1-8B-Instruct"
+  start=$(date +%s)
+  mkdir -p /tmp/hf/hub && cp -a "$src" /tmp/hf/hub/
+  du -sh /tmp/hf/hub/* 2>/dev/null
+  echo "copied in $(( $(date +%s) - start ))s"
+  export HF_HOME=/tmp/hf HF_HUB_OFFLINE=1
+fi
+
 if [ -n "$WARMUP" ]; then
   section "warm-up: $WARMUP"
   WARMUP="$WARMUP" python3 - <<'PY'
@@ -145,10 +162,14 @@ mode = os.environ["WARMUP"]
 end = time.time() + 30
 n = 0
 if mode == "ici":
-    f = jax.pmap(lambda v: jax.lax.psum(v, "i"), axis_name="i")
-    x = jax.device_put_sharded([jnp.ones((1 << 22,), jnp.float32)] * len(devs), devs)
+    from jax.sharding import NamedSharding, PartitionSpec as P
+    shard = NamedSharding(jax.make_mesh((len(devs),), ("i",)), P("i"))
+    x = jax.device_put(jnp.ones((len(devs), 1 << 22), jnp.float32), shard)
+    # Summing over the sharded axis is an all-reduce across every chip.
+    f = jax.jit(lambda a: a + a.sum(axis=0, keepdims=True) * 1e-9,
+                out_shardings=shard)
     while time.time() < end:
-        x = f(x) * (1.0 / len(devs))
+        x = f(x)
         x.block_until_ready()
         n += 1
 else:
