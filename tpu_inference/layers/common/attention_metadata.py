@@ -68,7 +68,11 @@ class PCPMetadata:
         "mamba_state_indices",
         "pcp",
     ],
-    meta_fields=["padded_num_reqs", "pcp_cache_pages"],
+    meta_fields=[
+        "padded_num_reqs",
+        "pcp_cache_pages",
+        "use_causal_mask",
+    ],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -104,6 +108,9 @@ class AttentionMetadata(object):
 
     # PCP only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
+
+    # STATIC: controls JIT specialization without adding a runtime array.
+    use_causal_mask: bool = True
 
 
 @functools.partial(
