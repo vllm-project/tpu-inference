@@ -215,10 +215,24 @@ def main_kernel_v2(
     )(indices_hbm_ref)
 
 
-@jax.jit
-def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
-                     end: jax.Array) -> jax.Array:
-    """Perform gather on indices within dynamic array start and end using BlockSpec."""
+@functools.partial(jax.jit,
+                   static_argnames=("max_row_subchunks", "trim_rows"))
+def ragged_gather_v2(x: jax.Array,
+                     indices: jax.Array,
+                     start: jax.Array,
+                     end: jax.Array,
+                     *,
+                     max_row_subchunks: int = 4,
+                     trim_rows: bool = True) -> jax.Array:
+    """Perform gather on indices within dynamic array start and end using BlockSpec.
+
+    Only rows in [start, end) are written; the rest of the output is garbage.
+    The kernel works in blocks of num_lanes * num_cores * num_row_subchunks
+    rows, so when [start, end) is a small slice of `indices` (an EP shard's
+    experts), max_row_subchunks=1 cuts the rows it moves. trim_rows=False
+    returns the block-padded output instead of copying it to
+    indices.size rows; the rows past indices.size are garbage too.
+    """
 
     assert x.ndim == 2, "Ragged gather only supports 2d inputs."
     assert indices.ndim == 1, "Ragged gather only supports 1d indices."
@@ -254,7 +268,9 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
 
     # Calculate ideal num_row_subchunks to avoid too much padding overhead.
     num_row_subchunks = max(
-        1, min(4, (out_size + base_block_size - 1) // base_block_size))
+        1,
+        min(max_row_subchunks,
+            (out_size + base_block_size - 1) // base_block_size))
 
     row_subchunk_size = num_simd_lanes
     row_chunk_size = row_subchunk_size * num_row_subchunks
@@ -270,7 +286,7 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         core_axis_name="core",
         subcore_axis_name="subcore",
     )
-    return core_map_helper.kernel(
+    out = core_map_helper.kernel(
         functools.partial(
             main_kernel_v2,
             core_axis_name=vector_mesh.core_axis_name,
@@ -291,4 +307,7 @@ def ragged_gather_v2(x: jax.Array, indices: jax.Array, start: jax.Array,
         ],
         mesh=vector_mesh,
         name="sc_ragged_gather_v2",
-    )(start, end, x, indices)[:out_size, :hidden_size]
+    )(start, end, x, indices)
+    if aligned_hidden_size != hidden_size:
+        out = out[:, :hidden_size]
+    return out[:out_size] if trim_rows else out

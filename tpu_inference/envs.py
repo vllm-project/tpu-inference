@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     MOE_TWO_STEP_DISPATCH: bool = False
     MOE_TWO_STEP_DISPATCH_FP8: bool = False
+    MOE_LEAN_PERMUTE_GATHER: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -543,6 +544,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # fp8 all-gather; halves the two-step's bytes. See fused_moe_gmm.py.
     "MOE_TWO_STEP_DISPATCH_FP8":
     env_bool("MOE_TWO_STEP_DISPATCH_FP8", default=False),
+    # EP dispatch permute gather: size the SparseCore gather's blocks for one
+    # shard's rows (max_row_subchunks=1) and hand the block-padded output to
+    # gmm_v2 instead of copying it to num_tokens * topk rows. See
+    # ragged_gather_v2 and fused_moe_gmm.py.
+    "MOE_LEAN_PERMUTE_GATHER":
+    env_bool("MOE_LEAN_PERMUTE_GATHER", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
