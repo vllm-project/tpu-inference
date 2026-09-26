@@ -40,6 +40,9 @@ set -u
 # --local-hf       copy the test model to local disk and load it from there
 # --diff-writes    list every file run 1 creates or changes, by directory
 # --compileall     byte-compile the installed Python before the first run
+# --no-metrics     unset TPU_RUNTIME_METRICS_PORTS, so libtpu serves no runtime
+#                  metrics for GKE's node agent to poll
+# --no-worker-env  also unset TPU_WORKER_HOSTNAMES and TPU_WORKER_ID
 RUNS=2
 NO_TP=0
 WARMUP=
@@ -67,6 +70,8 @@ while [ $# -gt 0 ]; do
     --local-hf) LOCAL_HF=1 ;;
     --diff-writes) DIFF_WRITES=1 ;;
     --compileall) COMPILEALL=1 ;;
+    --no-metrics) unset TPU_RUNTIME_METRICS_PORTS ;;
+    --no-worker-env) unset TPU_RUNTIME_METRICS_PORTS TPU_WORKER_HOSTNAMES TPU_WORKER_ID ;;
   esac
   shift
 done
