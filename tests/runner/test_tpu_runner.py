@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -180,6 +181,9 @@ class TestTPUJaxRunner:
         mock_sampling_instance = MagicMock()
         mock_sampling_metadata.from_input_batch.return_value = mock_sampling_instance
 
+        # This runner never ran capture_model, so unpacking the metadata blob
+        # compiles here, which VLLM_XLA_CHECK_RECOMPILATION (set by CI) forbids.
+        self.runner.maybe_forbid_compile = nullcontext()
         output = self.runner._prepare_inputs(scheduler_output)
         assert len(output) == 12
         input_ids, positions, attention_metadata, sampling_metadata, logits_indices, spec_decode_metadata, logits_indices_selector, padded_num_reqs, req_ids_dp, padded_num_scheduled_tokens_per_dp_rank, tokens_indices_selector, shared_attention_metadata = output
