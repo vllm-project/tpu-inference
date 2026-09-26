@@ -56,8 +56,9 @@ echo "[INFO] Dynamic mapping complete: $ci_queue -> $DEVICE"
 # are per-run values only this script computes. The pod starts in the image's
 # WORKDIR, the checkout run_bm.sh's relative paths expect.
 #
-# UPLOAD_DB is off unless the build turns it on: a kube row would land under
-# the bare-metal device name with nothing marking it as kube.
+# UPLOAD_DB is off unless the build turns it on. The rows it writes keep the
+# bare-metal Device, so kube and bare-metal results sit side by side, and
+# RUN_TYPE_SUFFIX marks the run type as kube's (see report_result.sh).
 #
 # run_bm.sh writes its logs under ARTIFACT_FOLDER/temp_logs, which run.sh then
 # uploads through ARTIFACTS_DIR: the server and benchmark logs run_job.sh
@@ -68,6 +69,7 @@ exec .buildkite/kubernetes/run.sh env \
     DEVICE="$DEVICE" \
     RECORD_ID="$RECORD_ID" \
     RUN_TYPE="$RUN_TYPE" \
+    RUN_TYPE_SUFFIX=_KUBE \
     CODE_HASH="$CODE_HASH" \
     JOB_REFERENCE="$JOB_REFERENCE" \
     EXTRA_ENVS="${EXTRA_ENVS:-}" \

@@ -131,7 +131,12 @@ fi
 
 RECORD_ID=$1
 EXIT_CODE=${2:-0} # Default to 0 if not provided
-RUN_TYPE="${RUN_TYPE:-DAILY}"
+# RUN_TYPE comes from the case file, re-exported by run_bm.sh, so a lane that
+# has to mark its rows cannot set it from outside. RUN_TYPE_SUFFIX is that mark:
+# the kube lane sets _KUBE, so its rows keep the case's run type and Device but
+# stay out of queries on the bare-metal run type. Exported so report_bigquery.py
+# records the same value.
+export RUN_TYPE="${RUN_TYPE:-DAILY}${RUN_TYPE_SUFFIX:-}"
 
 # Define Result_file name
 RESULT_FILE="${ARTIFACT_FOLDER}/${RECORD_ID}.result"
