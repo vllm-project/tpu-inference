@@ -60,7 +60,7 @@ steps:
         buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
   # Diagnostic branch only. Each kube step gets a fresh pod.
-  - label: ":kubernetes: tpu6e TP diag (kube, ICI warm-up)"
+  - label: ":kubernetes: tpu6e TP diag (kube, HBM warm-up)"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 240
     agents:
@@ -71,30 +71,4 @@ steps:
     plugins:
       - *kube_plugin
     commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --warmup-ici --runs 1
-
-  - label: ":kubernetes: tpu6e TP diag (kube, local JAX cache)"
-    depends_on: "build_docker_tpu6e"
-    timeout_in_minutes: 240
-    agents:
-      queue: "kube"
-    env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "tpu6e"
-    plugins:
-      - *kube_plugin
-    commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --local-jax-cache --runs 1
-
-  - label: ":kubernetes: tpu6e TP diag (kube, local HF model)"
-    depends_on: "build_docker_tpu6e"
-    timeout_in_minutes: 240
-    agents:
-      queue: "kube"
-    env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "tpu6e"
-    plugins:
-      - *kube_plugin
-    commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --local-hf --runs 1
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --warmup-hbm --runs 2

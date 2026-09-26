@@ -33,6 +33,8 @@ set -u
 #                  userspace analogue of booting with idle=poll.
 # --warmup-ici     30s of 8-chip psum (ICI all-reduce) before the first run
 # --warmup-chip    30s of per-chip matmuls, no collectives, before the first run
+# --warmup-hbm     write ~85% of every chip's HBM once, in a separate process,
+#                  before the first run
 # --local-jax-cache  compile into an empty local directory instead of the
 #                  shared cache, so nothing is read through gcsfuse lazily
 # --local-hf       copy the test model to local disk and load it from there
@@ -55,6 +57,7 @@ while [ $# -gt 0 ]; do
     --spin) SPIN=1 ;;
     --warmup-ici) WARMUP=ici ;;
     --warmup-chip) WARMUP=chip ;;
+    --warmup-hbm) WARMUP=hbm ;;
     --local-jax-cache)
       export JAX_COMPILATION_CACHE_DIR=/tmp/jax-cache VLLM_XLA_CACHE_PATH=/tmp/jax-cache ;;
     --local-hf) LOCAL_HF=1 ;;
@@ -172,6 +175,17 @@ if mode == "ici":
         x = f(x)
         x.block_until_ready()
         n += 1
+elif mode == "hbm":
+    chunk = 1 << 30  # bytes per array
+    for d in devs:
+        limit = d.memory_stats().get("bytes_limit", 32 << 30)
+        held = []
+        while (len(held) + 1) * chunk < 0.85 * limit:
+            held.append(jnp.ones((chunk // 4,), jnp.float32, device=d))
+        for a in held:
+            a.block_until_ready()
+        n += len(held)
+        del held
 else:
     xs = [jax.device_put(jnp.ones((4096, 4096), jnp.bfloat16), d) for d in devs]
     mm = jax.jit(lambda a: a @ a)
@@ -180,7 +194,7 @@ else:
         for a in xs:
             a.block_until_ready()
         n += 1
-print(f"{mode} warm-up: {n} iterations on {len(devs)} devices")
+print(f"{mode} warm-up: {n} {'GiB written' if mode == 'hbm' else 'iterations'} on {len(devs)} devices")
 PY
 fi
 
