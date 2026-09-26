@@ -60,8 +60,8 @@ steps:
         buildkite-agent pipeline upload .buildkite/pipeline_build.yml
 
   # Diagnostic branch only: validates precompiling DeviceBuffer.unpack_arrays
-  # before it goes up for review. Each kube step gets a fresh pod, so its first
-  # TP=8 run reads the shared JAX cache through gcsfuse cold.
+  # before it goes up for review. Build #37 ran the e2e checks; this reruns
+  # the runner unit tests on the review fixes.
   - label: ":kubernetes: tpu6e runner unit tests"
     depends_on: "build_docker_tpu6e"
     timeout_in_minutes: 120
@@ -80,59 +80,3 @@ steps:
             --ignore=/workspace/tpu_inference/tests/runner/test_processed_logprobs.py \
             --ignore=/workspace/tpu_inference/tests/runner/test_moe_expert_ids.py
         '
-
-  - label: ":kubernetes: tpu6e E2E speculative decoding test (BVT)"
-    depends_on: "build_docker_tpu6e"
-    timeout_in_minutes: 180
-    agents:
-      queue: "kube"
-    env:
-      SHAPE: *shape_single
-      TPU_VERSION: "tpu6e"
-    plugins:
-      - *kube_plugin
-    commands:
-      - |
-        .buildkite/kubernetes/run.sh bash -c '
-          BVT_ONLY=1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_speculative_decoding.py
-        '
-
-  - label: ":kubernetes: tpu6e test_tp_performance run 1 and run 2, then DP correctness"
-    depends_on: "build_docker_tpu6e"
-    timeout_in_minutes: 240
-    agents:
-      queue: "kube"
-    env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "tpu6e"
-    plugins:
-      - *kube_plugin
-    commands:
-      - |
-        .buildkite/kubernetes/run.sh bash -c '
-          bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 2
-          NEW_MODEL_DESIGN=1 python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_data_parallel.py::test_dp_correctness
-        '
-
-  - label: ":kubernetes: tpu6e TP diag (kube, profile run 1)"
-    depends_on: "build_docker_tpu6e"
-    timeout_in_minutes: 240
-    agents:
-      queue: "kube"
-    env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "tpu6e"
-    plugins:
-      - *kube_plugin
-    commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --profile --runs 1
-
-  - label: "tpu6e test_tp_performance (bare metal)"
-    depends_on: "build_docker_tpu6e"
-    timeout_in_minutes: 240
-    agents:
-      queue: "tpu_v6e_8_queue"
-    env:
-      TPU_VERSION: "tpu6e"
-    commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --runs 1
