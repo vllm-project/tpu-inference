@@ -443,6 +443,7 @@ def compute_and_gather_prompt_logprobs(
 def _build_prompt_target_ids(
     total_padded_tokens: int,
     req_snaps: List[PromptLogprobsReqSnap],
+    mesh: Optional[Mesh] = None,
 ) -> jax.Array:
     """Build the next-token target for every row of the packed logits buffer.
 
@@ -459,7 +460,9 @@ def _build_prompt_target_ids(
         targets[o:o + snap.num_logits] = np.asarray(
             snap.req_state.prompt_token_ids[s:s + snap.num_logits],
             dtype=np.int32)
-    return jnp.asarray(targets)
+    if mesh is not None:
+        return jax.device_put(targets, NamedSharding(mesh, P()))
+    return jax.device_put(targets)
 
 
 def compute_prompt_logprobs(
@@ -516,8 +519,11 @@ def compute_prompt_logprobs(
     # We use the statically precompiled max_logprobs instead of the dynamic user max_k
     # to avoid triggering JAX recompilation. The correct num_k is preserved in req_snaps.
     # Must follow the loop: the targets come from req_snaps.
+    sharding = getattr(full_logits, "sharding", None)
+    mesh = getattr(sharding, "mesh", None)
     prompt_target_ids = _build_prompt_target_ids(full_logits.shape[0],
-                                                 req_snaps)
+                                                 req_snaps,
+                                                 mesh=mesh)
     prompt_lp_tensors = compute_and_gather_prompt_logprobs(
         full_logits, prompt_target_ids, max_logprobs)
     prompt_lp_tensors = _jax_logprobs_copy_to_host_async(prompt_lp_tensors)
