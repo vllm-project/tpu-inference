@@ -22,6 +22,7 @@ import torch
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig, set_current_vllm_config)
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
@@ -1048,6 +1049,135 @@ class TestKVCacheManager:
 
         assert len(kv_cache_spec) == 1
         assert kv_cache_spec['layer.0'] == mock_mamba_spec
+
+    class _SpecOwningSideCache(AttentionLayerBase):
+        """A cache-owning layer type kv_cache_manager has never heard of.
+
+        Stands in for the indexer / compressor / conv-state layers that
+        subclass `AttentionLayerBase` directly and price their own KV cache
+        (#3538). Not registered anywhere in tpu-inference on purpose.
+        """
+        head_size = 128
+
+        def __init__(self, spec):
+            self._spec = spec
+
+        def get_attn_backend(self):
+            raise NotImplementedError
+
+        def get_kv_cache_spec(self, vllm_config):
+            return self._spec
+
+    def test_get_kv_cache_spec_honors_spec_owning_layer(self):
+        # A layer that owns its spec is honored as-is, without
+        # kv_cache_manager naming its class, and without the padding the
+        # standard path applies.
+        side_spec = FullAttentionSpec(block_size=64,
+                                      num_kv_heads=1,
+                                      head_size=128,
+                                      dtype=torch.bfloat16)
+        mock_attn = MagicMock(
+            spec=Attention,
+            num_kv_heads=8,
+            head_size=128,
+            attn_type=AttentionType.DECODER,
+            sliding_window=None,
+            kv_sharing_target_layer_name=None,
+        )
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.attn': mock_attn,
+            'layer.side': self._SpecOwningSideCache(side_spec),
+        }
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert kv_cache_spec['layer.side'] is side_spec
+        # The standard layer is still priced by the runner.
+        block_size = self.runner.vllm_config.cache_config.block_size
+        num_kv_heads = common_utils.get_padded_num_heads(
+            8, self.runner.mesh.shape["model"])
+        head_size = common_utils.get_padded_head_dim(128)
+        assert kv_cache_spec['layer.attn'] == FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            page_size_padded=get_attention_page_size_bytes(
+                self.runner.mesh, block_size, num_kv_heads, head_size,
+                self.runner.kv_cache_dtype, False))
+
+    def test_get_kv_cache_spec_does_not_divert_attention_to_own_spec(self):
+        # `get_kv_cache_spec` is an abstractmethod on `AttentionLayerBase`,
+        # so plain `Attention` has one too. The runner must keep pricing
+        # `Attention` through the standard path (padding, sharding) rather
+        # than calling the layer's own method.
+        sentinel_spec = FullAttentionSpec(block_size=16,
+                                          num_kv_heads=2,
+                                          head_size=64,
+                                          dtype=torch.bfloat16)
+        mock_attn = MagicMock(
+            spec=Attention,
+            num_kv_heads=8,
+            head_size=128,
+            attn_type=AttentionType.DECODER,
+            sliding_window=None,
+            kv_sharing_target_layer_name=None,
+        )
+        mock_attn.get_kv_cache_spec.return_value = sentinel_spec
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.0': mock_attn
+        }
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        mock_attn.get_kv_cache_spec.assert_not_called()
+        assert kv_cache_spec['layer.0'] is not sentinel_spec
+        assert kv_cache_spec['layer.0'].num_kv_heads != 2
+
+    def test_get_kv_cache_spec_ds_v4_cache_layers_own_their_specs(self):
+        # The DeepSeek-V4 cache layers the deleted whitelist used to admit
+        # by class name still own their specs through the general predicate.
+        from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
+                                                       DeepseekV4IndexerCache)
+        from vllm.models.deepseek_v4.compressor import CompressorStateCache
+        from vllm.v1.attention.backends.mla.sparse_swa import \
+            DeepseekV4SWACache
+
+        static_forward_context = {}
+        expected = {}
+        for i, cls in enumerate((DeepseekV4Attention, DeepseekV4IndexerCache,
+                                 DeepseekV4SWACache, CompressorStateCache)):
+            module = MagicMock(spec=cls)
+            spec = MagicMock(spec=MLAAttentionSpec)
+            module.get_kv_cache_spec.return_value = spec
+            static_forward_context[f'layer.{i}'] = module
+            expected[f'layer.{i}'] = spec
+        self.runner.vllm_config.compilation_config.static_forward_context = \
+            static_forward_context
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert kv_cache_spec == expected
+
+    def test_get_kv_cache_spec_spec_owner_returning_none_is_skipped(self):
+        # A spec owner may report that it needs no KV cache at all.
+        mock_attn = MagicMock(
+            spec=Attention,
+            num_kv_heads=8,
+            head_size=128,
+            attn_type=AttentionType.DECODER,
+            sliding_window=None,
+            kv_sharing_target_layer_name=None,
+        )
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.attn': mock_attn,
+            'layer.side': self._SpecOwningSideCache(None),
+        }
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        assert 'layer.side' not in kv_cache_spec
+        assert 'layer.attn' in kv_cache_spec
 
     def test_initialize_kv_cache_mamba(self):
         num_blocks = 100
