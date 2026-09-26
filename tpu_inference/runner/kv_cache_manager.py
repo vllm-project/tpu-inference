@@ -25,12 +25,8 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mla import MLAAttention
-from vllm.models.deepseek_v4.attention import (DeepseekV4Attention,
-                                               DeepseekV4IndexerCache)
-from vllm.models.deepseek_v4.compressor import CompressorStateCache
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         MLAAttentionSpec, SlidingWindowSpec)
@@ -65,11 +61,27 @@ logger = init_logger(__name__)
 DEFAULT_KV_CACHE_LAYOUT = "NHD"
 
 
-def is_cache_for_ds_v4(attn_module: AttentionLayerBase) -> bool:
-    return isinstance(attn_module, DeepseekV4IndexerCache) or isinstance(
-        attn_module, DeepseekV4SWACache) or isinstance(
-            attn_module, DeepseekV4Attention) or isinstance(
-                attn_module, CompressorStateCache)
+def is_kv_cache_spec_owner(attn_module: AttentionLayerBase) -> bool:
+    """Whether a layer prices its own KV cache spec.
+
+    `Attention` and `MLAAttention` are priced by the standard path in
+    `get_kv_cache_spec`, which applies TPU head-count and head-dim padding,
+    sharding, and the hybrid page-size unification. Every other
+    `AttentionLayerBase` subclass reports its own geometry through
+    `get_kv_cache_spec`, and the runner honors it as-is. That covers the
+    Mamba family and the DeepSeek-V4 caches this function used to whitelist
+    by class name, plus the growing set of cache-owning layers in vLLM
+    (indexer caches, compressor and conv states, sparse-attention side
+    caches) without a per-architecture edit here.
+
+    A bare `hasattr` probe would not work as the predicate:
+    `get_kv_cache_spec` is an abstractmethod on `AttentionLayerBase`, so
+    plain `Attention` satisfies it structurally and would silently bypass
+    the padding and sharding above.
+    """
+    if isinstance(attn_module, (Attention, MLAAttention)):
+        return False
+    return isinstance(attn_module, AttentionLayerBase)
 
 
 def is_ds_v4(vllm_config):
@@ -645,14 +657,7 @@ class KVCacheManager:
             logger.warning(f"Compilation num_layers = {len(layers)}")
 
             for layer_name, attn_module in layers.items():
-                if isinstance(attn_module, MambaBase):
-                    spec = attn_module.get_kv_cache_spec(
-                        self.runner.vllm_config)
-                    if spec is not None:
-                        kv_cache_spec[layer_name] = spec
-                    continue
-
-                if is_cache_for_ds_v4(attn_module):
+                if is_kv_cache_spec_owner(attn_module):
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     if spec is not None:
