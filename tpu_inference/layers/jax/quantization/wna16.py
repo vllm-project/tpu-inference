@@ -194,6 +194,15 @@ class WNA16LinearMethod(QuantizeMethodBase):
             # The three tensors can be spread across checkpoint files.
             return False
 
+        # A row-parallel layer splits the input dim across the serving mesh.
+        # Read its size here: inside cpu_mesh_context the current mesh is the
+        # host's, and QuantLinearConfig carries no mesh of its own.
+        in_axis = self.linear_config.in_features_sharding[0]
+        in_shards = 1
+        if self.use_kernel and in_axis is not None:
+            in_shards = get_mesh_shape_product(
+                self.linear_config.mesh or jax.sharding.get_abstract_mesh(),
+                in_axis)
         with cpu_mesh_context():
             weight, scale = unpack_wna16_linear_weight(
                 layer.weight_packed[...], layer.weight_scale[...],
@@ -211,6 +220,13 @@ class WNA16LinearMethod(QuantizeMethodBase):
                                                                  output_sizes,
                                                                  n_shards,
                                                                  dim=1)
+            if in_shards > 1:
+                # Keep every shard on whole scale groups.
+                scale, _ = _split_groups_for_shards(scale,
+                                                    self.group_size,
+                                                    self.in_features,
+                                                    in_shards,
+                                                    axis=0)
             if self.use_kernel:
                 # [in // group_size, 1, out] is the scale layout that routes
                 # sharded_quantized_matmul to the gmm_v2 kernel.
@@ -321,6 +337,42 @@ _MOE_PROJECTIONS = {
     "up_proj": "up",
     "down_proj": "down",
 }
+
+
+def _split_groups_for_shards(scale: jax.Array,
+                             group_size: int,
+                             in_features: int,
+                             num_shards: int,
+                             axis: int = -1) -> tuple[jax.Array, int]:
+    """Refine per-group scales so each shard of the input dim holds whole groups.
+
+    A layer whose input dim is split across ``num_shards`` (GMM_TP's w2, a
+    row-parallel linear) needs every shard to hold whole scale groups. When
+    the per-shard slice is not a multiple of ``group_size`` (Gemma 4
+    26B-A4B: the experts' 704 rows over 4 shards is 176, 5.5 groups of 32; the
+    dense MLP's 2112 is 528, 16.5), one group straddles two shards and its
+    scale cannot be split. Repeating each scale over sub-groups of
+    ``gcd(group_size, in_features // num_shards)`` rows keeps every weight's
+    scale unchanged and makes the group count divide evenly.
+
+    Args:
+        scale: per-group scales, ``in_features // group_size`` along ``axis``.
+        group_size: The checkpoint's group size.
+        in_features: The logical input size the groups run along.
+        num_shards: How many ways that dim is sharded.
+        axis: The scale's group axis.
+
+    Returns:
+        ``(scale, group_size)``, unchanged when the split already falls on
+        group boundaries.
+    """
+    if in_features % num_shards:
+        raise ValueError(f"input size {in_features} does not split into "
+                         f"{num_shards} shards.")
+    fine = math.gcd(group_size, in_features // num_shards)
+    if fine == group_size:
+        return scale, group_size
+    return jnp.repeat(scale, group_size // fine, axis=axis), fine
 
 
 class WNA16FusedMoEMethod(QuantizeMethodBase):
@@ -465,6 +517,13 @@ class WNA16FusedMoEMethod(QuantizeMethodBase):
             w_gate, s_gate = unpacked("gate")
             w_up, s_up = unpacked("up")
             w2, s2 = unpacked("down")
+            if layer.moe_backend == MoEBackend.GMM_TP:
+                # GMM_TP shards w2's input dim; keep every shard on whole
+                # scale groups.
+                s2, _ = _split_groups_for_shards(
+                    s2, self.group_size, shapes["down"][1],
+                    get_mesh_shape_product(layer.mesh,
+                                           ShardingAxisName.MLP_TENSOR))
             weights = FusedMoEWeights(
                 w13_weight=jnp.concatenate([w_gate, w_up], axis=1),
                 w13_weight_scale=jnp.concatenate([s_gate, s_up], axis=1),

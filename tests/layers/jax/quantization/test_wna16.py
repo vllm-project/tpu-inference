@@ -214,6 +214,34 @@ class TestWNA16Load:
         assert y.shape == (8, out)
         assert _rel_err(y, expected) < 1e-2
 
+    def test_row_parallel_scales_split_per_shard(self, rngs, mesh):
+        """A row-parallel linear whose rows do not split into whole groups
+        (26B-A4B's dense down_proj: 2112 over 4 shards) gets per-shard scale
+        groups, and still computes x @ dequant(W).T."""
+        n_in, out = 192, 64  # 192 / 4 = 48 rows per shard: 1.5 groups
+        config = CompressedTensorsConfig(_w4a16_config())
+        rng = np.random.default_rng(8)
+        tensors, dequant = _random_w4a16(rng, out, n_in)
+        with jax.set_mesh(mesh):
+            layer = JaxLinear(n_in,
+                              out,
+                              rngs,
+                              use_bias=False,
+                              quant_config=config,
+                              prefix="mlp.down_proj",
+                              kernel_init=nnx.with_partitioning(
+                                  nnx.initializers.uniform(), ("model", None)))
+            assert layer.quant_method.linear_config.in_features_sharding == (
+                "model", )
+            _load(layer, tensors)
+            with patch.object(wna16, "get_mesh_shape_product", return_value=4):
+                assert layer.quant_method.process_weights_after_loading(layer)
+            # gcd(32, 48) = 16: 12 groups of 16, 3 per shard.
+            assert layer.weight_scale.shape == (12, 1, out)
+            x = jnp.asarray(rng.standard_normal((8, n_in)), dtype=jnp.bfloat16)
+            y = layer(x)
+        assert _rel_err(y, np.asarray(x, np.float32) @ dequant.T) < 1e-2
+
     def test_process_waits_for_all_tensors(self, rngs, mesh):
         config = CompressedTensorsConfig(_w4a16_config())
         tensors, _ = _random_w4a16(np.random.default_rng(1), 32, 64)
@@ -439,6 +467,55 @@ class TestWNA16MoELifecycle:
             _load_moe(method, layer,
                       [("0.gate_proj.weight_zero_point", torch.zeros(1))])
 
+    def test_split_groups_keeps_aligned_shards(self):
+        scale = jnp.ones((2, 5, 22), jnp.float32)
+        out, group = wna16._split_groups_for_shards(scale, 32, 704, 2)
+        assert group == 32 and out.shape == scale.shape
+
+    def test_split_groups_refines_straddling_groups(self):
+        # 704 rows over 4 shards is 176 per shard: 5.5 groups of 32.
+        scale = jnp.asarray(
+            np.random.default_rng(5).uniform(0.001, 0.02, (2, 3, 22)),
+            jnp.float32)
+        out, group = wna16._split_groups_for_shards(scale, 32, 704, 4)
+        assert group == 16 and out.shape == (2, 3, 44)
+        assert (704 // 4) % group == 0 and out.shape[-1] % 4 == 0
+        np.testing.assert_array_equal(np.repeat(np.asarray(out), 16, -1),
+                                      np.repeat(np.asarray(scale), 32, -1))
+
+    def test_split_groups_along_axis_0_for_row_parallel_linears(self):
+        # Gemma 4 26B-A4B's dense MLP down_proj: 2112 rows over 4 shards.
+        scale = jnp.asarray(
+            np.random.default_rng(7).uniform(0.001, 0.02, (66, 5)),
+            jnp.float32)
+        out, group = wna16._split_groups_for_shards(scale, 32, 2112, 4, axis=0)
+        assert group == 16 and out.shape == (132, 5) and 132 % 4 == 0
+        np.testing.assert_array_equal(np.repeat(np.asarray(out), 16, 0),
+                                      np.repeat(np.asarray(scale), 32, 0))
+
+    def test_split_groups_rejects_uneven_shards(self):
+        with pytest.raises(ValueError, match="does not split"):
+            wna16._split_groups_for_shards(jnp.ones((1, 1, 3)), 32, 96, 5)
+
+    def test_gmm_tp_down_scales_split_per_shard(self):
+        """With 4 shards, w2's scales come out per 16 rows and still
+        dequantize exactly to the checkpoint."""
+        E, D, F = 4, 128, 64  # 64 / 4 = 16 rows per shard, half a group
+        method, layer = _moe_method_and_layer(num_experts=E, hidden=D, inter=F)
+        tensors, ref = _w4a16_moe_expert_tensors(np.random.default_rng(6), E,
+                                                 D, F)
+        _load_moe(method, layer, tensors)
+        with patch.object(wna16, "get_mesh_shape_product", return_value=4):
+            assert method.process_weights_after_loading(layer) is True
+        w2 = np.asarray(layer.kernel_down_proj_EFD[...], np.float32)
+        s2 = np.asarray(layer.kernel_down_proj_EFD_weight_scale[...])
+        assert s2.shape == (E, F // 16, 1, D)
+        deq2 = w2 * np.repeat(s2[:, :, 0, :], 16, axis=1)
+        np.testing.assert_allclose(deq2,
+                                   ref["down"].transpose(0, 2, 1),
+                                   rtol=0,
+                                   atol=0)
+
     def test_processed_weights_dequantize_to_the_checkpoint(self):
         """Gate, up and down land where GMM expects them, with their scales."""
         E, D, F = 4, 128, 64
@@ -493,18 +570,7 @@ def _moe_reference(x, logits, ref, top_k):
     return out
 
 
-@pytest.mark.skipif(jax.default_backend() != "tpu",
-                    reason="gmm_v2 is a TPU kernel")
-@pytest.mark.parametrize(
-    "num_experts,hidden,inter,top_k",
-    [
-        # Intermediate not a multiple of 128, like the 26B's 704.
-        (8, 256, 96, 2),
-        # gemma-4-26B-A4B's expert shape, fewer experts.
-        (8, 2816, 704, 4),
-    ])
-def test_moe_forward_matches_dequant_on_tpu(mesh, num_experts, hidden, inter,
-                                            top_k):
+def _check_moe_forward(mesh, num_experts, hidden, inter, top_k):
     from tpu_inference.layers.jax.moe.moe import JaxRoutedExperts
     prefix = "model.language_model.layers.0.experts"
     rng = np.random.default_rng(3)
@@ -538,3 +604,31 @@ def test_moe_forward_matches_dequant_on_tpu(mesh, num_experts, hidden, inter,
     expected = _moe_reference(np.asarray(x_bf16, np.float32), logits, ref,
                               top_k)
     assert _rel_err(y, expected) < 1e-2
+
+
+@pytest.mark.skipif(jax.default_backend() != "tpu",
+                    reason="gmm_v2 is a TPU kernel")
+@pytest.mark.parametrize(
+    "num_experts,hidden,inter,top_k",
+    [
+        # Intermediate not a multiple of 128, like the 26B's 704.
+        (8, 256, 96, 2),
+        # gemma-4-26B-A4B's expert shape, fewer experts.
+        (8, 2816, 704, 4),
+    ])
+def test_moe_forward_matches_dequant_on_tpu(mesh, num_experts, hidden, inter,
+                                            top_k):
+    _check_moe_forward(mesh, num_experts, hidden, inter, top_k)
+
+
+@pytest.mark.skipif(jax.default_backend() != "tpu"
+                    or len(jax.local_devices()) < 4,
+                    reason="needs 4 TPU chips")
+def test_moe_forward_at_tensor_parallel_4_on_tpu():
+    """GMM_TP over 4 chips: the 26B's 704 intermediate is 5.5 groups of 32 per
+    shard, which only loads with the per-shard scale split."""
+    shape = [1] * len(MESH_AXIS_NAMES)
+    shape[MESH_AXIS_NAMES.index("model")] = 4
+    devices = np.array(jax.local_devices()[:4]).reshape(shape)
+    with Mesh(devices, axis_names=MESH_AXIS_NAMES) as mesh4:
+        _check_moe_forward(mesh4, 8, 2816, 704, 4)
