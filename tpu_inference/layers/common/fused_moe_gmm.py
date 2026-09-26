@@ -262,12 +262,19 @@ def moe_gmm_local(x: jax.Array,
         topk_argsort_revert_indices = revert_indices_2d.flatten()
 
     if local_group_size < group_sizes.size:
-        mask = valid_rows_mask(
+        row_mask = valid_rows_mask(
             gmm1_res.shape[0],
             group_sizes,
             group_offset,
             group_offset + local_group_size,
-        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+        )
+        if is_onehot:
+            # gmm_v2 runs with zero_initialize=False, leaving rows outside this
+            # EP shard's [token_start, token_end) range uninitialized in HBM.
+            # Zero them out before `combine @ gmm2_res` so IEEE-754 `0.0 * NaN`
+            # (or `0.0 * Inf`) from stale HBM bits cannot corrupt valid rows.
+            gmm2_res = jnp.where(row_mask[:, None], gmm2_res, 0)
+        mask = row_mask[topk_argsort_revert_indices].reshape(-1, topk, 1)
     else:
         mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
