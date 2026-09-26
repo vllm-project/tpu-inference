@@ -60,8 +60,11 @@ Get started with vLLM on TPUs by following the [quickstart guide](https://docs.v
 Visit our [documentation](https://docs.vllm.ai/projects/tpu/en/latest/) to learn more.
 
 **Compatible TPU Generations**
-- Recommended: v7x, v5e, v6e
+- Tested in CI: v7x, v6e (every CI and nightly benchmark queue targets these)
+- Supported but untested in CI: v5e (expected to work; please report bugs)
 - Experimental: v3, v4, v5p
+
+Some features also need hardware that only newer generations have. The quantization matrix below lists the hardware each scheme requires, and kernels that use SparseCore, like the DeepSeek-V4 core attention gather, do not run on v5e.
 
 <br>
 
