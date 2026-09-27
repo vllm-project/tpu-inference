@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Optional
+import os
+from typing import Any, Optional, Sequence
 
 import jax
 import numpy as np
@@ -389,6 +390,28 @@ def get_flax_model(
     # costs ~17 ms/step on Gemma-4-31B decode at TP=2.
     _state_treedef = jax.tree_util.tree_structure(state)
 
+    device_mean_pooler = None
+    if pooler is not None:
+        if getattr(model_class, "supports_device_mean_pooling", False):
+            if envs.JINA_BERT_DEVICE_POOLING:
+                from tpu_inference.models.common.pooling import (
+                    FUSED_POOLING_MAX_REQS, DeviceMeanPooler,
+                    mean_pool_from_seq_lens)
+                device_mean_pooler = DeviceMeanPooler.maybe_create(
+                    pooler,
+                    mesh,
+                    vllm_config.scheduler_config.max_num_seqs,
+                    fused_max_reqs=FUSED_POOLING_MAX_REQS
+                    if envs.JINA_BERT_FUSED_POOLING else 0,
+                )
+        elif os.getenv("JINA_BERT_DEVICE_POOLING"):
+            logger.warning(
+                "JINA_BERT_DEVICE_POOLING is set but %s does not support "
+                "device mean pooling; using vLLM's CPU pooler.",
+                model_class.__name__)
+    fuse_mean_pooling = (not is_draft_model and device_mean_pooler is not None
+                         and device_mean_pooler.fused_max_reqs > 0)
+
     @jax.jit(
         out_shardings=(
             kv_cache_sharding,
@@ -405,7 +428,16 @@ def get_flax_model(
     def run_model(state_leaves, *args):
         state = jax.tree_util.tree_unflatten(_state_treedef, state_leaves)
         model = nnx.merge(graphdef, state)
-        return model(*args)
+        kv_caches, hidden_states, aux_hidden_states, *rest = model(*args)
+        if fuse_mean_pooling and not aux_hidden_states:
+            # args: (kv_caches, input_ids, attn_metadata, ...)
+            aux_hidden_states = list(
+                mean_pool_from_seq_lens(
+                    hidden_states,
+                    args[2].seq_lens,
+                    device_mean_pooler.fused_max_reqs,
+                ))
+        return (kv_caches, hidden_states, aux_hidden_states, *rest)
 
     @jax.jit(
         out_shardings=(
@@ -529,33 +561,27 @@ def get_flax_model(
         from torchax.interop import torch_view
         from vllm.v1.pool.metadata import PoolingMetadata
 
-        from tpu_inference.models.common.pooling import (DeviceMeanPooler,
-                                                         pool_on_host)
+        from tpu_inference.models.common.pooling import pool_on_host
 
         pooling_fast_path = envs.TPU_POOLING_FAST_PATH
-        device_mean_pooler = None
-        if envs.JINA_BERT_DEVICE_POOLING:
-            if getattr(model_class, "supports_device_mean_pooling", False):
-                device_mean_pooler = DeviceMeanPooler.maybe_create(
-                    pooler, mesh, vllm_config.scheduler_config.max_num_seqs)
-            else:
-                logger.warning(
-                    "JINA_BERT_DEVICE_POOLING is set but %s does not support "
-                    "device mean pooling; using vLLM's CPU pooler.",
-                    model_class.__name__)
 
         def compute_pooler_output(
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
             num_scheduled_tokens: Optional[np.ndarray] = None,
+            aux_hidden_states: Optional[Sequence[jax.Array]] = None,
         ):
             if num_scheduled_tokens is None:
                 num_scheduled_tokens = seq_lens
 
             if device_mean_pooler is not None:
-                outputs = device_mean_pooler(hidden_states, pooling_metadata,
-                                             num_scheduled_tokens)
+                outputs = device_mean_pooler(
+                    hidden_states,
+                    pooling_metadata,
+                    num_scheduled_tokens,
+                    aux_hidden_states=aux_hidden_states,
+                )
                 if outputs is not None:
                     return outputs
 

@@ -34,7 +34,9 @@ from vllm.model_executor.layers.pooler.special import DispatchPooler
 from vllm.pooling_params import PoolingParams
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
-from tpu_inference.models.common.pooling import DeviceMeanPooler, pool_on_host
+from tpu_inference.models.common.pooling import (DeviceMeanPooler,
+                                                 mean_pool_from_seq_lens,
+                                                 pool_on_host)
 
 HIDDEN = 64
 
@@ -99,8 +101,13 @@ def test_host_fast_path_is_bitwise_identical(lens, num_tokens):
 
 
 @pytest.mark.parametrize("lens,num_tokens", CASES)
-@pytest.mark.parametrize("dimensions,normalize", [(None, None), (32, None),
-                                                  (None, False)])
+@pytest.mark.parametrize("dimensions,normalize", [
+    (None, None),
+    (None, True),
+    (32, None),
+    (32, True),
+    (None, False),
+])
 def test_device_mean_pooling_matches(mesh, lens, num_tokens, dimensions,
                                      normalize):
     pooler = _pooler()
@@ -110,6 +117,40 @@ def test_device_mean_pooling_matches(mesh, lens, num_tokens, dimensions,
     want = _original(pooler, hidden, _metadata(lens, dimensions, normalize),
                      nst, nst)
     got = device_pooler(hidden, _metadata(lens, dimensions, normalize), nst)
+    assert got is not None and len(got) == len(want)
+    for g, w in zip(got, want):
+        assert g.shape == w.shape and g.dtype == w.dtype
+        assert torch.isfinite(g).all()
+        np.testing.assert_allclose(g.numpy(), w.numpy(), rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("lens,num_tokens", CASES)
+@pytest.mark.parametrize("dimensions,normalize", [
+    (None, None),
+    (None, True),
+    (32, None),
+    (32, True),
+    (None, False),
+])
+def test_fused_mean_pooling_matches(mesh, lens, num_tokens, dimensions,
+                                    normalize):
+    pooler = _pooler()
+    device_pooler = DeviceMeanPooler.maybe_create(pooler,
+                                                  mesh,
+                                                  256,
+                                                  fused_max_reqs=8)
+    assert device_pooler is not None
+    hidden, nst = _step(lens, num_tokens)
+    padded_seq_lens = np.zeros(16, dtype=np.int32)
+    padded_seq_lens[:len(lens)] = lens
+    aux = list(mean_pool_from_seq_lens(hidden, jnp.asarray(padded_seq_lens),
+                                       8))
+    want = _original(pooler, hidden, _metadata(lens, dimensions, normalize),
+                     nst, nst)
+    got = device_pooler(hidden,
+                        _metadata(lens, dimensions, normalize),
+                        nst,
+                        aux_hidden_states=aux)
     assert got is not None and len(got) == len(want)
     for g, w in zip(got, want):
         assert g.shape == w.shape and g.dtype == w.dtype

@@ -114,17 +114,19 @@ has a switch; unset means the default:
 | `JINA_BERT_MEGAKERNEL_PRECISION` | `default` | `highest`: full-fp32 matmuls (default: bf16 MXU operands, fp32 accumulation, as the XLA path) |
 | `JINA_BERT_MEGAKERNEL_VERSION`   | `v2`      | `v1`: the first megakernel                               |
 | `TPU_POOLING_FAST_PATH`          | `1`       | `0`: vLLM's pooler under torchax's dispatch modes, and sampling metadata built every step (the previous behaviour) |
-| `JINA_BERT_DEVICE_POOLING`       | `0`       | `1`: mean pooling on the TPU, see below                  |
+| `JINA_BERT_DEVICE_POOLING`       | `1`       | `0`: copy `[num_tokens, 512]` to host and run mean pooling in CPU torch |
+| `JINA_BERT_FUSED_POOLING`        | `1`       | `0`: run device mean pooling as a separate XLA dispatch after the forward pass |
 
-`TPU_POOLING_FAST_PATH=1` runs the same vLLM pooler on the same host copy
-of the hidden states, but as plain torch: the output is bitwise identical,
-and in a CPU-only measurement of the pooler call (1x1024 to 1x2048 tokens)
-it saved ~1.4 ms per step of torchax dispatch. `JINA_BERT_DEVICE_POOLING=1`
-computes the per-request means on the TPU and copies only
-`[num_requests, 512]` to the host (instead of `[num_tokens, 512]`, 4 MiB at
-2048 tokens); vLLM's pooler still applies the embedding head
-(normalization). It changes where the mean is computed, so it is off by
-default; the means match the CPU pooler to ~1e-7.
+`JINA_BERT_DEVICE_POOLING=1` (now the default) computes per-request mean
+pooling and L2 normalization on the TPU and copies only `[num_requests, 512]`
+to the host (instead of `[num_tokens, 512]`, 4 MiB at 2048 tokens). With
+`JINA_BERT_FUSED_POOLING=1` (also default), the mean pooling and L2
+normalization are fused directly into the `run_model` XLA executable for steps
+with `<= 32` requests using `attention_metadata.seq_lens` already on device,
+eliminating the second XLA dispatch per step. When `JINA_BERT_DEVICE_POOLING=0`,
+`TPU_POOLING_FAST_PATH=1` runs vLLM's pooler on the host copy of the hidden
+states as plain torch (bitwise identical to `TPU_POOLING_FAST_PATH=0`, saving
+~1.4 ms per step of torchax dispatch).
 
 **Long context (up to 8192 tokens).** The megakernel rejects steps above 2048
 tokens. For longer inputs, serve with the per-layer path, whose
@@ -177,7 +179,7 @@ packed and 1x2048 tokens on the real checkpoint: megakernel (every kernel
 version at this commit) and the per-layer XLA path, each at matmul precision
 `default` and `highest`; and, for the default megakernel paths, forward +
 host copy + vLLM's embed pooler for each pooling path (`old` =
-`TPU_POOLING_FAST_PATH=0`, `fast`, `device`). 20 warm-up runs, then 200
+`TPU_POOLING_FAST_PATH=0`, `fast`, `device`, `fused`). 20 warm-up runs, then 200
 timed runs to `block_until_ready`; the JSON has median, p90, mean and min
 in ms. Useful flags: `--cases 1x2048`, `--precisions default`,
 `--paths megakernel`, `--versions v2`, `--no-pooling`, `--runs 500`, and

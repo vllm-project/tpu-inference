@@ -257,9 +257,11 @@ def test_jina_bert_megakernel_env_vars(monkeypatch: pytest.MonkeyPatch):
 def test_jina_bert_optimization_env_vars(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("JINA_BERT_MEGAKERNEL_VERSION", raising=False)
     monkeypatch.delenv("JINA_BERT_DEVICE_POOLING", raising=False)
+    monkeypatch.delenv("JINA_BERT_FUSED_POOLING", raising=False)
     monkeypatch.delenv("TPU_POOLING_FAST_PATH", raising=False)
     assert envs.JINA_BERT_MEGAKERNEL_VERSION == "v2"
-    assert envs.JINA_BERT_DEVICE_POOLING is False
+    assert envs.JINA_BERT_DEVICE_POOLING is True
+    assert envs.JINA_BERT_FUSED_POOLING is True
     assert envs.TPU_POOLING_FAST_PATH is True
 
     monkeypatch.setenv("JINA_BERT_MEGAKERNEL_VERSION", "v1")
@@ -268,8 +270,10 @@ def test_jina_bert_optimization_env_vars(monkeypatch: pytest.MonkeyPatch):
     with pytest.raises(ValueError, match="JINA_BERT_MEGAKERNEL_VERSION"):
         _ = envs.JINA_BERT_MEGAKERNEL_VERSION
 
-    monkeypatch.setenv("JINA_BERT_DEVICE_POOLING", "1")
-    assert envs.JINA_BERT_DEVICE_POOLING is True
+    monkeypatch.setenv("JINA_BERT_DEVICE_POOLING", "0")
+    assert envs.JINA_BERT_DEVICE_POOLING is False
+    monkeypatch.setenv("JINA_BERT_FUSED_POOLING", "0")
+    assert envs.JINA_BERT_FUSED_POOLING is False
     monkeypatch.setenv("TPU_POOLING_FAST_PATH", "0")
     assert envs.TPU_POOLING_FAST_PATH is False
 

@@ -498,13 +498,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # megakernel, unchanged. v2 falls back to v1 where it does not fit.
     "JINA_BERT_MEGAKERNEL_VERSION":
     env_with_choices("JINA_BERT_MEGAKERNEL_VERSION", "v2", ["v1", "v2"]),
-    # JinaBert mean pooling on the TPU: one small jitted reduction per step,
-    # then only [num_reqs, hidden] (instead of [num_tokens, hidden]) is copied
-    # to the host, where vLLM's pooler still applies the embedding head
-    # (normalization, dimensions). Default 0: pooling runs entirely in vLLM's
-    # CPU pooler.
+    # JinaBert mean pooling on the TPU: per-request mean (and L2
+    # normalization) on the device, then only [num_reqs, hidden] (instead of
+    # [num_tokens, hidden]) is copied to the host. Set to 0 to run pooling
+    # entirely in vLLM's CPU pooler.
     "JINA_BERT_DEVICE_POOLING":
-    env_bool("JINA_BERT_DEVICE_POOLING", default=False),
+    env_bool("JINA_BERT_DEVICE_POOLING", default=True),
+    # Fuse JinaBert on-device mean pooling and L2 normalization into the
+    # primary model forward JIT (`run_model`) so the step executes in a
+    # single TPU dispatch with no separate pooling kernel launch or bounds
+    # H2D transfer. Set to 0 to run device pooling as a separate JIT call.
+    "JINA_BERT_FUSED_POOLING":
+    env_bool("JINA_BERT_FUSED_POOLING", default=True),
     # Pooling runner host fast path: skip the sampling metadata (unused by
     # pooling models) and run vLLM's CPU pooler with plain torch instead of
     # under torchax's dispatch modes (same ops, bitwise-identical output).

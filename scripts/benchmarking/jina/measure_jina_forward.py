@@ -171,6 +171,29 @@ def _forward_fn(model):
     return lambda ids, md: forward(leaves, ids, md)
 
 
+def _forward_with_pooling_fn(model):
+    """Jitted forward + fused mean pooling, as model_loader.run_model does."""
+    from flax import nnx
+
+    from tpu_inference.models.common.pooling import (FUSED_POOLING_MAX_REQS,
+                                                     mean_pool_from_seq_lens)
+    graphdef, state = nnx.split(model)
+    leaves, treedef = jax.tree_util.tree_flatten(state)
+
+    @jax.jit
+    def forward_with_pooling(leaves, input_ids, metadata):
+        m = nnx.merge(graphdef, jax.tree_util.tree_unflatten(treedef, leaves))
+        _, hidden, _, _ = m(kv_caches=[],
+                            input_ids=input_ids,
+                            attention_metadata=metadata)
+        aux = list(
+            mean_pool_from_seq_lens(hidden, metadata.seq_lens,
+                                    FUSED_POOLING_MAX_REQS))
+        return hidden, aux
+
+    return lambda ids, md: forward_with_pooling(leaves, ids, md)
+
+
 def _make_step(seq_lens, num_tokens, max_num_seqs, vocab_size, seed=0):
     from tpu_inference.layers.common.attention_metadata import \
         AttentionMetadata
@@ -216,7 +239,7 @@ def _timed(fn, runs, warmup):
 
 
 def _poolers(mesh, max_num_seqs):
-    """{name: fn(hidden, seq_lens) -> pooler output}, as available here."""
+    """{name: fn(hidden, seq_lens[, aux]) -> pooler output}, as available here."""
     import torch
     from vllm.model_executor.layers.pooler.activations import PoolerNormalize
     from vllm.model_executor.layers.pooler.seqwise.heads import \
@@ -281,6 +304,20 @@ def _poolers(mesh, max_num_seqs):
 
     poolers["fast"] = fast
     poolers["device"] = device
+    try:
+        from tpu_inference.models.common.pooling import mean_pool_from_seq_lens  # noqa: F401
+    except ImportError:
+        return poolers
+
+    def fused(hidden, lens, aux):
+        out = device_pooler(hidden,
+                            metadata(lens),
+                            np.array(lens, np.int32),
+                            aux_hidden_states=aux)
+        assert out is not None
+        return out
+
+    poolers["fused"] = fused
     return poolers
 
 
@@ -324,6 +361,8 @@ def main():
                                                    "megakernel_version"):
                     encoder.megakernel_version = version
                 forward = _forward_fn(model)
+                forward_pooled = (None if "fused" not in poolers else
+                                  _forward_with_pooling_fn(model))
                 if path == "xla" and precision == "highest":
                     make_ctx = functools.partial(jax.default_matmul_precision,
                                                  "highest")
@@ -356,13 +395,23 @@ def main():
                     if path != "megakernel" or precision != "default":
                         continue
                     for name, pool in poolers.items():
+                        if name == "fused":
 
-                        def run_step(forward=forward,
-                                     ids=ids,
-                                     md=md,
-                                     pool=pool,
-                                     seq_lens=seq_lens):
-                            return pool(forward(ids, md), seq_lens)
+                            def run_step(forward_pooled=forward_pooled,
+                                         ids=ids,
+                                         md=md,
+                                         pool=pool,
+                                         seq_lens=seq_lens):
+                                hidden, aux = forward_pooled(ids, md)
+                                return pool(hidden, seq_lens, aux)
+                        else:
+
+                            def run_step(forward=forward,
+                                         ids=ids,
+                                         md=md,
+                                         pool=pool,
+                                         seq_lens=seq_lens):
+                                return pool(forward(ids, md), seq_lens)
 
                         stats = _timed(run_step, args.runs, args.warmup)
                         row = dict(label,
@@ -406,8 +455,11 @@ def main():
             "dispatch to block_until_ready (wall clock).",
             "step = forward + host copy + vLLM embed pooler (mean + "
             "normalize); pooling: old = under torchax modes "
-            "(TPU_POOLING_FAST_PATH=0), fast = plain torch (default), "
-            "device = mean on TPU (JINA_BERT_DEVICE_POOLING=1).",
+            "(TPU_POOLING_FAST_PATH=0), fast = plain torch, "
+            "device = separate device mean pooling "
+            "(JINA_BERT_DEVICE_POOLING=1, JINA_BERT_FUSED_POOLING=0), "
+            "fused = mean + normalize fused into forward XLA executable "
+            "(default).",
             "xla/highest = jax.default_matmul_precision('highest') for the "
             "XLA matmuls; the Pallas flash-attention kernel is unchanged.",
         ],

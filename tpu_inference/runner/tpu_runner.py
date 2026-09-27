@@ -1172,6 +1172,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.device_buffer = common_utils.DeviceBuffer(initial_capacity=1024)
         # Cache a zero scalar JAX array to avoid eager allocation overhead during continue_decode cycles.
         self.zero_array = jnp.array(0, dtype=jnp.int32)
+        # Cached device arrays for the encoder-only (no KV cache) pooling fast path.
+        self._encoder_dummy_positions: dict[int, jax.Array] = {}
+        self._encoder_dummy_query_start_loc: Optional[jax.Array] = None
+        self._encoder_dummy_request_distribution: Optional[jax.Array] = None
+        self._last_pooling_seq_lens_cpu: Optional[np.ndarray] = None
+        self._last_pooling_num_scheduled_tokens_cpu: Optional[
+            np.ndarray] = None
 
     def load_model(self):
         with set_current_vllm_config(self.vllm_config):
@@ -1667,27 +1674,41 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if self.is_pooling_model:
             num_reqs = self.input_batch.num_reqs
 
-            # Retrieve sequence lengths
-            seq_lens_view = self.device_buffer.get_view((self.max_num_reqs, ),
-                                                        key="seq_lens")
-            seq_lens = seq_lens_view[:num_reqs]
+            if self._last_pooling_seq_lens_cpu is not None:
+                seq_lens = self._last_pooling_seq_lens_cpu
+            else:
+                seq_lens_view = self.device_buffer.get_view(
+                    (self.max_num_reqs, ), key="seq_lens")
+                seq_lens = seq_lens_view[:num_reqs]
 
             pooling_metadata = self.input_batch.get_pooling_metadata()
 
-            # Extract scheduled token counts for the current chunk
-            num_scheduled_tokens = np.array([
-                scheduler_output.num_scheduled_tokens[req_id]
-                for req_id in self.input_batch.req_ids[:num_reqs]
-            ],
-                                            dtype=np.int32)
+            if self._last_pooling_num_scheduled_tokens_cpu is not None:
+                num_scheduled_tokens = (
+                    self._last_pooling_num_scheduled_tokens_cpu)
+            else:
+                num_scheduled_tokens = np.array([
+                    scheduler_output.num_scheduled_tokens[req_id]
+                    for req_id in self.input_batch.req_ids[:num_reqs]
+                ],
+                                                dtype=np.int32)
 
             # Call the pooler with the decoupled interface
-            pooler_output = self.pooler_fn(
-                hidden_states,
-                pooling_metadata,
-                seq_lens,
-                num_scheduled_tokens,
-            )
+            if getattr(self.pooler_fn, "device_mean_pooler", None) is not None:
+                pooler_output = self.pooler_fn(
+                    hidden_states,
+                    pooling_metadata,
+                    seq_lens,
+                    num_scheduled_tokens,
+                    aux_hidden_states=aux_hidden_states,
+                )
+            else:
+                pooler_output = self.pooler_fn(
+                    hidden_states,
+                    pooling_metadata,
+                    seq_lens,
+                    num_scheduled_tokens,
+                )
 
             return ModelRunnerOutput(
                 req_ids=self.input_batch.req_ids,
@@ -2642,6 +2663,101 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 seq_lens_subtract_indices, positions_subtract_indices)
         return seq_lens, positions
 
+    def _prepare_encoder_pooling_inputs(
+        self,
+        scheduler_output: "VllmSchedulerOutput",
+        data_parallel_attn_sharding: NamedSharding,
+        metadata_attn_sharding: NamedSharding,
+    ):
+        num_reqs = self.input_batch.num_reqs
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        padded_total_num_scheduled_tokens = runner_utils.get_padded_token_len(
+            self.num_tokens_paddings, total_num_scheduled_tokens)
+
+        self.device_buffer.reset()
+        input_ids_cpu = self.device_buffer.get_view(
+            (padded_total_num_scheduled_tokens, ), key="input_ids")
+        seq_lens_cpu = self.device_buffer.get_view((self.max_num_reqs, ),
+                                                   key="seq_lens")
+
+        token_ids_cpu = self.input_batch.token_ids_cpu
+        num_computed_cpu = self.input_batch.num_computed_tokens_cpu
+        req_ids = self.input_batch.req_ids
+        sched_tokens_map = scheduler_output.num_scheduled_tokens
+
+        num_scheduled_tokens_cpu = np.empty(num_reqs, dtype=np.int32)
+        offset = 0
+        for req_idx in range(num_reqs):
+            n_tok = sched_tokens_map[req_ids[req_idx]]
+            num_scheduled_tokens_cpu[req_idx] = n_tok
+            start_pos = int(num_computed_cpu[req_idx])
+            end_offset = offset + n_tok
+            input_ids_cpu[offset:end_offset] = token_ids_cpu[
+                req_idx, start_pos:start_pos + n_tok]
+            seq_lens_cpu[req_idx] = start_pos + n_tok
+            offset = end_offset
+
+        if offset < padded_total_num_scheduled_tokens:
+            input_ids_cpu[offset:padded_total_num_scheduled_tokens] = 0
+        if num_reqs < self.max_num_reqs:
+            seq_lens_cpu[num_reqs:] = 0
+
+        self._last_pooling_seq_lens_cpu = seq_lens_cpu[:num_reqs]
+        self._last_pooling_num_scheduled_tokens_cpu = num_scheduled_tokens_cpu
+
+        input_ids, seq_lens = device_array(
+            self.mesh,
+            (input_ids_cpu, seq_lens_cpu),
+            sharding=(data_parallel_attn_sharding, metadata_attn_sharding),
+        )
+
+        positions = self._encoder_dummy_positions.get(
+            padded_total_num_scheduled_tokens)
+        if positions is None:
+            positions = device_array(
+                self.mesh,
+                np.zeros((padded_total_num_scheduled_tokens, ),
+                         dtype=np.int32),
+                sharding=data_parallel_attn_sharding,
+            )
+            self._encoder_dummy_positions[
+                padded_total_num_scheduled_tokens] = positions
+
+        if self._encoder_dummy_query_start_loc is None:
+            self._encoder_dummy_query_start_loc = device_array(
+                self.mesh,
+                np.zeros((self.max_num_reqs + 1, ), dtype=np.int32),
+                sharding=metadata_attn_sharding,
+            )
+        if self._encoder_dummy_request_distribution is None:
+            self._encoder_dummy_request_distribution = device_array(
+                self.mesh,
+                np.zeros((3, ), dtype=np.int32),
+                sharding=metadata_attn_sharding,
+            )
+
+        attn_metadata = AttentionMetadata(
+            input_positions=positions,
+            block_tables=None,
+            seq_lens=seq_lens,
+            query_start_loc=self._encoder_dummy_query_start_loc,
+            request_distribution=self._encoder_dummy_request_distribution,
+            query_start_loc_cpu=None,
+            seq_lens_cpu=seq_lens_cpu,
+        )
+        sampling_metadata = TPUSupportedSamplingMetadata()
+        lora_metadata = self.lora_utils.extract_lora_metadata()
+        return (
+            input_ids,
+            positions,
+            attn_metadata,
+            sampling_metadata,
+            None,
+            lora_metadata,
+            {},
+            None,
+        )
+
     def _prepare_inputs(self, scheduler_output: "VllmSchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2653,6 +2769,24 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             self.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA))
         metadata_attn_sharding = NamedSharding(
             self.mesh, PartitionSpec(ShardingAxisName.BATCH))
+
+        if (self.skip_sampling_metadata
+                and getattr(self.model, "supports_device_mean_pooling", False)
+                and len(self.kv_cache_config.kv_cache_groups) == 0
+                and dp_size == 1 and not self.uses_mrope
+                and not self.speculative_config
+                and not self.kv_cache_config.has_mamba_layers
+                and self.vllm_config.sharding_config.prefill_cp_size <= 1
+                and not self.phase_based_profiler
+                and not self.aggregated_stats_logger):
+            return self._prepare_encoder_pooling_inputs(
+                scheduler_output,
+                data_parallel_attn_sharding,
+                metadata_attn_sharding,
+            )
+
+        self._last_pooling_seq_lens_cpu = None
+        self._last_pooling_num_scheduled_tokens_cpu = None
 
         (req_ids_dp, req_indices_dp, num_scheduled_tokens_per_dp_rank,
          scheduled_tokens_per_dp_rank, num_req_per_dp_rank,

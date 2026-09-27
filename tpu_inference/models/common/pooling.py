@@ -48,6 +48,10 @@ logger = init_logger(__name__)
 MIN_REQ_BUCKET = 8
 # Steps with more requests than this fall back to the CPU pooler.
 MAX_DEVICE_POOLING_REQS = 256
+# Maximum requests per step computed by the in-model fused pooling output
+# (`JINA_BERT_FUSED_POOLING=1`); steps with more requests fall back to the
+# standalone jitted reduction in `DeviceMeanPooler`.
+FUSED_POOLING_MAX_REQS = 32
 
 
 def pool_on_host(pooler: Any, hidden_states: jax.Array, pooling_metadata: Any,
@@ -74,8 +78,10 @@ def pool_on_host(pooler: Any, hidden_states: jax.Array, pooling_metadata: Any,
     return pooler(torch_states, pooling_metadata)
 
 
-def _segment_means(hidden: jax.Array, bounds: jax.Array) -> jax.Array:
-    """Per-request mean of `hidden` rows.
+def _segment_means_and_norm(
+    hidden: jax.Array, bounds: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """Per-request mean and L2-normalized mean of `hidden` rows.
 
     Args:
       hidden: [T, D] hidden states of the step.
@@ -83,7 +89,7 @@ def _segment_means(hidden: jax.Array, bounds: jax.Array) -> jax.Array:
         unused slots have an empty range.
 
     Returns:
-      float32 [R, D]; zeros for unused slots.
+      (means, normed_means), each float32 [R, D]; zeros for unused slots.
     """
     num_tokens = hidden.shape[0]
     starts, ends = bounds[0][:, None], bounds[1][:, None]  # [R, 1]
@@ -101,7 +107,35 @@ def _segment_means(hidden: jax.Array, bounds: jax.Array) -> jax.Array:
                    precision=lax.Precision.HIGHEST,
                    preferred_element_type=jnp.float32)
     counts = (bounds[1] - bounds[0]).astype(jnp.float32)[:, None]
-    return sums / jnp.maximum(counts, 1.0)
+    means = sums / jnp.maximum(counts, 1.0)
+    norms = jnp.linalg.norm(means, axis=-1, keepdims=True)
+    normed = means / jnp.maximum(norms, 1e-12)
+    return means, normed
+
+
+def _segment_means(hidden: jax.Array, bounds: jax.Array) -> jax.Array:
+    """Per-request mean of `hidden` rows."""
+    return _segment_means_and_norm(hidden, bounds)[0]
+
+
+def mean_pool_from_seq_lens(
+    hidden: jax.Array,
+    seq_lens: jax.Array,
+    max_reqs: int = FUSED_POOLING_MAX_REQS,
+) -> tuple[jax.Array, jax.Array]:
+    """Per-request mean and L2-normalized mean of `hidden` from `seq_lens`.
+
+    Used when mean pooling is fused into the primary model JIT (`run_model`):
+    `seq_lens` is already on the device inside `AttentionMetadata`, so the
+    reduction and L2 normalization run in the same XLA launch as the encoder
+    without a second dispatch or H2D bounds transfer.
+    """
+    r = min(max_reqs, seq_lens.shape[0])
+    lens = jnp.maximum(seq_lens[:r].astype(jnp.int32), 0)
+    ends = jnp.cumsum(lens, dtype=jnp.int32)
+    starts = ends - lens
+    bounds = jnp.stack([starts, ends], axis=0)
+    return _segment_means_and_norm(hidden, bounds)
 
 
 def _req_bucket(num_reqs: int) -> int:
@@ -114,15 +148,38 @@ class DeviceMeanPooler:
     Use `maybe_create`, which returns None where this does not apply.
     """
 
-    def __init__(self, pooler: Any, max_num_reqs: int):
+    def __init__(self,
+                 pooler: Any,
+                 max_num_reqs: int,
+                 fused_max_reqs: int = 0):
+        from vllm.model_executor.layers.pooler.activations import \
+            PoolerNormalize
+        from vllm.model_executor.layers.pooler.seqwise.heads import \
+            EmbeddingPoolerHead
+
         self.pooler = pooler
         self.max_reqs = min(MAX_DEVICE_POOLING_REQS,
                             _req_bucket(max(max_num_reqs, 1)))
+        self.fused_max_reqs = min(max(fused_max_reqs, 0), self.max_reqs)
+        self._means_and_norm = jax.jit(_segment_means_and_norm)
         self._means = jax.jit(_segment_means)
 
+        embed = getattr(pooler, "poolers_by_task", {}).get("embed")
+        head = getattr(embed, "head", None)
+        self._can_bypass_cpu_head = (
+            isinstance(head, EmbeddingPoolerHead) and head.projector is None
+            and head.head_dtype in (None, torch.float32, "float32")
+            and (head.activation is None
+                 or isinstance(head.activation, PoolerNormalize)))
+        self._has_normalize_activation = (head is not None and isinstance(
+            head.activation, PoolerNormalize))
+
     @classmethod
-    def maybe_create(cls, pooler: Any, mesh: Mesh,
-                     max_num_reqs: int) -> Optional["DeviceMeanPooler"]:
+    def maybe_create(cls,
+                     pooler: Any,
+                     mesh: Mesh,
+                     max_num_reqs: int,
+                     fused_max_reqs: int = 0) -> Optional["DeviceMeanPooler"]:
         from vllm.model_executor.layers.pooler.seqwise.methods import MeanPool
         from vllm.model_executor.layers.pooler.seqwise.poolers import \
             SequencePooler
@@ -141,12 +198,19 @@ class DeviceMeanPooler:
             return None
         logger.info(
             "Mean pooling runs on the device (up to %d requests per "
-            "step); vLLM's pooler applies the embedding head.",
-            min(MAX_DEVICE_POOLING_REQS, _req_bucket(max_num_reqs)))
-        return cls(pooler, max_num_reqs)
+            "step, fused_max_reqs=%d).",
+            min(MAX_DEVICE_POOLING_REQS, _req_bucket(max_num_reqs)),
+            min(max(fused_max_reqs, 0),
+                min(MAX_DEVICE_POOLING_REQS, _req_bucket(max_num_reqs))))
+        return cls(pooler, max_num_reqs, fused_max_reqs=fused_max_reqs)
 
-    def __call__(self, hidden_states: jax.Array, pooling_metadata: Any,
-                 num_scheduled_tokens: np.ndarray) -> Optional[list]:
+    def __call__(
+        self,
+        hidden_states: jax.Array,
+        pooling_metadata: Any,
+        num_scheduled_tokens: np.ndarray,
+        aux_hidden_states: Optional[Sequence[jax.Array]] = None,
+    ) -> Optional[list]:
         """Pooler output for this step, or None to use the CPU pooler."""
         num_reqs = len(num_scheduled_tokens)
         if not 0 < num_reqs <= self.max_reqs:
@@ -161,10 +225,31 @@ class DeviceMeanPooler:
         ends = np.cumsum(lens)
         if ends[-1] > hidden_states.shape[0]:
             return None
-        bounds = np.zeros((2, _req_bucket(num_reqs)), np.int32)
-        bounds[0, :num_reqs] = ends - lens
-        bounds[1, :num_reqs] = ends
-        means = np.asarray(self._means(hidden_states, bounds))[:num_reqs]
+
+        if (aux_hidden_states is not None and len(aux_hidden_states) == 2
+                and num_reqs <= aux_hidden_states[0].shape[0]):
+            means_dev, normed_dev = aux_hidden_states
+        else:
+            bounds = np.zeros((2, _req_bucket(num_reqs)), np.int32)
+            bounds[0, :num_reqs] = ends - lens
+            bounds[1, :num_reqs] = ends
+            means_dev, normed_dev = self._means_and_norm(hidden_states, bounds)
+
+        pooling_params = pooling_metadata.pooling_params
+        if (self._can_bypass_cpu_head
+                and all(p.dimensions is None for p in pooling_params)):
+            flags = [
+                self._has_normalize_activation and bool(p.use_activation)
+                for p in pooling_params
+            ]
+            if all(flags):
+                arr = np.array(np.asarray(normed_dev)[:num_reqs], copy=True)
+                return list(torch.from_numpy(arr))
+            if not any(flags):
+                arr = np.array(np.asarray(means_dev)[:num_reqs], copy=True)
+                return list(torch.from_numpy(arr))
+
+        means = np.asarray(means_dev)[:num_reqs]
         pooled = torch.from_numpy(np.array(means, copy=True))
 
         # vLLM's pooler on the means as length-1 prompts: the mean of one
@@ -187,8 +272,10 @@ class DeviceMeanPooler:
             hidden = jax.device_put(
                 jnp.zeros((num_tokens, hidden_size), dtype), sharding)
             for reqs in self._req_buckets(num_tokens):
+                if reqs <= self.fused_max_reqs:
+                    continue
                 bounds = np.zeros((2, reqs), np.int32)
-                jax.block_until_ready(self._means(hidden, bounds))
+                jax.block_until_ready(self._means_and_norm(hidden, bounds))
 
     def _req_buckets(self, num_tokens: int):
         # A step of `num_tokens` (padded) tokens holds at most that many

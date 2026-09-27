@@ -49,6 +49,9 @@ class PersistentBatchManager:
         swap_cnt = 0
         if num_reqs <= 0:
             return swap_cnt
+        if getattr(self.model_config, "runner_type", None) == "pooling":
+            self.input_batch.request_distribution = [0, 0, num_reqs]
+            return swap_cnt
         # If total_num_scheduled_tokens == num_reqs, every request
         # is scheduled for exactly 1 token (all decode). No reordering needed.
         if scheduler_output.total_num_scheduled_tokens == num_reqs:
