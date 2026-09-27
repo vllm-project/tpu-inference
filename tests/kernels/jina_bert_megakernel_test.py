@@ -32,6 +32,7 @@ from jax._src import test_util as jtu
 from jax.experimental.pallas import tpu as pltpu
 
 from tpu_inference.kernels.jina_bert_megakernel import kernel as mk
+from tpu_inference.kernels.jina_bert_megakernel import kernel_v2 as mk_v2
 from tpu_inference.kernels.jina_bert_megakernel import reference as ref
 
 jax.config.parse_flags_with_absl()
@@ -145,8 +146,27 @@ class JinaBertMegakernelTest(jtu.JaxTestCase):
             call(x, seq_lens, packed, alibi_slopes=SLOPES, precision="bf16")
         with self.assertRaises(ValueError):
             call(x, seq_lens, packed, alibi_slopes=SLOPES, tile=200)
+        with self.assertRaises(ValueError):
+            call(x, seq_lens, packed, alibi_slopes=SLOPES, version="v3")
         with self.assertRaises(NotImplementedError):  # head_dim != 64.
             call(x, seq_lens, packed, alibi_slopes=SLOPES[:4])
+
+    def test_kernel_versions(self):
+        self.assertEqual(mk.DEFAULT_KERNEL_VERSION, "v2")
+        self.assertEqual(mk.resolve_kernel_version(None, 256), "v2")
+        self.assertEqual(mk.resolve_kernel_version("v1", 256), "v1")
+        self.assertEqual(mk.resolve_kernel_version("v2", 128), "v2")
+        # Tile overrides v2 does not implement run v1.
+        self.assertEqual(mk.resolve_kernel_version("v2", 384), "v1")
+        with self.assertRaisesRegex(ValueError, "version"):
+            mk.resolve_kernel_version("v3", 256)
+
+    def test_v2_gelu_matches_v1(self):
+        x = jnp.linspace(-12.0, 12.0, 200001, dtype=jnp.float32)
+        got = np.asarray(mk_v2.gelu_erf(x))
+        np.testing.assert_allclose(got, np.asarray(mk.gelu_erf(x)), atol=2e-6)
+        exact = np.asarray(jax.nn.gelu(x, approximate=False))
+        np.testing.assert_allclose(got, exact, atol=2e-6)
 
     def test_unsupported_geometry_reason(self):
         self.assertIsNone(
@@ -169,20 +189,25 @@ class JinaBertMegakernelTest(jtu.JaxTestCase):
     @mock.patch.object(mk, "_vmem_capacity_bytes", lambda: 128 * 1024 * 1024)
     def test_unsupported_vmem_reason(self):
         # On v6e (128 MiB of VMEM), jina-embeddings-v2-small-en fits at the
-        # step limit in both modes.
-        for precision in mk.PRECISIONS:
-            self.assertIsNone(
-                mk.unsupported_vmem_reason(mk.MAX_TOKENS, precision=precision))
+        # step limit in both modes, with both kernel versions.
+        for version in mk.KERNEL_VERSIONS:
+            for precision in mk.PRECISIONS:
+                self.assertIsNone(
+                    mk.unsupported_vmem_reason(mk.MAX_TOKENS,
+                                               precision=precision,
+                                               version=version))
         # A 12-layer 768-wide model (jina-embeddings-v2-base geometry) with
         # fp32 weights does not.
         base = dict(hidden_size=768,
                     num_heads=12,
                     intermediate_size=3072,
                     num_layers=12)
-        self.assertIsNotNone(
-            mk.unsupported_vmem_reason(mk.MAX_TOKENS,
-                                       precision="highest",
-                                       **base))
+        for version in mk.KERNEL_VERSIONS:
+            self.assertIsNotNone(
+                mk.unsupported_vmem_reason(mk.MAX_TOKENS,
+                                           precision="highest",
+                                           version=version,
+                                           **base))
 
     # ------------------------------------------------------------------
     # Metadata, packing, VMEM.
@@ -251,21 +276,24 @@ class JinaBertMegakernelTest(jtu.JaxTestCase):
         np.testing.assert_array_equal(packed.vecs[1, mk.ROW_LN2_G], p["ln2_g"])
 
     def test_vmem_budget(self):
-        for precision in mk.PRECISIONS:
-            sizes = [
-                mk.estimate_vmem_bytes(t, precision=precision)
-                for t in (16, 512, 2048)
-            ]
-            self.assertEqual(sizes, sorted(sizes))
-            # Must leave headroom below v6e's 128 MiB of VMEM.
-            self.assertLess(sizes[-1], 96 * 1024 * 1024)
+        for version in mk.KERNEL_VERSIONS:
+            for precision in mk.PRECISIONS:
+                sizes = [
+                    mk.estimate_vmem_bytes(t,
+                                           precision=precision,
+                                           version=version)
+                    for t in (16, 512, 2048)
+                ]
+                self.assertEqual(sizes, sorted(sizes))
+                # Must leave headroom below v6e's 128 MiB of VMEM.
+                self.assertLess(sizes[-1], 96 * 1024 * 1024)
 
     # ------------------------------------------------------------------
     # Numerics vs the dense reference.
 
     @parameterized.named_parameters([
-        (f"{name}_{precision}", seq_lens, num_tokens, tile, interpretable,
-         precision)
+        (f"{name}_{precision}_{version}", seq_lens, num_tokens, tile,
+         interpretable, precision, version)
         for name, seq_lens, num_tokens, tile, interpretable in (
             # (name, seq_lens, num_tokens, tile override, runs in the
             # interpreter off-TPU)
@@ -277,14 +305,18 @@ class JinaBertMegakernelTest(jtu.JaxTestCase):
             ("lens_exceed_tokens", [40, 900, 7], 128, None, True),
             ("len129", [129], 256, None, True),
             ("eight_seqs", [7, 33, 128, 1, 250, 64, 3, 19], 512, None, True),
+            # Only same-request tile pairs (v2's mask-free path), several
+            # ALiBi tile offsets.
+            ("len384_tile128", [384], 384, 128, True),
+            ("len512", [512], 512, None, True),
             ("len1009", [1009], 1024, None, False),
             ("len2016", [2016], 2048, None, False),
             ("len1009_len1000", [1009, 1000], 2048, None, False),
             ("len2048", [2048], 2048, None, False),
-        ) for precision in mk.PRECISIONS
+        ) for precision in mk.PRECISIONS for version in mk.KERNEL_VERSIONS
     ])
     def test_matches_reference(self, seq_lens, num_tokens, tile, interpretable,
-                               precision):
+                               precision, version):
         interpret = not _on_tpu()
         if interpret and not interpretable:
             self.skipTest("Large case: TPU only (too slow for the "
@@ -299,7 +331,8 @@ class JinaBertMegakernelTest(jtu.JaxTestCase):
                                                   alibi_slopes=SLOPES,
                                                   precision=precision,
                                                   tile=tile,
-                                                  interpret=interpret)
+                                                  interpret=interpret,
+                                                  version=version)
             got = np.asarray(got)
         finally:
             if interpret:
@@ -333,7 +366,8 @@ class JinaBertMegakernelTest(jtu.JaxTestCase):
             self.assertGreater(cos, 0.999)
             self.assertGreater(pooled, 0.9995)
 
-    def test_no_real_tokens(self):
+    @parameterized.parameters(*mk.KERNEL_VERSIONS)
+    def test_no_real_tokens(self, version):
         # E.g. precompilation/warmup steps: every request slot is empty.
         x = jnp.ones((32, D), jnp.float32)
         interpret = not _on_tpu()
@@ -342,7 +376,8 @@ class JinaBertMegakernelTest(jtu.JaxTestCase):
                                                   jnp.zeros((4, ), jnp.int32),
                                                   self._packed("default"),
                                                   alibi_slopes=SLOPES,
-                                                  interpret=interpret)
+                                                  interpret=interpret,
+                                                  version=version)
             got = np.asarray(got)
         finally:
             if interpret:

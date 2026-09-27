@@ -940,6 +940,22 @@ class CompilationManager:
         # and apply JIT on the entire computation.
         # See PoolingCursor and AllPool, MeanPool ... in vLLM repo for details.
 
+        # Optional on-device mean pooling (e.g. JINA_BERT_DEVICE_POOLING=1):
+        # one small jitted reduction per (token bucket, request bucket).
+        device_mean_pooler = getattr(self.runner.pooler_fn,
+                                     "device_mean_pooler", None)
+        if device_mean_pooler is not None:
+            start = time.perf_counter()
+            device_mean_pooler.precompile(
+                self.runner.num_tokens_paddings,
+                self.runner.model_config.get_hidden_size(),
+                to_jax_dtype(self.runner.model_config.dtype),
+                NamedSharding(self.runner.mesh,
+                              PartitionSpec(ShardingAxisName.ATTN_DATA, None)),
+            )
+            logger.info("Compiled device mean pooling in %.2f [secs].",
+                        time.perf_counter() - start)
+
     def _precompile_sampling(self) -> None:
         logger.info("Compiling sampling with different input shapes.")
         hsize = self.runner.vocab_size

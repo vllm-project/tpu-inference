@@ -72,6 +72,13 @@ MAX_TOKENS = 2048
 
 PRECISIONS = ("default", "highest")
 
+# Kernel implementations (`JINA_BERT_MEGAKERNEL_VERSION`): "v1" is the kernel
+# in this file; "v2" (`kernel_v2.py`) keeps the same contract, weights and
+# float32 numerics with a cheaper attention inner loop. `version=None`
+# selects DEFAULT_KERNEL_VERSION.
+KERNEL_VERSIONS = ("v1", "v2")
+DEFAULT_KERNEL_VERSION = "v2"
+
 NUM_LANES = 128
 HEAD_DIM = 64  # Heads are processed in 128-lane pairs; only 64 supported.
 MLP_CHUNK = 512  # Intermediate columns processed per MLP step.
@@ -187,6 +194,23 @@ def unsupported_geometry_reason(*, hidden_size: int, num_heads: int,
 def default_tile_size(num_tokens: int) -> int:
     """Token-tile size (rows per MXU step and attention block)."""
     return NUM_LANES if num_tokens <= NUM_LANES else 2 * NUM_LANES
+
+
+def resolve_kernel_version(version: str | None, tile: int) -> str:
+    """Kernel version that runs for `version` (None: the default) at `tile`.
+
+    v2 supports the default tile sizes (128 and 256 rows); other tile
+    overrides run v1.
+    """
+    version = DEFAULT_KERNEL_VERSION if version is None else version
+    if version not in KERNEL_VERSIONS:
+        raise ValueError(f"Unknown megakernel version {version!r}; expected "
+                         f"one of {KERNEL_VERSIONS}.")
+    if version == "v2":
+        from tpu_inference.kernels.jina_bert_megakernel import kernel_v2
+        if not kernel_v2.supports_tile(tile):
+            return "v1"
+    return version
 
 
 def build_tile_metadata(seq_lens: jax.Array, num_tokens: int,
@@ -501,11 +525,22 @@ def estimate_vmem_bytes(num_tokens: int,
                         intermediate_size: int = 2048,
                         num_layers: int = 4,
                         precision: str = "default",
-                        tile: int | None = None) -> int:
+                        tile: int | None = None,
+                        version: str | None = None) -> int:
     """VMEM held by the kernel's buffers (excludes Mosaic-internal scratch)."""
     tile = tile or default_tile_size(num_tokens)
     padded = -(-num_tokens // tile) * tile
     n_tiles = padded // tile
+    if resolve_kernel_version(version, tile) == "v2":
+        from tpu_inference.kernels.jina_bert_megakernel import kernel_v2
+        return kernel_v2.estimate_vmem_bytes(
+            n_tiles,
+            tile,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            intermediate_size=intermediate_size,
+            num_layers=num_layers,
+            precision=precision)
     cdt = wdt = mxu_dtype_for(precision)
     scratch = _scratch_shapes(n_tiles, tile, hidden_size, num_heads,
                               intermediate_size, cdt, wdt)
@@ -535,7 +570,8 @@ def unsupported_vmem_reason(num_tokens: int,
                             intermediate_size: int = 2048,
                             num_layers: int = 4,
                             precision: str = "default",
-                            tile: int | None = None) -> str | None:
+                            tile: int | None = None,
+                            version: str | None = None) -> str | None:
     """Why the kernel's buffers don't fit this chip's VMEM (None if they do)."""
     needed = estimate_vmem_bytes(num_tokens,
                                  hidden_size=hidden_size,
@@ -543,7 +579,8 @@ def unsupported_vmem_reason(num_tokens: int,
                                  intermediate_size=intermediate_size,
                                  num_layers=num_layers,
                                  precision=precision,
-                                 tile=tile)
+                                 tile=tile,
+                                 version=version)
     limit = vmem_limit_bytes(needed)
     if needed + 4 * _MIB > limit:
         return (f"it needs ~{needed / _MIB:.1f} MiB of VMEM for {num_tokens} "
@@ -552,11 +589,19 @@ def unsupported_vmem_reason(num_tokens: int,
     return None
 
 
-def _check_inputs(x, seq_lens, weights: JinaBertPackedWeights, alibi_slopes,
-                  precision, tile):
+def _check_inputs(x,
+                  seq_lens,
+                  weights: JinaBertPackedWeights,
+                  alibi_slopes,
+                  precision,
+                  tile,
+                  version=None):
     if precision not in PRECISIONS:
         raise ValueError(f"Unknown megakernel precision {precision!r}; "
                          f"expected one of {PRECISIONS}.")
+    if version is not None and version not in KERNEL_VERSIONS:
+        raise ValueError(f"Unknown megakernel version {version!r}; expected "
+                         f"one of {KERNEL_VERSIONS}.")
     if x.ndim != 2:
         raise ValueError(f"x must be [num_tokens, hidden], got {x.shape}.")
     num_tokens, d = x.shape
@@ -694,7 +739,8 @@ def jina_bert_encoder_megakernel(x: jax.Array,
                                  precision: str = "default",
                                  mesh: Mesh | None = None,
                                  tile: int | None = None,
-                                 interpret: Any = False) -> jax.Array:
+                                 interpret: Any = False,
+                                 version: str | None = None) -> jax.Array:
     """Runs all JinaBert encoder layers in one Pallas TPU kernel.
 
     Drop-in for `JinaBertEncoder.__call__`'s XLA path.
@@ -714,6 +760,8 @@ def jina_bert_encoder_megakernel(x: jax.Array,
       tile: token-tile size override (multiple of 128); None = heuristic.
       interpret: forwarded to `pallas_call` (e.g. `pltpu.InterpretParams()`
         to run on CPU).
+      version: kernel implementation, one of `KERNEL_VERSIONS`; None =
+        `DEFAULT_KERNEL_VERSION` (see `resolve_kernel_version`).
 
     Returns:
       float32 [T, D] final hidden states. Rows at padding positions are
@@ -723,15 +771,25 @@ def jina_bert_encoder_megakernel(x: jax.Array,
       ValueError: if T > `MAX_TOKENS` (at trace time), or on malformed inputs.
     """
     alibi_slopes = tuple(float(s) for s in alibi_slopes)
-    _check_inputs(x, seq_lens, weights, alibi_slopes, precision, tile)
+    _check_inputs(x, seq_lens, weights, alibi_slopes, precision, tile, version)
     if interpret is True:
         interpret = pltpu.InterpretParams()
-    impl = functools.partial(_encoder_megakernel,
-                             alibi_slopes=alibi_slopes,
-                             eps=float(eps),
-                             precision=precision,
-                             tile=tile,
-                             interpret=interpret)
+    tile_size = tile or default_tile_size(x.shape[0])
+    if resolve_kernel_version(version, tile_size) == "v2":
+        from tpu_inference.kernels.jina_bert_megakernel import kernel_v2
+        impl = functools.partial(kernel_v2.encoder_megakernel_v2,
+                                 alibi_slopes=alibi_slopes,
+                                 eps=float(eps),
+                                 precision=precision,
+                                 tile=tile_size,
+                                 interpret=interpret)
+    else:
+        impl = functools.partial(_encoder_megakernel,
+                                 alibi_slopes=alibi_slopes,
+                                 eps=float(eps),
+                                 precision=precision,
+                                 tile=tile,
+                                 interpret=interpret)
     if mesh is None:
         return impl(x, seq_lens, weights)
     if mesh.size != 1:

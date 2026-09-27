@@ -82,6 +82,9 @@ if TYPE_CHECKING:
     TPU_MESH_SORT_BY_COORDS: bool = False
     USE_JINA_BERT_MEGAKERNEL: bool = True
     JINA_BERT_MEGAKERNEL_PRECISION: str = "default"
+    JINA_BERT_MEGAKERNEL_VERSION: str = "v2"
+    JINA_BERT_DEVICE_POOLING: bool = False
+    TPU_POOLING_FAST_PATH: bool = True
 
 
 def env_with_choices(
@@ -487,6 +490,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "JINA_BERT_MEGAKERNEL_PRECISION":
     env_with_choices("JINA_BERT_MEGAKERNEL_PRECISION", "default",
                      ["default", "highest"]),
+    # JinaBert megakernel implementation. "v2" (default): the ALiBi bias
+    # tables built once per step instead of in every (layer, tile pair)
+    # step, no mask work on tile pairs inside a single request, the two heads
+    # of a 128-lane pair stacked so they share each K/V MXU weight load, the
+    # softmax in the exp2 domain and a cheaper GELU. "v1": the first
+    # megakernel, unchanged. v2 falls back to v1 where it does not fit.
+    "JINA_BERT_MEGAKERNEL_VERSION":
+    env_with_choices("JINA_BERT_MEGAKERNEL_VERSION", "v2", ["v1", "v2"]),
+    # JinaBert mean pooling on the TPU: one small jitted reduction per step,
+    # then only [num_reqs, hidden] (instead of [num_tokens, hidden]) is copied
+    # to the host, where vLLM's pooler still applies the embedding head
+    # (normalization, dimensions). Default 0: pooling runs entirely in vLLM's
+    # CPU pooler.
+    "JINA_BERT_DEVICE_POOLING":
+    env_bool("JINA_BERT_DEVICE_POOLING", default=False),
+    # Pooling runner host fast path: skip the sampling metadata (unused by
+    # pooling models) and run vLLM's CPU pooler with plain torch instead of
+    # under torchax's dispatch modes (same ops, bitwise-identical output).
+    # Set to 0 for the previous behaviour.
+    "TPU_POOLING_FAST_PATH":
+    env_bool("TPU_POOLING_FAST_PATH", default=True),
 }
 
 

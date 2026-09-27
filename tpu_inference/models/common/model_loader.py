@@ -529,19 +529,44 @@ def get_flax_model(
         from torchax.interop import torch_view
         from vllm.v1.pool.metadata import PoolingMetadata
 
+        from tpu_inference.models.common.pooling import (DeviceMeanPooler,
+                                                         pool_on_host)
+
+        pooling_fast_path = envs.TPU_POOLING_FAST_PATH
+        device_mean_pooler = None
+        if envs.JINA_BERT_DEVICE_POOLING:
+            if getattr(model_class, "supports_device_mean_pooling", False):
+                device_mean_pooler = DeviceMeanPooler.maybe_create(
+                    pooler, mesh, vllm_config.scheduler_config.max_num_seqs)
+            else:
+                logger.warning(
+                    "JINA_BERT_DEVICE_POOLING is set but %s does not support "
+                    "device mean pooling; using vLLM's CPU pooler.",
+                    model_class.__name__)
+
         def compute_pooler_output(
             hidden_states: jax.Array,
             pooling_metadata: PoolingMetadata,
             seq_lens: np.ndarray,
             num_scheduled_tokens: Optional[np.ndarray] = None,
         ):
+            if num_scheduled_tokens is None:
+                num_scheduled_tokens = seq_lens
+
+            if device_mean_pooler is not None:
+                outputs = device_mean_pooler(hidden_states, pooling_metadata,
+                                             num_scheduled_tokens)
+                if outputs is not None:
+                    return outputs
+
+            if pooling_fast_path:
+                return pool_on_host(pooler, hidden_states, pooling_metadata,
+                                    seq_lens, num_scheduled_tokens)
+
             # Performance optimization: use torch_view and move to CPU non-blocking
             torch_states = torch_view(hidden_states)
             with torchax.default_env():
                 torch_states = torch_states.to('cpu', non_blocking=True)
-
-                if num_scheduled_tokens is None:
-                    num_scheduled_tokens = seq_lens
 
                 # Align with our StepPool logic
                 pooling_metadata.build_pooling_cursor(
@@ -554,6 +579,8 @@ def get_flax_model(
                 outputs = pooler(torch_states, pooling_metadata)
                 return outputs
 
+        # Lets the compilation manager precompile the device pooling function.
+        compute_pooler_output.device_mean_pooler = device_mean_pooler
         pooler_fn = compute_pooler_output
     else:
         pooler_fn = _not_support

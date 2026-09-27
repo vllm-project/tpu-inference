@@ -340,8 +340,12 @@ class JinaBertMegakernelWeight(nnx.Variable):
     """
 
 
-def _megakernel_unsupported_reason(config, dtype: Any, mesh: Mesh,
-                                   precision: str) -> Optional[str]:
+def _megakernel_unsupported_reason(
+        config,
+        dtype: Any,
+        mesh: Mesh,
+        precision: str,
+        version: Optional[str] = None) -> Optional[str]:
     """Why the encoder megakernel can't serve this model (None if it can)."""
     if mesh.size != 1:
         return (f"it runs on a single chip (TP=1) but the mesh has "
@@ -364,7 +368,8 @@ def _megakernel_unsupported_reason(config, dtype: Any, mesh: Mesh,
                                    num_heads=config.num_attention_heads,
                                    intermediate_size=config.intermediate_size,
                                    num_layers=config.num_hidden_layers,
-                                   precision=precision)
+                                   precision=precision,
+                                   version=version)
 
 
 class JinaBertEncoder(JaxModule):
@@ -393,15 +398,29 @@ class JinaBertEncoder(JaxModule):
         self.alibi_slopes = tuple(get_alibi_slopes(config.num_attention_heads))
         self.layer_norm_eps = float(config.layer_norm_eps)
         self.megakernel_precision = envs.JINA_BERT_MEGAKERNEL_PRECISION
+        self.megakernel_version = envs.JINA_BERT_MEGAKERNEL_VERSION
         self.use_megakernel = False
         if envs.USE_JINA_BERT_MEGAKERNEL:
             reason = _megakernel_unsupported_reason(config, dtype, mesh,
-                                                    self.megakernel_precision)
+                                                    self.megakernel_precision,
+                                                    self.megakernel_version)
+            if reason is not None and self.megakernel_version != "v1":
+                # E.g. v2's buffers don't fit VMEM: v1's may.
+                v1_reason = _megakernel_unsupported_reason(
+                    config, dtype, mesh, self.megakernel_precision, "v1")
+                if v1_reason is None:
+                    logger.warning_once(
+                        "JinaBert encoder megakernel "
+                        f"{self.megakernel_version} not used: {reason}. "
+                        "Using megakernel v1.")
+                    self.megakernel_version = "v1"
+                    reason = None
             if reason is None:
                 self.use_megakernel = True
                 logger.info_once(
                     "JinaBert encoder: using the Pallas megakernel (matmul "
-                    f"precision={self.megakernel_precision!r}).")
+                    f"precision={self.megakernel_precision!r}, kernel "
+                    f"version={self.megakernel_version!r}).")
             else:
                 logger.warning_once(
                     f"JinaBert encoder megakernel not used: {reason}. "
@@ -419,6 +438,7 @@ class JinaBertEncoder(JaxModule):
                 eps=self.layer_norm_eps,
                 precision=self.megakernel_precision,
                 mesh=self.mesh,
+                version=self.megakernel_version,
             )
         for layer in self.layer:
             x = layer(x, attention_metadata)
@@ -510,6 +530,9 @@ class JinaBertForMaskedLM(JaxModule, LoadableWithIterator):
 
     # vLLM registry inspection: this model only supports the pooling runner.
     is_pooling_model = True
+    # Mean pooling may run on the device (JINA_BERT_DEVICE_POOLING=1, see
+    # tpu_inference/models/common/pooling.py); vLLM's CPU pooler otherwise.
+    supports_device_mean_pooling = True
 
     def __init__(self, vllm_config: VllmConfig, rng_key: jax.Array,
                  mesh: Mesh) -> None:

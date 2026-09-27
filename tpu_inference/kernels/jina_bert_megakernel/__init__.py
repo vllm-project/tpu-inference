@@ -14,11 +14,14 @@
 """JinaBert v2 encoder megakernel (see README.md)."""
 
 from tpu_inference.kernels.jina_bert_megakernel.kernel import (
-    MAX_TOKENS, PRECISIONS, JinaBertPackedWeights, estimate_vmem_bytes,
-    jina_bert_encoder_megakernel, mxu_dtype_for, pack_jina_bert_weights,
+    DEFAULT_KERNEL_VERSION, KERNEL_VERSIONS, MAX_TOKENS, PRECISIONS,
+    JinaBertPackedWeights, estimate_vmem_bytes, jina_bert_encoder_megakernel,
+    mxu_dtype_for, pack_jina_bert_weights, resolve_kernel_version,
     unsupported_geometry_reason, unsupported_vmem_reason)
 
 __all__ = [
+    "DEFAULT_KERNEL_VERSION",
+    "KERNEL_VERSIONS",
     "MAX_TOKENS",
     "PRECISIONS",
     "JinaBertPackedWeights",
@@ -26,6 +29,7 @@ __all__ = [
     "jina_bert_encoder_megakernel",
     "mxu_dtype_for",
     "pack_jina_bert_weights",
+    "resolve_kernel_version",
     "unsupported_geometry_reason",
     "unsupported_vmem_reason",
 ]

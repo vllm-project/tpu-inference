@@ -65,16 +65,19 @@ process — needed because the API-server process validates ModelConfig before
 ```bash
 pytest tests/kernels/encoder_alibi_kernel_test.py -v  # ALiBi kernel vs dense reference; expect 5 passed
 pytest tests/models/jax/test_jina_bert.py -v -rs   # parity vs official ONNX export; expect 3 passed
-pytest tests/e2e/test_jina_embeddings.py -v -rs    # full engine path
-pytest tests/models/jax/test_jina_bert_megakernel.py -v -rs -s  # vs XLA path
-pytest tests/kernels/jina_bert_megakernel_test.py -v -rs  # vs dense reference
+pytest tests/e2e/test_jina_embeddings.py -v -rs    # full engine path; expect 1 passed
+pytest tests/models/jax/test_jina_bert_megakernel.py -v -rs -s  # vs XLA path; 67 tests
+pytest tests/kernels/jina_bert_megakernel_test.py -v -rs  # vs dense reference; 75 tests
 ```
 
 The parity test compares per-token hidden states and mean-pooled embeddings
 against the model repo's official ONNX export (same weights, float32, no
 remote code) and requires cosine similarity > 0.999. The megakernel tests
-compare the encoder megakernel against the per-layer XLA path and a dense
-reference (see the kernel README).
+compare the encoder megakernel (both kernel versions, both matmul
+precisions) against the per-layer XLA path and a dense reference (see the
+kernel README). The host-side pooling paths and the switches below are
+covered by `pytest tests/models/common/test_pooling.py tests/test_envs.py`
+(no TPU needed).
 
 ## 6. Serve
 
@@ -102,11 +105,26 @@ sentence-transformers configuration.
 
 The encoder runs as one Pallas megakernel by default
 (`tpu_inference/kernels/jina_bert_megakernel/README.md`). It accepts at most
-2048 tokens per step, hence `--max-num-batched-tokens 2048`.
-`USE_JINA_BERT_MEGAKERNEL=0` selects the per-layer XLA path.
-`JINA_BERT_MEGAKERNEL_PRECISION=highest` selects full-fp32 matmuls; the
-default feeds bf16 operands to the MXU with fp32 accumulation, as the XLA
-path does.
+2048 tokens per step, hence `--max-num-batched-tokens 2048`. Every speed-up
+has a switch; unset means the default:
+
+| Environment variable             | Default   | `0` / other value                                        |
+| -------------------------------- | --------- | -------------------------------------------------------- |
+| `USE_JINA_BERT_MEGAKERNEL`       | `1`       | `0`: per-layer XLA path                                  |
+| `JINA_BERT_MEGAKERNEL_PRECISION` | `default` | `highest`: full-fp32 matmuls (default: bf16 MXU operands, fp32 accumulation, as the XLA path) |
+| `JINA_BERT_MEGAKERNEL_VERSION`   | `v2`      | `v1`: the first megakernel                               |
+| `TPU_POOLING_FAST_PATH`          | `1`       | `0`: vLLM's pooler under torchax's dispatch modes, and sampling metadata built every step (the previous behaviour) |
+| `JINA_BERT_DEVICE_POOLING`       | `0`       | `1`: mean pooling on the TPU, see below                  |
+
+`TPU_POOLING_FAST_PATH=1` runs the same vLLM pooler on the same host copy
+of the hidden states, but as plain torch: the output is bitwise identical,
+and in a CPU-only measurement of the pooler call (1x1024 to 1x2048 tokens)
+it saved ~1.4 ms per step of torchax dispatch. `JINA_BERT_DEVICE_POOLING=1`
+computes the per-request means on the TPU and copies only
+`[num_requests, 512]` to the host (instead of `[num_tokens, 512]`, 4 MiB at
+2048 tokens); vLLM's pooler still applies the embedding head
+(normalization). It changes where the mean is computed, so it is off by
+default; the means match the CPU pooler to ~1e-7.
 
 **Long context (up to 8192 tokens).** The megakernel rejects steps above 2048
 tokens. For longer inputs, serve with the per-layer path, whose
@@ -144,6 +162,69 @@ r = json.load(urllib.request.urlopen(req))
 print("dims:", len(r["data"][0]["embedding"]), "| usage:", r["usage"])
 PY
 ```
+
+## 7. Measure
+
+**Model forward, no server.** With vLLM stopped (the script needs the
+chip), from the repo root:
+
+```bash
+python scripts/benchmarking/jina/measure_jina_forward.py --output /tmp/after.json
+```
+
+It times the jitted forward (embeddings + encoder) for 1x1024, 2x1024
+packed and 1x2048 tokens on the real checkpoint: megakernel (every kernel
+version at this commit) and the per-layer XLA path, each at matmul precision
+`default` and `highest`; and, for the default megakernel paths, forward +
+host copy + vLLM's embed pooler for each pooling path (`old` =
+`TPU_POOLING_FAST_PATH=0`, `fast`, `device`). 20 warm-up runs, then 200
+timed runs to `block_until_ready`; the JSON has median, p90, mean and min
+in ms. Useful flags: `--cases 1x2048`, `--precisions default`,
+`--paths megakernel`, `--versions v2`, `--no-pooling`, `--runs 500`, and
+`--trace-dir /tmp/jina-forward-trace` (a `jax.profiler` trace of 5 extra
+runs of every measurement, annotated per measurement).
+
+Before/after: at this commit the `v1` rows with pooling `old` are the
+previous behaviour. To time an older commit itself, copy the script out of
+the tree first (it runs against older code, timing what exists there):
+
+```bash
+cp scripts/benchmarking/jina/measure_jina_forward.py /tmp/
+git checkout <old-commit> && python /tmp/measure_jina_forward.py --output /tmp/before.json
+git checkout -   # back to this commit (the editable install follows the checkout)
+```
+
+**Device trace of the live server.** Start the server with vLLM's
+profiler enabled (the TPU worker then records a `jax.profiler` trace
+between the two calls below; the API server gets the endpoints):
+
+```bash
+vllm serve jinaai/jina-embeddings-v2-small-en --runner pooling --convert embed \
+  --trust-remote-code --max-model-len 2048 --max-num-batched-tokens 2048 \
+  --dtype float32 \
+  --profiler-config '{"profiler": "torch", "torch_profiler_dir": "/tmp/jina-trace", "ignore_frontend": true}'
+```
+
+Start the load (e.g. the k6 step at the rate of interest), wait until it is
+steady, then capture a few seconds:
+
+```bash
+curl -X POST localhost:8000/start_profile
+sleep 3
+curl -X POST localhost:8000/stop_profile
+```
+
+Open `/tmp/jina-trace` with xprof (`pip install xprof`, then
+`xprof --logdir /tmp/jina-trace --port 8791`) or TensorBoard with
+`tensorboard-plugin-profile`. The trace view shows, per engine step, the
+host thread (`execute_model`, `_prepare_inputs`, the pooler) and the TPU
+timeline (the `jina_bert_encoder_megakernel_v2` kernel, host transfers,
+and with `JINA_BERT_DEVICE_POOLING=1` the pooling reduction).
+`PYTHON_TRACER_LEVEL=0` in the server's environment turns off Python
+function tracing (less overhead, fewer host details);
+`PROFILE_SINGLE_DEVICE=1` limits device tracing to one chip. The profiler
+adds host overhead, so read latencies from the unprofiled runs and use the
+trace for the breakdown.
 
 ## Known limitations / follow-ups
 

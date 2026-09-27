@@ -14,7 +14,8 @@
 """JinaBert encoder megakernel vs the per-layer XLA path.
 
 Loads jinaai/jina-embeddings-v2-small-en once per megakernel precision and
-runs each step through `JinaBertForMaskedLM` twice, with the same weights and
+kernel version (v2, the default, and v1) and runs each step through
+`JinaBertForMaskedLM` twice, with the same weights and
 inputs: once with the encoder megakernel and once with the per-layer XLA path
 (what `USE_JINA_BERT_MEGAKERNEL=0` selects). Reports the max abs error and
 the minimum per-token and mean-pooled cosine similarity over the real
@@ -134,10 +135,16 @@ def _xla_path(model):
         encoder.use_megakernel = True
 
 
-def _build_model(vllm_config, mesh, *, use_megakernel, precision="default"):
+def _build_model(vllm_config,
+                 mesh,
+                 *,
+                 use_megakernel,
+                 precision="default",
+                 version="v2"):
     with pytest.MonkeyPatch.context() as mp, jax.set_mesh(mesh):
         mp.setenv("USE_JINA_BERT_MEGAKERNEL", "1" if use_megakernel else "0")
         mp.setenv("JINA_BERT_MEGAKERNEL_PRECISION", precision)
+        mp.setenv("JINA_BERT_MEGAKERNEL_VERSION", version)
         return JinaBertForMaskedLM(vllm_config, jax.random.PRNGKey(0), mesh)
 
 
@@ -164,16 +171,26 @@ def jina_vllm_config():
         pytest.skip(f"Could not build ModelConfig for {MODEL_ID}: {e}")
 
 
-@pytest.fixture(scope="module", params=["default", "highest"])
+# (megakernel precision, kernel version); v2 is the default kernel, v1 the
+# previous one (JINA_BERT_MEGAKERNEL_VERSION=v1).
+MODEL_PARAMS = [("default", "v2"), ("highest", "v2"), ("default", "v1"),
+                ("highest", "v1")]
+
+
+@pytest.fixture(scope="module",
+                params=MODEL_PARAMS,
+                ids=[f"{p}-{v}" for p, v in MODEL_PARAMS])
 def loaded_model(request, jina_vllm_config, jina_mesh):
-    precision = request.param
+    precision, version = request.param
     model = _build_model(jina_vllm_config,
                          jina_mesh,
                          use_megakernel=True,
-                         precision=precision)
+                         precision=precision,
+                         version=version)
     encoder = model.model.encoder
     assert encoder.use_megakernel
     assert encoder.megakernel_precision == precision
+    assert encoder.megakernel_version == version
     with jax.set_mesh(jina_mesh), set_current_vllm_config(jina_vllm_config):
         loader = get_model_loader(LoadConfig(load_format="hf"))
         loader.load_weights(model, jina_vllm_config.model_config)
@@ -188,12 +205,12 @@ def _print_report():
     if not _REPORT:
         return
     print("\nJinaBert encoder megakernel vs XLA path (real tokens only):")
-    print(f"{'precision':<9} {'case':<17} {'T':>5} {'max abs err':>11} "
-          f"{'min token cos':>13} {'min pooled cos':>14}")
-    for precision, name, num_tokens, max_abs, token_cos, pooled_cos in (
-            _REPORT):
-        print(f"{precision:<9} {name:<17} {num_tokens:>5} {max_abs:>11.3e} "
-              f"{token_cos:>13.7f} {pooled_cos:>14.8f}")
+    print(f"{'precision':<9} {'kernel':<6} {'case':<17} {'T':>5} "
+          f"{'max abs err':>11} {'min token cos':>13} {'min pooled cos':>14}")
+    for precision, version, name, num_tokens, max_abs, token_cos, \
+            pooled_cos in _REPORT:
+        print(f"{precision:<9} {version:<6} {name:<17} {num_tokens:>5} "
+              f"{max_abs:>11.3e} {token_cos:>13.7f} {pooled_cos:>14.8f}")
 
 
 @pytest.mark.parametrize("name,seq_lens,num_tokens",
@@ -213,14 +230,15 @@ def test_megakernel_matches_xla_path(loaded_model, name, seq_lens, num_tokens,
     assert np.isfinite(got[:sum(seq_lens)]).all()
     max_abs, token_cos, pooled_cos = _compare(got, want, seq_lens)
     precision = loaded_model.model.encoder.megakernel_precision
-    _REPORT.append((precision, name, int(input_ids.shape[0]), max_abs,
+    version = loaded_model.model.encoder.megakernel_version
+    _REPORT.append((precision, version, name, int(input_ids.shape[0]), max_abs,
                     token_cos, pooled_cos))
     record_property("max_abs_err", max_abs)
     record_property("min_token_cos", token_cos)
     record_property("min_pooled_cos", pooled_cos)
-    print(f"[{precision}] {name} (T={input_ids.shape[0]}): max abs err "
-          f"{max_abs:.3e}, min token cos {token_cos:.7f}, min pooled cos "
-          f"{pooled_cos:.8f}")
+    print(f"[{precision}, {version}] {name} (T={input_ids.shape[0]}): max "
+          f"abs err {max_abs:.3e}, min token cos {token_cos:.7f}, min pooled "
+          f"cos {pooled_cos:.8f}")
     assert token_cos > MIN_TOKEN_COS
     assert pooled_cos > MIN_POOLED_COS
 
@@ -261,6 +279,11 @@ def test_unsupported_configs_fall_back(jina_vllm_config, jina_mesh):
     hf_config = jina_vllm_config.model_config.hf_config
     assert _megakernel_unsupported_reason(hf_config, jnp.float32, jina_mesh,
                                           "default") is None
+    for precision in ("default", "highest"):
+        for version in ("v1", "v2"):
+            assert _megakernel_unsupported_reason(hf_config, jnp.float32,
+                                                  jina_mesh, precision,
+                                                  version) is None
     assert "single chip" in _megakernel_unsupported_reason(
         hf_config, jnp.float32, types.SimpleNamespace(size=4), "default")
     assert "float32" in _megakernel_unsupported_reason(hf_config, jnp.bfloat16,

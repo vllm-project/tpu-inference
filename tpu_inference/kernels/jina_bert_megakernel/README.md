@@ -10,10 +10,13 @@ uses it by default; embeddings and mean pooling stay outside the kernel.
 | -------------------------------- | --------- | ------------------------------ |
 | `USE_JINA_BERT_MEGAKERNEL`       | `1`       | `0` selects the per-layer path |
 | `JINA_BERT_MEGAKERNEL_PRECISION` | `default` | matmul precision, see below    |
+| `JINA_BERT_MEGAKERNEL_VERSION`   | `v2`      | `v1` selects the first kernel  |
 
 The per-layer path (XLA matmuls and the encoder flash-attention kernel) is
 kept unchanged. The model also falls back to it, with a warning, where the
-megakernel does not apply: see [Known limits](#known-limits).
+megakernel does not apply: see [Known limits](#known-limits). The pooling
+switches (`TPU_POOLING_FAST_PATH`, `JINA_BERT_DEVICE_POOLING`) are described
+in `docs/models/jina_embeddings_v2.md`.
 
 ## Design
 
@@ -47,6 +50,32 @@ The design is inspired by that post and by
   head's 64 lanes, so `Q K^T` contracts over an aligned 128-lane slice (the
   zero lanes cost nothing extra on the MXU) without unaligned lane slicing.
 
+### Version 2 (`kernel_v2.py`, default)
+
+Same contract, packed weights, MXU operands and float32 numerics as v1;
+the attention inner loop (≈70% of the kernel at 2048 tokens) does less
+per (query tile, KV tile) step and input-independent work leaves it:
+
+- **ALiBi bias tables once per step.** v1 recomputes the token distance,
+  the mask and `slope_h * -|i - j|` in every (layer, query tile, KV tile)
+  step. v2 builds per-head-pair bias tables for every active tile offset
+  once per call, while the input and layer-0 weight DMAs are in flight; a
+  KV step adds one table.
+- **No mask work inside one request.** Tile pairs that lie in a single
+  request (all pairs of a 1x1024 or 1x2048 step) skip the segment mask;
+  other pairs build a `0 / -2e30` mask once and share it across heads.
+- **Head pairs stacked along rows.** The two heads of a 128-lane pair form
+  one `[2 * tile, 128]` query operand, so each K^T and V MXU weight load
+  serves both heads (half of v1's weight loads).
+- **Softmax in base 2** (scores scaled by `log2(e)` in float32 after the
+  MXU, bias tables pre-scaled), and a GELU with the A&S constants folded.
+
+Static bundle counts from the compiled v6e LLO at 2048 tokens (`default`;
+not a runtime measurement): an unmasked KV step drops from 2273 to 1659
+bundles, a masked one to 1832, and an MLP tile from 6331 to 5946. v2 needs
+tiles of 128 or 256 rows (other `tile` overrides run v1) and more VMEM for
+the bias tables (see below).
+
 The packed weight layout (`pack_jina_bert_weights`) is built once after
 checkpoint loading, in `JinaBertForMaskedLM.load_weights`. It is a derived
 copy; the checkpoint params and their loading are unchanged. If
@@ -70,28 +99,36 @@ GELU and all accumulations are float32. GELU is the exact erf form, with
 erf from Abramowitz & Stegun 7.1.26 (`|error| <= 1.5e-7`).
 
 Measured in the Pallas interpreter against a dense float32 reference
-(`reference.py`, random weights at realistic scales, up to 600 tokens):
+(`reference.py`, random weights at realistic scales, the interpretable
+cases of `tests/kernels/jina_bert_megakernel_test.py`):
 
-| Precision | Max abs error | Min per-token cosine | Min pooled cosine |
-| --------- | ------------- | -------------------- | ----------------- |
-| `default` | 7.9e-2        | 0.99977              | 0.99989           |
-| `highest` | 1.8e-5        | 1.0000000            | 1.0000000         |
+| Precision | Kernel | Max abs error | Min per-token cosine | Min pooled cosine |
+| --------- | ------ | ------------- | -------------------- | ----------------- |
+| `default` | v1     | 7.9e-2        | 0.99977              | 0.99989           |
+| `default` | v2     | 8.4e-2        | 0.99978              | 0.99990           |
+| `highest` | v1     | 1.8e-5        | 1.0000000            | 1.0000000         |
+| `highest` | v2     | 1.7e-5        | 1.0000000            | 1.0000000         |
+
+At `default` the differences between v1 and v2 are bfloat16 rounding
+noise (the MXU operands are the same; the float32 softmax and GELU round
+slightly differently), and go either way case by case.
 
 ## VMEM budget
 
 From `estimate_vmem_bytes`, for the kernel's own buffers (MiB):
 
-| Tokens | `default` | `highest` |
-| ------ | --------- | --------- |
-| 128    | 18.9      | 35.6      |
-| 512    | 23.6      | 41.9      |
-| 1024   | 26.9      | 47.2      |
-| 2048   | 33.4      | 57.7      |
+| Tokens | v1 `default` | v1 `highest` | v2 `default` | v2 `highest` |
+| ------ | ------------ | ------------ | ------------ | ------------ |
+| 128    | 18.9         | 35.6         | 19.8         | 36.6         |
+| 512    | 23.6         | 41.9         | 30.4         | 48.9         |
+| 1024   | 26.9         | 47.2         | 41.7         | 62.2         |
+| 2048   | 33.4         | 57.7         | 64.2         | 88.7         |
 
 The double-buffered weights take 16 MiB (`default`) or 32 MiB (`highest`)
 at every size. At 2048 tokens the residual stream, Q, K and V take 12 MiB
-or 20 MiB. The kernel asks Mosaic for `min(need + 32 MiB, 85% of VMEM)`,
-which is well within v6e's 128 MiB.
+or 20 MiB in v1; v2 adds 30 MiB of float32 ALiBi bias tables (8 heads x 15
+tile offsets x 256 x 256). The kernel asks Mosaic for
+`min(need + 32 MiB, 85% of VMEM)`, which is within v6e's 128 MiB.
 
 ## Known limits
 
@@ -104,17 +141,20 @@ which is well within v6e's 128 MiB.
   - head geometries other than an even number of 64-wide heads, or an
     intermediate size that is not a multiple of 512;
   - models whose buffers would not fit VMEM at 2048 tokens.
+- If v2's buffers do not fit VMEM but v1's do, the model uses v1 (with a
+  warning).
 - Attention work is still quadratic within a request; only tile pairs from
   different requests are skipped.
 
 ## Tests
 
 - `tests/kernels/jina_bert_megakernel_test.py`: kernel vs the dense
-  reference, input validation, tile metadata, packing, VMEM. Small cases
-  also run on CPU in the Pallas interpreter.
+  reference for both kernel versions, input validation, tile metadata,
+  packing, VMEM. Small cases also run on CPU in the Pallas interpreter.
 - `tests/models/jax/test_jina_bert_megakernel.py`: megakernel vs the
-  per-layer path on the real checkpoint, with the same weights and inputs.
-  It covers single sequences of 1 to 2048 tokens and packed steps, and
-  reports max abs error and min per-token and pooled cosine (TPU only).
+  per-layer path on the real checkpoint, with the same weights and inputs,
+  for both kernel versions and both precisions. It covers single sequences
+  of 1 to 2048 tokens and packed steps, and reports max abs error and min
+  per-token and pooled cosine (TPU only).
 - `tests/models/jax/test_jina_bert.py`: ONNX parity. It now runs through the
   megakernel by default.
