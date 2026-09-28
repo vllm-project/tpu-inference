@@ -346,6 +346,27 @@ class TpuPlatform(Platform):
                 "pool is sized for resident state only. Use 'align' (the "
                 "default when prefix caching is enabled) or 'none'.")
 
+        # Sparse retention assumes a checkpoint exists at every retained
+        # boundary. The GDN kernel writes exactly one per forward pass, at
+        # `(seq_len - 1) // mamba_block_size` (kernels/gdn/v3/memory_ref.py),
+        # and those pass ends are chunk boundaries the scheduler picks from a
+        # token budget it shares with concurrent decodes -- so for any fixed
+        # interval there are multiples the kernel never wrote. `None` (dense)
+        # is wrong for the same reason, more so. Only 0 -- semantic
+        # boundaries, which are pass ends -- lines up, and it is the default.
+        if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
+                == "align"):
+            retention = getattr(cache_config,
+                                "prefix_cache_retention_interval", 0)
+            if retention != 0:
+                raise NotImplementedError(
+                    "prefix_cache_retention_interval="
+                    f"{'dense' if retention is None else retention} is not "
+                    "supported with mamba prefix caching on TPU: the GDN "
+                    "kernel checkpoints once per forward pass, not on a fixed "
+                    "token interval, so the retained boundaries would not all "
+                    "exist. Use 0 (the default).")
+
         # Hybrid (mamba/linear-attention) models cannot use prefix caching with
         # speculative decoding because verify windows need consecutive state slots.
         if (cache_config and getattr(cache_config, "mamba_cache_mode", "none")
