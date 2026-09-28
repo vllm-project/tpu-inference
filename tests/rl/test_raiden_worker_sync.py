@@ -186,6 +186,47 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
         meta = sync.metadata_dict()
         self.assertEqual(meta["host_subgrid"], [1, 4])
 
+    def test_metadata_dict_dual_nic_partitions_shards_across_nics(self):
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="10.11.0.5")
+        sync.names = ["w"]
+        mock_mesh = SimpleNamespace(
+            axis_names=("x", "y"),
+            shape={
+                "x": 2,
+                "y": 8
+            },
+            local_mesh=None,
+        )
+        mock_sharding = SimpleNamespace(
+            mesh=mock_mesh,
+            spec=(),
+            shard_shape=lambda shape: shape,
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(2, 4),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=2,
+            )
+        ]
+        sync._sync = SimpleNamespace(
+            num_shards=8,
+            local_port=12345,
+            listener_port=23456,
+        )
+        with unittest.mock.patch.object(
+                rws,
+                "_resolve_data_nic_ips",
+                return_value=["10.11.0.5", "10.12.0.5"],
+        ):
+            meta = sync.metadata_dict()
+        self.assertEqual(
+            meta["shards"],
+            ["10.11.0.5:12345"] * 4 + ["10.12.0.5:12345"] * 4,
+        )
+        self.assertEqual(meta["control_plane_rpc_address"], "10.11.0.5:23456")
+
 
 class TestRaidenWorkerSyncH2D(unittest.TestCase):
 
