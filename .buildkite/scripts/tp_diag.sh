@@ -40,6 +40,8 @@ set -u
 # --scaling        accelerator facts, tpu_microbench.py, then per run a traced
 #                  warm TP=8 and TP=1 generate (tp_scaling_profile.py) instead
 #                  of the test
+# --trace-out DIR  with --scaling, save each run's trace as DIR/<tag>.tar.gz
+#                  (defaults to ARTIFACTS_DIR, which run.sh uploads on kube)
 # --local-jax-cache  compile into an empty local directory instead of the
 #                  shared cache, so nothing is read through gcsfuse lazily
 # --local-hf       copy the test model to local disk and load it from there
@@ -62,6 +64,7 @@ PREWARM=0
 SLEEP=0
 SLEEP_AFTER=0
 SCALING=0
+TRACE_OUT="${ARTIFACTS_DIR:-}"
 SAMPLE=0
 SPIN=0
 while [ $# -gt 0 ]; do
@@ -79,6 +82,7 @@ while [ $# -gt 0 ]; do
     --warmup-touch) WARMUP=touch ;;
     --sleep-after) SLEEP_AFTER="$2"; shift ;;
     --scaling) SCALING=1 ;;
+    --trace-out) TRACE_OUT="$2"; shift ;;
     --local-jax-cache)
       export JAX_COMPILATION_CACHE_DIR=/tmp/jax-cache VLLM_XLA_CACHE_PATH=/tmp/jax-cache ;;
     --local-hf) LOCAL_HF=1 ;;
@@ -320,4 +324,16 @@ for i in $(seq 1 "$RUNS"); do
     grep -v '\.pyc$' /tmp/run1_writes.txt | head -60
   fi
 done
+
+if [ "$SCALING" = 1 ] && [ -n "$TRACE_OUT" ] && [ -d /tmp/prof ]; then
+  section "save traces to $TRACE_OUT"
+  mkdir -p "$TRACE_OUT"
+  # Each archive unpacks to <tag>/plugins/profile/<time>/<host>.xplane.pb,
+  # the layout `xprof --logdir <tag>` expects.
+  for d in /tmp/prof/*/; do
+    tag=$(basename "$d")
+    tar -C /tmp/prof -czf "$TRACE_OUT/$tag.tar.gz" "$tag"
+  done
+  ls -la "$TRACE_OUT"
+fi
 exit 0

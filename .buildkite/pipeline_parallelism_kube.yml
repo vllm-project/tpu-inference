@@ -68,6 +68,7 @@ steps:
     env:
       SHAPE: *shape_multi
       TPU_VERSION: "tpu6e"
+      ARTIFACTS_DIR: "tp_traces"
     plugins:
       - *kube_plugin
     commands:
@@ -81,4 +82,8 @@ steps:
     env:
       TPU_VERSION: "tpu6e"
     commands:
-      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --scaling --runs 2
+      # /tmp/kernel_tuning is the one host directory run_in_docker.sh mounts
+      # read-write at the same path, so traces written there survive the
+      # container for the upload.
+      - .buildkite/scripts/run_in_docker.sh bash /workspace/tpu_inference/.buildkite/scripts/tp_diag.sh --scaling --runs 2 --trace-out /tmp/kernel_tuning/tp_traces_$$BUILDKITE_JOB_ID
+      - cd /tmp/kernel_tuning && buildkite-agent artifact upload "tp_traces_$$BUILDKITE_JOB_ID/*"
