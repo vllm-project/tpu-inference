@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, two-step dispatch, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, fused-RS MoE, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,66 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #47: the fused reduce-scatter MoE kernel (USE_GMM_FUSED_RS_KERNEL=1)
+        # on the current branch and mesh, to compare against the improved
+        # standard path (#45 384-token bucket, #46 + two-step dispatch).
+        #
+        # KERNEL FIXES. The two correctness fixes from the old branch are
+        # cherry-picked (kernel files only): 21d8c151c (output layout: emit
+        # P(ATTN_DATA) via a regather over the model axis; was 97e70c466) and
+        # 196099394 (refill DMA overwrote the buffer being read; was 59e60e854).
+        # Neither kernel file changed on main since, so both applied cleanly.
+        # Verified locally on the single-layer harness at production
+        # proportions (H 8192, I 2048, top-10) on attn_dp=2 x model=4:
+        #   bf16, 12 rows/device (the 384 bucket's per-device chunk): RS rel_l2
+        #     5.2e-3 vs path A 4.5e-3 -- correct at the small chunk.
+        #   fp8 block 512: RS 4.6e-2 vs path A 4.8e-2 -- agree.
+        #   fp8 block 128 (the checkpoint's expert blocks): RS 5.6e-2 vs path A
+        #     6.9e-3. NOT a bug: gmm_v2 (path A) keeps activations in bf16 below
+        #     block 256, while the RS kernel always quantizes them to fp8
+        #     (gmm_fused_rs_nodedup.py get_maybe_quantize_lhs; no switch). So in
+        #     production the RS path runs the experts w8a8 and #45/#46 run them
+        #     effectively w8a16. #39 ran this same checkpoint this way at full
+        #     accuracy (GSM8K 0.9795, MMLU 0.8941). A difference between the two
+        #     paths being compared, not a defect.
+        #
+        # MAX_NUM_BATCHED_TOKENS=2048/rank -> 16384 aggregate. Not #39's 4096:
+        # that was per rank on attn_dp=4, i.e. the same 16384 aggregate. 4096 on
+        # attn_dp=8 would be 32768, and the RS kernel asserts tokens x top-k <
+        # 262144 (_FUSED_RS_MAX_SAFE_SIZE_M): 32768 x 10 = 327680 fails,
+        # 16384 x 10 = 163840 passes. 16384 is the largest bucket this kernel
+        # can take. Every bucket must also divide by 32 (the sequence-parallel
+        # topk_weights split over ep=32): 32 ... 384 ... 16384 all do; the 384
+        # bucket gives 12 rows per device, tested above.
+        #
+        # MEMORY. Unchanged KV: C=368 (46/rank), pool 27232 at util 0.98, the
+        # exact figures #44-#46 ran (vLLM's available-KV check does not depend
+        # on the token budget). Activation memory must fit in the 1.95 GiB/device
+        # left after weights + KV; #39 measured the RS path at 1.17 GiB at 16384
+        # aggregate (on model=8; model=4 unmeasured). If it does not fit, the
+        # 16384 backbone compile fails in precompile; fallback MNBT=1024.
+        #
+        # PLATEAU. At 16384 aggregate, admitting 368 x 8192 takes ~186 steps
+        # (vs ~771 in #44-#46), leaving ~838 steps of pure 368-wide decode. The
+        # profile target is unchanged (decode_only at 368, min_kv_len >= 8250).
+        #
+        # MOE_TWO_STEP_DISPATCH is dropped: its hook sits after the RS early
+        # return in fused_moe_func, so it cannot affect this path.
+        #
+        # COMPARING. Decode step / median ITL / peak decode throughput compare
+        # directly with #45/#46 (a decode step schedules 368 tokens -> the 384
+        # bucket either way). TTFT and whole-run throughput do NOT: the token
+        # budget is 4x #45/#46's, which changes prefill by itself.
+        #
+        # WHAT TO READ FIRST:
+        #   1. "fused_moe_rs kernel in use" (fused_moe_gmm.py).
+        #   2. Precompile gets through the 16384 bucket; its backbone temp vs
+        #      the 1.95 GiB budget.
+        #   3. GSM8K / MMLU vs #45/#46 (~0.978 / ~0.894).
+        #   4. Decode step, median ITL, peak decode throughput vs #45/#46.
+        #
+        # ---- #46's rationale follows (the RS kernel replaces its dispatch) ----
+        #
         # #46: #45 with one change -- MOE_TWO_STEP_DISPATCH=1, the two-step MoE
         # dispatch all-gather. Measured on top of #45's 384-token bucket.
         #
@@ -352,9 +412,9 @@ steps:
           'MAX_MODEL_LEN=40960' \
           'MAX_NUM_SEQS=46' \
           'NUM_GPU_BLOCKS_OVERRIDE=27232' \
-          'MAX_NUM_BATCHED_TOKENS=512' \
+          'MAX_NUM_BATCHED_TOKENS=2048' \
+          'USE_GMM_FUSED_RS_KERNEL=1' \
           'COMPILATION_SIZES=384' \
-          'MOE_TWO_STEP_DISPATCH=1' \
           'GPU_MEMORY_UTILIZATION=0.98' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
