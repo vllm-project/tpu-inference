@@ -28,6 +28,7 @@ steps:
   - label: "tpu7x JAX unit tests - MoE two-step dispatch (multi chip)"
     key: moe_two_step_dispatch
     depends_on: build_docker
+    priority: 7
     agents:
       queue: tpu_v7x_8_queue
     timeout_in_minutes: 30
