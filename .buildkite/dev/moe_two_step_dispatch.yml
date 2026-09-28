@@ -1,0 +1,40 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dev-only: runs the "JAX unit tests - MoE two-step dispatch (multi chip)" step
+# from pipeline_jax.yml, with the same queue and command, before PR CI.
+steps:
+  - label: ":docker: Build base image (tpu7x)"
+    key: build_docker
+    agents:
+      queue: cpu_64_core
+    timeout_in_minutes: 25
+    env:
+      TPU_VERSION: "tpu7x"
+    commands:
+      - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+  - label: "tpu7x JAX unit tests - MoE two-step dispatch (multi chip)"
+    key: moe_two_step_dispatch
+    depends_on: build_docker
+    agents:
+      queue: tpu_v7x_8_queue
+    timeout_in_minutes: 30
+    env:
+      USE_PREBUILT_IMAGE: "1"
+      TPU_VERSION: "tpu7x"
+    commands:
+      - |
+        .buildkite/scripts/run_in_docker.sh bash -c \
+          'MOE_TWO_STEP_DISPATCH_REQUIRE_DUAL_CORE=1 python3 -m pytest -s -v -rs /workspace/tpu_inference/tests/layers/common/test_moe_two_step_dispatch.py'
