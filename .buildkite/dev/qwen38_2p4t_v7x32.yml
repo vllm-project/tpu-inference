@@ -145,7 +145,7 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
-        # #47: the fused reduce-scatter MoE kernel (USE_GMM_FUSED_RS_KERNEL=1)
+        # #49: the fused reduce-scatter MoE kernel (USE_GMM_FUSED_RS_KERNEL=1)
         # on the current branch and mesh, to compare against the improved
         # standard path (#45 384-token bucket, #46 + two-step dispatch).
         #
