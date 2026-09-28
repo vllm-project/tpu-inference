@@ -120,7 +120,10 @@ class WNA16LinearMethod(QuantizeMethodBase):
         self.num_groups = self.in_features // group_size
         self.use_kernel = _uses_kernel(group_size)
         in_sharding = getattr(linear_config, "in_features_sharding", (None, ))
-        if not self.use_kernel and in_sharding[0] is not None:
+        if (not self.use_kernel and in_sharding[0] is not None
+                and get_mesh_shape_product(
+                    linear_config.mesh or jax.sharding.get_abstract_mesh(),
+                    in_sharding[0]) > 1):
             # The XLA path's scale is [in // group_size, out] and inherits the
             # weight's sharding; with few groups (one, for channelwise) the
             # contracting axis cannot be split across the mesh.
@@ -406,6 +409,12 @@ class WNA16FusedMoEMethod(QuantizeMethodBase):
     def _staged(role: str, kind: str) -> str:
         return f"w4a16_{role}_{kind}"
 
+    def _expert_shape(self, layer, role: str, kind: str) -> tuple[int, int]:
+        """Checkpoint [out, cols] of one expert's packed weight or scale."""
+        out, n_in = self._shapes(layer)[role]
+        div = _PACK_FACTOR if kind == "packed" else self.group_size
+        return out, n_in // div
+
     def _staged_names(self) -> list[str]:
         return [
             self._staged(role, kind) for role in ("gate", "up", "down")
@@ -430,17 +439,18 @@ class WNA16FusedMoEMethod(QuantizeMethodBase):
                      "kernel_down_proj_EFD"):
             assert isinstance(getattr(layer, name, None), nnx.Param), name
             delattr(layer, name)
-        for role, (out, n_in) in self._shapes(layer).items():
-            for kind, shape, dtype in (
-                ("packed", (num_experts, out, n_in // _PACK_FACTOR),
-                 jnp.int32),
-                ("scale", (num_experts, out, n_in // self.group_size),
-                 jnp.bfloat16),
-            ):
+        for role in self._shapes(layer):
+            for kind, dtype in (("packed", jnp.int32), ("scale",
+                                                        jnp.bfloat16)):
                 # Staged on the host, as in the mxfp4 MoE method; per-expert
                 # tensors collect in _weights_to_load and are concatenated
                 # once all of them have arrived, as in the fp8 MoE method.
-                param = nnx.Param(jnp.zeros(shape, dtype=dtype),
+                # The placeholder is [E, cols, out]: the dummy loaders swap
+                # the last two dims of every _weights_to_load param, so this
+                # makes them produce the checkpoint's [out, cols] per expert.
+                out, cols = self._expert_shape(layer, role, kind)
+                param = nnx.Param(jnp.zeros((num_experts, cols, out),
+                                            dtype=dtype),
                                   eager_sharding=False)
                 param.set_metadata("mesh", cpu_mesh())
                 param.set_metadata(_weights_to_load=[None] * num_experts)
@@ -480,10 +490,11 @@ class WNA16FusedMoEMethod(QuantizeMethodBase):
                     f"{layer.prefix}: unexpected W4A16 expert tensor "
                     f"{torch_name}.")
             param = getattr(layer, self._staged(role, kind))
-            if tuple(torch_weight.shape) != tuple(param.shape[1:]):
+            expected = self._expert_shape(layer, role, kind)
+            if tuple(torch_weight.shape) != expected:
                 raise ValueError(
                     f"{torch_name}: shape {tuple(torch_weight.shape)}, "
-                    f"expected {tuple(param.shape[1:])}.")
+                    f"expected {expected}.")
             param._weights_to_load[expert_id] = jax_array_from_reshaped_torch(
                 torch_weight, reshape_dims=(1, ) + tuple(torch_weight.shape))
         return {

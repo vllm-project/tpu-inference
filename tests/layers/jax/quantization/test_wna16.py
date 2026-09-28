@@ -41,6 +41,7 @@ from tpu_inference.layers.jax.quantization.unquantized import \
     UnquantizedLinearMethod
 from tpu_inference.layers.jax.quantization.wna16 import (
     WNA16LinearMethod, WNA16MergedLinearMethod)
+from tpu_inference.models.jax.utils.weight_utils import JaxDummyModelLoader
 
 GROUP_SIZE = 32
 
@@ -312,19 +313,26 @@ class TestWNA16KernelSelection:
             assert wna16._uses_kernel(group_size) is expected
 
     @staticmethod
-    def _method(group_size, in_sharding):
+    def _method(group_size, in_sharding, in_shards=1):
         layer = SimpleNamespace(prefix="mlp.down_proj", einsum_str="mn,np->mp")
         cfg = SimpleNamespace(batch_features=(),
                               in_features=(256, ),
                               out_features=(128, ),
                               output_sizes=[128],
-                              in_features_sharding=(in_sharding, ))
-        with patch.object(wna16, "_mxu_column_size", return_value=256):
+                              in_features_sharding=(in_sharding, ),
+                              mesh=None)
+        with patch.object(wna16, "_mxu_column_size", return_value=256), \
+                patch.object(wna16, "get_mesh_shape_product",
+                             return_value=in_shards):
             return WNA16LinearMethod(layer, cfg, group_size)
 
     def test_channelwise_on_sharded_input_is_rejected(self):
         with pytest.raises(NotImplementedError, match="input dim is sharded"):
-            self._method(None, "model")
+            self._method(None, "model", in_shards=4)
+
+    def test_channelwise_on_a_size_one_axis_uses_xla(self):
+        # TP=1: the input dim names a mesh axis, but that axis has one device.
+        assert not self._method(None, "model", in_shards=1).use_kernel
 
     def test_grouped_on_sharded_input_uses_the_kernel(self):
         assert self._method(GROUP_SIZE, "model").use_kernel
@@ -429,8 +437,9 @@ class TestWNA16MoELifecycle:
         for name in ("kernel_gating_EDF", "kernel_up_proj_EDF",
                      "kernel_down_proj_EFD"):
             assert not hasattr(layer, name)
-        assert layer.w4a16_gate_packed.shape == (4, 64, 128 // 8)
-        assert layer.w4a16_down_scale.shape == (4, 128, 64 // GROUP_SIZE)
+        # [E, cols, out]: the dummy loaders swap the last two dims.
+        assert layer.w4a16_gate_packed.shape == (4, 128 // 8, 64)
+        assert layer.w4a16_down_scale.shape == (4, 64 // GROUP_SIZE, 128)
 
     def test_process_waits_for_every_expert(self):
         method, layer = _moe_method_and_layer()
@@ -466,6 +475,36 @@ class TestWNA16MoELifecycle:
         with pytest.raises(ValueError, match="unexpected"):
             _load_moe(method, layer,
                       [("0.gate_proj.weight_zero_point", torch.zeros(1))])
+
+    def test_dummy_weights_load_and_process(self):
+        """--load-format dummy fills the staged params and they process into
+        the same kernel shapes as a real checkpoint."""
+        E, D, F = 4, 128, 64
+        method, layer = _moe_method_and_layer(num_experts=E, hidden=D, inter=F)
+        model = SimpleNamespace(named_parameters=lambda: [(
+            name, getattr(layer, name)) for name in method._staged_names()])
+        loader = SimpleNamespace(_process_weights_after_loading=lambda m: None)
+        JaxDummyModelLoader.load_weights(loader, model, None)
+        for name in method._staged_names():
+            role, kind = name.split("_")[1:]
+            assert all(w.shape == (1, ) +
+                       method._expert_shape(layer, role, kind)
+                       for w in getattr(layer, name)._weights_to_load), name
+        assert method.process_weights_after_loading(layer) is True
+        real_method, real_layer = _moe_method_and_layer(num_experts=E,
+                                                        hidden=D,
+                                                        inter=F)
+        tensors, _ = _w4a16_moe_expert_tensors(np.random.default_rng(8), E, D,
+                                               F)
+        _load_moe(real_method, real_layer, tensors)
+        assert real_method.process_weights_after_loading(real_layer) is True
+        for name in ("kernel_gating_upproj_EDF",
+                     "kernel_gating_upproj_EDF_weight_scale",
+                     "kernel_down_proj_EFD",
+                     "kernel_down_proj_EFD_weight_scale"):
+            assert (getattr(layer,
+                            name)[...].shape == getattr(real_layer,
+                                                        name)[...].shape), name
 
     def test_split_groups_keeps_aligned_shards(self):
         scale = jnp.ones((2, 5, 22), jnp.float32)
