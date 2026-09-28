@@ -325,6 +325,19 @@ steps:
     commands:
       - .buildkite/kubernetes/run.sh python3 -m pytest -s -v -x /workspace/tpu_inference/tests/kernels/collectives
 
+  # The two-step path needs at least two dual-core chips, so it has no v6e
+  # counterpart; the env var turns wrong hardware into a failure, not a skip.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests - MoE two-step dispatch (multi chip)"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    env:
+      SHAPE: *shape_multi
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+    <<: *tpu_step
+    commands:
+      - |
+        .buildkite/kubernetes/run.sh bash -c 'MOE_TWO_STEP_DISPATCH_REQUIRE_DUAL_CORE=1 python3 -m pytest -s -v -rs /workspace/tpu_inference/tests/layers/common/test_moe_two_step_dispatch.py'
+
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX + vLLM models on multiple chips"
     if: build.env("NIGHTLY") == "1"
     env:

@@ -15,10 +15,13 @@
 
 The plan tests use fake devices and run anywhere. The gather tests need 8
 devices; the ones that check the real core-pairing check additionally need two
-cores per chip (v7x), since elsewhere the plan always falls back.
+cores per chip (v7x), since elsewhere the plan always falls back. CI runs this
+file on v7x-8 with MOE_TWO_STEP_DISPATCH_REQUIRE_DUAL_CORE=1, which turns
+missing hardware into a failure instead of a skip.
 """
 
 import math
+import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -37,12 +40,14 @@ from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
                                                   ShardingAxisNameBase)
 
 _NUM_DEVICES = len(jax.devices())
+_HAS_DUAL_CORE_CHIPS = _NUM_DEVICES >= 8 and any(
+    getattr(d, "core_on_chip", 0) for d in jax.devices())
+_REQUIRE_DUAL_CORE = "MOE_TWO_STEP_DISPATCH_REQUIRE_DUAL_CORE"
 
 requires_8_devices = pytest.mark.skipif(_NUM_DEVICES < 8,
                                         reason="needs 8 devices")
 requires_dual_core_chips = pytest.mark.skipif(
-    _NUM_DEVICES < 8
-    or not any(getattr(d, "core_on_chip", 0) for d in jax.devices()),
+    not _HAS_DUAL_CORE_CHIPS,
     reason="needs 8 devices with two cores per chip (e.g. v7x-8)")
 
 # Real-device mesh layouts the two-step gather is meant for.
@@ -56,6 +61,17 @@ _MESH_SIZES = [
 
 def _mesh_id(sizes: dict) -> str:
     return "x".join(f"{a}{n}" for a, n in sizes.items())
+
+
+@pytest.mark.skipif(os.environ.get(_REQUIRE_DUAL_CORE) != "1",
+                    reason=f"{_REQUIRE_DUAL_CORE} is not set")
+def test_required_hardware_is_present():
+    # Without this, a CI step that lands on the wrong hardware would skip every
+    # real-device test below and still pass.
+    assert _HAS_DUAL_CORE_CHIPS, (
+        f"{_REQUIRE_DUAL_CORE}=1 but found {_NUM_DEVICES} devices "
+        f"({jax.devices()[0].device_kind}); the real-device tests need 8 "
+        "devices with two cores per chip and would all be skipped.")
 
 
 @pytest.fixture(autouse=True)
