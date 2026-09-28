@@ -56,6 +56,37 @@ def local_ip() -> str:
     return "localhost"
 
 
+def _resolve_data_nic_ips(default_ip: str) -> List[str]:
+    """Resolves IPv4 addresses for interfaces in TPU_RAIDEN_DATA_NICS."""
+    nics_env = os.environ.get("TPU_RAIDEN_DATA_NICS", "").strip()
+    if not nics_env:
+        return [default_ip]
+    ips: List[str] = []
+    try:
+        import fcntl  # pylint: disable=g-import-not-at-top
+        import struct  # pylint: disable=g-import-not-at-top
+
+        for nic in nics_env.split(","):
+            nic = nic.strip()
+            if not nic:
+                continue
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                info = fcntl.ioctl(
+                    s.fileno(),
+                    0x8915,  # SIOCGIFADDR
+                    struct.pack("256s", nic[:15].encode("utf-8")),
+                )
+                ips.append(socket.inet_ntoa(info[20:24]))
+            except OSError:
+                continue
+            finally:
+                s.close()
+    except ImportError:
+        pass
+    return ips if ips else [default_ip]
+
+
 def is_maxtext_model(model: Any) -> bool:
     """True if `model` is a MaxTextForCausalLM (checked by class name to
     avoid a maxtext dependency)."""
@@ -386,27 +417,40 @@ class RaidenWorkerSync:
 
         num_shards = self._sync.num_shards if self._sync else 1
         shards_list = [""] * num_shards
+        nic_ips = _resolve_data_nic_ips(self.ip)
+        primary_ip = nic_ips[0] if nic_ips else self.ip
         if self._sync and hasattr(self._sync, "get_local_endpoints"):
             try:
                 for ep in self._sync.get_local_endpoints():
                     ep_addr = ep.get("endpoint", "")
                     if ep_addr.startswith(":"):
-                        ep_addr = f"{self.ip}{ep_addr}"
+                        ep_addr = f"{primary_ip}{ep_addr}"
                     elif ":" in ep_addr:
                         parts = ep_addr.split(":")
                         if parts[0] in ("0.0.0.0", "127.0.0.1", ""):
-                            ep_addr = f"{self.ip}:{parts[1]}"
+                            ep_addr = f"{primary_ip}:{parts[1]}"
                     for s in ep.get("shards", []):
                         if 0 <= s < num_shards:
                             shards_list[s] = ep_addr
             except Exception:
                 pass
         if not all(shards_list):
-            data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
-            shards_list = [s or data_addr
-                           for s in shards_list] if data_addr else []
+            if (self._sync and self._sync.local_port and len(nic_ips) > 1
+                    and num_shards >= len(nic_ips)):
+                port = self._sync.local_port
+                shards_per_nic = max(1, num_shards // len(nic_ips))
+                shards_list = [
+                    s or
+                    f"{nic_ips[min(i // shards_per_nic, len(nic_ips) - 1)]}:{port}"
+                    for i, s in enumerate(shards_list)
+                ]
+            else:
+                data_addr = (f"{primary_ip}:{self._sync.local_port}"
+                             if self._sync else "")
+                shards_list = [s or data_addr
+                               for s in shards_list] if data_addr else []
 
-        control_addr = (f"{self.ip}:{self._sync.listener_port}"
+        control_addr = (f"{primary_ip}:{self._sync.listener_port}"
                         if self._sync and self._sync.listener_port else "")
         return {
             "unit": {
