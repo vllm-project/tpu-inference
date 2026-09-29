@@ -15,6 +15,7 @@ from jax._src import mesh as mesh_lib
 from jax._src import xla_bridge as xb
 from jax._src.lib import xla_client as xc
 from jax._src.numpy.scalar_types import _ScalarMeta
+from jax.experimental import multihost_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from torchax.ops.mappings import j2t_dtype
 from torchax.ops.mappings import t2j as torchax_t2j
@@ -40,6 +41,70 @@ _DTYPE_STR_ALIAS_TO_JAX_DTYPE = {
     # NOTE: vLLM doesn't have this str dtype yet
     "fp4": jnp.float4_e2m1fn.dtype,
 }
+
+
+def safe_device_get(arr: Any) -> Any:
+    """Copy a ``jax.Array`` (or a pytree of them) to host numpy, safely under
+    multi-host SPMD.
+
+    Applied per leaf via ``tree_util.tree_map`` so tuples/dicts/lists work as a
+    drop-in for ``jax.device_get((a, b))``. See ``_leaf_device_get`` for the
+    per-array logic.
+    """
+    leaves = jax.tree_util.tree_leaves(arr)
+    if all(_is_host_fetchable(leaf) for leaf in leaves):
+        # Single-process fast path: one batched ``jax.device_get`` over the
+        # whole pytree, identical to the original (non multi-host) behavior.
+        out = jax.device_get(arr)
+        if isinstance(arr, (tuple, list, dict)):
+            return out
+        return np.asarray(out)
+    return jax.tree_util.tree_map(_leaf_device_get, arr)
+
+
+def _is_host_fetchable(leaf: Any) -> bool:
+    """True if ``jax.device_get(leaf)`` is safe (non-jax or fully addressable)."""
+    if not hasattr(leaf, "addressable_shards"):
+        return True
+    return bool(getattr(leaf, "is_fully_addressable", False))
+
+
+def _leaf_device_get(leaf: Any) -> Any:
+    """Copy a single leaf to host numpy, safe under multi-host SPMD.
+
+    On a multi-host mesh a global ``jax.Array`` can span non-addressable (non
+    process-local) devices, so a plain ``jax.device_get()`` raises:
+    ``RuntimeError: Fetching value for jax.Array that spans non-addressable
+    (non process local) devices is not possible``.
+
+    Ordered from cheapest/safest to most expensive:
+    - **Non-jax leaf** (python scalar, numpy, etc.): plain ``jax.device_get``.
+    - **Fully addressable** (single-process, any sharding): every shard is
+      local, so a plain ``jax.device_get`` is correct and cheap -- this
+      preserves the original behavior and avoids any collective.
+    - **Multi-process, fully replicated**: every host holds the complete value
+      on its first process-local shard, so we read that shard directly (no
+      collective).
+    - **Multi-process, sharded**: gather across processes with
+      ``process_allgather`` to reconstruct the full value -- taking a single
+      shard would silently return partial data. This branch runs a collective,
+      but it is only reached from SPMD code that executes on every host, and the
+      branch predicates (``is_fully_addressable`` / ``is_fully_replicated``) are
+      global array properties, so all hosts take the same branch together
+      (symmetric collective, no deadlock). ``tiled=True`` concatenates along
+      axis 0, which is correct for the batch/DP-sharded 1-D token tensors this
+      is used on; it is not a general-purpose gather.
+    """
+    if not hasattr(leaf, "addressable_shards"):
+        return np.asarray(jax.device_get(leaf))
+    if getattr(leaf, "is_fully_addressable", False):
+        return np.asarray(jax.device_get(leaf))
+    if getattr(leaf, "is_fully_replicated", False):
+        if leaf.addressable_shards:
+            return np.asarray(leaf.addressable_shards[0].data)
+        return np.asarray(multihost_utils.process_allgather(leaf,
+                                                            tiled=False))[0]
+    return np.asarray(multihost_utils.process_allgather(leaf, tiled=True))
 
 
 def to_jax_dtype(dtype: str | jnp.dtype | torch.dtype) -> jnp.dtype:
