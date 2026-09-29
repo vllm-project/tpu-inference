@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, fused-RS MoE, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, fused-RS MoE, decoupled GDN pool, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,24 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #51: #50 with one change -- USE_DECOUPLED_MAMBA_POOL=1. #50 had 16
+        # preemptions because, with prefix caching off, vLLM charged each
+        # request 3 extra attention blocks, one per GDN group (69 GDN layers =
+        # 3 x 23), which the TPU runner never uses: it keeps GDN state in its
+        # own 376-slot arrays and picks slots itself. Full length was 72 + 3 =
+        # 75 blocks, 46 x 75 = 3450 > 3403 per rank. The flag schedules GDN
+        # groups from the compact pool (47 slots/rank, mirrored across the 3
+        # groups) as prefix caching already does, so full length is 72 blocks
+        # and 46 x 72 = 3312. See experiments/.../kv_pool_split/FINDINGS.md.
+        #
+        # WHAT TO READ FIRST:
+        #   1. "Installed TPUHybridKVCacheCoordinator hooks" and, per rank,
+        #      "Initializing dual block pools: attn_blocks=3404, mamba_blocks=47".
+        #   2. 0 preemptions (#50: 16).
+        #   3. KV usage (now the attention pool alone) peaks ~96.7%, and sits
+        #      ~0 blocks/request above prompt + generated (#50: +3.0).
+        #   4. GSM8K ~0.979 and decode step ~83.1 ms, both unchanged from #50.
+        #
         # #50: #49 rerun without MMLU (STD_EVAL_SUITE=gsm8k); nothing else
         # changes. #49 passed precompile (16384 backbone temp 0.971 GiB) and
         # GSM8K (0.9810), then died 41 s into MMLU: prompt logprobs make the
@@ -424,6 +442,7 @@ steps:
           'NUM_GPU_BLOCKS_OVERRIDE=27232' \
           'MAX_NUM_BATCHED_TOKENS=2048' \
           'USE_GMM_FUSED_RS_KERNEL=1' \
+          'USE_DECOUPLED_MAMBA_POOL=1' \
           'COMPILATION_SIZES=384' \
           'GPU_MEMORY_UTILIZATION=0.98' \
           'BLOCK_SIZE=128' \
