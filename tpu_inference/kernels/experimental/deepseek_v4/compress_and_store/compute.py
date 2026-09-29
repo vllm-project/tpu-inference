@@ -223,7 +223,7 @@ def merge_slot_updates(
 
     slots_list = [slots_val[i] for i in range(pack_factor)]
 
-    for i in range(tile_n):
+    for i in range(n, tile_n):
         slot_i = kv_slots[i]
         valid_i = slot_i >= 0
         row_i = slot_i // pack_factor
