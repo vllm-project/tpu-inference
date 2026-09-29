@@ -848,6 +848,29 @@ class TestKVCacheManager:
             assert isinstance(spec, MLAAttentionSpec)
             assert spec.num_kv_heads == 1
 
+    def test_get_kv_cache_spec_with_dflash_uses_explicit_head_dim(self):
+        self.runner.vllm_config.compilation_config.static_forward_context = {}
+        mock_speculative_config = MagicMock()
+        mock_speculative_config.method = "dflash"
+        mock_speculative_config.use_gemma4_mtp = MagicMock(return_value=False)
+        mock_hf_config = MagicMock()
+        mock_hf_config.num_key_value_heads = 8
+        mock_hf_config.hidden_size = 6656
+        mock_hf_config.num_attention_heads = 32
+        mock_hf_config.num_hidden_layers = 5
+        mock_hf_config.head_dim = 128
+        mock_speculative_config.draft_model_config.hf_config = mock_hf_config
+        self.runner.speculative_config = mock_speculative_config
+
+        kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        for layer_idx in range(5):
+            draft_spec = kv_cache_spec[f"draft_layer.{layer_idx}"]
+            assert isinstance(draft_spec, FullAttentionSpec)
+            assert draft_spec.num_kv_heads == common_utils.get_padded_num_heads(
+                8, self.runner.mesh.shape["model"])
+            assert draft_spec.head_size == 128
+
     @patch('tpu_inference.models.common.kv_share.compute_mtp_kv_share_map')
     def test_get_kv_cache_spec_with_gemma4_mtp(self, mock_compute_map):
         # tests we create kv cache spec for gemma4 mtp draft model (KV-sharing)
