@@ -145,6 +145,16 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #50: #49 rerun without MMLU (STD_EVAL_SUITE=gsm8k); nothing else
+        # changes. #49 passed precompile (16384 backbone temp 0.971 GiB) and
+        # GSM8K (0.9810), then died 41 s into MMLU: prompt logprobs make the
+        # runner compute logits for every position (tpu_runner.py:1841-1849),
+        # 2048 tokens/rank x 248320 vocab x 4 B = 1.895 GiB, and loading
+        # jit__select_from_array_fn could not reserve that out of the ~1.95
+        # GiB/device left at util 0.98. MMLU is the only leg that sends
+        # prompt-logprob requests, so dropping it keeps the 2048/rank budget.
+        # Accuracy check is GSM8K alone (#49 0.9810, #39 0.9795).
+        #
         # #49: the fused reduce-scatter MoE kernel (USE_GMM_FUSED_RS_KERNEL=1)
         # on the current branch and mesh, to compare against the improved
         # standard path (#45 384-token bucket, #46 + two-step dispatch).
@@ -200,7 +210,7 @@ steps:
         #   1. "fused_moe_rs kernel in use" (fused_moe_gmm.py).
         #   2. Precompile gets through the 16384 bucket; its backbone temp vs
         #      the 1.95 GiB budget.
-        #   3. GSM8K / MMLU vs #45/#46 (~0.978 / ~0.894).
+        #   3. GSM8K vs #45/#46 (~0.978); #50 runs no MMLU.
         #   4. Decode step, median ITL, peak decode throughput vs #45/#46.
         #
         # ---- #46's rationale follows (the RS kernel replaces its dispatch) ----
@@ -431,7 +441,7 @@ steps:
           'PHASED_PROFILER_TARGET_CONCURRENCY=368' \
           'PHASED_PROFILER_ONLY_PHASES=decode_only' \
           'EVAL_SUITE=none' \
-          'STD_EVAL_SUITE=gsm8k,mmlu' \
+          'STD_EVAL_SUITE=gsm8k' \
           'GPQA_REASONING_EFFORT=xhigh' \
           'GPQA_SAMPLING=greedy' \
           'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
