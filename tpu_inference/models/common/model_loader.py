@@ -176,8 +176,9 @@ def _get_nnx_model(
                                             apply_to_abstract_model=False)
         return model
 
-    if vllm_config.load_config.load_format == "dummy" and not issubclass(
-            model_class, LoadableWithIterator):
+    if vllm_config.load_config.load_format in (
+            "dummy", "jax_dummy", "pathways_dummy") and not issubclass(
+                model_class, LoadableWithIterator):
         # Create a sharded model with random inited weights.
         # TODO: currently Qwen2ForCausalLM is using legacy model implementation
         # will merge the random init logic when all model are migrated to new model implementation

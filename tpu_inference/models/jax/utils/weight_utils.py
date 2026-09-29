@@ -1171,6 +1171,14 @@ class JaxDummyModelLoader(DummyModelLoader):
                         maxval=100,
                         dtype=param.get_value().dtype,
                     )
+                elif "float8" in getattr(param.get_value().dtype, "name", ""):
+                    dummy_weight = jax.random.uniform(
+                        key=jax.random.PRNGKey(0),
+                        shape=param_shape,
+                        dtype=jnp.float32,
+                        minval=-1e-3,
+                        maxval=1e-3,
+                    ).astype(param.get_value().dtype)
                 else:
                     dummy_weight = jax.random.uniform(
                         key=jax.random.PRNGKey(0),
