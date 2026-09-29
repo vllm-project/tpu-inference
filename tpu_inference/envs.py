@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     HASH_TABLE_ROW_MAJOR: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    MOE_HIERARCHICAL_DISPATCH: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -527,6 +528,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is interleaved per rank and a single valid-token count cannot describe it.
     "MOE_ROUTE_PADDING_TO_EXPERT0":
     env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    # Replace the MoE dispatch all-gather over the attention-data axes with a
+    # hierarchical gather: each chip's two cores each gather half the hidden
+    # columns over the attention-data axes, then swap halves on-chip. Halves
+    # the cross-chip traffic. Applies only when the model axis pairs a chip's
+    # two cores at adjacent indices and the hidden size is a multiple of 256;
+    # otherwise the one-step gather is kept. Only the expert-parallel GMM path
+    # uses it: not GMM_TP or FUSED_MOE, and not with the fp8 all-gather
+    # (MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8) or USE_GMM_FUSED_RS_KERNEL.
+    # See fused_moe_gmm.py.
+    "MOE_HIERARCHICAL_DISPATCH":
+    env_bool("MOE_HIERARCHICAL_DISPATCH", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which

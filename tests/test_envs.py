@@ -142,6 +142,21 @@ def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
 
 
+def test_moe_hierarchical_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """MOE_HIERARCHICAL_DISPATCH is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_HIERARCHICAL_DISPATCH", raising=False)
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "1")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "true")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "0")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
+
+
 def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
     """DP_SCHED_ROUTING defaults to least_loaded and only accepts known policies."""
     monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)
