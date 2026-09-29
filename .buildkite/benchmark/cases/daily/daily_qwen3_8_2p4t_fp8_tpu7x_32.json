@@ -28,6 +28,7 @@
           "NEW_MODEL_DESIGN": "1",
           "MOE_HIERARCHICAL_DISPATCH": "1",
           "MOE_STAGE_WEIGHTS_ON_HOST": "1",
+          "VLLM_INCREMENTAL_FP8_LOADING": "1",
           "BF16_LINEAR_REQUANTIZE_BLOCK_SIZE": "512",
           "BF16_LINEAR_REQUANTIZE_PATTERNS": "re:.*self_attn\\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$",
           "USE_BATCHED_RPA_KERNEL": "1",
