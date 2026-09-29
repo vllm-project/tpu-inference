@@ -160,7 +160,8 @@ def _scheduler_worker_process(
     atexit._clear()
     gc.enable()
     cache_config = getattr(vllm_config, "cache_config", None)
-    if getattr(cache_config, "mamba_cache_mode", "none") == "align":
+    if (envs.USE_DECOUPLED_MAMBA_POOL
+            or getattr(cache_config, "mamba_cache_mode", "none") == "align"):
         from tpu_inference.core.hybrid_coordinator import (
             install_hybrid_coordinator_hooks, set_mamba_num_blocks)
         install_hybrid_coordinator_hooks(vllm_config)

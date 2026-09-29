@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     MOE_TWO_STEP_DISPATCH: bool = False
+    USE_DECOUPLED_MAMBA_POOL: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -536,6 +537,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See fused_moe_gmm.py.
     "MOE_TWO_STEP_DISPATCH":
     env_bool("MOE_TWO_STEP_DISPATCH", default=False),
+    # Schedule hybrid models' mamba/GDN groups from their own compact pool even
+    # without prefix caching. Without it, vLLM draws one block per mamba group
+    # per request from the attention pool, which the TPU runner never uses (it
+    # keeps mamba state in separate arrays and picks slots itself). With
+    # prefix caching (align mode) the separate pool is always used. See
+    # core/hybrid_coordinator.py.
+    "USE_DECOUPLED_MAMBA_POOL":
+    env_bool("USE_DECOUPLED_MAMBA_POOL", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which

@@ -769,3 +769,130 @@ class TestTPUKVCacheManager:
                                                  num_new_tokens=16)
         assert blocks_no_mamba is None
         coord.mamba_block_pool.free_blocks(allocated_mamba)
+
+
+class TestDecoupledPoolWithoutPrefixCaching:
+    """USE_DECOUPLED_MAMBA_POOL: the decoupled pools with prefix caching off.
+
+    Mirrors Qwen3.5-style models: one attention group plus three mamba groups
+    in "none" mode, where vLLM sets the mamba block size to max_model_len
+    (one block per request per group).
+    """
+
+    MAX_MODEL_LEN = 1024
+    BLOCK = 16
+    TOKENS = 160  # 10 attention blocks per request
+
+    def _config(self, num_attn_blocks: int) -> KVCacheConfig:
+        attn_spec = FullAttentionSpec(block_size=self.BLOCK,
+                                      num_kv_heads=8,
+                                      head_size=128,
+                                      dtype=torch.bfloat16)
+        mamba_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                               dtypes=(torch.bfloat16, torch.float32),
+                               block_size=self.MAX_MODEL_LEN,
+                               mamba_cache_mode="none")
+        groups = [KVCacheGroupSpec(["attn_0"], attn_spec)]
+        groups += [
+            KVCacheGroupSpec([f"mamba_{i}"], mamba_spec) for i in range(3)
+        ]
+        return KVCacheConfig(num_blocks=num_attn_blocks,
+                             kv_cache_tensors=[],
+                             kv_cache_groups=groups)
+
+    def _manager(self, monkeypatch, decoupled: bool, num_attn_blocks: int,
+                 mamba_num_blocks: int) -> TPUKVCacheManager:
+        import vllm.v1.core.kv_cache_manager as mgr_mod
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        if decoupled:
+            monkeypatch.setenv("USE_DECOUPLED_MAMBA_POOL", "1")
+        else:
+            monkeypatch.delenv("USE_DECOUPLED_MAMBA_POOL", raising=False)
+        monkeypatch.setattr(mgr_mod, "get_kv_cache_coordinator",
+                            hc_mod.tpu_get_kv_cache_coordinator)
+        set_mamba_num_blocks(mamba_num_blocks)
+        return TPUKVCacheManager(
+            kv_cache_config=self._config(num_attn_blocks),
+            max_model_len=self.MAX_MODEL_LEN,
+            # lcm of the group block sizes, as vLLM computes it
+            scheduler_block_size=self.MAX_MODEL_LEN,
+            hash_block_size=self.BLOCK,
+            enable_caching=False,
+        )
+
+    def _fill(self, manager: TPUKVCacheManager, n: int) -> list[Request]:
+        admitted = []
+        for i in range(n):
+            req = Request(request_id=f"r{i}",
+                          prompt_token_ids=list(range(self.TOKENS)),
+                          sampling_params=MagicMock(),
+                          pooling_params=None)
+            if manager.allocate_slots(req, self.TOKENS) is None:
+                break
+            admitted.append(req)
+        return admitted
+
+    def test_factory_gated_on_flag(self, monkeypatch):
+        stock = self._manager(monkeypatch, decoupled=False,
+                              num_attn_blocks=131, mamba_num_blocks=14)
+        assert not isinstance(stock.coordinator, TPUHybridKVCacheCoordinator)
+        decoupled = self._manager(monkeypatch, decoupled=True,
+                                  num_attn_blocks=131, mamba_num_blocks=14)
+        assert isinstance(decoupled.coordinator, TPUHybridKVCacheCoordinator)
+
+    def test_mamba_groups_take_no_attention_blocks(self, monkeypatch):
+        # 130 usable attention blocks. vLLM's shared pool charges 10 + 3 per
+        # request (one per mamba group) and fits 10; the decoupled pools charge
+        # 10 attention blocks plus one mirrored mamba block and fit 13.
+        stock = self._manager(monkeypatch, decoupled=False,
+                              num_attn_blocks=131, mamba_num_blocks=14)
+        assert len(self._fill(stock, 13)) == 10
+
+        decoupled = self._manager(monkeypatch, decoupled=True,
+                                  num_attn_blocks=131, mamba_num_blocks=14)
+        assert len(self._fill(decoupled, 13)) == 13
+        coord = decoupled.coordinator
+        assert coord.attention_block_pool.get_num_free_blocks() == 0
+        assert coord.mamba_block_pool.get_num_free_blocks() == 0
+
+    def test_mamba_pool_bounds_admission(self, monkeypatch):
+        # Plenty of attention blocks, 5 usable mamba slots: the sixth request
+        # is refused rather than handed a slot that does not exist.
+        decoupled = self._manager(monkeypatch, decoupled=True,
+                                  num_attn_blocks=1000, mamba_num_blocks=6)
+        assert len(self._fill(decoupled, 8)) == 5
+
+    def test_blocks_recycle_after_free(self, monkeypatch):
+        decoupled = self._manager(monkeypatch, decoupled=True,
+                                  num_attn_blocks=131, mamba_num_blocks=14)
+        admitted = self._fill(decoupled, 13)
+        assert len(admitted) == 13
+        for req in admitted:
+            decoupled.free(req)
+        coord = decoupled.coordinator
+        assert coord.attention_block_pool.get_num_free_blocks() == 130
+        assert coord.mamba_block_pool.get_num_free_blocks() == 13
+
+    def test_usage_reports_attention_pool(self, monkeypatch):
+        # One request fills 10 of 130 attention blocks and 1 of 1 mamba slot.
+        # Reporting max() would read 100%; outside align mode the mamba pool
+        # is one slot per running request, so usage is the attention pool's.
+        decoupled = self._manager(monkeypatch, decoupled=True,
+                                  num_attn_blocks=131, mamba_num_blocks=2)
+        assert len(self._fill(decoupled, 1)) == 1
+        assert decoupled.coordinator.mamba_block_pool.get_usage() == 1.0
+        assert decoupled.usage == pytest.approx(10 / 130)
+
+    def test_maybe_install_hooks_with_flag(self, monkeypatch):
+        from unittest.mock import patch
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.enable_prefix_caching = False
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        monkeypatch.setenv("USE_DECOUPLED_MAMBA_POOL", "1")
+        with patch.object(hc_mod, "install_hybrid_coordinator_hooks") as inst:
+            hc_mod.maybe_install_hybrid_coordinator_hooks(vllm_config)
+            inst.assert_called_once_with(vllm_config)

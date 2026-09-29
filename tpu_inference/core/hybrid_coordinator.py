@@ -16,6 +16,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -51,6 +52,13 @@ logger = init_logger(__name__)
 #    Resolves mamba_num_blocks from an explicit argument, `kv_cache_config`, or
 #    get_mamba_num_blocks(), and initializes an independent Mamba BlockPool;
 #    fails fast if none of them is known.
+#
+# 4. WHEN IT IS USED:
+#    Always with mamba prefix caching (align mode). Without prefix caching only
+#    when USE_DECOUPLED_MAMBA_POOL is set; otherwise vLLM's coordinator draws one
+#    block per mamba group per request from the attention pool, blocks the TPU
+#    runner never reads (it indexes mamba state by its own slot ids outside
+#    align mode, see gdn_attention_op.py).
 # ==============================================================================
 _HOOKS_INSTALLED: bool = False
 _GLOBAL_MAMBA_NUM_BLOCKS: int | None = None
@@ -196,10 +204,12 @@ class TPUDualBlockPool(BlockPool):
         attention_pool: BlockPool,
         mamba_pool: BlockPool,
         mamba_group_ids: set[int] | None = None,
+        report_mamba_usage: bool = True,
     ):
         self.attention_pool = attention_pool
         self.mamba_pool = mamba_pool
         self.mamba_group_ids = mamba_group_ids or set()
+        self.report_mamba_usage = report_mamba_usage
         self.mamba_block_identities: set[int] = {
             id(b)
             for b in mamba_pool.blocks
@@ -248,6 +258,11 @@ class TPUDualBlockPool(BlockPool):
         return self.attention_pool.get_num_free_blocks()
 
     def get_usage(self) -> float:
+        # Without prefix caching the mamba pool holds one slot per running
+        # request, so it reads 100% whenever a rank is full and would hide the
+        # attention pool's usage; report the attention pool alone then.
+        if not self.report_mamba_usage:
+            return self.attention_pool.get_usage()
         return max(self.attention_pool.get_usage(),
                    self.mamba_pool.get_usage())
 
@@ -434,10 +449,14 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     f"Manager {i} block_pool is not attention_block_pool!")
 
         # Replace self.block_pool with TPUDualBlockPool
+        is_align_mode = any(
+            kv_cache_config.kv_cache_groups[i].kv_cache_spec.mamba_cache_mode
+            == "align" for i in self.mamba_group_ids)
         self.block_pool = TPUDualBlockPool(
             self.attention_block_pool,
             self.mamba_block_pool,
             mamba_group_ids=self.mamba_group_ids,
+            report_mamba_usage=is_align_mode,
         )
 
         # Re-verify and split groups so attention_groups binds to updated managers
@@ -675,7 +694,7 @@ def tpu_get_kv_cache_coordinator(
 ) -> KVCacheCoordinator:
     enable_caching = kwargs.get("enable_caching", False)
     has_mamba = any(is_mamba_group(g) for g in kv_cache_config.kv_cache_groups)
-    if enable_caching and has_mamba:
+    if has_mamba and (enable_caching or envs.USE_DECOUPLED_MAMBA_POOL):
         return TPUHybridKVCacheCoordinator(kv_cache_config, *args, **kwargs)
     return orig_get_kv_cache_coordinator(kv_cache_config, *args, **kwargs)
 
@@ -724,11 +743,13 @@ class MambaPoolSyncExecutorMixin:
 
 
 def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
-    """Install the hooks when mamba prefix caching (align mode) is on. Called
+    """Install the hooks when mamba prefix caching (align mode) is on, or when
+    USE_DECOUPLED_MAMBA_POOL asks for the decoupled pools without it. Called
     from the executors' `_init_executor`, which runs in the engine-core
     process; the platform config hook does not."""
     cache_config = vllm_config.cache_config
-    if (cache_config.enable_prefix_caching
+    if envs.USE_DECOUPLED_MAMBA_POOL or (
+            cache_config.enable_prefix_caching
             and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
         install_hybrid_coordinator_hooks(vllm_config)
 
