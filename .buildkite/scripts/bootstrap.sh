@@ -276,16 +276,13 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
     upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
-  
-    # Upload JAX pipeline for v7
-    set_jax_envs v7
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
 
-    # Upload JAX pipeline for v6 (default)
-    set_jax_envs v6
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
+    # Only the LKG promotion gate, not the full pipeline_jax.yml matrix. This
+    # pipeline exists to decide whether a vLLM commit is safe to pin, and that
+    # question is answered by a handful of single-chip steps; the multi-chip
+    # accuracy and perf suites run nightly against the already-pinned LKG.
+    # See the header of pipeline_integration_gate.yml for the reasoning.
+    upload_with_priority .buildkite/pipeline_integration_gate.yml "$JOB_PRIORITY"
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo

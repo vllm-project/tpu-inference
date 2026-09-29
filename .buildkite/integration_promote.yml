@@ -13,6 +13,11 @@
 # limitations under the License.
 
 steps:
+  # This file is uploaded before pipeline_integration_gate.yml (Buildkite
+  # inserts uploads in reverse order), so `gate_check` is not a resolvable
+  # depends_on target yet. The bare wait is equivalent in effect: every gated
+  # step soft-fails, gate_check is the one step that hard-fails, and a hard
+  # failure is what holds the wait and leaves promote_lkg unrun.
   - wait: ~
   # -----------------------------------------------------------------
   # Checkin LKG
