@@ -116,9 +116,10 @@ declare -a BENCHMARK_DOCKER_ARGS=(
   "-e" "BUILDKITE_BUILD_NUMBER=${BUILDKITE_BUILD_NUMBER}"
   "-e" "BUILDKITE_JOB_ID=${BUILDKITE_JOB_ID}"
   # report_result.sh uses this to replace the previous BigQuery row for a
-  # retried step, matching the Spanner upsert's semantics.
+  # retried step.
   "-e" "BUILDKITE_RETRY_COUNT=${BUILDKITE_RETRY_COUNT:-0}"
   "-e" "UPLOAD_DB=${UPLOAD_DB:-true}"
+  "-e" "SPANNER_UPLOAD_ENABLED=${SPANNER_UPLOAD_ENABLED:-false}"
   "-e" "MLCOMPASS_EXECUTION_MODE=${MLCOMPASS_EXECUTION_MODE:-}"
   "-e" "MLCOMPASS_EXPORT_ENABLED=${MLCOMPASS_EXPORT_ENABLED:-}"
   "-e" "MLCOMPASS_TEST_NAME=${MLCOMPASS_TEST_NAME:-}"
@@ -156,6 +157,7 @@ if [[ "${IS_MULTI_HOST_BENCH:-false}" == "true" ]]; then
       -e GCP_REGION=${GCP_REGION:-} \
       -e GCS_BUCKET=${GCS_BUCKET:-} \
       -e UPLOAD_DB=${UPLOAD_DB:-true} \
+      -e SPANNER_UPLOAD_ENABLED=${SPANNER_UPLOAD_ENABLED:-false} \
       -e BUILDKITE=${BUILDKITE:-} \
       -e BUILDKITE_AGENT_NAME=${BUILDKITE_AGENT_NAME:-} \
       -e BUILDKITE_AGENT_META_DATA_QUEUE=${BUILDKITE_AGENT_META_DATA_QUEUE:-} \
