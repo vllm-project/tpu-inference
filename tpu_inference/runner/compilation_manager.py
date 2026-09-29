@@ -1043,7 +1043,7 @@ class CompilationManager:
                             "allow_distributed_sampling":
                             allow_distributed_sampling
                         },
-                        compile_only=False,
+                        compile_only=True,
                         num_reqs=num_reqs,
                         do_sampling=do_sampling,
                         logprobs=logprobs,
