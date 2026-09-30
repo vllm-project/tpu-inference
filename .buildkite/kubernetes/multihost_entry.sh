@@ -24,6 +24,8 @@
 #   HEAD_HOST      the DNS name of index 0, which every host addresses.
 #   NUM_HOSTS      hosts in the slice; the head waits for this many Ray nodes.
 #   JOB_COMPLETION_INDEX  set by Kubernetes. 0 is the head.
+#   MULTIHOST_ENV_B64  optional, from run.sh: NUL-delimited KEY=VALUE pairs,
+#                  base64, exported on every host before Ray starts.
 set -uo pipefail
 
 if [ "$#" -lt 1 ]; then
@@ -45,6 +47,17 @@ cd "$REPO_DIR" || { echo "$0: no such directory: $REPO_DIR" >&2; exit 2; }
 
 # Core dumps are gigabytes each and fill the node's ephemeral storage.
 ulimit -c 0
+
+# Before Ray starts, on every host: a Ray worker inherits its raylet's
+# environment, so a variable only the head's command sets never reaches the
+# workers on the other hosts.
+if [ -n "${MULTIHOST_ENV_B64:-}" ]; then
+  while IFS= read -r -d '' kv; do
+    # KEY=VALUE, so export sets KEY; SC2163 reads this as exporting kv.
+    # shellcheck disable=SC2163
+    export "$kv"
+  done < <(printf '%s' "$MULTIHOST_ENV_B64" | base64 -d)
+fi
 
 export RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS=1
 export TPU_MULTIHOST_BACKEND=ray
