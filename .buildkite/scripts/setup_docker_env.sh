@@ -154,6 +154,10 @@ setup_environment() {
   local push_to_ci_cache=${3:-"false"}
   IMAGE_NAME="$image_name_param"
 
+  if [[ -n "${BUILDKITE:-}" && "$push_to_ci_cache" != "true" ]]; then
+    export USE_PREBUILT_IMAGE="${USE_PREBUILT_IMAGE:-1}"
+  fi
+
   # ==========================================
   # Skip Build and Cleanup in DEV_MODE if image already exists
   # ==========================================
@@ -165,7 +169,14 @@ setup_environment() {
   fi
 
   local CI_IMAGE_REPO="us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/${IMAGE_NAME}"
-  local LOCAL_TPU_VERSION="${TPU_VERSION:-tpu6e}" 
+  local LOCAL_TPU_VERSION="${TPU_VERSION:-}"
+  if [ -z "${LOCAL_TPU_VERSION}" ]; then
+    if [[ "${BUILDKITE_AGENT_META_DATA_QUEUE:-}" =~ v7x|tpu7x ]] || [[ "${BUILDKITE_AGENT_NAME:-}" =~ v7x|tpu7x ]] || [[ "${BUILDKITE_STEP_KEY:-}" =~ ^tpu7x ]] || [[ "${BUILDKITE_LABEL:-}" =~ ^tpu7x ]]; then
+      LOCAL_TPU_VERSION="tpu7x"
+    else
+      LOCAL_TPU_VERSION="tpu6e"
+    fi
+  fi 
 
   local DOCKERFILE_NAME="Dockerfile"
 
@@ -262,7 +273,7 @@ setup_environment() {
   fi
 
   # Build with specific hash and 'latest' tag for convenience
-  docker build \
+  DOCKER_BUILDKIT=1 docker build \
       --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" \
       --build-arg IS_TEST="true" \
       --build-arg BM_INFRA="${BM_INFRA:-false}" \
