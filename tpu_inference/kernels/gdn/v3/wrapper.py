@@ -101,14 +101,11 @@ def inner_kernel(
         cfg=cfg,
     )
 
-    conv_state_slot_ref[...] = new_conv_state
+    conv_state_slot_ref[...] = new_conv_state.astype(conv_state_slot_ref.dtype)
     if carry_conv_scratch_ref is not None:
         # The next tile resumes from the state after this tile's last token,
         # which is the final checkpoint.
         carry_conv_scratch_ref[...] = new_conv_state[:, -1]
-
-    # Apply activation function.
-    qkv_out_compact = jax.nn.silu(qkv_out_compact)
 
     # Step 2: GDN.
 
@@ -121,6 +118,7 @@ def inner_kernel(
     # load_activation_as_compact and load_activation_as_large leverages vmem ldst.
     # Passing refs into gdn.py breaks strict separation of concerns.
     if cfg.use_recurrent:
+        qkv_out_compact = jax.nn.silu(qkv_out_compact)
         q_compact, k_compact, v_compact, b_compact, a_compact = (
             vmem_ldst.load_activation_as_compact(
                 qkv_vreg=qkv_out_compact,
@@ -153,6 +151,9 @@ def inner_kernel(
                 cfgs=cfg,
             ))
 
+        q_large, k_large, v_large = (jax.nn.silu(q_large),
+                                     jax.nn.silu(k_large),
+                                     jax.nn.silu(v_large))
         out, new_recurrent_state = compute_gdn.chunked_gdn(
             q_large=q_large,
             k_large=k_large,
