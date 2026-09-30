@@ -86,6 +86,8 @@ if TYPE_CHECKING:
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     MOE_HIERARCHICAL_DISPATCH: bool = False
+    RAGGED_GATHER_MAX_ROW_SUBCHUNKS: int = 4
+    RAGGED_GATHER_TRIM_ROWS: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -539,6 +541,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # See fused_moe_gmm.py.
     "MOE_HIERARCHICAL_DISPATCH":
     env_bool("MOE_HIERARCHICAL_DISPATCH", default=False),
+    # EP dispatch permute gather: the ragged_gather_v2 kernel
+    # (kernels/sparse_core/ragged_gather_v2.py), called from fused_moe_gmm.py.
+    # max_row_subchunks: caps the SparseCore gather's block size; 1 gives the
+    # smallest blocks, which move fewer rows when one shard's rows are a small
+    # part of the input.
+    "RAGGED_GATHER_MAX_ROW_SUBCHUNKS":
+    lambda: int(os.getenv("RAGGED_GATHER_MAX_ROW_SUBCHUNKS") or "4"),
+    # trim_rows: copy the gather's output down to num_tokens * topk rows. When
+    # off, the block-padded output goes straight to gmm_v2, skipping the copy.
+    "RAGGED_GATHER_TRIM_ROWS":
+    env_bool("RAGGED_GATHER_TRIM_ROWS", default=True),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
