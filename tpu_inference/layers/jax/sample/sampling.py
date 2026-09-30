@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
+from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
@@ -277,6 +278,10 @@ def _distributed_topk_sample(
             jnp.ones_like(local_temperature),
             local_temperature,
         )
+        # Constrain local_logits so the vocabulary reduction dimension is major
+        # and the batch dimension is minor across TPU vector lanes for top_k.
+        local_logits = with_layout_constraint(local_logits,
+                                              Layout(major_to_minor=(1, 0)))
         scaled_logits = local_logits / safe_temperature[:, None]
         local_values, local_ids = lax.top_k(scaled_logits,
                                             candidates_per_shard)
