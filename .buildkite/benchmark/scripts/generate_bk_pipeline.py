@@ -196,6 +196,26 @@ def _get_kube_queue_filter() -> Set[str]:
     return set()
 
 
+def _kube_concurrency(shape: str) -> Dict[str, Any]:
+    """Buildkite concurrency settings for this build's steps on one shape.
+
+    A kube step's launcher submits its workload as soon as the step starts,
+    and the TPU queues admit in submission order, so a build that starts every
+    case at once parks a backlog in Kueue ahead of other lanes' later steps on
+    the same chips. Capping each shape at KUBE_BENCHMARK_CHIPS chips per build
+    keeps the backlog in Buildkite, where it does not hold other lanes up.
+    """
+    budget = int(os.getenv("KUBE_BENCHMARK_CHIPS", "16"))
+    chips = 1
+    for dim in shape.split("/")[1].split("x"):
+        chips *= int(dim)
+    build = os.getenv("BUILDKITE_BUILD_ID", "local")
+    return {
+        "concurrency": max(1, budget // chips),
+        "concurrency_group": f"tpu-inference-benchmark-kube/{build}/{shape}",
+    }
+
+
 def _get_mlcompass_select_tests() -> Set[str]:
     selected = os.getenv('MLCOMPASS_SELECT_TESTS')
     if selected:
@@ -297,6 +317,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
                 step_env["TPU_MAX_RUNTIME_SECONDS"] = str(
                     int(timeout_in_minutes) * 60)
             step_env["SHAPE"] = KUBE_SHAPES[agent]
+            step.update(_kube_concurrency(KUBE_SHAPES[agent]))
             step.update({
                 "env":
                 step_env,
