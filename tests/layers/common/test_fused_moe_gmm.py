@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for fused_moe_func's static activation input scales.
+"""Tests for fused_moe_func's static per-tensor lhs scales.
 
 The tests need a TPU on which gmm_v2 quantizes activations to fp8 for fp8
 weights (fp8_ops_per_second > 0, e.g. v6e, v7x).
@@ -56,21 +56,17 @@ def _make_mesh(**sizes) -> Mesh:
                          devices=devices)
 
 
-def _quantize(w: jax.Array, block_k: int | None):
-    """[E, K, N] -> fp8 weight and its [E, K // block_k, 1, N] scale."""
-    num_experts, k, n = w.shape
-    block_k = block_k or k
-    w32 = w.astype(jnp.float32).reshape(num_experts, k // block_k, block_k, n)
+def _quantize(w: jax.Array):
+    """[E, K, N] -> fp8 weight and its per-channel [E, 1, 1, N] scale."""
+    w32 = w.astype(jnp.float32)[:, None]
     scale = jnp.max(jnp.abs(w32), axis=2, keepdims=True) / _FP8_MAX
-    w_q = (w32 / scale).astype(jnp.float8_e4m3fn).reshape(num_experts, k, n)
-    return w_q, scale
+    return (w32 / scale).astype(jnp.float8_e4m3fn)[:, 0], scale
 
 
 def _run(mesh: Mesh,
          *,
          quantized: bool = True,
          clip: float | None = None,
-         block_k: int | None = None,
          **kwargs) -> np.ndarray:
     num_tokens, hidden, intermediate, num_experts = 64, 256, 1024, 16
     kx, k1, k2, kg = jax.random.split(jax.random.key(0), 4)
@@ -83,8 +79,8 @@ def _run(mesh: Mesh,
                            jnp.bfloat16) / 16
     w1_scale = w2_scale = None
     if quantized:
-        w1, w1_scale = _quantize(w1, block_k)
-        w2, w2_scale = _quantize(w2, block_k)
+        w1, w1_scale = _quantize(w1)
+        w2, w2_scale = _quantize(w2)
     rows = NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None))
     with jax.set_mesh(mesh):
         out = fused_moe_gmm.fused_moe_func(
@@ -123,40 +119,24 @@ def _rel_err(actual: np.ndarray, expected: np.ndarray) -> float:
                  marks=pytest.mark.skipif(_NUM_DEVICES < 8,
                                           reason="needs 8 devices")),
 ])
-def test_static_input_scale_is_used_and_accurate(sizes):
+def test_static_lhs_scale_is_used_and_accurate(sizes):
     mesh = _make_mesh(**sizes)
     reference = _run(mesh, quantized=False)
     dynamic = _run(mesh)
     # 224 / 448: the fixed,-224,224 convention of MaxText's fp8 recipes.
-    static = _run(mesh, w1_input_scale=_scale(0.5), w2_input_scale=_scale(0.5))
+    static = _run(mesh, w1_lhs_scale=_scale(0.5), w2_lhs_scale=_scale(0.5))
 
     assert not np.array_equal(static, dynamic), "static scale was not used"
     assert _rel_err(dynamic, reference) < 0.1
     assert _rel_err(static, reference) < 0.1
 
 
-def test_static_input_scale_saturates_at_fixed_range():
+def test_static_lhs_scale_saturates_at_fixed_range():
     # A static scale does not adapt to the input: GMM1 inputs beyond
     # +-(scale * fp8_max) saturate, exactly as if they had been clipped.
     mesh = _make_mesh()
     clip = 0.25
-    kwargs = dict(w1_input_scale=_scale(clip / _FP8_MAX),
-                  w2_input_scale=_scale(0.5))
+    kwargs = dict(w1_lhs_scale=_scale(clip / _FP8_MAX),
+                  w2_lhs_scale=_scale(0.5))
     np.testing.assert_array_equal(_run(mesh, **kwargs),
                                   _run(mesh, clip=clip, **kwargs))
-
-
-def test_input_scale_is_ignored_for_narrow_weight_scale_blocks():
-    # Weight-scale blocks narrower than the MXU make gmm_v2 dequantize the
-    # weights before the matmul, so the activations are never quantized and
-    # gmm_v2 would reject an lhs_scale.
-    mesh = _make_mesh()
-    expected = _run(mesh, block_k=128)
-    with mock.patch.object(fused_moe_gmm, "logger") as logger:
-        actual = _run(mesh,
-                      block_k=128,
-                      w1_input_scale=_scale(0.5),
-                      w2_input_scale=_scale(0.5))
-    np.testing.assert_array_equal(actual, expected)
-    assert any("is ignored" in call.args[0]
-               for call in logger.warning_once.call_args_list)
