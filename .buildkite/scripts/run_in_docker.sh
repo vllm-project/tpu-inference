@@ -173,6 +173,12 @@ trap 'docker kill "$IMAGE_NAME" 2>/dev/null || true; rm -f "$RUN_LOG"' EXIT INT 
 #   initiate models and bypass vLLM's CompilationManager logic entirely.
 # -----------------------------------------------------------------------------
 
+# The command runs under `umask 000`. The container is root, and the HF cache
+# it writes is the host's /mnt/disks/persist/models, which other jobs on the
+# same agents write from the host as the agent user. With the default umask, a
+# download here leaves hub/ and each models--* directory 0755 root-owned, and
+# those jobs then fail with "Permission denied" on every model this agent has
+# not cached yet.
 docker run \
   --name "$IMAGE_NAME" \
   --privileged \
@@ -204,7 +210,7 @@ docker run \
   -e NUM_PRECOMPILE_WORKERS="${NUM_PRECOMPILE_WORKERS:-1}" \
    "${BENCHMARK_DOCKER_ARGS[@]}" \
   "$FULL_IMAGE_TAG" \
-  "$@" 2>&1 | tee "$RUN_LOG" # Pass all script arguments as the command to run in the container
+  bash -c 'umask 000; exec "$@"' -- "$@" 2>&1 | tee "$RUN_LOG" # Pass all script arguments as the command to run in the container
 DOCKER_EXIT_CODE=${PIPESTATUS[0]}
 
 set -e
