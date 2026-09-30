@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, fused-RS MoE, decoupled GDN pool, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, accuracy)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,34 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #53: accuracy run for the shared expert in fp8. #46's configuration
+        # (standard MoE path, two-step dispatch, MNBT 512/rank, bucket 384,
+        # C=368 @ util 0.98) with three changes: the requantization pattern
+        # adds the shared expert's gate_up_proj and down_proj, all three lm_eval
+        # tasks run (GPQA settings as #30/#33), and BENCH_SWEEP=none skips the
+        # perf leg. A perf run follows only if accuracy holds.
+        #
+        # #32 put down_proj in fp8 and died at load: its 2048 input features
+        # are 4 blocks of 512, which the row-parallel input axis could not
+        # shard over model=8. #46's mesh has model=4 (ATTN_HEAD = model x
+        # expert x dcp = 4), so it is 4 blocks over 4 shards. Checked on real
+        # hardware first (experiments/.../shared_expert_fp8/): on an
+        # attn_dp=2 x model=4 mesh at block 512 with production shapes, both
+        # layers requantize (down_proj scale (1, 4, 1, 8192)), model=8 still
+        # raises #32's error, and the output tracks bf16 at rel_l2 0.038 for
+        # 16/48/512 tokens, the same as gate_up_proj. #33 already showed
+        # gate_up_proj alone is free on accuracy (MMLU identical to #30).
+        # Expected saving ~1.08 GiB/device (shared expert 2.16 GiB/device bf16
+        # at model=4). Pool stays pinned at 27232, so the saving is headroom.
+        #
+        # WHAT TO READ FIRST:
+        #   1. "BF16_LINEAR_REQUANTIZE_PATTERNS selected ... shared_expert" and
+        #      no "cannot shard" ValueError at load.
+        #   2. Init model per device ~1.08 GiB below #46 (81.59).
+        #   3. GPQA vs #30/#33 (0.8990 / 0.8838, noise +-0.035) and its
+        #      truncation (18-19/198); GSM8K vs #46 0.9780; MMLU vs #46 0.8945
+        #      (+-0.0025, the tightest instrument).
+        #
         # #52: #51 again, same configuration, after c345ae547. #51's rank
         # schedulers all died at startup: with caching off vLLM passes
         # hash_block_size = lcm of the group block sizes = 40960, and the TPU
@@ -439,17 +467,16 @@ steps:
           'RUNAI_STREAMER_LOG_TO_STDERR=1' \
           'TPU_WEIGHT_LOAD_PROFILE=1' \
           'TPU_WEIGHT_LOAD_PROFILE_EVERY=10000' \
-          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$' \
+          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$' \
           'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512' \
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=8' \
           'MAX_MODEL_LEN=40960' \
           'MAX_NUM_SEQS=46' \
           'NUM_GPU_BLOCKS_OVERRIDE=27232' \
-          'MAX_NUM_BATCHED_TOKENS=2048' \
-          'USE_GMM_FUSED_RS_KERNEL=1' \
-          'USE_DECOUPLED_MAMBA_POOL=1' \
+          'MAX_NUM_BATCHED_TOKENS=512' \
           'COMPILATION_SIZES=384' \
+          'MOE_TWO_STEP_DISPATCH=1' \
           'GPU_MEMORY_UTILIZATION=0.98' \
           'BLOCK_SIZE=128' \
           'KV_CACHE_DTYPE=fp8' \
@@ -457,7 +484,7 @@ steps:
           'OUTPUT_LEN=1024' \
           'NUM_PROMPTS=368' \
           'MAX_CONCURRENCY=368' \
-          'BENCH_SWEEP=368:368' \
+          'BENCH_SWEEP=none' \
           'NUM_WARMUPS=368' \
           'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
           'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
@@ -466,7 +493,7 @@ steps:
           'PHASED_PROFILER_TARGET_CONCURRENCY=368' \
           'PHASED_PROFILER_ONLY_PHASES=decode_only' \
           'EVAL_SUITE=none' \
-          'STD_EVAL_SUITE=gsm8k' \
+          'STD_EVAL_SUITE=gpqa,gsm8k,mmlu' \
           'GPQA_REASONING_EFFORT=xhigh' \
           'GPQA_SAMPLING=greedy' \
           'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
