@@ -63,6 +63,38 @@ echo "[INFO] Dynamic mapping complete: $ci_queue -> $DEVICE"
 # uploads through ARTIFACTS_DIR: the server and benchmark logs run_job.sh
 # uploads on bare metal, and the rest of what report_result.sh copies to GCS.
 export ARTIFACTS_DIR=artifacts/temp_logs
+
+# A shape spanning more than one host - its topology holds more chips than its
+# machine type's -<n>t has - runs as a Ray cluster across the slice, as
+# run_multihost.sh runs it on bare metal: every host joins, and
+# run_bm_multihost.sh starts the server on the head and hands the benchmark to
+# run_bm.sh against it.
+: "${SHAPE:?[ERROR] SHAPE is missing; the step was not made by generate_bk_pipeline.py}"
+ENTRY=.buildkite/benchmark/scripts/run_bm.sh
+IS_MULTI_HOST_BENCH=false
+topology="${SHAPE#*/}"
+slice_chips=1
+for dim in ${topology//x/ }; do
+    slice_chips=$((slice_chips * dim))
+done
+if [[ "${SHAPE%%/*}" =~ -([0-9]+)t$ ]] && (( slice_chips > BASH_REMATCH[1] )); then
+    IS_MULTI_HOST_BENCH=true
+    ENTRY=.buildkite/benchmark/scripts/run_bm_multihost.sh
+    export MULTIHOST_MANIFEST=ray-multihost-slice.yaml
+    export MULTIHOST_SHAPE="$SHAPE"
+    # The case's server environment on every host, not only in the head's
+    # server command: the Ray workers on the other hosts read it too, and
+    # inherit only what their raylet was started with.
+    SERVER_ENVS_B64=$(
+        SERVER_CMD_ENVS=()
+        eval "$(python3 .buildkite/benchmark/scripts/parser_case.py "$CASE_FILE" "$TARGET_CASE_NAME")"
+        if (( ${#SERVER_CMD_ENVS[@]} > 0 )); then
+            printf '%s\0' "${SERVER_CMD_ENVS[@]}" | base64 | tr -d '\n'
+        fi
+    )
+    export MULTIHOST_ENV_B64="$SERVER_ENVS_B64"
+fi
+
 exec .buildkite/kubernetes/run.sh env \
     ARTIFACT_FOLDER=/workspace/tpu_inference/artifacts \
     DEVICE="$DEVICE" \
@@ -80,4 +112,5 @@ exec .buildkite/kubernetes/run.sh env \
     MLCOMPASS_TEST_NAME="${MLCOMPASS_TEST_NAME:-}" \
     MLCOMPASS_TRACKING_ID="${MLCOMPASS_TRACKING_ID:-}" \
     MLCOMPASS_SPONGE_ID="${MLCOMPASS_SPONGE_ID:-}" \
-    bash .buildkite/benchmark/scripts/run_bm.sh "$CASE_FILE" "$TARGET_CASE_NAME"
+    IS_MULTI_HOST_BENCH="$IS_MULTI_HOST_BENCH" \
+    bash "$ENTRY" "$CASE_FILE" "$TARGET_CASE_NAME"

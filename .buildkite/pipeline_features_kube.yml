@@ -1030,9 +1030,8 @@ steps:
   # ---- multi-host ----
 
   # The only step here that spans two hosts. Everything else is one pod holding
-  # every chip on a node; this needs a slice, so it names a manifest instead of
-  # a shape and the shape comes from that manifest's nodeSelector. The slice is
-  # 2x2x2 tpu7x - the whole v7x fleet - so it waits for every chip to be free.
+  # every chip on a node; this needs a slice, so it names a manifest and the
+  # slice it asks for instead of a shape. The slice is 2x2x2 tpu7x.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for multi-host"
     key: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
     if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
@@ -1043,8 +1042,10 @@ steps:
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
-      # Read by run.sh on the agent, not forwarded: it selects the JobSet.
+      # Read by run.sh on the agent, not forwarded: they select the JobSet
+      # and the slice it asks for.
       MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MULTIHOST_SHAPE: "tpu7x-standard-4t/2x2x2"
       MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
       TENSOR_PARALLEL_SIZE: "16"
       ASYNC_SCHEDULING: "1"

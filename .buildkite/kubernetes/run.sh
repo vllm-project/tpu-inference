@@ -48,11 +48,45 @@ if [[ -z "${MULTIHOST_MANIFEST:-}" ]]; then
       exit 2
       ;;
   esac
-elif [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" ]]; then
-  # The only slice manifest here is 2x2x2 tpu7x. Same mislabelling risk as
-  # above, minus the shape to read it from.
-  echo "$0: ${MULTIHOST_MANIFEST} is a tpu7x slice; TPU_VERSION=${TPU_VERSION:-tpu6e}" >&2
-  exit 2
+else
+  # The slice the manifest asks for, in the same <machine-type>/<topology> form
+  # as SHAPE. Separate from SHAPE because a step's SHAPE defaults to a v6e
+  # single-host shape, which is never a slice.
+  shape="${MULTIHOST_SHAPE:-}"
+  machine_type="${shape%%/*}"
+  topology="${shape#*/}"
+  # The chips on each host are the machine type's -<n>t suffix; a slice holds
+  # the product of its topology, so the host count is the one over the other.
+  chips_per_host=""
+  if [[ "$machine_type" =~ -([0-9]+)t$ ]]; then
+    chips_per_host="${BASH_REMATCH[1]}"
+  fi
+  slice_chips=1
+  if [[ "$topology" =~ ^[0-9]+(x[0-9]+)+$ ]]; then
+    IFS=x read -r -a dims <<< "$topology"
+    for dim in "${dims[@]}"; do
+      slice_chips=$((slice_chips * dim))
+    done
+  else
+    chips_per_host=""
+  fi
+  if [[ -z "$chips_per_host" || "$chips_per_host" -eq 0 ]] ||
+     (( slice_chips % chips_per_host != 0 || slice_chips / chips_per_host < 2 )); then
+    echo "$0: MULTIHOST_SHAPE must be <machine-type>-<n>t/<topology> of a" \
+         "slice spanning two or more hosts, got '${shape}'" >&2
+    exit 2
+  fi
+  # The manifests here are tpu7x slices. Same mislabelling risk as above.
+  if [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" || "$machine_type" != tpu7x-* ]]; then
+    echo "$0: ${MULTIHOST_MANIFEST} is a tpu7x slice; TPU_VERSION=${TPU_VERSION:-tpu6e}," \
+         "MULTIHOST_SHAPE=${shape}" >&2
+    exit 2
+  fi
+  # Substituted into the manifest by the launcher, which reads the step's
+  # environment.
+  export MULTIHOST_TOPOLOGY="$topology"
+  export MULTIHOST_HOSTS=$((slice_chips / chips_per_host))
+  export MULTIHOST_CHIPS="$chips_per_host"
 fi
 
 # setup_docker_env.sh records the tag it pushed for each generation.
@@ -150,6 +184,11 @@ if [[ -n "${MULTIHOST_MANIFEST:-}" ]]; then
   MULTIHOST_ARGS_B64="$(printf '%s\0' "$@" | base64 | tr -d '\n')"
   export MULTIHOST_ARGS_B64
   env_args+=(--env MULTIHOST_ARGS_B64)
+  # Environment every host needs, not only the head: multihost_entry.sh exports
+  # it before Ray starts, so the Ray workers inherit it. Encoded the same way.
+  if [[ -n "${MULTIHOST_ENV_B64:-}" ]]; then
+    env_args+=(--env MULTIHOST_ENV_B64)
+  fi
   exec /opt/launcher/launch \
     --manifest "${here}/manifests/workloads/${MULTIHOST_MANIFEST}" \
     "${env_args[@]}"

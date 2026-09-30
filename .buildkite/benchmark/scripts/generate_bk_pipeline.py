@@ -23,14 +23,16 @@ from typing import Any, Dict, List, Set
 import yaml
 
 # Kueue shape for each bare-metal queue a case can name, used when
-# BENCHMARK_TARGET=kube. tpu_v7x_16_queue is a two-host slice, which a kube
-# step can only get through a JobSet manifest, and run_job.sh reaches it
-# through run_multihost.sh; cases on it are left out of the kube pipeline.
+# BENCHMARK_TARGET=kube. A shape spanning more than one host - the v7x-16 and
+# v7x-32 slices - runs as a Ray cluster across the slice; run_job_kube.sh
+# tells the two apart from the shape itself.
 KUBE_SHAPES = {
     "tpu_v6e_queue": "ct6e-standard-1t/1x1",
     "tpu_v6e_8_queue": "ct6e-standard-8t/2x4",
     "tpu_v7x_2_queue": "tpu7x-standard-1t/1x1x1",
     "tpu_v7x_8_queue": "tpu7x-standard-4t/2x2x1",
+    "tpu_v7x_16_queue": "tpu7x-standard-4t/2x2x2",
+    "tpu_v7x_32_queue": "tpu7x-standard-4t/2x2x4",
 }
 
 # List of authorized command types
@@ -194,6 +196,26 @@ def _get_kube_queue_filter() -> Set[str]:
     return set()
 
 
+def _kube_concurrency(shape: str) -> Dict[str, Any]:
+    """Buildkite concurrency settings for this build's steps on one shape.
+
+    A kube step's launcher submits its workload as soon as the step starts,
+    and the TPU queues admit in submission order, so a build that starts every
+    case at once parks a backlog in Kueue ahead of other lanes' later steps on
+    the same chips. Capping each shape at KUBE_BENCHMARK_CHIPS chips per build
+    keeps the backlog in Buildkite, where it does not hold other lanes up.
+    """
+    budget = int(os.getenv("KUBE_BENCHMARK_CHIPS", "16"))
+    chips = 1
+    for dim in shape.split("/")[1].split("x"):
+        chips *= int(dim)
+    build = os.getenv("BUILDKITE_BUILD_ID", "local")
+    return {
+        "concurrency": max(1, budget // chips),
+        "concurrency_group": f"tpu-inference-benchmark-kube/{build}/{shape}",
+    }
+
+
 def _get_mlcompass_select_tests() -> Set[str]:
     selected = os.getenv('MLCOMPASS_SELECT_TESTS')
     if selected:
@@ -295,6 +317,7 @@ def create_benchmark_steps(case_data: Dict[str, Any],
                 step_env["TPU_MAX_RUNTIME_SECONDS"] = str(
                     int(timeout_in_minutes) * 60)
             step_env["SHAPE"] = KUBE_SHAPES[agent]
+            step.update(_kube_concurrency(KUBE_SHAPES[agent]))
             step.update({
                 "env":
                 step_env,
