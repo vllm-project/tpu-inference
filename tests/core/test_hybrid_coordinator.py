@@ -815,9 +815,10 @@ class TestDecoupledPoolWithoutPrefixCaching:
         return TPUKVCacheManager(
             kv_cache_config=self._config(num_attn_blocks),
             max_model_len=self.MAX_MODEL_LEN,
-            # lcm of the group block sizes, as vLLM computes it
+            # What vLLM's resolve_kv_cache_block_sizes passes with prefix
+            # caching off: both are the lcm of the group block sizes.
             scheduler_block_size=self.MAX_MODEL_LEN,
-            hash_block_size=self.BLOCK,
+            hash_block_size=self.MAX_MODEL_LEN,
             enable_caching=False,
         )
 

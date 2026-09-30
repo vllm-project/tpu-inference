@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -330,6 +331,16 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         mamba_num_blocks: int | None = None,
         **kwargs,
     ):
+        if not enable_caching:
+            # Without prefix caching vLLM sets hash_block_size to the scheduler
+            # block size (the lcm of the group block sizes; 40960 with a mamba
+            # group at max_model_len), which the attention block size does not
+            # divide, and HybridKVCacheCoordinator asserts that every group's
+            # block size is a multiple of it. Nothing is hashed, so pass the
+            # gcd, the value vLLM picks when hashing is on.
+            hash_block_size = math.gcd(*(
+                g.kv_cache_spec.block_size
+                for g in kv_cache_config.kv_cache_groups))
         super().__init__(
             kv_cache_config,
             max_model_len,
