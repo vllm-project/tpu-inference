@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, accuracy)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,22 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #54: perf run for the shared expert in fp8. #46's exact configuration
+        # -- benchmark (C=368, 8192/1024, 368 warmups), decode profile at 368,
+        # GSM8K + MMLU -- with one change: the requantization pattern adds the
+        # shared expert's gate_up_proj and down_proj. #53 found no accuracy cost
+        # (MMLU 0.8955 vs #46 0.8945, GSM8K 0.9795, GPQA 0.8788 with 18/198
+        # truncated) and 1.07 GiB/device less weight memory.
+        #
+        # WHAT TO READ FIRST:
+        #   1. Decode step (profile) vs #46's 85.52 ms, and the shared-expert
+        #      matmuls in it: they move from bf16 to the fp8 blockwise kernel.
+        #   2. Median ITL / peak decode throughput / TTFT vs #46 (90.45 ms /
+        #      4083.3 tok/s / 132.5 s). Decode is memory-bound at this batch,
+        #      so a small win from halving the shared-expert weight reads is
+        #      the most to expect.
+        #   3. GSM8K / MMLU repeat #53's.
+        #
         # #53: accuracy run for the shared expert in fp8. #46's configuration
         # (standard MoE path, two-step dispatch, MNBT 512/rank, bucket 384,
         # C=368 @ util 0.98) with three changes: the requantization pattern
@@ -484,7 +500,7 @@ steps:
           'OUTPUT_LEN=1024' \
           'NUM_PROMPTS=368' \
           'MAX_CONCURRENCY=368' \
-          'BENCH_SWEEP=none' \
+          'BENCH_SWEEP=368:368' \
           'NUM_WARMUPS=368' \
           'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
           'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
@@ -493,7 +509,7 @@ steps:
           'PHASED_PROFILER_TARGET_CONCURRENCY=368' \
           'PHASED_PROFILER_ONLY_PHASES=decode_only' \
           'EVAL_SUITE=none' \
-          'STD_EVAL_SUITE=gpqa,gsm8k,mmlu' \
+          'STD_EVAL_SUITE=gsm8k,mmlu' \
           'GPQA_REASONING_EFFORT=xhigh' \
           'GPQA_SAMPLING=greedy' \
           'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
