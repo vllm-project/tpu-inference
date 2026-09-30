@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=368 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=384 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,36 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #55: #54 at C=384 (48/rank), spending the 1.07 GiB/device the fp8
+        # shared expert freed. A decode step already pads 46 requests/rank to
+        # the 48-row bucket (384 aggregate); at 48/rank those rows do real work
+        # and the step shape does not change, so decode throughput should rise
+        # ~4% (384/368) at about the same step time.
+        #
+        # KV sizing, from #54's logged sizes (block 23 x 262144 B, GDN slot
+        # 69 x 8511488 B, available 394.42 GiB cluster-wide):
+        #   MAX_NUM_SEQS 46 -> 48: GDN slots 376 -> 392 (auto, 8 x 48 + 1 up
+        #     to a multiple of 8).
+        #   NUM_GPU_BLOCKS_OVERRIDE 27232 -> 28928 (3616/rank, a multiple of
+        #     32). Sized for 75 blocks per full-length request (72 + 3 blocks
+        #     the stock coordinator charges for the GDN groups): 48 x 75 = 3600
+        #     of 3615 usable per rank, so no preemption even if every request
+        #     peaks together. 27232 could not hold 46 x 75 = 3450 per rank.
+        #   Total 376.85 GiB of 394.42 (did not fit #46's 360.19); free HBM
+        #   after KV ~2.3-2.4 GiB/device vs #46's 1.82 measured, ahead of the
+        #   1.36 GiB the 4096-token backbone needs.
+        # Above 48/rank the decode step pads to the 64/rank bucket (the fp8
+        # blockwise matmul wants a multiple of 16 rows per rank on v7x), which
+        # cost ~20% per step in #44, so 384 is the stopping point.
+        # Benchmark, profile target and warmups move to 384; nothing else
+        # changes.
+        #
+        # WHAT TO READ FIRST:
+        #   1. KV check passes; "HBM split" shows 28928 blocks + 392 slots.
+        #   2. Decode profile fires at 384 running; step vs #54's 85.04 ms.
+        #   3. Peak decode throughput vs #54's 4119 tok/s (expect ~+4%),
+        #      median ITL, TTFT (expect ~+4%), 0 preemptions.
+        #
         # #54: perf run for the shared expert in fp8. #46's exact configuration
         # -- benchmark (C=368, 8192/1024, 368 warmups), decode profile at 368,
         # GSM8K + MMLU -- with one change: the requantization pattern adds the
@@ -488,8 +518,8 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=8' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=46' \
-          'NUM_GPU_BLOCKS_OVERRIDE=27232' \
+          'MAX_NUM_SEQS=48' \
+          'NUM_GPU_BLOCKS_OVERRIDE=28928' \
           'MAX_NUM_BATCHED_TOKENS=512' \
           'COMPILATION_SIZES=384' \
           'MOE_TWO_STEP_DISPATCH=1' \
@@ -498,15 +528,15 @@ steps:
           'KV_CACHE_DTYPE=fp8' \
           'INPUT_LEN=8192' \
           'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=368' \
-          'MAX_CONCURRENCY=368' \
-          'BENCH_SWEEP=368:368' \
-          'NUM_WARMUPS=368' \
+          'NUM_PROMPTS=384' \
+          'MAX_CONCURRENCY=384' \
+          'BENCH_SWEEP=384:384' \
+          'NUM_WARMUPS=384' \
           'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
           'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
           'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
           'PHASED_PROFILER_TRACK_CONCURRENCY=1' \
-          'PHASED_PROFILER_TARGET_CONCURRENCY=368' \
+          'PHASED_PROFILER_TARGET_CONCURRENCY=384' \
           'PHASED_PROFILER_ONLY_PHASES=decode_only' \
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gsm8k,mmlu' \
