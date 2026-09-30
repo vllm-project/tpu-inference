@@ -145,6 +145,12 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #52: #51 again, same configuration, after c345ae547. #51's rank
+        # schedulers all died at startup: with caching off vLLM passes
+        # hash_block_size = lcm of the group block sizes = 40960, and the TPU
+        # coordinator's parent asserts every group's block size (128 for
+        # attention) is a multiple of it. The fix passes the gcd instead.
+        #
         # #51: #50 with one change -- USE_DECOUPLED_MAMBA_POOL=1. #50 had 16
         # preemptions because, with prefix caching off, vLLM charged each
         # request 3 extra attention blocks, one per GDN group (69 GDN layers =
