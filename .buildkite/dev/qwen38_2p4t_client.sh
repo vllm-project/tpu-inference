@@ -71,7 +71,12 @@ NUM_WARMUPS="${NUM_WARMUPS:-32}"
 #
 # Format: space-separated "concurrency[:num_prompts]", run in the order given.
 # Defaults to the single legacy leg, so an unset BENCH_SWEEP is a no-op.
+# "none" skips the perf legs, for accuracy-only builds.
 BENCH_SWEEP="${BENCH_SWEEP:-${MAX_CONCURRENCY}:${NUM_PROMPTS}}"
+if [ "${BENCH_SWEEP}" = "none" ]; then
+  echo "--- client leg: no perf legs (BENCH_SWEEP=none)"
+  exit 0
+fi
 
 # --- server-side metrics ----------------------------------------------------
 # The client can only see TTFT, which is `queue_time + prefill_time` glued
