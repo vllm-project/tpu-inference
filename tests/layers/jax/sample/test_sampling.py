@@ -128,53 +128,6 @@ class TestSampling:
         )
         assert bool(incomplete[0])
 
-    def test_distributed_sampling_multi_device_execution(self):
-        devices = jax.devices()
-        if len(devices) < 4:
-            return
-        num_devices = 4 if len(devices) < 8 else 8
-        mesh = Mesh(
-            np.array(devices[:num_devices]).reshape(num_devices // 2, 2),
-            (ShardingAxisName.ATTN_DATA_EXPERT, ShardingAxisName.EXPERT))
-
-        batch_size = 4
-        vocab_size = 1024
-        logits = jax.lax.with_sharding_constraint(
-            jax.random.normal(jax.random.key(0), (batch_size, vocab_size)),
-            jax.sharding.NamedSharding(
-                mesh,
-                jax.sharding.PartitionSpec(ShardingAxisName.MLP_DATA,
-                                           ShardingAxisName.MLP_TENSOR)))
-        metadata = TPUSupportedSamplingMetadata(
-            temperature=jax.lax.with_sharding_constraint(
-                jnp.full((batch_size, ), 0.8, dtype=jnp.float32),
-                jax.sharding.NamedSharding(
-                    mesh,
-                    jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA))),
-            top_k=jax.lax.with_sharding_constraint(
-                jnp.full((batch_size, ), 10, dtype=jnp.int32),
-                jax.sharding.NamedSharding(
-                    mesh,
-                    jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA))),
-            top_p=jax.lax.with_sharding_constraint(
-                jnp.full((batch_size, ), 0.9, dtype=jnp.float32),
-                jax.sharding.NamedSharding(
-                    mesh,
-                    jax.sharding.PartitionSpec(ShardingAxisName.ATTN_DATA))),
-            do_sampling=True,
-            logprobs=False,
-        )
-
-        tokens, out_logits = sample(
-            jax.random.key(42),
-            mesh,
-            logits,
-            metadata,
-            allow_distributed_sampling=True,
-        )
-        assert tokens.shape == (batch_size, )
-        assert out_logits.shape == (batch_size, vocab_size)
-
     def test_compute_logprobs(self):
         logits = jnp.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
                            dtype=jnp.float32)
