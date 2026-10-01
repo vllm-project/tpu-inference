@@ -38,19 +38,6 @@ SCALE_LANE = 128
 # behaviour; see the module history for what was removed and why.
 FP8_COMM_MIN_ROWS = int(os.environ.get("VLLM_TPU_FP8_RS_MIN_TOKENS", "2048"))
 
-# Selects STATIC FP8 scaling and sets its value. Unset/empty -> per-chunk
-# DYNAMIC scaling (the default). A positive float -> static at that factor;
-# 16 is the calibrated value for this model, within 0.08 dB of the dynamic
-# ceiling on real activations.
-#
-# Static is the faster arm: it drops the send-side max-abs reduction AND the
-# scale transfer, taking the fp8 phase-2 wire from 2 remote copies + 4
-# semaphore arrays per chunk down to 1 + 2. Dynamic is kept as the
-# calibration-free fallback for shapes/models this scale was not tuned on.
-_static_scale_env = os.environ.get("VLLM_TPU_FP8_RS_STATIC_SCALE", "").strip()
-FP8_STATIC_SCALE: float | None = (float(_static_scale_env)
-                                  if _static_scale_env else None)
-
 
 def next_multiple_of(val: int, multiple: int) -> int:
     """Rounds `val` up to the next multiple of `multiple`."""
@@ -76,10 +63,8 @@ _MB_STAGE_TARGET_BYTES = {False: 2 << 20, True: 8 << 20}  # bf16 : fp8
 # width. It is also the largest value measured.
 _MAX_MICRO_BATCHES = 8
 # Correctness floor for the BF16 wire -- see pick_num_micro_batches, where the
-# evidence and the scope of the floor are documented. RS_ALLOW_UNSAFE_MB1=1
-# lifts it so the underlying defect can be reproduced; it is not a tuning knob.
-_MIN_SAFE_MICRO_BATCHES = 1 if os.environ.get("RS_ALLOW_UNSAFE_MB1",
-                                              "0") == "1" else 2
+# scope of the floor is documented.
+_MIN_SAFE_MICRO_BATCHES = 2
 
 
 def pick_num_micro_batches(local_seq_len: int, hidden_dim_size: int,
