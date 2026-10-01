@@ -657,7 +657,6 @@ class DmaManager:
         grid = (num_ops_in_step, self.config.num_hcube_dims)
 
         def accum_body(fp8_ref, run_ref, *rest):
-            fp8_out_ref = None
             # rest is (scale_ref, d_ref), or just (d_ref,) under skip_scale_dma.
             # Static mode reconstructs the sender's constant, so both sides
             # agree by construction; dynamic mode reads the transferred value.
@@ -674,15 +673,6 @@ class DmaManager:
                 jnp.bfloat16)
             acc = recv_dq + run_ref[...]
             d_ref[...] = acc
-            # Optional fused producer store (disabled: fp8_out_ref is None).
-            # This block is a whole transfer chunk (both sides use block_shape
-            # (seq_chunk_size, hc_chunk_size)) and the next step sends a
-            # subset of the chunks written here, so quantizing here would
-            # spare the staging pass a re-read of this data.
-            if fp8_out_ref is not None:
-                fp8_out_ref[...] = jnp.clip(
-                    acc.astype(jnp.float32) / scale, -FP8_E4M3_MAX,
-                    FP8_E4M3_MAX).astype(jnp.float8_e4m3fn)
 
         data_index_fn = self.locator.make_phase2_index_fn(step_idx, mb_idx)
         out_index_fn = (self.locator.make_phase2_out_index_fn(
