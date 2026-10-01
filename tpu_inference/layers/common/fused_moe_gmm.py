@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools
-import os
 from typing import Literal
 
 import jax
@@ -40,25 +39,10 @@ from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
-# EXP-012 diagnostic, off by default and read once at import. Set
-# RS_NAN_PROBE=1 to print a per-call NaN census around the MoE unpermute.
-# Costs a device sync per chunk per layer, so it is a correctness-run knob,
-# never a perf-run one.
-_RS_NAN_PROBE = os.environ.get("RS_NAN_PROBE", "0") == "1"
-
-# Pipelining probe. Everything the MoE-chunking gate depends on --
-# num_tokens, scatter_axis_size, moe_chunk_size, is_onehot -- is a static
-# Python value at trace time, so a plain print() is enough and costs nothing
-# at run time. Set RS_PIPE_PROBE=1 to report every DISTINCT gate outcome
-# once. This is what turned "chunking cannot have engaged at
-# --max-num-batched-tokens=1024" from an inference into an observation.
-_RS_PIPE_PROBE = os.environ.get("RS_PIPE_PROBE", "0") == "1"
-_RS_PIPE_SEEN = set()
-
 # Below this many LOCAL rows the hierrs_tc Mosaic kernel will not compile
 # (its seq tile is 8), so that branch falls back to psum_scatter. hierrs_sc
 # has no such limit, which is why the guard is scoped to the tc backend.
-_RS_TC_MIN_LOCAL_ROWS = int(os.environ.get("RS_ROUTER_MIN_ROWS", "8"))
+_RS_TC_MIN_LOCAL_ROWS = 8
 
 # Target chunk size of 2048 slots was found empirically to be optimal
 # for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
@@ -275,17 +259,6 @@ def moe_gmm_local(x: jax.Array,
         actual_chunk_size = num_tokens
 
     is_pipelined = actual_chunk_size < num_tokens
-    if _RS_PIPE_PROBE:
-        _k = (num_tokens, topk, scatter_axis_size, moe_chunk_size,
-              actual_chunk_size, is_onehot, is_pipelined)
-        if _k not in _RS_PIPE_SEEN:
-            _RS_PIPE_SEEN.add(_k)
-            print(f"PIPEPROBE num_tokens={num_tokens} topk={topk} "
-                  f"scatter_axis={scatter_axis_size} "
-                  f"chunk={moe_chunk_size} "
-                  f"gate={moe_chunk_size * scatter_axis_size} "
-                  f"actual_chunk={actual_chunk_size} onehot={is_onehot} "
-                  f"pipelined={is_pipelined}", flush=True)
     if is_pipelined and scatter_axis_size > 1:
         num_chunks = num_tokens // actual_chunk_size
         topk_weights = _permute_tokens_for_chunked_rs(topk_weights,
@@ -347,23 +320,6 @@ def moe_gmm_local(x: jax.Array,
                 topk_weights,
                 topk,
             )
-        if _RS_NAN_PROBE:
-            # EXP-012. Counts NaN where it is BORN, not where it is observed.
-            # The fp8 wire's quant_body does `where(isfinite(x), x, 0.0)`,
-            # which sits downstream of this point, so a NaN produced by the
-            # one-hot unpermute is silently rewritten to 0 before anything
-            # downstream -- including the API response -- can see it. Probing
-            # here is the only way to tell "no NaN was produced" apart from "a
-            # NaN was produced and then hidden".
-            jax.debug.print(
-                "NANPROBE src={s} out={o} rows={r} onehot={h}",
-                s=jnp.isnan(gmm2_res.astype(jnp.float32)).sum(),
-                o=jnp.isnan(chunk_hidden.astype(jnp.float32)).sum(),
-                r=chunk_hidden.shape[0],
-                h=int(onehot_moe_permute_threshold > 0
-                      and batch_size <= onehot_moe_permute_threshold),
-            )
-
         if enable_rs_kernel:
             if envs.RS_KERNEL_BACKEND == "tc":
                 local_rows = chunk_hidden.shape[0] // scatter_axis_size

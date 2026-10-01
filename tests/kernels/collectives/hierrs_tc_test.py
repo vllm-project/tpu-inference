@@ -512,7 +512,7 @@ class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
     with fresh inputs BEFORE this test is relaxed.
     """
     self.assertEqual(hrs_config._MIN_SAFE_MICRO_BATCHES, 2,
-                     msg='the floor is disabled -- is RS_ALLOW_UNSAFE_MB1 set?')
+                     msg='the mb>=2 correctness floor is not in effect')
     for rows in self.PRODUCTION_ROWS:
       bf16_mb = hrs_config.pick_num_micro_batches(rows, self.HIDDEN,
                                                   self.BF16_ITEMSIZE, False)

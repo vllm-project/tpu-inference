@@ -39,19 +39,6 @@ from tpu_inference.kernels.collectives.hierrs_tc.kernel import (
 # without dragging in the vLLM graph. tpu_inference.logger imports vllm.
 logger = logging.getLogger(__name__)
 
-# RS_VMEM_PIN=0 disables VMEM operand pinning entirely and restores the old
-# behaviour (pl.ANY operands, 0.95 scoped claim). RS_VMEM_FRAC / RS_VMEM_INPUT
-# force a specific plan and exist for sweeps; unset, the plan is chosen by
-# _pick_vmem_plan below.
-_RS_VMEM_PIN = os.environ.get("RS_VMEM_PIN", "1") != "0"
-# Also request VMEM for the PRIMARY output (out_shape, seq_chunk x hidden --
-# 2 MiB at local_seq_len 2048). Takes effect only when the operand is pinned
-# too (see `_out0_space` below). The working buffers are handled separately by
-# RS_VMEM_WORK.
-_RS_VMEM_OUT = os.environ.get("RS_VMEM_OUT", "0") == "1"
-_RS_VMEM_INPUT_OVERRIDE = os.environ.get("RS_VMEM_INPUT")
-_RS_VMEM_FRAC_OVERRIDE = os.environ.get("RS_VMEM_FRAC")
-
 # RS_VMEM_WORK: place the kernel's WORKING buffers (running_sum, recv_buf and
 # the wire's staging buffers) in VMEM scratch instead of HBM.
 #
@@ -204,119 +191,46 @@ def _plan_work_scratch(local_seq_len, hidden_dim_size, itemsize, fp8_comm,
     return True, frac
 
 
-@functools.lru_cache(maxsize=1)
-def _memory_space_constraint_survives() -> bool:
-    """Will a with_memory_space_constraint aval survive an ordinary primitive?
-
-    jax 0.11 gave jax.core its own MemorySpace enum and made
-    `check_avals_context_mesh` assert `isinstance(aval.memory_space,
-    MemorySpace)` for every primitive traced under a mesh. The space that
-    `with_memory_space_constraint` attaches is Pallas's MemorySpace -- a
-    different enum -- so once the annotated aval reaches a non-Pallas primitive
-    under shard_map, abstract eval raises
-
-        TypeError: Primitive broadcast_in_dim got aval bfloat16<vmem>[...]
-                   with unknown memory_space type: <enum 'MemorySpace'>
-
-    On jax 0.10 there was no such check and the identical code pinned the
-    operand fine -- every EXP-017/021/024 pinned arm was measured that way.
-
-    This evaluates jax's own predicate rather than tracing a probe function: the
-    check is skipped unless BOTH the context mesh and the aval's mesh are
-    non-empty, which only holds inside shard_map, so a standalone eval_shape
-    probe reports "survives" no matter what and is worse than useless. If a
-    later JAX teaches core about Pallas spaces, pinning switches itself back on
-    with no code change here.
-    """
-    try:
-        from jax._src import core as jax_core
-    except Exception:  # noqa: BLE001 - unknown JAX layout, assume the old one
-        return True
-    core_space = getattr(jax_core, "MemorySpace", None)
-    if core_space is None:
-        # No core-level memory space enum -> no type check to trip over.
-        return True
-    return isinstance(pltpu.VMEM, core_space)
-
-
-_PIN_UNSUPPORTED_WARNED = False
-
-
-def _pin_unsupported_once() -> None:
-    global _PIN_UNSUPPORTED_WARNED
-    if not _PIN_UNSUPPORTED_WARNED:
-        _PIN_UNSUPPORTED_WARNED = True
-        print(
-            "hierrs_tc: explicit VMEM operand annotation disabled (and known "
-            f"to be a no-op on this JAX ({jax.__version__}): "
-            "with_memory_space_constraint compiles to byte-identical HLO). "
-            "Operand/output colouring is done by XLA's memory-space assignment "
-            "instead, whenever the scoped-VMEM claim leaves it room -- see the "
-            "need-sized claims in _plan_work_scratch. "
-            "Set RS_VMEM_INPUT=2 to force the old annotation path.",
-            flush=True)
-
-
-# Default scoped claim when we are NOT pinning. Deliberately generous: it is a
-# ceiling, not a reservation (EXP-016 measured 60.80 MiB claimed vs 8.00 MiB
-# used), and shrinking it buys nothing unless we are also pinning.
-_VMEM_FRAC_UNPINNED = 0.95
-# Headroom multiplier on the measured scoped requirement, so a shape whose
-# footprint is slightly off the operand/2 rule still compiles.
+# Scoped claim used when the operand cannot share VMEM with the kernel's
+# scratch. It is a ceiling, not a reservation: the kernel only uses what its
+# buffers need.
+_VMEM_FRAC_DEFAULT = 0.95
+# Headroom multiplier on the scoped requirement, so a shape whose footprint is
+# slightly off the operand/num_micro_batches model still compiles.
 _VMEM_SCOPED_SLACK = 1.30
-# Leave a little of VMEM unclaimed so MSA has somewhere to put small buffers
-# besides our operand.
+# Fraction of VMEM the scoped claim and the operand may use together. The rest
+# is left for XLA to place other small buffers.
 _VMEM_TOTAL_SAFETY = 0.92
 
 
-def _pick_vmem_plan(local_seq_len, hidden_dim_size, itemsize,
-                    num_micro_batches):
-    """Decide whether to pin the operand into VMEM, and how much to claim.
+def _pick_scoped_claim(local_seq_len, hidden_dim_size, itemsize,
+                       num_micro_batches):
+    """Returns the scoped-VMEM claim for this call, as a fraction of VMEM.
 
-  Two facts drive this, both measured in EXP-017:
+  The claim reserves VMEM for the kernel's staging buffers and semaphores.
+  Whatever VMEM it leaves free is what XLA's memory-space assignment can use
+  to keep the kernel's operand and output in VMEM instead of HBM. So the claim
+  is sized to what the kernel needs and capped so the operand still fits
+  beside it. When the two cannot fit together, the default ceiling is
+  returned and the operand stays in HBM.
 
-  1. `pl.ANY` resolves to input color 0 (HBM), so the 16 MiB operand
-     round-trips through HBM. `with_memory_space_constraint` is the ONLY way to
-     get color 1 -- a `BlockSpec(memory_space=VMEM)` leaves the color at 0 and
-     merely stages the operand into scoped VMEM, which is strictly worse.
-  2. The color is useless on its own. XLA reserves a colored operand out of
-     "alternate memory", which is whatever VMEM our scoped claim leaves behind.
-     At the old 0.95 claim that is ~3.2 MiB, and a 16 MiB operand fails to
-     compile outright ("Too many buffers are colored in the alternate memory").
-
-  So pinning needs the operand AND the kernel's own scratch to fit in VMEM
-  together. Measured scratch is almost exactly half the operand (512 rows ->
-  2 MiB of 4, 2048 -> 8 of 16, 4096 -> 16 of 32), so the requirement is ~1.5x
-  the operand. At 8192 rows the operand alone is 64 MiB -- the entire VMEM --
-  and no claim can make it fit, which is why this must be conditional rather
-  than a global constant. Getting that wrong does not merely lose the speedup:
-  an over-small claim raises CompileTimeScopedVmemOom and the server never
-  boots.
-
-  Returns (pin, frac).
+  Too small a claim fails at compile time with CompileTimeScopedVmemOom, so
+  the estimate carries `_VMEM_SCOPED_SLACK` headroom.
   """
     capacity = pltpu.get_tpu_info().vmem_capacity_bytes
     operand = local_seq_len * hidden_dim_size * itemsize
-    # Scratch scales as operand / num_micro_batches: the BufferedRef block is
-    # (seq_chunk_size, hidden/mb), so halving mb doubles every staging buffer.
-    # Verified exactly against measured `used_scoped_memory_configs`:
-    #   512/mb2 -> 2.00 MiB, 2048/mb2 -> 8.00, 4096/mb2 -> 16.00,
-    #   8192/mb2 -> 32.00, and 512/mb1 -> 4.00 MiB.
-    # An earlier version of this used a flat operand/2 -- correct at mb=2 and
-    # 2x too small at mb=1, which crashed a real server at startup with
-    # "Scoped allocation with size 4.00M and limit 3.20M". mb MUST be an input.
+    # Staging buffers scale as operand / num_micro_batches: each BufferedRef
+    # block is (seq_chunk_size, hidden / num_micro_batches).
     scoped_need = int(operand / max(1, num_micro_batches) * _VMEM_SCOPED_SLACK)
 
-    if not _RS_VMEM_PIN or operand + scoped_need > capacity * _VMEM_TOTAL_SAFETY:
-        return False, _VMEM_FRAC_UNPINNED
+    if operand + scoped_need > capacity * _VMEM_TOTAL_SAFETY:
+        return _VMEM_FRAC_DEFAULT
 
-    # Claim enough for our scratch, but never so much that MSA cannot reserve
-    # the operand out of what is left.
     lo = scoped_need / capacity
     hi = (capacity - operand) / capacity
     if lo > hi:
-        return False, _VMEM_FRAC_UNPINNED
-    return True, min(max(lo, 0.05), hi)
+        return _VMEM_FRAC_DEFAULT
+    return min(max(lo, 0.05), hi)
 
 
 def hierarchical_reduce_scatter_local(
@@ -382,21 +296,8 @@ def hierarchical_reduce_scatter_local(
                                                    local_x.dtype.itemsize,
                                                    fp8_comm)
 
-    vmem_pin, vmem_frac = _pick_vmem_plan(local_seq_len, hidden_dim_size,
-                                          local_x.dtype.itemsize,
-                                          num_micro_batches)
-    if _RS_VMEM_INPUT_OVERRIDE is not None:
-        vmem_pin = int(_RS_VMEM_INPUT_OVERRIDE) == 2
-    if _RS_VMEM_FRAC_OVERRIDE is not None:
-        vmem_frac = float(_RS_VMEM_FRAC_OVERRIDE)
-    # Pinning needs a memory-space annotation that survives shard_map tracing.
-    # Where it does not, fall back to the unpinned plan rather than crashing;
-    # an explicit RS_VMEM_INPUT=2 is still honoured so the failure stays
-    # reproducible.
-    if (vmem_pin and _RS_VMEM_INPUT_OVERRIDE is None
-            and not _memory_space_constraint_survives()):
-        _pin_unsupported_once()
-        vmem_pin = False
+    vmem_frac = _pick_scoped_claim(local_seq_len, hidden_dim_size,
+                                   local_x.dtype.itemsize, num_micro_batches)
 
     vector_width = pltpu.get_tpu_info().num_lanes
     mb_size = next_multiple_of(hidden_dim_size // num_micro_batches,
@@ -444,9 +345,8 @@ def hierarchical_reduce_scatter_local(
     # outputs or as leading scratch leaves hier_rs_kernel's positional unpacking
     # byte-identical, which is why that file needs no change. Never promote a
     # subset -- that interleaves the two groups and silently permutes the args.
-    _out0_space = pltpu.VMEM if (_RS_VMEM_OUT and vmem_pin) else pl.ANY
     out_shapes = [out_shape]
-    out_specs = [pl.BlockSpec(memory_space=_out0_space)]
+    out_specs = [pl.BlockSpec(memory_space=pl.ANY)]
     work_scratch = []
 
     def _emit_work(shape_struct, memref):
@@ -502,10 +402,9 @@ def hierarchical_reduce_scatter_local(
 
     grid_spec = pltpu.PrefetchScalarGridSpec(
         num_scalar_prefetch=0,
-        # pl.ANY here on purpose. A BlockSpec of pltpu.VMEM does NOT change the
-        # operand color (EXP-017 arm 1: color stayed 0 and scoped usage jumped
-        # 8 -> 24 MiB as the operand was staged into scratch). The color is set
-        # by with_memory_space_constraint at the call site below instead.
+        # pl.ANY lets XLA choose where the operand lives. A VMEM BlockSpec
+        # would not place the operand in VMEM; it would copy it into the
+        # kernel's scoped scratch, which costs more VMEM for no benefit.
         in_specs=[pl.BlockSpec(memory_space=pl.ANY)],
         out_specs=tuple(out_specs),
         # work_scratch FIRST: it occupies exactly the positions these buffers
@@ -536,39 +435,16 @@ def hierarchical_reduce_scatter_local(
         name=
         f"hier_rs_kernel.mb{num_micro_batches}{'_fp8' if fp8_comm else ''}",
         compiler_params=pltpu.CompilerParams(
-            # This becomes scoped_memory_configs {"memory_space":1, "size":...} on
-            # the custom-call, i.e. "reserve this much VMEM for me".
-            #
-            # 0.95 claims ~60.8 of 64 MiB and leaves XLA's memory-space
-            # assignment ~3 MiB to work with -- which may be exactly why it never
-            # promotes our 16 MiB operand to S(1) while it promotes the identical
-            # buffer for its own reduce-scatter. `pl.ANY` does not pin us to HBM;
-            # over-claiming scoped VMEM may leave MSA nowhere to put us.
-            #
-            # Actual need is ~8 MiB of BufferedRefs and semaphores, or ~24 MiB
-            # with RS_VMEM_LANDING, so 0.95 over-claims by 3-7x.
-            #
-            # Default unchanged at 0.95 until this is measured.
+            # Becomes scoped_memory_configs on the custom call: the VMEM the
+            # kernel reserves for itself. Whatever it leaves free is what XLA
+            # can use to keep the operand and output in VMEM, so it is sized to
+            # need rather than fixed (see _pick_scoped_claim and
+            # _plan_work_scratch).
             vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes *
                                  vmem_frac),
             disable_bounds_checks=True,
         ),
     )
-    # NOTE: no pltpu.with_memory_space_constraint here. It does not survive
-    # shard_map tracing -- the vmem-annotated aval reaches broadcast_in_dim,
-    # which rejects it ("unknown memory_space type"), and that failed all 24
-    # kernel tests. The in_specs BlockSpec above is sufficient on its own:
-    # results/probe_vmem_which_knob.py shows the producer is annotated S(1) with
-    # the BlockSpec alone and the constraint call adds nothing.
-    if vmem_pin:
-        # EXP-017 arm 2. Only `with_memory_space_constraint` sets the memory
-        # space on the INPUT AVAL, which is what _resolve_memory_spaces reads
-        # (jax/_src/pallas/mosaic/pallas_call_registration.py). The BlockSpec
-        # alone does not (arm 1 leaves the color at 0 and merely stages the
-        # operand into scoped VMEM). Historically this broke under shard_map --
-        # the vmem aval reached broadcast_in_dim -- so this arm re-tests that
-        # against the current JAX rather than trusting an old note.
-        local_x = pltpu.with_memory_space_constraint(local_x, pltpu.VMEM)
     out = hier_rs(local_x)[0]
     if needs_padding:
         out = out[:seq_chunk_size_orig, :]
