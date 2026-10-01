@@ -238,50 +238,87 @@ def _assert_bitwise_equal(actual: jax.Array, expected: jax.Array):
         np.asarray(expected).view(np.uint16))
 
 
+def _assert_gather_matches(actual: jax.Array, expected: jax.Array, fp8: bool):
+    """bf16 must match bit for bit. With fp8, the two paths quantize in
+    different XLA programs, which may round a value to a neighbouring fp8
+    value: at most 2**-3 of it (3 mantissa bits)."""
+    if not fp8:
+        _assert_bitwise_equal(actual, expected)
+        return
+    np.testing.assert_allclose(np.asarray(actual, np.float32),
+                               np.asarray(expected, np.float32),
+                               rtol=2**-3,
+                               atol=0)
+
+
 def _logical_plan(mesh: Mesh):
     """The plan for `mesh` if its model axis did pair the cores of a chip."""
     return fused_moe_gmm._hierarchical_dispatch_plan(
         _fake_mesh(_paired_devices(mesh.devices.size), **mesh.shape))
 
 
-def _run_gather(x: jax.Array, mesh: Mesh):
-    gather = jax.jit(
-        lambda h: fused_moe_gmm._apply_hierarchical_dispatch_gather(h, mesh))
+def _run_gather(x: jax.Array, mesh: Mesh, fp8: bool = False):
+    gather = jax.jit(lambda h: fused_moe_gmm.
+                     _apply_hierarchical_dispatch_gather(h, mesh, fp8=fp8))
     return gather(x), gather.lower(x).as_text()
 
 
+def _one_step_gather(x: jax.Array, mesh: Mesh, fp8: bool) -> jax.Array:
+    """What the one-step gather leaves: the input itself, or with fp8 the
+    output of _apply_all_gather_fp8."""
+    if not fp8:
+        return x
+    return jax.jit(
+        lambda h: fused_moe_gmm._apply_all_gather_fp8(h, mesh, h.dtype))(x)
+
+
 @requires_8_devices
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
 @pytest.mark.parametrize("sizes", _MESH_SIZES, ids=_mesh_id)
-def test_gather_matches_one_step_gather(sizes):
+def test_gather_matches_one_step_gather(sizes, fp8):
     """The data movement itself, on any hardware: force the plan the mesh
-    would get on v7x and check the result is the input, bit for bit, laid out
-    as the one-step gather would leave it."""
+    would get on v7x and check the result matches the one-step gather, bit
+    for bit and in layout."""
     mesh = _make_mesh(**sizes)
     x = _sharded_hidden_states(mesh)
     with mock.patch.object(fused_moe_gmm,
                            "_hierarchical_dispatch_plan",
                            return_value=_logical_plan(mesh)):
-        out, hlo = _run_gather(x, mesh)
+        out, hlo = _run_gather(x, mesh, fp8)
 
     assert "collective_permute" in hlo
     assert out.sharding.is_equivalent_to(
         NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)), out.ndim)
-    _assert_bitwise_equal(out, x)
+    _assert_gather_matches(out, _one_step_gather(x, mesh, fp8), fp8)
+
+
+@requires_8_devices
+def test_fp8_gather_falls_back_to_one_step_fp8_gather():
+    mesh = _make_mesh(attn_dp=2, model=4)
+    x = _sharded_hidden_states(mesh)
+    with mock.patch.object(fused_moe_gmm,
+                           "_hierarchical_dispatch_plan",
+                           return_value=None):
+        out, hlo = _run_gather(x, mesh, fp8=True)
+
+    assert "collective_permute" not in hlo
+    _assert_bitwise_equal(out, _one_step_gather(x, mesh, fp8=True))
 
 
 @requires_dual_core_chips
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
 @pytest.mark.parametrize("sizes", _MESH_SIZES, ids=_mesh_id)
-def test_gather_applies_on_dual_core_chips(sizes):
+def test_gather_applies_on_dual_core_chips(sizes, fp8):
     """The mesh builder puts a chip's two cores on the model axis, so the
-    real core-pairing check must pass and the gather must take two steps."""
+    real core-pairing check must pass and the gather must be hierarchical."""
     mesh = _make_mesh(**sizes)
     plan = fused_moe_gmm._hierarchical_dispatch_plan(mesh)
     assert plan == _logical_plan(mesh)
 
     x = _sharded_hidden_states(mesh)
-    out, hlo = _run_gather(x, mesh)
+    out, hlo = _run_gather(x, mesh, fp8)
     assert "collective_permute" in hlo
-    _assert_bitwise_equal(out, x)
+    _assert_gather_matches(out, _one_step_gather(x, mesh, fp8), fp8)
 
 
 @requires_dual_core_chips
@@ -312,11 +349,14 @@ def _moe_inputs(mesh: Mesh,
                 num_tokens: int = 64,
                 hidden: int = 256,
                 intermediate: int = 1024,
-                num_experts: int = 16):
+                num_experts: int = 16,
+                hidden_states: jax.Array | None = None):
     k1, k2, k3 = jax.random.split(jax.random.key(1), 3)
     rows = NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None))
+    if hidden_states is None:
+        hidden_states = _sharded_hidden_states(mesh, num_tokens, hidden)
     return dict(
-        hidden_states=_sharded_hidden_states(mesh, num_tokens, hidden),
+        hidden_states=hidden_states,
         w1=jax.random.normal(k1, (num_experts, hidden, 2 * intermediate),
                              jnp.bfloat16) / 10,
         w2=jax.random.normal(k2, (num_experts, intermediate, hidden),
@@ -327,7 +367,10 @@ def _moe_inputs(mesh: Mesh,
     )
 
 
-def _run_fused_moe(mesh: Mesh, enabled: bool, **kwargs):
+def _run_fused_moe(mesh: Mesh,
+                   enabled: bool,
+                   hidden_states: jax.Array | None = None,
+                   **kwargs):
     """Run fused_moe_func with the flag set to `enabled`.
 
     Returns (output, times the hierarchical gather was traced). The flag
@@ -343,7 +386,7 @@ def _run_fused_moe(mesh: Mesh, enabled: bool, **kwargs):
                                 "_apply_hierarchical_dispatch_gather",
                                 spy), jax.set_mesh(mesh)):
             out = fused_moe_gmm.fused_moe_func(
-                **_moe_inputs(mesh),
+                **_moe_inputs(mesh, hidden_states=hidden_states),
                 w1_scale=None,
                 w2_scale=None,
                 w1_bias=None,
@@ -367,10 +410,28 @@ def _warned_ignored(logger: mock.Mock) -> bool:
 
 
 @requires_8_devices
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
 @pytest.mark.parametrize("sizes", _MESH_SIZES, ids=_mesh_id)
-def test_fused_moe_output_is_unchanged(sizes):
+def test_fused_moe_output_is_unchanged(sizes, fp8):
     mesh = _make_mesh(**sizes)
-    expected, calls = _run_fused_moe(mesh, enabled=False, use_ep=True)
+    x = _sharded_hidden_states(mesh)
+    reference_x = x
+    if fp8:
+        # The two fp8 gathers may differ by one fp8 step, and the MoE matmuls
+        # spread that with no fixed bound. So check the hierarchical fp8 gather
+        # here, and use the bf16 MoE on its output as the reference.
+        with mock.patch.object(fused_moe_gmm,
+                               "_hierarchical_dispatch_plan",
+                               return_value=_logical_plan(mesh)):
+            gathered, _ = _run_gather(x, mesh, fp8=True)
+        _assert_gather_matches(gathered,
+                               _one_step_gather(x, mesh, fp8=True),
+                               fp8=True)
+        reference_x = jax.device_put(gathered, x.sharding)
+    expected, calls = _run_fused_moe(mesh,
+                                     enabled=False,
+                                     hidden_states=reference_x,
+                                     use_ep=True)
     assert calls == 0
 
     # Force the plan so the hierarchical path is exercised on any hardware.
@@ -378,23 +439,21 @@ def test_fused_moe_output_is_unchanged(sizes):
                            "_hierarchical_dispatch_plan",
                            return_value=_logical_plan(mesh)), \
             mock.patch.object(fused_moe_gmm, "logger") as logger:
-        actual, calls = _run_fused_moe(mesh, enabled=True, use_ep=True)
+        actual, calls = _run_fused_moe(mesh,
+                                       enabled=True,
+                                       hidden_states=x,
+                                       use_ep=True,
+                                       all_gather_fp8=fp8)
     assert calls == 1
     assert not _warned_ignored(logger)
     _assert_bitwise_equal(actual, expected)
 
 
 @requires_8_devices
-@pytest.mark.parametrize("kwargs", [
-    dict(use_ep=False),
-    dict(use_ep=True, all_gather_fp8=True),
-],
-                         ids=["tensor_parallel", "fp8_all_gather"])
-def test_fused_moe_skips_hierarchical_gather(kwargs):
-    # Only the expert-parallel path uses it, and the fp8 all-gather wins; the
-    # flag being ignored is logged.
+def test_fused_moe_skips_hierarchical_gather():
+    # Only the expert-parallel path uses it; the flag being ignored is logged.
     mesh = _make_mesh(attn_dp=2, model=4)
     with mock.patch.object(fused_moe_gmm, "logger") as logger:
-        _, calls = _run_fused_moe(mesh, enabled=True, **kwargs)
+        _, calls = _run_fused_moe(mesh, enabled=True, use_ep=False)
     assert calls == 0
     assert _warned_ignored(logger)
