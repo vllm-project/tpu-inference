@@ -589,6 +589,14 @@ class TpuPlatform(Platform):
         return True
 
     @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+        # Unconditional: the manager is only used for specs the runner emits
+        # under SKIP_MAMBA_SCHEDULER_BLOCKS.
+        from tpu_inference.core.runner_slot_mamba import \
+            register_runner_slot_mamba_spec
+        register_runner_slot_mamba_spec()
+
+    @classmethod
     def current_device(cls) -> torch.device:
         """
         Get the current device for the current platform.
