@@ -150,12 +150,18 @@ class ConvStateBuffer(BufferWrapper):
             start_from_old = self.cfgs.prev_kernel_size - sz_from_old
             sz_from_old = jnp.where(is_no_op, 0, sz_from_old)
 
-            pltpu.make_async_copy(
-                self.hbm_ref.at[state_idx,
-                                pl.ds(start_from_old, sz_from_old)],
-                self.get_slot_vmem(slot).at[idx, pl.ds(0, sz_from_old)],
-                sem,
-            ).start()
+            @pl.when(sz_from_old > 0)
+            def _do_copy_in(state_idx=state_idx,
+                            start_from_old=start_from_old,
+                            sz_from_old=sz_from_old,
+                            idx=idx):
+                pltpu.make_async_copy(
+                    self.hbm_ref.at[state_idx,
+                                    pl.ds(start_from_old, sz_from_old)],
+                    self.get_slot_vmem(slot).at[idx,
+                                                pl.ds(0, sz_from_old)],
+                    sem,
+                ).start()
 
     def wait_in(self, b_start, slot, sem):
         all_sz_from_old = 0
@@ -176,11 +182,15 @@ class ConvStateBuffer(BufferWrapper):
             state_idx = self.metadata_ref.s_idx_to_state_idx[s_idx]
             should_write = self.metadata_ref.b_idx_should_write[b_idx]
 
-            pltpu.make_async_copy(
-                self.get_slot_vmem(slot).at[pl.ds(idx, should_write)],
-                self.hbm_ref.at[pl.ds(state_idx, should_write)],
-                sem,
-            ).start()
+            @pl.when(should_write > 0)
+            def _do_copy_out(idx=idx,
+                             state_idx=state_idx,
+                             should_write=should_write):
+                pltpu.make_async_copy(
+                    self.get_slot_vmem(slot).at[pl.ds(idx, should_write)],
+                    self.hbm_ref.at[pl.ds(state_idx, should_write)],
+                    sem,
+                ).start()
 
     def wait_out(self, b_start, slot, sem):
         is_no_op = self.is_lower_oob(b_start)
@@ -255,16 +265,15 @@ def inner_kernel(
     # register and allows it to be reused across slides.  Instead of
     # pre-processing the inputs to use compact layout, performing strided load
     # allows performing relayout with zero-cost.
-    x_compact = strided_ldst.load_large_to_compact(x_slot_ref, jnp.float32)
+    x_tile_list = strided_ldst.load_large_to_compact_list(
+        x_slot_ref, jnp.float32)
+    prev_x_list = [prev_x_scratch_ref[k] for k in range(cfgs.prev_kernel_size)]
+    x_rows = prev_x_list + x_tile_list
 
-    # Load last prev_kernel_size rows of data.
-    # NOTE: If the current tile is the first tile, VMEM will contain uninitialized
-    # data.  In such cases, they will be overrided with either conv_state or zeros
-    # during computation and does not cause any numeric issues.
-    prev_x_scratch = prev_x_scratch_ref[...]
-    x_compact = jnp.concat([prev_x_scratch, x_compact], axis=0)
+    weights = [conv_rhs_ref.weight[k] for k in range(cfgs.kernel_size)]
+    bias = conv_rhs_ref.bias[...].reshape(
+        1, -1) if conv_rhs_ref.bias is not None else None
 
-    # NOTE: All conditionals below are static and evaluated during compile time.
     out_list = []
     for idx in range(cfgs.tile_size):
         b_idx = b_start + idx
@@ -273,17 +282,10 @@ def inner_kernel(
         sz_from_old = metadata_ref.b_idx_to_sz_from_old[b_idx]
         has_initial_state = metadata_ref.s_idx_has_initial_state[s_idx]
 
-        out = jnp.zeros((1, cfgs.dim_size), jnp.float32)
+        out = bias if bias is not None else None
 
         for k in range(cfgs.kernel_size):
-            # Computation for out[row] requires reading data
-            # x[row - (kernel_size - 1) + k] where k iterates from 0 to
-            # kernel_size - 1. Since x_compact is a concatenation of
-            # x[b_start - kernel_size : b_start] and x[b_start : b_end].
-            # x[row - (kernel_size - 1) + k] is equivalent to x_compact[idx + k],
-            # where idx = row - b_start.
-            in_idx = idx + k
-            lhs = x_compact[in_idx]
+            lhs = x_rows[idx + k]
 
             if k < cfgs.prev_kernel_size:
                 conv_state = conv_state_slot_ref[idx, k]
@@ -293,21 +295,14 @@ def inner_kernel(
             if k > 0:
                 conv_state_slot_ref[idx, k - 1] = lhs
 
-            rhs = conv_rhs_ref.weight[k]
-            out += lhs * rhs
+            prod = lhs * weights[k]
+            out = prod if out is None else out + prod
 
-        if conv_rhs_ref.bias is not None:
-            bias = conv_rhs_ref.bias[...].reshape(1, -1)
-            out += bias
         out_list.append(out)
 
-    out = jnp.stack(out_list, axis=0)
-    # NOTE: Similar to strided load, strided store is performed to ensure no
-    # post-processing is needed to the output.
-    strided_ldst.store_compact_to_large(x_slot_ref, out)
-    # NOTE: Write last prev_kernel_size rows of data to scratch memory to allow
-    # next tile to read from it.
-    prev_x_scratch_ref[...] = x_compact[cfgs.tile_size:]
+    strided_ldst.store_compact_to_large_list(x_slot_ref, out_list)
+    for k in range(cfgs.prev_kernel_size):
+        prev_x_scratch_ref[k] = x_rows[cfgs.tile_size + k]
 
     # Step 3: DMA epilogue.
 
@@ -396,14 +391,15 @@ def preprocess_metadata(
     query_start_loc = jnp.where(all_seqs <= num_seqs, query_start_loc,
                                 num_tokens)
 
-    # Map batch index to sequence index.
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    seqs = jnp.arange(max_seqs)
-    b_idx_to_s_idx = jnp.repeat(seqs,
-                                query_lens,
-                                total_repeat_length=cfgs.batch_size)
-    b_idx_query_start_loc = query_start_loc[b_idx_to_s_idx]
+    # Map batch index to sequence index via vectorized boundary comparison.
     all_b_idx = jnp.arange(cfgs.batch_size)
+    if max_seqs > 1:
+        b_idx_to_s_idx = jnp.sum(all_b_idx[:, None] >= query_start_loc[None,
+                                                                       1:-1],
+                                 axis=-1)
+    else:
+        b_idx_to_s_idx = jnp.zeros(cfgs.batch_size, dtype=jnp.int32)
+    b_idx_query_start_loc = query_start_loc[b_idx_to_s_idx]
     b_idx_query_len = 1 + all_b_idx - b_idx_query_start_loc
 
     # Compute number of rows that needs to be fetched from conv_state (old) and

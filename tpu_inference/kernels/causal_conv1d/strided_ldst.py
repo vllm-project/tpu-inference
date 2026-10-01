@@ -78,3 +78,52 @@ def store_compact_to_large(vmem_ref, vreg: jax.Array):
             u32_vmem_ref[packed_row:packed_row + 1] = packed
         else:
             vmem_ref[row_start:row_end] = vreg[packed_row]
+
+
+def load_large_to_compact_list(vmem_ref, dst_dtype=None):
+    assert vmem_ref.ndim == 2
+    row_size = vmem_ref.shape[0]
+    src_dtype = vmem_ref.dtype
+    should_unpack = dst_dtype is not None and dst_dtype != src_dtype
+    packing = 4 // src_dtype.itemsize
+    u32_vmem_ref = vmem_ref.bitcast(jnp.uint32) if should_unpack else None
+
+    unpacked_list = []
+    for row_start in range(0, row_size, packing):
+        if should_unpack:
+            packed_row = row_start // packing
+            packed = u32_vmem_ref[packed_row:packed_row + 1]
+            for p in range(packing):
+                if row_start + p < row_size:
+                    unpacked = pltpu.unpack_elementwise(
+                        packed,
+                        index=p,
+                        packed_dtype=src_dtype,
+                        unpacked_dtype=dst_dtype,
+                    )
+                    unpacked_list.append(unpacked)
+        else:
+            unpacked_list.append(vmem_ref[row_start:row_start + 1])
+    return unpacked_list
+
+
+def store_compact_to_large_list(vmem_ref, out_list):
+    row_size = vmem_ref.shape[0]
+    src_dtype = out_list[0].dtype
+    dst_dtype = vmem_ref.dtype
+    should_pack = src_dtype != dst_dtype
+    dst_packing = 4 // dst_dtype.itemsize
+    u32_vmem_ref = vmem_ref.bitcast(jnp.uint32) if should_pack else None
+
+    for row_start in range(0, row_size, dst_packing):
+        packed_row = row_start // dst_packing
+        if should_pack:
+            unpacked_slice = [
+                out_list[i] if i < row_size else jnp.zeros_like(out_list[0])
+                for i in range(row_start, row_start + dst_packing)
+            ]
+            packed = pltpu.pack_elementwise(unpacked_slice,
+                                            packed_dtype=dst_dtype)
+            u32_vmem_ref[packed_row:packed_row + 1] = packed
+        else:
+            vmem_ref[row_start:row_start + 1] = out_list[packed_row]
