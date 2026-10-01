@@ -188,8 +188,7 @@ def env_bool(env_name: str,
     return _get_bool_env
 
 
-def env_positive_float_or_none(
-        env_name: str) -> Callable[[], float | None]:
+def env_positive_float_or_none(env_name: str) -> Callable[[], float | None]:
     """Tri-state positive float: unset/empty -> None; otherwise a float > 0.
 
     Used for knobs where absence selects a different code path (here, None ->

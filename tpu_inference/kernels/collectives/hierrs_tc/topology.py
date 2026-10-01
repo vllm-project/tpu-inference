@@ -218,8 +218,7 @@ class ChunkLocator:
                                                      hcube_dim_idx)
             # The landing buffer is packed.
             chunk_slice = self.get_packed_slice(
-                my_chunk_idx,
-                mb_idx * self.mb_stride +
+                my_chunk_idx, mb_idx * self.mb_stride +
                 hcube_dim_idx * self.config.hc_chunk_size,
                 self.config.hc_chunk_size)
             return chunk_slice, self.config.hc_chunk_size

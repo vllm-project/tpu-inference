@@ -49,12 +49,14 @@ def _make_mesh(num_devices: int, axis_name: str) -> jax.sharding.Mesh:
     """
     devices = sorted(jax.devices(), key=lambda d: d.coords)[:num_devices]
     try:
-        axis_types = (jax.sharding.AxisType.Auto,)
-        return jax.make_mesh((num_devices,), (axis_name,), axis_types,
+        axis_types = (jax.sharding.AxisType.Auto, )
+        return jax.make_mesh((num_devices, ), (axis_name, ),
+                             axis_types,
                              devices=devices)
     except Exception:
         return jax.sharding.Mesh(
-            np.asarray(devices).reshape((num_devices,)), (axis_name,))
+            np.asarray(devices).reshape((num_devices, )), (axis_name, ))
+
 
 SpongeDir: str | None = os.environ.get('TEST_UNDECLARED_OUTPUTS_DIR', None)
 
@@ -94,7 +96,7 @@ def _snr_db(signal: jax.Array, noise: jax.Array) -> float:
 
 
 def _reference_reduce_scatter(x: jax.Array, mesh: jax.sharding.Mesh,
-                               in_specs: P) -> jax.Array:
+                              in_specs: P) -> jax.Array:
     """Reference: psum over 'x' axis then slice each device's shard."""
     axis_name = mesh.axis_names[0]
     num_devices = mesh.devices.size
@@ -103,7 +105,10 @@ def _reference_reduce_scatter(x: jax.Array, mesh: jax.sharding.Mesh,
         reduced = jax.lax.psum(local_x, axis_name=axis_name)
         idx = jax.lax.axis_index(axis_name)
         chunk = local_x.shape[0] // num_devices
-        return jax.lax.dynamic_slice_in_dim(reduced, idx * chunk, chunk, axis=0)
+        return jax.lax.dynamic_slice_in_dim(reduced,
+                                            idx * chunk,
+                                            chunk,
+                                            axis=0)
 
     return shard_map.shard_map(
         inner,
@@ -124,9 +129,7 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
     # ------------------------------------------------------------------ #
     # Correctness: bf16 mode should match reference psum+slice            #
     # ------------------------------------------------------------------ #
-    @parameterized.product(
-        num_micro_batches=[1, 2, 4],
-    )
+    @parameterized.product(num_micro_batches=[1, 2, 4], )
     def test_correctness_bf16(self, num_micro_batches):
         self._requires_devices(8)
         axis_name = 'x'
@@ -159,23 +162,27 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
             #    _MIN_BF16_SNR_DB for why elementwise rtol cannot be used here.
             snr = _snr_db(ref_f32, out_f32 - ref_f32)
             self.assertGreater(
-                snr, _MIN_BF16_SNR_DB,
+                snr,
+                _MIN_BF16_SNR_DB,
                 msg=f'bf16 mb={num_micro_batches} seed={seed}: SNR {snr:.1f} dB '
-                    f'< {_MIN_BF16_SNR_DB} dB vs psum reference')
+                f'< {_MIN_BF16_SNR_DB} dB vs psum reference')
 
             # 2. Accuracy against an exact f32 ground truth -- no collective
             #    involved, so this catches the case where kernel AND reference
             #    drift together, which (1) would happily pass.
-            truth = jnp.asarray(x, jnp.float32).reshape(
-                num_devices, seq_len // num_devices, hidden).sum(axis=0)
+            truth = jnp.asarray(x,
+                                jnp.float32).reshape(num_devices,
+                                                     seq_len // num_devices,
+                                                     hidden).sum(axis=0)
             scale = float(jnp.max(jnp.abs(truth))) or 1.0
             err_kernel = float(jnp.max(jnp.abs(out_f32 - truth))) / scale
             err_ref = float(jnp.max(jnp.abs(ref_f32 - truth))) / scale
             self.assertLess(
-                err_kernel, max(err_ref * _BF16_TRUTH_SLACK, 1e-3),
+                err_kernel,
+                max(err_ref * _BF16_TRUTH_SLACK, 1e-3),
                 msg=f'bf16 mb={num_micro_batches} seed={seed}: kernel error '
-                    f'{err_kernel:.4g} vs f32 truth exceeds reference '
-                    f'{err_ref:.4g} by more than {_BF16_TRUTH_SLACK}x')
+                f'{err_kernel:.4g} vs f32 truth exceeds reference '
+                f'{err_ref:.4g} by more than {_BF16_TRUTH_SLACK}x')
 
             # 3. Determinism. A race can give different answers on identical
             #    input from run to run, which a single call cannot detect.
@@ -187,9 +194,10 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
                 fp8_comm=False,
             )
             self.assertTrue(
-                bool(jnp.array_equal(jnp.asarray(again, jnp.float32), out_f32)),
+                bool(jnp.array_equal(jnp.asarray(again, jnp.float32),
+                                     out_f32)),
                 msg=f'bf16 mb={num_micro_batches} seed={seed}: two runs on '
-                    f'identical input disagree -- race, not precision')
+                f'identical input disagree -- race, not precision')
 
     # ------------------------------------------------------------------ #
     # Race regression gate                                                #
@@ -214,26 +222,31 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
         num_devices = jax.device_count()
         mesh = _make_mesh(num_devices, axis_name)
 
-        seq_len, hidden = 4096, 4096          # 512 local rows on 8 devices
+        seq_len, hidden = 4096, 4096  # 512 local rows on 8 devices
         in_specs = P(axis_name, None)
         runs = 12
 
         x = jax.random.normal(jax.random.key(0), (seq_len, hidden),
                               dtype=jnp.bfloat16)
-        x_sharded = jax.device_put(
-            x, jax.sharding.NamedSharding(mesh, in_specs))
-        truth = jnp.asarray(x, jnp.float32).reshape(
-            num_devices, seq_len // num_devices, hidden).sum(axis=0)
+        x_sharded = jax.device_put(x,
+                                   jax.sharding.NamedSharding(mesh, in_specs))
+        truth = jnp.asarray(x, jnp.float32).reshape(num_devices,
+                                                    seq_len // num_devices,
+                                                    hidden).sum(axis=0)
         scale = float(jnp.max(jnp.abs(truth))) or 1.0
         kw = dict(fp8_min_rows=0, fp8_static_scale=1.0) if fp8_comm else {}
         tol = 0.15 if fp8_comm else 0.05
 
         first, worst = None, 0.0
         for i in range(runs):
-            out = jnp.asarray(hrs.hierarchical_reduce_scatter(
-                x_sharded, mesh=mesh, in_specs=in_specs,
-                num_micro_batches=num_micro_batches, fp8_comm=fp8_comm, **kw),
-                jnp.float32)
+            out = jnp.asarray(
+                hrs.hierarchical_reduce_scatter(
+                    x_sharded,
+                    mesh=mesh,
+                    in_specs=in_specs,
+                    num_micro_batches=num_micro_batches,
+                    fp8_comm=fp8_comm,
+                    **kw), jnp.float32)
             worst = max(worst, float(jnp.max(jnp.abs(out - truth))) / scale)
             if first is None:
                 first = out
@@ -241,12 +254,13 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
                 self.assertTrue(
                     bool(jnp.array_equal(first, out)),
                     msg=f'mb={num_micro_batches} fp8={fp8_comm}: run {i} '
-                        f'differs from run 0 on identical input -- race')
+                    f'differs from run 0 on identical input -- race')
 
         self.assertLess(
-            worst, tol,
+            worst,
+            tol,
             msg=f'mb={num_micro_batches} fp8={fp8_comm}: max relative error '
-                f'{worst:.4g} over {runs} runs exceeds {tol}')
+            f'{worst:.4g} over {runs} runs exceeds {tol}')
 
     # ------------------------------------------------------------------ #
     # Quality evaluation: FP8 comm vs bf16 baseline                      #
@@ -297,9 +311,8 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
         avg_snr = sum(snr_values) / len(snr_values)
         avg_max_err = sum(max_errors) / len(max_errors)
 
-        print(
-            f'[fp8_quality seq={seq_len} hidden={hidden}] '
-            f'SNR={avg_snr:.1f} dB, avg_max_err={avg_max_err:.4f}')
+        print(f'[fp8_quality seq={seq_len} hidden={hidden}] '
+              f'SNR={avg_snr:.1f} dB, avg_max_err={avg_max_err:.4f}')
 
         self.assertGreater(
             avg_snr,
@@ -320,9 +333,9 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
 
         # Use a larger range to stress the FP8 scale computation.
         x = jax.random.normal(jax.random.key(42), (1024, 4096),
-                               dtype=jnp.bfloat16) * 10.0
+                              dtype=jnp.bfloat16) * 10.0
         x_sharded = jax.device_put(x,
-                                    jax.sharding.NamedSharding(mesh, in_specs))
+                                   jax.sharding.NamedSharding(mesh, in_specs))
 
         out = hrs.hierarchical_reduce_scatter(
             x_sharded,
@@ -345,7 +358,7 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
 
         x = jnp.zeros((1024, 4096), dtype=jnp.bfloat16)
         x_sharded = jax.device_put(x,
-                                    jax.sharding.NamedSharding(mesh, in_specs))
+                                   jax.sharding.NamedSharding(mesh, in_specs))
 
         out = hrs.hierarchical_reduce_scatter(
             x_sharded,
@@ -384,29 +397,37 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
             x_sharded = jax.device_put(
                 x, jax.sharding.NamedSharding(mesh, in_specs))
 
-            out_bf16 = hrs.hierarchical_reduce_scatter(
-                x_sharded, mesh=mesh, in_specs=in_specs, fp8_comm=False)
+            out_bf16 = hrs.hierarchical_reduce_scatter(x_sharded,
+                                                       mesh=mesh,
+                                                       in_specs=in_specs,
+                                                       fp8_comm=False)
 
             # Data-driven static scale with 2x headroom: map the largest final
             # value to ~half of fp8's range so partial sums that momentarily
             # exceed the final (sign cancellation) still avoid saturation.
             max_abs = float(jnp.max(jnp.abs(out_bf16.astype(jnp.float32))))
-            static_scale =  hrs_config.FP8_E4M3_MAX / (2.0 * max(max_abs, 1e-6))
+            static_scale = hrs_config.FP8_E4M3_MAX / (2.0 * max(max_abs, 1e-6))
 
             out_static = hrs.hierarchical_reduce_scatter(
-                x_sharded, mesh=mesh, in_specs=in_specs, fp8_comm=True,
-                fp8_static_scale=static_scale, fp8_min_rows=0)
+                x_sharded,
+                mesh=mesh,
+                in_specs=in_specs,
+                fp8_comm=True,
+                fp8_static_scale=static_scale,
+                fp8_min_rows=0)
 
             self.assertTrue(jnp.all(jnp.isfinite(out_static)),
                             'static-scale fp8 produced NaN or Inf')
-            noise = out_static.astype(jnp.float32) - out_bf16.astype(jnp.float32)
+            noise = out_static.astype(jnp.float32) - out_bf16.astype(
+                jnp.float32)
             snr_values.append(_snr_db(out_bf16, noise))
 
         avg_snr = sum(snr_values) / len(snr_values)
         print(f'[fp8_static seq={seq_len} hidden={hidden}] '
               f'SNR={avg_snr:.1f} dB (scale from bf16 max, 2x headroom)')
         self.assertGreater(
-            avg_snr, _MIN_STATIC_SNR_DB,
+            avg_snr,
+            _MIN_STATIC_SNR_DB,
             msg=f'static-scale SNR {avg_snr:.1f} dB < {_MIN_STATIC_SNR_DB} dB '
             f'for seq_len={seq_len}, hidden={hidden}.')
 
@@ -422,11 +443,14 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
 
         x = jnp.zeros((1024, 4096), dtype=jnp.bfloat16)
         x_sharded = jax.device_put(x,
-                                    jax.sharding.NamedSharding(mesh, in_specs))
+                                   jax.sharding.NamedSharding(mesh, in_specs))
 
-        out = hrs.hierarchical_reduce_scatter(
-            x_sharded, mesh=mesh, in_specs=in_specs, fp8_comm=True,
-            fp8_static_scale=0.0625, fp8_min_rows=0)
+        out = hrs.hierarchical_reduce_scatter(x_sharded,
+                                              mesh=mesh,
+                                              in_specs=in_specs,
+                                              fp8_comm=True,
+                                              fp8_static_scale=0.0625,
+                                              fp8_min_rows=0)
         self.assertTrue(jnp.all(jnp.isfinite(out)),
                         'static-scale fp8 produced NaN on zero input')
         self.assertAllClose(out, jnp.zeros_like(out), atol=0.0)
@@ -444,19 +468,27 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
         x = jax.random.normal(jax.random.key(7), (2048, 4096),
                               dtype=jnp.bfloat16)
         x_sharded = jax.device_put(x,
-                                    jax.sharding.NamedSharding(mesh, in_specs))
+                                   jax.sharding.NamedSharding(mesh, in_specs))
 
-        out_bf16 = hrs.hierarchical_reduce_scatter(
-            x_sharded, mesh=mesh, in_specs=in_specs, fp8_comm=False)
+        out_bf16 = hrs.hierarchical_reduce_scatter(x_sharded,
+                                                   mesh=mesh,
+                                                   in_specs=in_specs,
+                                                   fp8_comm=False)
         max_abs = float(jnp.max(jnp.abs(out_bf16.astype(jnp.float32))))
-        static_scale =  hrs_config.FP8_E4M3_MAX / (2.0 * max(max_abs, 1e-6))
+        static_scale = hrs_config.FP8_E4M3_MAX / (2.0 * max(max_abs, 1e-6))
 
-        out_dyn = hrs.hierarchical_reduce_scatter(
-            x_sharded, mesh=mesh, in_specs=in_specs, fp8_comm=True,
-            fp8_min_rows=0)
+        out_dyn = hrs.hierarchical_reduce_scatter(x_sharded,
+                                                  mesh=mesh,
+                                                  in_specs=in_specs,
+                                                  fp8_comm=True,
+                                                  fp8_min_rows=0)
         out_static = hrs.hierarchical_reduce_scatter(
-            x_sharded, mesh=mesh, in_specs=in_specs, fp8_comm=True,
-            fp8_static_scale=static_scale, fp8_min_rows=0)
+            x_sharded,
+            mesh=mesh,
+            in_specs=in_specs,
+            fp8_comm=True,
+            fp8_static_scale=static_scale,
+            fp8_min_rows=0)
 
         self.assertTrue(jnp.all(jnp.isfinite(out_dyn)))
         self.assertTrue(jnp.all(jnp.isfinite(out_static)))
@@ -464,13 +496,13 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
         diff = out_static.astype(jnp.float32) - out_dyn.astype(jnp.float32)
         snr = _snr_db(out_dyn, diff)
         print(f'[fp8_static_vs_dynamic] static-vs-dynamic SNR={snr:.1f} dB')
-        self.assertGreater(snr, 10.0,
-                           msg=f'static diverges from dynamic (SNR {snr:.1f} dB)')
+        self.assertGreater(
+            snr, 10.0, msg=f'static diverges from dynamic (SNR {snr:.1f} dB)')
 
 
 @jtu.with_config(jax_numpy_dtype_promotion='standard')
 class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
-  """Planning rules that decide how the kernel runs, tested without a TPU.
+    """Planning rules that decide how the kernel runs, tested without a TPU.
 
   These cover the two decisions taken before any device work happens: how many
   micro-batches to use, and whether the working set can live in VMEM scratch.
@@ -479,15 +511,15 @@ class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
   these rules regressed.
   """
 
-  # local_seq_len values a decode-heavy server reaches with MNBT 1024 and MoE
-  # chunk 256 on 8 devices. This is the per-device, pre-scatter row count,
-  # 8x the post-scatter count that appears in the HLO.
-  PRODUCTION_ROWS = (32, 64, 128, 256, 512, 1024, 2048)
-  HIDDEN = 4096
-  BF16_ITEMSIZE = 2
+    # local_seq_len values a decode-heavy server reaches with MNBT 1024 and MoE
+    # chunk 256 on 8 devices. This is the per-device, pre-scatter row count,
+    # 8x the post-scatter count that appears in the HLO.
+    PRODUCTION_ROWS = (32, 64, 128, 256, 512, 1024, 2048)
+    HIDDEN = 4096
+    BF16_ITEMSIZE = 2
 
-  def test_micro_batch_floor_is_bf16_only(self):
-    """mb=1 can return the previous call's result on the BF16 wire.
+    def test_micro_batch_floor_is_bf16_only(self):
+        """mb=1 can return the previous call's result on the BF16 wire.
 
     [Step C] in kernel.py reads the accumulator right after the emit_pipeline
     that writes it, with nothing ordering the two. The stale result is only
@@ -500,27 +532,31 @@ class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
     exemption must be re-validated with fresh inputs before this test is
     relaxed.
     """
-    self.assertEqual(hrs_config._MIN_SAFE_MICRO_BATCHES, 2,
-                     msg='the mb>=2 correctness floor is not in effect')
-    for rows in self.PRODUCTION_ROWS:
-      bf16_mb = hrs_config.pick_num_micro_batches(rows, self.HIDDEN,
-                                                  self.BF16_ITEMSIZE, False)
-      self.assertGreaterEqual(
-          bf16_mb, 2,
-          msg=f'bf16 at local_seq_len={rows} picked mb={bf16_mb}; mb=1 is '
-              'measurably incorrect, see the docstring above')
-      self.assertLessEqual(bf16_mb, hrs_config._MAX_MICRO_BATCHES)
+        self.assertEqual(hrs_config._MIN_SAFE_MICRO_BATCHES,
+                         2,
+                         msg='the mb>=2 correctness floor is not in effect')
+        for rows in self.PRODUCTION_ROWS:
+            bf16_mb = hrs_config.pick_num_micro_batches(
+                rows, self.HIDDEN, self.BF16_ITEMSIZE, False)
+            self.assertGreaterEqual(
+                bf16_mb,
+                2,
+                msg=f'bf16 at local_seq_len={rows} picked mb={bf16_mb}; mb=1 is '
+                'measurably incorrect, see the docstring above')
+            self.assertLessEqual(bf16_mb, hrs_config._MAX_MICRO_BATCHES)
 
-    # The exemption is real, not vacuous: at small shapes the fitted rule wants
-    # mb=1 and the FP8 wire is allowed to take it while BF16 is not.
-    fp8_mb = hrs_config.pick_num_micro_batches(128, self.HIDDEN,
-                                               self.BF16_ITEMSIZE, True)
-    self.assertEqual(fp8_mb, 1,
-                     msg='FP8 no longer takes mb=1, so the BF16-only floor is '
-                         'not being exercised by this test')
+        # The exemption is real, not vacuous: at small shapes the fitted rule wants
+        # mb=1 and the FP8 wire is allowed to take it while BF16 is not.
+        fp8_mb = hrs_config.pick_num_micro_batches(128, self.HIDDEN,
+                                                   self.BF16_ITEMSIZE, True)
+        self.assertEqual(
+            fp8_mb,
+            1,
+            msg='FP8 no longer takes mb=1, so the BF16-only floor is '
+            'not being exercised by this test')
 
-  def test_work_set_is_three_bytes_per_element_on_both_wires(self):
-    """Packed working buffers cost 3 B/elem of input on either wire.
+    def test_work_set_is_three_bytes_per_element_on_both_wires(self):
+        """Packed working buffers cost 3 B/elem of input on either wire.
 
     Working buffers only touch this device's chunk parity (ChunkLocator.pack),
     so they are allocated at half the input's rows. Per row they hold
@@ -528,43 +564,48 @@ class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
     (2 B) or the two fp8 staging buffers (1 B + 1 B): 6 B, halved to 3 B/elem
     of input. FP8 halves only the wire, not the working set.
     """
-    for rows in self.PRODUCTION_ROWS:
-      elems = rows * self.HIDDEN
-      bf16 = hrs._work_set_bytes(rows, self.HIDDEN, self.BF16_ITEMSIZE,
-                                False, 8, 8)
-      self.assertEqual(bf16, 3 * elems)
+        for rows in self.PRODUCTION_ROWS:
+            elems = rows * self.HIDDEN
+            bf16 = hrs._work_set_bytes(rows, self.HIDDEN, self.BF16_ITEMSIZE,
+                                       False, 8, 8)
+            self.assertEqual(bf16, 3 * elems)
 
-      # num_scale_slots only adds the two f32 scale buffers, which are tiny.
-      fp8 = hrs._work_set_bytes(rows, self.HIDDEN, self.BF16_ITEMSIZE,
-                               True, 8, 8)
-      scale_bytes = 2 * 8 * 8 * hrs_config.SCALE_LANE * 4
-      self.assertEqual(fp8, 3 * elems + scale_bytes)
+            # num_scale_slots only adds the two f32 scale buffers, which are tiny.
+            fp8 = hrs._work_set_bytes(rows, self.HIDDEN, self.BF16_ITEMSIZE,
+                                      True, 8, 8)
+            scale_bytes = 2 * 8 * 8 * hrs_config.SCALE_LANE * 4
+            self.assertEqual(fp8, 3 * elems + scale_bytes)
 
-  def test_work_scratch_falls_back_when_it_cannot_fit(self):
-    """The VMEM claim is sized from the shape and refuses shapes that don't fit.
+    def test_work_scratch_falls_back_when_it_cannot_fit(self):
+        """The VMEM claim is sized from the shape and refuses shapes that don't fit.
 
     At 2048 local rows the working set is ~24.3 MiB, and with scoped scratch
     plus the operand the total is ~50.7 MiB against 58.9 MiB usable, so it
     fits. 4096 rows is over budget and must fall back to the pl.ANY/HBM form
     rather than fail to compile.
     """
-    fake_info = mock.Mock(vmem_capacity_bytes=64 * 2**20)
-    with mock.patch.object(hrs.pltpu, 'get_tpu_info', return_value=fake_info):
-      for rows, mb, expected in ((256, 1, True), (512, 1, True),
-                                 (1024, 1, True), (2048, 2, True),
-                                 (4096, 4, False)):
-        enabled, frac = hrs._plan_work_scratch(rows, self.HIDDEN,
-                                               self.BF16_ITEMSIZE, True, 8,
-                                               8 * mb, mb, 0.95)
-        self.assertEqual(
-            enabled, expected,
-            msg=f'local_seq_len={rows} mb={mb}: VMEM scratch enabled={enabled}, '
-                f'expected {expected}')
-        if enabled:
-          # The claim must cover the need exactly, not a fixed fraction: an
-          # under-claim raises CompileTimeScopedVmemOom at compile time.
-          self.assertGreater(frac, 0.0)
-          self.assertLess(frac, 1.0)
+        fake_info = mock.Mock(vmem_capacity_bytes=64 * 2**20)
+        with mock.patch.object(hrs.pltpu,
+                               'get_tpu_info',
+                               return_value=fake_info):
+            for rows, mb, expected in ((256, 1, True), (512, 1,
+                                                        True), (1024, 1, True),
+                                       (2048, 2, True), (4096, 4, False)):
+                enabled, frac = hrs._plan_work_scratch(rows, self.HIDDEN,
+                                                       self.BF16_ITEMSIZE,
+                                                       True, 8, 8 * mb, mb,
+                                                       0.95)
+                self.assertEqual(
+                    enabled,
+                    expected,
+                    msg=
+                    f'local_seq_len={rows} mb={mb}: VMEM scratch enabled={enabled}, '
+                    f'expected {expected}')
+                if enabled:
+                    # The claim must cover the need exactly, not a fixed fraction: an
+                    # under-claim raises CompileTimeScopedVmemOom at compile time.
+                    self.assertGreater(frac, 0.0)
+                    self.assertLess(frac, 1.0)
 
 
 if __name__ == '__main__':

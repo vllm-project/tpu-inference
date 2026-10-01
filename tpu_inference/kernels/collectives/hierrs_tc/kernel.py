@@ -147,9 +147,7 @@ def hier_rs_kernel(
     # ============ Prologue: phase 1 for micro-batch 0 ============
     # [Step A]: Start remote D2D copies for micro-batch 0
     all_phase1_ops.extend(
-        dma.start_phase1_d2d_copies(src=input_ref,
-                                    dst=recv_buf_ref,
-                                    mb_idx=0))
+        dma.start_phase1_d2d_copies(src=input_ref, dst=recv_buf_ref, mb_idx=0))
 
     # [Step B]: Wait for micro-batch 0 copies to finish, and accumulate locally
     dma.run_phase1_accumulate_pipeline(
@@ -160,8 +158,7 @@ def hier_rs_kernel(
         in1_index_fn=locator.make_phase1_packed_index_fn(mb_idx=0),
         in2_index_fn=locator.make_phase1_index_fn(mb_idx=0),
         out_index_fn=locator.make_phase1_packed_index_fn(mb_idx=0),
-        hbm_index_fn=locator.make_phase1_in_index_fn_with_recv_sem(
-            mb_idx=0),
+        hbm_index_fn=locator.make_phase1_in_index_fn_with_recv_sem(mb_idx=0),
         block_size=config.mb_size,
         mb_idx=0,
     )
@@ -194,9 +191,7 @@ def hier_rs_kernel(
     def _start_phase2_step0(mb):
         """[Step F] body: start phase-2 step-0 C2C copies for micro-batch mb."""
         if fp8_comm:
-            dma.quantize_chunks_to_fp8_staging(running_sum_ref,
-                                               mb,
-                                               step_idx=0)
+            dma.quantize_chunks_to_fp8_staging(running_sum_ref, mb, step_idx=0)
         ops = dma.start_phase2_c2c_copies(mb_idx=mb,
                                           step_idx=0,
                                           src=running_sum_ref,
@@ -222,8 +217,8 @@ def hier_rs_kernel(
                 in1_index_fn=locator.make_phase1_packed_index_fn(m + 1),
                 in2_index_fn=locator.make_phase1_index_fn(m + 1),
                 out_index_fn=locator.make_phase1_packed_index_fn(m + 1),
-                hbm_index_fn=locator.
-                make_phase1_in_index_fn_with_recv_sem(m + 1),
+                hbm_index_fn=locator.make_phase1_in_index_fn_with_recv_sem(m +
+                                                                           1),
                 block_size=config.mb_size,
                 mb_idx=m + 1,
             )
@@ -252,8 +247,8 @@ def hier_rs_kernel(
                     in_index_fn=locator.make_phase2_index_fn(0, m),
                     out_index_fn=locator.make_phase2_out_index_fn(0, m)
                     if is_last else locator.make_phase2_index_fn(0, m),
-                    hbm_index_fn=locator.
-                    make_phase2_in_index_fn_with_recv_sem(0, m),
+                    hbm_index_fn=locator.make_phase2_in_index_fn_with_recv_sem(
+                        0, m),
                     block_size=config.hc_chunk_size,
                     mb_idx=m,
                     step_idx=0,
@@ -291,12 +286,11 @@ def hier_rs_kernel(
         # Wait for and accumulate phase-2 step 1 of micro-batch m.
         if config.num_hcube_dims > 1:
             if fp8_comm:
-                dma.run_phase2_dequant_accumulate_pipeline(
-                    running_sum_ref,
-                    output_ref,
-                    m,
-                    step_idx=1,
-                    is_last_step=True)
+                dma.run_phase2_dequant_accumulate_pipeline(running_sum_ref,
+                                                           output_ref,
+                                                           m,
+                                                           step_idx=1,
+                                                           is_last_step=True)
             else:
                 dma.run_phase2_accumulate_pipeline(
                     src1=p2_buf,
@@ -304,8 +298,8 @@ def hier_rs_kernel(
                     dst=output_ref,
                     in_index_fn=locator.make_phase2_index_fn(1, m),
                     out_index_fn=locator.make_phase2_out_index_fn(1, m),
-                    hbm_index_fn=locator.
-                    make_phase2_in_index_fn_with_recv_sem(1, m),
+                    hbm_index_fn=locator.make_phase2_in_index_fn_with_recv_sem(
+                        1, m),
                     block_size=config.hc_chunk_size,
                     mb_idx=m,
                     step_idx=1,
