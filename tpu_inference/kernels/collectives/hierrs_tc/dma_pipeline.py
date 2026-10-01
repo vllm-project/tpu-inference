@@ -36,28 +36,23 @@ from tpu_inference.kernels.collectives.hierrs_tc.topology import (ChunkLocator,
 
 
 def scoped(name: str):
-    """Wraps a whole pipeline pass in one COARSE jax.named_scope.
+    """Wraps a whole pipeline pass in one coarse jax.named_scope.
 
-  Deliberately coarse: one region per logical pass (phase-1 accumulate,
-  quantize staging, phase-2 dequant+accumulate) rather than per DMA
-  start/wait. Fine-grained scopes wrapped precisely the DMA issue/wait
-  structure -- the region a scheduler would need to reorder -- and 9 of them
-  were removed after measuring: bitwise-identical output, isolated A/B flat,
-  e2e +0.20%, but +70 KB (8.3%) of Mosaic IR.
+  There is one region per logical pass (phase-1 accumulate, quantize staging,
+  phase-2 dequant+accumulate) rather than one per DMA start/wait; per-DMA
+  scopes inflate the Mosaic IR without adding useful structure.
 
-  Applied as a decorator so a call site is never re-indented: every caller of
-  the wrapped method gets the region for free, and the diff stays reviewable.
+  Applied as a decorator so every caller of the wrapped method gets the
+  region without re-indenting the call site.
 
-  CAVEAT, measured (results/probe_scope_visibility.py): these regions are NOT
-  currently visible to xprof. jax/_src/pallas/mosaic/lowering.py:1750 emits
-  `tpu.trace_start(message=name, level=10)` with the level hardcoded, and 10
-  is above the profiler's capture threshold. `trace_level` in
-  ProfileOptions.advanced_configuration is inert (levels 2 and 15 produced
-  byte-identical 94113-event traces) and `tpu_trace_mode` is rejected by this
-  libtpu ("Invalid tpu_trace_mode (it is not supported)"), aborting collection
-  entirely. So quant/dequant cost is obtained by DIFFERENTIAL measurement
-  instead -- stub a pass out and diff whole-kernel device time. These scopes
-  are kept for readability and for the day the capture threshold is settable.
+  Limitation: these regions are not currently visible to xprof. The Pallas
+  Mosaic lowering emits `tpu.trace_start` with a hardcoded level of 10, which
+  is above the profiler's capture threshold, and neither `trace_level` in
+  ProfileOptions.advanced_configuration nor `tpu_trace_mode` changes that.
+  The cost of an individual pass therefore has to be measured
+  differentially: stub the pass out and compare whole-kernel device time.
+  The scopes are kept for readability and for when the capture threshold
+  becomes configurable.
   """
 
     def deco(fn):
@@ -75,10 +70,10 @@ def scoped(name: str):
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class RemoteWaitBufferedRef(pltpu.BufferedRef):
-    """Subclass of BufferedRef that implements semaphore-synchronized memory copies.
+    """BufferedRef whose copy_in is synchronized on a remote-write semaphore.
 
-  Used to wait for remote device writes before initiating local HBM-to-VMEM
-  copies.
+  Waits for a remote device's write to land in HBM before starting the local
+  HBM-to-VMEM copy of that data.
   """
 
     index_fn_with_recv_sem: Callable[..., Any] | None = dataclasses.field(
@@ -219,21 +214,21 @@ class DmaManager:
         self.fp8_recv_bref = fp8_recv_bref
         self.scale_bref = scale_bref
         self.fp8_static_scale = fp8_static_scale
-        # Only static mode can drop the scale transfer: dynamic genuinely needs the
-        # sender's per-chunk value on the receive side. In static mode the receiver
-        # reconstructs the identical constant, so writing/sending/waiting on it is
-        # pure overhead -- this is unconditional now, matching Config.skip_scale_dma.
-        # Only static mode can drop the scale transfer.
+        # Only static mode can drop the scale transfer: dynamic scaling needs
+        # the sender's per-chunk value on the receive side, whereas in static
+        # mode the receiver reconstructs the identical constant, so writing,
+        # sending and waiting on it would be pure overhead. Matches
+        # Config.skip_scale_dma.
         self.skip_scale_dma = fp8_static_scale is not None
 
     def start_phase1_d2d_copies(self, src, dst, mb_idx):
         """Push this device's partner-parity chunks into the partner's recv_buf.
 
-    src is the FULL input operand; dst is the partner's PACKED recv_buf, so
+    src is the full input operand; dst is the partner's packed recv_buf, so
     the two slices differ in their row offset. pack(c_neigh) == chip_idx for
-    either parity, and c_neigh carries the PARTNER's chiplet bit -- which is
-    exactly the receiver's parity -- so the packed destination row agrees with
-    where the receiver's accumulate pipeline reads (chip_idx as well).
+    either parity, and c_neigh carries the partner's chiplet bit, which is the
+    receiver's parity, so the packed destination row matches where the
+    receiver's accumulate pipeline reads (also chip_idx).
     """
         ops = []
         mb_start = mb_idx * self.config.mb_size
@@ -268,8 +263,8 @@ class DmaManager:
                                 fp8=False):
         """Start Phase-2 inter-chip (C2C) copies for one micro-batch and step.
 
-    Serves BOTH wires. The hypercube walk -- which neighbour, which chunk,
-    which hidden-dim slice -- is identical for bf16 and fp8; only three things
+    Serves both wires. The hypercube walk (which neighbour, which chunk,
+    which hidden-dim slice) is identical for bf16 and fp8; only three things
     differ, and all three are parameters rather than structure:
 
       * buffers    bf16 takes `src`/`dst` explicitly (running_sum -> the
@@ -277,17 +272,16 @@ class DmaManager:
                    fp8_send_buf -> fp8_recv_buf, which the caller has already
                    filled via quantize_chunks_to_fp8_staging.
       * semaphores each wire owns its own send/recv DMA semaphore arrays, so
-                   an in-flight bf16 and fp8 transfer could never alias.
-      * scale DMA  fp8 dynamic scaling sends a second, tiny (512 B) buffer
-                   alongside the payload. Negligible in bytes, NOT negligible
-                   in cost: it is another DMA issue plus two more semaphore
-                   arrays per chunk, which is what doubles fp8's fixed cost
-                   against bf16. Static scaling skips it entirely
-                   (`skip_scale_dma`), and that is the shipped configuration.
+                   in-flight bf16 and fp8 transfers cannot alias.
+      * scale DMA  fp8 dynamic scaling sends a second, small (512 B) buffer
+                   alongside the payload. It is cheap in bytes but not in
+                   fixed cost: another DMA issue plus two more semaphore
+                   arrays per chunk. Static scaling skips it entirely
+                   (`skip_scale_dma`).
 
     Returns a list of tuples whose first two slots are always
     `(data_op, scale_op)`, with `scale_op` None on every path that sends no
-    scale -- bf16 always, fp8 under static scaling. Callers rely on that fixed
+    scale (bf16 always, fp8 under static scaling). Callers rely on that fixed
     shape to drain both wires with one code path.
     """
         if fp8:
@@ -334,7 +328,7 @@ class DmaManager:
                 neighbor_chunk_idx = self.locator.get_phase2_chunk_idx(
                     neigh_device_id, step_idx, op_idx, hcube_dim_idx)
 
-                # src and dst are both PACKED working buffers (bf16:
+                # src and dst are both packed working buffers (bf16:
                 # running_sum -> landing buffer; fp8: fp8_send -> fp8_recv),
                 # and sender and receiver share chunk parity, so one packed
                 # slice serves both ends.
@@ -402,9 +396,9 @@ class DmaManager:
     ):
         """Orchestrates a D2D accumulation pipeline on a 1D chip grid.
 
-    src1 (recv_buf) and dst (running_sum) are PACKED working buffers; src2 is
-    the FULL input operand. That is why the two inputs take separate index
-    fns -- the only pipeline where packed and full indexing meet.
+    src1 (recv_buf) and dst (running_sum) are packed working buffers; src2 is
+    the full input operand, so the two inputs take separate index fns. This is
+    the only pipeline where packed and full indexing meet.
     """
 
         def accum_body(s1_ref, s2_ref, d_ref):
@@ -511,17 +505,15 @@ class DmaManager:
 
     @scoped("quant_stage")
     def quantize_chunks_to_fp8_staging(self, src_hbm, mb_idx, step_idx):
-        """Pipelined quantize of every Phase-2 chunk this device SENDs this step.
+        """Pipelined quantize of every Phase-2 chunk sent this step.
 
     Send-side mirror of run_phase2_dequant_accumulate_pipeline: emit_pipeline
     double-buffers the BF16 source chunk (HBM->VMEM load), the FP8 staging
     chunk and the scale (both VMEM->HBM stores), so the DMA engine prefetches
-    chunk s+1 while the VPU quantizes chunk s. This replaces the old serial
-    load/wait → quantize → store/wait → scale-store/wait chain (6 blocking
-    HBM round-trips per chunk).
+    chunk s+1 while the VPU quantizes chunk s.
 
     Reads BF16 from src_hbm (running_sum_ref); writes FP8 to fp8_send_buf and
-    the per-chunk scale to scale_send_buf.  Must complete before
+    the per-chunk scale to scale_send_buf. Must complete before
     start_phase2_c2c_copies(..., fp8=True) is called.
     """
         assert self.run_bref is not None
@@ -537,59 +529,42 @@ class DmaManager:
         grid = (num_ops_in_step, self.config.num_hcube_dims)
 
         def quant_body(bf16_ref, fp8_ref, scale_ref=None):
-            # Per-tensor quantize at a fixed static scale. There is no
-            # cross-lane max-abs reduction to do -- that is the send-side win of
-            # static mode -- and the round trip stays consistent because the
-            # recv side dequantizes with the identical constant.
+            # Static mode quantizes with a fixed per-tensor scale and skips the
+            # cross-lane max-abs reduction; the round trip stays consistent
+            # because the receiver dequantizes with the identical constant.
+            # Dynamic mode computes a per-chunk scale and ships it.
             data_f32 = bf16_ref[...].astype(jnp.float32)
             if self.fp8_static_scale is not None:
                 # scale is "units per fp8 step": quant divides by it, dequant
                 # multiplies. 1/fp8_static_scale mirrors the dynamic convention
                 # so both paths share the identical clip/cast below.
                 #
-                # NO non-finite guard on this path -- deliberate, and measured.
-                # There used to be a `where(isfinite(x), x, 0.0)` here. It cost
-                # 0.587 us, 0.59% of the kernel and 7.9% of the quant stage
-                # (EXP-013), and it never had anything to catch: 0 NaN reached
-                # this kernel's input across 192,352 unpermute calls with the
-                # guard disabled, even though gmm2_res itself carried up to
-                # 45,101 NaN elements per call (EXP-014). Quality unchanged
-                # (EXP-015, mmlu_pro 0.8204 +/- 0.0071 vs 0.8232 stock).
-                #
-                # WHY IT IS SAFE, and the condition that keeps it safe:
-                # the NaN lives in rows of gmm2_res that this EP shard never
-                # writes (gmm_wrapper passes zero_initialize=False). Only the
-                # ONE-HOT unpermute reads them -- it contracts over the full
-                # batch axis, and 0 * NaN = NaN, so a single poisoned row makes
-                # 100% of the output NaN (EXP-010). ragged_gather_reduce never
-                # loads an unowned row, so nothing reaches us.
-                #
-                # ==> This depends on ONEHOT_MOE_PERMUTE_THRESHOLD=0, the
-                #     library default (envs.py), which makes the gather path
-                #     unconditional. Raising it re-arms the one-hot matmul and
-                #     removes the only reason this path can drop the guard.
-                #     If that threshold is ever raised, restore the guard.
+                # This path has no non-finite guard, which keeps the quantize
+                # stage cheap. Like psum_scatter, it passes a non-finite input
+                # through. The MoE combine does not produce one: rows this EP
+                # shard never writes are uninitialized (gmm_v2 runs with
+                # zero_initialize=False), but ragged_gather_reduce never loads
+                # them, and the one-hot unpermute zeroes them before its
+                # contraction (fused_moe_gmm.moe_gmm_local).
                 scale = 1.0 / self.fp8_static_scale
             else:
-                # Cross-lane max-abs reduction. This is what static mode buys
-                # its send-side win by skipping -- and it is why the guard is
-                # KEPT here and only here: one non-finite value makes this
-                # scale NaN and takes the whole chunk with it, so dynamic is
-                # structurally far more exposed than static, where a NaN would
-                # stay local to its own element.
+                # Per-chunk scale from a cross-lane max-abs reduction. The
+                # non-finite guard is required here: one non-finite value would
+                # make the scale NaN and corrupt the whole chunk, whereas under
+                # a static scale a NaN stays local to its own element.
                 data_f32 = jnp.where(jnp.isfinite(data_f32), data_f32, 0.0)
                 scale = jnp.max(jnp.abs(data_f32)) / FP8_E4M3_MAX
                 scale = jnp.where(scale == 0.0, 1.0, scale)
             fp8_ref[...] = jnp.clip(data_f32 / scale, -FP8_E4M3_MAX,
                                     FP8_E4M3_MAX).astype(jnp.float8_e4m3fn)
-            # Dynamic must stage the scale for transfer; static does not --
-            # the receiver reconstructs the identical constant, so under
-            # skip_scale_dma the buffer, the DMA and the wait all disappear.
+            # Dynamic mode must stage the scale for transfer. Static mode does
+            # not: the receiver reconstructs the identical constant, so under
+            # skip_scale_dma the buffer, the DMA and the wait are all omitted.
             if scale_ref is not None:
                 scale_ref[...] = jnp.full((1, SCALE_LANE), scale, jnp.float32)
 
-        # Data + scale land at neigh_chunk_idx (the chunk destined for the
-        # neighbor) — same index the serial path wrote, and the same index
+        # Data and scale are written at neigh_chunk_idx (the chunk destined
+        # for the neighbor), the same index that
         # start_phase2_c2c_copies(..., fp8=True) reads back.
         def send_data_index_fn(op_idx, hcube_dim_idx):
             dim = (hcube_dim_idx + step_idx) % self.config.num_hcube_dims
@@ -606,8 +581,9 @@ class DmaManager:
             neigh_chunk_idx = self.locator.get_phase2_chunk_idx(
                 neigh_device_id, step_idx, op_idx, hcube_dim_idx)
             slot = self._scale_slot(step_idx, mb_idx, hcube_dim_idx, op_idx)
-            # block_shape (1, SCALE_LANE) -> element (neigh_chunk_idx, slot*128).
-            # Return the BLOCK index (neigh_chunk_idx, slot), NOT slot*SCALE_LANE.
+            # block_shape (1, SCALE_LANE): element (neigh_chunk_idx, slot*128).
+            # Return the block index (neigh_chunk_idx, slot), not
+            # slot * SCALE_LANE.
             return (neigh_chunk_idx, slot)
 
         bf16_spec = pl.BlockSpec(
@@ -655,9 +631,9 @@ class DmaManager:
                                                mb_idx, step_idx, is_last_step):
         """Pipelined FP8 dequant + BF16 accumulate for Phase 2.
 
-    Replaces the serial wait-loop. emit_pipeline double-buffers the FP8 recv
-    chunk, the running-sum chunk, and the scale, so the ICI engine prefetches
-    chunk s+1 while the VPU dequantizes/accumulates chunk s.
+    emit_pipeline double-buffers the FP8 recv chunk, the running-sum chunk
+    and the scale, so the DMA engine prefetches chunk s+1 while the VPU
+    dequantizes and accumulates chunk s.
     """
         assert self.fp8_recv_bref is not None
         assert self.scale_bref is not None
@@ -675,13 +651,10 @@ class DmaManager:
         grid = (num_ops_in_step, self.config.num_hcube_dims)
 
         def accum_body(fp8_ref, run_ref, *rest):
-            # rest is (scale_ref, d_ref), or just (d_ref,) when the scale transfer
-            # has been elided -- static mode reconstructs the identical constant, so
-            # the sender and receiver still agree by construction.
             fp8_out_ref = None
-            # Under skip_scale_dma (static) `rest` carries the destination ref
-            # alone and the receiver reconstructs the sender's constant, so the
-            # two agree by construction. Dynamic reads the transferred value.
+            # rest is (scale_ref, d_ref), or just (d_ref,) under skip_scale_dma.
+            # Static mode reconstructs the sender's constant, so both sides
+            # agree by construction; dynamic mode reads the transferred value.
             if self.skip_scale_dma:
                 (d_ref, ) = rest
                 scale_ref = None
@@ -695,10 +668,11 @@ class DmaManager:
                 jnp.bfloat16)
             acc = recv_dq + run_ref[...]
             d_ref[...] = acc
-            # Fused producer store: this block IS a whole transfer chunk (both sides
-            # use block_shape (seq_chunk_size, hc_chunk_size)), and the next step
-            # sends a subset of the chunks written here. Quantizing now saves the
-            # staging pass its 2 B/elem re-read of exactly this data.
+            # Optional fused producer store (disabled: fp8_out_ref is None).
+            # This block is a whole transfer chunk (both sides use block_shape
+            # (seq_chunk_size, hc_chunk_size)) and the next step sends a
+            # subset of the chunks written here, so quantizing here would
+            # spare the staging pass a re-read of this data.
             if fp8_out_ref is not None:
                 fp8_out_ref[...] = jnp.clip(
                     acc.astype(jnp.float32) / scale, -FP8_E4M3_MAX,
@@ -718,7 +692,7 @@ class DmaManager:
                 slot,
             )  # block_shape (1, SCALE_LANE) -> element (my_chunk_idx, slot*128)
 
-        # --- recv-sem index fns: wait for remote arrival before HBM->VMEM load ---
+        # Recv-sem index fns: wait for remote arrival before the HBM->VMEM load.
         def fp8_recv_sem_fn(grid_indices, ref):
             op_idx, hcube_dim_idx = grid_indices
             my_chunk_idx = self.locator.get_phase2_chunk_idx(

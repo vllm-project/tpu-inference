@@ -11,7 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Topology abstraction and layout chunk computations, abstracted from the pipeline."""
+"""Device topology and chunk-index math for the hierarchical reduce-scatter.
+
+Device ids 2k and 2k+1 are the two chiplets of physical chip k.
+"""
 
 import jax
 from jax.experimental import pallas as pl
@@ -30,11 +33,11 @@ class Topology:
                                          self.cur_id + 1, self.cur_id - 1)
 
     def get_device_id(self, chip_id, chiplet_bit):
-        """Returns the global device ID from physical chip `chip_id` and chiplet coordinate `chiplet_bit` (0 or 1)."""
+        """Returns the device ID of chiplet `chiplet_bit` (0/1) on `chip_id`."""
         return chip_id * 2 + chiplet_bit
 
     def get_neighbor_chip_id(self, dim):
-        """Returns the physical chip ID of the logical neighbor in hypercube dimension `dim`.
+        """Returns the chip ID of the hypercube neighbour along `dim`.
 
     For example, on a 2D hypercube of 4 physical chips (IDs: 0, 1, 2, 3):
     - If current chip is 0 (binary 00):
@@ -44,7 +47,9 @@ class Topology:
         return self.cur_chip_id ^ (1 << dim)
 
     def get_neighbor_device_id(self, dim):
-        """Returns the ID of the neighbor device along hypercube dimension `dim` sharing the same chiplet position.
+        """Returns the neighbour device along hypercube dimension `dim`.
+
+    The neighbour is on the adjacent chip and has the same chiplet position.
 
     For example, on a 2D hypercube of 4 chips (IDs 0-3) containing 8 logical
     devices (IDs 0-7):
@@ -59,7 +64,7 @@ class Topology:
 
 
 class ChunkLocator:
-    """Encapsulates sequence and HBM indexing math for TensorCore Reduce-Scatter."""
+    """Sequence and HBM indexing math for the TensorCore reduce-scatter."""
 
     def __init__(self, config: Config, topo: Topology):
         self.config = config
@@ -67,7 +72,7 @@ class ChunkLocator:
         self.mb_stride = config.num_hcube_dims * config.hc_chunk_size
 
     def get_slice(self, chunk_idx, start, size):
-        """Returns a 2D HBM slice for a given chunk index and hidden dimension range."""
+        """Returns a 2D HBM slice for a chunk index and hidden-dim range."""
         return (
             pl.ds(chunk_idx * self.config.seq_chunk_size,
                   self.config.seq_chunk_size),
@@ -75,27 +80,26 @@ class ChunkLocator:
         )
 
     def pack(self, chunk_idx):
-        """Global chunk index -> row-chunk index in a PACKED working buffer.
+        """Global chunk index -> row-chunk index in a packed working buffer.
 
     Every chunk index that ever touches a working buffer (recv_buf,
     running_sum, the bf16 phase-2 landing buffer, fp8_send, fp8_recv) is of
     the form `k * 2 + chiplet_bit`: phase 1 lands at this device's parity
     (`get_phase1_chunk_idx`), and phase 2 both reads and receives at it too,
     because hypercube neighbours share the chiplet position
-    (`get_neighbor_device_id`). The odd/even half of a full-size buffer is
-    therefore dead rows. Packed buffers drop that half -- allocated at
-    (local_seq_len // 2, hidden) -- and this remap, `chunk_idx // 2`, is exact
-    for both parities and agrees between DMA sender and receiver because both
-    compute the same chunk index and share parity.
+    (`get_neighbor_device_id`). The other-parity half of a full-size buffer
+    would therefore never be used. Packed buffers drop that half and are
+    allocated at (local_seq_len // 2, hidden). The remap `chunk_idx // 2` is
+    exact for both parities, and DMA sender and receiver agree on it because
+    both compute the same chunk index and share parity.
 
-    The INPUT operand is the one buffer this must never be applied to: its
-    other-parity rows are real data, read by the phase-1 send that pushes
-    them to the partner chiplet.
+    This must not be applied to the input operand: its other-parity rows are
+    real data, read by the phase-1 send to the partner chiplet.
     """
         return chunk_idx // 2
 
     def get_packed_slice(self, chunk_idx, start, size):
-        """`get_slice` into a PACKED working buffer (see `pack`)."""
+        """`get_slice` into a packed working buffer (see `pack`)."""
         return self.get_slice(self.pack(chunk_idx), start, size)
 
     def get_phase1_chunk_idx(self, device_id, chip_idx):
@@ -109,7 +113,7 @@ class ChunkLocator:
         return chip_idx * 2 + chiplet_bit
 
     def get_phase1_chunk_idxes(self, device_id):
-        """Returns all global chunk indices processed by the chiplet group of device `device_id`."""
+        """Returns all global chunk indices processed by `device_id`."""
         chiplet_bit = device_id % 2
         return [
             chip_idx * 2 + chiplet_bit
@@ -118,7 +122,7 @@ class ChunkLocator:
 
     def get_phase2_chunk_idx(self, device_id, step_idx, chunk_group_idx,
                              hcube_dim_idx):
-        """Calculates the chunk index owned by `device_id` for chunk group `chunk_group_idx` during Phase 2 (C2C RS).
+        """Returns the phase-2 chunk index of `device_id` for `chunk_group_idx`.
 
     During Phase 2, devices perform a hypercube reduction. At step `step_idx` of
     the hypercube reduction, the topology is partitioned into independent
@@ -151,7 +155,12 @@ class ChunkLocator:
         target_dim,
         dim_val,
     ):
-        """Calculates the mapped HBM chunk index for the hypercube communication ring of device `device_id` at iteration `chunk_group_idx` along active dimension `target_dim` with bit value `dim_val`, given the processed dimensions `prev_dims` and unprocessed dimensions `future_dims`."""
+        """Returns the hypercube chunk index (before chiplet interleaving).
+
+    Bits for `prev_dims` (already reduced) come from `device_id`'s chip,
+    bits for `future_dims` (not yet reduced) come from `chunk_group_idx`, and
+    the active dimension `target_dim` takes `dim_val`.
+    """
         chip_id = device_id // 2
         base = 0
         for d in prev_dims:
@@ -166,7 +175,7 @@ class ChunkLocator:
     def make_phase1_index_fn(self, mb_idx):
         """Grid index fn for the Phase 1 emit_pipeline (chip_idx -> ref index).
 
-    FULL-buffer indexing -- valid only for the input operand. The working
+    Full-buffer indexing, valid only for the input operand. The working
     buffers are packed; use `make_phase1_packed_index_fn` for those.
     """
 
@@ -177,7 +186,7 @@ class ChunkLocator:
         return phase1_index_fn
 
     def make_phase1_packed_index_fn(self, mb_idx):
-        """Phase-1 grid index fn into PACKED working buffers.
+        """Phase-1 grid index fn into packed working buffers.
 
     pack(chip_idx * 2 + chiplet_bit) == chip_idx, so the packed row-chunk
     index is the grid index itself.
@@ -189,7 +198,7 @@ class ChunkLocator:
         return phase1_packed_index_fn
 
     def make_phase1_in_index_fn_with_recv_sem(self, mb_idx):
-        """Phase 1 input index fn that also reports the slice width for the recv semaphore."""
+        """Index fn: phase-1 recv slice and width, for the recv semaphore."""
 
         def phase1_in_index_fn_with_recv_sem(grid_indices, ref):
             (chip_idx, ) = grid_indices
@@ -200,7 +209,7 @@ class ChunkLocator:
         return phase1_in_index_fn_with_recv_sem
 
     def make_phase2_in_index_fn_with_recv_sem(self, step_idx, mb_idx):
-        """Phase 2 input index fn that also reports the slice width for the recv semaphore."""
+        """Index fn: phase-2 recv slice and width, for the recv semaphore."""
 
         def phase2_in_index_fn_with_recv_sem(grid_indices, ref):
             chunk_group_idx, hcube_dim_idx = grid_indices

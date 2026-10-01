@@ -25,16 +25,10 @@ from absl.testing import absltest, parameterized
 from jax._src import test_util as jtu
 from jax.experimental import shard_map
 
-# Load the kernel by file path, bypassing tpu_inference/__init__.py (which
-# eagerly imports env_override -> vllm -> transformers -> torchvision). The
-# kernel is pure jax with zero tpu_inference imports, so loading it standalone
-# keeps this kernel unit test hermetic and runnable even when the serving
-# stack (torch / torch_tpu / torchvision) is broken or version-skewed -- a
-# kernel test shouldn't depend on the whole vLLM import graph.
-# hierrs_tc is a PACKAGE with intra-package imports, so the standalone
-# spec_from_file_location trick the monolith used cannot load it. A normal
-# import works and is verified not to drag in the vLLM graph: the package
-# imports only jax + its own modules.
+# The hierrs_tc package imports only jax and its own modules, so importing it
+# does not pull in the vLLM import graph. This keeps the kernel test runnable
+# even when the serving stack (torch / torch_tpu / torchvision) is broken or
+# version-skewed.
 from tpu_inference.kernels.collectives.hierrs_tc import config as hrs_config
 from tpu_inference.kernels.collectives.hierrs_tc import wrapper as hrs
 
@@ -64,8 +58,8 @@ def _make_mesh(num_devices: int, axis_name: str) -> jax.sharding.Mesh:
 
 SpongeDir: str | None = os.environ.get('TEST_UNDECLARED_OUTPUTS_DIR', None)
 
-# Minimum SNR (dB) we require for FP8 comm mode. FP8 E4M3FN gives ~2.4 bits
-# of mantissa, so we expect meaningful but bounded degradation.
+# Minimum SNR (dB) for the FP8 wire. E4M3FN has a 3-bit mantissa, so some
+# degradation is expected, but it must stay bounded.
 _MIN_SNR_DB = 20.0
 
 # Static scaling uses a single fixed scale for every chunk instead of a
@@ -77,16 +71,16 @@ _MIN_STATIC_SNR_DB = 12.0
 # The bf16 kernel and the psum reference sum the same values in different
 # orders, so they differ by bf16 reassociation error -- not by one ULP. An
 # elementwise rtol cannot express that: wherever the true value sits near zero
-# the denominator vanishes while the absolute error does not. Measured gap on
-# the shape below is a flat 47.9 dB across every micro-batch count and seed
-# (results/measure_bf16_tol.py), so 40 dB leaves ~2x margin in power while
-# still catching a genuinely wrong reduction, which lands far lower.
+# the denominator vanishes while the absolute error does not. On the shape
+# below the agreement is about 48 dB for every micro-batch count and seed, so
+# 40 dB leaves margin while still catching a wrong reduction, which lands far
+# lower.
 _MIN_BF16_SNR_DB = 40.0
 
 # How much worse than the psum reference the kernel may be against an exact
-# f32 ground truth. Measured: kernel 0.0053-0.0061, reference 0.0058-0.0063 --
-# the kernel is actually the more accurate of the two at several seeds, so this
-# is a regression guard rather than a fitted bound.
+# f32 ground truth. The two have similar max relative error (about 0.005-0.006)
+# and the kernel is often the more accurate, so this is a regression guard
+# rather than a fitted bound.
 _BF16_TRUTH_SLACK = 1.5
 
 
@@ -183,10 +177,8 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
                     f'{err_kernel:.4g} vs f32 truth exceeds reference '
                     f'{err_ref:.4g} by more than {_BF16_TRUTH_SLACK}x')
 
-            # 3. Determinism. The kernel raced for months precisely here:
-            #    identical input gave different answers run to run. A
-            #    correctness test that only ever calls the kernel once cannot
-            #    see that, which is how it stayed hidden.
+            # 3. Determinism. A race can give different answers on identical
+            #    input from run to run, which a single call cannot detect.
             again = hrs.hierarchical_reduce_scatter(
                 x_sharded,
                 mesh=mesh,
@@ -209,15 +201,13 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
     def test_no_race_multi_micro_batch(self, num_micro_batches, fp8_comm):
         """Repeat one shape many times and require bit-identical output.
 
-        Shape matters more than repetition count here. Two races were found in
-        this kernel, and NEITHER reproduced at the 128 local rows that
-        test_correctness_bf16 uses -- that test passes even with the bug
-        deliberately restored. 512 local rows with num_micro_batches=4 was wrong
-        in 157 of 200 runs, so this is the configuration a gate has to exercise.
+        Shape matters more than repetition count here. Write-after-read
+        hazards on the kernel's shared buffers do not show at the 128 local
+        rows that test_correctness_bf16 uses, but do at 512 local rows with
+        multiple micro-batches, so this test uses that shape.
 
-        Both failures were write-after-read hazards on a shared buffer, which
-        makes them timing-dependent: a single call can easily come back correct.
-        Comparing repeated calls is what exposes them.
+        Such hazards are timing-dependent and a single call can come back
+        correct; comparing repeated calls on identical input exposes them.
         """
         self._requires_devices(8)
         axis_name = 'x'
@@ -268,9 +258,7 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
     def test_fp8_comm_quality(self, seq_len, hidden):
         """FP8 comm output should have acceptable SNR vs bf16 baseline.
 
-        This is the primary evaluation gate before enabling real FP8 wire
-        transfers in Phase 2. If this test fails, FP8 quality is too poor
-        for production use at that shape.
+        A failure means FP8 wire quality is too poor for use at that shape.
         """
         self._requires_devices(8)
         axis_name = 'x'
@@ -380,8 +368,8 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
         """Static-scale FP8 output should have acceptable SNR vs bf16.
 
         Uses fp8_min_rows=0 to force the FP8 wire at every tested size (the
-        default env gate would otherwise silently fall back to bf16 below
-        ~2048 rows and make this comparison vacuous).
+        default gate would otherwise fall back to bf16 below ~2048 rows and
+        make this comparison vacuous).
         """
         self._requires_devices(8)
         axis_name = 'x'
@@ -482,34 +470,35 @@ class HierarchicalReduceScatterTest(jtu.JaxTestCase):
 
 @jtu.with_config(jax_numpy_dtype_promotion='standard')
 class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
-  """Planning rules that decide HOW the kernel runs, tested without a TPU.
+  """Planning rules that decide how the kernel runs, tested without a TPU.
 
   These cover the two decisions taken before any device work happens: how many
   micro-batches to use, and whether the working set can live in VMEM scratch.
-  Both are pure arithmetic, so they run anywhere and in milliseconds -- which
-  matters because the on-device suite only ever exercises whatever the
-  heuristics happen to pick, and would stay green if these rules regressed.
+  Both are pure arithmetic, so they run anywhere in milliseconds. The on-device
+  suite only exercises whatever the heuristics pick, so it would stay green if
+  these rules regressed.
   """
 
-  # local_seq_len values a decode-heavy server actually reaches, per RS_PIPE_PROBE
-  # at MNBT 1024 / MoE chunk 256 on 8 devices. This is the PER-DEVICE, PRE-scatter
-  # row count -- 8x the post-scatter count that appears in the HLO.
+  # local_seq_len values a decode-heavy server reaches with MNBT 1024 and MoE
+  # chunk 256 on 8 devices. This is the per-device, pre-scatter row count,
+  # 8x the post-scatter count that appears in the HLO.
   PRODUCTION_ROWS = (32, 64, 128, 256, 512, 1024, 2048)
   HIDDEN = 4096
   BF16_ITEMSIZE = 2
 
   def test_micro_batch_floor_is_bf16_only(self):
-    """mb=1 returns the PREVIOUS call's result on the BF16 wire.
+    """mb=1 can return the previous call's result on the BF16 wire.
 
-    [Step C] reads the accumulator on the line after the emit_pipeline that
-    writes it, with nothing ordering the two. Measured with a fresh input per
-    run against a psum+dynamic_slice reference: 26/30, 24/30 and 11/30 runs
-    below 40 dB SNR at 128, 256 and 512 local rows. mb>=2 is 0/30 everywhere.
+    [Step C] in kernel.py reads the accumulator right after the emit_pipeline
+    that writes it, with nothing ordering the two. The stale result is only
+    visible with a fresh input per call, since a reused input makes it look
+    correct. With mb>=2 the extra pipeline iterations give the write time to
+    land, which masks the hazard rather than removing it.
 
-    The FP8 wire is exempt because quantize_chunks_to_fp8_staging already
-    separates the write from the wire read (0/200 at the production shape).
-    If that staging step is ever removed, this exemption must be re-validated
-    with fresh inputs BEFORE this test is relaxed.
+    The FP8 wire is exempt because quantize_chunks_to_fp8_staging separates
+    the write from the wire read. If that staging step is removed, the
+    exemption must be re-validated with fresh inputs before this test is
+    relaxed.
     """
     self.assertEqual(hrs_config._MIN_SAFE_MICRO_BATCHES, 2,
                      msg='the mb>=2 correctness floor is not in effect')
@@ -531,14 +520,13 @@ class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
                          'not being exercised by this test')
 
   def test_work_set_is_three_bytes_per_element_on_both_wires(self):
-    """Packed working buffers cost 3 B/elem of input on EITHER wire.
+    """Packed working buffers cost 3 B/elem of input on either wire.
 
-    Working buffers only ever touch this device's chunk parity
-    (ChunkLocator.pack), so they are allocated at half the input's rows.
-    Unpacked the cost was 6 B/elem on both wires -- running_sum + recv_buf at
-    2 B each, plus either the bf16 landing buffer (2 B) or the two fp8
-    staging buffers (1 B + 1 B). Packing halves both wires equally; fp8
-    still halves only the wire, never the working set.
+    Working buffers only touch this device's chunk parity (ChunkLocator.pack),
+    so they are allocated at half the input's rows. Per row they hold
+    running_sum + recv_buf at 2 B each, plus either the bf16 landing buffer
+    (2 B) or the two fp8 staging buffers (1 B + 1 B): 6 B, halved to 3 B/elem
+    of input. FP8 halves only the wire, not the working set.
     """
     for rows in self.PRODUCTION_ROWS:
       elems = rows * self.HIDDEN
@@ -553,14 +541,12 @@ class HierarchicalReduceScatterPlanningTest(jtu.JaxTestCase):
       self.assertEqual(fp8, 3 * elems + scale_bytes)
 
   def test_work_scratch_falls_back_when_it_cannot_fit(self):
-    """The VMEM claim is sized from the shape, and refuses shapes that do not fit.
+    """The VMEM claim is sized from the shape and refuses shapes that don't fit.
 
-    With packed working buffers the production shape now fits: at 2048 local
-    rows the working set is ~24.3 MiB, and with scoped scratch plus the
-    operand the total is ~50.7 MiB against 58.9 MiB usable. Before packing
-    the same shape totalled 74.5 MiB and had to fall back -- that flip is the
-    point of packing. 4096 is still over budget and must fall back to the
-    pl.ANY/HBM form rather than fail to compile.
+    At 2048 local rows the working set is ~24.3 MiB, and with scoped scratch
+    plus the operand the total is ~50.7 MiB against 58.9 MiB usable, so it
+    fits. 4096 rows is over budget and must fall back to the pl.ANY/HBM form
+    rather than fail to compile.
     """
     fake_info = mock.Mock(vmem_capacity_bytes=64 * 2**20)
     with mock.patch.object(hrs.pltpu, 'get_tpu_info', return_value=fake_info):

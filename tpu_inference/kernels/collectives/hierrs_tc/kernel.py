@@ -15,8 +15,8 @@
 
 `hier_rs_kernel` is the pallas_call body: it sequences phase 1 (intra-chip D2D)
 and phase 2 (inter-chip hypercube) across micro-batches, driving the DmaManager.
-`make_unified_scratch_shapes` declares the scratch/BufferedRef layout the body
-unpacks positionally -- the two MUST be kept in lockstep.
+`make_unified_scratch_shapes` declares the scratch/BufferedRef layout that the
+body unpacks positionally, so the two must be kept in lockstep.
 """
 
 import jax.numpy as jnp
@@ -66,12 +66,11 @@ def hier_rs_kernel(
             scale_bref,
         ) = args
     else:
-        # Phase 2's bf16 wire gets its OWN landing buffer, appended ahead of
-        # the scratch shapes. Without it an incoming phase-2 chunk can
-        # overwrite phase-1 bytes the receiver has not drained yet -- a
-        # cross-device WAR that produced wrong answers in 157/200 runs at
-        # 512 rows / mb=4. Not optional; the fp8 wire has always had its own
-        # landing buffer, which is exactly why it never reproduced that bug.
+        # The bf16 wire has a dedicated phase-2 landing buffer, passed ahead of
+        # the scratch shapes. Sharing recv_buf_ref with phase 1 would let an
+        # incoming phase-2 chunk overwrite phase-1 data the receiver has not
+        # consumed yet (a cross-device write-after-read race). The fp8 wire
+        # lands in fp8_recv_ref and needs no extra buffer.
         p2_recv_buf_ref, *args = args
         (
             recv_bref,
@@ -88,11 +87,9 @@ def hier_rs_kernel(
         fp8_send_bref = scale_send_bref = None
         fp8_recv_bref = scale_bref = None
 
-    # Phase-2's bf16 landing zone. This is a
-    # dedicated buffer, so incoming phase-2 chunks cannot land on phase-1 bytes
-    # the receiver has not consumed yet (the cross-device WAR that corrupted
-    # bf16 at num_micro_batches=4). Otherwise it aliases recv_buf_ref, the old
-    # racy behaviour, kept for reproducing the bug.
+    # Phase-2 bf16 landing buffer. On the fp8 wire there is none and this
+    # falls back to recv_buf_ref, which the fp8 copies ignore: they always move
+    # fp8_send_ref -> fp8_recv_ref.
     p2_buf = p2_recv_buf_ref if p2_recv_buf_ref is not None else recv_buf_ref
 
     topo = Topology(axis_name)
@@ -131,34 +128,23 @@ def hier_rs_kernel(
 
     Slot 0 is the payload DMA and is always present; slot 1 is the fp8 scale
     DMA, which is None on the bf16 wire and under fp8 static scaling. Filtering
-    on None rather than branching on the wire is what lets both wires share one
-    call site.
+    on None lets both wires share one call site.
     """
         all_phase2_ops.extend([o[0] for o in ops])
         all_phase2_ops.extend([o[1] for o in ops if o[1] is not None])
 
-    # =========================================================================================================
-    #                                  HIERARCHICAL REDUCE-SCATTER TIMELINE (D2D + C2C Step 0)
-    # =========================================================================================================
+    # Hypercube step-0 schedule. Phase 1 (intra-chip D2D) of micro-batch m+1
+    # runs while phase 2 (inter-chip C2C) of micro-batch m is in flight.
     #
-    # Time -------->  t0                  t1                                      t2                                      t3
-    #                 | Global Prologue   |              Loop m=0                 |              Loop m=1                 |
-    #                 |                   |                                       |                                       |
-    # D2D/DMA (P1)    [A]========[B]      |       [D]========[E]                  |       [D]========[E]                  |
-    #                 |   P1 MB0          |       |   P1 MB1                      |       |   P1 MB2                      |
-    #                 |                   |       |                               |       |                               |
-    # C2C (P2)        |                   [C]=====================================[G]                                     |
-    #                 |                   |             P2 MB0                    |                                       |
-    #                 |                   |                                       [F]=====================================[G]
-    #                 |                   |                                       |             P2 MB1                    |
-    #                 |                   |                                       |                                       [F]========> (to t4)
-    #                 |                   |                                       |                                       |  P2 MB2
-    # Accumulate      |          [B]======|                  [E]======|           [G]======|                 [I]======|   [J]======|
-    #                 |            AC P1  |                    AC P1  |           |  AC P2 |                   AC P1  |   |  AC P2 |
-    #                 |            (MB0)  |                    (MB1)  |           |  (MB0) |                   (MB2)  |   |  (MB1) |
-    # =========================================================================================================
+    #                    prologue   | loop m=0   | loop m=1   | ...
+    #   P1 D2D start     [A] MB0    | [D] MB1    | [D] MB2    |
+    #   P1 accumulate    [B] MB0    | [E] MB1    | [E] MB2    |
+    #   P2 C2C start     [C] MB0    | [F] MB1    | [F] MB2    |
+    #   P2 accumulate               | [G] MB0    | [G] MB1    |
+    #
+    # Hypercube step 1 then repeats the phase-2 start/accumulate pattern.
 
-    # =========== Global Prologue: PHASE 1 Micro-Batch 0 D2D REDUCTIONS ===========
+    # ============ Prologue: phase 1 for micro-batch 0 ============
     # [Step A]: Start remote D2D copies for micro-batch 0
     all_phase1_ops.extend(
         dma.start_phase1_d2d_copies(src=input_ref,
@@ -180,7 +166,20 @@ def hier_rs_kernel(
         mb_idx=0,
     )
 
-    # [Step C]: Start Phase 2 Ring ICI copies for micro-batch 0
+    # [Step C]: Start phase-2 step-0 ICI copies for micro-batch 0.
+    #
+    # Ordering hazard: these copies read running_sum_ref, which the [Step B]
+    # emit_pipeline writes back to HBM asynchronously, and nothing orders the
+    # read after the write. At num_micro_batches=1 the read can be issued
+    # before the write has landed and ship stale data. The same hazard exists
+    # between [Step G] and the post-loop step-1 start below.
+    #
+    # The bf16 wire avoids it with a num_micro_batches >= 2 floor
+    # (config.pick_num_micro_batches); that masks the hazard by timing rather
+    # than fixing it. The fp8 wire is protected only because
+    # quantize_chunks_to_fp8_staging runs between the write and the read.
+    # Moving or removing that step requires re-validating fp8 at mb=1 with a
+    # fresh input on every run (a reused input hides stale reads).
     if fp8_comm:
         dma.quantize_chunks_to_fp8_staging(running_sum_ref,
                                            mb_idx=0,
@@ -193,7 +192,7 @@ def hier_rs_kernel(
     _collect_phase2_ops(mb_ops_0)
 
     def _start_phase2_step0(mb):
-        """[Step F] body: start the phase-2 step-0 C2C copies for micro-batch mb."""
+        """[Step F] body: start phase-2 step-0 C2C copies for micro-batch mb."""
         if fp8_comm:
             dma.quantize_chunks_to_fp8_staging(running_sum_ref,
                                                mb,
@@ -208,13 +207,14 @@ def hier_rs_kernel(
     for m in range(config.num_micro_batches):
 
         if m < config.num_micro_batches - 1:
-            # [Step D]: Start overlap Phase 1 D2D copies for next micro-batch
+            # [Step D]: Start phase-1 D2D copies for the next micro-batch,
+            # overlapping the phase-2 copies already in flight.
             all_phase1_ops.extend(
                 dma.start_phase1_d2d_copies(src=input_ref,
                                             dst=recv_buf_ref,
                                             mb_idx=m + 1))
 
-            # [Step E]: Wait and Accumulate Phase 1 for next micro-batch
+            # [Step E]: Wait for and accumulate phase 1 of the next micro-batch.
             dma.run_phase1_accumulate_pipeline(
                 src1=recv_buf_ref,
                 src2=input_ref,
@@ -228,36 +228,13 @@ def hier_rs_kernel(
                 mb_idx=m + 1,
             )
 
-            # [Step F]: Pre-start next micro-batch Phase 2 Ring ICI copies
-            #
-            # RACE (suspected, cross-device): start_phase2_c2c_copies issues remote
-            # copies into the NEIGHBOR's recv_buf_ref -- the same buffer [Step D]
-            # fills with phase-1 data and [Step E] consumes. Nothing tells the
-            # neighbor that it has finished draining phase 1 for this micro-batch,
-            # so a device that runs ahead can land phase-2 bytes on top of its
-            # neighbor's unread phase-1 bytes.
-            #
-            # If that is the mechanism, local reordering CANNOT fix it -- it only
-            # moves the window. RS_STEPF_DELAY=1 defers this start until after
-            # [Step G] purely as a diagnostic: if deferring "fixes" mb=4, the fix is
-            # timing, not ordering, and the race is still latent.
+            # [Step F]: Start phase-2 step-0 ICI copies for the next
+            # micro-batch. They land in the dedicated phase-2 buffer, not
+            # recv_buf_ref, so they cannot overwrite phase-1 data that the
+            # neighbour is still consuming in [Step E].
             _start_phase2_step0(m + 1)
 
-        # [Phase 2, Step 1] Pre-start Step 1 MB0 during the last iteration of Step 0
-        #
-        # RACE: this reads running_sum_ref for micro-batch 0, which was produced
-        # by [Step G] of an earlier iteration of this same loop. That producer is
-        # an emit_pipeline whose output lands in HBM asynchronously, so the read
-        # here is not ordered against it. Symptom: non-deterministic corruption of
-        # the last micro-batch's tile -- identical input, identical code,
-        # different answers run to run. Affects the bf16 and fp8 wires both;
-        # num_micro_batches == 1 is always correct because that case does the
-        # start AFTER the loop (see below), which is exactly the ordering the
-        # multi-micro-batch path is missing.
-        #
-        # RS_UNSAFE_STEP1_PRESTART=1 restores the old in-loop start to reproduce
-        # the bug; default is the safe ordering.
-        # [Step G]: Wait and Accumulate Phase 2 Step 0 for current micro-batch
+        # [Step G]: Wait for and accumulate phase-2 step 0 of micro-batch m.
         if config.num_hcube_dims >= 1:
             is_last = config.num_hcube_dims == 1
             if fp8_comm:
@@ -282,13 +259,11 @@ def hier_rs_kernel(
                     step_idx=0,
                 )
 
-        # [Step F], deferred variant -- diagnostic only (see the RACE note above).
-    # Start Step 1 MB0 here, after the Step-0 loop has fully drained, so the read
-    # of running_sum_ref is ordered against the [Step G] pipeline that wrote it.
-    # This was previously done only for num_micro_batches == 1 ("we couldn't
-    # pre-start Step 1 MB0 in the loop due to data dependency") -- the same data
-    # dependency exists for every micro-batch count; it was simply hidden by
-    # timing when other micro-batches gave the write time to land.
+    # Phase-2 step 1 for micro-batch 0 starts only after the step-0 loop, so
+    # that it reads running_sum_ref after the [Step G] pipeline that wrote it.
+    # Starting it inside the loop would race with that asynchronous write. At
+    # num_micro_batches=1 the write and this read are still unordered; see the
+    # hazard note at [Step C].
     if fp8_comm:
         dma.quantize_chunks_to_fp8_staging(running_sum_ref, 0, step_idx=1)
     mb_ops = dma.start_phase2_c2c_copies(mb_idx=0,
@@ -298,7 +273,7 @@ def hier_rs_kernel(
                                          fp8=fp8_comm)
     _collect_phase2_ops(mb_ops)
 
-    # ================= STEP 1 LOOP =================
+    # ============ Hypercube step 1 ============
     for m in range(config.num_micro_batches):
 
         if m < config.num_micro_batches - 1:
@@ -313,7 +288,7 @@ def hier_rs_kernel(
                                                  fp8=fp8_comm)
             _collect_phase2_ops(mb_ops)
 
-        # Accumulate Step 1
+        # Wait for and accumulate phase-2 step 1 of micro-batch m.
         if config.num_hcube_dims > 1:
             if fp8_comm:
                 dma.run_phase2_dequant_accumulate_pipeline(
@@ -380,10 +355,9 @@ def make_unified_scratch_shapes(
         fp8_recv_bref = pltpu.BufferedRef.input(fp8_block_spec,
                                                 jnp.float8_e4m3fn,
                                                 buffer_count=2)
-        # Send-side staging is now pipelined: emit_pipeline double-buffers these
-        # OUTPUT BufferedRefs (BF16->FP8 quantize) instead of the old serial
-        # load/quantize/store VMEM scratch + DMA-sem chain. The BF16 input reuses
-        # run_bref, so net VMEM is slightly lower than the serial scratch.
+        # Send-side staging: the BF16->FP8 quantize runs in an emit_pipeline
+        # that double-buffers these output BufferedRefs. Its BF16 input reuses
+        # run_bref.
         fp8_send_bref = pltpu.BufferedRef.output(fp8_block_spec,
                                                  jnp.float8_e4m3fn,
                                                  buffer_count=2)
@@ -406,6 +380,5 @@ def make_unified_scratch_shapes(
             scale_bref,  # scale_bref
         ]
 
-        # Appended LAST so the existing positional unpacking in hier_rs_kernel is
-        # undisturbed; the kernel unpacks these two off the tail.
+    # Order must match the positional unpacking in hier_rs_kernel.
     return scratch_shapes
