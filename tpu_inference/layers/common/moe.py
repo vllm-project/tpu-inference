@@ -178,6 +178,7 @@ def moe_apply(
                     moe_chunk_size=moe_chunk_size,
                     num_valid_tokens=extra_backend_kwargs.get(
                         "num_valid_tokens", None),
+                    layer_name=extra_backend_kwargs.get("layer_name", None),
                 )
             case MoEBackend.DENSE_MAT:
                 # NOTE: circular import avoidance

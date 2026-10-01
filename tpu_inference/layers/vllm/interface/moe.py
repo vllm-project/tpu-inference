@@ -138,6 +138,12 @@ def vllm_moe_apply(layer: RoutedExperts,
         extra_kwargs["e_score_correction_bias"] = jax_view(
             layer.e_score_correction_bias)
 
+    # Only when recording expert load: fused_moe_func takes the name as a static
+    # argument, so passing a different one per layer would otherwise compile a
+    # separate copy of the MoE for every layer.
+    if envs.MOE_LOG_EXPERT_LOAD > 0:
+        extra_kwargs["layer_name"] = getattr(layer, "layer_name", None)
+
     # Route padding tokens to a single expert instead of activating unnecessary
     # experts. Applicable when DP attention size is 1 (pure TP attention, e.g.
     # TP8_EP), since with DP attention the padding for each rank is interleaved.

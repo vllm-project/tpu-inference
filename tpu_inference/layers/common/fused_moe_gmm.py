@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import functools
+import os
+import re
+import time
 from typing import Literal
 
 import jax
@@ -59,6 +62,50 @@ def _override_token_indices_for_random_routing(
             jax.random.split(rng_key, num_tokens)) + (original_topk_indices //
                                                       global_num_experts)
     return topk_indices
+
+
+# Per-layer call counters for MOE_LOG_EXPERT_LOAD, in the process that runs the
+# host callback. Every layer runs once per step, so a layer's call index is the
+# step index, and the same index lines up across layers.
+_EXPERT_LOAD_CALLS: dict[int, int] = {}
+
+
+def _expert_load_host_callback(layer_idx: int, num_tokens: int,
+                               counts: np.ndarray) -> None:
+    if jax.process_index() != 0:
+        return
+    call = _EXPERT_LOAD_CALLS.get(layer_idx, 0)
+    _EXPERT_LOAD_CALLS[layer_idx] = call + 1
+    if call % envs.MOE_LOG_EXPERT_LOAD:
+        return
+    out_dir = envs.MOE_LOG_EXPERT_LOAD_DIR
+    os.makedirs(out_dir, exist_ok=True)
+    # Fixed-size int32 records: layer, tokens in the step, call (step) index,
+    # unix time, then tokens per expert.
+    record = np.concatenate([
+        np.array([layer_idx, num_tokens, call, int(time.time())], np.int32),
+        np.asarray(counts, np.int32)
+    ])
+    with open(os.path.join(out_dir, f"expert_load_pid{os.getpid()}.bin"),
+              "ab") as f:
+        record.tofile(f)
+
+
+def _record_expert_load(topk_indices: jax.Array, global_num_experts: int,
+                        layer_name: str | None) -> None:
+    """MOE_LOG_EXPERT_LOAD: hand this step's tokens per expert to the host.
+
+    Counts the final routing (after the all-gather across attention-data ranks
+    and any FORCE_MOE_RANDOM_ROUTING override), padding rows included, since
+    that is what the expert matmul processes.
+    """
+    counts = jnp.bincount(topk_indices.reshape(-1),
+                          length=global_num_experts).astype(jnp.int32)
+    match = re.search(r"layers\.(\d+)\.", layer_name or "")
+    layer_idx = int(match.group(1)) if match else -1
+    jax.debug.callback(
+        functools.partial(_expert_load_host_callback, layer_idx,
+                          topk_indices.shape[0]), counts)
 
 
 def all_gather_topk_indices_and_weights(
@@ -649,6 +696,7 @@ def _apply_two_step_dispatch_gather(hidden_states: jax.Array,
     "scatter_results",
     "moe_chunk_size",
     "defer_all_reduce",
+    "layer_name",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -675,6 +723,7 @@ def fused_moe_func(
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
     num_valid_tokens: jax.Array | None = None,
+    layer_name: str | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -779,6 +828,9 @@ def fused_moe_func(
         # of routing imbalance during performance debugging.
         topk_indices = _override_token_indices_for_random_routing(
             topk_indices, global_num_experts)
+
+    if envs.MOE_LOG_EXPERT_LOAD > 0:
+        _record_expert_load(topk_indices, global_num_experts, layer_name)
 
     def _process_tokens_locally(hidden_states_local, topk_indices_local):
         num_tokens_local = hidden_states_local.shape[0]

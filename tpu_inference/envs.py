@@ -77,6 +77,8 @@ if TYPE_CHECKING:
     DP_SCHED_ROUTING: str = "least_loaded"
     VLLM_MOE_CHUNK_SIZE: int = 0
     ONEHOT_MOE_PERMUTE_THRESHOLD: int = 0
+    MOE_LOG_EXPERT_LOAD: int = 0
+    MOE_LOG_EXPERT_LOAD_DIR: str = "/workspace/artifacts/expert_load"
     PROFILE_SINGLE_DEVICE: bool = False
     LORA_MODULE_PATH: str = ""
     SC_ALLREDUCE_ALLGATHER_OFFLOAD_MIN_BYTES: str = "auto"
@@ -488,6 +490,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is effectively disabled.
     "ONEHOT_MOE_PERMUTE_THRESHOLD":
     lambda: int(os.getenv("ONEHOT_MOE_PERMUTE_THRESHOLD", "0")),
+    # Measurement runs only. N > 0 records, every N-th step per MoE layer, how
+    # many tokens the routing sent to each expert (what the expert matmul then
+    # sees) into MOE_LOG_EXPERT_LOAD_DIR on process 0. Costs a host callback per
+    # layer per step, so a run with it on is not a timing run. 0 (the default)
+    # traces nothing extra. See layers/common/fused_moe_gmm.py.
+    "MOE_LOG_EXPERT_LOAD":
+    lambda: int(os.getenv("MOE_LOG_EXPERT_LOAD", "0")),
+    "MOE_LOG_EXPERT_LOAD_DIR":
+    lambda: os.getenv("MOE_LOG_EXPERT_LOAD_DIR",
+                      "/workspace/artifacts/expert_load"),
     # Profile a single device instead of all devices.
     "PROFILE_SINGLE_DEVICE":
     env_bool("PROFILE_SINGLE_DEVICE", default=False),
