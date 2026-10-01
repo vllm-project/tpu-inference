@@ -27,15 +27,11 @@ FP8_E4M3_MAX = 448.0
 # f32 lanes per scale slot -> 128 * 4 = 512 B, the minimum DMA inner slice.
 SCALE_LANE = 128
 
-# Minimum local rows (tokens per chip) for the FP8 wire. Below this the transfer
-# is latency-bound and FP8's quant/dequant cannot pay for the halved bytes
-# (measured crossover ~2048 rows on tpu7x-8). Shapes are static at trace time,
-# so this is a compile-time choice per token bucket.
-#
-# One of only TWO environment knobs in this kernel (the other is
-# VLLM_TPU_FP8_RS_STATIC_SCALE below). Every other flag the monolithic version
-# carried was experiment scaffolding and has been collapsed to its shipping
-# behaviour; see the module history for what was removed and why.
+# Minimum local rows (per device, before the scatter) for the FP8 wire. Below
+# this the transfer is latency-bound and FP8's quantize/dequantize cost
+# outweighs the halved bytes; the default is the crossover point on tpu7x-8.
+# Shapes are static at trace time, so this is a compile-time choice per token
+# bucket.
 FP8_COMM_MIN_ROWS = int(os.environ.get("VLLM_TPU_FP8_RS_MIN_TOKENS", "2048"))
 
 
@@ -44,26 +40,28 @@ def next_multiple_of(val: int, multiple: int) -> int:
     return ((val + multiple - 1) // multiple) * multiple
 
 
-# Target bytes of local input per micro-batch, per wire. The two differ by 4x
-# for a mechanical reason: the FP8 wire re-pays the quantize staging pass once
-# per micro-batch, and that pass is ~7.4 us of near-pure FIXED cost (measured by
-# removal: 8.4 us at 512 local rows against 7.3 us at 2048 -- four times the
-# data for less time). So splitting finer is expensive for FP8. BF16 has no such
-# pass; extra micro-batches cost it only DMA issues while buying more
-# DMA/compute overlap, so it wants small stages.
+# Target bytes of local input per micro-batch, per wire:
 #
-# Keyed on BYTES PER MICRO-BATCH, never on mb or on row count. The FP8 penalty
-# tracks STAGE SIZE, not stage count: mb=8 is optimal at a 64 MiB payload
-# (8 MiB/stage) and costs +48% at a 16 MiB payload (2 MiB/stage) -- same mb,
-# opposite verdict. A rule keyed on rows cannot express that.
+#   wire | stage target | reason
+#   bf16 |        2 MiB | no per-stage fixed cost; more stages, more overlap
+#   fp8  |        8 MiB | pays a fixed quantize/staging cost per stage
+#
+# The FP8 wire runs its quantize/staging pass once per micro-batch, and that
+# pass is dominated by a fixed cost that barely scales with size, so finer
+# splitting is expensive for FP8. BF16 has no such pass; extra micro-batches
+# cost it only DMA issues while buying more DMA/compute overlap.
+#
+# The rule is keyed on bytes per micro-batch, not on the micro-batch count or
+# the row count, because the FP8 overhead tracks stage size: the same
+# micro-batch count can be right for a large payload and wrong for a small
+# one.
 _MB_STAGE_TARGET_BYTES = {False: 2 << 20, True: 8 << 20}  # bf16 : fp8
 
 # Ceiling on the micro-batch count. Above this hc_chunk_size degenerates: at
 # hidden 4096, mb=16 gives mb_size=256 and hc_chunk_size=128, a single vector
-# width. It is also the largest value measured.
+# width.
 _MAX_MICRO_BATCHES = 8
-# Correctness floor for the BF16 wire -- see pick_num_micro_batches, where the
-# scope of the floor is documented.
+# Correctness floor for the BF16 wire; see pick_num_micro_batches.
 _MIN_SAFE_MICRO_BATCHES = 2
 
 
@@ -71,68 +69,46 @@ def pick_num_micro_batches(local_seq_len: int, hidden_dim_size: int,
                            itemsize: int, fp8_comm: bool) -> int:
     """Chooses `num_micro_batches` from bytes per micro-batch, per wire.
 
-  Fitted to a 12-cell device-time grid (mb {1,2,4,8} x local rows
-  {512,2048,8192} x {bf16, fp8-static16}, hidden 4096) with XLA psum_scatter as
-  a per-cell control at <=0.11% spread. Reproduces 6 of 6 measured optima:
+  The local payload is divided by the wire's stage target
+  (_MB_STAGE_TARGET_BYTES), floored to a power of two, and clamped so that
+  hc_chunk_size stays at least two vector widths and the count stays within
+  [_MIN_SAFE_MICRO_BATCHES (BF16 only), _MAX_MICRO_BATCHES].
 
-      payload   bf16 opt   fp8 opt
-       4 MiB       2          1
-      16 MiB       8          2
-      64 MiB       8          8      
-
-  `fp8_comm` must be the wire ACTUALLY used, i.e. resolved after the
-  FP8_COMM_MIN_ROWS downgrade -- picking the fp8 target for a call that runs
-  bf16 selects stages 4x too large.
-
-  See results/EXPERIMENTS.md, EXP-007 (grid) and EXP-008 (why the targets
-  differ).
+  `fp8_comm` must be the wire actually used, i.e. resolved after the
+  FP8_COMM_MIN_ROWS downgrade. Passing the FP8 target for a call that runs
+  BF16 selects stages 4x too large.
   """
     target = _MB_STAGE_TARGET_BYTES[bool(fp8_comm)]
     n = (local_seq_len * hidden_dim_size * itemsize) // target
     mb = 1 << max(0, n.bit_length() - 1)  # floor to a power of two
     # Keep hc_chunk_size >= 2 vector widths.
     mb = min(mb, max(1, hidden_dim_size // 512))
-    # CORRECTNESS FLOOR, not a tuning choice, and BF16-ONLY.
+    # Correctness floor for the BF16 wire, not a tuning choice.
     #
-    # THE DEFECT. At num_micro_batches=1 the kernel returns the PREVIOUS call's
-    # result. In kernel.py, [Step C] reads running_sum_ref on the line after the
+    # At num_micro_batches=1 the BF16 path can return the previous call's
+    # result. In kernel.py, [Step C] reads running_sum_ref right after the
     # [Step B] emit_pipeline that writes it, with nothing ordering the two, so
-    # the read can be issued before the write has landed. (A second instance of
-    # the same hazard exists between [Step G] and the post-loop read.) At mb>=2
-    # the extra loop iterations give the write time to land. That is masking by
-    # timing, not a fix -- the unordered access is still in the code.
+    # the read can be issued before the write has landed. The same hazard
+    # exists between [Step G] and the post-loop read. At mb>=2 the extra loop
+    # iterations give the write time to land. This masks the hazard by timing;
+    # it does not fix the ordering.
     #
-    # This is only observable with a FRESH input per call: with a fixed input a
-    # stale buffer holds a value identical to the correct one, so a reused-input
-    # test reports success. Any re-validation must vary the input every run and
-    # score against an independent psum + dynamic_slice reference.
+    # The failure is only observable with a fresh input per call: with a
+    # reused input the stale buffer holds the same value as the correct one.
+    # Any re-validation must vary the input on every run and compare against
+    # an independent psum + dynamic_slice reference.
     #
-    # EVIDENCE (fresh input per run, count of runs below a 40 dB SNR threshold;
-    # a correct bf16 result scores ~47.9 dB). `local_seq_len` below is the
-    # PER-DEVICE, PRE-scatter row count this function receives -- 8x the
-    # post-scatter row count that appears in the HLO.
+    # The FP8 wire is exempt only because quantize_chunks_to_fp8_staging runs
+    # between the write to running_sum_ref and the wire read, which separates
+    # them the same way extra micro-batches do. FP8 is masked, not immune: if
+    # that staging step is removed or reordered, re-validate FP8 at mb=1 with
+    # fresh inputs before relying on this exemption. FP8 only reaches mb=1 at
+    # local_seq_len 256 to 1024: the wrapper pads each device's chunk to a
+    # multiple of 32 rows, so smaller inputs arrive as 256, and 2048 already
+    # selects mb=2.
     #
-    #   local_seq_len | bf16 mb=1        | bf16 mb=2 | fp8 mb=1
-    #             128 | 26/30 bad        | 0/30      | clean
-    #             256 | 24/30 bad        | 0/30      | clean (0/200)
-    #             512 | 2/30 - 11/30 bad | 0/30      | clean
-    #            1024 | intermittent     | 0/30      | NOT MEASURED
-    #
-    # WHY FP8 IS EXEMPT. The fp8 path runs quantize_chunks_to_fp8_staging
-    # between the write to running_sum_ref and the wire read. That work
-    # evidently lets the write land, exactly as extra micro-batches do for
-    # bf16 -- so fp8 is MASKED, not immune. Two consequences:
-    #   * If that staging step is removed or reordered, re-validate fp8 at
-    #     mb=1 with fresh inputs BEFORE relying on this exemption.
-    #   * fp8 at mb=1 is validated at local_seq_len 256, 512 and 1024. Those
-    #     are every shape a server reaches at mb=1: the caller pads each
-    #     device's chunk up to _SEQ_TILE=32 BEFORE this function is called, so
-    #     any request under 256 rows arrives here as 256, and 2048 picks mb=2.
-    #
-    # COST OF THE FLOOR. ~15% on the reduce-scatter op at 256 rows
-    # (30.1 -> 34.7 us), roughly 1.4% of step time. Remove it only once the
-    # [Step B] -> [Step C] and [Step G] -> post-loop ordering is fixed in
-    # kernel.py and re-validated with fresh inputs across the shape range.
+    # Remove the floor only once the [Step B] -> [Step C] and [Step G] ->
+    # post-loop ordering is fixed in kernel.py.
     if not fp8_comm:
         mb = max(mb, _MIN_SAFE_MICRO_BATCHES)
     return int(min(max(mb, 1), _MAX_MICRO_BATCHES))
@@ -195,9 +171,9 @@ class Config:
   - mb_size        = round_up(hidden_dim_size // num_micro_batches, num_lanes)
   - hc_chunk_size  = round_up(mb_size // num_hcube_dims, num_lanes)
 
-  NOTE both mb_size and hc_chunk_size are rounded UP to a vector width rather
-  than divided exactly. A ragged tail is expected and is clamped at the slice
-  sites via get_capped_bounds; do not "simplify" these to plain division.
+  Both mb_size and hc_chunk_size are rounded up to a vector width rather than
+  divided exactly. The ragged tail this leaves is clamped at the slice sites
+  via get_capped_bounds, so these must not be replaced with plain division.
   ================================================================================================
   """
     # yapf: enable
@@ -212,20 +188,17 @@ class Config:
     dtype: jnp.dtype
     # FP8 chip-to-chip wire for Phase 2. Phase 1 stays BF16 either way.
     fp8_comm: bool = False
-    # Scale for the FP8 wire. None -> per-chunk dynamic scale (max|x| / 448),
-    # which needs no calibration but costs a cross-lane reduction on the send
-    # side and a scale transfer on the wire. A positive float -> STATIC scaling
-    # at that factor, which elides both (see skip_scale_dma).
+    # Scale for the FP8 wire. None selects a per-chunk dynamic scale
+    # (max|x| / 448), which needs no calibration but costs a cross-lane
+    # reduction on the send side and a scale transfer on the wire. A positive
+    # float selects static scaling at that factor, which elides both (see
+    # skip_scale_dma).
     #
-    # Defaults to FP8_STATIC_SCALE, i.e. dynamic unless
-    # VLLM_TPU_FP8_RS_STATIC_SCALE is set.
-    #
-    # 16 is the calibrated static value: measured against 200 captured real
-    # pre-RS activations (1.68e9 elements) it gives 31.54 dB aggregate SNR
-    # against a 31.62 dB dynamic ceiling -- dynamic buys 0.08 dB. Its
-    # representable range is 448/16 = 28.0 against an observed |x| max of
-    # 13.88, so ~2x clipping headroom. Do not raise past 32 without
-    # recalibrating: range 14.0 would sit 1% under the observed max.
+    # 16 is the calibrated static value for this model, with accuracy close to
+    # dynamic scaling. Its representable range, 448 / 16 = 28, leaves about 2x
+    # headroom over the largest pre-reduce-scatter activation magnitude seen
+    # in calibration. Recalibrate before raising it: at 32 the range (14)
+    # would fall just below that magnitude.
     fp8_static_scale: float | None = None
     # Pipelining unrolling factor for overlapping ALU/DMA. If None, determined
     # by heuristic.
@@ -255,8 +228,8 @@ class Config:
     def num_chips(self) -> int:
         """Number of physical TPU chips (num_devices // cores_per_chip).
 
-    NOTE this is chips, not devices: tpu7x-8 is 4 chips x 2 TensorCores = 8 JAX
-    devices, and the startup banner's `num_chips=8` refers to devices.
+    This counts chips, not devices: tpu7x-8 is 4 chips x 2 TensorCores = 8
+    JAX devices.
     """
         return self.num_devices // self.cores_per_chip
 
@@ -270,7 +243,7 @@ class Config:
         """Pipelining unrolling factor for overlapping ALU/DMA.
 
     If not set explicitly, chosen from bytes per micro-batch with a per-wire
-    target -- see pick_num_micro_batches. `fp8_comm` here is already the
+    target; see pick_num_micro_batches. `fp8_comm` here is already the
     resolved wire: the caller applies the FP8_COMM_MIN_ROWS downgrade before
     building the Config.
     """
@@ -315,14 +288,14 @@ class Config:
     def skip_scale_dma(self) -> bool:
         """Whether the Phase 2 scale transfer is elided.
 
-    Static only. In static mode the scale is a compile-time constant on both
+    Static scaling only. There the scale is a compile-time constant on both
     sides and the receiver reconstructs it, so writing, sending and waiting on
-    it is pure overhead. Eliding it takes the fp8 phase-2 wire from 2 remote
-    copies + 4 semaphore arrays per chunk down to 1 + 2, the same fixed-cost
-    profile as bf16 -- and that fixed cost, not payload bytes, is what sets
-    FP8_COMM_MIN_ROWS.
+    it is pure overhead. Eliding it takes the FP8 phase-2 wire from 2 remote
+    copies and 4 semaphore arrays per chunk down to 1 and 2, the same
+    fixed-cost profile as BF16. That fixed cost, not payload bytes, is what
+    sets FP8_COMM_MIN_ROWS.
 
-    Dynamic genuinely needs the sender's per-chunk value on the receive side,
+    Dynamic scaling needs the sender's per-chunk scale on the receive side,
     so it keeps both the buffer and the transfer.
     """
         return self.fp8_comm and self.fp8_static_scale is not None

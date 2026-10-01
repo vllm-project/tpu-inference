@@ -38,9 +38,10 @@ from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
 
-# Below this many LOCAL rows the hierrs_tc Mosaic kernel will not compile
-# (its seq tile is 8), so that branch falls back to psum_scatter. hierrs_sc
-# has no such limit, which is why the guard is scoped to the tc backend.
+# Below this many local (per-device) rows the hierrs_tc Mosaic kernel will
+# not compile (its seq tile is 8), so that branch falls back to psum_scatter.
+# hierrs_sc has no such limit, which is why the guard is scoped to the tc
+# backend.
 _RS_TC_MIN_LOCAL_ROWS = 8
 
 # Target chunk size of 2048 slots was found empirically to be optimal
@@ -319,15 +320,15 @@ def moe_gmm_local(x: jax.Array,
                                                scatter_dimension=0,
                                                tiled=True).astype(x.dtype)
                 else:
-                    # num_micro_batches is deliberately NOT passed: the kernel
+                    # num_micro_batches is intentionally not passed: the kernel
                     # picks it from bytes per micro-batch with a per-wire target
                     # (config.pick_num_micro_batches).
                     #
                     # It has to be decided there, not here. This site only knows
-                    # the REQUESTED wire (VLLM_TPU_FP8_REDUCE_SCATTER); the
+                    # the requested wire (VLLM_TPU_FP8_REDUCE_SCATTER); the
                     # kernel downgrades FP8 to BF16 below FP8_COMM_MIN_ROWS, and
-                    # the two wires want stage sizes 4x apart, so choosing here
-                    # would mis-tune every downgraded call. See EXP-007.
+                    # the two wires target stage sizes 4x apart, so choosing
+                    # here would mis-tune every downgraded call.
                     rs_out = hier_rs_tc.hierarchical_reduce_scatter_local(
                         chunk_hidden,
                         num_devices=scatter_axis_size,
