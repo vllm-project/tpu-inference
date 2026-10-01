@@ -196,19 +196,30 @@ set_kube_jax_envs() {
     esac
 }
 
-# The kube files in place of upload_pipeline's. A scheduled kube pipeline sets
-# CI_LANES=jax and runs the one generation its schedule names; any other kube
-# build runs both, as upload_pipeline does.
+# The kube files in place of upload_pipeline's. A scheduled kube run sets
+# CI_LANES to some of jax, models, features, parallelism and rl, and runs the
+# one generation its schedule names (TPU_VERSION and the KUBE_SHAPE_* env); any
+# other kube build runs jax for both generations, as upload_pipeline does.
 upload_kube_pipeline() {
     if [[ -n "${CI_LANES:-}" ]]; then
-        if [[ "${CI_LANES}" != "jax" ]]; then
-            echo "ERROR: CI_LANES='${CI_LANES}'; only the jax lane goes through bootstrap.sh" >&2
-            exit 1
-        fi
-        upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
-        if [[ "${TPU_VERSION:-tpu6e}" == "tpu6e" ]]; then
-            upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
-        fi
+        local lane
+        for lane in ${CI_LANES}; do
+            case "${lane}" in
+                jax)
+                    upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
+                    if [[ "${TPU_VERSION:-tpu6e}" == "tpu6e" ]]; then
+                        upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
+                    fi
+                    ;;
+                models|features|parallelism|rl)
+                    upload_with_priority ".buildkite/pipeline_${lane}_kube.yml" "$JOB_PRIORITY"
+                    ;;
+                *)
+                    echo "ERROR: CI_LANES has '${lane}'; the kube lanes are jax, models, features, parallelism and rl" >&2
+                    exit 1
+                    ;;
+            esac
+        done
         return
     fi
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
@@ -221,11 +232,12 @@ upload_kube_pipeline() {
       upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
       upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
     fi
-    # nightly_verify.yml runs only on nightly and tag builds. Its suites run on
-    # their own scheduled kube pipelines until it has a kube version.
+    # nightly_verify.yml runs only on nightly and tag builds. On kube its suites
+    # run as separate CI_LANES builds, one generation each, and the support
+    # matrices are built on bare metal only.
     if [[ "${NIGHTLY:-0}" == "1" || -n "${BUILDKITE_TAG:-}" ]]; then
       buildkite-agent annotate --style warning --context ci-fleet-gaps \
-        "Not run on kube: nightly_verify.yml (models, features, parallelism, rl and the support matrices) has no kube version yet."
+        "Not in this kube build: nightly_verify.yml. Its models, features, parallelism and rl suites run on kube as CI_LANES builds; the support matrices are bare-metal only."
     fi
 }
 
