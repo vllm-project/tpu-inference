@@ -242,7 +242,7 @@ trap 'kill "${DISK_WATCH_PID}" 2>/dev/null || true' EXIT
 echo "[disk-guard] watchdog pid=${DISK_WATCH_PID} interval=${DISK_WATCH_INTERVAL_S}s floor=${JAX_CACHE_MIN_FREE_GB}GB"
 
 echo "--- effective tpu-inference env ---"
-env | grep -E '^(VLLM_|MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_|ATTN_|SKIP_JAX|MOE_|ONEHOT_|TPU_|RUNAI_)' | sort || true
+env | grep -E '^(VLLM_|MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_|ATTN_|SKIP_JAX|FORCE_MOE_|MOE_|ONEHOT_|TPU_|RUNAI_)' | sort || true
 
 # ---------------------------------------------------------------------------
 # runai_streamer throughput.
@@ -406,7 +406,7 @@ write_repro_serve() {
     echo "# then the exact command it exec'd. Set the same environment in the"
     echo "# container on every host: Ray workers read some of it at import time."
     env | LC_ALL=C sort \
-      | grep -E '^(MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_[A-Z_]+|VLLM_[A-Z_]+|MOE_[A-Z_]+|RUNAI_STREAMER_[A-Z_]+|BF16_LINEAR_[A-Z_]+|PHASED_[A-Z_]+|PROFILE_[A-Z_]+|JAX_[A-Z_]+|SKIP_JAX_[A-Z_]+|XLA_[A-Z_]+|LIBTPU_[A-Z_]+|MIN_TOKEN_BUCKET|DISTRIBUTED_SAMPLING_[A-Z_]+|SAMPLING_[A-Z_]+)=' \
+      | grep -E '^(MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_[A-Z_]+|FORCE_MOE_[A-Z_]+|VLLM_[A-Z_]+|MOE_[A-Z_]+|RUNAI_STREAMER_[A-Z_]+|BF16_LINEAR_[A-Z_]+|PHASED_[A-Z_]+|PROFILE_[A-Z_]+|JAX_[A-Z_]+|SKIP_JAX_[A-Z_]+|XLA_[A-Z_]+|LIBTPU_[A-Z_]+|MIN_TOKEN_BUCKET|DISTRIBUTED_SAMPLING_[A-Z_]+|SAMPLING_[A-Z_]+)=' \
       | grep -vE '^[^=]*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[^=]*=' \
       | while IFS='=' read -r k v; do echo "export ${k}=$(repro_quote "${v}")"; done
     echo "ulimit -n $(ulimit -n)"
