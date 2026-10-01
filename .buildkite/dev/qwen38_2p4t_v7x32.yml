@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=384 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, expert-load recording)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=384 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, RANDOM ROUTING, decode profile)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,26 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #57: #55's configuration with FORCE_MOE_RANDOM_ROUTING=1 and evals off: the
+        # end-to-end check of the expert-imbalance estimate (experiments/.../
+        # expert_imbalance/STEP_MEASURE_FINDINGS.md). Random routing replaces each
+        # token's top-10 with a uniform draw (fixed key), which leaves every rank
+        # one 128-row tile per expert: no imbalance. Outputs are gibberish, so no
+        # evals; --ignore-eos keeps the benchmark's shape and KV use identical.
+        # Prediction from build 56's measured routing priced with the local
+        # kernel model: decode unchanged (full-batch step ~89.6 ms wall, ~85 ms
+        # device), admission steps ~4-5% faster than #55 (344.8 / 340.5 ms per
+        # 4096-token step), possibly more if the per-rank row copies around the
+        # expert matmul also scale with a rank's load. #55's admission step
+        # reproduces within ~1-2% across builds, so no real-routing re-run.
+        #
+        # WHAT TO READ FIRST:
+        #   1. "Forcing random routing should be used for performance testing
+        #      only." in the log.
+        #   2. Admission ms/step and prefill tok/s from metrics_c384_series.prom
+        #      vs #55.
+        #   3. Full-batch wall step and the decode profile's device step vs #55.
+        #
         # #56: expert-load measurement on #55's configuration. MOE_LOG_EXPERT_LOAD=16
         # records, every 16th step per MoE layer, how many tokens the routing sent
         # to each of the 512 experts (what the expert matmul sees), into
@@ -550,10 +570,16 @@ steps:
           'NUM_PROMPTS=384' \
           'MAX_CONCURRENCY=384' \
           'BENCH_SWEEP=384:384' \
-          'MOE_LOG_EXPERT_LOAD=16' \
+          'FORCE_MOE_RANDOM_ROUTING=1' \
           'NUM_WARMUPS=384' \
+          'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
+          'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
+          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
+          'PHASED_PROFILER_TRACK_CONCURRENCY=1' \
+          'PHASED_PROFILER_TARGET_CONCURRENCY=384' \
+          'PHASED_PROFILER_ONLY_PHASES=decode_only' \
           'EVAL_SUITE=none' \
-          'STD_EVAL_SUITE=gsm8k,mmlu' \
+          'STD_EVAL_SUITE=none' \
           'GPQA_REASONING_EFFORT=xhigh' \
           'GPQA_SAMPLING=greedy' \
           'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
