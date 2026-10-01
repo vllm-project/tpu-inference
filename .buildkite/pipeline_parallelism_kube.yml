@@ -18,6 +18,9 @@
 # lanes read side by side. CP.yml has no TPU step to migrate - its work sits on
 # cpu behind a TODO.
 #
+# bootstrap.sh uploads this file, beside pipeline_build.yml, for a kube build
+# with CI_LANES=parallelism (see ci_fleet.sh).
+#
 # A build is one generation. The defaults are v6e; a v7x build sets
 # TPU_VERSION=tpu7x, KUBE_SHAPE_SINGLE/KUBE_SHAPE_MULTI to tpu7x shapes and
 # TENSOR_PARALLEL_SIZE_SINGLE=2, the values the uploader exports for its v7x
@@ -44,21 +47,6 @@ x-kube-plugin: &kube_plugin
     podTemplate: tpu-launcher
 
 steps:
-  # The image comes from pipeline_build.yml, as on bare metal. There bootstrap.sh
-  # uploads it after publishing the vLLM pin that setup_docker_env.sh reads from
-  # build metadata; this pipeline does not run bootstrap.sh, so this step does
-  # both. Each build there records its pushed tag as ci-image-<generation>,
-  # which run.sh reads back.
-  - label: ":pipeline: Upload the image build"
-    agents:
-      queue: "cpu"
-    commands:
-      - |
-        source .buildkite/scripts/configs/pipeline_config.sh
-        buildkite-agent meta-data set VLLM_COMMIT_HASH \
-          "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
-        buildkite-agent pipeline upload .buildkite/pipeline_build.yml
-
   # ---- DP ----
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for DP (single-host)"

@@ -232,7 +232,9 @@ def moe_gmm_local(x: jax.Array,
                            group_offset,
                            lhs_scale=w2_lhs_scale)
 
-    batch_size = gmm2_res.shape[0]
+    # Not gmm2_res.shape[0]: x may carry padding rows past the last group
+    # (RAGGED_GATHER_TRIM_ROWS=False).
+    batch_size = topk_argsort_revert_indices.shape[0]
     local_group_size = w1.shape[0]
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
@@ -286,12 +288,19 @@ def moe_gmm_local(x: jax.Array,
         topk_argsort_revert_indices = revert_indices_2d.flatten()
 
     if local_group_size < group_sizes.size:
-        mask = valid_rows_mask(
+        row_mask = valid_rows_mask(
             gmm1_res.shape[0],
             group_sizes,
             group_offset,
             group_offset + local_group_size,
-        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+        )
+        if is_onehot:
+            # gmm_v2 runs with zero_initialize=False, leaving rows outside this
+            # EP shard's [token_start, token_end) range uninitialized in HBM.
+            # Zero them out before `combine @ gmm2_res` so IEEE-754 `0.0 * NaN`
+            # (or `0.0 * Inf`) from stale HBM bits cannot corrupt valid rows.
+            gmm2_res = jnp.where(row_mask[:, None], gmm2_res, 0)
+        mask = row_mask[topk_argsort_revert_indices].reshape(-1, topk, 1)
     else:
         mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
@@ -311,7 +320,7 @@ def moe_gmm_local(x: jax.Array,
             if onehot_moe_permute_threshold > 0 and batch_size <= onehot_moe_permute_threshold:
                 revert_indices = cur_indices.reshape(-1, topk)
                 onehot = jax.nn.one_hot(revert_indices,
-                                        batch_size,
+                                        gmm2_res.shape[0],
                                         dtype=gmm2_res.dtype)
                 combine = (onehot * cur_weights[..., None] *
                            cur_mask).sum(axis=1)
@@ -893,6 +902,8 @@ def fused_moe_func(
                     token_indices_sorted,
                     shard_output_start,
                     shard_output_end,
+                    max_row_subchunks=envs.RAGGED_GATHER_MAX_ROW_SUBCHUNKS,
+                    trim_rows=envs.RAGGED_GATHER_TRIM_ROWS,
                 )
         else:
             x = hidden_states_local[token_indices_sorted]

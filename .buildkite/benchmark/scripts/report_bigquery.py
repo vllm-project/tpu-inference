@@ -12,12 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mirror one benchmark result into BigQuery alongside the Spanner upsert.
+"""Write one benchmark result to BigQuery.
 
-report_result.sh calls this immediately after it writes RunRecord, with
-the same RECORD_ID, so a row in either sink can be joined to the other.
-Dashboards move to BigQuery on their own schedule; until they have, both
-writes have to stay truthful.
+report_result.sh calls this with the run's RECORD_ID, the same key its
+optional Spanner RunRecord write uses, so a row in either sink can be
+joined to the other.
 
 Metric names are translated from this repo's Spanner column names to the
 leaf names `vllm bench serve` prints, because that is the vocabulary the
