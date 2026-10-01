@@ -110,10 +110,6 @@ def gmm_wrapper(lhs,
                 fuse_act=None,
                 preferred_element_type=None,
                 lhs_scale=None):
-    # lhs_scale: optional scale for gmm_v2's in-kernel lhs quantization. None
-    # keeps the kernel's dynamic scale. Only passed when set, so gmm_v2 fails
-    # loudly if it cannot use it.
-    lhs_scale_kwargs = {} if lhs_scale is None else dict(lhs_scale=lhs_scale)
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -124,7 +120,8 @@ def gmm_wrapper(lhs,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
-        **lhs_scale_kwargs,
+        # None keeps gmm_v2's dynamic lhs scale.
+        lhs_scale=lhs_scale,
     )
     return gmm_res
 
