@@ -89,6 +89,65 @@ def _can_sample_distributed(
     return jnp.all(is_greedy | supported)
 
 
+def _topk_prefilter_chunk(num_values: int, k: int) -> int:
+    """Returns the chunk size that sorts the fewest values, or 0 to skip."""
+    best_chunk, best_cost = 0, num_values
+    for candidate in range(2, 257):
+        if num_values % candidate or num_values // candidate < k:
+            continue
+        cost = num_values // candidate + k * candidate
+        if cost < best_cost:
+            best_chunk, best_cost = candidate, cost
+    return best_chunk
+
+
+def _prefiltered_top_k(values: jax.Array,
+                       k: int,
+                       chunk: Optional[int] = None,
+                       strided: bool = True) -> tuple[jax.Array, jax.Array]:
+    """Same values as `lax.top_k(values, k)`, but only the k chunks with the
+    largest maxima (which hold every top-k value) go through the final top-k.
+
+    Indices of tied values may differ from `lax.top_k`.
+    """
+    batch, num_values = values.shape
+    if chunk is None:
+        chunk = _topk_prefilter_chunk(num_values, k)
+    if chunk == 0:
+        return lax.top_k(values, k)
+    num_chunks = num_values // chunk
+    if strided:
+        # chunks[b, r, c] = values[b, r * num_chunks + c].
+        chunks = values.reshape(batch, chunk, num_chunks)
+        _, chunk_ids = lax.top_k(jnp.max(chunks, axis=1), k)
+        candidates = jnp.take_along_axis(chunks, chunk_ids[:, None, :], axis=2)
+        top_values, positions = lax.top_k(candidates.reshape(batch, chunk * k),
+                                          k)
+        top_ids = ((positions // k) * num_chunks +
+                   jnp.take_along_axis(chunk_ids, positions % k, axis=1))
+    else:
+        # chunks[b, c, r] = values[b, c * chunk + r].
+        chunks = values.reshape(batch, num_chunks, chunk)
+        _, chunk_ids = lax.top_k(jnp.max(chunks, axis=-1), k)
+        candidates = jnp.take_along_axis(chunks, chunk_ids[:, :, None], axis=1)
+        top_values, positions = lax.top_k(candidates.reshape(batch, k * chunk),
+                                          k)
+        top_ids = (jnp.take_along_axis(chunk_ids, positions // chunk, axis=1) *
+                   chunk + positions % chunk)
+    return top_values, top_ids
+
+
+def _topp_mask_sorted(values: jax.Array, top_p: jax.Array,
+                      replace_val: float) -> jax.Array:
+    """`topp_mask` for a few candidates: one sort instead of 32 passes."""
+    sorted_values = -lax.sort(-values, dimension=values.ndim - 1)
+    cumulative = jnp.cumsum(jax.nn.softmax(sorted_values, axis=-1), axis=-1)
+    cutoff = jnp.sum(cumulative < top_p[:, None], axis=-1, keepdims=True)
+    cutoff = jnp.minimum(cutoff, values.shape[-1] - 1)
+    threshold = jnp.take_along_axis(sorted_values, cutoff, axis=-1)
+    return jnp.where(values >= threshold, values, replace_val)
+
+
 @dataclass
 class PromptLogprobsReqSnap:
     """Per-request state snapshotted at step N for use in get_output()."""
@@ -235,7 +294,7 @@ def _merge_topk_candidates(
     incomplete = jnp.any(shard_tails >= threshold[:, None], axis=-1)
     topk_values = jnp.where(candidate_values >= threshold[:, None],
                             candidate_values, -1e12)
-    filtered_values = topp_mask(topk_values, top_p, replace_val=-1e12)
+    filtered_values = _topp_mask_sorted(topk_values, top_p, -1e12)
     return filtered_values, candidate_ids, incomplete
 
 
@@ -286,8 +345,8 @@ def _distributed_topk_sample(
             local_temperature,
         )
         scaled_logits = local_logits / safe_temperature[:, None]
-        local_values, local_ids = lax.top_k(scaled_logits,
-                                            candidates_per_shard)
+        local_values, local_ids = _prefiltered_top_k(scaled_logits,
+                                                     candidates_per_shard)
         local_ids = (local_ids + shard_index * local_vocab_size).astype(
             jnp.int32)
 

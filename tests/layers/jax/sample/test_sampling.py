@@ -18,15 +18,18 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference import envs
+from tpu_inference.layers.common.binary_search import topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _can_sample_distributed, _merge_topk_candidates, compute_logprobs,
+    _can_sample_distributed, _merge_topk_candidates, _prefiltered_top_k,
+    _topk_prefilter_chunk, _topp_mask_sorted, compute_logprobs,
     compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
     sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
@@ -127,6 +130,54 @@ class TestSampling:
             jnp.array([0.95], dtype=jnp.float32),
         )
         assert bool(incomplete[0])
+
+    @pytest.mark.parametrize("strided", [True, False])
+    @pytest.mark.parametrize("chunk", [None, 4, 32])
+    def test_prefiltered_top_k_matches_lax_top_k(self, strided, chunk):
+        values = jax.random.normal(jax.random.key(3), (4, 4096),
+                                   dtype=jnp.float32)
+        expected, _ = jax.lax.top_k(values, 128)
+        top_values, top_ids = _prefiltered_top_k(values,
+                                                 128,
+                                                 chunk=chunk,
+                                                 strided=strided)
+        np.testing.assert_array_equal(top_values, expected)
+        np.testing.assert_array_equal(
+            jnp.take_along_axis(values, top_ids, axis=1), top_values)
+
+    @pytest.mark.parametrize("strided", [True, False])
+    def test_prefiltered_top_k_with_ties(self, strided):
+        values = jax.random.randint(jax.random.key(5), (3, 2048), 0,
+                                    8).astype(jnp.float32)
+        expected, _ = jax.lax.top_k(values, 64)
+        top_values, top_ids = _prefiltered_top_k(values,
+                                                 64,
+                                                 chunk=16,
+                                                 strided=strided)
+        np.testing.assert_array_equal(top_values, expected)
+        np.testing.assert_array_equal(
+            jnp.take_along_axis(values, top_ids, axis=1), top_values)
+        for row in np.asarray(top_ids):
+            assert len(set(row.tolist())) == row.size
+
+    def test_topk_prefilter_chunk(self):
+        # 75968 = 64 * 1187: chunk 32 sorts 2374 maxima + 4096 candidates.
+        assert _topk_prefilter_chunk(75968, 128) == 32
+        # No divisor up to 256 leaves enough chunks: plain top-k.
+        assert _topk_prefilter_chunk(4099, 128) == 0
+        # Too few values for the prefilter to help.
+        assert _topk_prefilter_chunk(256, 128) == 0
+
+    def test_topp_mask_sorted_matches_topp_mask(self):
+        logits = jax.random.normal(jax.random.key(11), (4, 256),
+                                   dtype=jnp.float32) * 3.0
+        top_p = jnp.array([0.5, 0.8, 0.9, 0.95], dtype=jnp.float32)
+        expected = topp_mask(logits, top_p, replace_val=-1e12)
+        actual = _topp_mask_sorted(logits, top_p, -1e12)
+        np.testing.assert_array_equal(actual > -1e11, expected > -1e11)
+        np.testing.assert_array_equal(
+            jnp.where(actual > -1e11, actual, 0.0),
+            jnp.where(expected > -1e11, expected, 0.0))
 
     def test_compute_logprobs(self):
         logits = jnp.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
