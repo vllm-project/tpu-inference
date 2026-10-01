@@ -34,7 +34,7 @@
 # run_multihost.sh builds and pushes its own image and would double the registry
 # prefix if setup_environment had already run.
 steps:
-  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=384 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, decode profile)"
+  - label: ":whale: Qwen3.8-2.4T-A95B-FP8 (v7x-32, tp=4 x attn_dp=8, C=384 @ util 0.98, bucket 384, two-step dispatch, shared-expert fp8, expert-load recording)"
     key: qwen38_2p4t_v7x32
     agents:
       queue: tpu_v7x_32_queue
@@ -145,6 +145,25 @@ steps:
 
         export MULTIHOST_DOCKER_ARGS
 
+        # #56: expert-load measurement on #55's configuration. MOE_LOG_EXPERT_LOAD=16
+        # records, every 16th step per MoE layer, how many tokens the routing sent
+        # to each of the 512 experts (what the expert matmul sees), into
+        # dev_artifacts/expert_load/ on host 0. GSM8K + MMLU (real text) and the
+        # C=384 benchmark (random-token prompts: decode and prefill) both run, so
+        # real text and synthetic prompts can be compared. Profiler off.
+        # NOT A TIMING RUN: the hook adds a host callback per layer per step.
+        # Purpose: measure real routing's per-rank load and price it with the
+        # local kernel model in experiments/.../expert_imbalance/ (step 0: the
+        # expert matmul's time on a rank follows its active experts and 128-row
+        # tiles, not its token count). With the flag off the compiled program is
+        # byte-identical to before (checked locally).
+        #
+        # WHAT TO READ FIRST:
+        #   1. dev_artifacts/expert_load/*.bin exists and grows (516 int32 per
+        #      record: layer, tokens, step, time, 512 counts).
+        #   2. GSM8K / MMLU equal #55's (0.9810 / 0.8960): the hook must not
+        #      change outputs.
+        #
         # #55: #54 at C=384 (48/rank), spending the 1.07 GiB/device the fp8
         # shared expert freed. A decode step already pads 46 requests/rank to
         # the 48-row bucket (384 aggregate); at 48/rank those rows do real work
@@ -531,13 +550,8 @@ steps:
           'NUM_PROMPTS=384' \
           'MAX_CONCURRENCY=384' \
           'BENCH_SWEEP=384:384' \
+          'MOE_LOG_EXPERT_LOAD=16' \
           'NUM_WARMUPS=384' \
-          'PHASED_PROFILING_DIR=/workspace/artifacts/profiles' \
-          'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
-          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
-          'PHASED_PROFILER_TRACK_CONCURRENCY=1' \
-          'PHASED_PROFILER_TARGET_CONCURRENCY=384' \
-          'PHASED_PROFILER_ONLY_PHASES=decode_only' \
           'EVAL_SUITE=none' \
           'STD_EVAL_SUITE=gsm8k,mmlu' \
           'GPQA_REASONING_EFFORT=xhigh' \
