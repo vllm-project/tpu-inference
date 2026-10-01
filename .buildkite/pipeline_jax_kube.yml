@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Step keys match pipeline_jax.yml's so the two read side by side.
+# Step keys match pipeline_jax.yml's so the two read side by side. bootstrap.sh
+# uploads this file once per generation, beside pipeline_build.yml, when a
+# build targets kube (ci_fleet.sh).
 #
 # Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
 # profile registry in ci-infra; a step names only a shape and a command.
@@ -21,8 +23,6 @@
 # passed to `bk build create --env` and could no longer be overridden per
 # build. Defaults belong in run.sh.
 
-# One generation per build: every upload of this file uploads
-# pipeline_build.yml again, and a second copy collides on its keys.
 x-shape-single: &shape_single "${KUBE_SHAPE_SINGLE:-ct6e-standard-1t/1x1}"
 x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
 
@@ -38,21 +38,6 @@ x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
         podTemplate: tpu-launcher
 
 steps:
-  # The image comes from pipeline_build.yml, as on bare metal. There bootstrap.sh
-  # uploads it after publishing the vLLM pin that setup_docker_env.sh reads from
-  # build metadata; this pipeline does not run bootstrap.sh, so this step does
-  # both. Each build there records its pushed tag as ci-image-<generation>,
-  # which run.sh reads back.
-  - label: ":pipeline: Upload the image build"
-    agents:
-      queue: "cpu"
-    commands:
-      - |
-        source .buildkite/scripts/configs/pipeline_config.sh
-        buildkite-agent meta-data set VLLM_COMMIT_HASH \
-          "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
-        buildkite-agent pipeline upload .buildkite/pipeline_build.yml
-
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E MLPerf tests for JAX models"
     env:
       SHAPE: *shape_single
@@ -221,7 +206,7 @@ steps:
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests - kernels"
     # One `if:` - a second key would silently replace this one.
-    if: 'build.env("TRIM") != "1" && (build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_TESTS") == "1")'
+    if: 'build.env("TRIM") != "1" && (build.env("NIGHTLY") == "1" || "${RUN_KERNEL_TESTS:-0}" == "1")'
     env:
       SHAPE: *shape_single
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -316,7 +301,7 @@ steps:
       - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} JAX unit tests - collective kernels"
-    if: build.env("NIGHTLY") == "1" || build.env("RUN_KERNEL_COLLECTIVES_TESTS") == "1"
+    if: build.env("NIGHTLY") == "1" || "${RUN_KERNEL_COLLECTIVES_TESTS:-0}" == "1"
     env:
       SHAPE: *shape_multi
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -659,46 +644,3 @@ steps:
     commands:
       - |
         .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/deepseek-v4-flash" -n 14042 -l 4
-
-  # pipeline_pypi.yml, which the bare-metal bootstrap uploads alongside
-  # pipeline_jax.yml. Its steps are fixed to tpu_v6e_queue there, so they run
-  # only in a v6e build here. The bare steps name run_with_pypi.sh, but with
-  # USE_PREBUILT_IMAGE=1 that pulls the same CI image as every other step and
-  # docker/Dockerfile.pypi is never built, so run.sh's CI image is the match.
-  - label: ":kubernetes: PyPI Test Performance benchmarks for meta-llama/Llama-3.1-8B-Instruct"
-    key: "pypi_meta-llama_Llama-3_1-8B-Instruct_Benchmark"
-    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu6e"
-    env:
-      SHAPE: *shape_single
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      TEST_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
-      TENSOR_PARALLEL_SIZE: "1"
-      MINIMUM_THROUGHPUT_THRESHOLD: "10.77"
-      INPUT_LEN: "1800"
-      OUTPUT_LEN: "128"
-      PREFIX_LEN: "0"
-      MAX_MODEL_LEN: "2048"
-      MAX_NUM_SEQS: "256"
-      MAX_NUM_BATCHED_TOKENS: "1024"
-    <<: *tpu_step
-    commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
-
-  - label: ":kubernetes: PyPI Test Performance benchmarks for Qwen/Qwen3-4B"
-    key: "pypi_Qwen_Qwen3-4B_Benchmark"
-    if: build.env("NIGHTLY") == "1" && "${TPU_VERSION:-tpu6e}" == "tpu6e"
-    env:
-      SHAPE: *shape_single
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
-      TEST_MODEL: "Qwen/Qwen3-4B"
-      TENSOR_PARALLEL_SIZE: "1"
-      MINIMUM_THROUGHPUT_THRESHOLD: "11.00"
-      INPUT_LEN: "1800"
-      OUTPUT_LEN: "128"
-      PREFIX_LEN: "0"
-      MAX_MODEL_LEN: "2048"
-      MAX_NUM_SEQS: "94"
-      MAX_NUM_BATCHED_TOKENS: "4096"
-    <<: *tpu_step
-    commands:
-      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh

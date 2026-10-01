@@ -174,7 +174,66 @@ set_jax_envs() {
     esac
 }
 
+# One generation of pipeline_jax_kube.yml: the kube shapes in place of the bare
+# queues set_jax_envs names.
+set_kube_jax_envs() {
+    case $1 in
+        v6)
+            export TPU_VERSION="tpu6e"
+            export KUBE_SHAPE_SINGLE="ct6e-standard-1t/1x1"
+            export KUBE_SHAPE_MULTI="ct6e-standard-8t/2x4"
+            export TENSOR_PARALLEL_SIZE_SINGLE=1
+            ;;
+        v7)
+            export TPU_VERSION="tpu7x"
+            export KUBE_SHAPE_SINGLE="tpu7x-standard-1t/1x1x1"
+            export KUBE_SHAPE_MULTI="tpu7x-standard-4t/2x2x1"
+            export TENSOR_PARALLEL_SIZE_SINGLE=2
+            ;;
+        unset)
+            unset TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
+            ;;
+    esac
+}
+
+# The kube files in place of upload_pipeline's. A scheduled kube pipeline sets
+# CI_LANES=jax and runs the one generation its schedule names; any other kube
+# build runs both, as upload_pipeline does.
+upload_kube_pipeline() {
+    if [[ -n "${CI_LANES:-}" ]]; then
+        if [[ "${CI_LANES}" != "jax" ]]; then
+            echo "ERROR: CI_LANES='${CI_LANES}'; only the jax lane goes through bootstrap.sh" >&2
+            exit 1
+        fi
+        upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
+        if [[ "${TPU_VERSION:-tpu6e}" == "tpu6e" ]]; then
+            upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
+        fi
+        return
+    fi
+    if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
+      set_kube_jax_envs v6
+      upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
+      set_kube_jax_envs unset
+      set_kube_jax_envs v7
+      upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
+      set_kube_jax_envs unset
+      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
+      upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
+    fi
+    # nightly_verify.yml runs only on nightly and tag builds. Its suites run on
+    # their own scheduled kube pipelines until it has a kube version.
+    if [[ "${NIGHTLY:-0}" == "1" || -n "${BUILDKITE_TAG:-}" ]]; then
+      buildkite-agent annotate --style warning --context ci-fleet-gaps \
+        "Not run on kube: nightly_verify.yml (models, features, parallelism, rl and the support matrices) has no kube version yet."
+    fi
+}
+
 upload_pipeline() {
+    if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
+      upload_kube_pipeline
+      return
+    fi
     if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
       # Upload JAX pipeline for v6 (default)
       set_jax_envs v6
@@ -196,6 +255,9 @@ upload_pipeline() {
 
 upload_benchmark_pipeline() {
     export BM_INFRA="true"
+    if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
+      export BENCHMARK_TARGET=kube
+    fi
     VLLM_COMMIT_HASH=$(buildkite-agent meta-data get "VLLM_COMMIT_HASH")
     TPU_COMMIT_HASH=$(git rev-parse HEAD)
     CODE_HASH="${VLLM_COMMIT_HASH}-${TPU_COMMIT_HASH}-"
@@ -232,6 +294,19 @@ upload_benchmark_pipeline() {
     process_json_benchmark_cases "$case_folder" "$generator_script" "$JOB_PRIORITY" "$changed_cases"
 }
 
+# Decides bare metal or kube (ci_fleet.sh), before anything that depends on
+# the answer is uploaded.
+choose_ci_fleet() {
+    echo "--- :kubernetes: Choosing bare metal or kube"
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/ci_fleet.sh"
+    resolve_ci_fleet
+    if [[ "${CI_FLEET}" == "kube" ]]; then
+      buildkite-agent annotate --style info --context ci-fleet \
+        "Runs on the kube fleet (${CI_FLEET_REASON})."
+    fi
+}
+
 echo "--- Starting Buildkite Bootstrap"
 echo "Running in pipeline: $BUILDKITE_PIPELINE_SLUG"
 
@@ -265,7 +340,11 @@ EOF
 
 fi
 
-upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
+# A scheduled kube lane (CI_LANES set) gates nothing yet, so it notifies
+# no one, as it did before it went through this script.
+if [[ -z "${CI_LANES:-}" ]]; then
+  upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
+fi
 rm "$NOTIFY_FILE"
 
 echo "Configure testing logic"
@@ -274,18 +353,27 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     VLLM_COMMIT_HASH=$(git ls-remote https://github.com/vllm-project/vllm.git HEAD | awk '{ print $1}')
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
+    choose_ci_fleet
     # Note: upload are inserted in reverse order, so promote LKG should upload before tests
     upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
-  
-    # Upload JAX pipeline for v7
-    set_jax_envs v7
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
+    if [[ "${CI_FLEET}" == "kube" ]]; then
+      set_kube_jax_envs v7
+      upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
+      set_kube_jax_envs unset
+      set_kube_jax_envs v6
+      upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
+      set_kube_jax_envs unset
+    else
+      # Upload JAX pipeline for v7
+      set_jax_envs v7
+      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+      set_jax_envs unset
 
-    # Upload JAX pipeline for v6 (default)
-    set_jax_envs v6
-    upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
-    set_jax_envs unset
+      # Upload JAX pipeline for v6 (default)
+      set_jax_envs v6
+      upload_with_priority .buildkite/pipeline_jax.yml "$JOB_PRIORITY"
+      set_jax_envs unset
+    fi
 
 else
   # Note: PR and Nightly pipelines will load VLLM_COMMIT_HASH from vllm_lkg.version file, if not exists, get the latest commit hash from vllm repo
@@ -319,6 +407,7 @@ else
     # If it's a PR, check for the specific label
     if [[ $PR_LABELS == *"ready"* ]]; then
       echo "Found 'ready' label on PR. Uploading main pipeline..."
+      choose_ci_fleet
       # Upload main pipeline if file list is empty or contains non-benchmark files
       if [ -z "${NON_SKIPPABLE_FILES:-}" ] || [ "${NON_BENCHMARK_COUNT:--1}" -ne 0 ]; then
         upload_pipeline
@@ -332,8 +421,12 @@ else
   else
     # If it's NOT a Pull Request (e.g., branch push, tag, manual build)
     echo "This is not a Pull Request build. Uploading main pipeline."
+    choose_ci_fleet
     upload_pipeline
-    upload_benchmark_pipeline
+    # A scheduled kube lane is its jax suite alone; the benchmark has its own.
+    if [[ -z "${CI_LANES:-}" ]]; then
+      upload_benchmark_pipeline
+    fi
   fi
 fi
 
