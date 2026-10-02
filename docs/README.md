@@ -1,8 +1,8 @@
 <p align="center">
    <!-- This image will ONLY show up in GitHub's dark mode -->
-  <img src="assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM JAX" style="width: 86%;">
     <!-- This image will ONLY show up in GitHub's light mode (and on other platforms) -->
-  <img src="assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM JAX" style="width: 86%;">
 </p>
 <p align="center">
 | <a href="https://docs.vllm.ai/projects/tpu/en/latest/"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/google-tpu-support/27"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
@@ -12,7 +12,7 @@
 
 ## About
 
-vLLM JAX-TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
+vLLM JAX is powered by `vllm-jax` (formerly `tpu-inference`), an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
 
 - Push the limits of TPU hardware performance in open source.
 - Provide more flexibility to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
@@ -56,7 +56,7 @@ vLLM JAX-TPU is now powered by `tpu-inference`, an expressive and powerful new h
 
 ## Contribute
 
-We're always looking for ways to partner with the community to accelerate vLLM TPU development. If you're interested in contributing to this effort, check out the [Contributing guide](https://github.com/vllm-project/tpu-inference/blob/main/CONTRIBUTING.md) and [Issues](https://github.com/vllm-project/tpu-inference/issues) to start. We recommend filtering Issues on the [**good first issue** tag](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+state%3Aopen+label%3A%22good+first+issue%22) if it's your first time contributing.
+We're always looking for ways to partner with the community to accelerate vLLM JAX development. If you're interested in contributing to this effort, check out the [Contributing guide](https://github.com/vllm-project/tpu-inference/blob/main/CONTRIBUTING.md) and [Issues](https://github.com/vllm-project/tpu-inference/issues) to start. We recommend filtering Issues on the [**good first issue** tag](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+state%3Aopen+label%3A%22good+first+issue%22) if it's your first time contributing.
 
 ## Contact us
 

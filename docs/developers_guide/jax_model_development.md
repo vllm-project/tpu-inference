@@ -1,13 +1,13 @@
 # JAX Model Development Guide
 
-`tpu-inference` provides a flexible framework for implementing Transformer-based architectures in Flax NNX.
+`vllm-jax` provides a flexible framework for implementing Transformer-based architectures in Flax NNX.
 
 The ingredients for integrating a new model type consist of:
 
 - defining the model architecture and implementing any custom layers
 - implementing weight loading logic
 - (optional) adding quantization support
-- registering the new model into tpu-inference
+- registering the new model into vllm-jax
 
 ## Code Organization
 
@@ -16,7 +16,7 @@ It is helpful to familiarize with the code organization before beginning model d
 ```bash
 tpu_inference
 ├── layers
-│   ├── jax # Provide pre-implemented building blocks for tpu-inference models.
+│   ├── jax # Provide pre-implemented building blocks for vllm-jax models.
 │   │    ├── __init__.py # Definition of JaxModule to provide pytorch-like APIs (e.g. named_parameters)
 │   │    ├── embed.py
 │   │    ├── linear.py
@@ -62,7 +62,7 @@ class NewModel(JaxModule, LoadableWithIterator):
     ...
 ```
 
-The constructor should set the architecture configuration (e.g. num_layers, hidden_size) and initialize the model layers. Layers can leverage tpu-inference to import or extend commonly used layer types (e.g. [JaxEmbed](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/embed.py#L25), [JaxRmsNorm](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/norm.py#L25), [JaxMoE](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/moe/moe.py#L129)). (Not recommended) The model can also be defined from scratch using flax NNX (e.g. [Llama3](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama3.py)).
+The constructor should set the architecture configuration (e.g. num_layers, hidden_size) and initialize the model layers. Layers can leverage vllm-jax to import or extend commonly used layer types (e.g. [JaxEmbed](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/embed.py#L25), [JaxRmsNorm](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/norm.py#L25), [JaxMoE](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/layers/jax/moe/moe.py#L129)). (Not recommended) The model can also be defined from scratch using flax NNX (e.g. [Llama3](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/models/jax/llama3.py)).
 
 ### Implementing the forward pass
 The forward pass contains the logic for stitching together the layers that are defined in the model constructor and is expected to use the following interface:
@@ -94,7 +94,7 @@ With [#1623](https://github.com/vllm-project/tpu-inference/issues/1623) and [#15
 
 ### Parameter level loading
 
-tpu-inference provides [default per-parameter weight loader](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/models/jax/utils/weight_utils.py#L840) if not specified otherwise. This is sufficient for most cases. However it's possible to provide specific weight loader by setting "weight_loader" attribute for the paramter. Typical usages are:
+vllm-jax provides [default per-parameter weight loader](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f9a2a99026e67de26f122c1a46b3e366/tpu_inference/models/jax/utils/weight_utils.py#L840) if not specified otherwise. This is sufficient for most cases. However it's possible to provide specific weight loader by setting "weight_loader" attribute for the paramter. Typical usages are:
 - unpack the weight, e.g. unpack uint8 into fp4
 - reshape the weight before loading
 
@@ -116,8 +116,8 @@ Each [quant_method](https://github.com/vllm-project/tpu-inference/blob/c2b3ff50f
 
 ## Quantization Support
 
-Many large LLMs like DeepSeek-V3 employ quantization to reduce hardware requirements and improve performance. The tpu-inference codebase can load pre-quantized model checkpoint, and utilizes [Qwix](https://github.com/google/qwix) to apply additional quantization settings to unquantized model weights. In tpu-inference, there are no assumptions on how a pre-quantized checkpoint is generated (so you are free to use your choice of popular tools), as long as the results are saved in HuggingFace Safetensor format and proper quantization configuration is provided on HuggingFace.
-For more details on how to perform inference runs with Qwix on tpu-inference, please refer to the [general readme](https://github.com/vllm-project/tpu-inference/tree/31fa76a0187496ec161c634c98ac5eba144cb36c?tab=readme-ov-file#quantization).
+Many large LLMs like DeepSeek-V3 employ quantization to reduce hardware requirements and improve performance. The vllm-jax codebase can load pre-quantized model checkpoint, and utilizes [Qwix](https://github.com/google/qwix) to apply additional quantization settings to unquantized model weights. In vllm-jax, there are no assumptions on how a pre-quantized checkpoint is generated (so you are free to use your choice of popular tools), as long as the results are saved in HuggingFace Safetensor format and proper quantization configuration is provided on HuggingFace.
+For more details on how to perform inference runs with Qwix on vllm-jax, please refer to the [general readme](https://github.com/vllm-project/tpu-inference/tree/31fa76a0187496ec161c634c98ac5eba144cb36c?tab=readme-ov-file#quantization).
 
 **Please note** that you may need to update the list of supported quantization types on TPU [here](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/tpu_inference/platforms/tpu_jax.py#L48). vLLM will trigger a validation error if the `quant_method` listed in the [HuggingFace quantization_config](https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/main/config.json#L40) is not one of the supported types.
 
@@ -125,11 +125,11 @@ For the sake of demonstration, we will be referencing [deepseek_v3.py](https://g
 
 ### Loading Pre-quantized Checkpoints
 
-Similar to vLLM, tpu-inference relies on "quantization_config" from `config.json` on HuggingFace to find out the proper [QuantizationConfig](https://github.com/vllm-project/tpu-inference/blob/c38e48fe2530d1c25143979d715e7578bcc242f3/tpu_inference/layers/jax/quantization/configs.py#L27), which is propagated to each module inside a model. Each module then utilize `QuantizationConfig` to update its topology (e.g. add parameters for scale) such that the parameters in the model can map to weights from HuggingFace.
+Similar to vLLM, vllm-jax relies on "quantization_config" from `config.json` on HuggingFace to find out the proper [QuantizationConfig](https://github.com/vllm-project/tpu-inference/blob/c38e48fe2530d1c25143979d715e7578bcc242f3/tpu_inference/layers/jax/quantization/configs.py#L27), which is propagated to each module inside a model. Each module then utilize `QuantizationConfig` to update its topology (e.g. add parameters for scale) such that the parameters in the model can map to weights from HuggingFace.
 
 After weights are loaded, we also through [process_weights_after_loading](https://github.com/vllm-project/tpu-inference/blob/c38e48fe2530d1c25143979d715e7578bcc242f3/tpu_inference/layers/jax/quantization/__init__.py#L69) re-quantize the weights for linear layers, to make quantization block layout more TPU-friendly.
 
-All above mechanism are natively implemented in tpu-inference, as an user, you don't need to do anything but
+All above mechanism are natively implemented in vllm-jax, as an user, you don't need to do anything but
 
 ```bash
 MODEL_IMPL_TYPE=flax_nnx vllm serve Qwen/Qwen3-30B-A3B-Instruct-2507-FP8
@@ -153,4 +153,4 @@ Once a new model type is implemented, it must be added to the model registry in 
 !!! warning
     per vLLM’s validation process, a model must be registered under a supported HuggingFace model name (see [here](https://github.com/vllm-project/vllm/blob/320feae6f506097c47b6b41a634a6197512cffc1/vllm/model_executor/models/registry.py#L428) for more detail).
 
-To plug in external Jax NNX modeling implementations into tpu-inference, please refer to the [dedicated documentation](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/docs/getting_started/out-of-tree.md).
+To plug in external Jax NNX modeling implementations into vllm-jax, please refer to the [dedicated documentation](https://github.com/vllm-project/tpu-inference/blob/31fa76a0187496ec161c634c98ac5eba144cb36c/docs/getting_started/out-of-tree.md).

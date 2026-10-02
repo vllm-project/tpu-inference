@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-site_name: vLLM JAX-TPU
+site_name: vLLM JAX
 site_url: !ENV READTHEDOCS_CANONICAL_URL
 repo_url: https://github.com/vllm-project/tpu-inference
 edit_uri: edit/main/docs/
@@ -76,7 +76,7 @@ nav:
       - 'Offline LoRA': api_and_code_examples/offline_lora_inference.md
     - 'Out-of-Tree Usage': getting_started/out-of-tree.md
   - 'Developers Guides':
-    - 'Contributing to vLLM JAX-TPU': developers_guide/contributing.md
+    - 'Contributing to vLLM JAX': developers_guide/contributing.md
     - 'Adding a New Model to CI': developers_guide/buildkite.md
     - 'JAX Model Development': developers_guide/jax_model_development.md
     - 'Torchax Model Development': developers_guide/torchax_model_development.md

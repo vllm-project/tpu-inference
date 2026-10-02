@@ -1,8 +1,8 @@
 <p align="center">
    <!-- This image will ONLY show up in GitHub's dark mode -->
-  <img src="docs/assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="docs/assets/tpu_inference_dark_mode_short.png#gh-dark-mode-only" alt="vLLM JAX" style="width: 86%;">
     <!-- This image will ONLY show up in GitHub's light mode (and on other platforms) -->
-  <img src="docs/assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM TPU" style="width: 86%;">
+  <img src="docs/assets/tpu_inference_light_mode_short.png#gh-light-mode-only" alt="vLLM JAX" style="width: 86%;">
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@
 
 ## About
 
-vLLM JAX-TPU is now powered by `tpu-inference`, an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
+vLLM JAX is powered by `vllm-jax` (formerly `tpu-inference`), an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
 
 - Push the limits of TPU hardware performance in open source.
 - Provide more flexibility to JAX and PyTorch users by running PyTorch model definitions performantly on TPU without any additional code changes, while also extending native support to JAX.
@@ -47,7 +47,7 @@ vLLM JAX-TPU is now powered by `tpu-inference`, an expressive and powerful new h
 
 ## Recommended models and features
 
-Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
+Although vLLM JAX’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 
 For this reason, we’ve provided **[Recommended Models](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/)** and **[Recommended Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_features/)** pages detailing the models and features that are validated through unit, integration, and performance testing.
 
@@ -934,7 +934,7 @@ Below is the live status of our supported models, features, and kernels. Click o
 [![bug](https://img.shields.io/badge/bug-12-d73a4a?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22bug%22) [![good first issue](https://img.shields.io/badge/good%20first%20issue-8-7057ff?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22good%20first%20issue%22) [![enhancement](https://img.shields.io/badge/enhancement-7-a2eeef?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22enhancement%22) [![contribution-welcome](https://img.shields.io/badge/contribution--welcome-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22contribution-welcome%22) [![auto-generated](https://img.shields.io/badge/auto--generated-5-ededed?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues?q=is%3Aissue+is%3Aopen+label%3A%22auto-generated%22) [![View All Issues](https://img.shields.io/badge/View%20All%20Issues-184-238636?style=flat-square)](https://github.com/vllm-project/tpu-inference/issues)
 <!-- END: issue_badges -->
 
-We're thrilled you're interested in contributing to the vLLM TPU project! Your help is essential for making our tools better for everyone. There are many ways to get involved, even if you're not ready to write code.
+We're thrilled you're interested in contributing to the vLLM JAX project! Your help is essential for making our tools better for everyone. There are many ways to get involved, even if you're not ready to write code.
 
 **Ways to Contribute:**
 
@@ -950,7 +950,7 @@ If you're ready to contribute code, our **[Contributing Guide](https://github.co
 
 ## 🌟 Contributors Wall
 
-A huge thank you to everyone who has helped build and improve `vllm-project/tpu-inference`!
+A huge thank you to everyone who has helped build and improve `vllm-project/vllm-jax` (formerly `vllm-project/tpu-inference`)!
 
 <details markdown="1">
 <summary><b>🌟 <i>Contribution Type Legend & Ranking</i></b></summary>
