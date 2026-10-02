@@ -894,6 +894,19 @@ def _ragged_paged_attention_kernel_loop(
 
         actual_bq_csz = min(bq_csz, actual_bq_sz)
 
+        def get_bq_start_bkv_idx(bq_idx):
+            # First bkv the sliding window lets this bq see.
+            start = (jnp.maximum(kv_q_gap + bq_idx * actual_bq_sz -
+                                 sliding_window, 0) // bkv_sz)
+            # The new KV is written to the cache only from the last bq's bkv
+            # loop, so that loop must also cover every bkv holding new tokens,
+            # not just the window. Otherwise, once q_len exceeds about
+            # bq_sz + sliding_window, the early new tokens never reach the
+            # cache, and prefix caching later serves those stale pages as
+            # computed. The extra bkvs fall outside the window and are masked.
+            return lax.select(bq_idx == num_bq - 1,
+                              jnp.minimum(start, kv_q_gap // bkv_sz), start)
+
         def get_next_bq_ids(seq_idx, bq_idx, bq_sem_idx):
             next_bq_idx = bq_idx + 1
             is_last_bq = next_bq_idx == num_bq
@@ -914,9 +927,7 @@ def _ragged_paged_attention_kernel_loop(
 
             next_bq_start_bkv_idx = 0
             if sliding_window is not None:
-                next_bq_start_bkv_idx = (jnp.maximum(
-                    kv_q_gap +
-                    (bq_idx + 1) * actual_bq_sz - sliding_window, 0) // bkv_sz)
+                next_bq_start_bkv_idx = get_bq_start_bkv_idx(bq_idx + 1)
             next_bkv_idx = lax.select(is_last_bkv, next_bq_start_bkv_idx,
                                       next_bkv_idx)
             next_bkv_idx = lax.select(is_last_bq, next_seq_start_bkv_idx,
@@ -937,9 +948,7 @@ def _ragged_paged_attention_kernel_loop(
             processed_q_len = kv_q_gap + bq_idx * actual_bq_sz
             start_bkv_idx = 0
             if sliding_window is not None:
-                # Recalculate the start_bkv_idx based on the processed_q_len.
-                start_bkv_idx = (
-                    jnp.maximum(processed_q_len - sliding_window, 0) // bkv_sz)
+                start_bkv_idx = get_bq_start_bkv_idx(bq_idx)
             if use_causal_mask:
                 effective_kv_len = jnp.minimum(kv_len,
                                                processed_q_len + actual_bq_sz)
