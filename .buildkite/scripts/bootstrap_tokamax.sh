@@ -18,6 +18,9 @@
 # 1. Resolves the newest tokamax nightly on PyPI
 # 2. Runs the JAX test suites against it.
 # 3. Only if every test passes, it pushes the requirements.txt bump to main.
+#
+# On kube (ci_fleet.sh) it runs the same suites as a shadow of the bare run:
+# no bump and, when scheduled, no notifications.
 
 set -euo pipefail
 
@@ -53,7 +56,12 @@ notify:
     if: build.state == "failed"
 EOF
 fi
-upload_with_priority "${NOTIFY_FILE}" "${JOB_PRIORITY}"
+# A scheduled kube run shadows the bare one, which reports the same failures.
+# Read from the schedule's env rather than ci_fleet.sh so nothing can fail
+# before the notifications are attached.
+if [[ "${BUILDKITE_SOURCE:-}" != "schedule" || "${CI_FLEET:-}" != "kube" ]]; then
+    upload_with_priority "${NOTIFY_FILE}" "${JOB_PRIORITY}"
+fi
 rm "${NOTIFY_FILE}"
 
 # Handles the environment state for different TPU generations.
@@ -79,6 +87,28 @@ set_jax_envs() {
         unset)
             unset TESTS_GROUP_LABEL TPU_VERSION TPU_QUEUE_SINGLE TPU_QUEUE_MULTI \
                   TENSOR_PARALLEL_SIZE_SINGLE TENSOR_PARALLEL_SIZE_MULTI COV_FAIL_UNDER
+            ;;
+    esac
+}
+
+# One generation of pipeline_jax_kube.yml: the kube shapes in place of the bare
+# queues set_jax_envs names. Mirrors bootstrap.sh.
+set_kube_jax_envs() {
+    case $1 in
+        v6)
+            export TPU_VERSION="tpu6e"
+            export KUBE_SHAPE_SINGLE="ct6e-standard-1t/1x1"
+            export KUBE_SHAPE_MULTI="ct6e-standard-8t/2x4"
+            export TENSOR_PARALLEL_SIZE_SINGLE=1
+            ;;
+        v7)
+            export TPU_VERSION="tpu7x"
+            export KUBE_SHAPE_SINGLE="tpu7x-standard-1t/1x1x1"
+            export KUBE_SHAPE_MULTI="tpu7x-standard-4t/2x2x1"
+            export TENSOR_PARALLEL_SIZE_SINGLE=2
+            ;;
+        unset)
+            unset TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
             ;;
     esac
 }
@@ -148,17 +178,38 @@ VLLM_COMMIT_HASH="$(get_vllm_commit_hash)"
 buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
 echo "Using vllm LKG commit hash: ${VLLM_COMMIT_HASH}"
 
+echo "--- :kubernetes: Choosing bare metal or kube"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/ci_fleet.sh"
+resolve_ci_fleet
+if [[ "${CI_FLEET}" == "kube" ]]; then
+    buildkite-agent annotate --style info --context ci-fleet \
+        "Runs on the kube fleet (${CI_FLEET_REASON}) as a shadow: main is not bumped."
+fi
+
 # Buildkite inserts uploaded steps in reverse order, so the promote has to be
-# uploaded first for it to end up last.
-upload_with_priority .buildkite/integration_tokamax_promote.yml "${JOB_PRIORITY}"
+# uploaded first for it to end up last. Only the bare run bumps main.
+if [[ "${CI_FLEET}" != "kube" ]]; then
+    upload_with_priority .buildkite/integration_tokamax_promote.yml "${JOB_PRIORITY}"
+fi
 
-set_jax_envs v7
-upload_with_priority .buildkite/pipeline_jax.yml "${JOB_PRIORITY}"
-set_jax_envs unset
+if [[ "${CI_FLEET}" == "kube" ]]; then
+    set_kube_jax_envs v7
+    upload_with_priority .buildkite/pipeline_jax_kube.yml "${JOB_PRIORITY}"
+    set_kube_jax_envs unset
 
-set_jax_envs v6
-upload_with_priority .buildkite/pipeline_jax.yml "${JOB_PRIORITY}"
-set_jax_envs unset
+    set_kube_jax_envs v6
+    upload_with_priority .buildkite/pipeline_jax_kube.yml "${JOB_PRIORITY}"
+    set_kube_jax_envs unset
+else
+    set_jax_envs v7
+    upload_with_priority .buildkite/pipeline_jax.yml "${JOB_PRIORITY}"
+    set_jax_envs unset
+
+    set_jax_envs v6
+    upload_with_priority .buildkite/pipeline_jax.yml "${JOB_PRIORITY}"
+    set_jax_envs unset
+fi
 
 upload_with_priority .buildkite/pipeline_build.yml "${JOB_PRIORITY}"
 
