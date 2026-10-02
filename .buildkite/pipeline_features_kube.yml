@@ -61,14 +61,19 @@ steps:
   # the recorder exits non-zero on anything but a pass - but the test itself now
   # reads as failed rather than tolerated, which is the question this lane asks.
   #
-  # Eight chips, because the offload tests shard across a whole node.
+  # Eight chips, because the offload tests shard across a whole node. Always
+  # a v6e-8 node, in a v7x build too, as bare metal pins KV_Cache_Offload.yml
+  # to tpu_v6e_8_queue: on v7x the accuracy test fails (issue #3683). The
+  # workload runs as tpu6e on the tpu6e image, which run.sh requires for a v6e
+  # shape; the keys keep the build's generation so the record steps match.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
     key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
     env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      SHAPE: "ct6e-standard-8t/2x4"
+      TPU_VERSION: "tpu6e"
       USE_V6E8_QUEUE: "True"
     <<: *tpu_step
+    depends_on: "build_docker_tpu6e"
     commands:
       - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py
 
@@ -92,11 +97,11 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for KV Cache Offload"
     key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
     env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      SHAPE: "ct6e-standard-8t/2x4"
+      TPU_VERSION: "tpu6e"
       USE_V6E8_QUEUE: "True"
     depends_on:
-      - "build_docker_${TPU_VERSION:-tpu6e}"
+      - "build_docker_tpu6e"
       - "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
