@@ -61,10 +61,7 @@ from tpu_inference.models.common.compiler_options import \
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
-from tpu_inference.models.vllm.dflash_draft import (dflash_draft_call_kwargs,
-                                                    dflash_draft_forward,
-                                                    validate_dflash_draft_model
-                                                    )
+from tpu_inference.models.vllm import dflash_draft
 from tpu_inference.models.vllm.experimental.model_patcher import (
     apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
@@ -321,7 +318,7 @@ class VllmModelWrapper:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
         if self.is_draft_model and self._spec_method == "dflash":
-            validate_dflash_draft_model(vllm_model)
+            dflash_draft.validate_dflash_draft_model(vllm_model)
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
@@ -546,11 +543,10 @@ class VllmModelWrapper:
                     torch_view(params_and_buffers),
                     kwargs={
                         "call_fn":
-                        dflash_draft_forward,
+                        dflash_draft.dflash_draft_forward,
                         "call_kwargs":
-                        dflash_draft_call_kwargs(input_ids,
-                                                 target_hidden_states,
-                                                 attn_metadata),
+                        dflash_draft.dflash_draft_call_kwargs(
+                            input_ids, target_hidden_states, attn_metadata),
                     },
                     tie_weights=False,
                 )

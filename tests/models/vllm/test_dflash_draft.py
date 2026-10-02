@@ -24,10 +24,6 @@ from torchax.interop import jax_view
 
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.models.vllm import dflash_draft
-from tpu_inference.models.vllm.dflash_draft import (dflash_draft_call_kwargs,
-                                                    dflash_draft_forward,
-                                                    validate_dflash_draft_model
-                                                    )
 from tpu_inference.models.vllm.vllm_model_wrapper import _VllmRunner
 from tpu_inference.models.vllm.vllm_model_wrapper_context import \
     set_vllm_model_wrapper_context
@@ -309,9 +305,9 @@ def test_dflash_draft_forward_matches_reference(monkeypatch, mesh):
                 kv_caches=kv_caches,
                 mesh=mesh,
                 layer_name_to_kvcache_index=layer_map):
-            kwargs = dflash_draft_call_kwargs(jnp.asarray(input_ids),
-                                              target_hidden_states, md)
-            out = dflash_draft_forward(model, **kwargs)
+            kwargs = dflash_draft.dflash_draft_call_kwargs(
+                jnp.asarray(input_ids), target_hidden_states, md)
+            out = dflash_draft.dflash_draft_forward(model, **kwargs)
             actual = np.asarray(jax_view(out))
             new_caches = list(kv_caches)
 
@@ -361,9 +357,9 @@ def test_dflash_draft_forward_honors_causal_layers(monkeypatch, mesh):
                 kv_caches=kv_caches,
                 mesh=mesh,
                 layer_name_to_kvcache_index=layer_map):
-            dflash_draft_forward(
+            dflash_draft.dflash_draft_forward(
                 model,
-                **dflash_draft_call_kwargs(
+                **dflash_draft.dflash_draft_call_kwargs(
                     jnp.array([3, 1, 1], dtype=jnp.int32),
                     target_hidden_states, md))
 
@@ -372,12 +368,12 @@ def test_dflash_draft_forward_honors_causal_layers(monkeypatch, mesh):
 
 
 def test_validate_dflash_draft_model_accepts_dflash_layout():
-    validate_dflash_draft_model(_FakeDFlashModel())
+    dflash_draft.validate_dflash_draft_model(_FakeDFlashModel())
 
 
 def test_validate_dflash_draft_model_rejects_other_models():
     with pytest.raises(NotImplementedError, match="not supported"):
-        validate_dflash_draft_model(torch.nn.Linear(2, 2))
+        dflash_draft.validate_dflash_draft_model(torch.nn.Linear(2, 2))
 
 
 @pytest.mark.parametrize("attr, value",
@@ -388,7 +384,7 @@ def test_validate_dflash_draft_model_rejects_unsupported_attention(
     model = _FakeDFlashModel()
     setattr(model.model.layers[0].self_attn, attr, value)
     with pytest.raises(NotImplementedError):
-        validate_dflash_draft_model(model)
+        dflash_draft.validate_dflash_draft_model(model)
 
 
 def test_vllm_runner_call_fn_uses_functional_params():
@@ -418,8 +414,9 @@ def test_dflash_draft_call_kwargs_unpacks_target_hidden_states():
         (2, HIDDEN)), jnp.array([0, 2], dtype=jnp.int32),
                             jnp.array([4, 5], dtype=jnp.int32))
     with torchax.default_env():
-        kwargs = dflash_draft_call_kwargs(jnp.array([1, 2, 3]),
-                                          target_hidden_states, md)
+        kwargs = dflash_draft.dflash_draft_call_kwargs(jnp.array([1, 2, 3]),
+                                                       target_hidden_states,
+                                                       md)
         assert kwargs["attention_metadata"] is md
         assert kwargs["target_query_start_loc"] is target_hidden_states[1]
         np.testing.assert_array_equal(
