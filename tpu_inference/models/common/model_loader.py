@@ -323,6 +323,11 @@ def get_flax_model(
     model_dtype = to_jax_dtype(original_dtype)
     vllm_config.model_config.dtype = model_dtype
     vllm_config.quant_config = get_tpu_quantization_config(vllm_config)
+    if "jax_w4a16" in (getattr(vllm_config, "additional_config", None) or {}):
+        from tpu_inference.models.common.w4a16_config import \
+            get_w4a16_quantization_config
+        vllm_config.quant_config = get_w4a16_quantization_config(
+            vllm_config, is_draft_model=is_draft_model)
 
     # Only perform qwix quantization if it is jax model.
     if vllm_config.model_config:
@@ -675,6 +680,14 @@ def get_model(
         "Loading model with MODEL_IMPL_TYPE=%s",
         envs.DRAFT_MODEL_IMPL_TYPE if is_draft_model else envs.MODEL_IMPL_TYPE)
     impl = resolve_model_impl_type(vllm_config, is_draft_model)
+    if "jax_w4a16" in (getattr(vllm_config, "additional_config", None) or {}):
+        from tpu_inference.models.common.w4a16_config import \
+            validate_w4a16_request
+        validate_w4a16_request(vllm_config,
+                               impl=impl,
+                               is_draft_model=is_draft_model)
+        with jax.set_mesh(mesh):
+            return get_flax_model(vllm_config, rng, mesh, is_draft_model)
 
     match impl:
         case "flax_nnx":
