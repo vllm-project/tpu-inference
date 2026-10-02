@@ -173,6 +173,78 @@ def test_propose_returns_2d_int_ids():
     assert jnp.issubdtype(draft_token_ids.dtype, jnp.integer)
 
 
+def test_propose_passes_kv_cache_mapping_to_vllm_draft():
+    """The vllm (torchax) draft step also takes the layer -> KV cache map."""
+    proposer = object.__new__(DFlashProposer)
+    proposer.mesh = _make_single_device_mesh()
+    proposer.num_speculative_tokens = 2
+    proposer.block_size = 3
+    proposer.state_leaves = None
+    proposer._is_vllm_draft = True
+    layer_map = {"model.layers.32.self_attn.attn": 1}
+    proposer.runner = MagicMock(layer_name_to_kvcache_index=layer_map)
+
+    hidden_states = jnp.ones((3, 4), dtype=jnp.bfloat16)
+    calls = {}
+
+    def fake_vllm_draft_step(state, kv_caches, input_ids, target_hidden_states,
+                             attn_metadata, layer_name_to_kvcache_index):
+        calls["mapping"] = layer_name_to_kvcache_index
+        return kv_caches, hidden_states, [], None
+
+    proposer.model_fn = fake_vllm_draft_step
+    proposer.compute_logits_fn = lambda _state, _hidden, _lora: jnp.array(
+        [[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
+
+    _, draft_token_ids = proposer.propose(
+        kv_caches=[],
+        input_ids=None,
+        attn_metadata=None,
+        last_token_indices=None,
+        target_hidden_states=None,
+    )
+
+    assert calls["mapping"] == tuple(layer_map.items())
+    np.testing.assert_array_equal(np.asarray(draft_token_ids),
+                                  np.array([[0, 1]], dtype=np.int32))
+
+
+def test_get_vllm_shared_params_shares_target_embed_and_lm_head():
+    proposer = object.__new__(DFlashProposer)
+    embed, lm_head = jnp.zeros((4, 2)), jnp.ones((4, 2))
+    proposer.runner = MagicMock(
+        state={
+            "vllm_model.model.embed_tokens.weight": embed,
+            "vllm_model.lm_head.weight": lm_head,
+            "vllm_model.model.norm.weight": jnp.ones((2, )),
+        })
+
+    shared = proposer._get_vllm_shared_params()
+
+    assert set(shared) == {
+        "vllm_model.model.embed_tokens.weight", "vllm_model.lm_head.weight"
+    }
+    assert shared["vllm_model.lm_head.weight"] is lm_head
+
+
+def test_get_vllm_shared_params_tied_target_uses_embedding_as_lm_head():
+    proposer = object.__new__(DFlashProposer)
+    embed = jnp.zeros((4, 2))
+    proposer.runner = MagicMock(
+        state={"vllm_model.model.embed_tokens.weight": embed})
+
+    shared = proposer._get_vllm_shared_params()
+
+    assert shared["vllm_model.lm_head.weight"] is embed
+
+
+def test_get_vllm_shared_params_ignores_non_dict_target_state():
+    proposer = object.__new__(DFlashProposer)
+    proposer.runner = MagicMock(state=None)
+
+    assert proposer._get_vllm_shared_params() == {}
+
+
 # ----- New Comprehensive Tests -----
 
 
