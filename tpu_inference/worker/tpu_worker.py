@@ -295,7 +295,7 @@ class TPUWorker(WorkerBase):
 
         visible_chips = ",".join(str(c) for c in range(start_chip, end_chip))
         # Unique libtpu port per rank so the runtimes can coexist on a host.
-        tpu_port = jax_parallel_state.BASE_JAX_PORT + dp_rank
+        tpu_port = jax_parallel_state.BASE_TPU_PROCESS_PORT + dp_rank
 
         os.environ["TPU_VISIBLE_CHIPS"] = visible_chips
         os.environ["TPU_CHIPS_PER_PROCESS_BOUNDS"] = f"1,{chips_per_rank},1"
@@ -344,7 +344,7 @@ class TPUWorker(WorkerBase):
             else:
                 # Single host PP logic
                 tpu_ports = [
-                    jax_parallel_state.BASE_JAX_PORT + i
+                    jax_parallel_state.BASE_TPU_PROCESS_PORT + i
                     for i in range(self.pp_config.pp_world_size)
                 ]
                 os.environ["TPU_PROCESS_ADDRESSES"] = ",".join(

@@ -20,6 +20,12 @@ from jax.experimental import transfer
 from tpu_inference.distributed.utils import format_host_port
 
 BASE_JAX_PORT = 5000
+# libtpu's per-process ports (TPU_PROCESS_PORT) when several runtimes share a
+# host. They must not overlap BASE_JAX_PORT: on a GKE node libtpu serves its
+# SliceBuilder worker on that port, both listeners bind it with SO_REUSEPORT,
+# and the kernel hands part of the transfer connections to libtpu, which closes
+# them ("SocketServer: Connection closed recv() == 0").
+BASE_TPU_PROCESS_PORT = 8476
 
 
 class GroupCoordinator:
