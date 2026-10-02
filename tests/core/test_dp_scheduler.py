@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
+import cloudpickle
 import numpy as np
 import pytest
 from vllm.config import VllmConfig
@@ -25,11 +27,12 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, ModelRunnerOutput
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 from tpu_inference.core.sched.dp_scheduler import (
     DPScheduler, DPSchedulerOutput, SchedulerCommand,
-    _get_max_cache_hit_length, update_vllm_config_for_dp_scheduler)
+    _get_max_cache_hit_length, _scheduler_worker_process,
+    update_vllm_config_for_dp_scheduler)
 
 
 def _make_mock_mp_context():
@@ -443,7 +446,8 @@ class TestDPScheduler:
     def test_round_robin_routing_skips_rank_queries(
             self, mock_vllm_config, mock_kv_cache_config,
             mock_structured_output_manager):
-        """round_robin assigns ranks cyclically without querying rank state."""
+        """round_robin assigns ranks cyclically without querying rank state,
+        and holds the requests until they go out as one batch per rank."""
         scheduler = self._create_scheduler(mock_vllm_config,
                                            mock_kv_cache_config,
                                            mock_structured_output_manager)
@@ -463,8 +467,153 @@ class TestDPScheduler:
 
         assert [scheduler.assigned_dp_rank[r.request_id]
                 for r in requests] == [0, 1, 0, 1, 0]
-        sent = [c.args[1] for c in scheduler._send_command.call_args_list]
-        assert sent == [SchedulerCommand.ADD_REQUEST] * 5
+        scheduler._send_command.assert_not_called()
+
+        scheduler._send_unsent_requests()
+
+        r = requests
+        assert scheduler._send_command.call_args_list == [
+            call(0, SchedulerCommand.ADD_REQUESTS, [r[0], r[2], r[4]]),
+            call(1, SchedulerCommand.ADD_REQUESTS, [r[1], r[3]]),
+        ]
+
+    @staticmethod
+    def _record_ipc(scheduler, results=None):
+        """Keep the real _send_command, and log every command sent and
+        every result read, in order."""
+        log = []
+
+        def pipe(rank):
+            conn = MagicMock()
+            conn.send_bytes.side_effect = lambda payload: log.append(
+                ("send", rank, *cloudpickle.loads(payload)))
+            return conn
+
+        def get_result(rank, command=None):
+            log.append(("get", rank, command))
+            return (results or {}).get(command)
+
+        scheduler.input_conns = [pipe(i) for i in range(scheduler.dp_size)]
+        scheduler._get_result = MagicMock(side_effect=get_result)
+        return log
+
+    def test_next_command_sends_held_requests_first(
+            self, mock_vllm_config, mock_kv_cache_config,
+            mock_structured_output_manager):
+        """The next command first sends the held requests, one ADD_REQUESTS
+        per rank, and reads their acks. So each rank gets the same commands
+        in the same order as with one ADD_REQUEST per add_request()."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = True
+        unfinished = SchedulerCommand.GET_NUM_UNFINISHED_REQUESTS
+        log = self._record_ipc(scheduler, {unfinished: 0})
+
+        r = [SimpleNamespace(request_id=f"req-{i}") for i in range(3)]
+        for req in r:
+            scheduler.add_request(req)  # no step yet: ranks idle, flushes
+        assert scheduler._pending_new_requests == []
+        assert log == []
+
+        scheduler.get_num_unfinished_requests()  # what step() asks first
+
+        add = SchedulerCommand.ADD_REQUESTS
+        assert log == [
+            ("send", 0, add, [r[0], r[2]]),
+            ("send", 1, add, [r[1]]),
+            ("get", 0, add),
+            ("get", 1, add),
+            ("send", 0, unfinished, None),
+            ("send", 1, unfinished, None),
+            ("get", 0, unfinished),
+            ("get", 1, unfinished),
+        ]
+
+    def test_finish_held_request_adds_it_first(self, mock_vllm_config,
+                                               mock_kv_cache_config,
+                                               mock_structured_output_manager):
+        """Aborting a held request adds it and then finishes it on its rank,
+        as without holding."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = False
+        finish = SchedulerCommand.FINISH_REQUESTS
+        log = self._record_ipc(scheduler, {finish: []})
+
+        req = SimpleNamespace(request_id="req-0")
+        scheduler.add_request(req)
+        scheduler.finish_requests("req-0", RequestStatus.FINISHED_ABORTED)
+
+        assert log == [
+            ("send", 0, SchedulerCommand.ADD_REQUESTS, [req]),
+            ("get", 0, SchedulerCommand.ADD_REQUESTS),
+            ("send", 0, finish, (["req-0"], RequestStatus.FINISHED_ABORTED)),
+            ("get", 0, finish),
+        ]
+
+    def test_shutdown_drops_held_requests(self, mock_vllm_config,
+                                          mock_kv_cache_config,
+                                          mock_structured_output_manager):
+        """shutdown() does not send held requests, so a dead rank holding
+        some cannot make it fail."""
+        scheduler = self._create_scheduler(mock_vllm_config,
+                                           mock_kv_cache_config,
+                                           mock_structured_output_manager)
+        scheduler._routing_policy = DPScheduler.RoutingPolicy.ROUND_ROBIN
+        scheduler._batch_prefills = False
+        log = self._record_ipc(scheduler)
+        scheduler.add_request(SimpleNamespace(request_id="req-0"))  # rank 0
+        dead, alive = MagicMock(), MagicMock()
+        dead.is_alive.return_value = False
+        alive.is_alive.side_effect = [True, True, False]  # send, ack, join
+        scheduler.processes = [dead, alive]
+
+        scheduler.shutdown()
+
+        shutdown = SchedulerCommand.SHUTDOWN
+        assert log == [("send", 1, shutdown, None), ("get", 1, shutdown)]
+
+    def test_worker_add_requests_adds_in_order_with_one_ack(self):
+        """The worker adds every request of an ADD_REQUESTS in order and
+        answers once."""
+        added = []
+
+        class _RankScheduler:
+
+            def __init__(self, **kwargs):
+                pass
+
+            def add_request(self, request):
+                added.append(request)
+
+            def shutdown(self):
+                pass
+
+        vllm_config = MagicMock()
+        vllm_config.additional_config = {}
+        vllm_config.cache_config.mamba_cache_mode = "none"
+        input_conn = MagicMock()
+        batch = (SchedulerCommand.ADD_REQUESTS, ["a", "b", "c"])
+        input_conn.recv_bytes.side_effect = [
+            cloudpickle.dumps(batch),
+            KeyboardInterrupt(),  # ends the worker loop
+        ]
+        output_conn = MagicMock()
+
+        with patch("atexit._clear"), patch("os._exit", side_effect=SystemExit):
+            with pytest.raises(SystemExit):
+                _scheduler_worker_process(0, input_conn, output_conn,
+                                          vllm_config, None, None, 16, 16,
+                                          None, False, False, _RankScheduler)
+
+        assert added == ["a", "b", "c"]
+        output_conn.send_bytes.assert_called_once()
+        assert cloudpickle.loads(
+            output_conn.send_bytes.call_args.args[0]) is None
 
     def test_schedule_sends_commands_and_combines_output(
             self, mock_vllm_config, mock_kv_cache_config,

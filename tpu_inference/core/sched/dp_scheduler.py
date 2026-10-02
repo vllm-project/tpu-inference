@@ -76,6 +76,7 @@ def _get_max_cache_hit_length(request: Request) -> int:
 class SchedulerCommand(Enum):
     """Enum for scheduler worker process commands."""
     ADD_REQUEST = "add_request"
+    ADD_REQUESTS = "add_requests"
     SCHEDULE = "schedule"
     FINISH_REQUESTS = "finish_requests"
     UPDATE_DRAFT_TOKEN_IDS = "update_draft_token_ids"
@@ -235,6 +236,11 @@ def _scheduler_worker_process(
                 case SchedulerCommand.ADD_REQUEST:
                     request = data
                     scheduler.add_request(request)
+                    _send_result(None)  # Signal completion
+
+                case SchedulerCommand.ADD_REQUESTS:
+                    for request in data:
+                        scheduler.add_request(request)
                     _send_result(None)  # Signal completion
 
                 case SchedulerCommand.SCHEDULE:
@@ -485,6 +491,11 @@ class DPScheduler(SchedulerInterface):
         self._routing_policy = self.RoutingPolicy(
             envs.DP_SCHED_ROUTING.lower())
         self._round_robin_next_rank: int = 0
+        # Round-robin requests that are routed (in assigned_dp_rank) but
+        # not sent yet. _send_command() sends them first, one ADD_REQUESTS
+        # per rank, so each rank gets the same commands in the same order
+        # as with one ADD_REQUEST round trip per request.
+        self._unsent_requests: Dict[int, List[Request]] = defaultdict(list)
         self._last_dp_balance_log_time: float = 0.0
 
         # Initialize NONE_HASH global before forking worker processes
@@ -632,6 +643,8 @@ class DPScheduler(SchedulerInterface):
                       command: SchedulerCommand,
                       data: Any = None) -> None:
         """Send a command to a worker process via its input pipe."""
+        if self._unsent_requests:
+            self._send_unsent_requests()
         start_time = time()
         payload = cloudpickle.dumps((command, data))
         serialize_time = time() - start_time
@@ -839,8 +852,26 @@ class DPScheduler(SchedulerInterface):
         rank = self._pick_rank_for_request(request)
         self.assigned_dp_rank[request.request_id] = rank
 
+        if self._routing_policy == self.RoutingPolicy.ROUND_ROBIN:
+            # Round robin never reads rank state, so the send can wait for
+            # the next command (see _send_command).
+            self._unsent_requests[rank].append(request)
+            return
         self._send_command(rank, SchedulerCommand.ADD_REQUEST, request)
         self._get_result(rank, SchedulerCommand.ADD_REQUEST)
+
+    def _send_unsent_requests(self) -> None:
+        """Send the routed round-robin requests, one message per rank.
+
+        All sends go out before the acks are read, so the ranks add their
+        requests in parallel, each in arrival order.
+        """
+        unsent = self._unsent_requests
+        self._unsent_requests = defaultdict(list)
+        for rank, requests in unsent.items():
+            self._send_command(rank, SchedulerCommand.ADD_REQUESTS, requests)
+        for rank in unsent:
+            self._get_result(rank, SchedulerCommand.ADD_REQUESTS)
 
     def _flush_pending(self) -> None:
         """Drain the pending reqs."""
@@ -1667,6 +1698,7 @@ class DPScheduler(SchedulerInterface):
     def shutdown(self) -> None:
         """Shutdown all DP rank scheduler worker processes."""
         atexit.unregister(self._atexit_cleanup)
+        self._unsent_requests.clear()  # never sent: ranks may be dead
 
         # Send shutdown command to all workers, skipping dead ones
         for rank in range(self.dp_size):
