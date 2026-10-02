@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from flax import nnx
 
+from tpu_inference.models.common.interface import ModelInterface
 from tpu_inference.spec_decode.jax.dflash import DFlashProposer
 
 
@@ -243,6 +244,64 @@ def test_get_vllm_shared_params_ignores_non_dict_target_state():
     proposer.runner = MagicMock(state=None)
 
     assert proposer._get_vllm_shared_params() == {}
+
+
+def _model_interface(model, state):
+    return ModelInterface(model_fn=MagicMock(),
+                          compute_logits_fn=MagicMock(),
+                          pooler_fn=None,
+                          combine_hidden_states_fn=MagicMock(),
+                          multimodal_fns=None,
+                          state=state,
+                          state_leaves=state,
+                          lora_manager=None,
+                          model=model)
+
+
+def _vllm_model():
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    return object.__new__(VllmModelWrapper)
+
+
+def _load_draft_configured_as_flax(monkeypatch, target_model, draft_model):
+    """Runs load_model with both impls configured as flax_nnx while get_model
+    returns ``draft_model``, as when the draft falls back to vLLM."""
+    from tpu_inference.spec_decode.jax import dflash as dflash_module
+
+    runner = MockRunner(_make_single_device_mesh())
+    runner.model = target_model
+    embed = jnp.zeros((4, 2))
+    runner.state = {"vllm_model.model.embed_tokens.weight": embed}
+    proposer = DFlashProposer(MockVllmConfig(), runner)
+
+    monkeypatch.setattr(
+        "tpu_inference.models.common.model_loader.resolve_model_impl_type",
+        lambda *args, **kwargs: "flax_nnx")
+    captured = {}
+
+    def fake_get_model(*args, shared_params=None, **kwargs):
+        captured["shared_params"] = shared_params
+        return _model_interface(draft_model, {"w": jnp.zeros((2, ))})
+
+    monkeypatch.setattr(dflash_module, "get_model", fake_get_model)
+    proposer.load_model(runner.state)
+    return proposer, captured["shared_params"], embed
+
+
+def test_load_model_detects_vllm_fallback_draft(monkeypatch):
+    proposer, shared_params, embed = _load_draft_configured_as_flax(
+        monkeypatch, target_model=_vllm_model(), draft_model=_vllm_model())
+
+    assert proposer._is_vllm_draft
+    assert shared_params["vllm_model.model.embed_tokens.weight"] is embed
+    assert shared_params["vllm_model.lm_head.weight"] is embed
+
+
+def test_load_model_rejects_vllm_draft_with_flax_target(monkeypatch):
+    with pytest.raises(ValueError, match="must match target"):
+        _load_draft_configured_as_flax(monkeypatch,
+                                       target_model=MagicMock(),
+                                       draft_model=_vllm_model())
 
 
 # ----- New Comprehensive Tests -----

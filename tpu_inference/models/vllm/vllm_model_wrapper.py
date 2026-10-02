@@ -318,7 +318,7 @@ class VllmModelWrapper:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
         if self.is_draft_model and self._spec_method == "dflash":
-            dflash_draft.validate_dflash_draft_model(vllm_model)
+            dflash_draft.validate_dflash_draft_model(vllm_model, self.mesh)
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)

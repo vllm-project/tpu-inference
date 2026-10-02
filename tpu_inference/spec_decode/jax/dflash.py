@@ -72,6 +72,12 @@ def _find_param(state: Any, paths: list[str]) -> Optional[Any]:
     return None
 
 
+def _is_vllm_model(model: Any) -> bool:
+    """Whether ``model`` is a vLLM (torchax) model loaded by get_model."""
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    return isinstance(model, VllmModelWrapper)
+
+
 class DFlashProposer:
     """Proposer for speculative decoding using DFlash block diffusion."""
 
@@ -141,20 +147,29 @@ class DFlashProposer:
         if draft_model_impl != target_model_impl:
             raise ValueError(
                 "Draft model implementation must match target model.")
-        self._is_vllm_draft = draft_model_impl == "vllm"
 
+        # Shared params only apply to a vllm (torchax) draft; get_flax_model
+        # ignores them, so pass them unconditionally in case get_model falls
+        # back from flax_nnx to the vLLM model.
         draft_mi = get_model(self.vllm_config,
                              self.rng_key,
                              self.mesh,
                              is_draft_model=True,
-                             shared_params=(self._get_vllm_shared_params()
-                                            if self._is_vllm_draft else None))
+                             shared_params=self._get_vllm_shared_params())
         self.model_fn = draft_mi.model_fn
         self.compute_logits_fn = draft_mi.compute_logits_fn
         self.combine_hidden_states_fn = draft_mi.combine_hidden_states_fn
         self.state = draft_mi.state
 
-        if draft_model_impl == "flax_nnx":
+        # Decide from what was actually loaded rather than from the configured
+        # impl type, which stays "flax_nnx" when get_model falls back to vLLM.
+        self._is_vllm_draft = _is_vllm_model(draft_mi.model)
+        if self._is_vllm_draft != _is_vllm_model(
+                getattr(self.runner, "model", None)):
+            raise ValueError(
+                "Draft model implementation must match target model.")
+
+        if not self._is_vllm_draft:
 
             def get_target_value(target, paths):
                 # 1. Check PyTorch/vLLM backend

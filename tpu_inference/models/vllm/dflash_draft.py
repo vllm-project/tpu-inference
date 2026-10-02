@@ -32,11 +32,12 @@ attention, mirroring the JAX-native ``tpu_inference.models.jax.dflash``:
 """
 
 from dataclasses import replace
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 import torch
+from jax.sharding import Mesh
 from torchax.interop import jax_view, torch_view
 
 from tpu_inference.layers.common.attention_interface import attention
@@ -50,8 +51,9 @@ _REQUIRED_ATTN_ATTRS = ("qkv_proj", "o_proj", "q_norm", "k_norm", "rotary_emb",
                         "q_size", "kv_size", "scaling")
 
 
-def validate_dflash_draft_model(vllm_model: torch.nn.Module) -> None:
-    """Raises if ``vllm_model`` does not follow the vLLM DFlash layout."""
+def validate_dflash_draft_model(vllm_model: torch.nn.Module,
+                                mesh: Optional[Mesh] = None) -> None:
+    """Raises if ``vllm_model`` can't run as a DFlash draft on this path."""
     inner = getattr(vllm_model, "model", None)
     layers = getattr(inner, "layers", None)
     if inner is None or layers is None or not hasattr(inner, "hidden_norm"):
@@ -59,6 +61,7 @@ def validate_dflash_draft_model(vllm_model: torch.nn.Module) -> None:
             f"{type(vllm_model).__name__} is not supported as a DFlash draft "
             "model on the vllm (torchax) path: expected a vLLM DFlash model "
             "with `model.layers` and `model.hidden_norm`.")
+    uses_dcp = mesh is not None and mesh.shape.get("dcp", 1) > 1
     for i, layer in enumerate(layers):
         attn = getattr(layer, "self_attn", None)
         missing = [
@@ -77,6 +80,15 @@ def validate_dflash_draft_model(vllm_model: torch.nn.Module) -> None:
             raise NotImplementedError(
                 "DFlash draft layers with attention sinks are not supported "
                 "on the vllm (torchax) path yet.")
+        # The head_dim=64 RPA kernel and the DCP path ignore
+        # use_causal_mask=False, which would silently make the noise block
+        # causal and degrade the drafts.
+        if not getattr(attn, "causal", False) and (attn.head_dim == 64
+                                                   or uses_dcp):
+            raise NotImplementedError(
+                f"DFlash draft layer {i} needs non-causal attention, which "
+                "the head_dim=64 attention kernel and decode context "
+                "parallelism do not support yet.")
 
 
 def _split_heads(x: torch.Tensor, head_dim: int) -> torch.Tensor:

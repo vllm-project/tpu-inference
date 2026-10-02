@@ -13,6 +13,8 @@
 # limitations under the License.
 """Unit tests for the vllm (torchax) DFlash draft forward."""
 
+from unittest.mock import MagicMock
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -385,6 +387,27 @@ def test_validate_dflash_draft_model_rejects_unsupported_attention(
     setattr(model.model.layers[0].self_attn, attr, value)
     with pytest.raises(NotImplementedError):
         dflash_draft.validate_dflash_draft_model(model)
+
+
+def test_validate_dflash_draft_model_rejects_non_causal_hd64():
+    model = _FakeDFlashModel()
+    model.model.layers[1].self_attn.head_dim = 64
+    with pytest.raises(NotImplementedError, match="non-causal"):
+        dflash_draft.validate_dflash_draft_model(model)
+
+    # Causal layers don't rely on use_causal_mask=False.
+    model.model.layers[1].self_attn.causal = True
+    dflash_draft.validate_dflash_draft_model(model)
+
+
+def test_validate_dflash_draft_model_rejects_non_causal_with_dcp():
+    model = _FakeDFlashModel()
+    dcp_mesh = MagicMock(shape={"data": 1, "dcp": 2, "model": 1})
+    with pytest.raises(NotImplementedError, match="non-causal"):
+        dflash_draft.validate_dflash_draft_model(model, dcp_mesh)
+
+    no_dcp_mesh = MagicMock(shape={"data": 1, "model": 1})
+    dflash_draft.validate_dflash_draft_model(model, no_dcp_mesh)
 
 
 def test_vllm_runner_call_fn_uses_functional_params():
