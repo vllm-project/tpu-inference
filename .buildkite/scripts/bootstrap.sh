@@ -363,9 +363,11 @@ EOF
 
 fi
 
-# A scheduled kube lane (CI_LANES set) gates nothing yet, so it notifies
-# no one, as it did before it went through this script.
-if [[ -z "${CI_LANES:-}" ]]; then
+# A scheduled kube build gates nothing yet, so it notifies no one: a lane
+# (CI_LANES set), or a shadow of the bare integration run (CI_FLEET=kube on its
+# schedule), whose failures the bare run already reports.
+if [[ -z "${CI_LANES:-}" ]] && \
+   [[ "${CI_FLEET:-}" != "kube" || "$BUILDKITE_SOURCE" != "schedule" ]]; then
   upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
 fi
 rm "$NOTIFY_FILE"
@@ -377,8 +379,12 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     choose_ci_fleet
-    # Note: upload are inserted in reverse order, so promote LKG should upload before tests
-    upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
+    # The pin moves on the bare run's results. A kube run shadows it and must
+    # not promote a vLLM commit the bare run has not passed.
+    if [[ "${CI_FLEET}" != "kube" ]]; then
+      # Note: upload are inserted in reverse order, so promote LKG should upload before tests
+      upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
+    fi
     if [[ "${CI_FLEET}" == "kube" ]]; then
       set_kube_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
