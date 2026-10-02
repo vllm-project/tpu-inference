@@ -16,6 +16,7 @@ import functools
 from typing import Literal
 
 import jax
+import numpy as np
 from jax import numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -208,7 +209,9 @@ def moe_gmm_local(x: jax.Array,
     gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
                            group_offset)
 
-    batch_size = gmm2_res.shape[0]
+    # Not gmm2_res.shape[0]: x may carry padding rows past the last group
+    # (RAGGED_GATHER_TRIM_ROWS=False).
+    batch_size = topk_argsort_revert_indices.shape[0]
     local_group_size = w1.shape[0]
 
     reduction_axis = (ShardingAxisName.MLP_TENSOR
@@ -262,12 +265,19 @@ def moe_gmm_local(x: jax.Array,
         topk_argsort_revert_indices = revert_indices_2d.flatten()
 
     if local_group_size < group_sizes.size:
-        mask = valid_rows_mask(
+        row_mask = valid_rows_mask(
             gmm1_res.shape[0],
             group_sizes,
             group_offset,
             group_offset + local_group_size,
-        )[topk_argsort_revert_indices].reshape(-1, topk, 1)
+        )
+        if is_onehot:
+            # gmm_v2 runs with zero_initialize=False, leaving rows outside this
+            # EP shard's [token_start, token_end) range uninitialized in HBM.
+            # Zero them out before `combine @ gmm2_res` so IEEE-754 `0.0 * NaN`
+            # (or `0.0 * Inf`) from stale HBM bits cannot corrupt valid rows.
+            gmm2_res = jnp.where(row_mask[:, None], gmm2_res, 0)
+        mask = row_mask[topk_argsort_revert_indices].reshape(-1, topk, 1)
     else:
         mask = jnp.full((batch_size, ), True).reshape(-1, topk, 1)
 
@@ -287,7 +297,7 @@ def moe_gmm_local(x: jax.Array,
             if onehot_moe_permute_threshold > 0 and batch_size <= onehot_moe_permute_threshold:
                 revert_indices = cur_indices.reshape(-1, topk)
                 onehot = jax.nn.one_hot(revert_indices,
-                                        batch_size,
+                                        gmm2_res.shape[0],
                                         dtype=gmm2_res.dtype)
                 combine = (onehot * cur_weights[..., None] *
                            cur_mask).sum(axis=1)
@@ -526,6 +536,130 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     )(hidden_states_q, scale)
 
 
+# The hierarchical gather splits the hidden columns in half; each half must be
+# whole 128-lane tiles, or the slice, gather and concatenate need relayout
+# copies.
+_HIERARCHICAL_HIDDEN_ALIGN = 2 * 128
+
+
+def _as_axes(spec) -> tuple[str, ...]:
+    if spec is None:
+        return ()
+    return (spec, ) if isinstance(spec, str) else tuple(spec)
+
+
+def _hierarchical_dispatch_plan(mesh: Mesh):
+    """Return (step1_axes, pair_axis, perm) for hierarchical dispatch, or None.
+
+    Step 1 gathers over the attention-data axes (excluding MLP-data). Step 2
+    swaps halves between the two cores of each chip along `pair_axis`, the one
+    remaining axis the hidden states are replicated across. Applies only if
+    `pair_axis` indices 2k, 2k+1 are the two cores of one chip in every rank;
+    checked from each device's coords, core_on_chip and slice_index, not
+    assumed.
+    """
+    # Step 1 axes: attention-data axes that are not in MLP-data.
+    mlp = set(_as_axes(ShardingAxisName.MLP_DATA))
+    attn = [a for a in _as_axes(ShardingAxisName.ATTN_DATA) if a not in mlp]
+    step1 = tuple(a for a in attn if mesh.shape.get(a, 1) > 1)
+    # Step 2 needs exactly one remaining axis (the one the hidden states are
+    # replicated across), of even size.
+    rest = [
+        a for a in mesh.axis_names
+        if a not in mlp and a not in attn and mesh.shape[a] > 1
+    ]
+    if not step1 or len(rest) != 1:
+        return None
+    pair_axis = rest[0]
+    size = mesh.shape[pair_axis]
+    if size % 2:
+        return None
+    # Rearrange mesh.devices into a 2D table: columns run along pair_axis,
+    # rows are combination of the other axes (attn_dp on our mesh).
+    devs = np.moveaxis(np.asarray(mesh.devices),
+                       mesh.axis_names.index(pair_axis), -1).reshape(-1, size)
+    # In every row, each adjacent pair (2k, 2k+1) must be the two cores of
+    # one chip. Coords are only unique within a slice, so the slices must
+    # match too.
+    for row in devs:
+        for k in range(0, size, 2):
+            a, b = row[k], row[k + 1]
+            ca, cb = getattr(a, "coords", None), getattr(b, "coords", None)
+            sa = getattr(a, "slice_index", None)
+            sb = getattr(b, "slice_index", None)
+            if (ca is None or cb is None or list(ca) != list(cb) or sa != sb
+                    or getattr(a, "core_on_chip", None) == getattr(
+                        b, "core_on_chip", None)):
+                return None
+    # (src, dest) positions along pair_axis for the step-2 ppermute: each core
+    # swaps with the other core of its chip. Every position appears once as a
+    # source and once as a destination.
+    perm = [(k + d, k + 1 - d) for k in range(0, size, 2) for d in (0, 1)]
+    return step1, pair_axis, perm
+
+
+def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
+                                        mesh: Mesh) -> jax.Array:
+    """Replicate attention-data-sharded hidden states in a hierarchical gather.
+
+    Replaces the one all-gather XLA would insert, which every model shard of a
+    rank runs on identical rows over cross-chip links. Instead, each core of a
+    chip gathers half the hidden columns over the attention-data axes, then the
+    two cores swap halves on-chip. Cross-chip traffic halves. Both column halves
+    keep the one-step row order, and the result is bitwise identical.
+
+    If the mesh doesn't fit (see _hierarchical_dispatch_plan) or the hidden
+    size is not a multiple of 256, returns the input unchanged; the caller's
+    next shard_map then makes XLA insert the usual one-step gather.
+    """
+    plan = _hierarchical_dispatch_plan(mesh)
+    hidden = hidden_states.shape[-1]
+    if plan is None:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_DISPATCH is set but does not apply to this mesh "
+            "(%s): keeping the one-step dispatch all-gather. It needs a single "
+            "model axis whose adjacent indices are the two cores of one chip "
+            "in every attention-data rank.",
+            str(dict(mesh.shape)))  # *_once caches on args: hashable
+        return hidden_states
+    if hidden % _HIERARCHICAL_HIDDEN_ALIGN:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_DISPATCH is set but hidden=%d is not a "
+            "multiple of %d, so its halves would not be whole 128-lane "
+            "tiles: keeping the one-step dispatch all-gather.", hidden,
+            _HIERARCHICAL_HIDDEN_ALIGN)
+        return hidden_states
+    step1, pair_axis, perm = plan
+    logger.info_once(
+        "MOE_HIERARCHICAL_DISPATCH: each chip's two cores gather half of the "
+        "%d hidden columns over %s, then swap halves on-chip along '%s' "
+        "(pairs %s).", hidden, str(step1), pair_axis, str(perm))
+    half = hidden // 2
+    mlp = ShardingAxisName.MLP_DATA
+
+    def _gather(x):
+        # All gather across step 1 axes.
+        core = jax.lax.axis_index(pair_axis) % 2
+        mine = jax.lax.dynamic_slice_in_dim(x, core * half, half, axis=1)
+        mine = jax.lax.all_gather(mine, step1, axis=0, tiled=True)
+        # Exchange the halves between two cores on the same chip.
+        theirs = jax.lax.ppermute(mine, pair_axis, perm)
+        first = core == 0
+        return jnp.concatenate([
+            jnp.where(first, mine, theirs),
+            jnp.where(first, theirs, mine),
+        ],
+                               axis=1)
+
+    return jax.shard_map(
+        _gather,
+        mesh=mesh,
+        in_specs=P(tuple(_as_axes(mlp)) + step1, None),
+        out_specs=P(mlp, None),
+        check_vma=False,
+    )(hidden_states)
+
+
 @jax.jit(static_argnames=(
     "topk",
     "renormalize",
@@ -590,6 +724,15 @@ def fused_moe_func(
     Returns:
         Output of moe operation [num_tokens, hidden_size]
     """
+
+    if envs.MOE_HIERARCHICAL_DISPATCH and (not use_ep or all_gather_fp8
+                                           or use_gmm_fused_rs_kernel):
+        logger.warning_once(
+            "MOE_HIERARCHICAL_DISPATCH is set but ignored: it only applies to "
+            "the expert-parallel GMM path without the fp8 all-gather or the "
+            "fused reduce-scatter kernel (use_ep=%s, all_gather_fp8=%s, "
+            "use_gmm_fused_rs_kernel=%s).", use_ep, all_gather_fp8,
+            use_gmm_fused_rs_kernel)
 
     if use_ep and use_gmm_fused_rs_kernel:
         from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
@@ -711,6 +854,8 @@ def fused_moe_func(
                     token_indices_sorted,
                     shard_output_start,
                     shard_output_end,
+                    max_row_subchunks=envs.RAGGED_GATHER_MAX_ROW_SUBCHUNKS,
+                    trim_rows=envs.RAGGED_GATHER_TRIM_ROWS,
                 )
         else:
             x = hidden_states_local[token_indices_sorted]
@@ -719,6 +864,9 @@ def fused_moe_func(
 
     if all_gather_fp8:
         hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+    elif use_ep and envs.MOE_HIERARCHICAL_DISPATCH:
+        hidden_states = _apply_hierarchical_dispatch_gather(
+            hidden_states, mesh)
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,

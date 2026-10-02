@@ -268,7 +268,9 @@ class BayesianOptimizer(TuningOptimizer):
         target_trials = min(tuner.tuner_config.n_bayesian_trials,
                             len(params_to_case_id))
 
-        study = optuna.create_study(direction="minimize")
+        study = optuna.create_study(direction="minimize",
+                                    sampler=optuna.samplers.TPESampler(
+                                        seed=tuner.tuner_config.bayesian_seed))
         try:
             while True:
                 completed_trials = [

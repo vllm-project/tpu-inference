@@ -92,7 +92,7 @@ class GptOss(nnx.Module):
 
         self.random_init = force_random_weights or self.vllm_config.additional_config.get(
             "random_weights", False)
-        self.enable_return_routed_experts = self.vllm_config.model_config.enable_return_routed_experts
+        self.enable_return_routed_experts = self.vllm_config.aux_output_config.enable_return_routed_experts
         self.mesh = mesh
 
         self.embedder = Embedder(

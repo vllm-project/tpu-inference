@@ -51,6 +51,21 @@ RUN if [ "$BM_INFRA" = "true" ]; then \
         && rm -rf /var/lib/apt/lists/*; \
     fi
 
+# The buildkite-agent CLI, so a pod can upload its own artifacts - it shares no
+# filesystem with the agent that scheduled it. The credential is not baked in;
+# the pod is handed one at run time.
+#
+# Staged to /tmp and moved, because COPY cannot be conditional and this file
+# builds the published vllm/vllm-tpu image as well as the test one. Only the
+# test image keeps the binary.
+COPY --from=buildkite/agent:3 /usr/local/bin/buildkite-agent /tmp/buildkite-agent
+RUN if [ "$IS_TEST" = "true" ]; then \
+        mv /tmp/buildkite-agent /usr/local/bin/buildkite-agent \
+        && buildkite-agent --version; \
+    else \
+        rm /tmp/buildkite-agent; \
+    fi
+
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git

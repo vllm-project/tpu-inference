@@ -56,7 +56,15 @@ def _run_inference_and_return_outputs(
     )
 
     if enable_export:
-        llm.llm_engine.vllm_config.model_config.enable_return_routed_experts = True
+        # TODO(#3636): this no longer enables anything. vLLM #45635 moved the
+        # flag to AuxOutputConfig, and it must be set at construction (the
+        # model graph is built with R3 off), but passing
+        # enable_return_routed_experts=True to LLM() is rejected on TPU by
+        # _verify_aux_output_compatibility at the current LKG. The MoE
+        # routed-experts assertions below are therefore dead code -- every
+        # matrix_case is Llama-3.1-8B, so nothing fails today. Re-wire this to
+        # the LLM() kwarg once the gate is platform-aware upstream.
+        llm.llm_engine.vllm_config.aux_output_config.enable_return_routed_experts = True
 
     try:
         start_time = time.time()

@@ -61,7 +61,8 @@ from torchax.interop import jax_view, torch_view
 from torchax.ops.mappings import t2j
 from vllm.ir import enable_torch_wrap
 from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
-from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+from vllm.v1.worker.encoder_cudagraph import (CaptureAxisKeys,
+                                              EncoderCudaGraphManager)
 
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import to_torch_dtype
@@ -423,7 +424,12 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
 
     # ----- Overrides of the CUDA-graph device hooks -----
 
-    def _capture_budget_graph(self, token_budget: int) -> None:
+    def _capture_budget_graph(
+            self,
+            token_budget: int,
+            path: str = "default",
+            axis_keys: CaptureAxisKeys = (),
+    ) -> None:
         """XLA-cache analog of ``torch.cuda.graph`` capture.
 
         Primes the ``jax.jit`` cache for ``token_budget`` by calling the
@@ -431,6 +437,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         runtime call is a cache hit instead of paying compile time. Invoked
         by the inherited ``capture()`` loop (optional — the cache also fills
         lazily on first ``execute``).
+
+        ``path`` and ``axis_keys`` mirror the base-class signature; the TPU
+        manager configures a single encoder path and no ``capture_axes``, so
+        both are always their defaults and the cache is keyed by
+        ``token_budget`` alone.
         """
         template = self.budget_templates[token_budget]
         out = self.model.run_budget_forward(template)
@@ -439,10 +450,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         self.budget_graphs[token_budget] = template
 
     def _run_budget_graph(
-        self,
-        mm_kwargs: dict[str, Any],
-        token_budget: int,
-        path: str = "default",
+            self,
+            mm_kwargs: dict[str, Any],
+            token_budget: int,
+            path: str = "default",
+            axis_keys: CaptureAxisKeys = (),
     ) -> jax.Array | None:
         """XLA-cache analog of CUDA-graph replay.
 
@@ -452,10 +464,11 @@ class MMEncoderJITManager(EncoderCudaGraphManager):
         ``_execute_local`` slices via the adapter's jax-friendly
         ``postprocess_encoder_output`` — no outer torchax env required.
 
-        ``path`` mirrors the base-class signature (the unified
-        ``_execute_local`` always forwards it); the TPU manager only
-        configures the single default encoder path, so budget templates
-        are keyed by ``token_budget`` alone.
+        ``path`` and ``axis_keys`` mirror the base-class signature (the
+        unified ``_execute_local`` always forwards both); the TPU manager
+        only configures the single default encoder path and no
+        ``capture_axes``, so budget templates are keyed by ``token_budget``
+        alone.
         """
         num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_templates:
@@ -504,6 +517,13 @@ def maybe_create_mm_encoder_jit_manager(
     if not vllm_config.compilation_config.cudagraph_mm_encoder:
         return None
     if not supports_encoder_cudagraph(vllm_model):
+        return None
+    if vllm_model.get_encoder_cudagraph_config().capture_axes:
+        # Budget templates are keyed by token budget alone, so per-axis
+        # shapes would replay the wrong template.
+        logger.warning(
+            "MM encoder JIT does not support encoder capture axes yet; "
+            "running the vision encoder eagerly.")
         return None
     return MMEncoderJITManager(
         vllm_config=vllm_config,

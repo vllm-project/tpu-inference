@@ -30,7 +30,10 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 import cloudpickle
 import numpy as np
 import torch
+from vllm import envs as vllm_envs
 from vllm.config import VllmConfig
+from vllm.distributed.aux_output_connector.connector import \
+    AuxOutputConnectorMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
@@ -40,8 +43,7 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
-from vllm.v1.outputs import (DraftTokenIds, LogprobsLists, ModelRunnerOutput,
-                             RoutedExpertsLists)
+from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -504,6 +506,7 @@ class DPScheduler(SchedulerInterface):
         self._routing_policy = self.RoutingPolicy(
             envs.DP_SCHED_ROUTING.lower())
         self._round_robin_next_rank: int = 0
+        self._last_dp_balance_log_time: float = 0.0
 
         # Initialize NONE_HASH global before forking worker processes
         # This ensures all workers inherit the initialized value
@@ -1022,6 +1025,9 @@ class DPScheduler(SchedulerInterface):
                     combined_kv_connector_metadata.reqs_to_load.update(
                         meta.reqs_to_load)
 
+        combined_aux_output_metadata = self._combine_aux_output_metadata(
+            rank_outputs)
+
         has_structured_output_requests = any(
             getattr(o, "has_structured_output_requests", False)
             for o in rank_outputs)
@@ -1043,8 +1049,37 @@ class DPScheduler(SchedulerInterface):
             max_num_scheduled_tokens_per_dp_rank=max_scheduled_tokens_per_rank,
             req_ids_per_rank=req_ids_per_rank,
             kv_connector_metadata=combined_kv_connector_metadata,
+            aux_output_connector_metadata=combined_aux_output_metadata,
             has_structured_output_requests=has_structured_output_requests,
             pending_structured_output_tokens=pending_structured_output_tokens,
+        )
+
+    @staticmethod
+    def _combine_aux_output_metadata(
+        rank_outputs: List[SchedulerOutput]
+    ) -> Optional[AuxOutputConnectorMetadata]:
+        metas = [
+            o.aux_output_connector_metadata for o in rank_outputs
+            if o.aux_output_connector_metadata is not None
+        ]
+        if not metas:
+            return None
+        # Request IDs are unique across ranks; every rank resets its
+        # generation together on a prefix-cache reset.
+        return AuxOutputConnectorMetadata(
+            generation=max(m.generation for m in metas),
+            requests={
+                rid: start
+                for m in metas
+                for rid, start in m.requests.items()
+            },
+            block_hashes={
+                rid: hashes
+                for m in metas
+                for rid, hashes in m.block_hashes.items()
+            },
+            finished_requests=tuple(rid for m in metas
+                                    for rid in m.finished_requests),
         )
 
     def _combine_cached_request_data(
@@ -1078,6 +1113,51 @@ class DPScheduler(SchedulerInterface):
             new_block_ids=combined_new_block_ids,
             num_computed_tokens=combined_num_computed_tokens,
             num_output_tokens=combined_num_output_tokens,
+        )
+
+    def _log_dp_rank_balance(
+        self,
+        rank_stats_list: List[Optional[SchedulerStats]],
+        total_running_reqs: int,
+        total_waiting_reqs: int,
+    ) -> None:
+        """Log per-rank request distribution and KV cache usage to detect DP imbalance."""
+        if self.dp_size <= 1 or not self.log_stats:
+            return
+
+        now = time()
+        interval = getattr(vllm_envs, "VLLM_LOG_STATS_INTERVAL", 10.0)
+        if now - self._last_dp_balance_log_time < interval:
+            return
+
+        self._last_dp_balance_log_time = now
+
+        rank_running = [
+            rs.num_running_reqs if rs is not None else 0
+            for rs in rank_stats_list
+        ]
+        rank_waiting = [
+            rs.num_waiting_reqs if rs is not None else 0
+            for rs in rank_stats_list
+        ]
+        rank_kv = [
+            rs.kv_cache_usage if rs is not None else 0.0
+            for rs in rank_stats_list
+        ]
+        kv_str = ", ".join(f"{u * 100:.1f}%" for u in rank_kv)
+
+        log_fn = (logger.info if (total_running_reqs > 0
+                                  or total_waiting_reqs > 0) else logger.debug)
+        log_fn(
+            "[DP Rank Balance] Running: %s (total=%d, min=%d, max=%d) | "
+            "Waiting: %s (total=%d) | KV: [%s]",
+            rank_running,
+            total_running_reqs,
+            min(rank_running) if rank_running else 0,
+            max(rank_running) if rank_running else 0,
+            rank_waiting,
+            total_waiting_reqs,
+            kv_str,
         )
 
     def _combine_scheduler_stats(
@@ -1156,6 +1236,9 @@ class DPScheduler(SchedulerInterface):
         num_ranks = len(rank_stats_list)
         avg_kv_cache_usage = (total_kv_cache_usage /
                               num_ranks if num_ranks else 0.0)
+
+        self._log_dp_rank_balance(rank_stats_list, total_running_reqs,
+                                  total_waiting_reqs)
 
         return SchedulerStats(
             num_running_reqs=total_running_reqs,
@@ -1325,21 +1408,9 @@ class DPScheduler(SchedulerInterface):
             global_model_output: ModelRunnerOutput) -> List[ModelRunnerOutput]:
         """Split the model runner output by DP rank for individual scheduler updates."""
         g = global_model_output  # short alias
+        aux_output = g.aux_output_connector_output
 
         outputs = []
-
-        routed_experts = getattr(g, "routed_experts", None)
-        req_id_to_routed_experts_range = {}
-        if routed_experts is not None:
-            current_token_offset = 0
-            for req_id in g.req_ids:
-                num_tokens_scheduled = scheduler_output.num_scheduled_tokens[
-                    req_id]
-                start_idx = current_token_offset
-                end_idx = start_idx + num_tokens_scheduled
-                current_token_offset = end_idx
-                req_id_to_routed_experts_range[req_id] = (start_idx, end_idx)
-
         for rank in range(self.dp_size):
             req_ids = scheduler_output.req_ids_per_rank.get(rank, [])
 
@@ -1366,29 +1437,11 @@ class DPScheduler(SchedulerInterface):
                     for rid in req_ids if rid in g.num_nans_in_logits
                 } if g.num_nans_in_logits else None),
                 kv_connector_output=g.kv_connector_output,
+                aux_output_connector_output=(None if aux_output is None else {
+                    rid: aux_output[rid]
+                    for rid in req_ids if rid in aux_output
+                }),
             )
-
-            if routed_experts is not None:
-                rank_routing_data = []
-                rank_slot_mapping = []
-                for rid in req_ids:
-                    if rid in req_id_to_routed_experts_range:
-                        start_idx, end_idx = req_id_to_routed_experts_range[
-                            rid]
-                        rank_routing_data.append(routed_experts.routing_data[
-                            start_idx:end_idx, :, :])
-                        rank_slot_mapping.append(
-                            routed_experts.slot_mapping[start_idx:end_idx])
-
-                if rank_routing_data:
-                    rank_model_runner_output.routed_experts = RoutedExpertsLists(
-                        routing_data=np.concatenate(rank_routing_data, axis=0),
-                        slot_mapping=np.concatenate(rank_slot_mapping, axis=0))
-                else:
-                    rank_model_runner_output.routed_experts = None
-            else:
-                rank_model_runner_output.routed_experts = None
-
             outputs.append(rank_model_runner_output)
 
         return outputs
@@ -1545,8 +1598,10 @@ class DPScheduler(SchedulerInterface):
             self._send_command(rank, SchedulerCommand.MAKE_STATS,
                                (spec_decoding_stats, kv_connector_stats))
 
+        rank_stats_list = []
         for rank in range(self.dp_size):
             rank_stats = self._get_result(rank, SchedulerCommand.MAKE_STATS)
+            rank_stats_list.append(rank_stats)
             if rank_stats is None:
                 continue
 
@@ -1572,6 +1627,9 @@ class DPScheduler(SchedulerInterface):
 
         # Average KV cache usage across ranks
         avg_kv_cache_usage = total_kv_cache_usage / self.dp_size if self.dp_size else 0.0
+
+        self._log_dp_rank_balance(rank_stats_list, total_running_reqs,
+                                  total_waiting_reqs)
 
         return SchedulerStats(
             num_running_reqs=total_running_reqs,

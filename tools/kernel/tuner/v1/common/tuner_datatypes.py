@@ -125,6 +125,8 @@ class TunerConfig:
     bayesian_early_stopping_patience: Optional[int] = None
     # Early stopping relative improvement threshold ratio (e.g., 0.05 for 5% improvement).
     bayesian_early_stopping_min_delta_ratio: float = 0.10
+    # Seed for the Optuna TPE sampler. None (default) means non-deterministic sampling.
+    bayesian_seed: Optional[int] = None
 
 
 @dataclass

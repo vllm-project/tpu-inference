@@ -109,15 +109,11 @@ class DenseGatherReduceTest(jtu.JaxTestCase):
     def setUp(self):
         super().setUp()
         try:
-            tpu_info = pltpu.get_tpu_info()
-            sc_info = tpu_info.sparse_core
+            sc_info = pltpu.get_tpu_info().sparse_core
         except ValueError:
-            tpu_info = None
             sc_info = None
         if sc_info is None:
             self.skipTest("SparseCore is not available")
-        if tpu_info.generation == 6:
-            self.skipTest("dense_gather_reduce is not supported on TPUv6e")
 
     @parameterized.parameters(*_test_cases)
     def test_sc_dense_gather_reduce(self, out_size, hidden_size, dtype,
@@ -247,7 +243,7 @@ class IsCompatibleTest(parameterized.TestCase):
     These mock get_tpu_info() so they run on any platform, unlike
     DenseGatherReduceTest which needs SparseCore hardware. They target the
     output-block packing gate: the kernel's output BlockSpec row dim is
-    (num_lanes // reduce_group_size) // packing, which must be >= 1.
+    (num_lanes // reduce_group_size) // out_packing, which must be >= 1.
     """
 
     def _fake_tpu_info(self, num_lanes, num_cores=1, num_subcores=1):
@@ -258,11 +254,10 @@ class IsCompatibleTest(parameterized.TestCase):
 
     # (num_lanes, dtype, reduce_group_size, expected_is_compatible)
     @parameterized.named_parameters(
-        # v6e SparseCore (num_lanes=8). bf16 packing=2: 8//8//2 = 0 -> the
-        # Qwen3-30B-A3B crash -> must fall back.
-        ("v6e_bf16_topk8_degenerate", 8, jnp.bfloat16, 8, False),
-        # Same v6e lanes but f32 (packing=1): 8//8//1 = 1 -> kernel is valid,
-        # must NOT be blocked just because it is v6e.
+        # v6e SparseCore (num_lanes=8), bf16, topk=8: enabled via the FP32
+        # output buffer (packing=1).
+        ("v6e_bf16_topk8_fp32_buffer", 8, jnp.bfloat16, 8, True),
+        # Same v6e lanes but f32 (packing=1): 8//8//1 = 1 -> kernel is valid.
         ("v6e_f32_topk8_ok", 8, jnp.float32, 8, True),
         # v6e lanes, bf16, smaller group: 8//4//2 = 1 -> valid.
         ("v6e_bf16_topk4_ok", 8, jnp.bfloat16, 4, True),

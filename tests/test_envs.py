@@ -8,6 +8,13 @@ from tpu_inference.envs import enable_envs_cache, environment_variables
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
+    # A default is only observable if the variable is unset, and the TPU device
+    # plugin injects TPU_ACCELERATOR_TYPE and TPU_NAME into any container
+    # holding a chip.
+    for name in ("JAX_PLATFORMS", "PHASED_PROFILING_DIR", "TPU_NAME",
+                 "TPU_ACCELERATOR_TYPE"):
+        monkeypatch.delenv(name, raising=False)
+
     assert envs.JAX_PLATFORMS == ""
     assert envs.PHASED_PROFILING_DIR == ""
     monkeypatch.setenv("JAX_PLATFORMS", "tpu")
@@ -133,6 +140,21 @@ def test_moe_stage_weights_on_host(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "0")
     assert envs.MOE_STAGE_WEIGHTS_ON_HOST is False
+
+
+def test_moe_hierarchical_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """MOE_HIERARCHICAL_DISPATCH is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_HIERARCHICAL_DISPATCH", raising=False)
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "1")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "true")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_DISPATCH", "0")
+    assert envs.MOE_HIERARCHICAL_DISPATCH is False
 
 
 def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):

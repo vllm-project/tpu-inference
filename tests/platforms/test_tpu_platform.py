@@ -102,6 +102,12 @@ class TestTpuPlatform:
         assert "MOE_STAGE_WEIGHTS_ON_HOST" in TpuPlatform.additional_env_vars
         assert "MOE_STAGE_WEIGHTS_ON_HOST" in envs.environment_variables
 
+    def test_additional_env_vars_covers_moe_hierarchical_dispatch(self):
+        """The dispatch gather is traced in the workers, so they must see the
+        flag."""
+        assert "MOE_HIERARCHICAL_DISPATCH" in TpuPlatform.additional_env_vars
+        assert "MOE_HIERARCHICAL_DISPATCH" in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
@@ -513,7 +519,7 @@ class TestTpuPlatform:
             torch.bfloat16, torch.float32)
         mock_backend.get_supported_kernel_block_sizes.return_value = [256]
 
-        with patch.object(TpuPlatform, '_find_non_ssm_backend', return_value=mock_backend), \
+        with patch.object(TpuPlatform, '_find_non_ssm_backends', return_value=[mock_backend]), \
              patch('vllm.model_executor.models.ModelRegistry.resolve_model_cls', return_value=(mock_backend, MagicMock())), \
              patch("tpu_inference.envs.USE_BATCHED_RPA_KERNEL", enable_batch_rpa):
             TpuPlatform.update_block_size_for_backend(vllm_config)

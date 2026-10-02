@@ -378,15 +378,14 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         self.moe_block_shape = self.weight_block_size
         if self.block_quant:
             assert self.weight_block_size is not None
-            refined_shape = vllm_fp8.refine_fp8_moe_block_shape(
-                self.moe, self.weight_block_size)
-            if refined_shape is not None:
-                block_n, block_k = self.weight_block_size
-                self.weight_scale_refine = (
-                    block_n // refined_shape[0],
-                    block_k // refined_shape[1],
-                )
-                self.moe_block_shape = refined_shape
+            # activation_key is only consulted for non-"auto" (CUDA) moe_backend.
+            self.moe_block_shape, self.weight_scale_refine = (
+                vllm_fp8.resolve_fp8_moe_weight_block_shape(
+                    self.moe,
+                    self.weight_block_size,
+                    vllm_fp8.kFp8Dynamic128Sym,
+                    self.quant_config.is_checkpoint_fp8_serialized,
+                ))
 
         self.fp8_backend = None
 

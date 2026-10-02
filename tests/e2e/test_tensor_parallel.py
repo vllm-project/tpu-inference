@@ -75,7 +75,18 @@ def _run_inference(
     test_prompts: list[str],
     sampling_params: SamplingParams,
 ) -> tuple[list, float]:
-    """Run inference with the given configuration."""
+    """Run inference with the given configuration and time a warm pass.
+
+    The first generate on a fresh engine also pays one-time costs: each op
+    precompilation does not cover is compiled, or read from the persistent
+    compilation cache, the first time a batch reaches each padding bucket.
+    That cost is fixed, so it cuts the speedup of the short TP run far more
+    than the long TP=1 run, and it depends on where the cache is stored (local
+    disk or a network filesystem). An untimed pass with the same prompts
+    leaves only steady-state serving in the timed one.
+    """
+    # With prefix caching the timed pass would reuse the warm-up's KV cache.
+    assert not config.enable_prefix_caching
     llm = None
     try:
         llm = LLM(
@@ -91,6 +102,7 @@ def _run_inference(
             enable_prefix_caching=config.enable_prefix_caching,
         )
 
+        llm.generate(test_prompts, sampling_params)
         start_time = time.time()
         outputs = llm.generate(test_prompts, sampling_params)
         elapsed_time = time.time() - start_time

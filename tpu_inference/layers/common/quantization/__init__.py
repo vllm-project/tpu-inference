@@ -97,6 +97,39 @@ def u32_unpack_i4(u32_packed_i4: jax.Array) -> jax.Array:
     return jnp.reshape(unpacked, u32_packed_i4.shape[:-1] + (-1, ))
 
 
+def unpack_wna16_linear_weight(
+    weight_packed: jax.Array,
+    weight_scale: jax.Array,
+    in_features: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Unpack a compressed-tensors ``pack-quantized`` 4-bit linear weight.
+
+    compressed-tensors stores a symmetric int4 weight of logical shape
+    ``[out, in]`` as int32 words of shape ``[out, ceil(in / 8)]``: word ``j``
+    holds columns ``8j .. 8j + 7``, lowest nibble first, each biased by +8.
+    The scale is ``[out, in // group_size]`` (``[out, 1]`` for channelwise).
+
+    The packed words must stay integer end to end: routing them through
+    float32 rounds any word above 2**24 and destroys its nibbles.
+
+    Args:
+        weight_packed: int32 packed weight, ``[out, ceil(in / 8)]``.
+        weight_scale: Per-group scale, ``[out, in // group_size]``.
+        in_features: Logical input size, used to drop the padding nibbles of
+            the last word.
+
+    Returns:
+        ``(weight, scale)`` in JAX matmul layout: int4 ``[in, out]`` and
+        ``[in // group_size, out]``.
+    """
+    if not jnp.issubdtype(weight_packed.dtype, jnp.integer):
+        raise TypeError(
+            f"Packed int4 weights must be an integer dtype, got "
+            f"{weight_packed.dtype}; a float round-trip corrupts the nibbles.")
+    weight = u32_unpack_i4(weight_packed)[:, :in_features]
+    return weight.T, weight_scale.T
+
+
 def dequantize_tensor(
     tensor_q: jax.Array,
     scale: jax.Array,

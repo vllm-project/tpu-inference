@@ -942,12 +942,14 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
         raise NotImplementedError("Video not yet supported.")
 
     def prepare_encoder_cudagraph_capture_inputs(
-        self,
-        token_budget: int,
-        max_batch_size: int,
-        max_frames_per_batch: int,
-        device: torch.device,
-        dtype: torch.dtype,
+            self,
+            token_budget: int,
+            max_batch_size: int,
+            max_frames_per_batch: int,
+            device: torch.device,
+            dtype: torch.dtype,
+            path: str = "default",
+            axis_keys: tuple = (),
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import \
             EncoderCudaGraphCaptureInputs
