@@ -13,11 +13,13 @@
 # limitations under the License.
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 from vllm.sampling_params import SamplingParams
 
+from tpu_inference.core import disagg_utils
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
 from tpu_inference.runner.persistent_batch_manager import \
     PersistentBatchManager
@@ -419,3 +421,133 @@ class TestPersistentBatchManager(unittest.TestCase):
 
             manager.update_states(scheduler_output_changed, None)
             mock_assert.assert_called_once()
+
+
+class _MambaMockInputBatch(MockInputBatch):
+    """MockInputBatch that also carries the mamba/prefill bookkeeping that
+    `_set_request_distribution` consults for the GDN segment check."""
+
+    def __init__(self, req_ids, num_prompt_tokens, num_computed_tokens):
+        super().__init__(req_ids)
+        self.has_mamba_layers = True
+        self.num_prompt_tokens = np.asarray(num_prompt_tokens, dtype=np.int32)
+        self.num_computed_tokens_cpu = np.asarray(num_computed_tokens,
+                                                  dtype=np.int32)
+
+
+class TestGdnSegmentHints(unittest.TestCase):
+    """GDN prefill/decode segment hints as enforced on the host."""
+
+    def setUp(self):
+        super().setUp()
+        disagg_utils._RESOLVED_GDN_SEGMENT_HINTS = None
+        self.addCleanup(
+            setattr,
+            disagg_utils,
+            "_RESOLVED_GDN_SEGMENT_HINTS",
+            None,
+        )
+
+    @staticmethod
+    def _kv_config(*, producer, consumer):
+        return SimpleNamespace(kv_transfer_config=SimpleNamespace(
+            is_kv_producer=producer, is_kv_consumer=consumer))
+
+    def test_kv_both_emits_both_segments(self):
+        """``kv_role='kv_both'`` sets both flags, so neither may be dropped."""
+        self.assertEqual(
+            disagg_utils.get_gdn_segment_hints(
+                self._kv_config(producer=True, consumer=True)),
+            (True, True),
+        )
+
+    def test_producer_and_consumer_roles(self):
+        self.assertEqual(
+            disagg_utils.get_gdn_segment_hints(
+                self._kv_config(producer=True, consumer=False)),
+            (False, True),
+        )
+        self.assertEqual(
+            disagg_utils.get_gdn_segment_hints(
+                self._kv_config(producer=False, consumer=True)),
+            (True, False),
+        )
+
+    def _make_manager(self, input_batch, vllm_config):
+        return PersistentBatchManager(
+            requests={},
+            input_batch=input_batch,
+            encoder_cache={},
+            uses_mrope=False,
+            model_config=MagicMock(),
+            is_last_rank=True,
+            vllm_config=vllm_config,
+        )
+
+    def test_one_token_prefills_are_not_decodes_on_prefill_worker(self):
+        """1-token prefill chunks must route to the prefill segment.
+
+        A 1-token prompt, a 1-token final prefill chunk and a 1-token
+        prefix-cache suffix all look like decodes to `_reorder_batch` (they
+        schedule a single token), but they are still prefills. On a
+        prefill-only worker they must not be counted as decode sequences,
+        otherwise the host guard trips and the kernel skips them.
+        """
+        # r0: 1-token prompt, r1: final 1-token chunk of a 2049-token prompt,
+        # r2: ordinary 64-token prefill.
+        input_batch = _MambaMockInputBatch(
+            req_ids=["r0", "r1", "r2"],
+            num_prompt_tokens=[1, 2049, 64],
+            num_computed_tokens=[0, 2048, 0],
+        )
+        manager = self._make_manager(
+            input_batch, self._kv_config(producer=True, consumer=False))
+
+        manager._set_request_distribution(num_decode=2, num_reqs=3)
+
+        self.assertEqual(input_batch.request_distribution, [0, 0, 3])
+
+    def test_real_decode_on_prefill_worker_raises(self):
+        """A genuine decode on a prefill-only worker must fail loudly."""
+        # r0 has consumed its whole prompt, so it is a real decode.
+        input_batch = _MambaMockInputBatch(
+            req_ids=["r0", "r1", "r2"],
+            num_prompt_tokens=[1, 2049, 64],
+            num_computed_tokens=[1, 2048, 0],
+        )
+        manager = self._make_manager(
+            input_batch, self._kv_config(producer=True, consumer=False))
+
+        with self.assertRaises(RuntimeError):
+            manager._set_request_distribution(num_decode=2, num_reqs=3)
+
+    def test_hints_resolve_before_first_trace(self):
+        """The guard is active on the first batch, before the model traces.
+
+        `get_gdn_segment_hints` normally caches the hints while tracing, but
+        with `SKIP_JAX_PRECOMPILE` / `enforce_eager` the first batch reaches
+        the runner first, so the check has to resolve them itself.
+        """
+        self.assertIsNone(disagg_utils._RESOLVED_GDN_SEGMENT_HINTS)
+        input_batch = _MambaMockInputBatch(
+            req_ids=["r0"],
+            num_prompt_tokens=[8],
+            num_computed_tokens=[8],
+        )
+        manager = self._make_manager(
+            input_batch, self._kv_config(producer=True, consumer=False))
+
+        with self.assertRaises(RuntimeError):
+            manager._set_request_distribution(num_decode=1, num_reqs=1)
+        self.assertEqual(disagg_utils._RESOLVED_GDN_SEGMENT_HINTS,
+                         (False, True))
+
+    def test_non_mamba_batch_is_unaffected(self):
+        """Models without mamba layers keep the plain distribution."""
+        input_batch = MockInputBatch(["r0", "r1"])
+        manager = self._make_manager(
+            input_batch, self._kv_config(producer=True, consumer=False))
+
+        manager._set_request_distribution(num_decode=2, num_reqs=2)
+
+        self.assertEqual(input_batch.request_distribution, [2, 2, 2])

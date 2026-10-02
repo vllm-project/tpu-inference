@@ -48,6 +48,8 @@ def run_jax_gdn_attention(
     kernel_size: int,
     mesh: jax.sharding.Mesh,
     read_state_indices: Optional[jnp.ndarray] = None,
+    has_decode_seqs: bool = True,
+    has_prefill_seqs: bool = True,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -88,6 +90,11 @@ def run_jax_gdn_attention(
           prefix caching passes a different slot here, since a request
           resumes from the cached state block of the last block boundary and
           checkpoints into the block covering its current position.
+        has_decode_seqs: Whether the batch can contain decode sequences. False
+          lets the kernel skip emitting the decode pass entirely; see
+          `disagg_utils.get_gdn_segment_hints`.
+        has_prefill_seqs: Whether the batch can contain prefill/mixed
+          sequences. False lets the kernel skip emitting the prefill pass.
 
     Returns:
         A tuple containing:
@@ -139,6 +146,8 @@ def run_jax_gdn_attention(
         d_k=d_k,
         d_v=d_v,
         kernel_size=kernel_size,
+        has_decode_seqs=has_decode_seqs,
+        has_prefill_seqs=has_prefill_seqs,
     )
 
     mapped_fn = jax.shard_map(
