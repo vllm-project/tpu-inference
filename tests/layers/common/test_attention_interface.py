@@ -63,7 +63,12 @@ def mesh():
 # ---- Test for `attention` ----
 
 
-def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
+def _test_attention(monkeypatch,
+                    mesh,
+                    head_dim,
+                    use_sinks=False,
+                    metadata_use_causal_mask=True,
+                    attention_use_causal_mask=None):
     """
     Tests the main `attention` function.
 
@@ -114,6 +119,7 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         seq_lens=jnp.array([5, 5, 0, 0], dtype=jnp.int32),
         query_start_loc=jnp.array([0, 5, 10, 10, 10], dtype=jnp.int32),
         request_distribution=jnp.array([0, 0, NUM_SEQS], dtype=jnp.int32),
+        use_causal_mask=metadata_use_causal_mask,
     )
     shared_attention_metadata = SharedAttentionMetadata(
         input_positions=jnp.arange(TOTAL_TOKENS, dtype=jnp.int32),
@@ -132,12 +138,18 @@ def _test_attention(monkeypatch, mesh, head_dim, use_sinks=False):
         mesh=mesh,
         head_dim_original=head_dim,
         sinks=sinks,
+        use_causal_mask=attention_use_causal_mask,
         shared_attention_metadata=shared_attention_metadata,
     )
 
     # 3. Assert
     # Check that both mocked kernels were called
     mock_paged_attn_kernel.assert_called_once()
+    expected_causal = (metadata_use_causal_mask if attention_use_causal_mask
+                       is None else attention_use_causal_mask)
+    if head_dim != 64:
+        assert mock_paged_attn_kernel.call_args.kwargs[
+            "use_causal_mask"] is expected_causal
 
     # Check output shapes
     assert final_kv_cache.shape == kv_cache.shape
@@ -157,6 +169,30 @@ def test_attention_hd64(monkeypatch, mesh):
 
 def test_attention_sink(monkeypatch, mesh):
     _test_attention(monkeypatch, mesh, 64, True)
+
+
+def test_attention_bidirectional_from_metadata(monkeypatch, mesh):
+    _test_attention(monkeypatch, mesh, 128, metadata_use_causal_mask=False)
+
+
+def test_attention_explicit_override_takes_precedence(monkeypatch, mesh):
+    _test_attention(
+        monkeypatch,
+        mesh,
+        128,
+        metadata_use_causal_mask=False,
+        attention_use_causal_mask=True,
+    )
+
+
+def test_attention_bidirectional_hd64_fails_loudly(monkeypatch, mesh):
+    with pytest.raises(NotImplementedError, match="head_dim==64"):
+        _test_attention(
+            monkeypatch,
+            mesh,
+            64,
+            metadata_use_causal_mask=False,
+        )
 
 
 def test_attention_sink_no_64_raises_error(monkeypatch, mesh):
