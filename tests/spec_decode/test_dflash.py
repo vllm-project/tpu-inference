@@ -239,6 +239,25 @@ def test_get_vllm_shared_params_tied_target_uses_embedding_as_lm_head():
     assert shared["vllm_model.lm_head.weight"] is embed
 
 
+def test_get_vllm_shared_params_multimodal_target():
+    """Multimodal targets nest the text model under `language_model`; the
+    params are still shared under the draft's own names."""
+    proposer = object.__new__(DFlashProposer)
+    embed, lm_head = jnp.zeros((4, 2)), jnp.ones((4, 2))
+    proposer.runner = MagicMock(
+        state={
+            "vllm_model.language_model.model.embed_tokens.weight": embed,
+            "vllm_model.language_model.lm_head.weight": lm_head,
+        })
+
+    shared = proposer._get_vllm_shared_params()
+
+    assert shared == {
+        "vllm_model.model.embed_tokens.weight": embed,
+        "vllm_model.lm_head.weight": lm_head,
+    }
+
+
 def test_get_vllm_shared_params_ignores_non_dict_target_state():
     proposer = object.__new__(DFlashProposer)
     proposer.runner = MagicMock(state=None)

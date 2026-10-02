@@ -55,11 +55,14 @@ TARGET_LM_HEAD_PATHS = [
 ]
 
 # Target params a vllm (torchax) DFlash draft shares by name, mirroring vLLM's
-# DFlash proposer, which reuses the target embedding and lm_head.
+# DFlash proposer, which reuses the target embedding and lm_head. Keys are the
+# draft's own param names; the target may nest its text model under
+# `language_model` (multimodal models).
 VLLM_SHARED_PARAM_NAMES = [
     "vllm_model.model.embed_tokens.weight",
     "vllm_model.lm_head.weight",
 ]
+_VLLM_TARGET_PREFIXES = ("vllm_model.", "vllm_model.language_model.")
 
 
 def _find_param(state: Any, paths: list[str]) -> Optional[Any]:
@@ -125,10 +128,13 @@ class DFlashProposer:
         target_state = getattr(self.runner, "state", None)
         if not isinstance(target_state, dict):
             return {}
-        shared = {
-            name: target_state[name]
-            for name in VLLM_SHARED_PARAM_NAMES if name in target_state
-        }
+        shared = {}
+        for name in VLLM_SHARED_PARAM_NAMES:
+            suffix = name.removeprefix("vllm_model.")
+            for prefix in _VLLM_TARGET_PREFIXES:
+                if prefix + suffix in target_state:
+                    shared[name] = target_state[prefix + suffix]
+                    break
         embed_name, lm_head_name = VLLM_SHARED_PARAM_NAMES
         if lm_head_name not in shared and embed_name in shared:
             # Tied target: its lm_head is the embedding table.

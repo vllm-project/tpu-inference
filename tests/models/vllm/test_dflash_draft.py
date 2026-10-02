@@ -439,6 +439,24 @@ def test_supported_draft_model_classes_is_vllm_dflash_qwen3():
         DFlashQwen3ForCausalLM, )
 
 
+def test_check_dflash_draft_weights_requires_own_or_shared():
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    check = VllmModelWrapper._check_dflash_draft_weights
+    embed = "vllm_model.model.embed_tokens.weight"
+    lm_head = "vllm_model.lm_head.weight"
+    model = _FakeDFlashModel()
+
+    check(model, {embed, lm_head})
+
+    with pytest.raises(ValueError, match="lm_head"):
+        check(model, {embed})
+
+    # Weights shipped in the draft checkpoint need not be shared.
+    model.has_own_embed_tokens = True
+    model.has_own_lm_head = True
+    check(model, set())
+
+
 def test_vllm_runner_call_fn_uses_functional_params():
     model = _FakeDFlashModel()
     runner = _VllmRunner(model)

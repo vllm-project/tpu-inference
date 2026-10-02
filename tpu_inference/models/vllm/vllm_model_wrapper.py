@@ -186,6 +186,27 @@ class VllmModelWrapper:
             substrs.append("lm_head")
         return substrs
 
+    @staticmethod
+    def _check_dflash_draft_weights(vllm_model: torch.nn.Module,
+                                    shared_names: set[str]) -> None:
+        """Raises if the DFlash draft's embedding / lm_head were neither in
+        its checkpoint nor shared from the target, i.e. left uninitialized."""
+        required = (
+            ("embed_tokens", "has_own_embed_tokens",
+             "vllm_model.model.embed_tokens.weight"),
+            ("lm_head", "has_own_lm_head", "vllm_model.lm_head.weight"),
+        )
+        missing = [
+            what for what, own_flag, name in required
+            if not getattr(vllm_model, own_flag, False)
+            and name not in shared_names
+        ]
+        if missing:
+            raise ValueError(
+                f"DFlash draft {type(vllm_model).__name__} has no {missing} "
+                "weights: they are not in its checkpoint and could not be "
+                "shared from the target model.")
+
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
         import sys
@@ -292,6 +313,7 @@ class VllmModelWrapper:
         self.vllm_config.compilation_config.static_all_moe_layers.extend(
             vllm_config_for_load.compilation_config.static_all_moe_layers)
 
+        shared_names: set[str] = set()
         if shared_params:
             assert self.is_draft_model, "Shared params should only be applied to draft model."
             logger.info("Applying weight sharing with target model.")
@@ -313,12 +335,14 @@ class VllmModelWrapper:
                     logger.info(f"Sharing parameter: {full_name}")
                     # torch_view creates a torchax tensor sharing memory with the JAX array
                     param.data = torchax.interop.torch_view(target_param)
+                    shared_names.add(full_name)
 
         if self._target_outputs_aux_hidden_states:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
         if self.is_draft_model and self._spec_method == "dflash":
             dflash_draft.validate_dflash_draft_model(vllm_model, self.mesh)
+            self._check_dflash_draft_weights(vllm_model, shared_names)
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
