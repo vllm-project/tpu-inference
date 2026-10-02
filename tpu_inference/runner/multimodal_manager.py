@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
@@ -22,6 +22,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_and_batch_mm_kwargs
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils.multi_modal_utils import \
     sanity_check_mm_encoder_outputs
@@ -144,8 +145,8 @@ class MultiModalManager:
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.runner.embed_multimodal_fn(
-                self.runner.state_leaves, modality=modality, **mm_kwargs_group)
+            curr_group_outputs = self._embed_multimodal_maybe_chunked(
+                modality, num_items, mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -162,6 +163,130 @@ class MultiModalManager:
         ):
 
             self.runner.encoder_cache[mm_hash] = output
+
+    def _embed_multimodal_maybe_chunked(self, modality: str, num_items: int,
+                                        mm_kwargs_group: dict):
+        """Run the vision encoder, splitting a single large video over temporal
+        chunks when ``MM_ENCODER_FRAME_CHUNK`` is set.
+
+        Encoding a long video in one shot makes the vision flash-attention
+        kernel process all ``t*h*w`` patches in a single call, which can
+        exhaust TPU VMEM. Qwen3-VL vision attention is segmented per frame
+        (``cu_seqlens`` has one entry per frame) and its position embeddings
+        are spatial-only, so a frame never attends across frame boundaries.
+        Splitting the video into temporal chunks and concatenating the
+        per-chunk outputs on the token axis is therefore bit-exact -- each
+        frame is encoded identically regardless of chunking. Deepstack
+        features ride on the hidden axis (dim=-1) and are preserved by the
+        token-axis concat.
+
+        The one cross-frame exception is EVS video-token pruning
+        (``video_pruning_rate``), which selects tokens across the whole video;
+        we fall back to a single un-chunked call when it is on to stay lossless.
+
+        Falls back to a single un-chunked call unless all of: the knob is on,
+        it's a single video item larger than one chunk, and pruning is off.
+        """
+
+        def _encode(kwargs: dict):
+            return self.runner.embed_multimodal_fn(self.runner.state_leaves,
+                                                   modality=modality,
+                                                   **kwargs)
+
+        frame_chunk = envs.MM_ENCODER_FRAME_CHUNK
+        grid_key = next(
+            (k for k in ("video_grid_thw", "image_grid_thw", "grid_thw")
+             if k in mm_kwargs_group), None)
+        pixel_key = next((k for k in ("pixel_values_videos", "pixel_values")
+                          if k in mm_kwargs_group), None)
+        # EVS pruning selects tokens across the whole video; chunking would
+        # prune each chunk independently, so skip it to stay lossless.
+        mm_config = getattr(self.runner.model_config, "multimodal_config",
+                            None)
+        pruning_on = bool(getattr(mm_config, "video_pruning_rate", None))
+
+        if (frame_chunk <= 0 or modality != "video" or num_items != 1
+                or grid_key is None or pixel_key is None or pruning_on):
+            return _encode(mm_kwargs_group)
+
+        grid = mm_kwargs_group[grid_key]
+        grid_list = grid.tolist() if hasattr(grid, "tolist") else list(grid)
+        if len(grid_list) != 1:
+            return _encode(mm_kwargs_group)
+        t, h, w = (int(x) for x in grid_list[0])
+
+        vision_config = getattr(self.runner.model_config.hf_config,
+                                "vision_config",
+                                self.runner.model_config.hf_config)
+        tps = int(getattr(vision_config, "temporal_patch_size", 2))
+        # frame_chunk is in raw frames; the grid temporal dim is in
+        # temporal-patches (each = tps frames).
+        chunk_t = max(1, frame_chunk // tps)
+        if t <= chunk_t:
+            return _encode(mm_kwargs_group)
+
+        pixels = mm_kwargs_group[pixel_key]
+        rows_per_t = h * w
+        timestamps = mm_kwargs_group.get("timestamps")
+
+        num_chunks = (t + chunk_t - 1) // chunk_t
+        logger.info(
+            "[mm_encoder chunk] video grid=(t=%d,h=%d,w=%d) %d patches -> "
+            "%d chunks of <=%d temporal-patches (<=%d frames)", t, h, w,
+            t * rows_per_t, num_chunks, chunk_t, chunk_t * tps)
+
+        chunk_outs = []
+        for t_start in range(0, t, chunk_t):
+            ct = min(chunk_t, t - t_start)
+            row_start = t_start * rows_per_t
+            row_end = (t_start + ct) * rows_per_t
+
+            chunk_grid = grid[:1].clone()
+            chunk_grid[0, 0] = ct
+
+            chunk_kwargs = dict(mm_kwargs_group)
+            chunk_kwargs[pixel_key] = pixels[row_start:row_end]
+            chunk_kwargs[grid_key] = chunk_grid
+            if timestamps is not None:
+                chunk_kwargs["timestamps"] = self._slice_timestamps(
+                    timestamps, t_start, t_start + ct)
+
+            out = _encode(chunk_kwargs)
+            # Each call returns per-item outputs; single item -> length 1.
+            # Pull to host immediately so device chunk buffers can be freed and
+            # aren't all held alongside the final concat.
+            chunk_outs.append(jax.device_get(out[0]))
+
+        # Concatenate on host (numpy) to avoid a per-shape XLA recompile of the
+        # concat and holding every chunk + the result in HBM at once, then move
+        # the assembled item back to device with the same sharding.
+        sharding = getattr(out[0], "sharding", None)
+        concatenated = np.concatenate(chunk_outs, axis=0)
+        if sharding is not None:
+            item = jax.device_put(concatenated, sharding)
+        else:
+            item = jnp.asarray(concatenated)
+        return [item]
+
+    @staticmethod
+    def _slice_timestamps(timestamps: Any, start: int, end: int) -> Any:
+        """Slice a per-temporal-patch timestamps field to [start, end).
+
+        The vision encoder itself ignores timestamps, but the input schema may
+        carry/validate them, so keep the length consistent with each chunk's
+        temporal extent. Handles a 1D tensor, a batched [1, T] tensor, and
+        (nested) python lists; passes anything else through unchanged.
+        """
+        if hasattr(timestamps, "ndim"):  # torch/np tensor
+            if timestamps.ndim == 1:
+                return timestamps[start:end]
+            return timestamps[..., start:end]
+        if isinstance(timestamps, (list, tuple)):
+            if len(timestamps) == 1 and isinstance(timestamps[0],
+                                                   (list, tuple)):
+                return type(timestamps)([timestamps[0][start:end]])
+            return timestamps[start:end]
+        return timestamps
 
     def gather_mm_embeddings(
         self,
