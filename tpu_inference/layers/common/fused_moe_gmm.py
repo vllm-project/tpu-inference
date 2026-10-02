@@ -160,6 +160,63 @@ def _permute_tokens_for_chunked_rs(x: jax.Array, dp_size: int,
     return x_transposed.reshape(x.shape)
 
 
+def _hierarchical_collect(hidden: jax.Array, pair_axis: str, perm: list,
+                          reduce_axes: tuple,
+                          scatter_axes: tuple) -> jax.Array:
+    """The reverse of _apply_hierarchical_dispatch_gather. Together the two axis
+    groups cover all EP devices: scatter_axes is attention DP, and
+    reduce_axes is TP (pair_axis; its other axes have size 1). Indices 2k and
+    2k+1 on pair_axis are the two cores of one chip.
+      1. On-chip: the two cores swap and add column halves; core 0 keeps the
+         left half, core 1 the right.
+      2. Cross-chip: reduce-scatter the rows over scatter_axes, at half width.
+      3. Each core puts its half into zeros at full width; the psum over
+         reduce_axes adds the other chips of the TP group and joins halves.
+    Same sum, different order: not bitwise identical to the one-step path.
+    """
+    half = hidden.shape[1] // 2
+    core = jax.lax.axis_index(pair_axis) % 2
+    mine = jax.lax.dynamic_slice_in_dim(hidden, core * half, half, axis=1)
+    theirs = jax.lax.dynamic_slice_in_dim(hidden, (1 - core) * half,
+                                          half,
+                                          axis=1)
+    mine = mine + jax.lax.ppermute(theirs, pair_axis, perm)
+    mine = jax.lax.psum_scatter(mine,
+                                axis_name=scatter_axes,
+                                scatter_dimension=0,
+                                tiled=True)
+    # We could theoretically remove the 0-fill, but it doesn't move extra data
+    # when there is a TP-sharded shared expert as it can ride along its all-reduce.
+    # Profile shows that removing the 0-fill is slower: it adds collectives while
+    # the shared expert's all-reduce still moves the same data.
+    out = jnp.zeros((mine.shape[0], 2 * half), mine.dtype)
+    out = jax.lax.dynamic_update_slice_in_dim(out, mine, core * half, axis=1)
+    return jax.lax.psum(out, axis_name=reduce_axes)
+
+
+def _hierarchical_collect_plan(mesh: Mesh, hidden: int) -> tuple | None:
+    """Return (pair_axis, perm) for _hierarchical_collect, or None if the mesh
+    or hidden size doesn't fit (same conditions as hierarchical dispatch)."""
+    plan = _hierarchical_dispatch_plan(mesh)
+    if plan is None:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_COLLECT is set but does not apply to this "
+            "mesh (%s): keeping the one-step collect.", str(dict(mesh.shape)))
+        return None
+    if hidden % _HIERARCHICAL_HIDDEN_ALIGN:
+        logger.warning_once(
+            "MOE_HIERARCHICAL_COLLECT is set but hidden=%d is not a "
+            "multiple of %d: keeping the one-step collect.", hidden,
+            _HIERARCHICAL_HIDDEN_ALIGN)
+        return None
+    _, pair_axis, perm = plan
+    logger.info_once(
+        "MOE_HIERARCHICAL_COLLECT: each chip's two cores add column "
+        "halves on-chip along '%s', then reduce-scatter half the "
+        "columns over the attention-data axes.", pair_axis)
+    return pair_axis, perm
+
+
 def moe_gmm_local(x: jax.Array,
                   w1: jax.Array,
                   w1_scale: jax.Array | None,
@@ -179,7 +236,8 @@ def moe_gmm_local(x: jax.Array,
                   onehot_moe_permute_threshold: int = 0,
                   scatter_results: bool = False,
                   moe_chunk_size: int = 0,
-                  defer_all_reduce: bool = False) -> jax.Array:
+                  defer_all_reduce: bool = False,
+                  hierarchical_collect: tuple | None = None) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -319,6 +377,11 @@ def moe_gmm_local(x: jax.Array,
                 num_devices=scatter_axis_size,
                 axis_name=reduction_axis)
             out = rs_out.astype(x.dtype)
+        elif (scatter_results and hierarchical_collect is not None
+              and scatter_axes and hierarchical_collect[0] in reduce_axes):
+            out = _hierarchical_collect(chunk_hidden, *hierarchical_collect,
+                                        reduce_axes,
+                                        scatter_axes).astype(x.dtype)
         elif scatter_results:
             if reduce_axes:
                 chunk_hidden = jax.lax.psum(chunk_hidden,
@@ -463,6 +526,11 @@ def expert_parallel_gmm(
     w2_scale_spec = None if w2_scale is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
 
+    hierarchical_collect = None
+    if (scatter_results and not enable_rs_kernel
+            and envs.MOE_HIERARCHICAL_COLLECT):
+        hierarchical_collect = _hierarchical_collect_plan(mesh, x.shape[-1])
+
     if scatter_results:
         final_out_specs = attn_data_p_spec
     elif enable_rs_kernel:
@@ -481,6 +549,7 @@ def expert_parallel_gmm(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            hierarchical_collect=hierarchical_collect,
         ),
         mesh=mesh,
         in_specs=(

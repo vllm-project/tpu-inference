@@ -157,6 +157,21 @@ def test_moe_hierarchical_dispatch(monkeypatch: pytest.MonkeyPatch):
     assert envs.MOE_HIERARCHICAL_DISPATCH is False
 
 
+def test_moe_hierarchical_collect(monkeypatch: pytest.MonkeyPatch):
+    """MOE_HIERARCHICAL_COLLECT is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_HIERARCHICAL_COLLECT", raising=False)
+    assert envs.MOE_HIERARCHICAL_COLLECT is False
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "1")
+    assert envs.MOE_HIERARCHICAL_COLLECT is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "true")
+    assert envs.MOE_HIERARCHICAL_COLLECT is True
+
+    monkeypatch.setenv("MOE_HIERARCHICAL_COLLECT", "0")
+    assert envs.MOE_HIERARCHICAL_COLLECT is False
+
+
 def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
     """DP_SCHED_ROUTING defaults to least_loaded and only accepts known policies."""
     monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)
