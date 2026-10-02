@@ -51,9 +51,26 @@ _REQUIRED_ATTN_ATTRS = ("qkv_proj", "o_proj", "q_norm", "k_norm", "rotary_emb",
                         "q_size", "kv_size", "scaling")
 
 
+def _supported_draft_model_classes() -> tuple[type, ...]:
+    """vLLM DFlash models whose forward ``dflash_draft_forward`` reproduces.
+
+    Matched exactly: other drafts served with ``method="dflash"`` (e.g.
+    DFlash2's conv-wrapped layers, Laguna's gated attention) share the
+    attribute names but compute something else.
+    """
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+    return (DFlashQwen3ForCausalLM, )
+
+
 def validate_dflash_draft_model(vllm_model: torch.nn.Module,
                                 mesh: Optional[Mesh] = None) -> None:
     """Raises if ``vllm_model`` can't run as a DFlash draft on this path."""
+    supported = _supported_draft_model_classes()
+    if type(vllm_model) not in supported:
+        raise NotImplementedError(
+            f"{type(vllm_model).__name__} is not supported as a DFlash draft "
+            "model on the vllm (torchax) path; supported: " +
+            ", ".join(cls.__name__ for cls in supported))
     inner = getattr(vllm_model, "model", None)
     layers = getattr(inner, "layers", None)
     if inner is None or layers is None or not hasattr(inner, "hidden_norm"):

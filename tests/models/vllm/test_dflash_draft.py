@@ -369,27 +369,49 @@ def test_dflash_draft_forward_honors_causal_layers(monkeypatch, mesh):
     assert seen == [True, False, True, True]
 
 
-def test_validate_dflash_draft_model_accepts_dflash_layout():
+@pytest.fixture
+def fake_model_supported(monkeypatch):
+    """Treats _FakeDFlashModel as the supported vLLM DFlash model class."""
+    monkeypatch.setattr(dflash_draft, "_supported_draft_model_classes", lambda:
+                        (_FakeDFlashModel, ))
+
+
+def test_validate_dflash_draft_model_accepts_dflash_layout(
+        fake_model_supported):
     dflash_draft.validate_dflash_draft_model(_FakeDFlashModel())
 
 
-def test_validate_dflash_draft_model_rejects_other_models():
+def test_validate_dflash_draft_model_rejects_other_models(
+        fake_model_supported):
     with pytest.raises(NotImplementedError, match="not supported"):
         dflash_draft.validate_dflash_draft_model(torch.nn.Linear(2, 2))
+
+
+def test_validate_dflash_draft_model_rejects_dflash_variants(
+        fake_model_supported):
+    """Variants (e.g. DFlash2) subclass the supported model and keep its
+    attribute names but change the forward, so they must not pass."""
+
+    class _FakeDFlash2Model(_FakeDFlashModel):
+        pass
+
+    with pytest.raises(NotImplementedError, match="_FakeDFlash2Model"):
+        dflash_draft.validate_dflash_draft_model(_FakeDFlash2Model())
 
 
 @pytest.mark.parametrize("attr, value",
                          [("sliding_window", 4),
                           ("attention_sink_bias", torch.zeros(NUM_HEADS))])
 def test_validate_dflash_draft_model_rejects_unsupported_attention(
-        attr, value):
+        fake_model_supported, attr, value):
     model = _FakeDFlashModel()
     setattr(model.model.layers[0].self_attn, attr, value)
     with pytest.raises(NotImplementedError):
         dflash_draft.validate_dflash_draft_model(model)
 
 
-def test_validate_dflash_draft_model_rejects_non_causal_hd64():
+def test_validate_dflash_draft_model_rejects_non_causal_hd64(
+        fake_model_supported):
     model = _FakeDFlashModel()
     model.model.layers[1].self_attn.head_dim = 64
     with pytest.raises(NotImplementedError, match="non-causal"):
@@ -400,7 +422,8 @@ def test_validate_dflash_draft_model_rejects_non_causal_hd64():
     dflash_draft.validate_dflash_draft_model(model)
 
 
-def test_validate_dflash_draft_model_rejects_non_causal_with_dcp():
+def test_validate_dflash_draft_model_rejects_non_causal_with_dcp(
+        fake_model_supported):
     model = _FakeDFlashModel()
     dcp_mesh = MagicMock(shape={"data": 1, "dcp": 2, "model": 1})
     with pytest.raises(NotImplementedError, match="non-causal"):
@@ -408,6 +431,12 @@ def test_validate_dflash_draft_model_rejects_non_causal_with_dcp():
 
     no_dcp_mesh = MagicMock(shape={"data": 1, "model": 1})
     dflash_draft.validate_dflash_draft_model(model, no_dcp_mesh)
+
+
+def test_supported_draft_model_classes_is_vllm_dflash_qwen3():
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+    assert dflash_draft._supported_draft_model_classes() == (
+        DFlashQwen3ForCausalLM, )
 
 
 def test_vllm_runner_call_fn_uses_functional_params():
