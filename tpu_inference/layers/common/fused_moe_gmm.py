@@ -24,6 +24,8 @@ from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
 
 import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
+from tpu_inference.kernels.collectives.hierrs_tc import \
+    wrapper as hier_rs_tc
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
@@ -36,6 +38,12 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+# Below this many local (per-device) rows the hierrs_tc Mosaic kernel will
+# not compile (its seq tile is 8), so that branch falls back to psum_scatter.
+# hierrs_sc has no such limit, which is why the guard is scoped to the tc
+# backend.
+_RS_TC_MIN_LOCAL_ROWS = 8
 
 # Target chunk size of 2048 slots was found empirically to be optimal
 # for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
@@ -314,11 +322,36 @@ def moe_gmm_local(x: jax.Array,
                 topk,
             )
         if enable_rs_kernel:
-            rs_out = hier_rs_sc.hierarchical_reduce_scatter_local(
-                chunk_hidden,
-                num_devices=scatter_axis_size,
-                axis_name=reduction_axis)
-            out = rs_out.astype(x.dtype)
+            if envs.RS_KERNEL_BACKEND == "tc":
+                local_rows = chunk_hidden.shape[0] // scatter_axis_size
+                if local_rows < _RS_TC_MIN_LOCAL_ROWS:
+                    out = jax.lax.psum_scatter(chunk_hidden,
+                                               axis_name=reduction_axis,
+                                               scatter_dimension=0,
+                                               tiled=True).astype(x.dtype)
+                else:
+                    # num_micro_batches is intentionally not passed: the kernel
+                    # picks it from bytes per micro-batch with a per-wire target
+                    # (config.pick_num_micro_batches).
+                    #
+                    # It has to be decided there, not here. This site only knows
+                    # the requested wire (VLLM_TPU_FP8_REDUCE_SCATTER); the
+                    # kernel downgrades FP8 to BF16 below FP8_COMM_MIN_ROWS, and
+                    # the two wires target stage sizes 4x apart, so choosing
+                    # here would mis-tune every downgraded call.
+                    rs_out = hier_rs_tc.hierarchical_reduce_scatter_local(
+                        chunk_hidden,
+                        num_devices=scatter_axis_size,
+                        axis_name=reduction_axis,
+                        fp8_comm=envs.VLLM_TPU_FP8_REDUCE_SCATTER,
+                        fp8_static_scale=envs.VLLM_TPU_FP8_RS_STATIC_SCALE)
+                    out = rs_out.astype(x.dtype)
+            else:
+                rs_out = hier_rs_sc.hierarchical_reduce_scatter_local(
+                    chunk_hidden,
+                    num_devices=scatter_axis_size,
+                    axis_name=reduction_axis)
+                out = rs_out.astype(x.dtype)
         elif scatter_results:
             if reduce_axes:
                 chunk_hidden = jax.lax.psum(chunk_hidden,
