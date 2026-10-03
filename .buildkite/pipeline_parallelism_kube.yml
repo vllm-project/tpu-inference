@@ -314,12 +314,7 @@ steps:
   # ---- PP ----
 
   # PP runs its stages as libtpu processes on one host that exchange device
-  # buffers - the "(multi-host)" steps too, whose shape is still one node. On a
-  # GKE node libtpu routes that through its tpunetd client (the TPU device
-  # plugin's vbar service), which drops the connection mid-transfer
-  # ("SocketServer: Connection closed"); with the client off libtpu uses the
-  # direct path a bare VM uses. Only these steps turn it off: the Ray slices in
-  # the jax and features lanes span hosts and pass with it on.
+  # buffers - the "(multi-host)" steps too, whose shape is still one node.
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for PP (single-host)"
     key: "${TPU_VERSION:-tpu6e}_PP_CorrectnessTest_Single_Host"
@@ -334,7 +329,6 @@ steps:
     commands:
       - |
         .buildkite/kubernetes/run.sh \
-          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for PP (single-host)"
@@ -368,7 +362,6 @@ steps:
     commands:
       - |
         .buildkite/kubernetes/run.sh \
-          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for PP (single-host)"
@@ -402,7 +395,6 @@ steps:
     commands:
       - |
         .buildkite/kubernetes/run.sh \
-          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for PP (multi-host)"
@@ -436,7 +428,6 @@ steps:
     commands:
       - |
         .buildkite/kubernetes/run.sh \
-          env LIBTPU_INIT_ARGS=--enable_tpunetd_client=false \
           python3 -m pytest -s -v -x /workspace/tpu_inference/tests/e2e/test_pipeline_parallel.py
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for PP (multi-host)"
