@@ -16,6 +16,7 @@ from contextlib import nullcontext
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.experimental.layout import Format, Layout
 from jax.sharding import Mesh, Sharding
 
@@ -154,7 +155,11 @@ def general_device_put(tensor: jax.Array,
         ctx = nullcontext() if source_mesh is None else jax.set_mesh(
             source_mesh)
         # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
-        # `source_mesh`.
+        # `source_mesh`. Without source_mesh, a CPU-placed jax.Array would dispatch
+        # through JAX inside the TPU mesh JIT context and raise "incompatible
+        # devices". Converting t to numpy keeps the callback in plain numpy land.
+        if source_mesh is None and isinstance(t, jax.Array):
+            t = np.asarray(jax.device_get(t))
         with ctx:
             global_array = jax.make_array_from_callback(
                 t.shape, sharding, lambda index: t[index])
