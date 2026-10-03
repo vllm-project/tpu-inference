@@ -318,6 +318,100 @@ class TestShardingConfigManager(unittest.TestCase):
         # Should use ss_tensor_parallelism (4)
         self.assertEqual(manager.tp_size, 4)
 
+    @staticmethod
+    def _cp_vllm_config(tensor_parallel_size: int,
+                        prefill_context_parallel_size: int,
+                        decode_context_parallel_size: int) -> MagicMock:
+        vllm_config = MagicMock()
+        vllm_config.parallel_config.tensor_parallel_size = tensor_parallel_size
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.decode_context_parallel_size = (
+            decode_context_parallel_size)
+        vllm_config.parallel_config.prefill_context_parallel_size = (
+            prefill_context_parallel_size)
+        vllm_config.model_config.use_mla = False
+        vllm_config.model_config.get_total_num_kv_heads.return_value = 4
+        vllm_config.speculative_config = None
+        vllm_config.lora_config = None
+        vllm_config.cache_config.cache_dtype = "bfloat16"
+        vllm_config.additional_config = {"sharding": {}}
+        return vllm_config
+
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    def test_prefill_cp_sets_dcp_and_keeps_mesh_dcp_axis_at_one(self):
+        # DCP is set to PCP on the user's behalf so vLLM scales its block
+        # accounting, while the mesh 'dcp' axis stays at 1.
+        vllm_config = self._cp_vllm_config(tensor_parallel_size=4,
+                                           prefill_context_parallel_size=2,
+                                           decode_context_parallel_size=1)
+
+        manager = ShardingConfigManager.from_vllm_config(vllm_config)
+
+        self.assertEqual(manager.prefill_cp_size, 2)
+        self.assertEqual(manager.decode_cp_size, 1)
+        # TP is not divided, because the mesh 'dcp' axis is 1.
+        self.assertEqual(manager.tp_size, 4)
+        self.assertEqual(manager.total_devices, 8)  # TP(4) * PCP(2)
+        self.assertEqual(
+            vllm_config.parallel_config.decode_context_parallel_size, 2)
+
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    def test_prefill_cp_accepts_explicit_matching_dcp(self):
+        # Passing DCP == PCP explicitly resolves to the same mesh.
+        vllm_config = self._cp_vllm_config(tensor_parallel_size=4,
+                                           prefill_context_parallel_size=2,
+                                           decode_context_parallel_size=2)
+
+        manager = ShardingConfigManager.from_vllm_config(vllm_config)
+
+        self.assertEqual(manager.prefill_cp_size, 2)
+        self.assertEqual(manager.decode_cp_size, 1)
+        self.assertEqual(manager.tp_size, 4)
+        self.assertEqual(manager.total_devices, 8)
+        self.assertEqual(
+            vllm_config.parallel_config.decode_context_parallel_size, 2)
+
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    def test_prefill_cp_rejects_full_axis_dcp(self):
+        # DCP == tp * pcp is legal upstream but unimplemented here, so it must
+        # not be silently rewritten to PCP.
+        vllm_config = self._cp_vllm_config(tensor_parallel_size=4,
+                                           prefill_context_parallel_size=2,
+                                           decode_context_parallel_size=8)
+
+        with self.assertRaisesRegex(ValueError,
+                                    "decode_context_parallel_size=8"):
+            ShardingConfigManager.from_vllm_config(vllm_config)
+
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    def test_decode_cp_without_prefill_cp_is_unchanged(self):
+        # Regression guard: DCP alone still reuses the TP ranks.
+        vllm_config = self._cp_vllm_config(tensor_parallel_size=8,
+                                           prefill_context_parallel_size=1,
+                                           decode_context_parallel_size=2)
+
+        manager = ShardingConfigManager.from_vllm_config(vllm_config)
+
+        self.assertEqual(manager.prefill_cp_size, 1)
+        self.assertEqual(manager.decode_cp_size, 2)
+        self.assertEqual(manager.tp_size, 4)  # DCP reuses the TP axis
+        self.assertEqual(manager.total_devices, 8)
+        self.assertEqual(
+            vllm_config.parallel_config.decode_context_parallel_size, 2)
+
+    @patch("tpu_inference.layers.common.sharding.envs.NEW_MODEL_DESIGN", True)
+    def test_validate_rejects_sharding_on_both_cp_axes(self):
+        # Unreachable via from_vllm_config; guards hand-built strategies.
+        vllm_config = self._cp_vllm_config(tensor_parallel_size=4,
+                                           prefill_context_parallel_size=2,
+                                           decode_context_parallel_size=2)
+        strategy = ShardingStrategy(tensor_parallelism=2,
+                                    decode_context_parallelism=2,
+                                    prefill_context_parallelism=2)
+
+        with self.assertRaisesRegex(ValueError, "'pcp' and 'dcp'"):
+            ShardingConfigManager.validate(vllm_config, strategy)
+
 
 class TestLazyShardingAxisName(unittest.TestCase):
 
