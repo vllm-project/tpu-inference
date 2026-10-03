@@ -80,6 +80,11 @@ class DiffusionModelSpec:
         if self.block_size % self.sub_block_size:
             raise ValueError(
                 "Diffusion sub_block_size must divide block_size exactly")
+        if (self.logit_alignment is LogitAlignment.SHIFTED
+                and self.canvas_policy is not CanvasPolicy.SEED_AND_MASK):
+            raise ValueError(
+                "Shifted logit alignment requires seed_and_mask canvas semantics"
+            )
         if not self.supported_algorithms:
             raise ValueError(
                 "Diffusion model spec must support at least one algorithm")
