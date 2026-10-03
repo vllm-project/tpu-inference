@@ -185,34 +185,76 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
         return tp_size
 
 
+def _is_local_device(device: Any) -> bool:
+    """Returns True if the device belongs to the current host process."""
+    if hasattr(device, "process_index"):
+        return device.process_index == jax.process_index()
+    return True
+
+
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     usage = []
     if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
 
+    last_exception: Optional[Exception] = None
     multihost_backend = envs.TPU_MULTIHOST_BACKEND
     if multihost_backend == "ray":
-        # MemoryStats is only supported for addressable PjRt devices.
-        # Assume all the devices have similar memory usage for now.
-        # TODO(ranlihao): find a proper way to get the memory usage of each device.
+        # MemoryStats is only supported for local PjRt devices belonging to this process.
+        # Assume all devices across the mesh have identical memory usage.
         for device in devices:
+            if not _is_local_device(device):
+                continue
             try:
-                hbm_used = device.memory_stats()["bytes_in_use"]
-                hbm_limit = device.memory_stats()["bytes_limit"]
+                stats = device.memory_stats()
+                hbm_used = max(
+                    stats.get("peak_bytes_in_use", 0),
+                    stats.get("bytes_in_use", 0),
+                )
+                hbm_limit = stats["bytes_limit"]
                 logger.info(
                     "Get memory stats for device %s. Assuming all devices have the same usage.",
                     device)
                 usage.extend([(hbm_used, hbm_limit)] * len(devices))
                 break
             except Exception as e:
+                last_exception = e
                 logger.warning(
                     "Failed to get memory stats for device %s: %s. ", device,
                     e)
     else:
         for device in devices:
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
-            usage.append((hbm_used, hbm_limit))
+            if not _is_local_device(device):
+                continue
+            try:
+                stats = device.memory_stats()
+                hbm_used = max(
+                    stats.get("peak_bytes_in_use", 0),
+                    stats.get("bytes_in_use", 0),
+                )
+                hbm_limit = stats["bytes_limit"]
+                usage.append((hbm_used, hbm_limit))
+            except Exception as e:
+                last_exception = e
+                logger.warning(
+                    "Failed to get memory stats for device %s: %s. ", device,
+                    e)
+
+        # In multi-host topologies, remote devices on other processes cannot be inspected locally.
+        # Pad the list with the local representative usage to match len(devices).
+        if 0 < len(usage) < len(devices):
+            fallback_used, fallback_limit = usage[0]
+            usage.extend([(fallback_used, fallback_limit)] * (len(devices) - len(usage)))
+
+    # If all device queries failed, re-raise the underlying PJRT exception to avoid masking errors.
+    if not usage:
+        err_msg = f"Failed to retrieve TPU memory stats for devices {devices}."
+        if last_exception is not None:
+            err_msg += f" Underlying error: {last_exception}"
+            logger.error(err_msg)
+            raise RuntimeError(err_msg) from last_exception
+        logger.error(err_msg)
+        raise RuntimeError(err_msg)
 
     return usage
 
