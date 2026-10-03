@@ -1,10 +1,10 @@
 
 # Recommended Models
 
-Although vLLM TPU’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
+Although vLLM JAX’s new unified backend makes out-of-the-box high performance serving possible with any model supported in vLLM, the reality is that we're still in the process of implementing a few core components.
 For this reason, until we land more capabilities, we recommend starting from this list of stress tested models and features below.
 
-We are still landing components in tpu-inference that will improve performance for larger scale, higher complexity models (XL MoE, +vision encoders, MLA, etc.).
+We are still landing components in vllm-jax that will improve performance for larger scale, higher complexity models (XL MoE, +vision encoders, MLA, etc.).
 
 If you’d like us to prioritize something specific, please submit a GitHub feature request [here](https://github.com/vllm-project/tpu-inference/issues/new/choose).
 

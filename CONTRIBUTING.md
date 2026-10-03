@@ -1,6 +1,6 @@
-# Contributing to TPU Inference
+# Contributing to vLLM JAX
 
-Thank you for your interest in contributing to TPU Inference! Our community is open to everyone and welcomes all kinds of contributions, no matter how small or large. There are several ways you can contribute to the project:
+Thank you for your interest in contributing to vLLM JAX! Our community is open to everyone and welcomes all kinds of contributions, no matter how small or large. There are several ways you can contribute to the project:
 
 - Identify and report any issues or bugs.
 - Request or add support for a new model.
@@ -9,7 +9,7 @@ Thank you for your interest in contributing to TPU Inference! Our community is o
 
 We also believe in the power of community support; thus, answering queries, offering PR reviews, and assisting others are also highly regarded and beneficial contributions.
 
-Finally, one of the most impactful ways to support us is by raising awareness about TPU Inference. Talk about it in your blog posts and highlight how it's driving your incredible projects. Express your support on social media if you're using TPU Inference, or simply offer your appreciation by starring our repository!
+Finally, one of the most impactful ways to support us is by raising awareness about vLLM JAX. Talk about it in your blog posts and highlight how it's driving your incredible projects. Express your support on social media if you're using vLLM JAX, or simply offer your appreciation by starring our repository!
 
 ## Getting Started
 
@@ -54,4 +54,4 @@ pre-commit run --all-files
 
 ## Thank You!
 
-We wanted to thank you for taking the time to read these guidelines and for your interest in contributing to TPU Inference. All of your contributions help make TPU Infernece a great tool and community for everyone!
+We wanted to thank you for taking the time to read these guidelines and for your interest in contributing to vLLM JAX. All of your contributions help make vLLM JAX a great tool and community for everyone!
