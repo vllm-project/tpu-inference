@@ -710,3 +710,12 @@ class TestTPUWorker:
 
         runner.delete_kv_cache.assert_not_called()
         runner.reinitialize_kv_cache.assert_not_called()
+
+    @pytest.mark.parametrize("num_blocks", [None, 2048])
+    def test_get_attn_num_blocks(self, num_blocks):
+        from tpu_inference.worker.tpu_worker import TPUWorker
+
+        worker = MagicMock()
+        worker.cache_config.num_gpu_blocks_override = num_blocks
+
+        assert TPUWorker.get_attn_num_blocks(worker) == num_blocks
