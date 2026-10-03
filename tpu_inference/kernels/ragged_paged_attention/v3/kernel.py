@@ -894,16 +894,24 @@ def _ragged_paged_attention_kernel_loop(
 
         actual_bq_csz = min(bq_csz, actual_bq_sz)
 
-        def get_bq_start_bkv_idx(bq_idx):
+        def get_bq_attn_start_bkv_idx(bq_idx):
             # First bkv the sliding window lets this bq see.
-            start = (jnp.maximum(kv_q_gap + bq_idx * actual_bq_sz -
-                                 sliding_window, 0) // bkv_sz)
-            # The new KV is written to the cache only from the last bq's bkv
-            # loop, so that loop must also cover every bkv holding new tokens,
-            # not just the window. Otherwise, once q_len exceeds about
-            # bq_sz + sliding_window, the early new tokens never reach the
-            # cache, and prefix caching later serves those stale pages as
-            # computed. The extra bkvs fall outside the window and are masked.
+            return (jnp.maximum(
+                kv_q_gap + bq_idx * actual_bq_sz - sliding_window, 0) //
+                    bkv_sz)
+
+        def get_bq_start_bkv_idx(bq_idx):
+            # First bkv this bq's loop visits. The new KV is written to the
+            # cache only from the last bq's bkv loop, so that loop must also
+            # cover every bkv holding new tokens, not just the window.
+            # Otherwise, once q_len exceeds about bq_sz + sliding_window, the
+            # early new tokens never reach the cache, and prefix caching later
+            # serves those stale pages as computed. bkvs before the window
+            # start are write-only: attention is skipped for them. Without a
+            # cache write (KV-shared layers) there is nothing to cover.
+            start = get_bq_attn_start_bkv_idx(bq_idx)
+            if not update_kv_cache:
+                return start
             return lax.select(bq_idx == num_bq - 1,
                               jnp.minimum(start, kv_q_gap // bkv_sz), start)
 
@@ -947,8 +955,10 @@ def _ragged_paged_attention_kernel_loop(
 
             processed_q_len = kv_q_gap + bq_idx * actual_bq_sz
             start_bkv_idx = 0
+            attn_start_bkv_idx = 0
             if sliding_window is not None:
                 start_bkv_idx = get_bq_start_bkv_idx(bq_idx)
+                attn_start_bkv_idx = get_bq_attn_start_bkv_idx(bq_idx)
             if use_causal_mask:
                 effective_kv_len = jnp.minimum(kv_len,
                                                processed_q_len + actual_bq_sz)
@@ -1015,6 +1025,10 @@ def _ragged_paged_attention_kernel_loop(
                 effective_bkv_sz = jnp.maximum(effective_bkv_sz, 0)
 
                 num_loops = cdiv(effective_bkv_sz, bkv_csz)
+                # Write-only bkvs (before the window, last bq only) skip
+                # QK/softmax/PV: every element would be masked anyway.
+                num_loops = lax.select(bkv_idx >= attn_start_bkv_idx,
+                                       num_loops, 0)
 
                 @pl.loop(0, num_loops, unroll=False)
                 def attention_loop(idx):
