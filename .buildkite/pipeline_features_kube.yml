@@ -210,8 +210,8 @@ steps:
       NUM_PROMPTS: "20"
       TEST_MODE: "2"
     # Exit 75 is disagg_multi_host.sh saying the TPU runtime refused to open
-    # a session - never that the test failed - and it exits so expecting one
-    # retry, as the jax lane gives it.
+    # a session or a Ray cluster did not form - never that the test failed -
+    # and it exits so expecting one retry, as the jax lane gives it.
     retry:
       automatic:
         - exit_status: 75
@@ -257,8 +257,8 @@ steps:
       MAX_CONCURRENCY: "10"
       TEST_MODE: "1"
     # Exit 75 is disagg_multi_host.sh saying the TPU runtime refused to open
-    # a session - never that the test failed - and it exits so expecting one
-    # retry, as the jax lane gives it.
+    # a session or a Ray cluster did not form - never that the test failed -
+    # and it exits so expecting one retry, as the jax lane gives it.
     retry:
       automatic:
         - exit_status: 75

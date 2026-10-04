@@ -66,25 +66,37 @@ PREFILL_VLLM_PORT=8400
 DECODE_VLLM_PORT=9400
 PROXY_PORT=8000
 COMMON_SIDE_PORT=8900
+# All of a cluster's nodes start within a few seconds of the head; this is room
+# for a slow host, not an expected wait.
+RAY_FORM_TIMEOUT=${RAY_FORM_TIMEOUT:=180}
 
 PIDS=()
 
 dump_logs() {
+  local rc=$1
   echo "--- Script exiting, displaying logs ---"
-  for f in prefill.txt decode.txt proxy.txt benchmark.txt correctness.txt; do
+  for f in ray-prefill.txt ray-decode.txt prefill.txt decode.txt proxy.txt benchmark.txt correctness.txt; do
     echo "--- $LOG_DIR/$f ---"
     [ -f "$LOG_DIR/$f" ] && cat "$LOG_DIR/$f" || echo "File not found."
   done
-  echo "--- ray ---"
-  for d in /tmp/ray-prefill* /tmp/ray-decode*; do
-    [ -d "$d" ] && find "$d" -name "raylet.err" -exec tail -20 {} + 2>/dev/null || true
-  done
+  # A Ray node's own errors stay in its session directory: the files above only
+  # hold what `ray start` printed and what vLLM saw from the outside. Only on
+  # failure, since a passing run would print them for every node.
+  if [ "$rc" -ne 0 ]; then
+    for f in /tmp/ray-prefill-*/session_latest/logs/{gcs_server.out,gcs_server.err,raylet.out,raylet.err,dashboard_agent.log} \
+             /tmp/ray-decode-*/session_latest/logs/{gcs_server.out,gcs_server.err,raylet.out,raylet.err,dashboard_agent.log}; do
+      [ -s "$f" ] || continue
+      echo "--- $f (last 40 lines) ---"
+      tail -n 40 "$f"
+    done
+  fi
   echo "--- End of logs ---"
 }
 
 cleanup() {
+  local rc=$?
   set +e
-  dump_logs
+  dump_logs "$rc"
   # Ray first: it supervises the per-chip workers, and killing it before the
   # vLLM servers avoids a page of connection errors in the logs above.
   ray stop --force >/dev/null 2>&1
@@ -98,13 +110,13 @@ cleanup() {
 trap cleanup EXIT
 
 # EX_TEMPFAIL. The step retries once on exactly this code, so it has to mean
-# "the chips were not ready", never "the test failed".
+# "the TPU runtime or Ray did not come up", never "the test failed".
 EXIT_TEMPFAIL=75
 
 # Still a heuristic: START_SESSION also fails deterministically for a wrong
 # process-bounds setting or chips a previous pod never released, which is why
 # the step's retry is capped at one.
-exit_if_transient_tpu_init_failure() {
+exit_if_transient_startup_failure() {
   local log=$1 name=$2
   [ -f "$log" ] || return 0
   if grep -qF -e 'TPU initialization failed: GRPC_ERROR' \
@@ -112,6 +124,56 @@ exit_if_transient_tpu_init_failure() {
     echo "[disagg-harness] ${name}: TPU runtime session failure; exiting ${EXIT_TEMPFAIL} so the step retries." >&2
     exit "$EXIT_TEMPFAIL"
   fi
+  if grep -qF -e 'Failed to connect to GCS' \
+               -e 'Failed to connect to Ray cluster' "$log" 2>/dev/null; then
+    echo "[disagg-harness] ${name}: lost its Ray cluster; exiting ${EXIT_TEMPFAIL} so the step retries." >&2
+    exit "$EXIT_TEMPFAIL"
+  fi
+}
+
+# Alive nodes in the cluster on $1, or 0 while its GCS is not answering. The
+# TCP check first, because ray.init() against a GCS that is not there retries
+# for a minute before it gives up.
+ray_alive_nodes() {
+  timeout 30 python3 - "$1" 2>/dev/null <<'PY' || echo 0
+import logging
+import socket
+import sys
+
+port = int(sys.argv[1])
+try:
+    socket.create_connection(("127.0.0.1", port), timeout=2).close()
+except OSError:
+    print(0)
+    sys.exit()
+import ray
+
+ray.init(address=f"127.0.0.1:{port}", logging_level=logging.ERROR, log_to_driver=False)
+print(sum(1 for n in ray.nodes() if n["Alive"]))
+PY
+}
+
+# Without this, a head whose GCS never comes up shows only as the vLLM server's
+# ray.init() giving up about fourteen minutes later, with nothing from the head
+# itself in the log.
+wait_for_ray_cluster() {
+  local role=$1 ray_port=$2 head_pid=$3
+  local end=$((SECONDS + RAY_FORM_TIMEOUT)) alive=0
+  echo "Waiting for the $role Ray cluster on port $ray_port to reach $NUM_HOSTS_PER_INSTANCE nodes..."
+  while [ $SECONDS -lt $end ]; do
+    if ! kill -0 "$head_pid" 2>/dev/null; then
+      echo "[disagg-harness] $role Ray head (pid $head_pid) exited; exiting ${EXIT_TEMPFAIL} so the step retries." >&2
+      exit "$EXIT_TEMPFAIL"
+    fi
+    alive=$(ray_alive_nodes "$ray_port")
+    if [ "$alive" -ge "$NUM_HOSTS_PER_INSTANCE" ]; then
+      echo "=== $role Ray cluster up: $alive nodes ==="
+      return 0
+    fi
+    sleep 3
+  done
+  echo "[disagg-harness] $role Ray cluster on port $ray_port has $alive of $NUM_HOSTS_PER_INSTANCE nodes after ${RAY_FORM_TIMEOUT}s; exiting ${EXIT_TEMPFAIL} so the step retries." >&2
+  exit "$EXIT_TEMPFAIL"
 }
 
 wait_for_server() {
@@ -126,14 +188,14 @@ wait_for_server() {
     if ! kill -0 "$pid" 2>/dev/null; then
       echo "Error: $name (pid $pid) died before becoming healthy." >&2
       [ -f "$log" ] && tail -80 "$log"
-      exit_if_transient_tpu_init_failure "$log" "$name"
+      exit_if_transient_startup_failure "$log" "$name"
       return 1
     fi
     sleep 2
   done
   echo "Error: $name did not become healthy within the timeout." >&2
   [ -f "$log" ] && tail -80 "$log"
-  exit_if_transient_tpu_init_failure "$log" "$name"
+  exit_if_transient_startup_failure "$log" "$name"
   return 1
 }
 
@@ -152,7 +214,7 @@ check_failed_requests() {
 }
 
 mkdir -p "$LOG_DIR"
-rm -f "$LOG_DIR"/{prefill,decode,proxy,benchmark,correctness}.txt
+rm -f "$LOG_DIR"/{ray-prefill,ray-decode,prefill,decode,proxy,benchmark,correctness}.txt
 rm -rf /tmp/ray-prefill* /tmp/ray-decode* /tmp/libtpu_lockfile
 ray stop --force >/dev/null 2>&1 || true
 
@@ -164,7 +226,7 @@ start_instance() {
   local ports=("$@")
   local addrs=()
   for p in "${ports[@]}"; do addrs+=("127.0.0.1:$p"); done
-  local joined
+  local joined head_pid
   joined=$(IFS=, ; echo "${addrs[*]}")
 
   for ((i=0; i<NUM_HOSTS_PER_INSTANCE; i++)); do
@@ -197,10 +259,12 @@ start_instance() {
       TPU_PROCESS_PORT="${ports[$i]}" \
       $cmd >>"$LOG_DIR/ray-${role}.txt" 2>&1 &
     PIDS+=($!)
+    [ "$i" -eq 0 ] && head_pid=$!
     sleep 1
   done
 
   echo "--- started $role Ray cluster: ${NUM_HOSTS_PER_INSTANCE} processes, chips ${chip_base}-$(( chip_base + NUM_HOSTS_PER_INSTANCE - 1 )) ---"
+  wait_for_ray_cluster "$role" "$ray_port" "$head_pid"
 
   env \
     VLLM_XLA_CHECK_RECOMPILATION=0 \
