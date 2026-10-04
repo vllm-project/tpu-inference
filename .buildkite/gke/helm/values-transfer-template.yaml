@@ -1,0 +1,77 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ==============================================================================
+# Base Values Template for buildkite_to_helm.py (Buildkite -> Helm transfer)
+#
+# buildkite_to_helm.py auto-detects this file (falling back to values.yaml) and
+# inherits its image registry, commit hashes, builder, TPU / resources, storage
+# and secret settings into every generated values-<model>-ci.yaml. Edit here to
+# change the defaults of every converted pipeline; use --base-values to point at
+# a different file.
+#
+# It is also a valid, deployable script-mode values file on its own:
+# a Llama-3.1-8B CI benchmark that mirrors
+# .buildkite/models/meta-llama_Llama-3_1-8B-Instruct.yml:
+# - TPU: tpu7x (Topology: 2x2x1, TP=2, 4 TPU chips)
+# - Script: /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh
+# - Dataset: sonnet (benchmarks/sonnet.txt)
+# - Input/Output: 1800 / 128
+# - Min Throughput: 10.77 req/s
+# ==============================================================================
+
+image:
+  registry: "us-central1-docker.pkg.dev/cienet-cmcs/lyle-vllm-images/vllm-tpu"
+  tpuInferenceCommit: "eda7055d27bdd8a5a34b45a067983f4c0d4eb11b"  # Existing prebuilt image in GAR
+  vllmCommit: "51da0ca66c8065619c79e35dff97aa99aeaf5644"          # vLLM commit hash (from .buildkite/vllm_lkg.version)
+
+# Optional on-demand builder: checks if image exists in GAR; if absent, builds and pushes.
+builder:
+  enabled: true
+  gitRepo: "https://github.com/vllm-project/tpu-inference.git"
+
+tpu:
+  accelerator: "tpu7x"
+  topology: "2x2x1"
+
+resources:
+  tpu: 4
+  cpu: "32"
+  memory: "100Gi"
+
+scriptJobs:
+  - name: "benchmark"
+    command: "bash /workspace/tpu_inference/tests/e2e/benchmarking/benchmark.sh"
+    workingDir: "/workspace/vllm"
+    backoffLimit: 1
+    env:
+      TEST_MODEL: "meta-llama/Llama-3.1-8B-Instruct"
+      TENSOR_PARALLEL_SIZE: "2"
+      MINIMUM_THROUGHPUT_THRESHOLD: "10.77"
+      INPUT_LEN: "1800"
+      OUTPUT_LEN: "128"
+      PREFIX_LEN: "0"
+      MAX_MODEL_LEN: "2048"
+      MAX_NUM_SEQS: "256"
+      MAX_NUM_BATCHED_TOKENS: "1024"
+
+storage:
+  type: "ramdisk"
+
+hfTokenSecret:
+  name: "dennis-hf-token"
+  key: "token"
+
+
+
