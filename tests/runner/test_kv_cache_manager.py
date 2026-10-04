@@ -2380,4 +2380,3 @@ class TestKVCacheManager:
             self.runner.max_model_len // 256)
         assert block_tables[1].max_num_blocks_per_req == (
             self.runner.max_model_len // (256 * 4))
-
