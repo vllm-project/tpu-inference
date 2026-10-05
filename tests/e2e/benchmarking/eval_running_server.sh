@@ -26,7 +26,8 @@
 # Results are written to ${OUT_DIR}/metrics.json. No thresholds are applied
 # here (see check_eval_thresholds.py), so one leg failing does not throw away
 # the others. The exit status is non-zero only if the smoke request fails,
-# i.e. the server is not serving.
+# i.e. the server is not serving. The Python parts live in
+# eval_running_server_helpers.py.
 #
 # Configuration, all through the environment:
 #   MODEL                   served model name (required)
@@ -57,6 +58,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 OUT_DIR="${OUT_DIR:-/workspace/artifacts}"
 BASE_URL="http://${HOST}:${PORT}"
+HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/eval_running_server_helpers.py"
 
 mkdir -p "${OUT_DIR}"
 # Per-leg status lines, merged into metrics.json at the end.
@@ -72,18 +74,13 @@ record_leg() {  # record_leg <leg> <exit code> <seconds>
 # ---------------------------------------------------------------------------
 echo "--- smoke: one completion from ${MODEL}"
 start=${SECONDS}
-smoke_payload=$(python3 -c 'import json, sys; print(json.dumps({"model": sys.argv[1], "prompt": "San Francisco is a", "max_tokens": 16, "temperature": 0}))' "${MODEL}")
 curl -sS --max-time 600 "${BASE_URL}/v1/completions" \
-  -H 'Content-Type: application/json' -d "${smoke_payload}" \
+  -H 'Content-Type: application/json' \
+  -d "$(python3 "${HELPERS}" smoke-payload "${MODEL}")" \
   -o "${OUT_DIR}/smoke.json"
 smoke_rc=$?
 if [ "${smoke_rc}" -eq 0 ]; then
-  python3 - "${OUT_DIR}/smoke.json" <<'PY'
-import json, sys
-text = json.load(open(sys.argv[1]))["choices"][0]["text"]
-print(f"[smoke] completion: {text!r}")
-sys.exit(0 if text.strip() else 1)
-PY
+  python3 "${HELPERS}" check-smoke "${OUT_DIR}/smoke.json"
   smoke_rc=$?
 fi
 record_leg smoke "${smoke_rc}" $((SECONDS - start))
@@ -91,38 +88,14 @@ record_leg smoke "${smoke_rc}" $((SECONDS - start))
 # ---------------------------------------------------------------------------
 # gsm8k: stock lm_eval gsm8k (5-shot, multi-turn few-shot) over chat
 # completions. With GSM8K_REASONING_EFFORT set, the task is overridden only to
-# add chat_template_kwargs; an `include:` override replaces generation_kwargs
-# as a whole, so the stock values are restated alongside it.
+# add chat_template_kwargs.
 # ---------------------------------------------------------------------------
 run_gsm8k() {
   local task="gsm8k" task_dir="${OUT_DIR}/lm_eval_tasks"
   if [ -n "${GSM8K_REASONING_EFFORT:-}" ]; then
     task="gsm8k_chat_reasoning"
-    mkdir -p "${task_dir}"
-    python3 - "${task_dir}" "${task}" "${GSM8K_REASONING_EFFORT}" <<'PY' || return 1
-import os, sys
-import lm_eval.tasks
-import yaml
-
-task_dir, task, effort = sys.argv[1:]
-stock = os.path.join(os.path.dirname(lm_eval.tasks.__file__), "gsm8k", "gsm8k.yaml")
-override = {
-    "include": stock,
-    "task": task,
-    # The include carries the stock tag; a tag of its own keeps the override
-    # from re-registering the stock `math_word_problems` group.
-    "tag": f"{task}_tag",
-    "generation_kwargs": {
-        "until": ["Question:", "</s>", "<|im_end|>"],
-        "do_sample": False,
-        "temperature": 0.0,
-        "chat_template_kwargs": {"reasoning_effort": effort},
-    },
-}
-with open(os.path.join(task_dir, f"{task}.yaml"), "w") as f:
-    yaml.safe_dump(override, f, sort_keys=False)
-print(f"[gsm8k] staged {task} (reasoning_effort={effort})")
-PY
+    python3 "${HELPERS}" stage-gsm8k-task "${task_dir}" "${task}" \
+      "${GSM8K_REASONING_EFFORT}" || return 1
   fi
 
   local args=(
@@ -181,42 +154,6 @@ fi
 # ---------------------------------------------------------------------------
 # metrics.json
 # ---------------------------------------------------------------------------
-python3 - "${OUT_DIR}" "${MODEL}" <<'PY'
-import glob, json, os, sys
-
-out_dir, model = sys.argv[1:]
-metrics = {"model": model}
-for line in open(os.path.join(out_dir, "leg_status.tsv")):
-    leg, rc, seconds = line.rstrip("\n").split("\t")
-    metrics[leg] = {"status": "ok" if rc == "0" else "failed",
-                    "exit_code": int(rc), "seconds": int(seconds)}
-
-gsm8k = metrics.get("gsm8k")
-results = sorted(glob.glob(os.path.join(out_dir, "gsm8k", "**", "results_*.json"),
-                           recursive=True))
-if gsm8k is not None and gsm8k["status"] == "ok" and results:
-    data = json.load(open(results[-1]))
-    task, scores = next((t, s) for t, s in data["results"].items()
-                        if "exact_match,flexible-extract" in s)
-    gsm8k.update({
-        "task": task,
-        "flexible_extract": scores["exact_match,flexible-extract"],
-        "strict_match": scores["exact_match,strict-match"],
-        "num_samples": data["n-samples"][task]["effective"],
-    })
-
-bench = metrics.get("bench")
-bench_file = os.path.join(out_dir, "bench.json")
-if bench is not None and bench["status"] == "ok" and os.path.isfile(bench_file):
-    data = json.load(open(bench_file))
-    for key in ("num_prompts", "completed", "failed", "request_throughput",
-                "output_throughput", "total_token_throughput", "median_ttft_ms",
-                "p99_ttft_ms", "median_tpot_ms", "median_itl_ms", "p99_itl_ms"):
-        bench[key] = data.get(key)
-
-with open(os.path.join(out_dir, "metrics.json"), "w") as f:
-    json.dump(metrics, f, indent=2)
-print(json.dumps(metrics, indent=2))
-PY
+python3 "${HELPERS}" write-metrics "${OUT_DIR}" "${MODEL}"
 
 exit "${smoke_rc}"
