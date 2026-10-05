@@ -108,6 +108,11 @@ class TestTpuPlatform:
         assert "MOE_HIERARCHICAL_DISPATCH" in TpuPlatform.additional_env_vars
         assert "MOE_HIERARCHICAL_DISPATCH" in envs.environment_variables
 
+    def test_additional_env_vars_covers_moe_hierarchical_collect(self):
+        """The collect is traced in the workers, so they must see the flag."""
+        assert "MOE_HIERARCHICAL_COLLECT" in TpuPlatform.additional_env_vars
+        assert "MOE_HIERARCHICAL_COLLECT" in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()

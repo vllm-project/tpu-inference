@@ -203,6 +203,7 @@ class TpuPlatform(Platform):
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR",
         "MOE_HIERARCHICAL_DISPATCH",
+        "MOE_HIERARCHICAL_COLLECT",
         "RAGGED_GATHER_MAX_ROW_SUBCHUNKS",
         "RAGGED_GATHER_TRIM_ROWS",
         "TPU_CHIPS_PER_HOST_BOUNDS",
