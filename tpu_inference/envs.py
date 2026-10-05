@@ -587,9 +587,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     env_bool("RAIDEN_H2D_SETTLE", default=True),
     # With prefix caching off, stop the scheduler from charging GDN layers one
     # block per group per request from the attention pool. The TPU runner keeps
-    # GDN state in its own arrays and never reads those blocks. Ignored with
-    # prefix caching, speculative decoding or a KV connector. Read by the model
-    # runner, so set it on every host. See core/runner_slot_mamba.py.
+    # GDN state in its own arrays and never reads those blocks. Applies to GDN
+    # layers only; other mamba layers keep their blocks. Ignored with prefix
+    # caching, speculative decoding or a KV connector. Read by the model runner;
+    # TpuPlatform.additional_env_vars carries it to Ray workers on other hosts.
+    # See core/runner_slot_mamba.py.
     "SKIP_MAMBA_SCHEDULER_BLOCKS":
     env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
 }

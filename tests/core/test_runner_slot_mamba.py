@@ -81,6 +81,17 @@ def flag_off(monkeypatch):
     monkeypatch.delenv("SKIP_MAMBA_SCHEDULER_BLOCKS", raising=False)
 
 
+@pytest.fixture
+def runner_slot_registered():
+    """Registers RunnerSlotMambaSpec whatever the current platform is.
+
+    vLLM's built-in specs are loaded first: a registration into the empty
+    registry would keep them from ever loading. Registering twice is a no-op.
+    """
+    KVCacheSpecRegistry.get_manager_class(_attn_spec())
+    runner_slot_mamba.register_runner_slot_mamba_spec()
+
+
 class TestGate:
 
     def test_flag_off_keeps_spec(self, flag_off):
@@ -123,6 +134,18 @@ class TestGate:
         assert out is spec
         assert "GDN layers only" in warn.call_args.args[1]
 
+    def test_mamba_subclass_keeps_its_spec(self, flag_on):
+
+        @dataclasses.dataclass(frozen=True)
+        class OtherMambaSpec(MambaSpec):
+            extra: int = 0
+
+        spec = _gdn_spec(OtherMambaSpec)
+        with patch.object(runner_slot_mamba.logger, "warning_once") as warn:
+            out = maybe_runner_slot_mamba_spec(spec, _vllm_config())
+        assert out is spec
+        assert "OtherMambaSpec" in warn.call_args.args[1]
+
     def test_attention_spec_untouched(self, flag_on):
         spec = _attn_spec()
         with patch.object(runner_slot_mamba.logger, "warning_once") as warn:
@@ -149,6 +172,11 @@ class TestRegistration:
         assert KVCacheSpecRegistry.get_manager_class(
             _gdn_spec()) is MambaManager
 
+    def test_flag_reaches_ray_workers(self):
+        # The flag is read by the runner on every host; Ray copies only VLLM_*
+        # and the platform's additional_env_vars to remote workers.
+        assert "SKIP_MAMBA_SCHEDULER_BLOCKS" in TpuPlatform.additional_env_vars
+
     def test_grouping_keeps_spec_class(self):
         # A spec that lost its subclass while vLLM groups the layers would
         # silently map back to the stock MambaManager.
@@ -168,6 +196,7 @@ class TestRegistration:
             type(g.kv_cache_spec) is RunnerSlotMambaSpec for g in gdn_groups)
 
 
+@pytest.mark.usefixtures("runner_slot_registered")
 class TestSchedulerAccounting:
     """vLLM's own KVCacheManager with prefix caching off, as the scheduler
     builds it, with stock GDN specs and with RunnerSlotMambaSpec."""

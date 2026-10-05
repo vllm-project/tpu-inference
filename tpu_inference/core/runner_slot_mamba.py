@@ -64,7 +64,8 @@ class RunnerSlotMambaManager(MambaManager):
 
     The overrides take *args/**kwargs so they keep matching vLLM's signatures
     across releases. Freeing and skipped-block removal need no override: they
-    walk the request's block list, which stays empty.
+    walk the request's block list, which stays empty. KV-connector allocation
+    is never reached: the spec is not swapped when a connector is configured.
     """
 
     def __init__(self, kv_cache_spec: MambaSpec, block_pool, **kwargs) -> None:
@@ -79,16 +80,18 @@ class RunnerSlotMambaManager(MambaManager):
     def allocate_new_blocks(self, *args, **kwargs) -> list[KVCacheBlock]:
         return []
 
-    def allocate_external_computed_blocks(self, *args, **kwargs) -> None:
-        return None
-
 
 def _ineligible_reason(spec: MambaSpec,
                        vllm_config: "VllmConfig") -> str | None:
+    # Exact class only: a subclass may carry fields RunnerSlotMambaSpec cannot
+    # take, or be registered to a manager of its own.
+    if type(spec) is not MambaSpec:
+        return f"its spec is {type(spec).__name__}, not MambaSpec"
     if spec.mamba_type != MambaAttentionBackendEnum.GDN_ATTN:
         return f"it applies to GDN layers only, not {spec.mamba_type.name}"
+    # The spec's own mamba_cache_mode is copied from this config by vLLM.
     mode = vllm_config.cache_config.mamba_cache_mode
-    if mode != "none" or spec.mamba_cache_mode != "none":
+    if mode != "none":
         return f"mamba cache mode is {mode!r}, not 'none' (prefix caching)"
     if vllm_config.speculative_config is not None:
         return "speculative decoding is on"

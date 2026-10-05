@@ -192,6 +192,7 @@ class TpuPlatform(Platform):
         "ENABLE_RS_KERNEL",
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        "SKIP_MAMBA_SCHEDULER_BLOCKS",
     ]
 
     @classmethod
