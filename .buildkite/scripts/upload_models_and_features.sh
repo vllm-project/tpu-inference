@@ -51,19 +51,6 @@ failure_handler() {
 trap 'failure_handler $LINENO' ERR
 declare -a TARGET_FOLDERS=()
 
-# CI targets whose steps run on a fixed v7x multi-host queue. They only go into
-# the v7x group: in the v6e group the same steps would still be dispatched to
-# that queue, holding a scarce multi-host slice to record a v6e result.
-V7X_ONLY_TARGETS=("multi-host" "Qwen/Qwen3.8-2.4T-A95B")
-
-is_v7x_only() {
-  local target
-  for target in "${V7X_ONLY_TARGETS[@]}"; do
-    [[ "$target" == "$1" ]] && return 0
-  done
-  return 1
-}
-
 # Append the kernel_microbenchmarks subdirectories
 add_kernel_microbenchmarks() {
   local kernel_parent_dir=".buildkite/kernel_microbenchmarks"
@@ -138,7 +125,7 @@ for folder_path in "${TARGET_FOLDERS[@]}"; do
     yml_content=$(grep -v "^steps:" "${yml_file}")
 
     # Store the content for both hardware types
-    if ! is_v7x_only "$subject_name"; then
+    if [[ "$subject_name" != "multi-host" ]]; then
       pipeline_v6e_fragments+=("${yml_content}")
     fi
     pipeline_v7x_fragments+=("${yml_content}")

@@ -23,8 +23,10 @@
 #
 # Every step runs only in the MODEL_IMPL_TYPE=vllm nightly. The model only has a
 # vllm (torchax) implementation, so the auto nightly would repeat the same run,
-# and the README model table is built from the vllm matrix. The file is also
-# left out of the v6e group (V7X_ONLY_TARGETS in upload_models_and_features.sh).
+# and the README model table is built from the vllm matrix. Every step is also
+# limited to the v7x group: the UnitTest queue is a fixed v7x-32 queue, so in
+# the v6e group (TPU_VERSION=tpu6e at upload) the steps would still wait on that
+# agent. A false `if:` keeps them out of the build entirely.
 #
 # The serve configuration matches the daily benchmark case
 # (.buildkite/benchmark/cases/daily/daily_qwen3_8_2p4t_fp8_tpu7x_32.json), whose
@@ -35,7 +37,7 @@
 steps:
   - label: "${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
-    if: build.env("MODEL_IMPL_TYPE") == "vllm"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     agents:
       queue: tpu_v7x_32_queue
     soft_fail: true
@@ -102,7 +104,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record unit test result for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
-    if: build.env("MODEL_IMPL_TYPE") == "vllm"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3.8-2.4T-A95B"
@@ -120,7 +122,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
-    if: build.env("MODEL_IMPL_TYPE") == "vllm"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     agents:
       queue: cpu
     soft_fail: true
@@ -132,7 +134,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record accuracy result for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
-    if: build.env("MODEL_IMPL_TYPE") == "vllm"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3.8-2.4T-A95B"
@@ -150,7 +152,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
-    if: build.env("MODEL_IMPL_TYPE") == "vllm"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     agents:
       queue: cpu
     soft_fail: true
@@ -163,7 +165,7 @@ steps:
   - label: "${TPU_VERSION:-tpu6e} Record performance benchmark result for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_record_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
     depends_on: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
-    if: build.env("MODEL_IMPL_TYPE") == "vllm"
+    if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
     env:
       CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       CI_TARGET: "Qwen/Qwen3.8-2.4T-A95B"
