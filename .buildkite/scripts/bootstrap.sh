@@ -276,6 +276,8 @@ upload_kube_pipeline() {
         done
         set_kube_jax_envs unset
       done
+      # The P/D benchmark, once: it is a v7x workload whatever the generation.
+      upload_with_priority .buildkite/pipeline_disagg_kube.yml "$JOB_PRIORITY"
       buildkite-agent annotate --style warning --context ci-fleet-gaps \
         "Not in this kube build: the support matrices nightly_verify.yml builds on bare metal."
     fi
