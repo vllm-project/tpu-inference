@@ -455,9 +455,14 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         apply_admission_cap: bool = False,
         watermark_blocks: int = 0,
         reserved_blocks: int = 0,
+        prefill_end: int = 0,
     ) -> bool:
         attn_blocks_needed = 0
         mamba_blocks_needed = 0
+        # Mirror upstream: under dense retention every chunk publishes a
+        # state, so `prefill_end` is ignored.
+        if self.retention_interval != 0:
+            prefill_end = 0
 
         for i, manager in enumerate(self.single_type_managers):
             is_mamba = i in self.mamba_group_ids
@@ -480,6 +485,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
+                    prefill_end=prefill_end,
                 )
 
             if is_mamba:
@@ -512,9 +518,12 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        prefill_end: int = 0,
     ) -> int:
         """Returns attention blocks needed. Used by scheduler for in-flight prefill reservation."""
         num_blocks_to_allocate = 0
+        if self.retention_interval != 0:
+            prefill_end = 0
         for i, manager in enumerate(self.single_type_managers):
             if i in self.mamba_group_ids:
                 continue
@@ -537,6 +546,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                     num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
+                    prefill_end=prefill_end,
                 )
         return num_blocks_to_allocate
 
@@ -557,6 +567,7 @@ class TPUKVCacheManager(KVCacheManager):
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        skip_zeroing_group_ids: tuple[int, ...] = (),
     ) -> KVCacheBlocks | None:
         if not isinstance(self.coordinator, TPUHybridKVCacheCoordinator):
             return super().allocate_slots(
@@ -571,6 +582,7 @@ class TPUKVCacheManager(KVCacheManager):
                 full_sequence_must_fit=full_sequence_must_fit,
                 reserved_blocks=reserved_blocks,
                 has_scheduled_reqs=has_scheduled_reqs,
+                skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
         if num_new_tokens == 0 and num_external_computed_tokens == 0:
@@ -597,6 +609,10 @@ class TPUKVCacheManager(KVCacheManager):
         ):
             watermark_blocks = self.watermark_blocks
 
+        # Matches the scheduler's own prefill boundary: `num_tokens - 1`
+        # extends it to resumed requests replaying their output tokens.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+
         if full_sequence_must_fit:
             full_num_tokens = min(request.num_tokens, self.max_model_len)
             can_fit = self.coordinator.can_allocate_tokens(
@@ -610,6 +626,7 @@ class TPUKVCacheManager(KVCacheManager):
                 apply_admission_cap=True,
                 watermark_blocks=watermark_blocks,
                 reserved_blocks=0,
+                prefill_end=prefill_end,
             )
             if not can_fit:
                 return None
@@ -636,6 +653,7 @@ class TPUKVCacheManager(KVCacheManager):
             apply_admission_cap=False,
             watermark_blocks=watermark_blocks,
             reserved_blocks=reserved_blocks,
+            prefill_end=prefill_end,
         )
         if not can_fit:
             return None
@@ -647,6 +665,7 @@ class TPUKVCacheManager(KVCacheManager):
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
