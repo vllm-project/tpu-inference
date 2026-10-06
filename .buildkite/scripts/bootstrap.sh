@@ -260,15 +260,32 @@ upload_kube_pipeline() {
       set_kube_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
       set_kube_jax_envs unset
-      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
+      # Not nightly_releases.yml: the bare-metal nightly publishes the
+      # vllm/vllm-tpu nightly image, and a second publisher would race it for
+      # the :nightly tag.
       upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
     fi
-    # nightly_verify.yml runs only on nightly and tag builds. On kube its suites
-    # run as separate CI_LANES builds, one generation each, and the support
-    # matrices are built on bare metal only.
+    # What nightly_verify.yml runs on bare metal on nightly and tag builds: the
+    # models, features, parallelism and rl suites for both generations. Their
+    # step keys carry TPU_VERSION, so each file uploads once per generation in
+    # the same build. The support matrices are built on bare metal only.
     if [[ "${NIGHTLY:-0}" == "1" || -n "${BUILDKITE_TAG:-}" ]]; then
+      local gen suite
+      for gen in v6 v7; do
+        set_kube_jax_envs "${gen}"
+        for suite in models features parallelism rl; do
+          upload_kube_lane "${suite}"
+        done
+        set_kube_jax_envs unset
+      done
+      # The P/D benchmark, once a day: it is a v7x workload whatever the
+      # generation, and the vllm and flax_nnx nightlies would run it again on
+      # the same code.
+      if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
+        upload_with_priority .buildkite/pipeline_disagg_kube.yml "$JOB_PRIORITY"
+      fi
       buildkite-agent annotate --style warning --context ci-fleet-gaps \
-        "Not in this kube build: nightly_verify.yml. Its models, features, parallelism and rl suites run on kube as CI_LANES builds; the support matrices are bare-metal only."
+        "Not in this kube build: the support matrices nightly_verify.yml builds and the nightly image nightly_releases.yml publishes, both on bare metal."
     fi
 }
 
