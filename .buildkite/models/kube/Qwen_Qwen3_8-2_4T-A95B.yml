@@ -12,18 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The kube steps for ../Qwen_Qwen3_8-2_4T-A95B.yml, with the same keys. See README.md.
+# Qwen3.8-2.4T-A95B-FP8 on a v7x-32 slice (2x2x4, four hosts). It runs on the
+# kube fleet only, so there is no ../Qwen_Qwen3_8-2_4T-A95B.yml. See README.md.
 
 steps:
-  # As in the bare-metal file, the UnitTest step serves the model once on a
-  # v7x-32 slice (2x2x4, four hosts) and measures everything against that one
-  # server, and Accuracy and Benchmark gate those measurements. Only in the
-  # MODEL_IMPL_TYPE=vllm v7x build, as there.
+  # Loading the 2.4 TB checkpoint and compiling takes about an hour, so the
+  # model is served once: the UnitTest step brings the server up across the
+  # slice (serve_and_run.sh on the Ray head), runs a smoke request, GSM8K and
+  # an 8k/1k random benchmark against it, and publishes the measurements as
+  # build meta-data. Accuracy and Benchmark are cheap gates over those
+  # measurements. Benchmark depends on UnitTest's record rather than
+  # Accuracy's so that an accuracy regression does not also hide the perf
+  # result.
   #
-  # The slice is a JobSet in place of run_multihost.sh. serve_and_run.sh runs
-  # the same serve and client commands on the head, MULTIHOST_ENV_B64 carries
-  # what MULTIHOST_ENV_VARS does there to every host, and the head uploads
-  # ARTIFACTS_DIR, from which the step reads metrics.json into meta-data.
+  # Every step runs only in a MODEL_IMPL_TYPE=vllm v7x build. The model only
+  # has a vllm (torchax) implementation, so an auto build would repeat the
+  # same run, and a v6e build has no v7x-32 slice; a false `if:` keeps the
+  # steps out of the build entirely.
+  #
+  # The serve configuration matches the daily benchmark case
+  # (.buildkite/benchmark/cases/daily/daily_qwen3_8_2p4t_fp8_tpu7x_32.json),
+  # whose history is the reference for the perf thresholds; keep the two in
+  # sync. --num-gpu-blocks-override pins the KV pool of this hybrid attention /
+  # linear-attention model, which the scheduler otherwise sizes far too small.
+  # The head uploads ARTIFACTS_DIR, from which the step reads metrics.json
+  # into meta-data.
 
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest"
@@ -116,6 +129,9 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_UnitTest
 
+  # GSM8K reference on this configuration: 0.9795 flexible / 0.9788 strict and
+  # 0.9795 / 0.9795 on two runs (stderr 0.0039). 0.96 sits about 5 stderr
+  # below; a broken model scores near zero.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy"
     if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
@@ -150,6 +166,9 @@ steps:
       - |
         .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Accuracy
 
+  # Perf reference on this configuration: 1076.2 output / 9686.1 total tok/s
+  # (random 8192/1024, concurrency 368); the daily case varies by about 0.1%
+  # run to run. The limits are 3% below.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for Qwen/Qwen3.8-2.4T-A95B-FP8"
     key: "${TPU_VERSION:-tpu6e}_Qwen_Qwen3_8-2_4T-A95B_Benchmark"
     if: 'build.env("MODEL_IMPL_TYPE") == "vllm" && "${TPU_VERSION:-tpu6e}" == "tpu7x"'
