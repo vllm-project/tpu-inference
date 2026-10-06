@@ -12,6 +12,32 @@
 # qwen38_2p4t_kube_head.sh on the head, which serves, runs the legs and stops
 # the server. The head uploads ARTIFACTS_DIR (dev_artifacts/) when it returns.
 #
+# This build: #71 plus two knobs of the expert-parallel dispatch permute, the
+# SparseCore ragged_gather_v2 kernel (fused_moe_gmm.py; used because
+# ONEHOT_MOE_PERMUTE_THRESHOLD is 0):
+#
+#   RAGGED_GATHER_MAX_ROW_SUBCHUNKS=1  smallest gather blocks (default 4). A
+#                                      shard's rows are a small part of the
+#                                      3840 sorted rows at decode, so smaller
+#                                      blocks move fewer rows.
+#   RAGGED_GATHER_TRIM_ROWS=0          hand the block-padded output straight to
+#                                      gmm_v2 instead of copying it down to
+#                                      num_tokens x topk rows. Nothing
+#                                      downstream reads the padding rows.
+#
+# Both are layout changes only, so accuracy must not move; GSM8K and MMLU run
+# anyway, as in #71. Everything else is #71, described below.
+#
+# WHAT TO READ FIRST:
+#   1. The capture fires as in #71: one decode_only_concur_384.
+#   2. Decode step vs #71's 80.40 ms, and the gather in it: the TensorCore
+#      side (gather_offload / copy ops after the permute) and the SparseCore
+#      kernel time.
+#   3. Peak decode vs #71's 4565.8 tok/s, admission per wave vs 236/261 s.
+#   4. GSM8K / MMLU vs #71's 0.9803 / 0.8940.
+#
+# ---- #71's description follows ----
+#
 # Serving configuration: build #55's (tp=32 as model=4 x attn_dp=8, C=384 =
 # 48/rank, util 0.98, MNBT 512/rank, pool 28928, bucket 384, attention/GDN and
 # shared expert requantized to fp8 at block 512), with four merged options on:
@@ -94,7 +120,7 @@ steps:
       BM_INFRA: "true"
       TPU_VERSION: "tpu7x"
 
-  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 (kube v7x-32, model=4 x attn_dp=8, C=384, hierarchical dispatch+collect, fp8 dispatch gather, skip-mamba blocks, GSM8K+MMLU, decode profile)"
+  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 (kube v7x-32, model=4 x attn_dp=8, C=384, hierarchical dispatch+collect, fp8 dispatch gather, skip-mamba blocks, ragged gather subchunks=1 no-trim, GSM8K+MMLU, decode profile)"
     key: qwen38_2p4t_kube_v7x32
     depends_on: "build_docker_tpu7x"
     # Counted from when the agent takes the job, so it includes any wait for
@@ -120,8 +146,8 @@ steps:
     # (USE_BATCHED_RPA_KERNEL is read at import time; USE_BATCHED_RPA_SEQ_ON_LANE
     # selects the KV layout that makes a per-device page 65,536 B). In order:
     # common runtime and loading, the requantization patterns, the four options
-    # under validation, serve.sh, client.sh (a warmup wave of 384, then the
-    # measured wave), the decode profile, eval_std.sh (add gpqa to
+    # #71 validated, the two ragged-gather knobs, serve.sh, client.sh (a warmup
+    # wave of 384, then the measured wave), the decode profile, eval_std.sh (add gpqa to
     # STD_EVAL_SUITE to run it with the GPQA_* settings), eval.sh (off), and
     # ART_DIR, which is ARTIFACTS_DIR under the image's WORKDIR.
     commands:
@@ -148,6 +174,8 @@ steps:
           'MOE_HIERARCHICAL_COLLECT=true' \
           'MOE_HIERARCHICAL_DISPATCH=true' \
           'MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8' \
+          'RAGGED_GATHER_MAX_ROW_SUBCHUNKS=1' \
+          'RAGGED_GATHER_TRIM_ROWS=0' \
           'MODEL_PATH=gs://tpu-commons-ci/qwen/Qwen3.8-2.4T-A95B-FP8' \
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=8' \

@@ -253,7 +253,7 @@ else
 fi
 
 echo "--- effective tpu-inference env ---"
-env | grep -E '^(VLLM_|MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_|ATTN_|SKIP_JAX|SKIP_MAMBA_|FORCE_MOE_|MOE_|ONEHOT_|TPU_|RUNAI_|BF16_LINEAR_|PHASED_)' | sort || true
+env | grep -E '^(VLLM_|MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_|ATTN_|SKIP_JAX|SKIP_MAMBA_|FORCE_MOE_|MOE_|ONEHOT_|TPU_|RUNAI_|BF16_LINEAR_|PHASED_|RAGGED_GATHER_)' | sort || true
 
 # ---------------------------------------------------------------------------
 # runai_streamer throughput.
@@ -417,7 +417,7 @@ write_repro_serve() {
     echo "# then the exact command it exec'd. Set the same environment in the"
     echo "# container on every host: Ray workers read some of it at import time."
     env | LC_ALL=C sort \
-      | grep -E '^(MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_[A-Z0-9_]+|FORCE_MOE_[A-Z0-9_]+|VLLM_[A-Z0-9_]+|MOE_[A-Z0-9_]+|RUNAI_STREAMER_[A-Z0-9_]+|BF16_LINEAR_[A-Z0-9_]+|PHASED_[A-Z0-9_]+|PROFILE_[A-Z0-9_]+|JAX_[A-Z0-9_]+|SKIP_JAX_[A-Z0-9_]+|SKIP_MAMBA_[A-Z0-9_]+|XLA_[A-Z0-9_]+|LIBTPU_[A-Z0-9_]+|MIN_TOKEN_BUCKET|DISTRIBUTED_SAMPLING_[A-Z0-9_]+|SAMPLING_[A-Z0-9_]+)=' \
+      | grep -E '^(MODEL_IMPL_TYPE|NEW_MODEL_DESIGN|USE_[A-Z0-9_]+|FORCE_MOE_[A-Z0-9_]+|VLLM_[A-Z0-9_]+|MOE_[A-Z0-9_]+|RUNAI_STREAMER_[A-Z0-9_]+|BF16_LINEAR_[A-Z0-9_]+|PHASED_[A-Z0-9_]+|PROFILE_[A-Z0-9_]+|JAX_[A-Z0-9_]+|SKIP_JAX_[A-Z0-9_]+|SKIP_MAMBA_[A-Z0-9_]+|RAGGED_GATHER_[A-Z0-9_]+|XLA_[A-Z0-9_]+|LIBTPU_[A-Z0-9_]+|MIN_TOKEN_BUCKET|DISTRIBUTED_SAMPLING_[A-Z0-9_]+|SAMPLING_[A-Z0-9_]+)=' \
       | grep -vE '^[^=]*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[^=]*=' \
       | while IFS='=' read -r k v; do echo "export ${k}=$(repro_quote "${v}")"; done
     echo "ulimit -n $(ulimit -n)"
