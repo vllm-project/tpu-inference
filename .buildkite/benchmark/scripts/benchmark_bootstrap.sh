@@ -39,6 +39,8 @@ esac
 JOB_PRIORITY="$PRIORITY_BENCHMARK"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "$JOB_PRIORITY"
+# No WORKLOAD_PRIORITY: on kube an unclassed workload is ordered at 0, below
+# integration and above the nightlies, where this rung sits on bare metal.
 
 TIMEZONE="America/Los_Angeles"
 JOB_REFERENCE="$(TZ="$TIMEZONE" date +%Y%m%d_%H%M%S)"

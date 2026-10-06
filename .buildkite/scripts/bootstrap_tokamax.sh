@@ -32,6 +32,8 @@ REQUIREMENTS_FILE="requirements.txt"
 JOB_PRIORITY="${PRIORITY_INTEGRATION}"
 export JOB_PRIORITY
 buildkite-agent meta-data set "JOB_PRIORITY" "${JOB_PRIORITY}"
+# Its Kueue priority class when it runs on kube (ci-infra launch.py).
+buildkite-agent meta-data set "WORKLOAD_PRIORITY" "integration"
 
 # Attach failure notifications before anything can fail. Uploading this first is
 # what guarantees a notification even when the resolve below dies (PyPI
