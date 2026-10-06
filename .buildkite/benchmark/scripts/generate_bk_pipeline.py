@@ -282,6 +282,11 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             "ci_queue": agent,
             "USE_PREBUILT_IMAGE": "1",
             "TPU_VERSION": tpu_version,
+            # Off for every step, whatever the build or the case asks for: a
+            # failed export fails the job, and it fails on every host without
+            # a grant on MLCompass's table. A step's env wins over the
+            # build's, so this also overrides a schedule that sets it.
+            "MLCOMPASS_EXPORT_ENABLED": "false",
         }
 
         timeout_in_minutes = step_env.pop("BK_TIMEOUT_IN_MINUTES", None)
