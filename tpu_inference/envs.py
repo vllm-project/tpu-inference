@@ -96,6 +96,7 @@ if TYPE_CHECKING:
     SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     RAIDEN_H2D_SETTLE: bool = True
+    SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
 
 
 def env_with_choices(
@@ -592,6 +593,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":
     env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # With prefix caching off, stop the scheduler from charging GDN layers one
+    # block per group per request from the attention pool. The TPU runner keeps
+    # GDN state in its own arrays and never reads those blocks. Applies to GDN
+    # layers only; other mamba layers keep their blocks. Ignored with prefix
+    # caching, speculative decoding or a KV connector. Read by the model runner;
+    # TpuPlatform.additional_env_vars carries it to Ray workers on other hosts.
+    # See core/runner_slot_mamba.py.
+    "SKIP_MAMBA_SCHEDULER_BLOCKS":
+    env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
 }
 
 

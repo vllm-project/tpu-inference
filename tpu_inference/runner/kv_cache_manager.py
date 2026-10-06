@@ -41,6 +41,7 @@ from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
     DEFAULT_MAMBA_CACHE_MULTIPLIER, mamba_blocks_per_request, mamba_pool_size,
     set_mamba_num_blocks)
+from tpu_inference.core.runner_slot_mamba import maybe_runner_slot_mamba_spec
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.kv_share import compute_kv_share_map
@@ -649,7 +650,9 @@ class KVCacheManager:
                     spec = attn_module.get_kv_cache_spec(
                         self.runner.vllm_config)
                     if spec is not None:
-                        kv_cache_spec[layer_name] = spec
+                        kv_cache_spec[
+                            layer_name] = maybe_runner_slot_mamba_spec(
+                                spec, self.runner.vllm_config)
                     continue
 
                 if is_cache_for_ds_v4(attn_module):
