@@ -2,7 +2,8 @@
 
 One file per model, named after its bare-metal file in `..`, with the same
 step keys, so the two lanes read side by side. A file in `..` with no TPU step
-to migrate has no file here; its work sits on cpu behind a TODO.
+to migrate has no file here; its work sits on cpu behind a TODO. A model that
+runs on the kube fleet only has a file here and none in `..`.
 
 `upload_kube_lane` in `.buildkite/scripts/bootstrap.sh` uploads every file here
 as one pipeline, beside `pipeline_build.yml`, for a kube build with
