@@ -25,6 +25,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         MambaSpec, MLAAttentionSpec,
@@ -34,6 +35,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
+from tpu_inference.core.runner_slot_mamba import RunnerSlotMambaSpec
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
                                            get_attention_page_size_bytes)
@@ -1048,6 +1050,38 @@ class TestKVCacheManager:
 
         assert len(kv_cache_spec) == 1
         assert kv_cache_spec['layer.0'] == mock_mamba_spec
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_get_kv_cache_spec_gdn_runner_slot_flag(self, monkeypatch, flag):
+        """SKIP_MAMBA_SCHEDULER_BLOCKS: GDN specs go to vLLM as
+        RunnerSlotMambaSpec (prefix caching off, no MTP, no KV connector)."""
+        if flag:
+            monkeypatch.setenv("SKIP_MAMBA_SCHEDULER_BLOCKS", "1")
+        else:
+            monkeypatch.delenv("SKIP_MAMBA_SCHEDULER_BLOCKS", raising=False)
+        gdn_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                             dtypes=(torch.bfloat16, torch.float32),
+                             block_size=1024,
+                             mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+        mock_gdn_module = MagicMock(spec=MambaBase)
+        mock_gdn_module.get_kv_cache_spec.return_value = gdn_spec
+
+        def get_layers_side_effect(vllm_config, attn_cls):
+            if MambaBase in attn_cls:
+                return {'layer.0': mock_gdn_module}
+            return {}
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.0': mock_gdn_module
+        }
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                side_effect=get_layers_side_effect):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        expected_cls = RunnerSlotMambaSpec if flag else MambaSpec
+        assert type(kv_cache_spec['layer.0']) is expected_cls
 
     def test_initialize_kv_cache_mamba(self):
         num_blocks = 100

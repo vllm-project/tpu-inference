@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+import importlib
 import os
 import random
 from typing import TYPE_CHECKING, Optional, Tuple, Union
@@ -152,6 +154,33 @@ else:
 logger = init_logger(__name__)
 
 
+@contextlib.contextmanager
+def _no_uniproc_startup_threads(*args, **kwargs):
+    yield
+
+
+def _disable_uniproc_startup_thread_cap() -> None:
+    """Undo vllm-project/vllm#58946 for the TPU UniProcExecutor path.
+
+    vllm#58946 wraps EngineCore process start in `torch.set_num_threads(n)`
+    plus `OMP_NUM_THREADS=n` when the executor is a UniProcExecutor. On TPU
+    the processes forked after that (EngineCore, then the DPScheduler workers)
+    hang inside libgomp, so e.g. Mistral-Small-4 with DP attention never
+    finishes its first step. Keep the pre-#58946 behavior on TPU.
+    """
+    try:
+        engine_utils = importlib.import_module("vllm.v1.engine.utils")
+    except ImportError:
+        return
+    if getattr(engine_utils, "_configure_uniproc_startup_threads",
+               None) in (None, _no_uniproc_startup_threads):
+        return
+    engine_utils._configure_uniproc_startup_threads = (
+        _no_uniproc_startup_threads)
+    logger.info("Disabled vLLM UniProc EngineCore startup thread cap "
+                "(vllm#58946) on TPU.")
+
+
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
     device_name: str = "tpu"
@@ -174,6 +203,7 @@ class TpuPlatform(Platform):
     additional_env_vars: list[str] = [
         "PHASED_PROFILING_DIR",
         "MOE_HIERARCHICAL_DISPATCH",
+        "MOE_HIERARCHICAL_COLLECT",
         "RAGGED_GATHER_MAX_ROW_SUBCHUNKS",
         "RAGGED_GATHER_TRIM_ROWS",
         "TPU_CHIPS_PER_HOST_BOUNDS",
@@ -192,6 +222,7 @@ class TpuPlatform(Platform):
         "ENABLE_RS_KERNEL",
         "USE_GMM_FUSED_RS_KERNEL",
         "MOE_ALL_GATHER_ACTIVATION_DTYPE",
+        "SKIP_MAMBA_SCHEDULER_BLOCKS",
     ]
 
     @classmethod
@@ -439,6 +470,7 @@ class TpuPlatform(Platform):
                 logger.info("Force using UniProcExecutor for JAX on "
                             "single host without pipeline parallelism.")
                 parallel_config.distributed_executor_backend = "uni"
+                _disable_uniproc_startup_thread_cap()
             else:
                 logger.info("Force using MultiprocExecutor for JAX on "
                             "single host with pipeline parallelism.")
@@ -587,6 +619,14 @@ class TpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: VllmConfig) -> None:
+        # Unconditional: the manager is only used for specs the runner emits
+        # under SKIP_MAMBA_SCHEDULER_BLOCKS.
+        from tpu_inference.core.runner_slot_mamba import \
+            register_runner_slot_mamba_spec
+        register_runner_slot_mamba_spec()
 
     @classmethod
     def current_device(cls) -> torch.device:

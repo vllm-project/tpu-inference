@@ -40,6 +40,7 @@ ALLOWED_QUEUES=(
     "tpu_v6e_8_queue"
     "tpu_v7x_8_queue"
     "tpu_v7x_16_queue"
+    "tpu_v7x_32_queue"
 )
 
 # Helper function: check if an array contains a value
@@ -56,6 +57,11 @@ contains() {
 EXCLUDED_FOLDERS=(
     "\.buildkite/kubernetes/"
     "\.buildkite/benchmark/lm_eval/"
+    # The kube lane's files, beside the bare-metal ones they mirror. Their
+    # labels and record-step dependencies follow the kube lane's conventions,
+    # which the checks below do not describe.
+    "\.buildkite/models/kube/"
+    "\.buildkite/features/kube/"
 )
 
 # Convert the array into a pipe-separated string for regex

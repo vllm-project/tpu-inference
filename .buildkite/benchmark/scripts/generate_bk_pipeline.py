@@ -282,6 +282,14 @@ def create_benchmark_steps(case_data: Dict[str, Any],
             "ci_queue": agent,
             "USE_PREBUILT_IMAGE": "1",
             "TPU_VERSION": tpu_version,
+            # Both off for every step, whatever the build or the case asks
+            # for. A failed MLCompass export fails the job, and it fails on
+            # every host without a grant on MLCompass's table. The Spanner
+            # row duplicates the BigQuery one report_result.sh writes anyway.
+            # A step's env wins over the build's, so this also overrides a
+            # schedule that sets either.
+            "MLCOMPASS_EXPORT_ENABLED": "false",
+            "SPANNER_UPLOAD_ENABLED": "false",
         }
 
         timeout_in_minutes = step_env.pop("BK_TIMEOUT_IN_MINUTES", None)

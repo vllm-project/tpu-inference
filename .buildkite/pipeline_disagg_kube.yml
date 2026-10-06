@@ -12,20 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# P/D disaggregation on the Kueue fleet. Unscheduled and triggered by hand: it
-# shares a reservation with the nightly running the same benchmark, and the two
-# must not run at once.
-
-env:
-  # One immutable tag per build: the tag is read twice, and imagePullPolicy
-  # defaults to IfNotPresent, so a reused tag can benchmark another build's push.
-  WORKLOAD_IMAGE: "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/disagg-benchmark:kube-${BUILDKITE_BUILD_NUMBER}"
+# The P/D disaggregation benchmark on the Kueue fleet, uploaded by bootstrap.sh
+# into kube nightly builds. Its engines run on an image of their own, from
+# benchmark.Dockerfile, built here once per build.
+#
+# WORKLOAD_IMAGE is set on each step rather than for the file: this is uploaded
+# into a build alongside other files, and both steps read the same tag. One
+# immutable tag per build, because imagePullPolicy defaults to IfNotPresent, so
+# a reused tag can benchmark another build's push.
+x-disagg-image: &disagg_image "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/disagg-benchmark:kube-${BUILDKITE_BUILD_NUMBER}"
 
 steps:
   - label: ":docker: Build Disagg Benchmark Image"
     key: "build_kube_disagg_image"
     agents:
       queue: cpu_64_core
+    env:
+      WORKLOAD_IMAGE: *disagg_image
     commands:
       - gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       # --pull: the base tag is republished daily, and a copy cached on this
@@ -42,6 +45,7 @@ steps:
     agents:
       queue: "kube"
     env:
+      WORKLOAD_IMAGE: *disagg_image
       # Names the cache namespace the engines share with the single-host steps;
       # disagg_engine.sh refuses to start without it.
       TPU_VERSION: "tpu7x"
