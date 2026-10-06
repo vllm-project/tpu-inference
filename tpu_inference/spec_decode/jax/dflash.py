@@ -54,6 +54,16 @@ TARGET_LM_HEAD_PATHS = [
     "model.embed_tokens.embedding", "embed.embedding", "embed_tokens.embedding"
 ]
 
+# Target params a vllm (torchax) DFlash draft shares by name, mirroring vLLM's
+# DFlash proposer, which reuses the target embedding and lm_head. Keys are the
+# draft's own param names; the target may nest its text model under
+# `language_model` (multimodal models).
+VLLM_SHARED_PARAM_NAMES = [
+    "vllm_model.model.embed_tokens.weight",
+    "vllm_model.lm_head.weight",
+]
+_VLLM_TARGET_PREFIXES = ("vllm_model.", "vllm_model.language_model.")
+
 
 def _find_param(state: Any, paths: list[str]) -> Optional[Any]:
     from tpu_inference.models.jax.utils.weight_utils import get_param
@@ -63,6 +73,12 @@ def _find_param(state: Any, paths: list[str]) -> Optional[Any]:
         except ValueError:
             continue
     return None
+
+
+def _is_vllm_model(model: Any) -> bool:
+    """Whether ``model`` is a vLLM (torchax) model loaded by get_model."""
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    return isinstance(model, VllmModelWrapper)
 
 
 class DFlashProposer:
@@ -99,20 +115,36 @@ class DFlashProposer:
         # On-device KV caches (allocated in load_model)
         self._draft_kv_caches: Optional[list[jax.Array]] = None
         self._max_kv_len: int = 0
+        # Set in load_model: the vllm (torchax) draft step additionally needs
+        # the layer -> KV cache index mapping.
+        self._is_vllm_draft: bool = False
+
+    def _get_vllm_shared_params(self) -> dict[str, Any]:
+        """Target embedding / lm_head for a vllm (torchax) DFlash draft.
+
+        DFlash checkpoints usually ship neither; the wrapper keeps the draft's
+        own copy when its checkpoint does provide one.
+        """
+        target_state = getattr(self.runner, "state", None)
+        if not isinstance(target_state, dict):
+            return {}
+        shared = {}
+        for name in VLLM_SHARED_PARAM_NAMES:
+            suffix = name.removeprefix("vllm_model.")
+            for prefix in _VLLM_TARGET_PREFIXES:
+                if prefix + suffix in target_state:
+                    shared[name] = target_state[prefix + suffix]
+                    break
+        embed_name, lm_head_name = VLLM_SHARED_PARAM_NAMES
+        if lm_head_name not in shared and embed_name in shared:
+            # Tied target: its lm_head is the embedding table.
+            shared[lm_head_name] = shared[embed_name]
+        return shared
 
     def load_model(self, target_model: Any) -> None:
         """Load the DFlash draft model and share embeddings from target."""
         from tpu_inference.models.common.model_loader import \
             resolve_model_impl_type
-
-        draft_mi = get_model(self.vllm_config,
-                             self.rng_key,
-                             self.mesh,
-                             is_draft_model=True)
-        self.model_fn = draft_mi.model_fn
-        self.compute_logits_fn = draft_mi.compute_logits_fn
-        self.combine_hidden_states_fn = draft_mi.combine_hidden_states_fn
-        self.state = draft_mi.state
 
         draft_model_impl = resolve_model_impl_type(self.vllm_config,
                                                    is_draft_model=True)
@@ -122,7 +154,28 @@ class DFlashProposer:
             raise ValueError(
                 "Draft model implementation must match target model.")
 
-        if draft_model_impl == "flax_nnx":
+        # Shared params only apply to a vllm (torchax) draft; get_flax_model
+        # ignores them, so pass them unconditionally in case get_model falls
+        # back from flax_nnx to the vLLM model.
+        draft_mi = get_model(self.vllm_config,
+                             self.rng_key,
+                             self.mesh,
+                             is_draft_model=True,
+                             shared_params=self._get_vllm_shared_params())
+        self.model_fn = draft_mi.model_fn
+        self.compute_logits_fn = draft_mi.compute_logits_fn
+        self.combine_hidden_states_fn = draft_mi.combine_hidden_states_fn
+        self.state = draft_mi.state
+
+        # Decide from what was actually loaded rather than from the configured
+        # impl type, which stays "flax_nnx" when get_model falls back to vLLM.
+        self._is_vllm_draft = _is_vllm_model(draft_mi.model)
+        if self._is_vllm_draft != _is_vllm_model(
+                getattr(self.runner, "model", None)):
+            raise ValueError(
+                "Draft model implementation must match target model.")
+
+        if not self._is_vllm_draft:
 
             def get_target_value(target, paths):
                 # 1. Check PyTorch/vLLM backend
@@ -480,6 +533,7 @@ class DFlashProposer:
     @functools.partial(
         jax.jit,
         static_argnums=(0, ),
+        static_argnames=("layer_name_to_kvcache_index", ),
         donate_argnames=("kv_caches", ),
         out_shardings=(
             None,  # kv_caches - keep original sharding
@@ -499,6 +553,7 @@ class DFlashProposer:
         input_ids: jax.Array,
         attn_metadata: AttentionMetadata,
         target_hidden_states: jax.Array,
+        layer_name_to_kvcache_index: Optional[tuple] = None,
     ) -> tuple[list[jax.Array], jnp.ndarray]:
         """JIT-compiled forward pass of the draft model.
 
@@ -507,14 +562,15 @@ class DFlashProposer:
            new speculative tokens.
         3. Computes vocabulary logits and greedily samples the token IDs.
         4. Constrains the sharding of the drafted token IDs back to ATTN_DATA.
+
+        ``layer_name_to_kvcache_index`` is only set for the vllm (torchax)
+        draft model, whose step function needs it to locate its KV caches.
         """
-        kv_caches, hidden_states, *_ = self.model_fn(
-            state_leaves,
-            kv_caches,
-            input_ids,
-            target_hidden_states,
-            attn_metadata,
-        )
+        model_args = (state_leaves, kv_caches, input_ids, target_hidden_states,
+                      attn_metadata)
+        if layer_name_to_kvcache_index is not None:
+            model_args += (layer_name_to_kvcache_index, )
+        kv_caches, hidden_states, *_ = self.model_fn(*model_args)
         draft_token_ids = self._get_draft_token_ids(state_leaves,
                                                     hidden_states)
         return kv_caches, draft_token_ids
@@ -548,10 +604,15 @@ class DFlashProposer:
         target_hidden_states,
     ) -> tuple[list[jax.Array], jnp.ndarray]:
         """Generate all draft tokens in one forward pass using paged KV cache."""
+        layer_name_to_kvcache_index = None
+        if getattr(self, "_is_vllm_draft", False):
+            layer_name_to_kvcache_index = tuple(
+                self.runner.layer_name_to_kvcache_index.items())
         return self._propose(
             self.state_leaves,
             kv_caches,
             input_ids,
             attn_metadata,
             target_hidden_states,
+            layer_name_to_kvcache_index=layer_name_to_kvcache_index,
         )

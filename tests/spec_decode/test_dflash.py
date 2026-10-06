@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 from flax import nnx
 
+from tpu_inference.models.common.interface import ModelInterface
 from tpu_inference.spec_decode.jax.dflash import DFlashProposer
 
 
@@ -171,6 +172,155 @@ def test_propose_returns_2d_int_ids():
     assert draft_token_ids.ndim == 2
     assert draft_token_ids.shape == (1, 2)
     assert jnp.issubdtype(draft_token_ids.dtype, jnp.integer)
+
+
+def test_propose_passes_kv_cache_mapping_to_vllm_draft():
+    """The vllm (torchax) draft step also takes the layer -> KV cache map."""
+    proposer = object.__new__(DFlashProposer)
+    proposer.mesh = _make_single_device_mesh()
+    proposer.num_speculative_tokens = 2
+    proposer.block_size = 3
+    proposer.state_leaves = None
+    proposer._is_vllm_draft = True
+    layer_map = {"model.layers.32.self_attn.attn": 1}
+    proposer.runner = MagicMock(layer_name_to_kvcache_index=layer_map)
+
+    hidden_states = jnp.ones((3, 4), dtype=jnp.bfloat16)
+    calls = {}
+
+    def fake_vllm_draft_step(state, kv_caches, input_ids, target_hidden_states,
+                             attn_metadata, layer_name_to_kvcache_index):
+        calls["mapping"] = layer_name_to_kvcache_index
+        return kv_caches, hidden_states, [], None
+
+    proposer.model_fn = fake_vllm_draft_step
+    proposer.compute_logits_fn = lambda _state, _hidden, _lora: jnp.array(
+        [[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
+
+    _, draft_token_ids = proposer.propose(
+        kv_caches=[],
+        input_ids=None,
+        attn_metadata=None,
+        last_token_indices=None,
+        target_hidden_states=None,
+    )
+
+    assert calls["mapping"] == tuple(layer_map.items())
+    np.testing.assert_array_equal(np.asarray(draft_token_ids),
+                                  np.array([[0, 1]], dtype=np.int32))
+
+
+def test_get_vllm_shared_params_shares_target_embed_and_lm_head():
+    proposer = object.__new__(DFlashProposer)
+    embed, lm_head = jnp.zeros((4, 2)), jnp.ones((4, 2))
+    proposer.runner = MagicMock(
+        state={
+            "vllm_model.model.embed_tokens.weight": embed,
+            "vllm_model.lm_head.weight": lm_head,
+            "vllm_model.model.norm.weight": jnp.ones((2, )),
+        })
+
+    shared = proposer._get_vllm_shared_params()
+
+    assert set(shared) == {
+        "vllm_model.model.embed_tokens.weight", "vllm_model.lm_head.weight"
+    }
+    assert shared["vllm_model.lm_head.weight"] is lm_head
+
+
+def test_get_vllm_shared_params_tied_target_uses_embedding_as_lm_head():
+    proposer = object.__new__(DFlashProposer)
+    embed = jnp.zeros((4, 2))
+    proposer.runner = MagicMock(
+        state={"vllm_model.model.embed_tokens.weight": embed})
+
+    shared = proposer._get_vllm_shared_params()
+
+    assert shared["vllm_model.lm_head.weight"] is embed
+
+
+def test_get_vllm_shared_params_multimodal_target():
+    """Multimodal targets nest the text model under `language_model`; the
+    params are still shared under the draft's own names."""
+    proposer = object.__new__(DFlashProposer)
+    embed, lm_head = jnp.zeros((4, 2)), jnp.ones((4, 2))
+    proposer.runner = MagicMock(
+        state={
+            "vllm_model.language_model.model.embed_tokens.weight": embed,
+            "vllm_model.language_model.lm_head.weight": lm_head,
+        })
+
+    shared = proposer._get_vllm_shared_params()
+
+    assert shared == {
+        "vllm_model.model.embed_tokens.weight": embed,
+        "vllm_model.lm_head.weight": lm_head,
+    }
+
+
+def test_get_vllm_shared_params_ignores_non_dict_target_state():
+    proposer = object.__new__(DFlashProposer)
+    proposer.runner = MagicMock(state=None)
+
+    assert proposer._get_vllm_shared_params() == {}
+
+
+def _model_interface(model, state):
+    return ModelInterface(model_fn=MagicMock(),
+                          compute_logits_fn=MagicMock(),
+                          pooler_fn=None,
+                          combine_hidden_states_fn=MagicMock(),
+                          multimodal_fns=None,
+                          state=state,
+                          state_leaves=state,
+                          lora_manager=None,
+                          model=model)
+
+
+def _vllm_model():
+    from tpu_inference.models.vllm.vllm_model_wrapper import VllmModelWrapper
+    return object.__new__(VllmModelWrapper)
+
+
+def _load_draft_configured_as_flax(monkeypatch, target_model, draft_model):
+    """Runs load_model with both impls configured as flax_nnx while get_model
+    returns ``draft_model``, as when the draft falls back to vLLM."""
+    from tpu_inference.spec_decode.jax import dflash as dflash_module
+
+    runner = MockRunner(_make_single_device_mesh())
+    runner.model = target_model
+    embed = jnp.zeros((4, 2))
+    runner.state = {"vllm_model.model.embed_tokens.weight": embed}
+    proposer = DFlashProposer(MockVllmConfig(), runner)
+
+    monkeypatch.setattr(
+        "tpu_inference.models.common.model_loader.resolve_model_impl_type",
+        lambda *args, **kwargs: "flax_nnx")
+    captured = {}
+
+    def fake_get_model(*args, shared_params=None, **kwargs):
+        captured["shared_params"] = shared_params
+        return _model_interface(draft_model, {"w": jnp.zeros((2, ))})
+
+    monkeypatch.setattr(dflash_module, "get_model", fake_get_model)
+    proposer.load_model(runner.state)
+    return proposer, captured["shared_params"], embed
+
+
+def test_load_model_detects_vllm_fallback_draft(monkeypatch):
+    proposer, shared_params, embed = _load_draft_configured_as_flax(
+        monkeypatch, target_model=_vllm_model(), draft_model=_vllm_model())
+
+    assert proposer._is_vllm_draft
+    assert shared_params["vllm_model.model.embed_tokens.weight"] is embed
+    assert shared_params["vllm_model.lm_head.weight"] is embed
+
+
+def test_load_model_rejects_vllm_draft_with_flax_target(monkeypatch):
+    with pytest.raises(ValueError, match="must match target"):
+        _load_draft_configured_as_flax(monkeypatch,
+                                       target_model=MagicMock(),
+                                       draft_model=_vllm_model())
 
 
 # ----- New Comprehensive Tests -----

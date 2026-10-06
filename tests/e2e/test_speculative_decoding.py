@@ -599,6 +599,71 @@ def test_dflash_performance(
         extra_kwargs={"gpu_memory_utilization": 0.85})
 
 
+def _use_vllm_model_impl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "vllm")
+    monkeypatch.setenv("DRAFT_MODEL_IMPL_TYPE", "vllm")
+
+
+# The per-push job leaves MODEL_IMPL_TYPE unset, so test_dflash_* resolve to
+# flax_nnx there. These cases pin the vllm (torchax) path, where both the
+# target and the vLLM DFlash draft model run as PyTorch models via torchax.
+@pytest.mark.bvt
+def test_dflash_torchax_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    """DFlash outputs on the vllm (torchax) path match the non-spec ones."""
+    model_name = 'meta-llama/Llama-3.1-8B-Instruct'
+    _use_vllm_model_impl(monkeypatch)
+    extra_kwargs = {"gpu_memory_utilization": 0.85}
+    test_prompts = get_eagle3_test_prompts()
+
+    # The baseline must come from the same (torchax) target implementation.
+    ref_outputs = _get_baseline_results(monkeypatch,
+                                        sampling_config,
+                                        model_name,
+                                        test_prompts,
+                                        max_num_seqs=10,
+                                        extra_kwargs=extra_kwargs)
+
+    _test_correctness_helper(
+        monkeypatch,
+        sampling_config,
+        model_name, {
+            'model': "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat",
+            "num_speculative_tokens": 9,
+            "method": "dflash",
+            "draft_tensor_parallel_size": 1
+        },
+        test_prompts,
+        ref_outputs=ref_outputs,
+        max_num_seqs=10,
+        extra_kwargs=extra_kwargs)
+
+
+@pytest.mark.bvt
+def test_dflash_torchax_performance(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+):
+    """DFlash on the vllm (torchax) path reaches the expected acceptance."""
+    _use_vllm_model_impl(monkeypatch)
+
+    _test_performance_helper(
+        monkeypatch,
+        sampling_config, {
+            "method": "dflash",
+            "model": "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat",
+            "num_speculative_tokens": 9,
+            "draft_tensor_parallel_size": 1
+        },
+        min_acceptance_rate=0.40,
+        max_num_seqs=20,
+        async_scheduling=True,
+        model_name='meta-llama/Llama-3.1-8B-Instruct',
+        extra_kwargs={"gpu_memory_utilization": 0.85})
+
+
 @pytest.fixture(scope="module")
 def mtp_baseline():
     '''

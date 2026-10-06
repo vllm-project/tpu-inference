@@ -61,6 +61,7 @@ from tpu_inference.models.common.compiler_options import \
 from tpu_inference.models.common.interface import PoolerFunc
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.models.vllm import dflash_draft
 from tpu_inference.models.vllm.experimental.model_patcher import (
     apply_model_specific_patches, patch_mm_model)
 from tpu_inference.models.vllm.experimental.vision_tower_jit import (
@@ -121,6 +122,13 @@ class _VllmRunner(torch.nn.Module):
             call_kwargs = kwargs.get("call_kwargs", {})
             method = getattr(self.vllm_model, method_name)
             return method(*call_args, **call_kwargs)
+        elif "call_fn" in kwargs:
+            # Runs a free function against the vLLM model so it sees the
+            # functional (traced) params of `torch.func.functional_call`.
+            call_args = kwargs.get("call_args", tuple())
+            call_kwargs = kwargs.get("call_kwargs", {})
+            return kwargs["call_fn"](self.vllm_model, *call_args,
+                                     **call_kwargs)
         else:
             return self.compute_hidden_state(kwargs)
 
@@ -152,6 +160,52 @@ class VllmModelWrapper:
         self.vllm_config.quant_config = get_tpu_quantization_config(
             self.vllm_config, self.mesh)
         self._apply_pp_patch()
+
+    @property
+    def _spec_method(self) -> Optional[str]:
+        speculative_config = self.vllm_config.speculative_config
+        return speculative_config.method if speculative_config else None
+
+    @property
+    def _target_outputs_aux_hidden_states(self) -> bool:
+        """Whether the target model also returns aux hidden states for the
+        drafter (EAGLE3 and DFlash consume intermediate target layers)."""
+        return (not self.is_draft_model
+                and self._spec_method in ("eagle3", "dflash"))
+
+    def _draft_owned_param_substrs(self,
+                                   vllm_model: torch.nn.Module) -> list[str]:
+        """Shared-param names the draft must keep because its checkpoint
+        ships them (DFlash only; vLLM records this while loading weights)."""
+        if self._spec_method != "dflash":
+            return []
+        substrs = []
+        if getattr(vllm_model, "has_own_embed_tokens", False):
+            substrs.append("embed_tokens")
+        if getattr(vllm_model, "has_own_lm_head", False):
+            substrs.append("lm_head")
+        return substrs
+
+    @staticmethod
+    def _check_dflash_draft_weights(vllm_model: torch.nn.Module,
+                                    shared_names: set[str]) -> None:
+        """Raises if the DFlash draft's embedding / lm_head were neither in
+        its checkpoint nor shared from the target, i.e. left uninitialized."""
+        required = (
+            ("embed_tokens", "has_own_embed_tokens",
+             "vllm_model.model.embed_tokens.weight"),
+            ("lm_head", "has_own_lm_head", "vllm_model.lm_head.weight"),
+        )
+        missing = [
+            what for what, own_flag, name in required
+            if not getattr(vllm_model, own_flag, False)
+            and name not in shared_names
+        ]
+        if missing:
+            raise ValueError(
+                f"DFlash draft {type(vllm_model).__name__} has no {missing} "
+                "weights: they are not in its checkpoint and could not be "
+                "shared from the target model.")
 
     def _apply_pp_patch(self):
         # patch `get_pp_group` in vLLM to jax's get_pp_group.
@@ -259,12 +313,18 @@ class VllmModelWrapper:
         self.vllm_config.compilation_config.static_all_moe_layers.extend(
             vllm_config_for_load.compilation_config.static_all_moe_layers)
 
+        shared_names: set[str] = set()
         if shared_params:
             assert self.is_draft_model, "Shared params should only be applied to draft model."
             logger.info("Applying weight sharing with target model.")
+            skip_substrs = self._draft_owned_param_substrs(vllm_model)
             for name, param in vllm_model.named_parameters():
                 full_name = f"vllm_model.{name}"
                 if full_name in shared_params:
+                    if any(s in full_name for s in skip_substrs):
+                        logger.info(f"Draft model has its own {full_name}; "
+                                    "not sharing it with the target model.")
+                        continue
                     target_param = shared_params[full_name]
                     if param.shape != target_param.shape:
                         logger.warning(
@@ -275,10 +335,14 @@ class VllmModelWrapper:
                     logger.info(f"Sharing parameter: {full_name}")
                     # torch_view creates a torchax tensor sharing memory with the JAX array
                     param.data = torchax.interop.torch_view(target_param)
+                    shared_names.add(full_name)
 
-        if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3" and not self.is_draft_model:
+        if self._target_outputs_aux_hidden_states:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
+        if self.is_draft_model and self._spec_method == "dflash":
+            dflash_draft.validate_dflash_draft_model(vllm_model, self.mesh)
+            self._check_dflash_draft_weights(vllm_model, shared_names)
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
@@ -416,7 +480,7 @@ class VllmModelWrapper:
             if not is_last_rank:
                 output = JaxIntermediateTensors.from_torch(output_from_torch)
             else:
-                if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3":
+                if self._target_outputs_aux_hidden_states:
                     output, aux_hidden_states = jax_view(output_from_torch)
                 else:
                     output = jax_view(output_from_torch)
@@ -477,8 +541,47 @@ class VllmModelWrapper:
                 hidden_states, hidden_prenorm = jax_view(output_from_torch)
             return new_kv_caches, hidden_states, [hidden_prenorm], None
 
+        def dflash_draft_step_fun_impl(
+            params_and_buffers,
+            kv_caches: List[jax.Array],
+            input_ids: jax.Array,
+            target_hidden_states: Tuple[jax.Array, jax.Array, jax.Array],
+            attn_metadata: AttentionMetadata,
+            layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
+        ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
+                   Optional[jax.Array]]:
+            # Same contract as the JAX DFlash model: `target_hidden_states` is
+            # (combined target hidden, target query_start_loc, target
+            # positions) and `input_ids` is the flattened noise block.
+            layer_name_to_kvcache_index = dict(layer_name_to_kvcache_index)
+            num_tokens = attn_metadata.input_positions.shape[-1]
+            with torchax.default_env(), set_vllm_model_wrapper_context(
+                    kv_caches=kv_caches,
+                    mesh=self.mesh,
+                    layer_name_to_kvcache_index=layer_name_to_kvcache_index
+            ), set_forward_context(attn_metadata=attn_metadata,
+                                   vllm_config=self.vllm_config,
+                                   num_tokens=num_tokens):
+                output_from_torch = torch.func.functional_call(
+                    self.model,
+                    torch_view(params_and_buffers),
+                    kwargs={
+                        "call_fn":
+                        dflash_draft.dflash_draft_forward,
+                        "call_kwargs":
+                        dflash_draft.dflash_draft_call_kwargs(
+                            input_ids, target_hidden_states, attn_metadata),
+                    },
+                    tie_weights=False,
+                )
+                vllm_model_wrapper_context = get_vllm_model_wrapper_context()
+                new_kv_caches = vllm_model_wrapper_context.kv_caches
+
+            return new_kv_caches, jax_view(output_from_torch), [], None
+
         draft_step_fun = jax.jit(
-            draft_step_fun_impl,
+            dflash_draft_step_fun_impl
+            if self._spec_method == "dflash" else draft_step_fun_impl,
             donate_argnames=("kv_caches", ),
             out_shardings=(
                 None,  # kv_caches - keep original sharding
@@ -487,7 +590,9 @@ class VllmModelWrapper:
                 None,  # list of aux hidden states
                 None,  # expert ids
             ),
-            static_argnames=("layer_name_to_kvcache_index", "spec_step_idx"),
+            static_argnames=(("layer_name_to_kvcache_index", )
+                             if self._spec_method == "dflash" else
+                             ("layer_name_to_kvcache_index", "spec_step_idx")),
         )
 
         step_fun_jit = partial(
