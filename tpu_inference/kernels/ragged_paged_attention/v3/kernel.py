@@ -901,14 +901,11 @@ def _ragged_paged_attention_kernel_loop(
                     bkv_sz)
 
         def get_bq_start_bkv_idx(bq_idx):
-            # First bkv this bq's loop visits. The new KV is written to the
-            # cache only from the last bq's bkv loop, so that loop must also
-            # cover every bkv holding new tokens, not just the window.
-            # Otherwise, once q_len exceeds about bq_sz + sliding_window, the
-            # early new tokens never reach the cache, and prefix caching later
-            # serves those stale pages as computed. bkvs before the window
-            # start are write-only: attention is skipped for them. Without a
-            # cache write (KV-shared layers) there is nothing to cover.
+            # First bkv this bq's loop visits.
+            # New KV is cached only in the last bq's loop, but its SWA may
+            # start after the first bkv holding new KV. Extend that loop back
+            # to kv_q_gap // bkv_sz so those bkvs are still cached; they are
+            # write-only (attention skipped). No cache write, no extension.
             start = get_bq_attn_start_bkv_idx(bq_idx)
             if not update_kv_cache:
                 return start
@@ -1025,8 +1022,8 @@ def _ragged_paged_attention_kernel_loop(
                 effective_bkv_sz = jnp.maximum(effective_bkv_sz, 0)
 
                 num_loops = cdiv(effective_bkv_sz, bkv_csz)
-                # Write-only bkvs (before the window, last bq only) skip
-                # QK/softmax/PV: every element would be masked anyway.
+                # bkvs before the SWA start are write-only: skip attention,
+                # every score there is masked.
                 num_loops = lax.select(bkv_idx >= attn_start_bkv_idx,
                                        num_loops, 0)
 
