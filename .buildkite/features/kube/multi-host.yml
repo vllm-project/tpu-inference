@@ -1,0 +1,94 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The kube steps for ../multi-host.yml, with the same keys. See README.md.
+
+steps:
+  # The only step here that spans two hosts. Everything else is one pod holding
+  # every chip on a node; this needs a slice, so it names a manifest and the
+  # slice it asks for instead of a shape. The slice is 2x2x2 tpu7x.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      USE_PREBUILT_IMAGE: "1"
+      # Read by run.sh on the agent, not forwarded: they select the JobSet
+      # and the slice it asks for.
+      MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MULTIHOST_SHAPE: "tpu7x-standard-4t/2x2x2"
+      MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
+      TENSOR_PARALLEL_SIZE: "16"
+      ASYNC_SCHEDULING: "1"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/ray_multihost_e2e.sh
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_record_multi-host_CorrectnessTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "multi-host"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest
+
+  # A placeholder on bare metal too: it records itself unverified and holds no
+  # chips, so it runs as a plain kube step.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on: "${TPU_VERSION:-tpu6e}_record_multi-host_CorrectnessTest"
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for multi-host"
+    key: "${TPU_VERSION:-tpu6e}_record_multi-host_PerformanceTest"
+    if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "multi-host"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_multi-host_PerformanceTest

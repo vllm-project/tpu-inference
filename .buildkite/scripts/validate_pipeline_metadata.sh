@@ -57,6 +57,11 @@ contains() {
 EXCLUDED_FOLDERS=(
     "\.buildkite/kubernetes/"
     "\.buildkite/benchmark/lm_eval/"
+    # The kube lane's files, beside the bare-metal ones they mirror. Their
+    # labels and record-step dependencies follow the kube lane's conventions,
+    # which the checks below do not describe.
+    "\.buildkite/models/kube/"
+    "\.buildkite/features/kube/"
 )
 
 # Convert the array into a pipe-separated string for regex

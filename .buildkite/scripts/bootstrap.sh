@@ -207,6 +207,26 @@ set_kube_jax_envs() {
     esac
 }
 
+# One kube lane. models and features keep a file per model or feature in
+# .buildkite/<lane>/kube/, beside its bare-metal file, and go up together as
+# one pipeline the way upload_models_and_features.sh sends the bare-metal ones:
+# each file's own steps: line dropped and the rest concatenated. The other
+# lanes are a single file each.
+upload_kube_lane() {
+    local lane="$1"
+    local dir=".buildkite/${lane}/kube"
+    if [[ ! -d "${dir}" ]]; then
+        upload_with_priority ".buildkite/pipeline_${lane}_kube.yml" "$JOB_PRIORITY"
+        return
+    fi
+    echo "--- :pipeline: Uploading ${dir}/*.yml with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+    {
+        echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+        echo "steps:"
+        grep -hv '^steps:' "${dir}"/*.yml
+    } | buildkite-agent pipeline upload
+}
+
 # The kube files in place of upload_pipeline's. A scheduled kube run sets
 # CI_LANES to some of jax, models, features, parallelism and rl, and runs the
 # one generation its schedule names (TPU_VERSION and the KUBE_SHAPE_* env); any
@@ -223,7 +243,7 @@ upload_kube_pipeline() {
                     fi
                     ;;
                 models|features|parallelism|rl)
-                    upload_with_priority ".buildkite/pipeline_${lane}_kube.yml" "$JOB_PRIORITY"
+                    upload_kube_lane "${lane}"
                     ;;
                 *)
                     echo "ERROR: CI_LANES has '${lane}'; the kube lanes are jax, models, features, parallelism and rl" >&2
