@@ -904,8 +904,8 @@ def _ragged_paged_attention_kernel_loop(
             # First bkv this bq's loop visits.
             # New KV is cached only in the last bq's loop, but its SWA may
             # start after the first bkv holding new KV. Extend that loop back
-            # to kv_q_gap // bkv_sz so those bkvs are still cached; they are
-            # write-only (attention skipped). No cache write, no extension.
+            # so those bkvs are still cached; they are write-only (attention
+            # skipped). No cache write, no extension.
             start = get_bq_attn_start_bkv_idx(bq_idx)
             if not update_kv_cache:
                 return start

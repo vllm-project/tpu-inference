@@ -465,11 +465,9 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         sliding_window: int,
         seq_lens,
     ):
-        # Regression: with q_len > bq_sz + sliding_window, the new KV of the
-        # chunk's early tokens lies before the last bq's window. It is only
-        # written to the cache from the last bq's bkv loop, so the kernel must
-        # still visit those bkvs. The harness compares the updated cache with
-        # the reference, which fails if any new token is left unwritten.
+        # q_len > bq_sz + sliding_window: the last bq's SWA starts after the
+        # first bkv holding new KV. Every new token must still be cached;
+        # the harness checks the updated cache against the reference.
         self._test_ragged_paged_attention(
             seq_lens,
             (4, 4),
