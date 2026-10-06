@@ -512,6 +512,7 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
+        **kwargs,
     ) -> int:
         """Returns attention blocks needed. Used by scheduler for in-flight prefill reservation."""
         num_blocks_to_allocate = 0
@@ -557,6 +558,7 @@ class TPUKVCacheManager(KVCacheManager):
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        **kwargs,
     ) -> KVCacheBlocks | None:
         if not isinstance(self.coordinator, TPUHybridKVCacheCoordinator):
             return super().allocate_slots(
@@ -571,6 +573,7 @@ class TPUKVCacheManager(KVCacheManager):
                 full_sequence_must_fit=full_sequence_must_fit,
                 reserved_blocks=reserved_blocks,
                 has_scheduled_reqs=has_scheduled_reqs,
+                **kwargs,
             )
 
         if num_new_tokens == 0 and num_external_computed_tokens == 0:
@@ -647,6 +650,7 @@ class TPUKVCacheManager(KVCacheManager):
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                **kwargs,
             )
 
         new_blocks = self.coordinator.allocate_new_blocks(
