@@ -114,84 +114,83 @@ steps:
     plugins:
       - kubernetes:
           podTemplate: tpu-launcher
+    # The agent runs this with /bin/sh, so no bash arrays. MULTIHOST_ENV_B64 is
+    # every host's environment, not only the head's: Ray workers inherit their
+    # raylet's environment, and they load, shard and run the model
+    # (USE_BATCHED_RPA_KERNEL is read at import time; USE_BATCHED_RPA_SEQ_ON_LANE
+    # selects the KV layout that makes a per-device page 65,536 B). In order:
+    # common runtime and loading, the requantization patterns, the four options
+    # under validation, serve.sh, client.sh (a warmup wave of 384, then the
+    # measured wave), the decode profile, eval_std.sh (add gpqa to
+    # STD_EVAL_SUITE to run it with the GPQA_* settings), eval.sh (off), and
+    # ART_DIR, which is ARTIFACTS_DIR under the image's WORKDIR.
     commands:
       - |
         set -euo pipefail
-        # Every host's environment, not only the head's: Ray workers inherit
-        # their raylet's environment, and they load, shard and run the model.
-        # USE_BATCHED_RPA_KERNEL is read at import time; USE_BATCHED_RPA_SEQ_ON_LANE
-        # selects the KV layout that makes a per-device page 65,536 B.
-        ENV_VARS=(
-          'MODEL_IMPL_TYPE=vllm'
-          'NEW_MODEL_DESIGN=1'
-          'USE_BATCHED_RPA_KERNEL=1'
-          'USE_BATCHED_RPA_SEQ_ON_LANE=1'
-          'USE_MOE_EP_KERNEL=0'
-          'VLLM_INCREMENTAL_FP8_LOADING=1'
-          'MOE_STAGE_WEIGHTS_ON_HOST=1'
-          'VLLM_XLA_CHECK_RECOMPILATION=0'
-          'SKIP_JAX_PRECOMPILE=0'
-          'VLLM_ENGINE_READY_TIMEOUT_S=18000'
-          'RUNAI_STREAMER_CONCURRENCY=16'
-          'RUNAI_STREAMER_MEMORY_LIMIT=128000000000'
-          'RUNAI_STREAMER_LOG_LEVEL=INFO'
-          'RUNAI_STREAMER_LOG_TO_STDERR=1'
-          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$'
-          'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512'
-          # --- the four options under validation ---
-          'SKIP_MAMBA_SCHEDULER_BLOCKS=true'
-          'MOE_HIERARCHICAL_COLLECT=true'
-          'MOE_HIERARCHICAL_DISPATCH=true'
-          'MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8'
-          # --- serve.sh ---
-          'MODEL_PATH=gs://tpu-commons-ci/qwen/Qwen3.8-2.4T-A95B-FP8'
-          'TENSOR_PARALLEL_SIZE=32'
-          'ATTN_DP_SIZE=8'
-          'MAX_MODEL_LEN=40960'
-          'MAX_NUM_SEQS=48'
-          'NUM_GPU_BLOCKS_OVERRIDE=28928'
-          'MAX_NUM_BATCHED_TOKENS=512'
-          'COMPILATION_SIZES=384'
-          'GPU_MEMORY_UTILIZATION=0.98'
-          'BLOCK_SIZE=128'
-          'KV_CACHE_DTYPE=fp8'
-          'JAX_CACHE_GUARD=0'
-          'SERVE_DEBUG_ERRORS=0'
-          # --- client.sh: one wave of 384 after a warmup wave of 384 ---
-          'INPUT_LEN=8192'
-          'OUTPUT_LEN=1024'
-          'NUM_PROMPTS=384'
-          'MAX_CONCURRENCY=384'
-          'BENCH_SWEEP=384:384'
-          'NUM_WARMUPS=384'
-          # --- decode profile at saturation ---
-          'PHASED_PROFILING_DIR=/workspace/tpu_inference/dev_artifacts/profiles'
-          'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250'
-          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5'
-          'PHASED_PROFILER_TRACK_CONCURRENCY=1'
-          'PHASED_PROFILER_TARGET_CONCURRENCY=384'
-          'PHASED_PROFILER_ONLY_PHASES=decode_only'
-          # --- eval_std.sh; add gpqa to run it with the GPQA_* below ---
-          'STD_EVAL_SUITE=gsm8k,mmlu'
-          'GPQA_REASONING_EFFORT=xhigh'
-          'GPQA_SAMPLING=greedy'
-          'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).'
-          'GPQA_MAX_GEN_TOKS=32768'
-          'GPQA_CONCURRENCY=32'
-          'GPQA_TIMEOUT_S=10800'
-          'GSM8K_REASONING_EFFORT=low'
-          'GSM8K_CONCURRENCY=64'
-          'GSM8K_MAX_TOKENS=1024'
-          'GSM8K_TIMEOUT_S=7200'
-          'MMLU_BATCH_SIZE=8'
-          'MMLU_CONCURRENCY=8'
-          'MMLU_TIMEOUT_S=10800'
-          # --- eval.sh, the fork-based harness: off ---
-          'EVAL_SUITE=none'
-          # --- the head driver; ARTIFACTS_DIR under the image's WORKDIR ---
-          'ART_DIR=/workspace/tpu_inference/dev_artifacts'
-        )
-        echo "--- effective MULTIHOST_ENV_B64"; printf '%s\n' "$${ENV_VARS[@]}"
-        MULTIHOST_ENV_B64=$$(printf '%s\0' "$${ENV_VARS[@]}" | base64 | tr -d '\n')
+        MULTIHOST_ENV_B64=$$(printf '%s\0' \
+          'MODEL_IMPL_TYPE=vllm' \
+          'NEW_MODEL_DESIGN=1' \
+          'USE_BATCHED_RPA_KERNEL=1' \
+          'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
+          'USE_MOE_EP_KERNEL=0' \
+          'VLLM_INCREMENTAL_FP8_LOADING=1' \
+          'MOE_STAGE_WEIGHTS_ON_HOST=1' \
+          'VLLM_XLA_CHECK_RECOMPILATION=0' \
+          'SKIP_JAX_PRECOMPILE=0' \
+          'VLLM_ENGINE_READY_TIMEOUT_S=18000' \
+          'RUNAI_STREAMER_CONCURRENCY=16' \
+          'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
+          'RUNAI_STREAMER_LOG_LEVEL=INFO' \
+          'RUNAI_STREAMER_LOG_TO_STDERR=1' \
+          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$' \
+          'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512' \
+          'SKIP_MAMBA_SCHEDULER_BLOCKS=true' \
+          'MOE_HIERARCHICAL_COLLECT=true' \
+          'MOE_HIERARCHICAL_DISPATCH=true' \
+          'MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8' \
+          'MODEL_PATH=gs://tpu-commons-ci/qwen/Qwen3.8-2.4T-A95B-FP8' \
+          'TENSOR_PARALLEL_SIZE=32' \
+          'ATTN_DP_SIZE=8' \
+          'MAX_MODEL_LEN=40960' \
+          'MAX_NUM_SEQS=48' \
+          'NUM_GPU_BLOCKS_OVERRIDE=28928' \
+          'MAX_NUM_BATCHED_TOKENS=512' \
+          'COMPILATION_SIZES=384' \
+          'GPU_MEMORY_UTILIZATION=0.98' \
+          'BLOCK_SIZE=128' \
+          'KV_CACHE_DTYPE=fp8' \
+          'JAX_CACHE_GUARD=0' \
+          'SERVE_DEBUG_ERRORS=0' \
+          'INPUT_LEN=8192' \
+          'OUTPUT_LEN=1024' \
+          'NUM_PROMPTS=384' \
+          'MAX_CONCURRENCY=384' \
+          'BENCH_SWEEP=384:384' \
+          'NUM_WARMUPS=384' \
+          'PHASED_PROFILING_DIR=/workspace/tpu_inference/dev_artifacts/profiles' \
+          'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
+          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
+          'PHASED_PROFILER_TRACK_CONCURRENCY=1' \
+          'PHASED_PROFILER_TARGET_CONCURRENCY=384' \
+          'PHASED_PROFILER_ONLY_PHASES=decode_only' \
+          'STD_EVAL_SUITE=gsm8k,mmlu' \
+          'GPQA_REASONING_EFFORT=xhigh' \
+          'GPQA_SAMPLING=greedy' \
+          'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
+          'GPQA_MAX_GEN_TOKS=32768' \
+          'GPQA_CONCURRENCY=32' \
+          'GPQA_TIMEOUT_S=10800' \
+          'GSM8K_REASONING_EFFORT=low' \
+          'GSM8K_CONCURRENCY=64' \
+          'GSM8K_MAX_TOKENS=1024' \
+          'GSM8K_TIMEOUT_S=7200' \
+          'MMLU_BATCH_SIZE=8' \
+          'MMLU_CONCURRENCY=8' \
+          'MMLU_TIMEOUT_S=10800' \
+          'EVAL_SUITE=none' \
+          'ART_DIR=/workspace/tpu_inference/dev_artifacts' \
+          | base64 | tr -d '\n')
         export MULTIHOST_ENV_B64
+        echo "--- effective MULTIHOST_ENV_B64"
+        printf '%s' "$$MULTIHOST_ENV_B64" | base64 -d | tr '\0' '\n'
         .buildkite/kubernetes/run.sh bash .buildkite/dev/qwen38_2p4t_kube_head.sh
