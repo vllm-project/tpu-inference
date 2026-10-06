@@ -40,6 +40,7 @@ ALLOWED_QUEUES=(
     "tpu_v6e_8_queue"
     "tpu_v7x_8_queue"
     "tpu_v7x_16_queue"
+    "tpu_v7x_32_queue"
 )
 
 # Helper function: check if an array contains a value

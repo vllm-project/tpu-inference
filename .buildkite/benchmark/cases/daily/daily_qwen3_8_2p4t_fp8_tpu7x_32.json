@@ -30,7 +30,7 @@
           "MOE_STAGE_WEIGHTS_ON_HOST": "1",
           "VLLM_INCREMENTAL_FP8_LOADING": "1",
           "BF16_LINEAR_REQUANTIZE_BLOCK_SIZE": "512",
-          "BF16_LINEAR_REQUANTIZE_PATTERNS": "re:.*self_attn\\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$",
+          "BF16_LINEAR_REQUANTIZE_PATTERNS": "re:.*self_attn\\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$,re:.*\\.mlp\\.shared_expert\\.(gate_up_proj|gate_proj|up_proj|down_proj)$",
           "USE_BATCHED_RPA_KERNEL": "1",
           "USE_BATCHED_RPA_SEQ_ON_LANE": "1",
           "RUNAI_STREAMER_MEMORY_LIMIT": "128000000000",
