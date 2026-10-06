@@ -1,0 +1,197 @@
+# Qwen/Qwen3.8-2.4T-A95B-FP8 on the kube fleet's v7x-32 slice (2x2x4: four
+# hosts, 16 chips, 32 devices): GSM8K + MMLU, an 8k/1k benchmark at C=384 and a
+# decode-only profile at saturation, all against one server.
+#
+# Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_kube.yml
+#
+# How the slice is reached is the kube models lane's (models/kube/
+# Qwen_Qwen3_8-2_4T-A95B.yml): build the CI image on cpu_64_core, then a step
+# on the `kube` queue hands .buildkite/kubernetes/run.sh the
+# ray-multihost-slice.yaml JobSet. multihost_entry.sh exports
+# MULTIHOST_ENV_B64 on every host before Ray starts and runs
+# qwen38_2p4t_kube_head.sh on the head, which serves, runs the legs and stops
+# the server. The head uploads ARTIFACTS_DIR (dev_artifacts/) when it returns.
+#
+# Serving configuration: build #55's (tp=32 as model=4 x attn_dp=8, C=384 =
+# 48/rank, util 0.98, MNBT 512/rank, pool 28928, bucket 384, attention/GDN and
+# shared expert requantized to fp8 at block 512), with four merged options on:
+#
+#   SKIP_MAMBA_SCHEDULER_BLOCKS      GDN groups take no scheduler blocks with
+#                                    prefix caching off (#3736). A full-length
+#                                    request holds 72 blocks instead of 75, so
+#                                    the pool, kept at #55's 28928 for
+#                                    comparison, peaks ~4% lower.
+#   MOE_HIERARCHICAL_DISPATCH        upstream form of #55's MOE_TWO_STEP_DISPATCH:
+#                                    each chip's two cores gather half the
+#                                    columns over attn_dp, then swap on-chip.
+#   MOE_HIERARCHICAL_COLLECT         the reverse for the combine: add halves
+#                                    on-chip, then reduce-scatter half width
+#                                    (#3725). Not bitwise identical.
+#   MOE_ALL_GATHER_ACTIVATION_DTYPE  fp8: the dispatch gather moves fp8 rows.
+#
+# Dropped from #55's environment because nothing on this branch reads them:
+# MOE_TWO_STEP_DISPATCH (now MOE_HIERARCHICAL_DISPATCH), TPU_WEIGHT_LOAD_PROFILE*,
+# BENCH_REQUEST_TIMEOUT_S (its backend_request_func.py hook is not carried, so
+# the fork harness keeps the stock 6 h per-request timeout), and the bare-metal
+# cache and checkpoint-mount plumbing.
+#
+# GPQA is wired but off this round. The GPQA_* settings are #55's, for the
+# lm_eval leg: add gpqa to STD_EVAL_SUITE to run it. EVAL_SUITE=none keeps the
+# fork-based harness (qwen38_2p4t_eval.sh) in the chain as a no-op, as in #55.
+# Both read gpqa_diamond.csv from EVAL_DATA_URI (the weights bucket's
+# eval-data/ by default), which a kube pod has not yet been shown to reach.
+#
+# Kube-specific, none of which changes what is measured:
+#   - Weights from gs://tpu-commons-ci, the copy the kube nightly reads.
+#   - JAX_CACHE_GUARD=0: the fleet owns the compilation cache (/cache/jax,
+#     forwarded by run.sh), so serve.sh must not cap or evict it.
+#   - SERVE_DEBUG_ERRORS=0: serve.sh's logging config is written to the head's
+#     /tmp only, and the Ray executor forwards VLLM_LOGGING_CONFIG_PATH to the
+#     workers on the other hosts, which then fail to start.
+#   - RUNAI_STREAMER_CONCURRENCY=16, libstreamer's default and what the kube
+#     nightly loads with. Bare metal raised nofile on every host with docker
+#     --ulimit to afford 64 reader threads; the JobSet has no such hook. Set
+#     explicitly because serve.sh would otherwise default the head to 64 and
+#     repro_serve.sh would record a value the loading workers never had.
+#
+# The decode profile needs PHASED_PROFILER_ONLY_PHASES and
+# PHASED_PROFILER_TARGET_CONCURRENCY, carried on this branch in
+# tpu_inference/runner/utils.py. Without them TRACK_CONCURRENCY captures every
+# concurrency the ramp passes through. With them it fires once, in the
+# benchmark's warmup wave: decode-only, exactly 384 requests, min_kv_len >= 8250.
+# GSM8K and MMLU cannot trigger it.
+#
+# WHAT TO READ FIRST:
+#   1. Worker logs (job log only): "MOE_HIERARCHICAL_DISPATCH: each chip's two
+#      cores gather half ... in fp8" and "MOE_HIERARCHICAL_COLLECT: ...", and
+#      no "is set but does not apply". The head's "[runner_slot_mamba] GDN
+#      groups take no scheduler blocks" (flag_check.txt counts it).
+#   2. KV check passes with 28928 blocks + 392 slots, as #55.
+#   3. GSM8K / MMLU vs #55's 0.9810 / 0.8960: the fp8 dispatch gather and the
+#      reordered collect sum are the accuracy risk.
+#   4. Exactly one "Starting profiling for decode_only_concur_384 phase";
+#      decode step vs #55's 84.96 ms, and the dispatch/collect collectives in it.
+#   5. Peak decode throughput vs #55's 4337 tok/s, peak KV ~92% (#55 95.9%),
+#      0 preemptions.
+
+.docker_build_template: &docker_build_template
+  agents:
+    queue: cpu_64_core
+  retry:
+    automatic:
+      - exit_status: "*"
+        limit: 3
+  commands:
+    - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+steps:
+  # Publishes ci-image-tpu7x, from which run.sh names the workload image.
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: "build_docker_tpu7x"
+    <<: *docker_build_template
+    timeout_in_minutes: 60
+    env:
+      BM_INFRA: "true"
+      TPU_VERSION: "tpu7x"
+
+  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 (kube v7x-32, model=4 x attn_dp=8, C=384, hierarchical dispatch+collect, fp8 dispatch gather, skip-mamba blocks, GSM8K+MMLU, decode profile)"
+    key: qwen38_2p4t_kube_v7x32
+    depends_on: "build_docker_tpu7x"
+    # Counted from when the agent takes the job, so it includes any wait for
+    # the slice's quota; TPU_MAX_RUNTIME_SECONDS bounds the run itself.
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      TPU_VERSION: "tpu7x"
+      # Read by run.sh on the agent: the JobSet and the slice it asks for.
+      MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MULTIHOST_SHAPE: "tpu7x-standard-4t/2x2x4"
+      ARTIFACTS_DIR: "dev_artifacts"
+      # From admission. #55 took 1h36m including the image build: ~55 min to
+      # /health, ~8 min GSM8K, ~19 min MMLU, ~12 min for two benchmark waves.
+      TPU_MAX_RUNTIME_SECONDS: "14400"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        set -euo pipefail
+        # Every host's environment, not only the head's: Ray workers inherit
+        # their raylet's environment, and they load, shard and run the model.
+        # USE_BATCHED_RPA_KERNEL is read at import time; USE_BATCHED_RPA_SEQ_ON_LANE
+        # selects the KV layout that makes a per-device page 65,536 B.
+        ENV_VARS=(
+          'MODEL_IMPL_TYPE=vllm'
+          'NEW_MODEL_DESIGN=1'
+          'USE_BATCHED_RPA_KERNEL=1'
+          'USE_BATCHED_RPA_SEQ_ON_LANE=1'
+          'USE_MOE_EP_KERNEL=0'
+          'VLLM_INCREMENTAL_FP8_LOADING=1'
+          'MOE_STAGE_WEIGHTS_ON_HOST=1'
+          'VLLM_XLA_CHECK_RECOMPILATION=0'
+          'SKIP_JAX_PRECOMPILE=0'
+          'VLLM_ENGINE_READY_TIMEOUT_S=18000'
+          'RUNAI_STREAMER_CONCURRENCY=16'
+          'RUNAI_STREAMER_MEMORY_LIMIT=128000000000'
+          'RUNAI_STREAMER_LOG_LEVEL=INFO'
+          'RUNAI_STREAMER_LOG_TO_STDERR=1'
+          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$'
+          'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512'
+          # --- the four options under validation ---
+          'SKIP_MAMBA_SCHEDULER_BLOCKS=true'
+          'MOE_HIERARCHICAL_COLLECT=true'
+          'MOE_HIERARCHICAL_DISPATCH=true'
+          'MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8'
+          # --- serve.sh ---
+          'MODEL_PATH=gs://tpu-commons-ci/qwen/Qwen3.8-2.4T-A95B-FP8'
+          'TENSOR_PARALLEL_SIZE=32'
+          'ATTN_DP_SIZE=8'
+          'MAX_MODEL_LEN=40960'
+          'MAX_NUM_SEQS=48'
+          'NUM_GPU_BLOCKS_OVERRIDE=28928'
+          'MAX_NUM_BATCHED_TOKENS=512'
+          'COMPILATION_SIZES=384'
+          'GPU_MEMORY_UTILIZATION=0.98'
+          'BLOCK_SIZE=128'
+          'KV_CACHE_DTYPE=fp8'
+          'JAX_CACHE_GUARD=0'
+          'SERVE_DEBUG_ERRORS=0'
+          # --- client.sh: one wave of 384 after a warmup wave of 384 ---
+          'INPUT_LEN=8192'
+          'OUTPUT_LEN=1024'
+          'NUM_PROMPTS=384'
+          'MAX_CONCURRENCY=384'
+          'BENCH_SWEEP=384:384'
+          'NUM_WARMUPS=384'
+          # --- decode profile at saturation ---
+          'PHASED_PROFILING_DIR=/workspace/tpu_inference/dev_artifacts/profiles'
+          'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250'
+          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5'
+          'PHASED_PROFILER_TRACK_CONCURRENCY=1'
+          'PHASED_PROFILER_TARGET_CONCURRENCY=384'
+          'PHASED_PROFILER_ONLY_PHASES=decode_only'
+          # --- eval_std.sh; add gpqa to run it with the GPQA_* below ---
+          'STD_EVAL_SUITE=gsm8k,mmlu'
+          'GPQA_REASONING_EFFORT=xhigh'
+          'GPQA_SAMPLING=greedy'
+          'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).'
+          'GPQA_MAX_GEN_TOKS=32768'
+          'GPQA_CONCURRENCY=32'
+          'GPQA_TIMEOUT_S=10800'
+          'GSM8K_REASONING_EFFORT=low'
+          'GSM8K_CONCURRENCY=64'
+          'GSM8K_MAX_TOKENS=1024'
+          'GSM8K_TIMEOUT_S=7200'
+          'MMLU_BATCH_SIZE=8'
+          'MMLU_CONCURRENCY=8'
+          'MMLU_TIMEOUT_S=10800'
+          # --- eval.sh, the fork-based harness: off ---
+          'EVAL_SUITE=none'
+          # --- the head driver; ARTIFACTS_DIR under the image's WORKDIR ---
+          'ART_DIR=/workspace/tpu_inference/dev_artifacts'
+        )
+        echo "--- effective MULTIHOST_ENV_B64"; printf '%s\n' "$${ENV_VARS[@]}"
+        MULTIHOST_ENV_B64=$$(printf '%s\0' "$${ENV_VARS[@]}" | base64 | tr -d '\n')
+        export MULTIHOST_ENV_B64
+        .buildkite/kubernetes/run.sh bash .buildkite/dev/qwen38_2p4t_kube_head.sh
