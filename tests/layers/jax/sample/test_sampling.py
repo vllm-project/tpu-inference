@@ -131,38 +131,68 @@ class TestSampling:
         )
         assert bool(incomplete[0])
 
-    @pytest.mark.parametrize("strided", [True, False])
-    @pytest.mark.parametrize("chunk", [None, 4, 32])
-    def test_prefiltered_top_k_matches_lax_top_k(self, strided, chunk):
-        values = jax.random.normal(jax.random.key(3), (4, 4096),
-                                   dtype=jnp.float32)
+    @staticmethod
+    def _check_prefiltered_top_k(values):
+        """Tied values may pick other ids, but each id points at its value."""
         expected, _ = jax.lax.top_k(values, 128)
-        top_values, top_ids = _prefiltered_top_k(values,
-                                                 128,
-                                                 chunk=chunk,
-                                                 strided=strided)
+        top_values, top_ids = _prefiltered_top_k(values, 128)
         np.testing.assert_array_equal(top_values, expected)
+        # Sorted like lax.top_k: _merge_topk_candidates reads the last value
+        # as each shard's smallest candidate.
+        assert np.all(top_values[:, 1:] <= top_values[:, :-1])
+        top_ids = np.asarray(top_ids)
+        assert np.all((top_ids >= 0) & (top_ids < values.shape[1]))
         np.testing.assert_array_equal(
-            jnp.take_along_axis(values, top_ids, axis=1), top_values)
-
-    @pytest.mark.parametrize("strided", [True, False])
-    def test_prefiltered_top_k_with_ties(self, strided):
-        values = jax.random.randint(jax.random.key(5), (3, 2048), 0,
-                                    8).astype(jnp.float32)
-        expected, _ = jax.lax.top_k(values, 64)
-        top_values, top_ids = _prefiltered_top_k(values,
-                                                 64,
-                                                 chunk=16,
-                                                 strided=strided)
-        np.testing.assert_array_equal(top_values, expected)
-        np.testing.assert_array_equal(
-            jnp.take_along_axis(values, top_ids, axis=1), top_values)
-        for row in np.asarray(top_ids):
+            np.take_along_axis(np.asarray(values), top_ids, axis=1),
+            top_values)
+        for row in top_ids:
             assert len(set(row.tolist())) == row.size
 
+    # Per-shard vocab sizes of Qwen3 (151936) with 1, 2 and 8 vocab shards.
+    @pytest.mark.parametrize("num_values,chunk", [(151936, None), (151936, 16),
+                                                  (75968, None),
+                                                  (18992, None)])
+    def test_prefiltered_top_k_matches_lax_top_k(self, num_values, chunk):
+        # Rows of distinct values, so the ids must match lax.top_k too.
+        keys = jax.random.split(jax.random.key(3), 4)
+        values = jax.vmap(lambda key: jax.random.permutation(key, num_values))(
+            keys).astype(jnp.float32)
+        expected_values, expected_ids = jax.lax.top_k(values, 128)
+        top_values, top_ids = _prefiltered_top_k(values, 128, chunk=chunk)
+        np.testing.assert_array_equal(top_values, expected_values)
+        np.testing.assert_array_equal(top_ids, expected_ids)
+
+    @pytest.mark.parametrize("num_values", [151936, 18992])
+    def test_prefiltered_top_k_with_ties(self, num_values):
+        values = jax.random.randint(jax.random.key(5), (4, num_values), 0,
+                                    8).astype(jnp.float32)
+        self._check_prefiltered_top_k(values)
+
+    @pytest.mark.parametrize("num_allowed", [5, 300])
+    def test_prefiltered_top_k_with_masked_logits(self, num_allowed):
+        # Structured output sets the logits of disallowed tokens to -inf.
+        rng = np.random.default_rng(num_allowed)
+        allowed = np.zeros((4, 151936), dtype=bool)
+        for row in allowed:
+            row[rng.choice(row.size, num_allowed, replace=False)] = True
+        logits = jax.random.normal(jax.random.key(7),
+                                   allowed.shape,
+                                   dtype=jnp.float32)
+        self._check_prefiltered_top_k(jnp.where(allowed, logits, -jnp.inf))
+
+    def test_prefiltered_top_k_falls_back_to_lax_top_k(self):
+        # 4099 is prime, so no chunk size divides it.
+        values = jax.random.normal(jax.random.key(9), (2, 4099),
+                                   dtype=jnp.float32)
+        for actual, expected in zip(_prefiltered_top_k(values, 128),
+                                    jax.lax.top_k(values, 128)):
+            np.testing.assert_array_equal(actual, expected)
+
     def test_topk_prefilter_chunk(self):
-        # 75968 = 64 * 1187: chunk 32 sorts 2374 maxima + 4096 candidates.
+        # 151936 = 128 * 1187: chunk 32 sorts 4748 maxima + 4096 candidates.
+        assert _topk_prefilter_chunk(151936, 128) == 32
         assert _topk_prefilter_chunk(75968, 128) == 32
+        assert _topk_prefilter_chunk(18992, 128) == 16
         # No divisor up to 256 leaves enough chunks: plain top-k.
         assert _topk_prefilter_chunk(4099, 128) == 0
         # Too few values for the prefilter to help.

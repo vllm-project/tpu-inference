@@ -29,11 +29,14 @@ from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import VllmSchedulerOutput
 
     from tpu_inference.runner.input_batch import CachedRequestState
+
+logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 
@@ -101,39 +104,39 @@ def _topk_prefilter_chunk(num_values: int, k: int) -> int:
     return best_chunk
 
 
-def _prefiltered_top_k(values: jax.Array,
-                       k: int,
-                       chunk: Optional[int] = None,
-                       strided: bool = True) -> tuple[jax.Array, jax.Array]:
+def _prefiltered_top_k(
+        values: jax.Array,
+        k: int,
+        chunk: Optional[int] = None) -> tuple[jax.Array, jax.Array]:
     """Same values as `lax.top_k(values, k)`, but only the k chunks with the
     largest maxima (which hold every top-k value) go through the final top-k.
 
-    Indices of tied values may differ from `lax.top_k`.
+    Chunk c holds values c, c + num_chunks, c + 2 * num_chunks, ..., so the
+    chunk maxima are an elementwise max across rows. On TPU7x this layout is
+    faster than contiguous chunks: for a [32, 75968] shard with k=128 it takes
+    128us, versus 160us with contiguous chunks and 700us for `lax.top_k`.
+
+    Like `lax.top_k`, the values come back in descending order;
+    `_merge_topk_candidates` relies on this. Indices of tied values may differ
+    from `lax.top_k`.
     """
     batch, num_values = values.shape
     if chunk is None:
         chunk = _topk_prefilter_chunk(num_values, k)
     if chunk == 0:
+        logger.warning_once(
+            "Top-k prefilter skipped: no chunk size from 2 to 256 helps for "
+            "%d values per vocab shard, so sampling uses lax.top_k.",
+            num_values)
         return lax.top_k(values, k)
     num_chunks = num_values // chunk
-    if strided:
-        # chunks[b, r, c] = values[b, r * num_chunks + c].
-        chunks = values.reshape(batch, chunk, num_chunks)
-        _, chunk_ids = lax.top_k(jnp.max(chunks, axis=1), k)
-        candidates = jnp.take_along_axis(chunks, chunk_ids[:, None, :], axis=2)
-        top_values, positions = lax.top_k(candidates.reshape(batch, chunk * k),
-                                          k)
-        top_ids = ((positions // k) * num_chunks +
-                   jnp.take_along_axis(chunk_ids, positions % k, axis=1))
-    else:
-        # chunks[b, c, r] = values[b, c * chunk + r].
-        chunks = values.reshape(batch, num_chunks, chunk)
-        _, chunk_ids = lax.top_k(jnp.max(chunks, axis=-1), k)
-        candidates = jnp.take_along_axis(chunks, chunk_ids[:, :, None], axis=1)
-        top_values, positions = lax.top_k(candidates.reshape(batch, k * chunk),
-                                          k)
-        top_ids = (jnp.take_along_axis(chunk_ids, positions // chunk, axis=1) *
-                   chunk + positions % chunk)
+    # chunks[b, r, c] = values[b, r * num_chunks + c].
+    chunks = values.reshape(batch, chunk, num_chunks)
+    _, chunk_ids = lax.top_k(jnp.max(chunks, axis=1), k)
+    candidates = jnp.take_along_axis(chunks, chunk_ids[:, None, :], axis=2)
+    top_values, positions = lax.top_k(candidates.reshape(batch, chunk * k), k)
+    top_ids = ((positions // k) * num_chunks +
+               jnp.take_along_axis(chunk_ids, positions % k, axis=1))
     return top_values, top_ids
 
 
@@ -290,6 +293,8 @@ def _merge_topk_candidates(
                                     axis=-1)[:, 0]
     shard_candidates = candidate_values.reshape(candidate_values.shape[0], -1,
                                                 candidates_per_shard)
+    # Each shard's candidates are sorted in descending order, so the last one
+    # is the smallest.
     shard_tails = shard_candidates[:, :, -1]
     incomplete = jnp.any(shard_tails >= threshold[:, None], axis=-1)
     topk_values = jnp.where(candidate_values >= threshold[:, None],
