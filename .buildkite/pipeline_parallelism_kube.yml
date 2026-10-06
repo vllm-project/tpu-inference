@@ -27,7 +27,7 @@
 # group.
 #
 # Tests are not soft_fail here; each record step depends on its test with
-# allow_failure instead. See pipeline_features_kube.yml.
+# allow_failure instead. See features/kube/README.md.
 #
 # Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
 # profile registry in ci-infra; a step names only a shape and a command.
