@@ -73,6 +73,9 @@ echo "===================================================================="
 echo " Starting vLLM Server: Qwen3.5-397B-A17B-FP8 (EP=8, DCP=4, TP=8)"
 echo "===================================================================="
 
+SERVER_LOG="${OUTPUTS_DIR}/vllm_397b_serve.log"
+ln -sf "${SERVER_LOG}" /tmp/vllm_397b_serve.log 2>/dev/null || true
+
 vllm serve "${MODEL_PATH}" \
   --max-model-len=65536 --max-num-batched-tokens=2048 --max-num-seqs=16 \
   --enable-prefix-caching \
@@ -86,7 +89,7 @@ vllm serve "${MODEL_PATH}" \
   --prefix-cache-retention-interval 0 \
   --enable-expert-parallel \
   --served-model-name Qwen/Qwen3.5-397B-A17B Qwen/Qwen3.5-397B-A17B-FP8 \
-  --decode-context-parallel-size 4 > /tmp/vllm_397b_serve.log 2>&1 &
+  --decode-context-parallel-size 4 > "${SERVER_LOG}" 2>&1 &
 
 SERVER_PID=$!
 echo "Server PID: ${SERVER_PID}"
@@ -101,19 +104,19 @@ for i in $(seq 1 480); do
     fi
     if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
         echo "Server died unexpectedly! Check log:"
-        tail -n 120 /tmp/vllm_397b_serve.log
+        tail -n 120 "${SERVER_LOG}"
         exit 1
     fi
     if [ $((i % 6)) -eq 0 ]; then
         echo "Waiting for server ($((i * 5))s elapsed)..."
-        tail -n 5 /tmp/vllm_397b_serve.log 2>/dev/null || true
+        tail -n 5 "${SERVER_LOG}" 2>/dev/null || true
     fi
     sleep 5
 done
 
 if [ "${READY}" -ne 1 ]; then
     echo "Timed out waiting for server to become ready!"
-    tail -n 100 /tmp/vllm_397b_serve.log
+    tail -n 100 "${SERVER_LOG}"
     kill "${SERVER_PID}" 2>/dev/null || true
     exit 1
 fi
@@ -131,22 +134,59 @@ python3 benchmark_agentic.py \
   --concurrency 1 \
   --save-responses-file "${OUTPUTS_DIR}/bench1_responses.jsonl" 2>&1 | tee "${OUTPUTS_DIR}/bench1_results.log"
 
+if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+    echo "===================================================================="
+    echo " ERROR: vLLM Server crashed during benchmark! Last 120 log lines:"
+    echo "===================================================================="
+    tail -n 120 "${SERVER_LOG}"
+    exit 1
+fi
+
 cp "${OUTPUTS_DIR}/bench1_responses.jsonl" /home/wenxindong_google_com/tpu-inference/bench1_responses.jsonl || true
 cp "${OUTPUTS_DIR}/bench1_responses.txt" /home/wenxindong_google_com/tpu-inference/bench1_responses.txt || true
-gsutil cp "${OUTPUTS_DIR}/bench1_responses.jsonl" gs://wenxindong-vm/trace/dcp_opt/bench1_responses.jsonl || true
-gsutil cp "${OUTPUTS_DIR}/bench1_responses.txt" gs://wenxindong-vm/trace/dcp_opt/bench1_responses.txt || true
+
+python3 -c '
+from google.cloud import storage
+import os
+try:
+    client = storage.Client()
+    bucket = client.bucket("wenxindong-vm")
+    for fname in ["bench1_responses.jsonl", "bench1_responses.txt"]:
+        p = os.path.join(os.environ.get("CDK_OUTPUT_DIR", "/tmp"), fname)
+        if os.path.exists(p):
+            bucket.blob(f"trace/dcp_opt/{fname}").upload_from_filename(p)
+            print(f"Uploaded {fname} to gs://wenxindong-vm/trace/dcp_opt/{fname}")
+except Exception as e:
+    print(f"GCS upload notice: {e}")
+' || true
 
 echo ""
 echo "===================================================================="
 echo " Sample Model Responses for Coherence Inspection:"
 echo "===================================================================="
-head -n 40 "${OUTPUTS_DIR}/bench1_responses.txt" || true
+head -n 50 "${OUTPUTS_DIR}/bench1_responses.txt" || true
 
 echo ""
 echo "===================================================================="
 echo " Benchmark 1 Complete & Profiles Saved!"
 echo " Server is listening on http://localhost:8000 (PID: ${SERVER_PID})"
 echo " Keeping vLLM server running for additional scripts..."
+echo " Drop scripts into ${OUTPUTS_DIR}/cmds/*.sh to execute interactively."
 echo "===================================================================="
-wait "${SERVER_PID}"
+
+mkdir -p "${OUTPUTS_DIR}/cmds" "${OUTPUTS_DIR}/results"
+while kill -0 "${SERVER_PID}" 2>/dev/null; do
+    for script in $(ls "${OUTPUTS_DIR}/cmds"/*.sh 2>/dev/null | sort); do
+        sname="$(basename "${script}")"
+        if [ ! -f "${OUTPUTS_DIR}/results/${sname}.done" ]; then
+            echo "[$(date -u +%T)] Running script: ${script}"
+            bash "${script}" > "${OUTPUTS_DIR}/results/${sname}.log" 2>&1 || true
+            touch "${OUTPUTS_DIR}/results/${sname}.done"
+            echo "[$(date -u +%T)] Finished script: ${script}"
+        fi
+    done
+    sleep 5
+done
+
+echo "Server exited. Script terminating."
 
