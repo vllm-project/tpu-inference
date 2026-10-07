@@ -58,7 +58,8 @@ def test_hbm_usage_bytes_ray_backend():
         "bytes_in_use": 100 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
-    mock_device2 = MagicMock()
+    mock_device1.process_index = jax.process_index()
+    mock_device2 = MagicMock(process_index=jax.process_index())
     mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
 
     devices = [mock_device1, mock_device2]
@@ -67,6 +68,38 @@ def test_hbm_usage_bytes_ray_backend():
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (100 * GBYTES, 128 * GBYTES)]
     assert usage == expected_usage
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_hbm_usage_bytes_remote_devices_listed_first():
+    """A non-leader host whose devices come after remote ones in the list."""
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = {
+        "bytes_in_use": 3 * GBYTES,
+        "bytes_limit": 96 * GBYTES
+    }
+
+    usage = hbm_usage_bytes([remote, remote, local, local])
+
+    assert usage == [(3 * GBYTES, 96 * GBYTES)] * 4
+    remote.memory_stats.assert_not_called()
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("tpu_inference.utils.pathways_hbm_usage_gb")
+def test_hbm_usage_bytes_falls_back_when_no_stats(mock_live_usage):
+    """No device reports stats: estimate instead of returning an empty list,
+    which would budget 0 bytes for the KV cache."""
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = None
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    mock_live_usage.return_value = [(1 * GBYTES, 96 * GBYTES)] * 2
+
+    usage = hbm_usage_bytes([local, remote])
+
+    mock_live_usage.assert_called_once_with([local, remote])
+    assert usage == [(1 * GBYTES, 96 * GBYTES)] * 2
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
