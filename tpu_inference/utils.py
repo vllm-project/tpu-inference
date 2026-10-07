@@ -209,10 +209,22 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
                     "Failed to get memory stats for device %s: %s. ", device,
                     e)
     else:
+        # memory_stats() is only supported for addressable devices. Under
+        # native multi-host (jax.distributed, one process per host) `devices`
+        # also holds other hosts' devices; query only this host's and assume
+        # remote devices have similar usage, as the Ray branch above does.
+        # Do not swap in jax.local_devices(): a single-host worker may use only
+        # some of the host's devices (e.g. TP=4 on an 8-device host), and
+        # counting the rest over-sizes the KV cache until allocation fails.
+        process_index = jax.process_index()
         for device in devices:
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
-            usage.append((hbm_used, hbm_limit))
+            if device.process_index != process_index:
+                continue
+            stats = device.memory_stats()
+            usage.append((stats["bytes_in_use"], stats["bytes_limit"]))
+        num_remote = len(devices) - len(usage)
+        if usage and num_remote > 0:
+            usage.extend([usage[0]] * num_remote)
 
     return usage
 
