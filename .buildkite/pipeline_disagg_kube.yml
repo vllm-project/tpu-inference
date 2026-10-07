@@ -20,6 +20,8 @@
 # into a build alongside other files, and both steps read the same tag. One
 # immutable tag per build, because imagePullPolicy defaults to IfNotPresent, so
 # a reused tag can benchmark another build's push.
+# The commands read it as $$WORKLOAD_IMAGE, at run time: the upload interpolates
+# a bare $WORKLOAD_IMAGE before any step's env exists, and leaves the tag empty.
 x-disagg-image: &disagg_image "us-central1-docker.pkg.dev/cloud-ullm-inference-ci-cd/tpu-inference-ci/disagg-benchmark:kube-${BUILDKITE_BUILD_NUMBER}"
 
 steps:
@@ -33,8 +35,8 @@ steps:
       - gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
       # --pull: the base tag is republished daily, and a copy cached on this
       # agent would silently measure an older nightly.
-      - docker build --pull -f .buildkite/kubernetes/benchmark.Dockerfile -t "$WORKLOAD_IMAGE" .buildkite/kubernetes
-      - docker push "$WORKLOAD_IMAGE"
+      - docker build --pull -f .buildkite/kubernetes/benchmark.Dockerfile -t "$$WORKLOAD_IMAGE" .buildkite/kubernetes
+      - docker push "$$WORKLOAD_IMAGE"
 
   - label: ":kubernetes: :tpu: Kube P/D Disaggregated Benchmark"
     key: "kube_pd_disagg_benchmark"
