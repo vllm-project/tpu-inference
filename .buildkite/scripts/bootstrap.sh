@@ -260,9 +260,6 @@ upload_kube_pipeline() {
       set_kube_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
       set_kube_jax_envs unset
-      # Not nightly_releases.yml: the bare-metal nightly publishes the
-      # vllm/vllm-tpu nightly image, and a second publisher would race it for
-      # the :nightly tag.
       upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
     fi
     # What nightly_verify.yml runs on bare metal on nightly and tag builds: the
@@ -285,7 +282,7 @@ upload_kube_pipeline() {
         upload_with_priority .buildkite/pipeline_disagg_kube.yml "$JOB_PRIORITY"
       fi
       buildkite-agent annotate --style warning --context ci-fleet-gaps \
-        "Not in this kube build: the support matrices nightly_verify.yml builds and the nightly image nightly_releases.yml publishes, both on bare metal."
+        "Not in this kube build: the support matrices nightly_verify.yml builds on bare metal."
     fi
 }
 
@@ -306,7 +303,6 @@ upload_pipeline() {
       set_jax_envs unset
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
       upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     fi
 
