@@ -30,6 +30,8 @@ from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.models.common.compiler_options import \
+    get_sampling_compiler_options
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import VllmSchedulerOutput
@@ -328,7 +330,10 @@ def _distributed_topk_sample(
     return sampled_ids, jnp.any(incomplete)
 
 
-@jax.jit(static_argnames=["mesh", "allow_distributed_sampling"])
+@jax.jit(
+    static_argnames=["mesh", "allow_distributed_sampling"],
+    compiler_options=get_sampling_compiler_options(),
+)
 def sample(
     rng: jax.Array,
     mesh: Mesh,
