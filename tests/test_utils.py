@@ -71,7 +71,8 @@ def test_hbm_usage_bytes_ray_backend():
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
-def test_hbm_usage_bytes_remote_devices_listed_first():
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_remote_devices_listed_first(_):
     """A non-leader host whose devices come after remote ones in the list."""
     remote = MagicMock(process_index=jax.process_index() + 1)
     local = MagicMock(process_index=jax.process_index())
@@ -88,7 +89,8 @@ def test_hbm_usage_bytes_remote_devices_listed_first():
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
 @patch("tpu_inference.utils.pathways_hbm_usage_gb")
-def test_hbm_usage_bytes_falls_back_when_no_stats(mock_live_usage):
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_falls_back_when_no_stats(_, mock_live_usage):
     """No device reports stats: estimate instead of returning an empty list,
     which would budget 0 bytes for the KV cache."""
     local = MagicMock(process_index=jax.process_index())
@@ -145,7 +147,8 @@ def test_hbm_usage_bytes_counts_only_given_devices():
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
-def test_hbm_usage_bytes_non_addressable_devices():
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_non_addressable_devices(_):
     """Remote devices are not queried and reuse a local device's stats."""
     local = MagicMock(process_index=jax.process_index())
     local.memory_stats.return_value = {

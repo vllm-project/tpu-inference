@@ -189,13 +189,11 @@ def _local_memory_stats(device: Any) -> Optional[Tuple[int, int]]:
     if the runtime does not report memory stats for it."""
     try:
         stats = device.memory_stats()
+        return stats["bytes_in_use"], stats["bytes_limit"]
     except Exception as e:
         logger.warning("Failed to get memory stats for device %s: %s", device,
                        e)
         return None
-    if not stats or "bytes_limit" not in stats:
-        return None
-    return stats.get("bytes_in_use", 0), stats["bytes_limit"]
 
 
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
@@ -215,12 +213,16 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
 
-    process_index = jax.process_index()
-    usage = [
-        _local_memory_stats(device)
-        if device.process_index == process_index else None
-        for device in devices
-    ]
+    if jax.process_count() == 1:
+        # Single process: every device is addressable.
+        usage = [_local_memory_stats(device) for device in devices]
+    else:
+        process_index = jax.process_index()
+        usage = [
+            _local_memory_stats(device)
+            if device.process_index == process_index else None
+            for device in devices
+        ]
     sample = next((u for u in usage if u is not None), None)
     if sample is None:
         if devices:
