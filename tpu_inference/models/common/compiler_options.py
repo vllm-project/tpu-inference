@@ -74,4 +74,3 @@ def get_sampling_compiler_options():
         "xla_tpu_enable_sparse_core_collective_offload_2d_all_gather": "false",
         "xla_tpu_enable_sparse_core_collective_offload_3d_all_gather": "false",
     }
-
