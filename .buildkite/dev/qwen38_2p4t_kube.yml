@@ -1,6 +1,7 @@
 # Qwen/Qwen3.8-2.4T-A95B-FP8 on the kube fleet's v7x-32 slice (2x2x4: four
-# hosts, 16 chips, 32 devices): GSM8K + MMLU, an 8k/1k benchmark at C=384 and a
-# decode-only profile at saturation, all against one server.
+# hosts, 16 chips, 32 devices), served once per build with the legs run
+# against it. This build is a prefill test; #71/#72 (described further down)
+# ran GSM8K + MMLU, an 8k/1k benchmark at C=384 and a decode profile.
 #
 # Trigger with DEV_PIPELINE_FILE=.buildkite/dev/qwen38_2p4t_kube.yml
 #
@@ -12,7 +13,50 @@
 # qwen38_2p4t_kube_head.sh on the head, which serves, runs the legs and stops
 # the server. The head uploads ARTIFACTS_DIR (dev_artifacts/) when it returns.
 #
-# This build: #71 plus two knobs of the expert-parallel dispatch permute, the
+# This build: prefill throughput at MAX_NUM_BATCHED_TOKENS=4096 per rank
+# (32768 tokens per step), #72's model configuration otherwise.
+#
+# Traffic: 8192 tokens in, 1 out (--ignore-eos), so every step is prefill. An
+# 8192-token prompt is two 4096-token steps. BENCH_SWEEP "8:128 16:256": one
+# prompt per attn_dp rank, then one running and one queued per rank. The
+# second is saturation: a rank refills from its own queue instead of waiting
+# on the client, so the ranks stay in step.
+#
+# Sizing, per device, from #31's measured scratch fit and #72's footprint:
+#   MAX_NUM_SEQS 48 -> 2: GDN slots 392 -> 24 (0.41 GiB).
+#   NUM_GPU_BLOCKS_OVERRIDE 28928 -> 2688 = 8 x 336, enough for one full
+#     max_model_len request (40960 = 320 blocks) per rank; this traffic needs
+#     2 x 65 + 1 = 131. 0.47 GiB.
+#   Resident = 80.52 weights + 0.88 KV + ~0.14 = 81.54 GiB, leaving 13.20 GiB
+#   for the largest step. Scratch at 32768 aggregate tokens = 0.404 GiB +
+#   0.3144 MiB/token = 10.47 GiB (#31), plus ~0.75 for #72's fp8 and
+#   hierarchical halves: ~2.0-2.7 GiB of headroom. #29 ran 32768 aggregate at
+#   81.58 GiB resident. 8192/rank (65536) needs 16-20 GiB: it does not fit
+#   with fused_moe_gmm.
+#   The SparseCore gather and gather-reduce were checked on a v7x core at
+#   these shapes (327680 rows of 8192): exact, and equal to bf16 rounding.
+#
+# Carries the memory_analysis logging commit (e41700d1e): precompile prints
+# "Memory analysis of backbone ... | temp=..." for every bucket, so the 32768
+# bucket's scratch is read, not inferred.
+#
+# No evals: at 2 sequences per rank GSM8K would take hours, and the token
+# budget changes chunk boundaries, not the model's math (#29: GSM8K unchanged
+# at 8192/rank). Profile: one prefill_only capture of 5 steps at 8 requests,
+# in the first leg's warmup. NUM_WARMUPS=32 keeps the capture and its trace
+# write inside that warmup.
+#
+# WHAT TO READ FIRST:
+#   1. "Memory analysis of backbone" at the 32768 bucket: temp vs the
+#      predicted 10.5-11.2 GiB, and precompile completing.
+#   2. Prompt throughput per leg (bench_c8/bench_c16, metrics_c*.json) vs #72's
+#      13,107 tok/s while admitting at 512/rank; step time from the 5-s series.
+#   3. The capture: 8 requests, 32768 padded tokens per step, PREFILL_ONLY.
+#   4. TTFT at C=8 (two steps plus the client gap) vs C=16.
+#
+# ---- #72's description follows ----
+#
+# #72: #71 plus two knobs of the expert-parallel dispatch permute, the
 # SparseCore ragged_gather_v2 kernel (fused_moe_gmm.py; used because
 # ONEHOT_MOE_PERMUTE_THRESHOLD is 0):
 #
@@ -120,7 +164,7 @@ steps:
       BM_INFRA: "true"
       TPU_VERSION: "tpu7x"
 
-  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 (kube v7x-32, model=4 x attn_dp=8, C=384, hierarchical dispatch+collect, fp8 dispatch gather, skip-mamba blocks, ragged gather subchunks=1 no-trim, GSM8K+MMLU, decode profile)"
+  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 prefill (kube v7x-32, #72 config, MNBT 4096/rank, 2 seqs/rank, pool 2688, 8k in / 1 out at C=8 and C=16, prefill profile)"
     key: qwen38_2p4t_kube_v7x32
     depends_on: "build_docker_tpu7x"
     # Counted from when the agent takes the job, so it includes any wait for
@@ -134,8 +178,8 @@ steps:
       MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
       MULTIHOST_SHAPE: "tpu7x-standard-4t/2x2x4"
       ARTIFACTS_DIR: "dev_artifacts"
-      # From admission. #55 took 1h36m including the image build: ~55 min to
-      # /health, ~8 min GSM8K, ~19 min MMLU, ~12 min for two benchmark waves.
+      # From admission: ~60 min to /health with three more token buckets to
+      # compile, then a few minutes of legs.
       TPU_MAX_RUNTIME_SECONDS: "14400"
     plugins:
       - kubernetes:
@@ -146,10 +190,10 @@ steps:
     # (USE_BATCHED_RPA_KERNEL is read at import time; USE_BATCHED_RPA_SEQ_ON_LANE
     # selects the KV layout that makes a per-device page 65,536 B). In order:
     # common runtime and loading, the requantization patterns, the four options
-    # #71 validated, the two ragged-gather knobs, serve.sh, client.sh (a warmup
-    # wave of 384, then the measured wave), the decode profile, eval_std.sh (add gpqa to
-    # STD_EVAL_SUITE to run it with the GPQA_* settings), eval.sh (off), and
-    # ART_DIR, which is ARTIFACTS_DIR under the image's WORKDIR.
+    # #71 validated, the two ragged-gather knobs, serve.sh, client.sh (two
+    # prefill legs, each after its warmups), the prefill profile, eval_std.sh
+    # (off; add tasks to STD_EVAL_SUITE), eval.sh (off), and ART_DIR, which is
+    # ARTIFACTS_DIR under the image's WORKDIR.
     commands:
       - |
         set -euo pipefail
@@ -180,9 +224,9 @@ steps:
           'TENSOR_PARALLEL_SIZE=32' \
           'ATTN_DP_SIZE=8' \
           'MAX_MODEL_LEN=40960' \
-          'MAX_NUM_SEQS=48' \
-          'NUM_GPU_BLOCKS_OVERRIDE=28928' \
-          'MAX_NUM_BATCHED_TOKENS=512' \
+          'MAX_NUM_SEQS=2' \
+          'NUM_GPU_BLOCKS_OVERRIDE=2688' \
+          'MAX_NUM_BATCHED_TOKENS=4096' \
           'COMPILATION_SIZES=384' \
           'GPU_MEMORY_UTILIZATION=0.98' \
           'BLOCK_SIZE=128' \
@@ -190,18 +234,17 @@ steps:
           'JAX_CACHE_GUARD=0' \
           'SERVE_DEBUG_ERRORS=0' \
           'INPUT_LEN=8192' \
-          'OUTPUT_LEN=1024' \
-          'NUM_PROMPTS=384' \
-          'MAX_CONCURRENCY=384' \
-          'BENCH_SWEEP=384:384' \
-          'NUM_WARMUPS=384' \
+          'OUTPUT_LEN=1' \
+          'NUM_PROMPTS=256' \
+          'MAX_CONCURRENCY=16' \
+          'BENCH_SWEEP=8:128 16:256' \
+          'NUM_WARMUPS=32' \
           'PHASED_PROFILING_DIR=/workspace/tpu_inference/dev_artifacts/profiles' \
-          'PHASED_PROFILER_DECODE_ONLY_KV_LEN_THRESHOLD=8250' \
           'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
           'PHASED_PROFILER_TRACK_CONCURRENCY=1' \
-          'PHASED_PROFILER_TARGET_CONCURRENCY=384' \
-          'PHASED_PROFILER_ONLY_PHASES=decode_only' \
-          'STD_EVAL_SUITE=gsm8k,mmlu' \
+          'PHASED_PROFILER_TARGET_CONCURRENCY=8' \
+          'PHASED_PROFILER_ONLY_PHASES=prefill_only' \
+          'STD_EVAL_SUITE=none' \
           'GPQA_REASONING_EFFORT=xhigh' \
           'GPQA_SAMPLING=greedy' \
           'GPQA_SYSTEM_PROMPT=Answer with only the letter in parentheses, e.g. (A).' \
