@@ -24,7 +24,9 @@ VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
 TAG="nightly-$(date +%Y%m%d)-${BUILDKITE_COMMIT:0:7}-${VLLM_COMMIT_HASH:0:7}"
 echo "--- Building vllm/vllm-tpu:${TAG} (vLLM ${VLLM_COMMIT_HASH})"
 
-yes | docker system prune -a
+# -f rather than piping yes: under pipefail, yes dying of SIGPIPE once prune
+# has its answer fails the script (exit 141).
+docker system prune -a -f
 docker build --build-arg VLLM_COMMIT_HASH="${VLLM_COMMIT_HASH}" --no-cache \
   -f docker/Dockerfile -t vllm/vllm-tpu:nightly -t "vllm/vllm-tpu:${TAG}" .
 
