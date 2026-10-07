@@ -410,14 +410,16 @@ if contains_element "$DATASET" "${DATASETS[@]}"; then
   fi
 fi
 
-# sonnet ships inside the vLLM checkout rather than the GCS bucket, so it is
-# built here instead of being synced above. `vllm bench serve` samples each
-# prompt from a distinct slice of the file, and one copy of sonnet.txt is too
-# short to fill 1800-token inputs at 1000 prompts -- concatenating it four times
-# is what bm-infra did, and the recorded throughput history these cases continue
-# was measured against that same 4x file.
+# sonnet ships in this repo rather than the GCS bucket, so it is built here
+# instead of being synced above. It is vLLM's benchmarks/sonnet.txt, byte for
+# byte, kept here since vLLM removed it and its sonnet loader (vllm #60129);
+# the sonnet cases run scripts/vllm/benchmarking/benchmark_serving.py, which
+# still has one. The client samples each prompt from a distinct slice of the
+# file, and one copy is too short to fill 1800-token inputs at 1000 prompts --
+# concatenating it four times is what bm-infra did, and the recorded throughput
+# history these cases continue was measured against that same 4x file.
 if [[ "$DATASET" == "sonnet" ]]; then
-  SONNET_SRC="/workspace/vllm/benchmarks/sonnet.txt"
+  SONNET_SRC="/workspace/tpu_inference/scripts/vllm/benchmarking/sonnet.txt"
   SONNET_4X="$DATASET_DIR/sonnet_4x.txt"
   if [[ ! -f "$SONNET_SRC" ]]; then
     echo "[ERROR] $SONNET_SRC not found; cannot build the sonnet dataset."
