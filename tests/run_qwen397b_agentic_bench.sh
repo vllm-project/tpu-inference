@@ -142,10 +142,8 @@ python3 benchmark_agentic.py \
   --concurrency 2 2>&1 | tee "${OUTPUTS_DIR}/bench2_results.log"
 
 echo ""
-echo "Shutting down vLLM server..."
-kill "${SERVER_PID}" 2>/dev/null || true
-wait "${SERVER_PID}" 2>/dev/null || true
-
 echo "===================================================================="
-echo " All Benchmarks Completed Successfully!"
+echo " Benchmarks Complete! Keeping vLLM server running for additional scripts..."
+echo " Server is listening on http://localhost:8000 (PID: ${SERVER_PID})"
 echo "===================================================================="
+wait "${SERVER_PID}"
