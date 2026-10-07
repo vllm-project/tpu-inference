@@ -13,7 +13,28 @@
 # qwen38_2p4t_kube_head.sh on the head, which serves, runs the legs and stops
 # the server. The head uploads ARTIFACTS_DIR (dev_artifacts/) when it returns.
 #
-# This build: prefill throughput at MAX_NUM_BATCHED_TOKENS=4096 per rank
+# This build: #73 again, to capture the prefill profile #73 missed. Server
+# and traffic are #73's; only the profiler and the leg order change.
+#
+#   PHASED_PROFILER_ONLY_PHASES=prefill_heavy (was prefill_only). Under
+#     attn_dp the profiler's step total is one rank's token count
+#     (tpu_runner.py:2824) while prefill tokens are summed over all ranks, so
+#     a full prefill step reads ratio 8.0: PREFILL_HEAVY, never PREFILL_ONLY.
+#   BENCH_SWEEP "16:256 8:128" (was 8:128 16:256). The capture targets a step
+#     with 8 scheduled requests, i.e. every rank prefilling. At C=8 #73's ranks
+#     ran as groups of 1 and 7 and never formed one; at C=16 every step does.
+#     Running C=16 first puts the capture in its warmup, at saturation.
+#   NUM_WARMUPS 32 -> 64 and PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR 5 -> 4:
+#     the capture (4 steps of ~2 s) and its trace write end inside the warmup.
+#
+# WHAT TO READ FIRST: one "Starting profiling for prefill_heavy_concur_8
+# phase"; its batch composition (8 requests, 32768 padded tokens); the step's
+# device time vs the ~2.02 s #73 inferred from throughput; the leg numbers
+# against #73's 16,218 / 8,661 tok/s.
+#
+# ---- #73's description follows ----
+#
+# #73: prefill throughput at MAX_NUM_BATCHED_TOKENS=4096 per rank
 # (32768 tokens per step), #72's model configuration otherwise.
 #
 # Traffic: 8192 tokens in, 1 out (--ignore-eos), so every step is prefill. An
@@ -164,7 +185,7 @@ steps:
       BM_INFRA: "true"
       TPU_VERSION: "tpu7x"
 
-  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 prefill (kube v7x-32, #72 config, MNBT 4096/rank, 2 seqs/rank, pool 2688, 8k in / 1 out at C=8 and C=16, prefill profile)"
+  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 prefill (kube v7x-32, #73 rerun: MNBT 4096/rank, 8k in / 1 out at C=16 then C=8, prefill_heavy profile at saturation)"
     key: qwen38_2p4t_kube_v7x32
     depends_on: "build_docker_tpu7x"
     # Counted from when the agent takes the job, so it includes any wait for
@@ -237,13 +258,13 @@ steps:
           'OUTPUT_LEN=1' \
           'NUM_PROMPTS=256' \
           'MAX_CONCURRENCY=16' \
-          'BENCH_SWEEP=8:128 16:256' \
-          'NUM_WARMUPS=32' \
+          'BENCH_SWEEP=16:256 8:128' \
+          'NUM_WARMUPS=64' \
           'PHASED_PROFILING_DIR=/workspace/tpu_inference/dev_artifacts/profiles' \
-          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=5' \
+          'PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR=4' \
           'PHASED_PROFILER_TRACK_CONCURRENCY=1' \
           'PHASED_PROFILER_TARGET_CONCURRENCY=8' \
-          'PHASED_PROFILER_ONLY_PHASES=prefill_only' \
+          'PHASED_PROFILER_ONLY_PHASES=prefill_heavy' \
           'STD_EVAL_SUITE=none' \
           'GPQA_REASONING_EFFORT=xhigh' \
           'GPQA_SAMPLING=greedy' \
