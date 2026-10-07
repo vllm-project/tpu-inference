@@ -17,6 +17,9 @@
 # side. Five files have no TPU step to migrate at all - their work sits on cpu
 # behind a TODO.
 #
+# bootstrap.sh uploads this file, beside pipeline_build.yml, for a kube build
+# with CI_LANES=features (see ci_fleet.sh).
+#
 # A build is one generation. The defaults are v6e; a v7x build sets
 # TPU_VERSION=tpu7x and KUBE_SHAPE_SINGLE/KUBE_SHAPE_MULTI to tpu7x shapes. The
 # multi-host steps run only in a v7x build, as on bare metal, where the
@@ -24,9 +27,6 @@
 #
 # Chips, topology, Kueue queue, caches and deadlines come from the cluster-side
 # profile registry in ci-infra; a step names only a shape and a command.
-#
-# Everything uploads as one file because every upload brings in
-# pipeline_build.yml again, and a second copy collides on its keys.
 #
 # Do not add a pipeline-level `env:` block: a name set there wins over one
 # passed to `bk build create --env` and could no longer be overridden per
@@ -53,21 +53,6 @@ x-kube-plugin: &kube_plugin
     - *kube_plugin
 
 steps:
-  # The image comes from pipeline_build.yml, as on bare metal. There bootstrap.sh
-  # uploads it after publishing the vLLM pin that setup_docker_env.sh reads from
-  # build metadata; this pipeline does not run bootstrap.sh, so this step does
-  # both. Each build there records its pushed tag as ci-image-<generation>,
-  # which run.sh reads back.
-  - label: ":pipeline: Upload the image build"
-    agents:
-      queue: "cpu"
-    commands:
-      - |
-        source .buildkite/scripts/configs/pipeline_config.sh
-        buildkite-agent meta-data set VLLM_COMMIT_HASH \
-          "$${VLLM_COMMIT_HASH:-$$(get_vllm_commit_hash)}"
-        buildkite-agent pipeline upload .buildkite/pipeline_build.yml
-
   # The bare-metal files mark every test soft_fail so the record step after it
   # is still reached. That is not needed here: allow_failure on the record
   # step's own dependency reaches it just the same, and `buildkite-agent step
@@ -76,14 +61,19 @@ steps:
   # the recorder exits non-zero on anything but a pass - but the test itself now
   # reads as failed rather than tolerated, which is the question this lane asks.
   #
-  # Eight chips, because the offload tests shard across a whole node.
+  # Eight chips, because the offload tests shard across a whole node. Always
+  # a v6e-8 node, in a v7x build too, as bare metal pins KV_Cache_Offload.yml
+  # to tpu_v6e_8_queue: on v7x the accuracy test fails (issue #3683). The
+  # workload runs as tpu6e on the tpu6e image, which run.sh requires for a v6e
+  # shape; the keys keep the build's generation so the record steps match.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
     key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
     env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      SHAPE: "ct6e-standard-8t/2x4"
+      TPU_VERSION: "tpu6e"
       USE_V6E8_QUEUE: "True"
     <<: *tpu_step
+    depends_on: "build_docker_tpu6e"
     commands:
       - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py
 
@@ -107,11 +97,11 @@ steps:
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for KV Cache Offload"
     key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
     env:
-      SHAPE: *shape_multi
-      TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      SHAPE: "ct6e-standard-8t/2x4"
+      TPU_VERSION: "tpu6e"
       USE_V6E8_QUEUE: "True"
     depends_on:
-      - "build_docker_${TPU_VERSION:-tpu6e}"
+      - "build_docker_tpu6e"
       - "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
     timeout_in_minutes: 1440
     agents:
@@ -1030,9 +1020,8 @@ steps:
   # ---- multi-host ----
 
   # The only step here that spans two hosts. Everything else is one pod holding
-  # every chip on a node; this needs a slice, so it names a manifest instead of
-  # a shape and the shape comes from that manifest's nodeSelector. The slice is
-  # 2x2x2 tpu7x - the whole v7x fleet - so it waits for every chip to be free.
+  # every chip on a node; this needs a slice, so it names a manifest and the
+  # slice it asks for instead of a shape. The slice is 2x2x2 tpu7x.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for multi-host"
     key: "${TPU_VERSION:-tpu6e}_multi-host_CorrectnessTest"
     if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
@@ -1043,8 +1032,10 @@ steps:
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
       USE_PREBUILT_IMAGE: "1"
-      # Read by run.sh on the agent, not forwarded: it selects the JobSet.
+      # Read by run.sh on the agent, not forwarded: they select the JobSet
+      # and the slice it asks for.
       MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MULTIHOST_SHAPE: "tpu7x-standard-4t/2x2x2"
       MODEL: "gs://tpu-commons-ci/qwen/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
       TENSOR_PARALLEL_SIZE: "16"
       ASYNC_SCHEDULING: "1"
