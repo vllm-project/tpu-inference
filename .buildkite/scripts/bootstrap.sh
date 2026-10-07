@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the shared pipeline config file.
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
+# shellcheck source=nightly_suites.sh
+source "${SCRIPT_DIR}/nightly_suites.sh"
 
 determine_job_priority() {
   local priority=""
@@ -227,6 +229,33 @@ upload_kube_lane() {
     } | buildkite-agent pipeline upload
 }
 
+# A suite's bare-metal files whose steps all run on the cpu queue. They are
+# placeholders that record a model, feature or kernel as unverified for the
+# support matrix, with nothing to run on a TPU, so they have no kube version
+# and a kube nightly uploads them as they are. A file with TPU steps that has
+# no kube version beside it goes in KUBE_MISSING, for the build annotation.
+KUBE_MISSING=()
+upload_cpu_only_files() {
+    local suite="$1" f queues
+    local -a files=()
+    for f in ".buildkite/${suite}"/*.yml ".buildkite/${suite}"/*/*.yml; do
+        [[ -f "${f}" && "${f}" != */kube/* ]] || continue
+        queues=$(grep -oE 'queue:[[:space:]]*"?[^"[:space:],}#]+' "${f}" | sed -E 's/queue:[[:space:]]*"?//' | sort -u || true)
+        if [[ "${queues}" == "cpu" ]]; then
+            files+=("${f}")
+        elif [[ -d ".buildkite/${suite}/kube" && ! -f ".buildkite/${suite}/kube/$(basename "${f}")" ]]; then
+            KUBE_MISSING+=("${f}")
+        fi
+    done
+    [[ "${#files[@]}" -gt 0 ]] || return 0
+    echo "--- :pipeline: Uploading ${#files[@]} cpu-only file(s) from .buildkite/${suite} with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+    {
+        echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
+        echo "steps:"
+        grep -hv '^steps:' "${files[@]}"
+    } | buildkite-agent pipeline upload
+}
+
 # The kube files in place of upload_pipeline's. A scheduled kube run sets
 # CI_LANES to some of jax, models, features, parallelism and rl, and runs the
 # one generation its schedule names (TPU_VERSION and the KUBE_SHAPE_* env); any
@@ -263,15 +292,18 @@ upload_kube_pipeline() {
       upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
     fi
     # What nightly_verify.yml runs on bare metal on nightly and tag builds: the
-    # models, features, parallelism and rl suites for both generations. Their
-    # step keys carry TPU_VERSION, so each file uploads once per generation in
-    # the same build. The support matrices are built on bare metal only.
+    # suites nightly_suites names, for both generations. Their step keys carry
+    # TPU_VERSION, so each file uploads once per generation in the same build.
+    # The support matrices are built on bare metal only.
     if [[ "${NIGHTLY:-0}" == "1" || -n "${BUILDKITE_TAG:-}" ]]; then
       local gen suite
       for gen in v6 v7; do
         set_kube_jax_envs "${gen}"
-        for suite in models features parallelism rl; do
-          upload_kube_lane "${suite}"
+        for suite in $(nightly_suites); do
+          case "${suite}" in
+            models|features|parallelism|rl) upload_kube_lane "${suite}" ;;
+          esac
+          upload_cpu_only_files "${suite}"
         done
         set_kube_jax_envs unset
       done
@@ -281,8 +313,11 @@ upload_kube_pipeline() {
       if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
         upload_with_priority .buildkite/pipeline_disagg_kube.yml "$JOB_PRIORITY"
       fi
-      buildkite-agent annotate --style warning --context ci-fleet-gaps \
-        "Not in this kube build: the support matrices nightly_verify.yml builds on bare metal."
+      local gaps="Not in this kube build: the support matrices nightly_verify.yml builds on bare metal."
+      if [[ "${#KUBE_MISSING[@]}" -gt 0 ]]; then
+        gaps+=" Also missing, bare-metal files with TPU steps and no kube version: $(printf '%s\n' "${KUBE_MISSING[@]}" | sort -u | xargs)."
+      fi
+      buildkite-agent annotate --style warning --context ci-fleet-gaps "${gaps}"
     fi
 }
 
