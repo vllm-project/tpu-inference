@@ -64,18 +64,15 @@ add_kernel_microbenchmarks() {
   fi
 }
 
-case "${MODEL_IMPL_TYPE}" in
-  "auto")
-    TARGET_FOLDERS=("parallelism" "models" "features" "rl")
+# shellcheck source=nightly_suites.sh
+source "$(dirname "${BASH_SOURCE[0]}")/nightly_suites.sh"
+for suite in $(nightly_suites); do
+  if [[ "${suite}" == "kernel_microbenchmarks" ]]; then
     add_kernel_microbenchmarks
-    ;;
-  "flax_nnx")
-    TARGET_FOLDERS=("quantization" "parallelism" "features")
-    ;;
-  "vllm")
-    TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
-    ;;
-esac
+  else
+    TARGET_FOLDERS+=("${suite}")
+  fi
+done
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()

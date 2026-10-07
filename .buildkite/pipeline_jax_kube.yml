@@ -221,7 +221,7 @@ steps:
           --ignore=/workspace/tpu_inference/tests/kernels/collectives \
           --ignore=/workspace/tpu_inference/tests/kernels/spmm_v1_test.py
 
-  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests single chip - test_lora"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models single chip - test_lora"
     if: build.env("NIGHTLY") == "1"
     env:
       SHAPE: *shape_single
@@ -232,7 +232,7 @@ steps:
     commands:
       - .buildkite/kubernetes/run.sh python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_lora.py
 
-  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests single chip - test_lora_adapter"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models single chip - test_lora_adapter"
     if: build.env("NIGHTLY") == "1"
     env:
       SHAPE: *shape_single
@@ -255,7 +255,7 @@ steps:
           'python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_bgmv.py && \
            python3 -m pytest -s -v -x /workspace/tpu_inference/tests/lora/test_layers.py'
 
-  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer JAX UniProcExecutor"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer JAX UniProcExecutor"
     env:
       SHAPE: *shape_single
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -264,7 +264,7 @@ steps:
     commands:
       - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/e2e/test_runai_model_streamer_loader.py::test_correctness_jax_uni_proc_executor
 
-  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer Torchax UniProcExecutor"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax UniProcExecutor"
     env:
       SHAPE: *shape_single
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -333,7 +333,7 @@ steps:
     commands:
       - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh
 
-  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests multi chips"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} lora e2e tests for JAX + vLLM models multi chips"
     env:
       SHAPE: *shape_multi
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -377,7 +377,7 @@ steps:
     commands:
       - .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/.buildkite/kubernetes/disagg_multi_host.sh
 
-  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Runai Model Streamer Torchax RayDistributedExecutor"
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness Test | Runai Model Streamer Torchax RayDistributedExecutor"
     env:
       SHAPE: *shape_multi
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
