@@ -68,7 +68,7 @@ class PCPMetadata:
         "mamba_state_indices",
         "pcp",
     ],
-    meta_fields=["padded_num_reqs", "pcp_cache_pages"],
+    meta_fields=["padded_num_reqs", "pcp_cache_pages", "is_decode"],
 )
 @dataclass
 class AttentionMetadata(object):
@@ -101,6 +101,7 @@ class AttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+    is_decode: bool = False
 
     # PCP only. Number of kv pages occupied by the current request.
     pcp_cache_pages: int | None = None
@@ -115,7 +116,7 @@ class AttentionMetadata(object):
         "request_distribution",
         "mamba_state_indices",
     ],
-    meta_fields=["padded_num_reqs"],
+    meta_fields=["padded_num_reqs", "is_decode"],
 )
 @dataclass
 class SharedAttentionMetadata(object):
@@ -142,6 +143,7 @@ class SharedAttentionMetadata(object):
     # power of 2 between min and max requests.
     # Env var ATTN_CUSTOM_NUM_REQS_BUCKETS can manually override the buckets.
     padded_num_reqs: int = -1
+    is_decode: bool = False
 
 
 class GroupedAttentionMetadata(dict):

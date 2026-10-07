@@ -146,6 +146,7 @@ def _decode_core_impl(
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
+            is_decode=True,
         )
         shared_attn_metadata = SharedAttentionMetadata(
             input_positions=pos,
@@ -153,6 +154,7 @@ def _decode_core_impl(
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
+            is_decode=True,
         )
         kvc, hidden_states, _, expert_indices_step = model_fn(
             state,
@@ -463,6 +465,7 @@ def continue_decode(
                 query_start_loc=attn.query_start_loc,
                 request_distribution=attn.request_distribution,
                 mamba_state_indices=attn.mamba_state_indices,
+                is_decode=True,
             )
             shared_am = SharedAttentionMetadata(
                 input_positions=input_positions,
@@ -470,6 +473,7 @@ def continue_decode(
                 query_start_loc=attn.query_start_loc,
                 request_distribution=attn.request_distribution,
                 mamba_state_indices=attn.mamba_state_indices,
+                is_decode=True,
             )
             _, _, _, experts = model_fn(state,
                                         kv_caches,
@@ -546,6 +550,7 @@ def continue_decode(
             query_start_loc=attn.query_start_loc,
             request_distribution=attn.request_distribution,
             mamba_state_indices=attn.mamba_state_indices,
+            is_decode=True,
         ),
         step_counter=step_counter.astype(jnp.int32),
     )
