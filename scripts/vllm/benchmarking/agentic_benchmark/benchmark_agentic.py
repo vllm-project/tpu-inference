@@ -611,6 +611,20 @@ async def main_async(args: argparse.Namespace):
                     )
                 else:
                     print("Server health check OK.")
+            async with session.get(
+                    f"http://{args.host}:{args.port}/v1/models") as resp:
+                if resp.status == 200:
+                    models_data = await resp.json()
+                    available_models = [m.get("id") for m in models_data.get("data", [])]
+                    if args.model not in available_models and len(available_models) > 0:
+                        for cand in [args.model, f"{args.model}-FP8", args.model_path_or_id]:
+                            if cand in available_models:
+                                print(f"Resolved model '{args.model}' -> '{cand}' on server.")
+                                args.model = cand
+                                break
+                        else:
+                            print(f"Using server model '{available_models[0]}' for '{args.model}'.")
+                            args.model = available_models[0]
         except Exception as e:
             print(f"Error connecting to server health endpoint: {e}")
             print("Please ensure vLLM serve was started before running.")

@@ -84,6 +84,7 @@ vllm serve "${MODEL_PATH}" \
   --mamba-cache-mode align \
   --prefix-cache-retention-interval 0 \
   --enable-expert-parallel \
+  --served-model-name Qwen/Qwen3.5-397B-A17B Qwen/Qwen3.5-397B-A17B-FP8 \
   --decode-context-parallel-size 4 > /tmp/vllm_397b_serve.log 2>&1 &
 
 SERVER_PID=$!
