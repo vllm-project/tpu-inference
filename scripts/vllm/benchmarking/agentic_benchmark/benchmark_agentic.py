@@ -922,6 +922,15 @@ async def main_async(args: argparse.Namespace):
     print_report(all_stats, total_duration_sec, args, num_batches=num_batches)
 
 
+def parse_time_seconds(val: Any) -> float:
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip()
+    if s.endswith("s") or s.endswith("S"):
+        s = s[:-1]
+    return float(s)
+
+
 def main():
     """Main parsing entry point for the script."""
     parser = argparse.ArgumentParser(
@@ -948,32 +957,40 @@ def main():
                         help="vLLM server port.")
     parser.add_argument(
         "--num-groups",
+        "--num_groups",
         type=int,
         default=None,
+        dest="num_groups",
         help="Total number of GRPO groups (requests) to simulate. Defaults to 2, "
         "or to every group in --trace-file when replaying a trace.",
     )
     parser.add_argument(
         "--num-batches",
+        "--num_batches",
         type=int,
         default=None,
+        dest="num_batches",
         help="Number of batches of requests to simulate. Each batch runs "
         "--concurrency number of groups. If not set, runs a single batch "
         "(or ceil(num_groups / concurrency) batches when num_groups is set).",
     )
     parser.add_argument(
         "--time-between-batches",
-        type=float,
+        "--time_between_batches",
+        type=parse_time_seconds,
         default=0.0,
+        dest="time_between_batches",
         help="Time in seconds between launching consecutive batches to the "
         "server. Each batch of --concurrency groups is dispatched at intervals "
         "of time_between_batches seconds.",
     )
     parser.add_argument(
         "--group-size",
+        "--group_size",
         "-g",
         type=int,
         default=None,
+        dest="group_size",
         help="Group size (number of parallel streams per prompt). Defaults "
         f"to {DEFAULT_GROUP_SIZE}, or to every stream a --trace-file group "
         "holds when replaying a trace. Replaying a trace keeps the first "
