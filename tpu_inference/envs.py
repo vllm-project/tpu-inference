@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
-    DCP_DECODE_ONLY_OPT: bool = False
+    DCP_DECODE_ONLY_OPT: bool = True
     DCP_PROJ_REPLICATE: bool = False
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
@@ -385,7 +385,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
     "DCP_DECODE_ONLY_OPT":
-    env_bool("DCP_DECODE_ONLY_OPT"),
+    env_bool("DCP_DECODE_ONLY_OPT", default=True),
     "DCP_PROJ_REPLICATE":
     env_bool("VLLM_DCP_PROJ_REPLICATE"),
     # Optional operator override for RPA v3 kernel block sizes, per case.

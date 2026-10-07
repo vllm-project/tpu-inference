@@ -185,6 +185,37 @@ def load_trace(path: str) -> List[List[Dict[str, Any]]]:
     return [groups[k] for k in sorted(groups)]
 
 
+def record_response_turn(stat: Dict[str, Any], args: argparse.Namespace) -> None:
+    out_path = getattr(args, "save_responses_file", None)
+    if not out_path:
+        return
+    try:
+        parent_dir = os.path.dirname(os.path.abspath(out_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        rec = {
+            "group_idx": stat.get("group_idx"),
+            "stream_idx": stat.get("stream_idx"),
+            "turn": stat.get("turn"),
+            "num_turns": stat.get("num_turns"),
+            "output_tokens": stat.get("output_tokens"),
+            "input_history_tokens": stat.get("input_history_tokens"),
+            "success": stat.get("success"),
+            "response_text": stat.get("response_text", ""),
+        }
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+
+        txt_path = out_path + ".txt" if not out_path.endswith(".jsonl") else out_path[:-6] + ".txt"
+        with open(txt_path, "a", encoding="utf-8") as f:
+            f.write(f"=== Group {stat.get('group_idx')} | Stream {stat.get('stream_idx')} | Turn {stat.get('turn')}/{stat.get('num_turns')} | Tokens: {stat.get('output_tokens')} ===\n")
+            f.write(stat.get("response_text", "") + "\n\n")
+            f.flush()
+    except Exception:
+        pass
+
+
 async def run_grpo_stream(
     session: aiohttp.ClientSession,
     url: str,
@@ -354,6 +385,7 @@ async def run_grpo_stream(
                                           args.tool_time_max)
             turn_stat["tool_time_s"] = idle
             stats.append(turn_stat)
+            record_response_turn(turn_stat, args)
             if idle > 0:
                 await asyncio.sleep(idle)
 
@@ -665,6 +697,17 @@ async def main_async(args: argparse.Namespace):
         async with semaphore:
             return await run_group(session, url, args.model, tokenizer,
                                    group_idx, args, global_prefix, specs)
+
+    if getattr(args, "save_responses_file", None):
+        out_path = args.save_responses_file
+        parent_dir = os.path.dirname(os.path.abspath(out_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            pass
+        txt_path = out_path + ".txt" if not out_path.endswith(".jsonl") else out_path[:-6] + ".txt"
+        with open(txt_path, "w", encoding="utf-8") as f:
+            pass
 
     start_time = time.perf_counter()
 
