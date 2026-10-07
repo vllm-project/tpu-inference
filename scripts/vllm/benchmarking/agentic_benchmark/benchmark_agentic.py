@@ -11,6 +11,8 @@ This script simulates a continuous stream of GRPO training requests:
   fill from other streams.
 - All streams run concurrently and asynchronously, testing vLLM's ability
   to handle prefix caching and async scheduling of multi-turn conversations.
+- Requests are grouped into batches of size --concurrency, dispatched to the
+  server at intervals of --time-between-batches seconds.
 """
 
 import argparse
@@ -148,6 +150,7 @@ def read_trace(path: str) -> str:
     bucket, _, blob = path[len("gs://"):].partition("/")
     if not bucket or not blob:
         raise ValueError(f"malformed GCS URI: {path}")
+
     try:
         from google.cloud import storage
     except ImportError:
@@ -185,6 +188,146 @@ def load_trace(path: str) -> List[List[Dict[str, Any]]]:
     return [groups[k] for k in sorted(groups)]
 
 
+def record_response_turn(stat: Dict[str, Any],
+                         args: argparse.Namespace) -> None:
+    """Saves individual turn responses to a JSONL and text file if requested."""
+    out_path = getattr(args, "save_responses_file", None)
+    if not out_path:
+        return
+    try:
+        parent_dir = os.path.dirname(os.path.abspath(out_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        rec = {
+            "batch_idx": stat.get("batch_idx", 0),
+            "group_idx": stat.get("group_idx"),
+            "stream_idx": stat.get("stream_idx"),
+            "traj_id": stat.get("traj_id"),
+            "turn": stat.get("turn"),
+            "num_turns": stat.get("num_turns"),
+            "output_tokens": stat.get("output_tokens"),
+            "input_history_tokens": stat.get("input_history_tokens"),
+            "success": stat.get("success"),
+            "response_text": stat.get("response_text", ""),
+        }
+        with open(out_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+
+        txt_path = (out_path + ".txt" if not out_path.endswith(".jsonl")
+                    else out_path[:-6] + ".txt")
+        with open(txt_path, "a", encoding="utf-8") as f:
+            f.write(
+                f"=== Batch {stat.get('batch_idx', 0)} | Group {stat.get('group_idx')} | "
+                f"Stream {stat.get('stream_idx')} | Turn {stat.get('turn')}/{stat.get('num_turns')} | "
+                f"Tokens: {stat.get('output_tokens')} ===\n"
+            )
+            f.write(stat.get("response_text", "") + "\n\n")
+            f.flush()
+    except Exception:
+        pass
+
+
+def save_trajectory_metrics(
+    all_stats: List[Dict[str, Any]],
+    total_duration_sec: float,
+    num_batches: int,
+    time_between_batches: float,
+    concurrency: int,
+    batch_launch_times: List[float],
+    args: argparse.Namespace,
+) -> None:
+    """Saves turn-by-turn and trajectory-level metrics in JSONL for visualization."""
+    out_path = getattr(args, "save_trajectory_file", None)
+    if not out_path:
+        return
+    try:
+        parent_dir = os.path.dirname(os.path.abspath(out_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+
+        trajectories: Dict[str, List[Dict[str, Any]]] = {}
+        for stat in all_stats:
+            traj_id = stat.get("traj_id") or (
+                f"b{stat.get('batch_idx', 0)}_g{stat.get('group_idx')}_s{stat.get('stream_idx')}"
+            )
+            trajectories.setdefault(traj_id, []).append(stat)
+
+        meta = {
+            "type": "benchmark_meta",
+            "num_batches": num_batches,
+            "time_between_batches": round(time_between_batches, 3),
+            "concurrency": concurrency,
+            "total_groups": len(set(s["group_idx"] for s in all_stats)),
+            "total_trajectories": len(trajectories),
+            "total_turns": len(all_stats),
+            "total_duration_sec": round(total_duration_sec, 3),
+            "batch_launch_times": [round(t, 3) for t in batch_launch_times],
+        }
+
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(meta, ensure_ascii=False) + "\n")
+
+            # Trajectory summary rows
+            for traj_id, turns in sorted(trajectories.items()):
+                turns.sort(key=lambda t: t.get("turn", 0))
+                first = turns[0]
+                last = turns[-1]
+                tot_out = sum(t.get("output_tokens", 0) for t in turns)
+                tot_model = sum(t.get("model_time_s", 0.0) for t in turns)
+                tot_tool = sum(t.get("tool_time_s", 0.0) for t in turns)
+                t_start = first.get("start_time_s", 0.0)
+                t_end = last.get("end_time_s", 0.0) + last.get("tool_time_s", 0.0)
+                traj_rec = {
+                    "type": "trajectory",
+                    "traj_id": traj_id,
+                    "batch_idx": first.get("batch_idx", 0),
+                    "group_idx": first.get("group_idx", 0),
+                    "stream_idx": first.get("stream_idx", 0),
+                    "num_turns": len(turns),
+                    "start_time_s": round(t_start, 4),
+                    "end_time_s": round(t_end, 4),
+                    "duration_s": round(max(0.0, t_end - t_start), 4),
+                    "model_time_s": round(tot_model, 4),
+                    "tool_time_s": round(tot_tool, 4),
+                    "prompt_tokens": first.get("input_history_tokens", 0),
+                    "output_tokens": tot_out,
+                    "status": ("COMPLETED" if all(t.get("success", False)
+                                                  for t in turns) else "FAILED"),
+                }
+                f.write(json.dumps(traj_rec, ensure_ascii=False) + "\n")
+
+            # Turn-by-turn records
+            for stat in all_stats:
+                rec = {
+                    "type": "turn",
+                    "batch_idx": stat.get("batch_idx", 0),
+                    "group_idx": stat.get("group_idx"),
+                    "stream_idx": stat.get("stream_idx"),
+                    "traj_id": stat.get("traj_id") or (
+                        f"b{stat.get('batch_idx', 0)}_g{stat.get('group_idx')}_s{stat.get('stream_idx')}"
+                    ),
+                    "turn": stat.get("turn"),
+                    "num_turns": stat.get("num_turns"),
+                    "start_time_s": stat.get("start_time_s"),
+                    "end_time_s": stat.get("end_time_s"),
+                    "model_time_s": stat.get("model_time_s"),
+                    "tool_time_s": stat.get("tool_time_s"),
+                    "ttft_ms": stat.get("ttft_ms"),
+                    "tpot_ms": stat.get("tpot_ms"),
+                    "total_time_ms": stat.get("total_time_ms"),
+                    "output_tokens": stat.get("output_tokens"),
+                    "input_history_tokens": stat.get("input_history_tokens"),
+                    "success": stat.get("success"),
+                }
+                if not stat.get("success"):
+                    rec["error"] = stat.get("error")
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"Saved trajectory and turn metrics to {out_path}")
+    except Exception as e:
+        print(f"Warning: Failed to save trajectory metrics: {e}")
+
+
 async def run_grpo_stream(
     session: aiohttp.ClientSession,
     url: str,
@@ -195,6 +338,8 @@ async def run_grpo_stream(
     group_idx: int,
     args: argparse.Namespace,
     spec: Dict[str, Any] | None = None,
+    batch_idx: int = 0,
+    bench_start_time: float = 0.0,
 ) -> List[Dict[str, Any]]:
     """Runs a single GRPO stream as a multi-turn conversation.
 
@@ -207,10 +352,14 @@ async def run_grpo_stream(
         stream_idx: Index of the stream within the group.
         group_idx: Index of the group/request.
         args: Parsed command line arguments.
+        spec: Optional trajectory spec when replaying a trace.
+        batch_idx: Index of the batch launching this stream.
+        bench_start_time: Benchmark launch time for timeline tracking.
 
     Returns:
         List[Dict[str, Any]]: Statistics of each turn in the stream.
     """
+    traj_id = f"b{batch_idx}_g{group_idx}_s{stream_idx}"
     out_lens = spec.get("out_lens") if spec else None
     obs_lens = spec.get("obs_lens") if spec else None
     tool_times = spec.get("tool_times") if spec else None
@@ -249,7 +398,7 @@ async def run_grpo_stream(
         payload["stream_options"] = {"include_usage": True}
 
         headers = {"Authorization": f"Bearer {os.getenv('HF_TOKEN', '')}"}
-        start_time = time.perf_counter()
+        turn_start_sec = time.perf_counter()
         ttft = None
         usage = None
         full_response_text = []
@@ -272,7 +421,7 @@ async def run_grpo_stream(
                         try:
                             data = json.loads(data_str)
                             if ttft is None:
-                                ttft = ((time.perf_counter() - start_time) *
+                                ttft = ((time.perf_counter() - turn_start_sec) *
                                         1000.0)
 
                             if data.get("usage"):
@@ -286,16 +435,14 @@ async def run_grpo_stream(
                         except Exception:
                             pass
 
-            end_time = time.perf_counter()
-            total_time_ms = (end_time - start_time) * 1000.0
+            turn_end_sec = time.perf_counter()
+            model_time_sec = turn_end_sec - turn_start_sec
+            total_time_ms = model_time_sec * 1000.0
 
             assistant_response = "".join(full_response_text)
 
             # Token counts come from the server: they are what the engine
-            # actually processed. Counting client-side instead is inaccurate
-            # in both directions -- re-encoding detokenized text is not
-            # round-trip identity, and any tokens the server reports outside
-            # "content" are invisible here.
+            # actually processed.
             if not usage:
                 raise RuntimeError(
                     "server did not report usage; it must support "
@@ -318,16 +465,22 @@ async def run_grpo_stream(
             })
 
             turn_stat = {
+                "batch_idx": batch_idx,
                 "group_idx": group_idx,
                 "stream_idx": stream_idx,
+                "traj_id": traj_id,
                 "turn": turn,
                 "num_turns": num_turns,
-                "ttft_ms": ttft,
-                "tpot_ms": tpot,
-                "total_time_ms": total_time_ms,
+                "start_time_s": round(turn_start_sec - bench_start_time, 4),
+                "end_time_s": round(turn_end_sec - bench_start_time, 4),
+                "model_time_s": round(model_time_sec, 4),
+                "ttft_ms": round(ttft, 2),
+                "tpot_ms": round(tpot, 2),
+                "total_time_ms": round(total_time_ms, 2),
                 "output_tokens": assistant_tokens,
                 "input_history_tokens": prompt_tokens,
                 "success": True,
+                "response_text": assistant_response,
             }
 
             # Simulate environment response of 10-100 tokens
@@ -351,26 +504,30 @@ async def run_grpo_stream(
                 else:
                     idle = random.uniform(args.tool_time_min,
                                           args.tool_time_max)
-            turn_stat["tool_time_s"] = idle
+            turn_stat["tool_time_s"] = round(idle, 4)
             stats.append(turn_stat)
+            record_response_turn(turn_stat, args)
             if idle > 0:
                 await asyncio.sleep(idle)
 
         except Exception as e:
-            total_time_ms = (time.perf_counter() - start_time) * 1000.0
-            # Include the type: some exceptions (notably asyncio.TimeoutError)
-            # have an empty str(), which would otherwise record the failure
-            # with no reason at all.
-            error_msg = f"{type(e).__name__}: {e}" if str(e) else \
-                type(e).__name__
+            turn_end_sec = time.perf_counter()
+            total_time_ms = (turn_end_sec - turn_start_sec) * 1000.0
+            error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             stats.append({
+                "batch_idx": batch_idx,
                 "group_idx": group_idx,
                 "stream_idx": stream_idx,
+                "traj_id": traj_id,
                 "turn": turn,
                 "num_turns": num_turns,
-                "ttft_ms": total_time_ms,
+                "start_time_s": round(turn_start_sec - bench_start_time, 4),
+                "end_time_s": round(turn_end_sec - bench_start_time, 4),
+                "model_time_s": round(turn_end_sec - turn_start_sec, 4),
+                "tool_time_s": 0.0,
+                "ttft_ms": round(total_time_ms, 2),
                 "tpot_ms": 0.0,
-                "total_time_ms": total_time_ms,
+                "total_time_ms": round(total_time_ms, 2),
                 "output_tokens": 0,
                 "input_history_tokens": 0,
                 "success": False,
@@ -391,6 +548,8 @@ async def run_group(
     args: argparse.Namespace,
     global_prefix: str = "",
     specs: List[Dict[str, Any]] | None = None,
+    batch_idx: int = 0,
+    bench_start_time: float = 0.0,
 ) -> List[Dict[str, Any]]:
     """Runs a single GRPO group of G parallel streams.
 
@@ -401,6 +560,10 @@ async def run_group(
         tokenizer: Model tokenizer.
         group_idx: Index of this group.
         args: Parsed arguments.
+        global_prefix: Shared global prefix string across all groups.
+        specs: List of stream specs for this group when replaying a trace.
+        batch_idx: Index of the batch containing this group.
+        bench_start_time: Benchmark launch time for timeline tracking.
 
     Returns:
         List[Dict[str, Any]]: Accumulated stats of all streams in the group.
@@ -409,7 +572,6 @@ async def run_group(
         target_len = specs[0].get("prompt_len") or args.initial_prompt_len_max
         initial_prompt = build_initial_prompt(tokenizer, global_prefix,
                                               target_len, group_idx)
-        # Already trimmed to --group-size when the trace was loaded.
         num_streams = len(specs)
     elif global_prefix:
         target_len = random.randint(args.initial_prompt_len_min,
@@ -422,7 +584,7 @@ async def run_group(
         num_streams = resolve_group_size(args)
 
     initial_prompt_len = len(tokenizer.encode(initial_prompt))
-    print(f"Group {group_idx}: Starting {num_streams} streams with "
+    print(f"Batch {batch_idx} | Group {group_idx}: Starting {num_streams} streams with "
           f"shared initial prompt of {initial_prompt_len} tokens...")
 
     tasks = []
@@ -438,6 +600,8 @@ async def run_group(
                 group_idx,
                 args,
                 specs[stream_idx] if specs else None,
+                batch_idx=batch_idx,
+                bench_start_time=bench_start_time,
             ))
 
     results = await asyncio.gather(*tasks)
@@ -452,6 +616,7 @@ def print_report(
     all_stats: List[Dict[str, Any]],
     total_duration_sec: float,
     args: argparse.Namespace,
+    num_batches: int = 1,
 ) -> None:
     """Calculates and prints the benchmark performance report.
 
@@ -459,6 +624,7 @@ def print_report(
         all_stats: List of all turn statistics collected.
         total_duration_sec: Total duration of the benchmark run.
         args: Parsed arguments.
+        num_batches: Total number of batches simulated.
     """
     print("\n" + "=" * 80)
     print("GRPO BENCHMARK PERFORMANCE REPORT")
@@ -480,6 +646,8 @@ def print_report(
     total_tokens = total_input_tokens + total_output_tokens
 
     print(f"Total Benchmark Time:      {total_duration_sec:.2f} seconds")
+    print(f"Simulated Batches:         {num_batches} (Time between batches: {args.time_between_batches:.2f}s)")
+    print(f"Concurrency per Batch:     {args.concurrency} groups/batch")
     print(f"Simulated GRPO Groups:     {total_groups}")
     print(f"Simulated Streams (g):     {total_streams}")
     print(f"Total Conversational Turns:{total_turns} (Success: "
@@ -500,12 +668,12 @@ def print_report(
               f"p99 {get_percentile(tool_idle, 99)*1000:.0f} ms per gap")
 
     # Throughput metrics
-    groups_per_sec = total_groups / total_duration_sec
-    streams_per_sec = total_streams / total_duration_sec
-    turns_per_sec = total_turns / total_duration_sec
-    input_tokens_per_sec = total_input_tokens / total_duration_sec
-    output_tokens_per_sec = total_output_tokens / total_duration_sec
-    total_tokens_per_sec = total_tokens / total_duration_sec
+    groups_per_sec = total_groups / total_duration_sec if total_duration_sec > 0 else 0
+    streams_per_sec = total_streams / total_duration_sec if total_duration_sec > 0 else 0
+    turns_per_sec = total_turns / total_duration_sec if total_duration_sec > 0 else 0
+    input_tokens_per_sec = total_input_tokens / total_duration_sec if total_duration_sec > 0 else 0
+    output_tokens_per_sec = total_output_tokens / total_duration_sec if total_duration_sec > 0 else 0
+    total_tokens_per_sec = total_tokens / total_duration_sec if total_duration_sec > 0 else 0
 
     print("-" * 80)
     print("THROUGHPUT METRICS")
@@ -518,14 +686,11 @@ def print_report(
     print(f"Total Tokens / sec:        {total_tokens_per_sec:.2f}")
 
     # Divide Turn 1 TTFT into "Prefill/Miss" vs "Cached/Hit" streams
-    # For each group, the stream with the maximum TTFT at Turn 1 is the Miss (Prefill).
-    # The others are Hits.
     turn1_miss_ttft = []
     turn1_hit_ttft = []
     subsequent_ttft = []
     all_tpot = []
 
-    # Group statistics by group index for turn 1
     groups_turn1: Dict[int, List[Dict[str, Any]]] = {}
     for stat in all_stats:
         if not stat["success"]:
@@ -542,7 +707,6 @@ def print_report(
     for g_idx, stats in groups_turn1.items():
         if not stats:
             continue
-        # Find the one with highest TTFT (assumed to be the cache miss prefill)
         sorted_stats = sorted(stats, key=lambda x: x["ttft_ms"], reverse=True)
         turn1_miss_ttft.append(sorted_stats[0]["ttft_ms"])
         for rem in sorted_stats[1:]:
@@ -611,6 +775,22 @@ async def main_async(args: argparse.Namespace):
                     )
                 else:
                     print("Server health check OK.")
+            async with session.get(
+                    f"http://{args.host}:{args.port}/v1/models") as resp:
+                if resp.status == 200:
+                    models_data = await resp.json()
+                    available_models = [
+                        m.get("id") for m in models_data.get("data", [])
+                    ]
+                    if args.model not in available_models and len(available_models) > 0:
+                        for cand in [args.model, f"{args.model}-FP8", args.model_path_or_id]:
+                            if cand in available_models:
+                                print(f"Resolved model '{args.model}' -> '{cand}' on server.")
+                                args.model = cand
+                                break
+                        else:
+                            print(f"Using server model '{available_models[0]}' for '{args.model}'.")
+                            args.model = available_models[0]
         except Exception as e:
             print(f"Error connecting to server health endpoint: {e}")
             print("Please ensure vLLM serve was started before running.")
@@ -619,8 +799,6 @@ async def main_async(args: argparse.Namespace):
     trace_groups: List[List[Dict[str, Any]]] | None = None
     if args.trace_file:
         trace_groups = load_trace(args.trace_file)
-        if args.num_groups is not None:
-            trace_groups = trace_groups[:args.num_groups]
         # Honour --group-size by keeping only its first streams of each group.
         widest = max((len(g) for g in trace_groups), default=0)
         trace_groups = [
@@ -629,11 +807,44 @@ async def main_async(args: argparse.Namespace):
         if args.group_size is not None and args.group_size > widest:
             print(f"Warning: --group-size {args.group_size} exceeds the "
                   f"{widest} streams the trace holds; running {widest}.")
+
+    # Resolve number of batches and total groups
+    # Each batch runs "concurrency" number of groups
+    if args.num_batches is not None:
+        num_batches = max(1, args.num_batches)
+        total_groups = num_batches * args.concurrency
+        if trace_groups is not None:
+            if len(trace_groups) < total_groups:
+                print(f"Notice: trace has {len(trace_groups)} groups; "
+                      f"cycling to fill {total_groups} groups across {num_batches} batches.")
+                extended = []
+                while len(extended) < total_groups:
+                    extended.extend(trace_groups)
+                trace_groups = extended[:total_groups]
+            else:
+                trace_groups = trace_groups[:total_groups]
+    elif trace_groups is not None:
+        if args.num_groups is not None:
+            trace_groups = trace_groups[:args.num_groups]
+        total_groups = len(trace_groups)
+        num_batches = max(1, (total_groups + args.concurrency - 1) // args.concurrency)
+    elif args.num_groups is not None:
+        total_groups = args.num_groups
+        num_batches = max(1, (total_groups + args.concurrency - 1) // args.concurrency)
+    else:
+        # Default behavior: 1 batch running args.concurrency groups (or at least 2 groups if concurrency is 1)
+        total_groups = 2 if (args.time_between_batches == 0.0 and args.concurrency == 1) else args.concurrency
+        num_batches = max(1, (total_groups + args.concurrency - 1) // args.concurrency)
+
+    if trace_groups is not None:
         turns = sum(
             len(s.get("out_lens", [])) for g in trace_groups for s in g)
         streams = sum(len(g) for g in trace_groups)
-        print(f"Replaying trace {args.trace_file}: {len(trace_groups)} groups,"
-              f" {streams} streams, {turns:,} turns")
+        print(f"Replaying trace {args.trace_file}: {num_batches} batches, "
+              f"{len(trace_groups)} groups, {streams} streams, {turns:,} turns")
+    else:
+        print(f"Configured benchmark: {num_batches} batches of {args.concurrency} groups "
+              f"({total_groups} total groups), launched {args.time_between_batches}s apart")
 
     global_prefix = ""
     if args.global_prefix_len > 0:
@@ -642,29 +853,59 @@ async def main_async(args: argparse.Namespace):
         got = len(tokenizer.encode(global_prefix, add_special_tokens=False))
         print(f"Global prefix shared by every trajectory: {got} tokens")
 
-    semaphore = asyncio.Semaphore(args.concurrency)
-
-    async def worker(group_idx: int,
-                     session: aiohttp.ClientSession,
-                     specs: List[Dict[str, Any]] | None = None):
-        async with semaphore:
-            return await run_group(session, url, args.model, tokenizer,
-                                   group_idx, args, global_prefix, specs)
+    if getattr(args, "save_responses_file", None):
+        out_path = args.save_responses_file
+        parent_dir = os.path.dirname(os.path.abspath(out_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            pass
+        txt_path = (out_path + ".txt" if not out_path.endswith(".jsonl")
+                    else out_path[:-6] + ".txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            pass
 
     start_time = time.perf_counter()
+    all_group_tasks = []
+    batch_launch_times: List[float] = []
 
     async with make_client_session() as session:
-        if trace_groups is not None:
-            group_tasks = [
-                worker(i + 1, session, specs)
-                for i, specs in enumerate(trace_groups)
-            ]
-        else:
-            num_groups = 2 if args.num_groups is None else args.num_groups
-            group_tasks = [
-                worker(i, session) for i in range(1, num_groups + 1)
-            ]
-        results = await asyncio.gather(*group_tasks)
+        for batch_idx in range(num_batches):
+            start_g = batch_idx * args.concurrency
+            end_g = min(start_g + args.concurrency, total_groups)
+            batch_items = []
+            for g in range(start_g, end_g):
+                g_idx = g + 1
+                spec = trace_groups[g] if trace_groups is not None else None
+                batch_items.append((g_idx, spec))
+
+            launch_offset = time.perf_counter() - start_time
+            batch_launch_times.append(launch_offset)
+            print(f"Batch {batch_idx + 1}/{num_batches}: Launching {len(batch_items)} groups "
+                  f"(concurrency={args.concurrency}) at +{launch_offset:.2f}s...")
+
+            for g_idx, spec in batch_items:
+                task = asyncio.create_task(
+                    run_group(
+                        session=session,
+                        url=url,
+                        model=args.model,
+                        tokenizer=tokenizer,
+                        group_idx=g_idx,
+                        args=args,
+                        global_prefix=global_prefix,
+                        specs=spec,
+                        batch_idx=batch_idx,
+                        bench_start_time=start_time,
+                    )
+                )
+                all_group_tasks.append(task)
+
+            # Wait time_between_batches seconds before launching next batch
+            if batch_idx < num_batches - 1 and args.time_between_batches > 0:
+                await asyncio.sleep(args.time_between_batches)
+
+        results = await asyncio.gather(*all_group_tasks)
 
     end_time = time.perf_counter()
     total_duration_sec = end_time - start_time
@@ -673,7 +914,12 @@ async def main_async(args: argparse.Namespace):
     for group_res in results:
         all_stats.extend(group_res)
 
-    print_report(all_stats, total_duration_sec, args)
+    if getattr(args, "save_trajectory_file", None):
+        save_trajectory_metrics(all_stats, total_duration_sec, num_batches,
+                                args.time_between_batches, args.concurrency,
+                                batch_launch_times, args)
+
+    print_report(all_stats, total_duration_sec, args, num_batches=num_batches)
 
 
 def main():
@@ -704,8 +950,24 @@ def main():
         "--num-groups",
         type=int,
         default=None,
-        help="Number of GRPO groups (requests) to simulate. Defaults to 2, "
+        help="Total number of GRPO groups (requests) to simulate. Defaults to 2, "
         "or to every group in --trace-file when replaying a trace.",
+    )
+    parser.add_argument(
+        "--num-batches",
+        type=int,
+        default=None,
+        help="Number of batches of requests to simulate. Each batch runs "
+        "--concurrency number of groups. If not set, runs a single batch "
+        "(or ceil(num_groups / concurrency) batches when num_groups is set).",
+    )
+    parser.add_argument(
+        "--time-between-batches",
+        type=float,
+        default=0.0,
+        help="Time in seconds between launching consecutive batches to the "
+        "server. Each batch of --concurrency groups is dispatched at intervals "
+        "of time_between_batches seconds.",
     )
     parser.add_argument(
         "--group-size",
@@ -805,7 +1067,7 @@ def main():
         "--concurrency",
         type=int,
         default=1,
-        help="Number of GRPO groups running concurrently.",
+        help="Number of GRPO groups running concurrently per batch.",
     )
     parser.add_argument(
         "--temperature",
@@ -823,6 +1085,19 @@ def main():
                         type=int,
                         default=42,
                         help="Random seed for generation.")
+    parser.add_argument(
+        "--save-trajectory-file",
+        type=str,
+        default=None,
+        help="Optional path to save trajectory and turn metrics (JSONL) for "
+        "visualization.",
+    )
+    parser.add_argument(
+        "--save-responses-file",
+        type=str,
+        default=None,
+        help="Optional path to save all turn responses to a JSONL file.",
+    )
 
     args = parser.parse_args()
 
