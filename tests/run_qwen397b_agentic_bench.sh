@@ -17,6 +17,7 @@ export SLICE_ROPE_CACHE=1
 export DP_SCHED_BATCH_PREFILL=false
 export NEW_MODEL_DESIGN=1
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false'
+export PHASED_PROFILING_DIR="gs://wenxindong-vm/trace/dcp_opt"
 
 mkdir -p /home/wenxindong_google_com/work/bench_logs/scripts
 if [ -f /home/wenxindong_google_com/tpu-inference/gbs1024_trace_file.jsonl ]; then
@@ -127,23 +128,25 @@ python3 benchmark_agentic.py \
   --trace-file /home/wenxindong_google_com/work/bench_logs/scripts/gbs1024_trace_file.jsonl \
   --global-prefix-len 6476 \
   --num-groups 1 \
-  --concurrency 1 2>&1 | tee "${OUTPUTS_DIR}/bench1_results.log"
+  --concurrency 1 \
+  --save-responses-file "${OUTPUTS_DIR}/bench1_responses.jsonl" 2>&1 | tee "${OUTPUTS_DIR}/bench1_results.log"
+
+cp "${OUTPUTS_DIR}/bench1_responses.jsonl" /home/wenxindong_google_com/tpu-inference/bench1_responses.jsonl || true
+cp "${OUTPUTS_DIR}/bench1_responses.txt" /home/wenxindong_google_com/tpu-inference/bench1_responses.txt || true
+gsutil cp "${OUTPUTS_DIR}/bench1_responses.jsonl" gs://wenxindong-vm/trace/dcp_opt/bench1_responses.jsonl || true
+gsutil cp "${OUTPUTS_DIR}/bench1_responses.txt" gs://wenxindong-vm/trace/dcp_opt/bench1_responses.txt || true
 
 echo ""
 echo "===================================================================="
-echo " Benchmark 2: (num-groups 2, concurrency 2)"
+echo " Sample Model Responses for Coherence Inspection:"
 echo "===================================================================="
-python3 benchmark_agentic.py \
-  --model Qwen/Qwen3.5-397B-A17B \
-  --model-path-or-id Qwen/Qwen3.5-397B-A17B \
-  --trace-file /home/wenxindong_google_com/work/bench_logs/scripts/gbs1024_trace_file.jsonl \
-  --global-prefix-len 6476 \
-  --num-groups 2 \
-  --concurrency 2 2>&1 | tee "${OUTPUTS_DIR}/bench2_results.log"
+head -n 40 "${OUTPUTS_DIR}/bench1_responses.txt" || true
 
 echo ""
 echo "===================================================================="
-echo " Benchmarks Complete! Keeping vLLM server running for additional scripts..."
+echo " Benchmark 1 Complete & Profiles Saved!"
 echo " Server is listening on http://localhost:8000 (PID: ${SERVER_PID})"
+echo " Keeping vLLM server running for additional scripts..."
 echo "===================================================================="
 wait "${SERVER_PID}"
+

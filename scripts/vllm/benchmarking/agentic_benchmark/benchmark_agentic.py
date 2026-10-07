@@ -328,6 +328,7 @@ async def run_grpo_stream(
                 "output_tokens": assistant_tokens,
                 "input_history_tokens": prompt_tokens,
                 "success": True,
+                "response_text": assistant_response,
             }
 
             # Simulate environment response of 10-100 tokens
@@ -687,6 +688,32 @@ async def main_async(args: argparse.Namespace):
     for group_res in results:
         all_stats.extend(group_res)
 
+    if getattr(args, "save_responses_file", None):
+        out_path = args.save_responses_file
+        parent_dir = os.path.dirname(os.path.abspath(out_path))
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            for stat in all_stats:
+                f.write(json.dumps({
+                    "group_idx": stat.get("group_idx"),
+                    "stream_idx": stat.get("stream_idx"),
+                    "turn": stat.get("turn"),
+                    "num_turns": stat.get("num_turns"),
+                    "output_tokens": stat.get("output_tokens"),
+                    "input_history_tokens": stat.get("input_history_tokens"),
+                    "success": stat.get("success"),
+                    "response_text": stat.get("response_text", ""),
+                }, ensure_ascii=False) + "\n")
+        print(f"Saved {len(all_stats)} response records to {out_path}")
+
+        txt_path = out_path + ".txt" if not out_path.endswith(".jsonl") else out_path[:-6] + ".txt"
+        with open(txt_path, "w", encoding="utf-8") as f:
+            for stat in all_stats:
+                f.write(f"=== Group {stat.get('group_idx')} | Stream {stat.get('stream_idx')} | Turn {stat.get('turn')}/{stat.get('num_turns')} | Tokens: {stat.get('output_tokens')} ===\n")
+                f.write(stat.get("response_text", "") + "\n\n")
+        print(f"Saved human-readable responses to {txt_path}")
+
     print_report(all_stats, total_duration_sec, args)
 
 
@@ -837,6 +864,12 @@ def main():
                         type=int,
                         default=42,
                         help="Random seed for generation.")
+    parser.add_argument(
+        "--save-responses-file",
+        type=str,
+        default=None,
+        help="Optional path to save all turn responses to a JSONL file.",
+    )
 
     args = parser.parse_args()
 
