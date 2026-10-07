@@ -24,3 +24,13 @@ def register_layers():
     # that vLLM invokes at startup, before any model is loaded.
     from tpu_inference.models.vllm.experimental import register_models
     register_models()
+
+    # Initialize JAX compilation cache if GCS persistence is configured.
+    try:
+        from tpu_inference import gcs_cache
+        gcs_cache.restore_jax_cache()
+        gcs_cache.register_auto_save()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to initialize JAX compilation cache in plugin: %s", e)

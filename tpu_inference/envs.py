@@ -17,6 +17,10 @@ if TYPE_CHECKING:
     DECODE_SLICES: str = ""
     SKIP_JAX_PRECOMPILE: bool = False
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
+    JAX_CACHE_GCS_DIR: str | None = None
+    SAVE_JAX_CACHE: bool = True
+    LOCAL_JAX_CACHE_DIR: str = "/tmp/jax_cache"
+    JAX_CACHE_MAX_WORKERS: int = 8
     MODEL_IMPL_TYPE: str = "auto"
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
@@ -559,6 +563,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":
     env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # GCS URI for persisting and restoring JAX compilation cache artifacts.
+    # Accepts gs://<bucket>/<prefix>. Supports ROLLOUT_JAX_CACHE_GCS_DIR and
+    # VLLM_JAX_CACHE_GCS_DIR as aliases.
+    "JAX_CACHE_GCS_DIR":
+    lambda: os.getenv("JAX_CACHE_GCS_DIR") or os.getenv("ROLLOUT_JAX_CACHE_GCS_DIR") or os.getenv("VLLM_JAX_CACHE_GCS_DIR"),
+    # Whether to upload local compilation cache to GCS when JAX_CACHE_GCS_DIR is configured.
+    "SAVE_JAX_CACHE":
+    env_bool("SAVE_JAX_CACHE", default=True),
+    # Local directory to store JAX compilation cache artifacts.
+    "LOCAL_JAX_CACHE_DIR":
+    lambda: os.getenv("LOCAL_JAX_CACHE_DIR") or os.getenv("JAX_CACHE_DIR") or os.getenv("JAX_COMPILATION_CACHE_DIR") or os.getenv("VLLM_XLA_CACHE_PATH") or "/tmp/jax_cache",
+    # Max concurrent worker threads for downloading/uploading compilation cache to/from GCS.
+    "JAX_CACHE_MAX_WORKERS":
+    lambda: int(os.getenv("JAX_CACHE_MAX_WORKERS", "8")),
 }
 
 

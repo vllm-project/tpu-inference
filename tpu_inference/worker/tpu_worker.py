@@ -669,7 +669,10 @@ class TPUWorker(WorkerBase):
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        from tpu_inference import gcs_cache
+        gcs_cache.restore_jax_cache()
         self.model_runner.capture_model()
+        gcs_cache.save_jax_cache()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         self.model_runner._init_random()
@@ -911,6 +914,28 @@ class TPUWorker(WorkerBase):
             gcs_weight_sync  # pylint: disable=g-import-not-at-top
 
         return gcs_weight_sync.tpu_worker_gcs_metrics(self)
+
+    def upload_jax_cache(
+        self,
+        gcs_uri: Optional[str] = None,
+        local_dir: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> bool:
+        """Persists JAX compilation cache from local_dir to GCS."""
+        from tpu_inference import gcs_cache  # pylint: disable=g-import-not-at-top
+        return gcs_cache.save_jax_cache(
+            gcs_uri=gcs_uri, local_dir=local_dir, role=role)
+
+    def restore_jax_cache(
+        self,
+        gcs_uri: Optional[str] = None,
+        local_dir: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> bool:
+        """Restores JAX compilation cache from GCS to local_dir."""
+        from tpu_inference import gcs_cache  # pylint: disable=g-import-not-at-top
+        return gcs_cache.restore_jax_cache(
+            gcs_uri=gcs_uri, local_dir=local_dir, role=role)
 
 
     def reset_encoder_cache(self) -> None:
