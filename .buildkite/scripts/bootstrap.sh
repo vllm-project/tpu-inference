@@ -22,8 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the shared pipeline config file.
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
-# shellcheck source=nightly_suites.sh
-source "${SCRIPT_DIR}/nightly_suites.sh"
+# shellcheck source=kube_suites.sh
+source "${SCRIPT_DIR}/kube_suites.sh"
 
 determine_job_priority() {
   local priority=""
@@ -187,75 +187,6 @@ set_jax_envs() {
     esac
 }
 
-# One generation of pipeline_jax_kube.yml: the kube shapes in place of the bare
-# queues set_jax_envs names.
-set_kube_jax_envs() {
-    case $1 in
-        v6)
-            export TPU_VERSION="tpu6e"
-            export KUBE_SHAPE_SINGLE="ct6e-standard-1t/1x1"
-            export KUBE_SHAPE_MULTI="ct6e-standard-8t/2x4"
-            export TENSOR_PARALLEL_SIZE_SINGLE=1
-            ;;
-        v7)
-            export TPU_VERSION="tpu7x"
-            export KUBE_SHAPE_SINGLE="tpu7x-standard-1t/1x1x1"
-            export KUBE_SHAPE_MULTI="tpu7x-standard-4t/2x2x1"
-            export TENSOR_PARALLEL_SIZE_SINGLE=2
-            ;;
-        unset)
-            unset TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
-            ;;
-    esac
-}
-
-# One kube lane. models and features keep a file per model or feature in
-# .buildkite/<lane>/kube/, beside its bare-metal file, and go up together as
-# one pipeline the way upload_models_and_features.sh sends the bare-metal ones:
-# each file's own steps: line dropped and the rest concatenated. The other
-# lanes are a single file each.
-upload_kube_lane() {
-    local lane="$1"
-    local dir=".buildkite/${lane}/kube"
-    if [[ ! -d "${dir}" ]]; then
-        upload_with_priority ".buildkite/pipeline_${lane}_kube.yml" "$JOB_PRIORITY"
-        return
-    fi
-    echo "--- :pipeline: Uploading ${dir}/*.yml with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-    {
-        echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-        echo "steps:"
-        grep -hv '^steps:' "${dir}"/*.yml
-    } | buildkite-agent pipeline upload
-}
-
-# A suite's bare-metal files whose steps all run on the cpu queue. They are
-# placeholders that record a model, feature or kernel as unverified for the
-# support matrix, with nothing to run on a TPU, so they have no kube version
-# and a kube nightly uploads them as they are. A file with TPU steps that has
-# no kube version beside it goes in KUBE_MISSING, for the build annotation.
-KUBE_MISSING=()
-upload_cpu_only_files() {
-    local suite="$1" f queues
-    local -a files=()
-    for f in ".buildkite/${suite}"/*.yml ".buildkite/${suite}"/*/*.yml; do
-        [[ -f "${f}" && "${f}" != */kube/* ]] || continue
-        queues=$(grep -oE 'queue:[[:space:]]*"?[^"[:space:],}#]+' "${f}" | sed -E 's/queue:[[:space:]]*"?//' | sort -u || true)
-        if [[ "${queues}" == "cpu" ]]; then
-            files+=("${f}")
-        elif [[ -d ".buildkite/${suite}/kube" && ! -f ".buildkite/${suite}/kube/$(basename "${f}")" ]]; then
-            KUBE_MISSING+=("${f}")
-        fi
-    done
-    [[ "${#files[@]}" -gt 0 ]] || return 0
-    echo "--- :pipeline: Uploading ${#files[@]} cpu-only file(s) from .buildkite/${suite} with priority ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-    {
-        echo "priority: ${JOB_PRIORITY:-PRIORITY_DEFAULT}"
-        echo "steps:"
-        grep -hv '^steps:' "${files[@]}"
-    } | buildkite-agent pipeline upload
-}
-
 # The kube files in place of upload_pipeline's. A scheduled kube run sets
 # CI_LANES to some of jax, models, features, parallelism and rl, and runs the
 # one generation its schedule names (TPU_VERSION and the KUBE_SHAPE_* env); any
@@ -291,33 +222,18 @@ upload_kube_pipeline() {
       set_kube_jax_envs unset
       upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
     fi
-    # What nightly_verify.yml runs on bare metal on nightly and tag builds: the
-    # suites nightly_suites names, for both generations. Their step keys carry
-    # TPU_VERSION, so each file uploads once per generation in the same build.
-    # The support matrices are built on bare metal only.
+    # Nightly and tag builds: nightly_verify.yml, as on bare metal. Its "Upload
+    # Tests" step sends up the kube suites (upload_kube_nightly_suites).
     if [[ "${NIGHTLY:-0}" == "1" || -n "${BUILDKITE_TAG:-}" ]]; then
-      local gen suite
-      for gen in v6 v7; do
-        set_kube_jax_envs "${gen}"
-        for suite in $(nightly_suites); do
-          case "${suite}" in
-            models|features|parallelism|rl) upload_kube_lane "${suite}" ;;
-          esac
-          upload_cpu_only_files "${suite}"
-        done
-        set_kube_jax_envs unset
-      done
       # The P/D benchmark, once a day: it is a v7x workload whatever the
       # generation, and the vllm and flax_nnx nightlies would run it again on
-      # the same code.
+      # the same code. Each upload lands above the ones before it, so this sits
+      # below nightly_verify.yml's wait and the support matrices do not wait out
+      # its hours; its steps have depends_on, so the wait does not hold them.
       if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
         upload_with_priority .buildkite/pipeline_disagg_kube.yml "$JOB_PRIORITY"
       fi
-      local gaps="Not in this kube build: the support matrices nightly_verify.yml builds on bare metal."
-      if [[ "${#KUBE_MISSING[@]}" -gt 0 ]]; then
-        gaps+=" Also missing, bare-metal files with TPU steps and no kube version: $(printf '%s\n' "${KUBE_MISSING[@]}" | sort -u | xargs)."
-      fi
-      buildkite-agent annotate --style warning --context ci-fleet-gaps "${gaps}"
+      upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
     fi
 }
 
@@ -431,11 +347,11 @@ EOF
 
 fi
 
-# A scheduled kube build gates nothing yet, so it notifies no one: a lane
-# (CI_LANES set), or a shadow of the bare integration run (CI_FLEET=kube on its
-# schedule), whose failures the bare run already reports.
+# A scheduled kube build notifies no one unless its schedule sets
+# KUBE_OWNS_NIGHTLY=1: a lane (CI_LANES set), a shadow of the bare integration
+# run, or a nightly the bare-metal nightly still reports for.
 if [[ -z "${CI_LANES:-}" ]] && \
-   [[ "${CI_FLEET:-}" != "kube" || "$BUILDKITE_SOURCE" != "schedule" ]]; then
+   [[ "${CI_FLEET:-}" != "kube" || "$BUILDKITE_SOURCE" != "schedule" || "${KUBE_OWNS_NIGHTLY:-0}" == "1" ]]; then
   upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
 fi
 rm "$NOTIFY_FILE"

@@ -49,6 +49,17 @@ failure_handler() {
 
 # Catch ERR signals
 trap 'failure_handler $LINENO' ERR
+
+# A kube build sends up the kube versions of the same suites.
+if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
+  # shellcheck source=configs/pipeline_config.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/configs/pipeline_config.sh"
+  # shellcheck source=kube_suites.sh
+  source "$(dirname "${BASH_SOURCE[0]}")/kube_suites.sh"
+  export JOB_PRIORITY="${JOB_PRIORITY:-1}"
+  upload_kube_nightly_suites
+  exit 0
+fi
 declare -a TARGET_FOLDERS=()
 
 # Append the kernel_microbenchmarks subdirectories
