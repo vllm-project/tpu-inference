@@ -5,14 +5,16 @@
 Similar to Google Trellis (https://github.com/google/trellis/pull/67), this tool
 renders an interactive waterfall timeline displaying multi-turn trajectories,
 turn-by-turn latency segmentation (model generation vs. environment/tool idle time),
-batch launch boundaries, and per-turn metrics (prompt/gen tokens, TTFT, TPOT, tok/s).
+batch launch boundaries, per-turn metrics (prompt/gen tokens, TTFT, TPOT, tok/s),
+and a multi-run comparison dropdown to switch seamlessly between benchmark runs
+(e.g., comparing different trace files or engine flags such as DP_SCHED_BATCH_PREFILL).
 
 Input formats supported:
-1. Trajectory JSONL from benchmark_agentic.py (--save-trajectory-file).
+1. One or more trajectory JSONL files from benchmark_agentic.py (--save-trajectory-file).
 2. Responses JSONL from benchmark_agentic.py (--save-responses-file).
 3. Trellis inference_metrics.jsonl files.
 4. Raw log files with [DEBUG_INFERENCE][Turn] and [DEBUG_INFERENCE][Trajectory] lines.
-5. Built-in --demo mode generating realistic sample data.
+5. Built-in --demo mode generating realistic sample data across multiple runs.
 """
 
 import argparse
@@ -23,20 +25,25 @@ import re
 import socketserver
 import sys
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
-def generate_demo_data() -> Dict[str, Any]:
-    """Generates realistic synthetic multi-batch agentic benchmark trajectories."""
+def generate_single_demo_dataset(
+    seed: int = 42,
+    num_batches: int = 3,
+    concurrency: int = 4,
+    group_size: int = 4,
+    time_between_batches: float = 20.0,
+    has_tool_time: bool = True,
+    model_factor: float = 1.0,
+    run_name: str = "Demo Run",
+    dp_sched_prefill: bool = False,
+) -> Dict[str, Any]:
+    """Generates a realistic synthetic multi-batch agentic benchmark trajectory dataset."""
     import random
-    rng = random.Random(42)
+    rng = random.Random(seed)
 
-    num_batches = 3
-    concurrency = 4
-    group_size = 4
-    time_between_batches = 20.0
     batch_launch_times = [round(b * time_between_batches, 3) for b in range(num_batches)]
-
     trajectories = []
     turns_all = []
     traj_idx = 0
@@ -60,12 +67,21 @@ def generate_demo_data() -> Dict[str, Any]:
                 for turn in range(1, num_turns + 1):
                     # Turn 1 prefill is longer on cache miss
                     is_miss = (s == 0 and turn == 1)
-                    ttft_s = rng.uniform(0.4, 0.8) if is_miss else rng.uniform(0.05, 0.15)
+                    base_ttft = rng.uniform(0.4, 0.8) if is_miss else rng.uniform(0.05, 0.15)
+                    if dp_sched_prefill and turn > 1:
+                        # DP batch prefill batches prefills together, reducing tail TTFT under load
+                        base_ttft *= 0.82
+                    ttft_s = base_ttft * model_factor
+
                     gen_toks = rng.randint(150, 450)
-                    tpot_ms = rng.uniform(4.5, 7.5)
+                    tpot_ms = rng.uniform(4.5, 7.5) * model_factor
                     decode_s = (gen_toks - 1) * (tpot_ms / 1000.0)
                     model_time_s = round(ttft_s + decode_s, 3)
-                    tool_time_s = round(rng.uniform(1.0, 3.5), 3) if turn < num_turns else 0.0
+
+                    if has_tool_time and turn < num_turns:
+                        tool_time_s = round(rng.uniform(0.8, 3.2), 3)
+                    else:
+                        tool_time_s = 0.0
 
                     turn_start = round(t_cur, 3)
                     turn_end = round(turn_start + model_time_s, 3)
@@ -114,17 +130,20 @@ def generate_demo_data() -> Dict[str, Any]:
                 }
                 trajectories.append(traj_rec)
 
-    total_duration = max(t["end_time_s"] for t in trajectories)
+    total_duration = max((t["end_time_s"] for t in trajectories), default=1.0)
     meta = {
-        "type": "benchmark_meta",
+        "run_name": run_name,
+        "model": "Qwen/Qwen3.5-397B-A17B-FP8",
         "num_batches": num_batches,
-        "time_between_batches": time_between_batches,
         "concurrency": concurrency,
-        "total_groups": concurrency * num_batches,
+        "group_size": group_size,
+        "time_between_batches_sec": time_between_batches,
+        "batch_launch_times": batch_launch_times,
         "total_trajectories": len(trajectories),
         "total_turns": len(turns_all),
-        "total_duration_sec": round(total_duration, 2),
-        "batch_launch_times": batch_launch_times,
+        "total_duration_sec": total_duration,
+        "dp_sched_batch_prefill": dp_sched_prefill,
+        "trace_file": "gs://wenxindong-vm/rl/mlperf2026/agentic_benchmark/gbs1024_trace_file_tool_time.jsonl" if has_tool_time else "gbs1024_trace_file.jsonl",
     }
     return {
         "meta": meta,
@@ -133,19 +152,37 @@ def generate_demo_data() -> Dict[str, Any]:
     }
 
 
-def parse_metrics_file(path: str) -> Dict[str, Any]:
-    """Parses various metrics and log formats into unified trajectory and turn records."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Input file not found: {path}")
-
-    meta = {
-        "num_batches": 1,
-        "time_between_batches": 0.0,
-        "concurrency": 1,
-        "batch_launch_times": [0.0],
+def generate_demo_runs() -> Dict[str, Dict[str, Any]]:
+    """Generates synthetic runs comparing different benchmark configurations."""
+    return {
+        "Demo: Tool Time (DP_SCHED=false)": generate_single_demo_dataset(
+            seed=42, has_tool_time=True, dp_sched_prefill=False, model_factor=1.0,
+            run_name="Demo: Tool Time (DP_SCHED=false)"
+        ),
+        "Demo: Tool Time (DP_SCHED=true)": generate_single_demo_dataset(
+            seed=43, has_tool_time=True, dp_sched_prefill=True, model_factor=0.92,
+            run_name="Demo: Tool Time (DP_SCHED=true)"
+        ),
+        "Demo: Baseline (No Tool Time)": generate_single_demo_dataset(
+            seed=44, has_tool_time=False, dp_sched_prefill=False, model_factor=1.0,
+            run_name="Demo: Baseline (No Tool Time)"
+        ),
     }
+
+
+def parse_metrics_file(path: str, run_name: Optional[str] = None) -> Dict[str, Any]:
+    """Parses a trajectory metrics JSONL or text log file into structured records."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Input metrics file not found: {path}")
+
     trajectories: Dict[str, Dict[str, Any]] = {}
     turns: List[Dict[str, Any]] = []
+    base_name = run_name or os.path.splitext(os.path.basename(path))[0]
+    meta: Dict[str, Any] = {
+        "source_file": os.path.abspath(path),
+        "run_name": base_name,
+        "batch_launch_times": [],
+    }
 
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         lines = [line.strip() for line in f if line.strip()]
@@ -207,7 +244,6 @@ def parse_metrics_file(path: str) -> Dict[str, Any]:
 
     # Format 2: Fallback parser for Tunix / Trellis [DEBUG_INFERENCE] text logs
     if not turns:
-        # Regex for [DEBUG_INFERENCE][Turn] and [DEBUG_INFERENCE][Trajectory]
         turn_re = re.compile(
             r"\[DEBUG_INFERENCE\]\[Turn\]\s+(?:prompt_id=(?P<pid>[^\s,]+)|traj_id=(?P<tid>[^\s,]+)).*?"
             r"step_index=(?P<step>\d+).*?"
@@ -248,14 +284,12 @@ def parse_metrics_file(path: str) -> Dict[str, Any]:
 
     for traj_id, t_list in traj_turns_map.items():
         if traj_id not in trajectories:
-            t_list.sort(key=lambda x: x.get("turn", 0))
             first = t_list[0]
-            last = t_list[-1]
-            tot_out = sum(x.get("output_tokens", 0) for x in t_list)
-            tot_model = sum(x.get("model_time_s", 0.0) for x in t_list)
-            tot_tool = sum(x.get("tool_time_s", 0.0) for x in t_list)
-            t_start = first.get("start_time_s", 0.0)
-            t_end = last.get("end_time_s", 0.0) + last.get("tool_time_s", 0.0)
+            t_start = min((x["start_time_s"] for x in t_list), default=0.0)
+            t_end = max((x["end_time_s"] for x in t_list), default=0.0)
+            tot_model = sum((x["model_time_s"] for x in t_list))
+            tot_tool = sum((x.get("tool_time_s", 0.0) for x in t_list))
+            tot_out = sum((x.get("output_tokens", 0) for x in t_list))
             b_idx = first.get("batch_idx", 0)
             trajectories[traj_id] = {
                 "type": "trajectory",
@@ -296,18 +330,27 @@ def parse_metrics_file(path: str) -> Dict[str, Any]:
     }
 
 
-def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn Waterfall") -> str:
+def generate_html(
+    runs_data: Union[Dict[str, Any], Dict[str, Dict[str, Any]]],
+    title: str = "Agentic RL Trajectory Turn Waterfall",
+) -> str:
     """Generates a standalone, dependency-free interactive HTML waterfall visualization."""
-    data_json = json.dumps(data)
+    if "trajectories" in runs_data and "turns" in runs_data:
+        single_name = runs_data.get("meta", {}).get("run_name") or "Default Run"
+        all_runs: Dict[str, Dict[str, Any]] = {single_name: runs_data}
+    else:
+        all_runs = runs_data  # type: ignore
 
-    html_template = f"""<!DOCTYPE html>
+    runs_json = json.dumps(all_runs)
+
+    html_template = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
+  <title>__TITLE__</title>
   <style>
-    :root {{
+    :root {
       --bg: #0f172a;
       --panel: #1e293b;
       --panel-border: #334155;
@@ -326,67 +369,65 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
       --b5: #06b6d4;
       --b6: #f97316;
       --b7: #6366f1;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg);
       color: var(--text);
       line-height: 1.4;
       padding: 16px 20px 40px;
-    }}
-    header {{
+    }
+    header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      flex-wrap: wrap;
-      gap: 12px;
       margin-bottom: 16px;
       padding-bottom: 12px;
       border-bottom: 1px solid var(--panel-border);
-    }}
-    h1 {{
+    }
+    h1 {
       font-size: 20px;
       font-weight: 700;
       letter-spacing: -0.02em;
       color: #fff;
-    }}
-    .subtitle {{
+    }
+    .subtitle {
       font-size: 13px;
       color: var(--text-muted);
       margin-top: 2px;
-    }}
-    .stats-bar {{
+    }
+    .stats-bar {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
       gap: 10px;
       margin-bottom: 16px;
-    }}
-    .stat-card {{
+    }
+    .stat-card {
       background: var(--panel);
       border: 1px solid var(--panel-border);
       border-radius: 6px;
       padding: 10px 12px;
-    }}
-    .stat-card .label {{
+    }
+    .stat-card .label {
       font-size: 11px;
       color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.05em;
       margin-bottom: 4px;
-    }}
-    .stat-card .val {{
+    }
+    .stat-card .val {
       font-size: 18px;
       font-weight: 700;
       color: #fff;
-    }}
-    .stat-card .unit {{
+    }
+    .stat-card .unit {
       font-size: 12px;
       font-weight: 400;
       color: var(--text-muted);
       margin-left: 2px;
-    }}
-    .controls {{
+    }
+    .controls {
       display: flex;
       gap: 12px;
       align-items: center;
@@ -397,18 +438,18 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
       padding: 8px 14px;
       margin-bottom: 14px;
       font-size: 13px;
-    }}
-    .control-group {{
+    }
+    .control-group {
       display: flex;
       align-items: center;
       gap: 6px;
-    }}
-    label {{
+    }
+    label {
       font-weight: 600;
       color: var(--text-muted);
       font-size: 12px;
-    }}
-    select, input[type="text"] {{
+    }
+    select, input[type="text"] {
       background: #0b1120;
       color: #fff;
       border: 1px solid var(--panel-border);
@@ -416,98 +457,105 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
       border-radius: 4px;
       font-size: 12px;
       outline: none;
-    }}
-    select:focus, input:focus {{
+    }
+    select:focus, input:focus {
       border-color: var(--accent);
-    }}
-    .toggle {{
+    }
+    .toggle {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       cursor: pointer;
       user-select: none;
-    }}
-    .toggle input {{ cursor: pointer; }}
-    .chart-container {{
+    }
+    .toggle input { cursor: pointer; }
+    .chart-container {
       background: var(--panel);
       border: 1px solid var(--panel-border);
       border-radius: 6px;
       padding: 14px 14px 6px;
       position: relative;
-    }}
-    .chart-header {{
+    }
+    .chart-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 8px;
       font-size: 12px;
-    }}
-    .chart-scroll {{
+    }
+    .chart-scroll {
       overflow-x: auto;
       max-height: 580px;
       overflow-y: auto;
       border: 1px solid var(--panel-border);
       border-radius: 4px;
-      background: #090e1a;
+      background: #0b1120;
       position: relative;
-    }}
-    svg {{
-      display: block;
-      user-select: none;
-    }}
-    .legend {{
+    }
+    #tooltip {
+      position: fixed;
+      display: none;
+      background: #1e293b;
+      border: 1px solid #475569;
+      color: #f8fafc;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1.4;
+      pointer-events: none;
+      z-index: 1000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      white-space: pre-line;
+      max-width: 360px;
+    }
+    .legend {
       display: flex;
       gap: 16px;
       align-items: center;
-      flex-wrap: wrap;
-      font-size: 11px;
-      color: var(--text-muted);
       margin-top: 10px;
-      padding-top: 8px;
-      border-top: 1px solid var(--panel-border);
-    }}
-    .legend-item {{
-      display: inline-flex;
+      font-size: 12px;
+      color: var(--text-muted);
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
       align-items: center;
       gap: 6px;
-    }}
-    .tag {{
+    }
+    .hatched-legend {
+      width: 18px;
+      height: 12px;
+      background: repeating-linear-gradient(
+        45deg,
+        #475569,
+        #475569 3px,
+        #1e293b 3px,
+        #1e293b 6px
+      );
+      border: 1px solid #64748b;
+      border-radius: 2px;
+    }
+    .tag {
       display: inline-block;
       padding: 2px 6px;
       border-radius: 3px;
-      font-size: 11px;
+      font-size: 10px;
       font-weight: 600;
-      background: #334155;
-      color: #fff;
-    }}
-    #tooltip {{
-      position: fixed;
-      display: none;
-      background: rgba(15, 23, 42, 0.96);
-      border: 1px solid var(--accent);
-      border-radius: 6px;
-      padding: 10px 14px;
-      font-size: 12px;
-      color: #fff;
-      pointer-events: none;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.7);
-      z-index: 1000;
-      white-space: pre-line;
-      max-width: 380px;
-      backdrop-filter: blur(4px);
-    }}
-    .profile-card {{
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .profile-card {
       margin-top: 16px;
       background: var(--panel);
       border: 1px solid var(--panel-border);
       border-radius: 6px;
       padding: 12px 16px;
-    }}
-    .profile-card h3 {{
+    }
+    .profile-card h3 {
       font-size: 14px;
       margin-bottom: 8px;
       color: #fff;
-    }}
+    }
   </style>
 </head>
 <body>
@@ -515,7 +563,7 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
 
   <header>
     <div>
-      <h1>{title}</h1>
+      <h1>__TITLE__</h1>
       <div class="subtitle" id="subtitle-info">Continuous multi-batch trajectory turn waterfall & latency profiling</div>
     </div>
     <div style="display:flex; gap:8px;">
@@ -528,6 +576,11 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
   </div>
 
   <div class="controls">
+    <div class="control-group" id="run-select-group">
+      <label for="run-select" style="color:var(--accent); font-weight:700;">Run / Benchmark:</label>
+      <select id="run-select" style="font-weight:600; min-width: 220px;"></select>
+    </div>
+
     <div class="control-group">
       <label for="batch-filter">Batch:</label>
       <select id="batch-filter">
@@ -557,10 +610,12 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
       </label>
     </div>
 
-    <div class="control-group" style="margin-left: auto;">
+    <div class="control-group" style="margin-left: auto; display:flex; gap:8px; align-items:center;">
       <label for="zoom-scale">Zoom:</label>
-      <input type="range" id="zoom-scale" min="0.5" max="3.0" step="0.1" value="1.0" style="width: 100px;">
-      <span id="zoom-val" style="font-size: 11px; color: var(--text-muted); width: 32px;">1.0x</span>
+      <input type="range" id="zoom-scale" min="0.5" max="3.0" step="0.1" value="1.0" style="width: 90px;">
+      <span id="zoom-val" style="font-size: 11px; color: var(--text-muted); width: 28px;">1.0x</span>
+      <input type="file" id="run-file-input" accept=".jsonl,.json" style="display:none;">
+      <button id="load-file-btn" type="button" style="background:#334155; color:#f8fafc; border:1px solid #475569; padding:4px 9px; border-radius:4px; font-size:11px; cursor:pointer;" title="Load local trajectory JSONL into visualizer">+ Add Run File</button>
     </div>
   </div>
 
@@ -583,7 +638,7 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
         <span>Model Generation (Turn #)</span>
       </div>
       <div class="legend-item">
-        <span style="display:inline-block;width:18px;height:13px;background:var(--b0);opacity:0.4;border-radius:2px;border:1px solid var(--b0);"></span>
+        <div class="hatched-legend"></div>
         <span>Environment / Tool Idle Time</span>
       </div>
       <div class="legend-item">
@@ -602,353 +657,517 @@ def generate_html(data: Dict[str, Any], title: str = "Agentic RL Trajectory Turn
   </div>
 
   <script>
-    const RAW_DATA = {data_json};
+    const ALL_RUNS = __RUNS_JSON__;
+    let currentRunKey = Object.keys(ALL_RUNS)[0] || "Default Run";
+    let RAW_DATA = ALL_RUNS[currentRunKey] || { meta: {}, trajectories: [], turns: [] };
+
     const COLORS = [
       "#3b82f6", "#10b981", "#f59e0b", "#ec4899",
       "#8b5cf6", "#06b6d4", "#f97316", "#6366f1"
     ];
 
     const tooltip = document.getElementById("tooltip");
-    function showTip(e, text) {{
+    function showTip(e, text) {
       tooltip.textContent = text;
       tooltip.style.display = "block";
       const x = Math.min(e.clientX + 14, window.innerWidth - 380);
       const y = Math.min(e.clientY + 14, window.innerHeight - 180);
       tooltip.style.left = x + "px";
       tooltip.style.top = y + "px";
-    }}
-    function hideTip() {{
+    }
+    function hideTip() {
       tooltip.style.display = "none";
-    }}
+    }
 
     // Greedy swimlane row packing
-    function packSwimlanes(items) {{
+    function packSwimlanes(items) {
       items.sort((a, b) => a.start_time_s - b.start_time_s || b.duration_s - a.duration_s);
       const rowEnds = [];
       const rowAssigned = [];
-      for (let i = 0; i < items.length; i++) {{
+      for (let i = 0; i < items.length; i++) {
         const it = items[i];
         let placed = false;
-        for (let r = 0; r < rowEnds.length; r++) {{
-          if (rowEnds[r] <= it.start_time_s) {{
+        for (let r = 0; r < rowEnds.length; r++) {
+          if (rowEnds[r] <= it.start_time_s) {
             rowAssigned[i] = r;
             rowEnds[r] = it.end_time_s;
             placed = true;
             break;
-          }}
-        }}
-        if (!placed) {{
+          }
+        }
+        if (!placed) {
           rowAssigned[i] = rowEnds.length;
           rowEnds.push(it.end_time_s);
-        }}
-      }}
-      return {{ nrows: Math.max(rowEnds.length, 1), rows: rowAssigned }};
-    }}
+        }
+      }
+      return { nrows: Math.max(rowEnds.length, 1), rows: rowAssigned };
+    }
 
-    function renderStats(trajs, turns, meta) {{
+    function renderStats(trajs, turns, meta) {
       const sb = document.getElementById("stats-bar");
       sb.innerHTML = "";
-      const totalDur = meta.total_duration_sec || 0;
-      const numTrajs = trajs.length;
-      const numTurns = turns.length;
-      const avgDur = numTrajs ? (trajs.reduce((a, b) => a + (b.duration_s || 0), 0) / numTrajs).toFixed(2) : "0.00";
-      const avgModel = numTurns ? (turns.reduce((a, b) => a + (b.model_time_s || 0), 0) / numTurns).toFixed(2) : "0.00";
-      const avgTool = numTurns ? (turns.reduce((a, b) => a + (b.tool_time_s || 0), 0) / numTurns).toFixed(2) : "0.00";
-      const totOutToks = turns.reduce((a, b) => a + (b.output_tokens || 0), 0);
-      const tps = totalDur > 0 ? (totOutToks / totalDur).toFixed(1) : "0.0";
+
+      const totalTrajs = trajs.length;
+      const totalTurns = turns.length;
+      const totalGenToks = turns.reduce((acc, t) => acc + (t.output_tokens || 0), 0);
+      const totalModelSec = turns.reduce((acc, t) => acc + (t.model_time_s || 0), 0);
+      const totalToolSec = turns.reduce((acc, t) => acc + (t.tool_time_s || 0), 0);
+      const wallSec = meta.total_duration_sec || Math.max(...trajs.map(t => t.end_time_s), 1.0);
+
+      const genThroughput = totalDurationSec => totalDurationSec > 0 ? (totalGenToks / totalDurationSec).toFixed(1) : "0.0";
+      const avgTpot = turns.length > 0 ? (turns.filter(t => t.tpot_ms).reduce((acc, t) => acc + t.tpot_ms, 0) / (turns.filter(t => t.tpot_ms).length || 1)).toFixed(2) : "--";
+      const avgTtft = turns.length > 0 ? (turns.filter(t => t.ttft_ms).reduce((acc, t) => acc + t.ttft_ms, 0) / (turns.filter(t => t.ttft_ms).length || 1)).toFixed(1) : "--";
 
       const cards = [
-        {{ label: "Simulated Batches", val: meta.num_batches || 1, unit: "" }},
-        {{ label: "Total Trajectories", val: numTrajs, unit: "" }},
-        {{ label: "Total Turns", val: numTurns, unit: "" }},
-        {{ label: "Avg Trajectory", val: avgDur, unit: "s" }},
-        {{ label: "Avg Model Turn", val: avgModel, unit: "s" }},
-        {{ label: "Avg Tool Idle", val: avgTool, unit: "s" }},
-        {{ label: "Output Tokens", val: totOutToks.toLocaleString(), unit: "" }},
-        {{ label: "Throughput", val: tps, unit: "tok/s" }}
+        { label: "Trajectories", val: totalTrajs, unit: "" },
+        { label: "Total Turns", val: totalTurns, unit: "" },
+        { label: "Wall Time", val: wallSec.toFixed(1), unit: "s" },
+        { label: "Throughput", val: genThroughput(wallSec), unit: "tok/s" },
+        { label: "Avg TTFT", val: avgTtft, unit: "ms" },
+        { label: "Avg TPOT", val: avgTpot, unit: "ms" },
+        { label: "Model Gen Time", val: totalModelSec.toFixed(1), unit: "s" },
+        { label: "Tool Idle Time", val: totalToolSec.toFixed(1), unit: "s" },
       ];
 
-      cards.forEach(c => {{
+      cards.forEach(c => {
         const el = document.createElement("div");
         el.className = "stat-card";
-        el.innerHTML = `<div class="label">${{c.label}}</div><div class="val">${{c.val}}<span class="unit">${{c.unit}}</span></div>`;
+        el.innerHTML = `<div class="label">${c.label}</div><div class="val">${c.val}<span class="unit">${c.unit}</span></div>`;
         sb.appendChild(el);
-      }});
-    }}
+      });
+    }
 
-    function renderChart() {{
-      const host = document.getElementById("svg-host");
-      host.innerHTML = "";
+    function populateRunSelector() {
+      const rSel = document.getElementById("run-select");
+      rSel.innerHTML = "";
+      const runKeys = Object.keys(ALL_RUNS);
+      runKeys.forEach(k => {
+        const opt = document.createElement("option");
+        opt.value = k;
+        opt.textContent = k;
+        if (k === currentRunKey) opt.selected = true;
+        rSel.appendChild(opt);
+      });
+      const group = document.getElementById("run-select-group");
+      if (group) {
+        group.style.display = runKeys.length > 0 ? "flex" : "none";
+      }
+    }
 
-      const batchFilter = document.getElementById("batch-filter").value;
-      const searchQuery = document.getElementById("search-input").value.trim().toLowerCase();
-      const sortBy = document.getElementById("sort-select").value;
-      const showToolTime = document.getElementById("toggle-tool-time").checked;
+    function populateBatchFilter() {
+      const bSel = document.getElementById("batch-filter");
+      const prevVal = bSel.value;
+      bSel.innerHTML = '<option value="all">All Batches</option>';
+      const numBatches = (RAW_DATA.meta && RAW_DATA.meta.num_batches) || 1;
+      for (let b = 0; b < numBatches; b++) {
+        const opt = document.createElement("option");
+        opt.value = String(b);
+        opt.textContent = `Batch ${b}`;
+        bSel.appendChild(opt);
+      }
+      if (prevVal === "all" || parseInt(prevVal) < numBatches) {
+        bSel.value = prevVal;
+      } else {
+        bSel.value = "all";
+      }
+    }
+
+    function updateSubtitle() {
+      const sub = document.getElementById("subtitle-info");
+      if (!sub) return;
+      const m = (RAW_DATA && RAW_DATA.meta) ? RAW_DATA.meta : {};
+      const model = m.model || m.model_name || "";
+      const trace = m.trace_file ? m.trace_file.split("/").pop() : "";
+      const dp = m.dp_sched_batch_prefill !== undefined ? `DP_SCHED=${m.dp_sched_batch_prefill}` : "";
+      const parts = ["Continuous multi-batch trajectory turn waterfall & latency profiling"];
+      if (model) parts.push(`Model: ${model}`);
+      if (trace) parts.push(`Trace: ${trace}`);
+      if (dp) parts.push(dp);
+      sub.textContent = parts.join(" | ");
+    }
+
+    function switchRun(runKey) {
+      if (!ALL_RUNS[runKey]) return;
+      currentRunKey = runKey;
+      RAW_DATA = ALL_RUNS[runKey];
+      populateBatchFilter();
+      renderStats(RAW_DATA.trajectories, RAW_DATA.turns, RAW_DATA.meta);
+      renderChart();
+      renderTurnProfile();
+      updateSubtitle();
+    }
+
+    function parseClientJSONL(text, filename) {
+      const lines = text.split("\n").map(l => l.trim()).filter(l => l);
+      const meta = { source_file: filename, run_name: filename.replace(/\\.[^/.]+$/, ""), batch_launch_times: [] };
+      const trajectories = {};
+      const turns = [];
+
+      for (const line of lines) {
+        if (!line.startsWith("{")) continue;
+        let rec;
+        try { rec = JSON.parse(line); } catch (e) { continue; }
+        const rType = rec.type;
+        if (rType === "benchmark_meta") {
+          Object.assign(meta, rec);
+        } else if (rType === "trajectory") {
+          if (rec.traj_id) trajectories[rec.traj_id] = rec;
+        } else if (rType === "turn" || (rec.turn && rec.group_idx !== undefined)) {
+          const bIdx = rec.batch_idx || 0;
+          const gIdx = rec.group_idx || 0;
+          const sIdx = rec.stream_idx || 0;
+          const trajId = rec.traj_id || `b${bIdx}_g${gIdx}_s${sIdx}`;
+          const tNum = rec.turn || 1;
+          const numTurns = rec.num_turns || 1;
+          let mTime = rec.model_time_s;
+          if (mTime === undefined && rec.total_time_ms) mTime = rec.total_time_ms / 1000.0;
+          turns.push({
+            type: "turn",
+            batch_idx: bIdx,
+            group_idx: gIdx,
+            stream_idx: sIdx,
+            traj_id: trajId,
+            turn: tNum,
+            num_turns: numTurns,
+            start_time_s: rec.start_time_s || 0.0,
+            end_time_s: rec.end_time_s || (mTime || 0.0),
+            model_time_s: mTime || 0.0,
+            tool_time_s: rec.tool_time_s || 0.0,
+            prompt_tokens: rec.input_history_tokens || rec.prompt_tokens || 0,
+            output_tokens: rec.output_tokens || rec.completion_tokens || 0,
+            ttft_ms: rec.ttft_ms,
+            tpot_ms: rec.tpot_ms,
+            total_time_ms: rec.total_time_ms,
+            success: rec.success !== undefined ? rec.success : true,
+            error: rec.error
+          });
+        }
+      }
+
+      // Synthesize trajectories if needed
+      const turnsByTraj = {};
+      turns.forEach(t => {
+        turnsByTraj[t.traj_id] = turnsByTraj[t.traj_id] || [];
+        turnsByTraj[t.traj_id].push(t);
+      });
+      for (const [tid, tList] of Object.entries(turnsByTraj)) {
+        if (!trajectories[tid]) {
+          const first = tList[0];
+          const tStart = Math.min(...tList.map(t => t.start_time_s));
+          const tEnd = Math.max(...tList.map(t => t.end_time_s));
+          const totModel = tList.reduce((acc, t) => acc + (t.model_time_s || 0), 0);
+          const totTool = tList.reduce((acc, t) => acc + (t.tool_time_s || 0), 0);
+          const totOut = tList.reduce((acc, t) => acc + (t.output_tokens || 0), 0);
+          trajectories[tid] = {
+            type: "trajectory",
+            traj_id: tid,
+            batch_idx: first.batch_idx || 0,
+            group_idx: first.group_idx || 0,
+            stream_idx: first.stream_idx || 0,
+            num_turns: tList.length,
+            start_time_s: tStart,
+            end_time_s: tEnd,
+            duration_s: Math.max(0, tEnd - tStart),
+            model_time_s: totModel,
+            tool_time_s: totTool,
+            prompt_tokens: first.prompt_tokens || 0,
+            output_tokens: totOut,
+            status: tList.every(t => t.success) ? "COMPLETED" : "FAILED"
+          };
+        }
+      }
+
+      const batches = [...new Set(Object.values(trajectories).map(t => t.batch_idx))].sort((a,b)=>a-b);
+      meta.num_batches = meta.num_batches || batches.length || 1;
+      meta.total_trajectories = Object.keys(trajectories).length;
+      meta.total_turns = turns.length;
+      meta.total_duration_sec = Math.max(...Object.values(trajectories).map(t => t.end_time_s), 1.0);
+      return { meta, trajectories: Object.values(trajectories), turns };
+    }
+
+    function renderChart() {
+      const bFilter = document.getElementById("batch-filter").value;
+      const searchVal = document.getElementById("search-input").value.trim().toLowerCase();
+      const sortVal = document.getElementById("sort-select").value;
+      const showTool = document.getElementById("toggle-tool-time").checked;
       const zoom = parseFloat(document.getElementById("zoom-scale").value);
 
       let trajs = [...RAW_DATA.trajectories];
-      if (batchFilter !== "all") {{
-        const bTarget = parseInt(batchFilter, 10);
-        trajs = trajs.filter(t => t.batch_idx === bTarget);
-      }}
-      if (searchQuery) {{
-        trajs = trajs.filter(t => (
-          t.traj_id.toLowerCase().includes(searchQuery) ||
-          String(t.group_idx).includes(searchQuery) ||
-          String(t.stream_idx).includes(searchQuery)
-        ));
-      }}
 
-      // Sorting
-      if (sortBy === "start") {{
-        trajs.sort((a, b) => a.start_time_s - b.start_time_s || a.traj_id.localeCompare(b.traj_id));
-      }} else if (sortBy === "duration") {{
+      if (bFilter !== "all") {
+        const b = parseInt(bFilter);
+        trajs = trajs.filter(t => t.batch_idx === b);
+      }
+
+      if (searchVal) {
+        trajs = trajs.filter(t => {
+          return t.traj_id.toLowerCase().includes(searchVal) ||
+                 `g${t.group_idx}`.includes(searchVal) ||
+                 `s${t.stream_idx}`.includes(searchVal) ||
+                 `b${t.batch_idx}`.includes(searchVal);
+        });
+      }
+
+      if (sortVal === "start") {
+        trajs.sort((a, b) => a.start_time_s - b.start_time_s || a.group_idx - b.group_idx);
+      } else if (sortVal === "duration") {
         trajs.sort((a, b) => b.duration_s - a.duration_s);
-      }} else if (sortBy === "turns") {{
+      } else if (sortVal === "turns") {
         trajs.sort((a, b) => b.num_turns - a.num_turns);
-      }} else if (sortBy === "id") {{
+      } else if (sortVal === "id") {
         trajs.sort((a, b) => a.traj_id.localeCompare(b.traj_id));
-      }}
+      }
 
       document.getElementById("chart-count-info").textContent =
-        `Showing ${{trajs.length}} trajectories (${{RAW_DATA.meta.total_turns}} total turns across ${{RAW_DATA.meta.num_batches}} batches)`;
+        `Showing ${trajs.length} trajectories (${RAW_DATA.meta.total_turns} total turns across ${RAW_DATA.meta.num_batches} batches)`;
 
-      if (!trajs.length) {{
-        host.innerHTML = '<div style="padding:40px; text-align:center; color:var(--text-muted);">No trajectories match filter.</div>';
+      const host = document.getElementById("svg-host");
+      host.innerHTML = "";
+
+      if (trajs.length === 0) {
+        host.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-muted);">No trajectories match filter.</div>';
         return;
-      }}
-
-      const packing = packSwimlanes(trajs);
-      trajs.forEach((t, i) => {{ t.row = packing.rows[i]; }});
+      }
 
       const tStart = 0.0;
       const tEnd = Math.max(...trajs.map(t => t.end_time_s), RAW_DATA.meta.total_duration_sec || 1.0);
       const span = Math.max(tEnd - tStart, 1.0);
 
-      const left = 80, right = 40, top = 28, rowH = 22, barH = 16, bottom = 28;
-      const baseW = Math.max(document.getElementById("scroll-box").clientWidth - 20, 800);
-      const plotW = Math.round((baseW - left - right) * zoom);
-      const svgW = left + plotW + right;
-      const plotH = packing.nrows * rowH;
-      const svgH = top + plotH + bottom;
+      const pxPerSec = Math.max(30 * zoom, 12);
+      const svgWidth = Math.max(Math.round(span * pxPerSec) + 160, 900);
+      const labelW = 120;
+      const rowHeight = 22;
+      const rowGap = 6;
+      const headerH = 28;
 
-      const tx = (t) => left + ((t - tStart) / span) * plotW;
+      const numRows = trajs.length;
+      const svgHeight = headerH + numRows * (rowHeight + rowGap) + 30;
 
       const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      svg.setAttribute("width", svgW);
-      svg.setAttribute("height", svgH);
-      svg.setAttribute("viewBox", `0 0 ${{svgW}} ${{svgH}}`);
+      svg.setAttribute("width", svgWidth);
+      svg.setAttribute("height", svgHeight);
+      svg.style.display = "block";
 
-      // Time grid
-      const steps = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600];
-      const stp = steps.find(s => span / s <= 14) || 60;
-      for (let t = 0; t <= tEnd; t += stp) {{
-        const gx = tx(t);
+      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+      const pattern = document.createElementNS("http://www.w3.org/2000/svg", "pattern");
+      pattern.setAttribute("id", "tool-hatch");
+      pattern.setAttribute("width", "6");
+      pattern.setAttribute("height", "6");
+      pattern.setAttribute("patternTransform", "rotate(45 0 0)");
+      pattern.setAttribute("patternUnits", "userSpaceOnUse");
+      pattern.innerHTML = '<line x1="0" y1="0" x2="0" y2="6" stroke="#64748b" stroke-width="2.5" opacity="0.7"/>';
+      defs.appendChild(pattern);
+      svg.appendChild(defs);
+
+      // Time axis grid
+      const axisG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const stepSec = span > 180 ? 30 : (span > 60 ? 10 : (span > 20 ? 5 : 1));
+      for (let sec = 0; sec <= span; sec += stepSec) {
+        const x = labelW + Math.round(sec * pxPerSec);
         const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        line.setAttribute("x1", gx); line.setAttribute("x2", gx);
-        line.setAttribute("y1", top - 4); line.setAttribute("y2", top + plotH);
-        line.setAttribute("stroke", "var(--grid)");
-        line.setAttribute("opacity", "0.4");
-        svg.appendChild(line);
+        line.setAttribute("x1", x);
+        line.setAttribute("y1", headerH - 6);
+        line.setAttribute("x2", x);
+        line.setAttribute("y2", svgHeight - 10);
+        line.setAttribute("stroke", "#334155");
+        line.setAttribute("stroke-dasharray", "2,3");
+        axisG.appendChild(line);
 
         const txt = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        txt.setAttribute("x", gx);
-        txt.setAttribute("y", svgH - 10);
+        txt.setAttribute("x", x);
+        txt.setAttribute("y", headerH - 10);
+        txt.setAttribute("fill", "#94a3b8");
+        txt.setAttribute("font-size", "11");
         txt.setAttribute("text-anchor", "middle");
-        txt.setAttribute("fill", "var(--text-muted)");
-        txt.setAttribute("font-size", "10");
-        txt.textContent = t >= 60 ? (t / 60).toFixed(1) + "m" : t + "s";
-        svg.appendChild(txt);
-      }}
+        txt.textContent = `${sec}s`;
+        axisG.appendChild(txt);
+      }
+      svg.appendChild(axisG);
 
-      // Swimlane row labels & guidelines
-      for (let r = 0; r < packing.nrows; r++) {{
-        const ry = top + r * rowH;
-        const rlab = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        rlab.setAttribute("x", left - 8);
-        rlab.setAttribute("y", ry + barH - 3);
-        rlab.setAttribute("text-anchor", "end");
-        rlab.setAttribute("fill", "var(--text-muted)");
-        rlab.setAttribute("font-size", "10");
-        rlab.textContent = "lane " + (r + 1);
-        svg.appendChild(rlab);
+      // Map turns by trajectory
+      const trajTurns = {};
+      RAW_DATA.turns.forEach(t => {
+        trajTurns[t.traj_id] = trajTurns[t.traj_id] || [];
+        trajTurns[t.traj_id].push(t);
+      });
 
-        const gline = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        gline.setAttribute("x1", left); gline.setAttribute("x2", left + plotW);
-        gline.setAttribute("y1", ry + barH + 3); gline.setAttribute("y2", ry + barH + 3);
-        gline.setAttribute("stroke", "var(--grid)");
-        gline.setAttribute("stroke-dasharray", "2 4");
-        gline.setAttribute("opacity", "0.25");
-        svg.appendChild(gline);
-      }}
+      // Render Trajectory Rows
+      trajs.forEach((traj, idx) => {
+        const y = headerH + idx * (rowHeight + rowGap);
+        const rowG = document.createElementNS("http://www.w3.org/2000/svg", "g");
 
-      // Trajectories & turns map
-      const turnsByTraj = {{}};
-      RAW_DATA.turns.forEach(t => {{
-        turnsByTraj[t.traj_id] = turnsByTraj[t.traj_id] || [];
-        turnsByTraj[t.traj_id].push(t);
-      }});
+        // Row background on hover
+        const rowBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rowBg.setAttribute("x", 0);
+        rowBg.setAttribute("y", y - 2);
+        rowBg.setAttribute("width", svgWidth);
+        rowBg.setAttribute("height", rowHeight + 4);
+        rowBg.setAttribute("fill", "transparent");
+        rowBg.style.cursor = "pointer";
+        rowG.appendChild(rowBg);
 
-      trajs.forEach(it => {{
-        const ry = top + it.row * rowH;
-        const bCol = COLORS[it.batch_idx % COLORS.length];
-        const tTurns = (turnsByTraj[it.traj_id] || []).sort((a, b) => a.turn - b.turn);
+        // Label
+        const lbl = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        lbl.setAttribute("x", 6);
+        lbl.setAttribute("y", y + rowHeight / 2 + 4);
+        lbl.setAttribute("fill", "#e2e8f0");
+        lbl.setAttribute("font-size", "11");
+        lbl.setAttribute("font-family", "monospace");
+        lbl.textContent = traj.traj_id;
+        rowG.appendChild(lbl);
 
-        tTurns.forEach(turn => {{
-          const mX0 = tx(turn.start_time_s);
-          const mX1 = tx(turn.end_time_s);
-          const mW = Math.max(mX1 - mX0, 1.5);
+        // Turn blocks
+        const tList = trajTurns[traj.traj_id] || [];
+        tList.sort((a, b) => a.turn - b.turn);
 
-          // 1. Model generation bar
+        tList.forEach(turn => {
+          const mX = labelW + Math.round((turn.start_time_s - tStart) * pxPerSec);
+          const mW = Math.max(Math.round(turn.model_time_s * pxPerSec), 2);
+          const color = COLORS[turn.batch_idx % COLORS.length];
+
+          // Model computation block
           const mRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-          mRect.setAttribute("x", mX0);
-          mRect.setAttribute("y", ry);
+          mRect.setAttribute("x", mX);
+          mRect.setAttribute("y", y);
           mRect.setAttribute("width", mW);
-          mRect.setAttribute("height", barH);
-          mRect.setAttribute("fill", bCol);
-          mRect.setAttribute("rx", "2");
-          mRect.setAttribute("stroke", "rgba(0,0,0,0.35)");
-          mRect.setAttribute("stroke-width", "0.5");
+          mRect.setAttribute("height", rowHeight);
+          mRect.setAttribute("rx", 3);
+          mRect.setAttribute("fill", color);
           mRect.style.cursor = "pointer";
 
-          const tokRate = turn.model_time_s > 0 ? (turn.output_tokens / turn.model_time_s).toFixed(1) : "0.0";
-          const mTip = `Trajectory: ${{it.traj_id}} (Batch ${{it.batch_idx}}, Group ${{it.group_idx}}, Stream ${{it.stream_idx}})
-Turn: ${{turn.turn}} / ${{it.num_turns}}
-Phase: Model Generation
-Duration: ${{turn.model_time_s.toFixed(2)}}s
-Tokens: ${{turn.prompt_tokens.toLocaleString()}} prompt / ${{turn.output_tokens.toLocaleString()}} gen (${{tokRate}} tok/s)
-TTFT: ${{turn.ttft_ms != null ? turn.ttft_ms.toFixed(1) + 'ms' : 'N/A'}} | TPOT: ${{turn.tpot_ms != null ? turn.tpot_ms.toFixed(2) + 'ms' : 'N/A'}}
-Span: +${{turn.start_time_s.toFixed(2)}}s → +${{turn.end_time_s.toFixed(2)}}s
-Trajectory Total: ${{it.duration_s.toFixed(1)}}s (${{it.output_tokens.toLocaleString()}} tokens)`;
+          const tipText = [
+            `Trajectory: ${turn.traj_id} (Turn ${turn.turn}/${turn.num_turns})`,
+            `Batch: ${turn.batch_idx} | Group: ${turn.group_idx} | Stream: ${turn.stream_idx}`,
+            `Model Time: ${turn.model_time_s.toFixed(3)} s`,
+            `Tool/Env Idle: ${turn.tool_time_s.toFixed(3)} s`,
+            `Prompt Tokens: ${turn.prompt_tokens}`,
+            `Generated Tokens: ${turn.output_tokens}`,
+            turn.ttft_ms ? `TTFT: ${turn.ttft_ms} ms` : null,
+            turn.tpot_ms ? `TPOT: ${turn.tpot_ms} ms` : null,
+            `Start: ${turn.start_time_s.toFixed(3)} s -> End: ${turn.end_time_s.toFixed(3)} s`,
+          ].filter(Boolean).join("\n");
 
-          mRect.addEventListener("mousemove", e => showTip(e, mTip));
+          mRect.addEventListener("mousemove", (e) => showTip(e, tipText));
           mRect.addEventListener("mouseleave", hideTip);
-          svg.appendChild(mRect);
+          rowG.appendChild(mRect);
 
-          // Turn number label inside generation block if wide enough
-          if (mW >= 13) {{
-            const numTxt = document.createElementNS("http://www.w3.org/2000/svg", "text");
-            numTxt.setAttribute("x", mX0 + mW / 2);
-            numTxt.setAttribute("y", ry + barH / 2 + 3.5);
-            numTxt.setAttribute("text-anchor", "middle");
-            numTxt.setAttribute("fill", "#ffffff");
-            numTxt.setAttribute("font-size", mW >= 20 ? "9.5" : "8");
-            numTxt.setAttribute("font-weight", "700");
-            numTxt.setAttribute("pointer-events", "none");
-            numTxt.textContent = String(turn.turn);
-            svg.appendChild(numTxt);
-          }}
+          // Turn number inside model block if width permits
+          if (mW >= 12) {
+            const tTxt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            tTxt.setAttribute("x", mX + mW / 2);
+            tTxt.setAttribute("y", y + rowHeight / 2 + 4);
+            tTxt.setAttribute("fill", "#ffffff");
+            tTxt.setAttribute("font-size", mW >= 18 ? "10" : "8");
+            tTxt.setAttribute("font-weight", "700");
+            tTxt.setAttribute("text-anchor", "middle");
+            tTxt.style.pointerEvents = "none";
+            tTxt.textContent = String(turn.turn);
+            rowG.appendChild(tTxt);
+          }
 
-          // 2. Tool / Environment Idle Time bar
-          if (showToolTime && turn.tool_time_s > 0) {{
-            const eX0 = mX1;
-            const eX1 = tx(turn.end_time_s + turn.tool_time_s);
-            const eW = Math.max(eX1 - eX0, 1.0);
+          // Tool / environment idle block
+          if (showTool && turn.tool_time_s > 0) {
+            const toolX = mX + mW;
+            const toolW = Math.max(Math.round(turn.tool_time_s * pxPerSec), 2);
+            const toolRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+            toolRect.setAttribute("x", toolX);
+            toolRect.setAttribute("y", y + 2);
+            toolRect.setAttribute("width", toolW);
+            toolRect.setAttribute("height", rowHeight - 4);
+            toolRect.setAttribute("rx", 2);
+            toolRect.setAttribute("fill", "url(#tool-hatch)");
+            toolRect.setAttribute("stroke", "#475569");
+            toolRect.setAttribute("stroke-width", "0.5");
+            toolRect.style.cursor = "pointer";
 
-            const eRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-            eRect.setAttribute("x", eX0);
-            eRect.setAttribute("y", ry);
-            eRect.setAttribute("width", eW);
-            eRect.setAttribute("height", barH);
-            eRect.setAttribute("fill", bCol);
-            eRect.setAttribute("opacity", "0.4");
-            eRect.setAttribute("rx", "1");
-            eRect.setAttribute("stroke", bCol);
-            eRect.setAttribute("stroke-width", "0.5");
-            eRect.style.cursor = "pointer";
+            const toolTip = `Tool Call Idle Gap (Turn ${turn.turn} -> ${turn.turn + 1})\n` +
+                            `Duration: ${turn.tool_time_s.toFixed(3)} s\n` +
+                            `Time: ${(turn.end_time_s).toFixed(3)} s -> ${(turn.end_time_s + turn.tool_time_s).toFixed(3)} s`;
+            toolRect.addEventListener("mousemove", (e) => showTip(e, toolTip));
+            toolRect.addEventListener("mouseleave", hideTip);
+            rowG.appendChild(toolRect);
+          }
+        });
 
-            const eTip = `Trajectory: ${{it.traj_id}} (Batch ${{it.batch_idx}}, Group ${{it.group_idx}}, Stream ${{it.stream_idx}})
-Turn: ${{turn.turn}} / ${{it.num_turns}}
-Phase: Tool / Environment Idle Time
-Duration: ${{turn.tool_time_s.toFixed(2)}}s
-Span: +${{turn.end_time_s.toFixed(2)}}s → +${{(turn.end_time_s + turn.tool_time_s).toFixed(2)}}s`;
+        rowBg.addEventListener("mouseenter", () => { rowBg.setAttribute("fill", "rgba(255,255,255,0.04)"); });
+        rowBg.addEventListener("mouseleave", () => { rowBg.setAttribute("fill", "transparent"); });
+        svg.appendChild(rowG);
+      });
 
-            eRect.addEventListener("mousemove", e => showTip(e, eTip));
-            eRect.addEventListener("mouseleave", hideTip);
-            svg.appendChild(eRect);
-          }}
-        }});
-      }});
-
-      // Batch launch vertical boundary lines
+      // Batch launch vertical boundary markers
       const launchTimes = RAW_DATA.meta.batch_launch_times || [0.0];
-      launchTimes.forEach((bTime, bIdx) => {{
-        const bx = tx(bTime);
-        const bline = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        bline.setAttribute("x1", bx); blline = bline; bline.setAttribute("x2", bx);
-        bline.setAttribute("y1", top - 6); bline.setAttribute("y2", top + plotH + 4);
-        bline.setAttribute("stroke", "#000");
-        bline.setAttribute("stroke-width", "2");
-        bline.setAttribute("opacity", "0.95");
-        svg.appendChild(bline);
+      launchTimes.forEach((bTime, bIdx) => {
+        const bX = labelW + Math.round(bTime * pxPerSec);
+        const bG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+
+        const vLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        vLine.setAttribute("x1", bX);
+        vLine.setAttribute("y1", headerH - 8);
+        vLine.setAttribute("x2", bX);
+        vLine.setAttribute("y2", svgHeight - 6);
+        vLine.setAttribute("stroke", "#000000");
+        vLine.setAttribute("stroke-width", "2.5");
+        bG.appendChild(vLine);
 
         const badge = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-        badge.setAttribute("x", bx - 14);
-        badge.setAttribute("y", top - 22);
-        badge.setAttribute("width", "28");
-        badge.setAttribute("height", "15");
-        badge.setAttribute("rx", "3");
-        badge.setAttribute("fill", "#000");
-        badge.setAttribute("stroke", "#475569");
+        badge.setAttribute("x", bX - 12);
+        badge.setAttribute("y", 2);
+        badge.setAttribute("width", 24);
+        badge.setAttribute("height", 16);
+        badge.setAttribute("rx", 3);
+        badge.setAttribute("fill", "#000000");
+        badge.setAttribute("stroke", "#ffffff");
         badge.setAttribute("stroke-width", "1");
-        svg.appendChild(badge);
+        bG.appendChild(badge);
 
-        const blbl = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        blbl.setAttribute("x", bx);
-        blbl.setAttribute("y", top - 11);
-        blbl.setAttribute("text-anchor", "middle");
-        blbl.setAttribute("fill", "#fff");
-        blbl.setAttribute("font-size", "9.5");
-        blbl.setAttribute("font-weight", "700");
-        blbl.textContent = "b" + bIdx;
-        svg.appendChild(blbl);
+        const badgeTxt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        badgeTxt.setAttribute("x", bX);
+        badgeTxt.setAttribute("y", 14);
+        badgeTxt.setAttribute("fill", "#ffffff");
+        badgeTxt.setAttribute("font-size", "10");
+        badgeTxt.setAttribute("font-weight", "700");
+        badgeTxt.setAttribute("text-anchor", "middle");
+        badgeTxt.textContent = `b${bIdx}`;
+        bG.appendChild(badgeTxt);
 
-        const bTip = (e) => showTip(e, `Batch ${{bIdx}} launch boundary dispatched at +${{bTime.toFixed(2)}}s`);
-        [bline, badge, blbl].forEach(el => {{
-          el.addEventListener("mousemove", bTip);
-          el.addEventListener("mouseleave", hideTip);
-        }});
-      }});
+        bG.addEventListener("mousemove", (e) => showTip(e, `Batch ${bIdx} Launch Boundary\nTime: ${bTime.toFixed(2)}s`));
+        bG.addEventListener("mouseleave", hideTip);
+        svg.appendChild(bG);
+      });
 
       host.appendChild(svg);
-    }}
+    }
 
-    function renderTurnProfile() {{
+    function renderTurnProfile() {
       const host = document.getElementById("turn-profile-host");
       host.innerHTML = "";
       const turns = RAW_DATA.turns;
-      if (!turns.length) return;
+      if (!turns || turns.length === 0) return;
 
-      const maxTurn = Math.max(...turns.map(t => t.turn));
-      const modelSum = new Array(maxTurn + 1).fill(0);
-      const toolSum = new Array(maxTurn + 1).fill(0);
-      const count = new Array(maxTurn + 1).fill(0);
-
-      turns.forEach(t => {{
-        modelSum[t.turn] += (t.model_time_s || 0);
-        toolSum[t.turn] += (t.tool_time_s || 0);
-        count[t.turn] += 1;
-      }});
+      const turnsByNum = {};
+      turns.forEach(t => {
+        turnsByNum[t.turn] = turnsByNum[t.turn] || { models: [], tools: [] };
+        turnsByNum[t.turn].models.push(t.model_time_s || 0.0);
+        if (t.tool_time_s) turnsByNum[t.turn].tools.push(t.tool_time_s);
+      });
 
       const rows = [];
-      for (let i = 1; i <= maxTurn; i++) {{
-        if (count[i] > 0) {{
-          rows.push({{
-            turn: i,
-            avgModel: modelSum[i] / count[i],
-            avgTool: toolSum[i] / count[i],
-            n: count[i],
-          }});
-        }}
-      }}
+      const turnKeys = Object.keys(turnsByNum).map(Number).sort((a, b) => a - b);
+      turnKeys.forEach(tn => {
+        const obj = turnsByNum[tn];
+        const avgModel = obj.models.reduce((a, b) => a + b, 0) / (obj.models.length || 1);
+        const avgTool = obj.tools.length > 0 ? (obj.tools.reduce((a, b) => a + b, 0) / obj.tools.length) : 0.0;
+        rows.push({ turn: tn, avgModel, avgTool, total: avgModel + avgTool });
+      });
 
-      const maxVal = Math.max(...rows.map(r => r.avgModel + r.avgTool), 0.1);
+      const maxVal = Math.max(...rows.map(r => r.total), 0.1);
+
       const table = document.createElement("div");
-      table.style.cssText = "display:grid; grid-template-columns: 60px 1fr 100px; gap:8px; align-items:center; font-size:12px;";
+      table.style.cssText = "display:grid; grid-template-columns: 80px 1fr 120px; gap:8px 12px; font-size:12px; align-items:center; max-height:220px; overflow-y:auto;";
 
-      rows.slice(0, 20).forEach(r => {{
+      rows.forEach(r => {
         const rowDiv = document.createElement("div");
-        rowDiv.textContent = `Turn ${{r.turn}}:`;
+        rowDiv.textContent = `Turn ${r.turn}:`;
         rowDiv.style.color = "var(--text-muted)";
 
         const barContainer = document.createElement("div");
@@ -958,65 +1177,96 @@ Span: +${{turn.end_time_s.toFixed(2)}}s → +${{(turn.end_time_s + turn.tool_tim
         const tPct = (r.avgTool / maxVal * 100).toFixed(1);
 
         barContainer.innerHTML = `
-          <div style="width:${{mPct}}%; background:var(--b0);" title="Model: ${{r.avgModel.toFixed(2)}}s"></div>
-          <div style="width:${{tPct}}%; background:var(--b0); opacity:0.4;" title="Tool: ${{r.avgTool.toFixed(2)}}s"></div>
+          <div style="width:${mPct}%; background:var(--b0);" title="Model: ${r.avgModel.toFixed(2)}s"></div>
+          <div style="width:${tPct}%; background:var(--b0); opacity:0.4;" title="Tool: ${r.avgTool.toFixed(2)}s"></div>
         `;
 
         const valTxt = document.createElement("div");
         valTxt.style.color = "var(--text-muted)";
-        valTxt.textContent = `${{r.avgModel.toFixed(2)}}s + ${{r.avgTool.toFixed(2)}}s`;
+        valTxt.textContent = `${r.avgModel.toFixed(2)}s + ${r.avgTool.toFixed(2)}s`;
 
         table.appendChild(rowDiv);
         table.appendChild(barContainer);
         table.appendChild(valTxt);
-      }});
+      });
 
       host.appendChild(table);
-    }}
+    }
 
     // Initialization
-    function init() {{
-      const bSel = document.getElementById("batch-filter");
-      const numBatches = RAW_DATA.meta.num_batches || 1;
-      for (let b = 0; b < numBatches; b++) {{
-        const opt = document.createElement("option");
-        opt.value = String(b);
-        opt.textContent = `Batch ${{b}}`;
-        bSel.appendChild(opt);
-      }}
+    function init() {
+      populateRunSelector();
+      populateBatchFilter();
+      updateSubtitle();
 
       renderStats(RAW_DATA.trajectories, RAW_DATA.turns, RAW_DATA.meta);
       renderChart();
       renderTurnProfile();
 
+      document.getElementById("run-select").addEventListener("change", (e) => switchRun(e.target.value));
       document.getElementById("batch-filter").addEventListener("change", renderChart);
       document.getElementById("search-input").addEventListener("input", renderChart);
       document.getElementById("sort-select").addEventListener("change", renderChart);
       document.getElementById("toggle-tool-time").addEventListener("change", renderChart);
-      document.getElementById("zoom-scale").addEventListener("input", (e) => {{
+      document.getElementById("zoom-scale").addEventListener("input", (e) => {
         document.getElementById("zoom-val").textContent = parseFloat(e.target.value).toFixed(1) + "x";
         renderChart();
-      }});
+      });
+
+      // Add Run file upload listener
+      const fileInput = document.getElementById("run-file-input");
+      const loadBtn = document.getElementById("load-file-btn");
+      if (loadBtn && fileInput) {
+        loadBtn.addEventListener("click", () => fileInput.click());
+        fileInput.addEventListener("change", (e) => {
+          const file = e.target.files && e.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+            try {
+              const text = evt.target.result;
+              const parsed = parseClientJSONL(text, file.name);
+              const runName = file.name.replace(/\\.[^/.]+$/, "");
+              ALL_RUNS[runName] = parsed;
+              populateRunSelector();
+              document.getElementById("run-select").value = runName;
+              switchRun(runName);
+            } catch (err) {
+              alert("Failed to parse run metrics JSONL file: " + err);
+            }
+          };
+          reader.readAsText(file);
+        });
+      }
+
       window.addEventListener("resize", renderChart);
-    }}
+    }
 
     window.addEventListener("DOMContentLoaded", init);
   </script>
 </body>
 </html>
 """
-    return html_template
+    return html_template.replace("__TITLE__", title).replace("__RUNS_JSON__", runs_json)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize multi-turn agentic RL trajectories and turn latencies."
+        description="Visualize multi-turn agentic RL trajectories and turn latencies across one or more benchmark runs."
     )
     parser.add_argument(
-        "input",
-        nargs="?",
-        default=None,
-        help="Input trajectory metrics JSONL file (e.g. from benchmark_agentic.py --save-trajectory-file).",
+        "inputs",
+        nargs="*",
+        default=[],
+        help="One or more input trajectory metrics JSONL files, or 'Run Label=path/to/file.jsonl'.",
+    )
+    parser.add_argument(
+        "--run",
+        "-r",
+        action="append",
+        dest="explicit_runs",
+        default=[],
+        help="Explicitly named run in format 'Run Label=path/to/file.jsonl' (can be specified multiple times).",
     )
     parser.add_argument(
         "--output",
@@ -1034,7 +1284,7 @@ def main():
     parser.add_argument(
         "--demo",
         action="store_true",
-        help="Generate synthetic demo data to preview the visualization.",
+        help="Generate synthetic multi-run demo data to preview the comparison visualization.",
     )
     parser.add_argument(
         "--serve",
@@ -1055,19 +1305,41 @@ def main():
 
     args = parser.parse_args()
 
-    if args.demo or not args.input:
-        if not args.input and not args.demo:
-            print("No input file provided. Generating interactive demo data (--demo)...")
-        data = generate_demo_data()
-    else:
-        print(f"Parsing metrics from: {args.input}")
-        data = parse_metrics_file(args.input)
+    runs_data: Dict[str, Dict[str, Any]] = {}
 
-    html_content = generate_html(data, title=args.title)
+    # 1. Parse explicitly named runs via -r / --run
+    for item in args.explicit_runs:
+        if "=" in item:
+            name, path = item.rsplit("=", 1)
+        else:
+            name, path = os.path.splitext(os.path.basename(item))[0], item
+        print(f"Loading named run '{name}' from: {path}")
+        runs_data[name] = parse_metrics_file(path, run_name=name)
+
+    # 2. Parse positional inputs
+    for item in args.inputs:
+        if "=" in item:
+            name, path = item.rsplit("=", 1)
+        else:
+            name, path = os.path.splitext(os.path.basename(item))[0], item
+        print(f"Loading run '{name}' from: {path}")
+        runs_data[name] = parse_metrics_file(path, run_name=name)
+
+    # 3. Fallback to demo mode if no inputs provided or --demo requested
+    if args.demo or not runs_data:
+        if not runs_data and not args.demo:
+            print("No input files provided. Generating interactive multi-run demo data (--demo)...")
+        demo_runs = generate_demo_runs()
+        runs_data.update(demo_runs)
+
+    html_content = generate_html(runs_data, title=args.title)
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(html_content)
+
     print(f"Generated trajectory waterfall visualization: {os.path.abspath(args.output)}")
-    print(f"Total trajectories: {len(data['trajectories'])}, Total turns: {len(data['turns'])}")
+    print(f"Total runs embedded: {len(runs_data)} -> {list(runs_data.keys())}")
+    for name, rdata in runs_data.items():
+        print(f"  - [{name}]: {len(rdata['trajectories'])} trajectories, {len(rdata['turns'])} turns")
 
     if args.open:
         try:
