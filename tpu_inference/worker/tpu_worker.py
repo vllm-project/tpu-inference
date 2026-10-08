@@ -203,8 +203,23 @@ class TPUWorker(WorkerBase):
         self.devices = devices if devices is not None else []
         self.device_ranks = set(device.id for device in self.devices
                                 if isinstance(device, jaxlib._jax.Device))
-        self.pp_config = PPConfig(vllm_config, rank, ip, prev_worker_ip,
-                                  self.parallel_config.pipeline_parallel_size)
+        w_ip = os.environ.get("TPU_PP_WORKER_IP", ip)
+        if w_ip == "localhost" or not w_ip:
+            try:
+                import ray
+                if ray.is_initialized():
+                    import ray.util
+                    w_ip = ray.util.get_node_ip_address()
+            except Exception:
+                pass
+        p_ip = os.environ.get("TPU_PP_PREV_WORKER_IP", prev_worker_ip)
+        self.pp_config = PPConfig(
+            vllm_config,
+            rank,
+            w_ip,
+            p_ip,
+            self.parallel_config.pipeline_parallel_size,
+        )
 
         # If model_weights is set, and we are in a distributed environment on Ray,
         # the driver might have overwritten `model` to its local cache path.
@@ -466,6 +481,9 @@ class TPUWorker(WorkerBase):
                 self.topology_order_id = get_device_topology_order_id(
                     jax.local_devices(), jax.devices())
 
+        self.is_first_rank = is_first_rank
+        self.is_last_rank = is_last_rank
+
         self.model_runner = TPUModelRunner(self.vllm_config, self.devices,
                                            self.rank, is_first_rank,
                                            is_last_rank)
@@ -503,11 +521,26 @@ class TPUWorker(WorkerBase):
                     f"TPUKVCacheStatsLogger initialized on worker rank {self.rank}."
                 )
 
-    def initialize_pp_transfer_connect(self):
+    def get_node_ip(self) -> str:
+        try:
+            import ray
+            if ray.is_initialized():
+                import ray.util
+                return ray.util.get_node_ip_address()
+        except Exception:
+            pass
+        return self.pp_config.worker_ip
+
+    def initialize_pp_transfer_connect(self,
+                                       worker_ips: Optional[list[str]] = None,
+                                       prev_worker_ip: Optional[str] = None):
         if self.rank == 0:
             return
-        jax_parallel_state.connect(self.pp_config.prev_worker_ip,
-                                   self.rank - 1)
+        if worker_ips is not None and self.rank < len(worker_ips):
+            target_ip = worker_ips[self.rank - 1]
+        else:
+            target_ip = prev_worker_ip or self.pp_config.prev_worker_ip
+        jax_parallel_state.connect(target_ip, self.rank - 1)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
@@ -583,7 +616,6 @@ class TPUWorker(WorkerBase):
             # receive intermediate tensors
             uuid = self.model_runner.get_uuid_for_jax_transfer(
                 scheduler_output, self.rank - 1, self.step_counter)
-            # TODO: this method might only works for vllm model, not sure about jax models.
             tensor_spec = self.model_runner.get_intermediate_tensor_spec(
                 scheduler_output)
             intermediate_tensors_dict = get_pp_group().recv_tensor_dict(
@@ -606,10 +638,13 @@ class TPUWorker(WorkerBase):
         else:
             self.step_counter += 1
             # With a connector, the scheduler expects output from all workers
-            # TODO(mrjunwan): Figure out if this is ok after https://github.com/vllm-project/vllm/pull/26866
+            # In pipeline parallel execution on TPU v6e, the last rank produces the sampled token outputs.
+            # Even on non-driver Ray actor workers, the last rank must return its ModelRunnerOutput
+            # back to the engine core / driver to complete generation.
             if has_kv_transfer_group():
                 return output
-            return output if self.is_driver_worker else None
+            return output if (self.is_driver_worker
+                              or self.is_last_rank) else None
 
     def sample_tokens(self,
                       grammar_output: GrammarOutput) -> ModelRunnerOutput:

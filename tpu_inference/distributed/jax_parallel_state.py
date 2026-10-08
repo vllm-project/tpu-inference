@@ -72,11 +72,24 @@ def init_pp_distributed_environment(ip: str, rank: int, world_size: int,
 
     if need_pp:
         port_number = BASE_JAX_PORT + rank
-        server_address = format_host_port(ip, port_number)
+        # Bind listening socket to 0.0.0.0 to accept cross-node traffic across
+        # all network interfaces in multi-host TPU v6e cloud/GKE environments.
+        server_address = format_host_port("0.0.0.0", port_number)
+        adv_ip = ip
+        # When running distributed under Ray across TPU v6e hosts, 'localhost' cannot be reached by peers.
+        # Dynamically resolve and advertise this node's routable IP address.
+        if ip == "localhost":
+            try:
+                import ray
+
+                if ray.is_initialized():
+                    adv_ip = ray.util.get_node_ip_address()
+            except Exception:
+                pass
         transfer_server = transfer.start_transfer_server(
             device.client, server_address,
-            [format_host_port(ip, 0),
-             format_host_port(ip, 0)])
+            [format_host_port(adv_ip, 0),
+             format_host_port(adv_ip, 0)])
         _PP.transfer_server = transfer_server
 
 
