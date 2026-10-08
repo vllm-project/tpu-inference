@@ -17,7 +17,7 @@
 # upload_models_and_features.sh, after configs/pipeline_config.sh
 # (upload_with_priority).
 
-# shellcheck source=nightly_suites.sh
+# shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/nightly_suites.sh"
 
 # One generation of pipeline_jax_kube.yml: the kube shapes in place of the bare

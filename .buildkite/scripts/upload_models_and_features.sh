@@ -52,9 +52,9 @@ trap 'failure_handler $LINENO' ERR
 
 # A kube build sends up the kube versions of the same suites.
 if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
-  # shellcheck source=configs/pipeline_config.sh
+  # shellcheck source=/dev/null
   source "$(dirname "${BASH_SOURCE[0]}")/configs/pipeline_config.sh"
-  # shellcheck source=kube_suites.sh
+  # shellcheck source=/dev/null
   source "$(dirname "${BASH_SOURCE[0]}")/kube_suites.sh"
   export JOB_PRIORITY="${JOB_PRIORITY:-1}"
   upload_kube_nightly_suites
@@ -75,7 +75,7 @@ add_kernel_microbenchmarks() {
   fi
 }
 
-# shellcheck source=nightly_suites.sh
+# shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/nightly_suites.sh"
 for suite in $(nightly_suites); do
   if [[ "${suite}" == "kernel_microbenchmarks" ]]; then
