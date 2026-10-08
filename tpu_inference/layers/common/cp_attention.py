@@ -444,7 +444,11 @@ def dcp_forward(
     """
     if envs.DCP_DECODE_ONLY_OPT:
         is_decode_only = (md.request_distribution[0] == md.request_distribution[2])
-        return jax.lax.cond(
+        # Only return the attention output through lax.cond. Both branches update
+        # kv_cache in-place in HBM. Returning kv_cache as part of the conditional phi
+        # causes XLA copy_insertion (IndicesToCopyForConditional) to insert a 1.25 GB
+        # DeepCopyInstruction on every layer (~500us/layer, 32ms/step).
+        out = jax.lax.cond(
             is_decode_only,
             lambda: dcp_forward_decode_only(
                 mesh=mesh,
@@ -459,7 +463,7 @@ def dcp_forward(
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
-            ),
+            )[1],
             lambda: dcp_forward_two_phase(
                 mesh=mesh,
                 q=q,
@@ -473,8 +477,9 @@ def dcp_forward(
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
-            ),
+            )[1],
         )
+        return kv_cache, out
 
     return dcp_forward_two_phase(
         mesh=mesh,

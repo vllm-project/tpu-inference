@@ -24,7 +24,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from typing import Any, Dict, List
+from typing import Any
 
 import aiohttp
 from transformers import AutoTokenizer
@@ -60,7 +60,7 @@ def make_client_session() -> aiohttp.ClientSession:
     )
 
 
-def get_percentile(data: List[float], percentile: float) -> float:
+def get_percentile(data: list[float], percentile: float) -> float:
     """Calculates the percentile value of a list of numbers.
 
     Args:
@@ -166,7 +166,7 @@ def read_trace(path: str) -> str:
     return storage.Client().bucket(bucket).blob(blob).download_as_text()
 
 
-def load_trace(path: str) -> List[List[Dict[str, Any]]]:
+def load_trace(path: str) -> list[list[dict[str, Any]]]:
     """Loads a rollout trace, returning per-group lists of trajectory specs.
 
     Args:
@@ -176,7 +176,7 @@ def load_trace(path: str) -> List[List[Dict[str, Any]]]:
         List[List[Dict[str, Any]]]: Trajectories grouped by "group", each
         inner list sorted by "stream".
     """
-    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    groups: dict[Any, list[dict[str, Any]]] = {}
     for line in read_trace(path).splitlines():
         line = line.strip()
         if not line:
@@ -188,7 +188,7 @@ def load_trace(path: str) -> List[List[Dict[str, Any]]]:
     return [groups[k] for k in sorted(groups)]
 
 
-def record_response_turn(stat: Dict[str, Any],
+def record_response_turn(stat: dict[str, Any],
                          args: argparse.Namespace) -> None:
     """Saves individual turn responses to a JSONL and text file if requested."""
     out_path = getattr(args, "save_responses_file", None)
@@ -214,14 +214,13 @@ def record_response_turn(stat: Dict[str, Any],
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             f.flush()
 
-        txt_path = (out_path + ".txt" if not out_path.endswith(".jsonl")
-                    else out_path[:-6] + ".txt")
+        txt_path = (out_path + ".txt" if not out_path.endswith(".jsonl") else
+                    out_path[:-6] + ".txt")
         with open(txt_path, "a", encoding="utf-8") as f:
             f.write(
                 f"=== Batch {stat.get('batch_idx', 0)} | Group {stat.get('group_idx')} | "
                 f"Stream {stat.get('stream_idx')} | Turn {stat.get('turn')}/{stat.get('num_turns')} | "
-                f"Tokens: {stat.get('output_tokens')} ===\n"
-            )
+                f"Tokens: {stat.get('output_tokens')} ===\n")
             f.write(stat.get("response_text", "") + "\n\n")
             f.flush()
     except Exception:
@@ -229,12 +228,12 @@ def record_response_turn(stat: Dict[str, Any],
 
 
 def save_trajectory_metrics(
-    all_stats: List[Dict[str, Any]],
+    all_stats: list[dict[str, Any]],
     total_duration_sec: float,
     num_batches: int,
     time_between_batches: float,
     concurrency: int,
-    batch_launch_times: List[float],
+    batch_launch_times: list[float],
     args: argparse.Namespace,
 ) -> None:
     """Saves turn-by-turn and trajectory-level metrics in JSONL for visualization."""
@@ -246,7 +245,7 @@ def save_trajectory_metrics(
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
 
-        trajectories: Dict[str, List[Dict[str, Any]]] = {}
+        trajectories: dict[str, list[dict[str, Any]]] = {}
         for stat in all_stats:
             traj_id = stat.get("traj_id") or (
                 f"b{stat.get('batch_idx', 0)}_g{stat.get('group_idx')}_s{stat.get('stream_idx')}"
@@ -277,48 +276,79 @@ def save_trajectory_metrics(
                 tot_model = sum(t.get("model_time_s", 0.0) for t in turns)
                 tot_tool = sum(t.get("tool_time_s", 0.0) for t in turns)
                 t_start = first.get("start_time_s", 0.0)
-                t_end = last.get("end_time_s", 0.0) + last.get("tool_time_s", 0.0)
+                t_end = last.get("end_time_s", 0.0) + last.get(
+                    "tool_time_s", 0.0)
                 traj_rec = {
-                    "type": "trajectory",
-                    "traj_id": traj_id,
-                    "batch_idx": first.get("batch_idx", 0),
-                    "group_idx": first.get("group_idx", 0),
-                    "stream_idx": first.get("stream_idx", 0),
-                    "num_turns": len(turns),
-                    "start_time_s": round(t_start, 4),
-                    "end_time_s": round(t_end, 4),
-                    "duration_s": round(max(0.0, t_end - t_start), 4),
-                    "model_time_s": round(tot_model, 4),
-                    "tool_time_s": round(tot_tool, 4),
-                    "prompt_tokens": first.get("input_history_tokens", 0),
-                    "output_tokens": tot_out,
-                    "status": ("COMPLETED" if all(t.get("success", False)
-                                                  for t in turns) else "FAILED"),
+                    "type":
+                    "trajectory",
+                    "traj_id":
+                    traj_id,
+                    "batch_idx":
+                    first.get("batch_idx", 0),
+                    "group_idx":
+                    first.get("group_idx", 0),
+                    "stream_idx":
+                    first.get("stream_idx", 0),
+                    "num_turns":
+                    len(turns),
+                    "start_time_s":
+                    round(t_start, 4),
+                    "end_time_s":
+                    round(t_end, 4),
+                    "duration_s":
+                    round(max(0.0, t_end - t_start), 4),
+                    "model_time_s":
+                    round(tot_model, 4),
+                    "tool_time_s":
+                    round(tot_tool, 4),
+                    "prompt_tokens":
+                    first.get("input_history_tokens", 0),
+                    "output_tokens":
+                    tot_out,
+                    "status": ("COMPLETED" if all(
+                        t.get("success", False) for t in turns) else "FAILED"),
                 }
                 f.write(json.dumps(traj_rec, ensure_ascii=False) + "\n")
 
             # Turn-by-turn records
             for stat in all_stats:
                 rec = {
-                    "type": "turn",
-                    "batch_idx": stat.get("batch_idx", 0),
-                    "group_idx": stat.get("group_idx"),
-                    "stream_idx": stat.get("stream_idx"),
-                    "traj_id": stat.get("traj_id") or (
-                        f"b{stat.get('batch_idx', 0)}_g{stat.get('group_idx')}_s{stat.get('stream_idx')}"
-                    ),
-                    "turn": stat.get("turn"),
-                    "num_turns": stat.get("num_turns"),
-                    "start_time_s": stat.get("start_time_s"),
-                    "end_time_s": stat.get("end_time_s"),
-                    "model_time_s": stat.get("model_time_s"),
-                    "tool_time_s": stat.get("tool_time_s"),
-                    "ttft_ms": stat.get("ttft_ms"),
-                    "tpot_ms": stat.get("tpot_ms"),
-                    "total_time_ms": stat.get("total_time_ms"),
-                    "output_tokens": stat.get("output_tokens"),
-                    "input_history_tokens": stat.get("input_history_tokens"),
-                    "success": stat.get("success"),
+                    "type":
+                    "turn",
+                    "batch_idx":
+                    stat.get("batch_idx", 0),
+                    "group_idx":
+                    stat.get("group_idx"),
+                    "stream_idx":
+                    stat.get("stream_idx"),
+                    "traj_id":
+                    stat.get("traj_id") or
+                    (f"b{stat.get('batch_idx', 0)}_g{stat.get('group_idx')}_s{stat.get('stream_idx')}"
+                     ),
+                    "turn":
+                    stat.get("turn"),
+                    "num_turns":
+                    stat.get("num_turns"),
+                    "start_time_s":
+                    stat.get("start_time_s"),
+                    "end_time_s":
+                    stat.get("end_time_s"),
+                    "model_time_s":
+                    stat.get("model_time_s"),
+                    "tool_time_s":
+                    stat.get("tool_time_s"),
+                    "ttft_ms":
+                    stat.get("ttft_ms"),
+                    "tpot_ms":
+                    stat.get("tpot_ms"),
+                    "total_time_ms":
+                    stat.get("total_time_ms"),
+                    "output_tokens":
+                    stat.get("output_tokens"),
+                    "input_history_tokens":
+                    stat.get("input_history_tokens"),
+                    "success":
+                    stat.get("success"),
                 }
                 if not stat.get("success"):
                     rec["error"] = stat.get("error")
@@ -337,10 +367,10 @@ async def run_grpo_stream(
     stream_idx: int,
     group_idx: int,
     args: argparse.Namespace,
-    spec: Dict[str, Any] | None = None,
+    spec: dict[str, Any] | None = None,
     batch_idx: int = 0,
     bench_start_time: float = 0.0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Runs a single GRPO stream as a multi-turn conversation.
 
     Args:
@@ -421,8 +451,9 @@ async def run_grpo_stream(
                         try:
                             data = json.loads(data_str)
                             if ttft is None:
-                                ttft = ((time.perf_counter() - turn_start_sec) *
-                                        1000.0)
+                                ttft = (
+                                    (time.perf_counter() - turn_start_sec) *
+                                    1000.0)
 
                             if data.get("usage"):
                                 usage = data["usage"]
@@ -513,25 +544,43 @@ async def run_grpo_stream(
         except Exception as e:
             turn_end_sec = time.perf_counter()
             total_time_ms = (turn_end_sec - turn_start_sec) * 1000.0
-            error_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            error_msg = f"{type(e).__name__}: {e}" if str(e) else type(
+                e).__name__
             stats.append({
-                "batch_idx": batch_idx,
-                "group_idx": group_idx,
-                "stream_idx": stream_idx,
-                "traj_id": traj_id,
-                "turn": turn,
-                "num_turns": num_turns,
-                "start_time_s": round(turn_start_sec - bench_start_time, 4),
-                "end_time_s": round(turn_end_sec - bench_start_time, 4),
-                "model_time_s": round(turn_end_sec - turn_start_sec, 4),
-                "tool_time_s": 0.0,
-                "ttft_ms": round(total_time_ms, 2),
-                "tpot_ms": 0.0,
-                "total_time_ms": round(total_time_ms, 2),
-                "output_tokens": 0,
-                "input_history_tokens": 0,
-                "success": False,
-                "error": error_msg,
+                "batch_idx":
+                batch_idx,
+                "group_idx":
+                group_idx,
+                "stream_idx":
+                stream_idx,
+                "traj_id":
+                traj_id,
+                "turn":
+                turn,
+                "num_turns":
+                num_turns,
+                "start_time_s":
+                round(turn_start_sec - bench_start_time, 4),
+                "end_time_s":
+                round(turn_end_sec - bench_start_time, 4),
+                "model_time_s":
+                round(turn_end_sec - turn_start_sec, 4),
+                "tool_time_s":
+                0.0,
+                "ttft_ms":
+                round(total_time_ms, 2),
+                "tpot_ms":
+                0.0,
+                "total_time_ms":
+                round(total_time_ms, 2),
+                "output_tokens":
+                0,
+                "input_history_tokens":
+                0,
+                "success":
+                False,
+                "error":
+                error_msg,
             })
             # End conversation on error
             break
@@ -547,10 +596,10 @@ async def run_group(
     group_idx: int,
     args: argparse.Namespace,
     global_prefix: str = "",
-    specs: List[Dict[str, Any]] | None = None,
+    specs: list[dict[str, Any]] | None = None,
     batch_idx: int = 0,
     bench_start_time: float = 0.0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Runs a single GRPO group of G parallel streams.
 
     Args:
@@ -584,8 +633,9 @@ async def run_group(
         num_streams = resolve_group_size(args)
 
     initial_prompt_len = len(tokenizer.encode(initial_prompt))
-    print(f"Batch {batch_idx} | Group {group_idx}: Starting {num_streams} streams with "
-          f"shared initial prompt of {initial_prompt_len} tokens...")
+    print(
+        f"Batch {batch_idx} | Group {group_idx}: Starting {num_streams} streams with "
+        f"shared initial prompt of {initial_prompt_len} tokens...")
 
     tasks = []
     for stream_idx in range(num_streams):
@@ -613,7 +663,7 @@ async def run_group(
 
 
 def print_report(
-    all_stats: List[Dict[str, Any]],
+    all_stats: list[dict[str, Any]],
     total_duration_sec: float,
     args: argparse.Namespace,
     num_batches: int = 1,
@@ -646,7 +696,9 @@ def print_report(
     total_tokens = total_input_tokens + total_output_tokens
 
     print(f"Total Benchmark Time:      {total_duration_sec:.2f} seconds")
-    print(f"Simulated Batches:         {num_batches} (Time between batches: {args.time_between_batches:.2f}s)")
+    print(
+        f"Simulated Batches:         {num_batches} (Time between batches: {args.time_between_batches:.2f}s)"
+    )
     print(f"Concurrency per Batch:     {args.concurrency} groups/batch")
     print(f"Simulated GRPO Groups:     {total_groups}")
     print(f"Simulated Streams (g):     {total_streams}")
@@ -691,7 +743,7 @@ def print_report(
     subsequent_ttft = []
     all_tpot = []
 
-    groups_turn1: Dict[int, List[Dict[str, Any]]] = {}
+    groups_turn1: dict[int, list[dict[str, Any]]] = {}
     for stat in all_stats:
         if not stat["success"]:
             continue
@@ -716,7 +768,7 @@ def print_report(
     print("LATENCY METRICS")
     print("-" * 80)
 
-    def print_latency_row(label: str, latencies: List[float]):
+    def print_latency_row(label: str, latencies: list[float]):
         if not latencies:
             print(f"{label:<30} N/A")
             return
@@ -782,21 +834,29 @@ async def main_async(args: argparse.Namespace):
                     available_models = [
                         m.get("id") for m in models_data.get("data", [])
                     ]
-                    if args.model not in available_models and len(available_models) > 0:
-                        for cand in [args.model, f"{args.model}-FP8", args.model_path_or_id]:
+                    if args.model not in available_models and len(
+                            available_models) > 0:
+                        for cand in [
+                                args.model, f"{args.model}-FP8",
+                                args.model_path_or_id
+                        ]:
                             if cand in available_models:
-                                print(f"Resolved model '{args.model}' -> '{cand}' on server.")
+                                print(
+                                    f"Resolved model '{args.model}' -> '{cand}' on server."
+                                )
                                 args.model = cand
                                 break
                         else:
-                            print(f"Using server model '{available_models[0]}' for '{args.model}'.")
+                            print(
+                                f"Using server model '{available_models[0]}' for '{args.model}'."
+                            )
                             args.model = available_models[0]
         except Exception as e:
             print(f"Error connecting to server health endpoint: {e}")
             print("Please ensure vLLM serve was started before running.")
             sys.exit(1)
 
-    trace_groups: List[List[Dict[str, Any]]] | None = None
+    trace_groups: list[list[dict[str, Any]]] | None = None
     if args.trace_file:
         trace_groups = load_trace(args.trace_file)
         # Honour --group-size by keeping only its first streams of each group.
@@ -815,8 +875,10 @@ async def main_async(args: argparse.Namespace):
         total_groups = num_batches * args.concurrency
         if trace_groups is not None:
             if len(trace_groups) < total_groups:
-                print(f"Notice: trace has {len(trace_groups)} groups; "
-                      f"cycling to fill {total_groups} groups across {num_batches} batches.")
+                print(
+                    f"Notice: trace has {len(trace_groups)} groups; "
+                    f"cycling to fill {total_groups} groups across {num_batches} batches."
+                )
                 extended = []
                 while len(extended) < total_groups:
                     extended.extend(trace_groups)
@@ -827,24 +889,31 @@ async def main_async(args: argparse.Namespace):
         if args.num_groups is not None:
             trace_groups = trace_groups[:args.num_groups]
         total_groups = len(trace_groups)
-        num_batches = max(1, (total_groups + args.concurrency - 1) // args.concurrency)
+        num_batches = max(1, (total_groups + args.concurrency - 1) //
+                          args.concurrency)
     elif args.num_groups is not None:
         total_groups = args.num_groups
-        num_batches = max(1, (total_groups + args.concurrency - 1) // args.concurrency)
+        num_batches = max(1, (total_groups + args.concurrency - 1) //
+                          args.concurrency)
     else:
         # Default behavior: 1 batch running args.concurrency groups (or at least 2 groups if concurrency is 1)
-        total_groups = 2 if (args.time_between_batches == 0.0 and args.concurrency == 1) else args.concurrency
-        num_batches = max(1, (total_groups + args.concurrency - 1) // args.concurrency)
+        total_groups = 2 if (args.time_between_batches == 0.0
+                             and args.concurrency == 1) else args.concurrency
+        num_batches = max(1, (total_groups + args.concurrency - 1) //
+                          args.concurrency)
 
     if trace_groups is not None:
         turns = sum(
             len(s.get("out_lens", [])) for g in trace_groups for s in g)
         streams = sum(len(g) for g in trace_groups)
-        print(f"Replaying trace {args.trace_file}: {num_batches} batches, "
-              f"{len(trace_groups)} groups, {streams} streams, {turns:,} turns")
+        print(
+            f"Replaying trace {args.trace_file}: {num_batches} batches, "
+            f"{len(trace_groups)} groups, {streams} streams, {turns:,} turns")
     else:
-        print(f"Configured benchmark: {num_batches} batches of {args.concurrency} groups "
-              f"({total_groups} total groups), launched {args.time_between_batches}s apart")
+        print(
+            f"Configured benchmark: {num_batches} batches of {args.concurrency} groups "
+            f"({total_groups} total groups), launched {args.time_between_batches}s apart"
+        )
 
     global_prefix = ""
     if args.global_prefix_len > 0:
@@ -858,16 +927,16 @@ async def main_async(args: argparse.Namespace):
         parent_dir = os.path.dirname(os.path.abspath(out_path))
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
+        with open(out_path, "w", encoding="utf-8"):
             pass
-        txt_path = (out_path + ".txt" if not out_path.endswith(".jsonl")
-                    else out_path[:-6] + ".txt")
-        with open(txt_path, "w", encoding="utf-8") as f:
+        txt_path = (out_path + ".txt" if not out_path.endswith(".jsonl") else
+                    out_path[:-6] + ".txt")
+        with open(txt_path, "w", encoding="utf-8"):
             pass
 
     start_time = time.perf_counter()
     all_group_tasks = []
-    batch_launch_times: List[float] = []
+    batch_launch_times: list[float] = []
 
     async with make_client_session() as session:
         for batch_idx in range(num_batches):
@@ -881,8 +950,10 @@ async def main_async(args: argparse.Namespace):
 
             launch_offset = time.perf_counter() - start_time
             batch_launch_times.append(launch_offset)
-            print(f"Batch {batch_idx + 1}/{num_batches}: Launching {len(batch_items)} groups "
-                  f"(concurrency={args.concurrency}) at +{launch_offset:.2f}s...")
+            print(
+                f"Batch {batch_idx + 1}/{num_batches}: Launching {len(batch_items)} groups "
+                f"(concurrency={args.concurrency}) at +{launch_offset:.2f}s..."
+            )
 
             for g_idx, spec in batch_items:
                 task = asyncio.create_task(
@@ -897,8 +968,7 @@ async def main_async(args: argparse.Namespace):
                         specs=spec,
                         batch_idx=batch_idx,
                         bench_start_time=start_time,
-                    )
-                )
+                    ))
                 all_group_tasks.append(task)
 
             # Wait time_between_batches seconds before launching next batch
@@ -926,7 +996,7 @@ def parse_time_seconds(val: Any) -> float:
     if isinstance(val, (int, float)):
         return float(val)
     s = str(val).strip()
-    if s.endswith("s") or s.endswith("S"):
+    if s.endswith(("s", "S")):
         s = s[:-1]
     return float(s)
 
@@ -961,7 +1031,8 @@ def main():
         type=int,
         default=None,
         dest="num_groups",
-        help="Total number of GRPO groups (requests) to simulate. Defaults to 2, "
+        help=
+        "Total number of GRPO groups (requests) to simulate. Defaults to 2, "
         "or to every group in --trace-file when replaying a trace.",
     )
     parser.add_argument(
