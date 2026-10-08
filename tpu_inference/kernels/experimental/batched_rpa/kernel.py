@@ -525,7 +525,7 @@ def rpa_kernel(
             flat_smem = jax.tree_util.tree_leaves(schedule_ref)
             dma_list = []
             for h, s in zip(flat_hbm, flat_smem):
-                if h.memory_space == pltpu.HBM:
+                if jax.typeof(h).memory_space == pltpu.HBM:
                     read_size = (h.shape[0] // cfgs.max_steps_ub) * safe_steps
                     read_size = utils.align_to(read_size, 1024)
 
