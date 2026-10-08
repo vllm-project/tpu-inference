@@ -120,3 +120,33 @@ python scripts/vllm/benchmarking/agentic_benchmark/benchmark_agentic.py \
 - `--concurrency`: Number of groups running concurrently within each batch.
 - `--save-trajectory-file`: Path to write turn-by-turn and trajectory-level metrics (JSONL), compatible with downstream trajectory visualization tools.
 
+---
+
+## 5. Trajectory & Turn Waterfall Visualization Tool
+
+An interactive, self-contained HTML visualization tool is provided in `visualize_trajectories.py`.
+
+### Features
+- **Waterfall Swimlanes**: Trajectories are packed greedily into non-colliding swimlanes across the benchmark timeline.
+- **Turn-by-Turn Latency**: Divides each trajectory into model generation (solid colored block with turn number) and tool/environment idle time (translucent block).
+- **Batch Launch Markers**: Displays solid vertical lines at each batch dispatch boundary (`b0`, `b1`, `b2`...).
+- **Interactive Tooltips**: Hover over any turn to inspect model latency, prompt/completion tokens, throughput (tok/s), TTFT, TPOT, and tool time.
+- **Interactive Controls**: Filter by batch, search group/stream ID, sort by duration/turns/start, toggle tool time, and zoom in/out.
+- **Latency Profiling**: Summary metrics dashboard and turn-by-turn average latency breakdown.
+
+### Usage
+
+```bash
+# Visualize trajectories saved from benchmark_agentic.py
+python scripts/vllm/benchmarking/agentic_benchmark/visualize_trajectories.py \
+    trajectories.jsonl \
+    --output waterfall.html \
+    --open
+
+# Preview with synthetic demo data
+python scripts/vllm/benchmarking/agentic_benchmark/visualize_trajectories.py \
+    --demo \
+    --output waterfall.html \
+    --serve --port 8080
+```
+
