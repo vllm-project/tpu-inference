@@ -140,9 +140,6 @@ def _write_decode_kv_kernel_optimized(
             ).wait()
 
 
-@jax.jit(
-    static_argnames=("cp_group_size", "cp_kv_cache_interleaved_size"), donate_argnames="kv_cache",
-)
 def write_decode_kv(
     merged_kv: jax.Array,      # [max_num_tokens, nh_x2//kp, kp, head_dim]
     kv_cache: jax.Array,       # [local_pages, local_page_size, nh_x2//kp, kp, hd]
