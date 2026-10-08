@@ -413,12 +413,8 @@ def generate_html(
     options_html = ""
     for idx, k in enumerate(all_runs.keys()):
         sel = " selected" if idx == 0 else ""
-        escaped_k = (
-            k.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-        )
+        escaped_k = (k.replace("&", "&amp;").replace("<", "&lt;").replace(
+            ">", "&gt;").replace('"', "&quot;"))
         options_html += f'<option value="{escaped_k}"{sel}>{escaped_k}</option>\n'
 
     first_key = list(all_runs.keys())[0] if all_runs else "Default Run"
@@ -1661,12 +1657,11 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
 </body>
 </html>
 """
-    return (
-        html_template.replace("__TITLE__", title)
-        .replace("__RUN_OPTIONS__", options_html)
-        .replace("__CHART_COUNT_INFO__", chart_count_info)
-        .replace("__RUNS_JSON__", runs_json)
-    )
+    return (html_template.replace("__TITLE__", title).replace(
+        "__RUN_OPTIONS__", options_html).replace("__CHART_COUNT_INFO__",
+                                                 chart_count_info).replace(
+                                                     "__RUNS_JSON__",
+                                                     runs_json))
 
 
 def main():
