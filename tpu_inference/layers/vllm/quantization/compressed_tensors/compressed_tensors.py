@@ -139,7 +139,8 @@ class VllmCompressedTensorsConfig(CompressedTensorsConfig, VllmQuantConfig):
                 is_static_input_scheme=is_static_input_scheme,
                 linear_config=linear_config,
             )
-        if self._is_dynamic_token_w8a8(weight_quant, input_quant):
+        if input_quant is not None and self._is_dynamic_token_w8a8(
+                weight_quant, input_quant):
             return VllmCompressedTensorsW8A8Int8(
                 strategy=weight_quant.strategy,
                 is_static_input_scheme=False,
