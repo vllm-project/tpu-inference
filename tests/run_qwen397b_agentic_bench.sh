@@ -18,7 +18,9 @@ export DP_SCHED_BATCH_PREFILL=false
 export NEW_MODEL_DESIGN=1
 export LIBTPU_INIT_ARGS=' --xla_tpu_use_minor_sharding_for_major_trivial_input=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=false --xla_tpu_ars_combiner_threshold_in_bytes=0 --xla_tpu_enable_async_collective_merger=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false'
 export DCP_DECODE_ONLY_OPT=1
-export PHASED_PROFILING_DIR="gs://wenxindong-vm/trace/dcp_opt"
+export VLLM_XLA_CHECK_RECOMPILATION=1
+export PHASED_PROFILING_DIR="/tmp/phased_profiles"
+rm -rf /tmp/phased_profiles
 
 mkdir -p /home/wenxindong_google_com/work/bench_logs/scripts
 if [ -f /home/wenxindong_google_com/tpu-inference/gbs1024_trace_file.jsonl ]; then
@@ -156,6 +158,10 @@ done
 echo "Terminating profiling client (PID: ${CLIENT_PID}) so clean benchmark runs without profiler slowdown..."
 kill "${CLIENT_PID}" 2>/dev/null || true
 wait "${CLIENT_PID}" 2>/dev/null || true
+
+mkdir -p "${OUTPUTS_DIR}/trace" "${OUTPUTS_DIR}/phased_profiles"
+cp -r /tmp/phased_profiles/* "${OUTPUTS_DIR}/trace/" 2>/dev/null || true
+cp -r /tmp/phased_profiles/* "${OUTPUTS_DIR}/phased_profiles/" 2>/dev/null || true
 
 echo ""
 echo "===================================================================="
