@@ -923,7 +923,7 @@ def generate_html(
     }
 
     function parseClientJSONL(text, filename) {
-      const lines = text.split("\n").map(l => l.trim()).filter(l => l);
+      const lines = text.split("\\n").map(l => l.trim()).filter(l => l);
       const meta = { source_file: filename, run_name: filename.replace(/\\.[^/.]+$/, ""), batch_launch_times: [] };
       const trajectories = {};
       const turns = [];
@@ -1170,7 +1170,7 @@ def generate_html(
             turn.ttft_ms ? `TTFT: ${turn.ttft_ms} ms` : null,
             turn.tpot_ms ? `TPOT: ${turn.tpot_ms} ms` : null,
             `Start: ${turn.start_time_s.toFixed(3)} s -> End: ${turn.end_time_s.toFixed(3)} s`,
-          ].filter(Boolean).join("\n");
+          ].filter(Boolean).join("\\n");
 
           mRect.addEventListener("mousemove", (e) => showTip(e, tipText));
           mRect.addEventListener("mouseleave", hideTip);
@@ -1205,8 +1205,8 @@ def generate_html(
             toolRect.setAttribute("stroke-width", "0.5");
             toolRect.style.cursor = "pointer";
 
-            const toolTip = `Tool Call Idle Gap (Turn ${turn.turn} -> ${turn.turn + 1})\n` +
-                            `Duration: ${turn.tool_time_s.toFixed(3)} s\n` +
+            const toolTip = `Tool Call Idle Gap (Turn ${turn.turn} -> ${turn.turn + 1})\\n` +
+                            `Duration: ${turn.tool_time_s.toFixed(3)} s\\n` +
                             `Time: ${(turn.end_time_s).toFixed(3)} s -> ${(turn.end_time_s + turn.tool_time_s).toFixed(3)} s`;
             toolRect.addEventListener("mousemove", (e) => showTip(e, toolTip));
             toolRect.addEventListener("mouseleave", hideTip);
@@ -1255,7 +1255,7 @@ def generate_html(
         badgeTxt.textContent = `b${bIdx}`;
         bG.appendChild(badgeTxt);
 
-        bG.addEventListener("mousemove", (e) => showTip(e, `Batch ${bIdx} Launch Boundary\nTime: ${bTime.toFixed(2)}s`));
+        bG.addEventListener("mousemove", (e) => showTip(e, `Batch ${bIdx} Launch Boundary\\nTime: ${bTime.toFixed(2)}s`));
         bG.addEventListener("mouseleave", hideTip);
         svg.appendChild(bG);
       });
@@ -1559,7 +1559,7 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
             pt.ttft_ms ? `TTFT: ${pt.ttft_ms} ms` : null,
             pt.tpot_ms ? `TPOT: ${pt.tpot_ms} ms` : null,
             `Time: ${pt.time.toFixed(2)} s`,
-          ].filter(Boolean).join("\n");
+          ].filter(Boolean).join("\\n");
 
           circle.addEventListener("mousemove", (e) => {
             highlightTraj();
