@@ -50,7 +50,10 @@ MAX_ALLOWED_PAGE_INDICES_N = (
 # NOTE: this kernel is experimental and not fully tested.  See
 # tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
 # for details
-if envs.USE_BATCHED_RPA_KERNEL:
+if envs.USE_BATCHED_RPA_LONG_CTX_KERNEL:
+    import tpu_inference.kernels.experimental.batched_rpa_long_ctx.wrapper as rpa
+    logger.info_once("Using batched RPA long-ctx kernel")
+elif envs.USE_BATCHED_RPA_KERNEL:
     import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
     logger.info_once("Using experimental batched RPA kernel")
 else:
