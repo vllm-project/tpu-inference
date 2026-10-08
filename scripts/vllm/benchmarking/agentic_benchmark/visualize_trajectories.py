@@ -410,6 +410,17 @@ def generate_html(
 
     runs_json = json.dumps(all_runs)
 
+    options_html = ""
+    for idx, k in enumerate(all_runs.keys()):
+        sel = " selected" if idx == 0 else ""
+        escaped_k = (
+            k.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+        options_html += f'<option value="{escaped_k}"{sel}>{escaped_k}</option>\n'
+
     html_template = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -645,7 +656,9 @@ def generate_html(
   <div class="controls">
     <div class="control-group" id="run-select-group">
       <label for="run-select" style="color:var(--accent); font-weight:700;">Run / Benchmark:</label>
-      <select id="run-select" style="font-weight:600; min-width: 220px;"></select>
+      <select id="run-select" style="font-weight:600; min-width: 220px;">
+        __RUN_OPTIONS__
+      </select>
     </div>
 
     <div class="control-group">
@@ -1626,13 +1639,20 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
       window.addEventListener("resize", () => { renderChart(); renderThroughputChart(); });
     }
 
-    window.addEventListener("DOMContentLoaded", init);
+    if (document.readyState === "loading") {
+      window.addEventListener("DOMContentLoaded", init);
+    } else {
+      init();
+    }
   </script>
 </body>
 </html>
 """
-    return html_template.replace("__TITLE__",
-                                 title).replace("__RUNS_JSON__", runs_json)
+    return (
+        html_template.replace("__TITLE__", title)
+        .replace("__RUN_OPTIONS__", options_html)
+        .replace("__RUNS_JSON__", runs_json)
+    )
 
 
 def main():
