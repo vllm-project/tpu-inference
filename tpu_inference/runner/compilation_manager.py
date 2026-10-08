@@ -382,8 +382,7 @@ class CompilationManager:
                                     is_last_rank=True,
                                     num_reqs: int,
                                     pcp_has_cached_kv: bool = False,
-                                    pcp_num_reqs: int = 1,
-                                    is_decode: bool = False) -> None:
+                                    pcp_num_reqs: int = 1) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -483,7 +482,6 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
-                is_decode=is_decode,
             )
 
             return attention_metadata_gid
@@ -496,7 +494,6 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
-                is_decode=is_decode,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
@@ -695,9 +692,6 @@ class CompilationManager:
 
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
-        dcp_enabled = ('dcp' in self.runner.mesh.shape
-                       and self.runner.mesh.shape['dcp'] > 1)
-        needs_decode_compile = dcp_enabled and not self.runner.enable_continue_decode
         for num_tokens in self.runner.num_tokens_paddings:
             for num_reqs in self.runner.attn_num_reqs_paddings:
                 dp_sharding = NamedSharding(
@@ -745,7 +739,7 @@ class CompilationManager:
                         # A bucket that cannot give every request one token
                         # per chunk never carries that many requests.
                         if (_pcp_reqs > 1
-                                and num_tokens < 2 * _pcp * _pcp_reqs):
+                                 and num_tokens < 2 * _pcp * _pcp_reqs):
                             continue
                         self._precompile_backbone_helper(
                             f"worker{self.runner.rank} backbone",
@@ -758,17 +752,6 @@ class CompilationManager:
                             num_reqs=num_reqs,
                             pcp_has_cached_kv=_has_cached_kv,
                             pcp_num_reqs=_pcp_reqs)
-                if needs_decode_compile:
-                    self._precompile_backbone_helper(
-                        f"worker{self.runner.rank} backbone decode",
-                        input_ids=input_ids,
-                        positions=positions,
-                        inputs_embeds=None,
-                        intermediate_tensors=intermediate_tensors,
-                        is_first_rank=is_first_rank,
-                        is_last_rank=is_last_rank,
-                        num_reqs=num_reqs,
-                        is_decode=True)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()

@@ -154,7 +154,7 @@ def _dcp_a2a_reduce(
     return out_merge, out_lse
 
 
-def dcp_forward(
+def dcp_forward_two_phase(
     mesh: Mesh,
     q: jax.Array,
     k: jax.Array,
@@ -167,33 +167,8 @@ def dcp_forward(
     q_scale: float | None = None,
     k_scale: float | None = None,
     v_scale: float | None = None,
-    is_decode: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
-    """DCP attention forward — single shard_map over the 'dcp' axis.
-
-    Inside the shard_map body:
-      1. all_gather Q heads    cache phase needs full head view per rank
-      2. cache phase           attend full Q against this rank's KV cache
-      3. _dcp_a2a_reduce       all_to_all: head slices become token slices
-      4. current phase         attend local Q against this rank's new tokens
-      5. merge_attn_states     lse-weighted combine
-    """
-    if is_decode and envs.DCP_DECODE_ONLY_OPT:
-        return dcp_forward_decode_only(
-            mesh=mesh,
-            q=q,
-            k=k,
-            v=v,
-            kv_cache=kv_cache,
-            attention_metadata=md,
-            head_dim_original=head_dim_original,
-            sm_scale=sm_scale,
-            attention_chunk_size=attention_chunk_size,
-            q_scale=q_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
-        )
-
+    """Two-phase DCP attention forward (cache phase + current phase)."""
     if head_dim_original is None:
         head_dim_original = q.shape[-1]
     if sm_scale is None:
@@ -425,7 +400,7 @@ def dcp_forward_decode_only(
         )
 
         final_output, _ = _dcp_a2a_reduce(attn_out, lse, dcp_axis, dcp_size)
-        return kv_cache_final, final_output
+        return kv_cache_final, final_output.astype(q.dtype)
 
     return jax.shard_map(
         _shard_fn,
@@ -445,6 +420,76 @@ def dcp_forward_decode_only(
         check_vma=False,
     )(q, k, v, kv_cache, md.seq_lens, md.block_tables, md.query_start_loc,
       md.request_distribution, cp_rank_global)
+
+
+def dcp_forward(
+    mesh: Mesh,
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    kv_cache: jax.Array,
+    md: AttentionMetadata,
+    head_dim_original: int | None = None,
+    sm_scale: float | None = None,
+    attention_chunk_size: int | None = None,
+    q_scale: float | None = None,
+    k_scale: float | None = None,
+    v_scale: float | None = None,
+    is_decode: bool = False,
+) -> tuple[jax.Array, jax.Array]:
+    """DCP attention forward.
+
+    When envs.DCP_DECODE_ONLY_OPT is enabled, dynamically dispatches via jax.lax.cond
+    based on distribution[0] == distribution[2] (i.e. num_decode_reqs == num_reqs).
+    """
+    if envs.DCP_DECODE_ONLY_OPT:
+        is_decode_only = (md.request_distribution[0] == md.request_distribution[2])
+        return jax.lax.cond(
+            is_decode_only,
+            lambda: dcp_forward_decode_only(
+                mesh=mesh,
+                q=q,
+                k=k,
+                v=v,
+                kv_cache=kv_cache,
+                attention_metadata=md,
+                head_dim_original=head_dim_original,
+                sm_scale=sm_scale,
+                attention_chunk_size=attention_chunk_size,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            ),
+            lambda: dcp_forward_two_phase(
+                mesh=mesh,
+                q=q,
+                k=k,
+                v=v,
+                kv_cache=kv_cache,
+                md=md,
+                head_dim_original=head_dim_original,
+                sm_scale=sm_scale,
+                attention_chunk_size=attention_chunk_size,
+                q_scale=q_scale,
+                k_scale=k_scale,
+                v_scale=v_scale,
+            ),
+        )
+
+    return dcp_forward_two_phase(
+        mesh=mesh,
+        q=q,
+        k=k,
+        v=v,
+        kv_cache=kv_cache,
+        md=md,
+        head_dim_original=head_dim_original,
+        sm_scale=sm_scale,
+        attention_chunk_size=attention_chunk_size,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+    )
 
 
 def pcp_forward(

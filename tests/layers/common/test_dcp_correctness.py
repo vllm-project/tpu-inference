@@ -99,7 +99,6 @@ def run_correctness_check(kv_len: int, q_len: int = 1):
             seq_lens=sl,
             query_start_loc=qsl,
             request_distribution=dist,
-            is_decode=(q_len == 1),
         )
         return attention(c, q, k, v, md, mesh_tp8, sm_scale=sm_scale, use_causal_mask=True)
 
@@ -134,7 +133,6 @@ def run_correctness_check(kv_len: int, q_len: int = 1):
             seq_lens=sl,
             query_start_loc=qsl,
             request_distribution=dist,
-            is_decode=(q_len == 1),
         )
         return attention(c, q, k, v, md, mesh_dcp, sm_scale=sm_scale, use_causal_mask=True)
 

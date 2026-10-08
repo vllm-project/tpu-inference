@@ -279,7 +279,6 @@ def bench_kv_len(global_kv_len: int):
                 seq_lens=sl,
                 query_start_loc=qsl,
                 request_distribution=dist,
-                is_decode=True,
             )
             updated_cache, out = attention(cache, q, k, v, md, mesh, sm_scale=sm_scale, use_causal_mask=True)
             return updated_cache, out
@@ -317,7 +316,6 @@ def bench_kv_len(global_kv_len: int):
                 seq_lens=sl,
                 query_start_loc=qsl,
                 request_distribution=dist,
-                is_decode=True,
             )
             updated_cache, out = attention(cache, q, k, v, md, mesh, sm_scale=sm_scale, use_causal_mask=True)
             return updated_cache, out
