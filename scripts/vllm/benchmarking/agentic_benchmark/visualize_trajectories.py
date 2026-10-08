@@ -421,6 +421,15 @@ def generate_html(
         )
         options_html += f'<option value="{escaped_k}"{sel}>{escaped_k}</option>\n'
 
+    first_key = list(all_runs.keys())[0] if all_runs else "Default Run"
+    first_run = all_runs.get(first_key, {})
+    first_trajs = first_run.get("trajectories", [])
+    first_turns = first_run.get("turns", [])
+    first_meta = first_run.get("meta", {})
+    num_batches = first_meta.get("num_batches", 1)
+    tot_turns = first_meta.get("total_turns", len(first_turns))
+    chart_count_info = f"Showing {len(first_trajs)} trajectories ({tot_turns} total turns across {num_batches} batches)"
+
     html_template = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -701,7 +710,7 @@ def generate_html(
 
   <div class="chart-container">
     <div class="chart-header">
-      <div id="chart-count-info" style="font-weight:600; color:var(--text);">Loading trajectories...</div>
+      <div id="chart-count-info" style="font-weight:600; color:var(--text);">__CHART_COUNT_INFO__</div>
       <div style="display:flex; gap:8px;">
         <span class="tag" style="background:#000; color:#fff; border:1px solid #475569;">Black line: Batch Dispatch Boundary</span>
       </div>
@@ -1639,10 +1648,14 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
       window.addEventListener("resize", () => { renderChart(); renderThroughputChart(); });
     }
 
-    if (document.readyState === "loading") {
-      window.addEventListener("DOMContentLoaded", init);
-    } else {
+    try {
       init();
+    } catch (err) {
+      console.error("Initialization error:", err);
+      const errBox = document.getElementById("chart-count-info");
+      if (errBox) {
+        errBox.innerHTML = '<span style="color:#ef4444; font-weight:700;">Error: ' + err.message + '</span>';
+      }
     }
   </script>
 </body>
@@ -1651,6 +1664,7 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
     return (
         html_template.replace("__TITLE__", title)
         .replace("__RUN_OPTIONS__", options_html)
+        .replace("__CHART_COUNT_INFO__", chart_count_info)
         .replace("__RUNS_JSON__", runs_json)
     )
 
