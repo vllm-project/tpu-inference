@@ -382,6 +382,7 @@ class _Request:
 
     def __init__(self, req_id, num_prompt_tokens, prompt_start=0):
         self.request_id = req_id
+        self.num_prompt_tokens = num_prompt_tokens
         self.num_tokens = num_prompt_tokens
         self.num_output_tokens = 0
         self.block_hashes = []
@@ -453,6 +454,20 @@ class TestTPUAuxOutputWorker:
         req.append_token()
         np.testing.assert_array_equal(connector.take_output(req, out),
                                       _rows(3, 5))
+
+    def test_prompt_start_past_cut_prompt_is_clamped(self):
+        # A P/D prefiller may cut the prompt short of the requested start;
+        # the scheduler clamps the start to the cut prompt, so the worker
+        # must still emit an (empty) output for the request.
+        connector = AuxOutputSchedulerConnector()
+        worker = _worker()
+        req = _Request("r0", num_prompt_tokens=3, prompt_start=4)
+
+        worker.begin_step(_schedule(connector, [req], {"r0": 3}))
+        out = worker.process_step(["r0"], [_entry("r0", 0, 3, 3, [1])])
+        req.append_token()
+        assert out["r0"].token_start == 3
+        assert len(connector.take_output(req, out)) == 0
 
     def test_prefix_hit_reads_rows_computed_by_earlier_request(self):
         connector = AuxOutputSchedulerConnector()
