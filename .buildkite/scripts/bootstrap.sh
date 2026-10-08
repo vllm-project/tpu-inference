@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the shared pipeline config file.
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
-# shellcheck source=kube_suites.sh
+# shellcheck source=/dev/null
 source "${SCRIPT_DIR}/kube_suites.sh"
 
 determine_job_priority() {

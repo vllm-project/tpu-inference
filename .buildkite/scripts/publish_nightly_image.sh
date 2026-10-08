@@ -17,7 +17,7 @@
 # :nightly and as nightly-<date>-<tpu-inference sha>-<vllm sha>.
 set -euo pipefail
 
-# shellcheck source=configs/pipeline_config.sh
+# shellcheck source=/dev/null
 source "$(dirname "${BASH_SOURCE[0]}")/configs/pipeline_config.sh"
 
 VLLM_COMMIT_HASH=$(get_vllm_commit_hash)
