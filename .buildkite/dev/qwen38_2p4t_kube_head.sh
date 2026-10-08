@@ -66,6 +66,13 @@ finish() {
     for _ in $(seq 1 24); do kill -0 "${SERVE_PID}" 2>/dev/null || break; sleep 5; done
     kill -KILL "${SERVE_PID}" 2>/dev/null || true
   fi
+  # Each host's Ray worker wrote its own trace, but only this pod uploads, so
+  # pull the other hosts' profile files over the still-running Ray cluster.
+  if [ -n "${PHASED_PROFILING_DIR:-}" ] && [ "${COLLECT_WORKER_PROFILES:-1}" = "1" ]; then
+    echo "--- collecting profile files from the other hosts"
+    timeout 900 python3 "${S}/qwen38_2p4t_collect_profiles.py" "${PHASED_PROFILING_DIR}" \
+      || echo "[head] WARNING: profile collection did not finish"
+  fi
   # What the head can see of the flags under test. The worker-side lines
   # (MOE_HIERARCHICAL_*, "Starting profiling for") are in the job log only.
   {
@@ -74,7 +81,7 @@ finish() {
     grep -m3 -E 'GPU KV cache size|Maximum concurrency' "${SERVE_LOG}" 2>/dev/null
     echo "final num_preemptions: $(grep -E '^vllm:num_preemptions_total' "${ART_DIR}/metrics_final.prom" 2>/dev/null | awk '{s+=$NF} END{print s}')"
     if [ -n "${PHASED_PROFILING_DIR:-}" ]; then
-      echo "profile files on this host:"
+      echo "profile files (this host plus those collected from the others):"
       find "${PHASED_PROFILING_DIR}" \( -name '*.xplane.pb' -o -name '*.trace.json.gz' \) -printf '%s\t%p\n' 2>/dev/null
     fi
     echo "legs rc=${rc}"
