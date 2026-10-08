@@ -204,3 +204,20 @@ def test_model_spec_rejects_incompatible_sub_block_size():
             sub_block_size=4,
             supported_algorithms=(DiffusionAlgorithm.LOW_CONFIDENCE, ),
         )
+
+
+def test_model_spec_rejects_shifted_all_masked_canvas():
+    with pytest.raises(ValueError, match="requires seed_and_mask"):
+        DiffusionModelSpec(
+            name="invalid",
+            block_size=4,
+            mask_token_id=7,
+            attention_policy=AttentionPolicy.BLOCK_CAUSAL,
+            logit_alignment=LogitAlignment.SHIFTED,
+            canvas_policy=CanvasPolicy.ALL_MASKED,
+            prompt_remainder_policy=(
+                PromptRemainderPolicy.REQUIRE_BLOCK_ALIGNED),
+            next_block_policy=NextBlockPolicy.ALL_MASKED,
+            sub_block_size=4,
+            supported_algorithms=(DiffusionAlgorithm.LOW_CONFIDENCE, ),
+        )
