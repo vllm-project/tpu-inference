@@ -36,8 +36,12 @@ def restore_scheduler_patch():
     (Scheduler._update_request_with_output, Scheduler.__init__,
      AsyncScheduler._update_request_with_output) = originals
     for cls in (Scheduler, AsyncScheduler):
-        if "_continue_decode_patched" in cls.__dict__:
-            del cls._continue_decode_patched
+        for attribute in (
+                "_continue_decode_patched",
+                "_multi_token_decode_patched",
+        ):
+            if attribute in cls.__dict__:
+                delattr(cls, attribute)
 
 
 def _make_request(num_computed_tokens=10, num_output_placeholders=1):
@@ -54,6 +58,7 @@ def _make_scheduler(cls):
     # Instance attributes read by the base implementation are set explicitly.
     scheduler = mock.MagicMock(spec=cls)
     scheduler.max_model_len = 1024
+    scheduler._multi_token_decode_enabled = True
     return scheduler
 
 
