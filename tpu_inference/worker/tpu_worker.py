@@ -814,7 +814,8 @@ class TPUWorker(WorkerBase):
     def bind_raiden_sync(self,
                          worker_index: int = 0,
                          parallelism: int = 4,
-                         job_name: str = "rollout") -> dict:
+                         job_name: str = "rollout",
+                         auto_h2d: Optional[bool] = None) -> dict:
         """Binds this worker's live weights to Raiden and returns wire-safe
         registration metadata (never the arrays)."""
         from tpu_inference.rl import \
@@ -826,6 +827,7 @@ class TPUWorker(WorkerBase):
                 job_name=job_name,
                 worker_index=worker_index,
                 parallelism=parallelism,
+                auto_h2d=auto_h2d,
             )
         else:
             # Re-bind: the transport is reused, but the caller may have moved
@@ -833,7 +835,7 @@ class TPUWorker(WorkerBase):
             # metadata_dict() would otherwise re-register under the stale one.
             self._raiden_rl_weight_sync.job_name = job_name
             self._raiden_rl_weight_sync.worker_index = worker_index
-        self._raiden_rl_weight_sync.bind(state)
+        self._raiden_rl_weight_sync.bind(state, auto_h2d=auto_h2d)
         return self._raiden_rl_weight_sync.metadata_dict()
 
     def refresh_model_state_leaves(self) -> None:
