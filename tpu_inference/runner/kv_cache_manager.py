@@ -39,8 +39,8 @@ from tpu_inference import envs as tpu_envs
 from tpu_inference import utils
 from tpu_inference import utils as common_utils
 from tpu_inference.core.hybrid_coordinator import (  # noqa: F401
-    DEFAULT_MAMBA_CACHE_MULTIPLIER, mamba_blocks_per_request, mamba_pool_size,
-    set_mamba_num_blocks)
+    DEFAULT_MAMBA_CACHE_MULTIPLIER, is_mamba_group, mamba_blocks_per_request,
+    mamba_pool_size, set_mamba_num_blocks)
 from tpu_inference.core.runner_slot_mamba import maybe_runner_slot_mamba_spec
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -722,7 +722,8 @@ class KVCacheManager:
         context_cnt = utils.get_mesh_shape_product(self.runner.mesh,
                                                    ShardingAxisName.KV_CONTEXT)
         block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size * context_cnt
+            kv_cache_group.kv_cache_spec.block_size *
+            (1 if is_mamba_group(kv_cache_group) else context_cnt)
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
         if block_sizes != [self.runner.cache_config.block_size]:
