@@ -381,7 +381,7 @@ def dcp_forward_decode_only(
             q_all_heads = lax.all_gather(q_local, dcp_axis, axis=1, tiled=True)
 
         # RPA use kv_len - q_len to decide cache_len, we +1 here to include new tokens.
-        attn_out, kv_cache_final, lse = _rpa_cp_call(
+        attn_out, _, lse = _rpa_cp_call(
             q_all_heads,
             k_local,
             v_local,
@@ -400,7 +400,7 @@ def dcp_forward_decode_only(
         )
 
         final_output, _ = _dcp_a2a_reduce(attn_out, lse, dcp_axis, dcp_size)
-        return kv_cache_final, final_output.astype(q.dtype)
+        return kv_cache_updated, final_output.astype(q.dtype)
 
     return jax.shard_map(
         _shard_fn,

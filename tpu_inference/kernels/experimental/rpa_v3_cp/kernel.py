@@ -2186,7 +2186,6 @@ def get_default_block_sizes(
         "pcp_ring_axis_name",
         "pcp_ring_mesh_axis_names",
     ),
-    donate_argnames="kv_cache",
 )
 def ragged_paged_attention(
     queries: jax.
