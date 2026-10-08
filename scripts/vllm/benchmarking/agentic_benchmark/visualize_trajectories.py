@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Interactive trajectory and turn waterfall visualizer for agentic RL benchmarks.
 
-Similar to Google Trellis (https://github.com/google/trellis/pull/67), this tool
-renders an interactive waterfall timeline displaying multi-turn trajectories,
+This tool renders an interactive waterfall timeline displaying multi-turn trajectories,
 turn-by-turn latency segmentation (model generation vs. environment/tool idle time),
 batch launch boundaries, per-turn metrics (prompt/gen tokens, TTFT, TPOT, tok/s),
 and a multi-run comparison dropdown to switch seamlessly between benchmark runs
@@ -12,7 +11,7 @@ and a multi-run comparison dropdown to switch seamlessly between benchmark runs
 Input formats supported:
 1. One or more trajectory JSONL files from benchmark_agentic.py (--save-trajectory-file).
 2. Responses JSONL from benchmark_agentic.py (--save-responses-file).
-3. Trellis inference_metrics.jsonl files.
+3. Distributed RL inference_metrics.jsonl files.
 4. Raw log files with [DEBUG_INFERENCE][Turn] and [DEBUG_INFERENCE][Trajectory] lines.
 5. Built-in --demo mode generating realistic sample data across multiple runs.
 """
@@ -242,7 +241,7 @@ def parse_metrics_file(path: str, run_name: Optional[str] = None) -> Dict[str, A
                 }
                 turns.append(turn_rec)
 
-    # Format 2: Fallback parser for Tunix / Trellis [DEBUG_INFERENCE] text logs
+    # Format 2: Fallback parser for [DEBUG_INFERENCE] text logs
     if not turns:
         turn_re = re.compile(
             r"\[DEBUG_INFERENCE\]\[Turn\]\s+(?:prompt_id=(?P<pid>[^\s,]+)|traj_id=(?P<tid>[^\s,]+)).*?"
