@@ -66,7 +66,7 @@ def num_hidden_layers_override(model_config: ModelConfig) -> int | None:
     num_hidden_layers, so nothing is dropped unless the user
     explicitly truncated the model.
     """
-    overrides = model_config.hf_overrides
+    overrides = getattr(model_config, "hf_overrides", None)
     if not isinstance(overrides, dict):
         return None
     if "num_hidden_layers" not in overrides and "num_hidden_layers" not in (
