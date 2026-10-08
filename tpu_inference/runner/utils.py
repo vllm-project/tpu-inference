@@ -616,7 +616,13 @@ class PhasedBasedProfiler:
         self.track_concurrency: bool = os.getenv(
             "PHASED_PROFILER_TRACK_CONCURRENCY",
             str(PHASED_PROFILER_TRACK_CONCURRENCY)).lower() in ("1", "true")
-        self.profile_dir: str = profile_dir
+        self.gcs_target_dir: Optional[str] = None
+        if profile_dir.startswith("gs://"):
+            self.gcs_target_dir = profile_dir
+            self.profile_dir: str = os.path.join(tempfile.gettempdir(), "phased_profiles")
+            os.makedirs(self.profile_dir, exist_ok=True)
+        else:
+            self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phases_profiled: set = set()
         self.default_profiling_options = jax.profiler.ProfileOptions()
@@ -638,9 +644,12 @@ class PhasedBasedProfiler:
         self.worker_rank = worker_rank
         self.aggregated_stats_logger = None
 
+        if self.gcs_target_dir:
+            atexit.register(self.close)
+
         logger.info(
-            "Phased-based profiler enabled. Traces will be saved to: %s",
-            self.profile_dir)
+            "Phased-based profiler enabled. Traces will be saved to: %s (local: %s)",
+            profile_dir, self.profile_dir)
         if self.num_decode_steps_to_skip > 0:
             logger.info(
                 "Will skip %d decode-heavy steps before profiling decode_heavy phase.",
@@ -648,6 +657,46 @@ class PhasedBasedProfiler:
         if self.decode_kv_len_threshold >= 0:
             logger.info("Will skip decode-only steps until min KV len >= %d.",
                         self.decode_kv_len_threshold)
+
+    def _sync_dir_to_gcs(self,
+                         local_dir: str,
+                         target_gcs_dir: str,
+                         blocking: bool = False) -> None:
+        """Helper to sync local directory of traces to GCS using the Python SDK."""
+        if not target_gcs_dir.startswith("gs://") or not os.path.exists(local_dir):
+            return
+
+        def _upload():
+            try:
+                from google.cloud import storage  # type: ignore
+                client = storage.Client()
+                bucket_name, base_blob_name = target_gcs_dir[5:].split("/", 1)
+                base_blob_name = base_blob_name.rstrip("/")
+                bucket = client.bucket(bucket_name)
+                for root, _, files in os.walk(local_dir):
+                    for f in files:
+                        if f.startswith(".canonical_ts_"):
+                            continue
+                        local_path = os.path.join(root, f)
+                        rel_path = os.path.relpath(local_path, local_dir)
+                        blob_name = f"{base_blob_name}/{rel_path}"
+                        blob = bucket.blob(blob_name)
+                        blob.upload_from_filename(local_path)
+                logger.info("Successfully synced phased profiles from %s to %s",
+                            local_dir, target_gcs_dir)
+            except Exception as e:
+                logger.error(
+                    f"Failed to upload profile dir {local_dir} to {target_gcs_dir}: {e}",
+                    exc_info=True)
+
+        if blocking:
+            _upload()
+        else:
+            threading.Thread(target=_upload, daemon=True).start()
+
+    def close(self) -> None:
+        if self.gcs_target_dir and os.path.exists(self.profile_dir):
+            self._sync_dir_to_gcs(self.profile_dir, self.gcs_target_dir, blocking=True)
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -765,6 +814,16 @@ class PhasedBasedProfiler:
             if self.profiling_n_steps_left <= 0:
                 jax.profiler.stop_trace()
                 self._merge_profile_directories()
+                if self.gcs_target_dir:
+                    self._sync_dir_to_gcs(self.profile_dir, self.gcs_target_dir)
+                cdk_output_dir = os.environ.get("CDK_OUTPUT_DIR")
+                if cdk_output_dir and os.path.exists(cdk_output_dir):
+                    try:
+                        shutil.copytree(self.profile_dir,
+                                        os.path.join(cdk_output_dir, "trace"),
+                                        dirs_exist_ok=True)
+                    except Exception as e:
+                        logger.warning("Failed to copy profiles to CDK_OUTPUT_DIR: %s", e)
                 logger.info(
                     f"Profiling for {self.current_phase} phase finished")
                 self.current_phase = ""

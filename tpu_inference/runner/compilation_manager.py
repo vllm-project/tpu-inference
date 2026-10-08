@@ -739,7 +739,7 @@ class CompilationManager:
                         # A bucket that cannot give every request one token
                         # per chunk never carries that many requests.
                         if (_pcp_reqs > 1
-                                and num_tokens < 2 * _pcp * _pcp_reqs):
+                                 and num_tokens < 2 * _pcp * _pcp_reqs):
                             continue
                         self._precompile_backbone_helper(
                             f"worker{self.runner.rank} backbone",
