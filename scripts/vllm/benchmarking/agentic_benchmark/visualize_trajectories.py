@@ -651,9 +651,45 @@ def generate_html(
     </div>
   </div>
 
-  <div class="profile-card" id="profile-container">
-    <h3>Turn-by-Turn Latency Profile (Average Model vs Tool Duration)</h3>
-    <div id="turn-profile-host"></div>
+  <div class="profile-card" id="throughput-card">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+      <div>
+        <h3>Trajectory Generation Throughput Over Time</h3>
+        <div style="font-size:12px; color:var(--text-muted); margin-top:2px;">Generation throughput (tok/s) across turns for each trajectory over benchmark timeline. Color-coded by batch with turn markers.</div>
+      </div>
+      <div style="display:flex; gap:14px; align-items:center; font-size:12px;">
+        <label class="toggle">
+          <input type="checkbox" id="toggle-agg-tps" checked>
+          <span>Show Aggregate Throughput</span>
+        </label>
+        <label class="toggle">
+          <input type="checkbox" id="toggle-turn-labels" checked>
+          <span>Turn # Labels</span>
+        </label>
+      </div>
+    </div>
+    <div class="chart-scroll" id="throughput-scroll-box" style="max-height:360px;">
+      <div id="throughput-svg-host"></div>
+    </div>
+    <div class="legend" style="margin-top:8px;">
+      <span style="font-weight:600; color:#fff;">Throughput Legend:</span>
+      <div class="legend-item">
+        <span style="display:inline-block;width:18px;height:3px;background:var(--b0);border-radius:2px;"></span>
+        <span>Trajectory Throughput Line</span>
+      </div>
+      <div class="legend-item">
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--b0);border:1.5px solid #fff;"></span>
+        <span>Turn Marker (Turn #)</span>
+      </div>
+      <div class="legend-item">
+        <span style="display:inline-block;width:18px;height:2px;background:#38bdf8;border-top:2px dashed #38bdf8;"></span>
+        <span>Aggregate Throughput (tok/s)</span>
+      </div>
+      <div class="legend-item">
+        <span style="display:inline-block;width:16px;height:12px;background:#000;border:1px solid #fff;border-radius:2px;color:#fff;text-align:center;line-height:10px;font-size:8px;font-weight:700;">b0</span>
+        <span>Batch Launch Boundary</span>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -793,7 +829,7 @@ def generate_html(
       populateBatchFilter();
       renderStats(RAW_DATA.trajectories, RAW_DATA.turns, RAW_DATA.meta);
       renderChart();
-      renderTurnProfile();
+      renderThroughputChart();
       updateSubtitle();
     }
 
@@ -1138,59 +1174,333 @@ def generate_html(
       host.appendChild(svg);
     }
 
-    function renderTurnProfile() {
-      const host = document.getElementById("turn-profile-host");
+    function renderThroughputChart() {
+      const host = document.getElementById("throughput-svg-host");
+      if (!host) return;
       host.innerHTML = "";
-      const turns = RAW_DATA.turns;
-      if (!turns || turns.length === 0) return;
 
-      const turnsByNum = {};
-      turns.forEach(t => {
-        turnsByNum[t.turn] = turnsByNum[t.turn] || { models: [], tools: [] };
-        turnsByNum[t.turn].models.push(t.model_time_s || 0.0);
-        if (t.tool_time_s) turnsByNum[t.turn].tools.push(t.tool_time_s);
+      const bFilter = document.getElementById("batch-filter").value;
+      const searchVal = document.getElementById("search-input").value.trim().toLowerCase();
+      const zoom = parseFloat(document.getElementById("zoom-scale").value);
+      const showAgg = document.getElementById("toggle-agg-tps") ? document.getElementById("toggle-agg-tps").checked : true;
+      const showLabels = document.getElementById("toggle-turn-labels") ? document.getElementById("toggle-turn-labels").checked : true;
+
+      let trajs = [...RAW_DATA.trajectories];
+      if (bFilter !== "all") {
+        const b = parseInt(bFilter);
+        trajs = trajs.filter(t => t.batch_idx === b);
+      }
+      if (searchVal) {
+        trajs = trajs.filter(t => {
+          return t.traj_id.toLowerCase().includes(searchVal) ||
+                 `g${t.group_idx}`.includes(searchVal) ||
+                 `s${t.stream_idx}`.includes(searchVal) ||
+                 `b${t.batch_idx}`.includes(searchVal);
+        });
+      }
+
+      if (trajs.length === 0) {
+        host.innerHTML = '<div style="padding: 30px; text-align: center; color: var(--text-muted);">No trajectories match filter.</div>';
+        return;
+      }
+
+      // Map turns by trajectory
+      const trajTurns = {};
+      RAW_DATA.turns.forEach(t => {
+        trajTurns[t.traj_id] = trajTurns[t.traj_id] || [];
+        trajTurns[t.traj_id].push(t);
       });
 
-      const rows = [];
-      const turnKeys = Object.keys(turnsByNum).map(Number).sort((a, b) => a - b);
-      turnKeys.forEach(tn => {
-        const obj = turnsByNum[tn];
-        const avgModel = obj.models.reduce((a, b) => a + b, 0) / (obj.models.length || 1);
-        const avgTool = obj.tools.length > 0 ? (obj.tools.reduce((a, b) => a + b, 0) / obj.tools.length) : 0.0;
-        rows.push({ turn: tn, avgModel, avgTool, total: avgModel + avgTool });
+      const tStart = 0.0;
+      const tEnd = Math.max(...trajs.map(t => t.end_time_s), RAW_DATA.meta.total_duration_sec || 1.0);
+      const span = Math.max(tEnd - tStart, 1.0);
+
+      const pxPerSec = Math.max(30 * zoom, 12);
+      const svgWidth = Math.max(Math.round(span * pxPerSec) + 160, 900);
+      const svgHeight = 280;
+      const padL = 70;
+      const padR = 40;
+      const padT = 24;
+      const padB = 36;
+      const plotW = svgWidth - padL - padR;
+      const plotH = svgHeight - padT - padB;
+
+      // Extract points per trajectory: (midpoint_time, throughput_tps)
+      const trajPoints = {};
+      let maxTps = 50.0;
+
+      trajs.forEach(tr => {
+        const tList = trajTurns[tr.traj_id] || [];
+        tList.sort((a, b) => a.turn - b.turn);
+        const pts = [];
+        tList.forEach(t => {
+          const mTime = Math.max(t.model_time_s || 0.0, 0.001);
+          const tps = (t.output_tokens || 0) / mTime;
+          const tMid = t.start_time_s + mTime / 2.0;
+          if (tps > maxTps) maxTps = tps;
+          pts.push({
+            time: tMid,
+            tps: tps,
+            turn: t.turn,
+            num_turns: t.num_turns,
+            traj_id: tr.traj_id,
+            batch_idx: tr.batch_idx,
+            group_idx: tr.group_idx,
+            stream_idx: tr.stream_idx,
+            model_time_s: t.model_time_s,
+            tool_time_s: t.tool_time_s,
+            prompt_tokens: t.prompt_tokens,
+            output_tokens: t.output_tokens,
+            ttft_ms: t.ttft_ms,
+            tpot_ms: t.tpot_ms,
+          });
+        });
+        trajPoints[tr.traj_id] = pts;
       });
 
-      const maxVal = Math.max(...rows.map(r => r.total), 0.1);
+      // Nice ceiling for y-axis
+      const yMax = Math.ceil((maxTps * 1.15) / 25) * 25;
 
-      const table = document.createElement("div");
-      table.style.cssText = "display:grid; grid-template-columns: 80px 1fr 120px; gap:8px 12px; font-size:12px; align-items:center; max-height:220px; overflow-y:auto;";
+      const scaleX = t => padL + ((t - tStart) / span) * (span * pxPerSec);
+      const scaleY = tps => padT + plotH - (Math.max(0, tps) / yMax) * plotH;
 
-      rows.forEach(r => {
-        const rowDiv = document.createElement("div");
-        rowDiv.textContent = `Turn ${r.turn}:`;
-        rowDiv.style.color = "var(--text-muted)";
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("width", svgWidth);
+      svg.setAttribute("height", svgHeight);
+      svg.style.display = "block";
 
-        const barContainer = document.createElement("div");
-        barContainer.style.cssText = "display:flex; height:14px; background:#090e1a; border-radius:3px; overflow:hidden;";
+      // Gridlines & Y-Axis ticks
+      const yAxisG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const ySteps = 4;
+      for (let i = 0; i <= ySteps; i++) {
+        const val = Math.round((yMax / ySteps) * i);
+        const y = scaleY(val);
 
-        const mPct = (r.avgModel / maxVal * 100).toFixed(1);
-        const tPct = (r.avgTool / maxVal * 100).toFixed(1);
+        const gridLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        gridLine.setAttribute("x1", padL);
+        gridLine.setAttribute("y1", y);
+        gridLine.setAttribute("x2", padL + Math.round(span * pxPerSec));
+        gridLine.setAttribute("y2", y);
+        gridLine.setAttribute("stroke", "#334155");
+        gridLine.setAttribute("stroke-dasharray", i === 0 ? "none" : "2,3");
+        gridLine.setAttribute("stroke-width", i === 0 ? "1.5" : "1");
+        yAxisG.appendChild(gridLine);
 
-        barContainer.innerHTML = `
-          <div style="width:${mPct}%; background:var(--b0);" title="Model: ${r.avgModel.toFixed(2)}s"></div>
-          <div style="width:${tPct}%; background:var(--b0); opacity:0.4;" title="Tool: ${r.avgTool.toFixed(2)}s"></div>
-        `;
+        const yTxt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        yTxt.setAttribute("x", padL - 10);
+        yTxt.setAttribute("y", y + 4);
+        yTxt.setAttribute("fill", "#94a3b8");
+        yTxt.setAttribute("font-size", "11");
+        yTxt.setAttribute("text-anchor", "end");
+        yTxt.textContent = `${val} tok/s`;
+        yAxisG.appendChild(yTxt);
+      }
+      svg.appendChild(yAxisG);
 
-        const valTxt = document.createElement("div");
-        valTxt.style.color = "var(--text-muted)";
-        valTxt.textContent = `${r.avgModel.toFixed(2)}s + ${r.avgTool.toFixed(2)}s`;
+      // Time X-Axis
+      const xAxisG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const stepSec = span > 180 ? 30 : (span > 60 ? 10 : (span > 20 ? 5 : 1));
+      for (let sec = 0; sec <= span; sec += stepSec) {
+        const x = scaleX(sec);
+        const xLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        xLine.setAttribute("x1", x);
+        xLine.setAttribute("y1", padT);
+        xLine.setAttribute("x2", x);
+        xLine.setAttribute("y2", padT + plotH);
+        xLine.setAttribute("stroke", "#1e293b");
+        xLine.setAttribute("stroke-dasharray", "2,3");
+        xAxisG.appendChild(xLine);
 
-        table.appendChild(rowDiv);
-        table.appendChild(barContainer);
-        table.appendChild(valTxt);
+        const xTxt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        xTxt.setAttribute("x", x);
+        xTxt.setAttribute("y", padT + plotH + 18);
+        xTxt.setAttribute("fill", "#94a3b8");
+        xTxt.setAttribute("font-size", "11");
+        xTxt.setAttribute("text-anchor", "middle");
+        xTxt.textContent = `${sec}s`;
+        xAxisG.appendChild(xTxt);
+      }
+      svg.appendChild(xAxisG);
+
+      // Batch Launch Boundary markers
+      const launchTimes = RAW_DATA.meta.batch_launch_times || [0.0];
+      launchTimes.forEach((bTime, bIdx) => {
+        const bX = scaleX(bTime);
+        const bG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+
+        const vLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        vLine.setAttribute("x1", bX);
+        vLine.setAttribute("y1", padT - 6);
+        vLine.setAttribute("x2", bX);
+        vLine.setAttribute("y2", padT + plotH);
+        vLine.setAttribute("stroke", "#000000");
+        vLine.setAttribute("stroke-width", "2");
+        bG.appendChild(vLine);
+
+        const badge = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        badge.setAttribute("x", bX - 12);
+        badge.setAttribute("y", 2);
+        badge.setAttribute("width", 24);
+        badge.setAttribute("height", 16);
+        badge.setAttribute("rx", 3);
+        badge.setAttribute("fill", "#000000");
+        badge.setAttribute("stroke", "#ffffff");
+        badge.setAttribute("stroke-width", "1");
+        bG.appendChild(badge);
+
+        const badgeTxt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        badgeTxt.setAttribute("x", bX);
+        badgeTxt.setAttribute("y", 14);
+        badgeTxt.setAttribute("fill", "#ffffff");
+        badgeTxt.setAttribute("font-size", "10");
+        badgeTxt.setAttribute("font-weight", "700");
+        badgeTxt.setAttribute("text-anchor", "middle");
+        badgeTxt.textContent = `b${bIdx}`;
+        bG.appendChild(badgeTxt);
+
+        bG.addEventListener("mousemove", (e) => showTip(e, `Batch ${bIdx} Launch Boundary
+Time: ${bTime.toFixed(2)}s`));
+        bG.addEventListener("mouseleave", hideTip);
+        svg.appendChild(bG);
       });
 
-      host.appendChild(table);
+      // Optional Aggregate Throughput Line (Rolling active tok/s)
+      if (showAgg && span > 0) {
+        const numBuckets = Math.min(Math.round(span * 2), 600);
+        const dtBucket = span / numBuckets;
+        const aggCurve = [];
+
+        for (let k = 0; k <= numBuckets; k++) {
+          const tCur = tStart + k * dtBucket;
+          let activeToksPerSec = 0.0;
+          RAW_DATA.turns.forEach(t => {
+            if (tCur >= t.start_time_s && tCur <= t.end_time_s) {
+              const dur = Math.max(t.model_time_s, 0.001);
+              activeToksPerSec += (t.output_tokens || 0) / dur;
+            }
+          });
+          aggCurve.push({ t: tCur, val: activeToksPerSec });
+        }
+
+        const maxAgg = Math.max(...aggCurve.map(p => p.val), 1.0);
+        // Normalize agg to fit comfortably in top area
+        const aggPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        let dStr = "";
+        aggCurve.forEach((pt, idx) => {
+          const x = scaleX(pt.t);
+          const y = scaleY((pt.val / maxAgg) * (yMax * 0.9));
+          dStr += (idx === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`);
+        });
+        aggPath.setAttribute("d", dStr);
+        aggPath.setAttribute("fill", "none");
+        aggPath.setAttribute("stroke", "#38bdf8");
+        aggPath.setAttribute("stroke-width", "2.5");
+        aggPath.setAttribute("stroke-dasharray", "4,3");
+        aggPath.setAttribute("opacity", "0.85");
+        aggPath.style.cursor = "pointer";
+
+        aggPath.addEventListener("mousemove", (e) => {
+          showTip(e, `Aggregate Active Token Generation Rate
+Peak: ${maxAgg.toFixed(1)} tok/s`);
+        });
+        aggPath.addEventListener("mouseleave", hideTip);
+        svg.appendChild(aggPath);
+      }
+
+      // Draw Trajectory Curves and Turn Markers
+      const linesG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const markersG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+
+      trajs.forEach(tr => {
+        const pts = trajPoints[tr.traj_id] || [];
+        if (pts.length === 0) return;
+        const color = COLORS[tr.batch_idx % COLORS.length];
+
+        // Polyline connecting turns of trajectory
+        let pathD = "";
+        pts.forEach((pt, idx) => {
+          const x = scaleX(pt.time);
+          const y = scaleY(pt.tps);
+          pathD += (idx === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`);
+        });
+
+        const trajPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        trajPath.setAttribute("d", pathD);
+        trajPath.setAttribute("fill", "none");
+        trajPath.setAttribute("stroke", color);
+        trajPath.setAttribute("stroke-width", "1.8");
+        trajPath.setAttribute("opacity", "0.7");
+        trajPath.setAttribute("class", `traj-tps-line traj-${tr.traj_id}`);
+        trajPath.style.cursor = "pointer";
+
+        const highlightTraj = () => {
+          svg.querySelectorAll(".traj-tps-line").forEach(l => l.setAttribute("opacity", "0.15"));
+          trajPath.setAttribute("opacity", "1.0");
+          trajPath.setAttribute("stroke-width", "3.2");
+        };
+        const resetTraj = () => {
+          svg.querySelectorAll(".traj-tps-line").forEach(l => l.setAttribute("opacity", "0.7"));
+          trajPath.setAttribute("stroke-width", "1.8");
+        };
+
+        trajPath.addEventListener("mouseenter", highlightTraj);
+        trajPath.addEventListener("mouseleave", resetTraj);
+        linesG.appendChild(trajPath);
+
+        // Turn Markers along trajectory line
+        pts.forEach(pt => {
+          const x = scaleX(pt.time);
+          const y = scaleY(pt.tps);
+
+          const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+          circle.setAttribute("cx", x);
+          circle.setAttribute("cy", y);
+          circle.setAttribute("r", "5");
+          circle.setAttribute("fill", color);
+          circle.setAttribute("stroke", "#ffffff");
+          circle.setAttribute("stroke-width", "1.5");
+          circle.style.cursor = "pointer";
+
+          const tipMsg = [
+            `Trajectory: ${pt.traj_id} (Turn ${pt.turn}/${pt.num_turns})`,
+            `Batch: ${pt.batch_idx} | Group: ${pt.group_idx} | Stream: ${pt.stream_idx}`,
+            `Generation Throughput: ${pt.tps.toFixed(1)} tok/s`,
+            `Tokens Generated: ${pt.output_tokens}`,
+            `Turn Model Time: ${pt.model_time_s.toFixed(3)} s`,
+            pt.ttft_ms ? `TTFT: ${pt.ttft_ms} ms` : null,
+            pt.tpot_ms ? `TPOT: ${pt.tpot_ms} ms` : null,
+            `Time: ${pt.time.toFixed(2)} s`,
+          ].filter(Boolean).join("\n");
+
+          circle.addEventListener("mousemove", (e) => {
+            highlightTraj();
+            showTip(e, tipMsg);
+          });
+          circle.addEventListener("mouseleave", () => {
+            resetTraj();
+            hideTip();
+          });
+          markersG.appendChild(circle);
+
+          // Turn number inside/above marker if enabled
+          if (showLabels) {
+            const lbl = document.createElementNS("http://www.w3.org/2000/svg", "text");
+            lbl.setAttribute("x", x);
+            lbl.setAttribute("y", y - 8);
+            lbl.setAttribute("fill", "#e2e8f0");
+            lbl.setAttribute("font-size", "9");
+            lbl.setAttribute("font-weight", "700");
+            lbl.setAttribute("text-anchor", "middle");
+            lbl.style.pointerEvents = "none";
+            lbl.textContent = `t${pt.turn}`;
+            markersG.appendChild(lbl);
+          }
+        });
+      });
+
+      svg.appendChild(linesG);
+      svg.appendChild(markersG);
+      host.appendChild(svg);
     }
 
     // Initialization
@@ -1201,14 +1511,21 @@ def generate_html(
 
       renderStats(RAW_DATA.trajectories, RAW_DATA.turns, RAW_DATA.meta);
       renderChart();
-      renderTurnProfile();
+      renderThroughputChart();
 
       document.getElementById("run-select").addEventListener("change", (e) => switchRun(e.target.value));
-      document.getElementById("batch-filter").addEventListener("change", renderChart);
-      document.getElementById("search-input").addEventListener("input", renderChart);
+      document.getElementById("batch-filter").addEventListener("change", () => { renderChart(); renderThroughputChart(); });
+      document.getElementById("search-input").addEventListener("input", () => { renderChart(); renderThroughputChart(); });
       document.getElementById("sort-select").addEventListener("change", renderChart);
       document.getElementById("toggle-tool-time").addEventListener("change", renderChart);
+      if (document.getElementById("toggle-agg-tps")) {
+        document.getElementById("toggle-agg-tps").addEventListener("change", renderThroughputChart);
+      }
+      if (document.getElementById("toggle-turn-labels")) {
+        document.getElementById("toggle-turn-labels").addEventListener("change", renderThroughputChart);
+      }
       document.getElementById("zoom-scale").addEventListener("input", (e) => {
+        renderThroughputChart();
         document.getElementById("zoom-val").textContent = parseFloat(e.target.value).toFixed(1) + "x";
         renderChart();
       });
@@ -1239,7 +1556,7 @@ def generate_html(
         });
       }
 
-      window.addEventListener("resize", renderChart);
+      window.addEventListener("resize", () => { renderChart(); renderThroughputChart(); });
     }
 
     window.addEventListener("DOMContentLoaded", init);
