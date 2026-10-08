@@ -25,8 +25,12 @@ import tpu_inference.envs as envs
 from tpu_inference.kernels.collectives.hierrs_sc import wrapper as hier_rs_sc
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
-from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
-    ragged_gather_reduce
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import (
+    ragged_gather_reduce as ragged_gather_reduce_v2,
+)
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v3 import (
+    ragged_gather_reduce as ragged_gather_reduce_v3,
+)
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
     ragged_gather_v2 as ragged_gather
 from tpu_inference.layers.common.quantization import quantize_tensor
@@ -35,6 +39,13 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+
+def _select_ragged_gather_reduce(version: str | None = None):
+    v = (version or envs.RAGGED_GATHER_REDUCE_VERSION or "v2").lower()
+    if v == "v3":
+        return ragged_gather_reduce_v3
+    return ragged_gather_reduce_v2
 
 # Target chunk size of 2048 slots was found empirically to be optimal
 # for MoE workloads (e.g., Qwen) to hide ICI/DMA latency during AllReduce.
@@ -178,7 +189,8 @@ def moe_gmm_local(x: jax.Array,
                   onehot_moe_permute_threshold: int = 0,
                   scatter_results: bool = False,
                   moe_chunk_size: int = 0,
-                  defer_all_reduce: bool = False) -> jax.Array:
+                  defer_all_reduce: bool = False,
+                  ragged_gather_reduce_version: str | None = None) -> jax.Array:
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
@@ -300,9 +312,10 @@ def moe_gmm_local(x: jax.Array,
                            cur_mask).sum(axis=1)
                 chunk_hidden = combine @ gmm2_res
             else:
-                chunk_hidden = ragged_gather_reduce(gmm2_res, cur_indices,
-                                                    cur_weights.reshape(-1),
-                                                    cur_mask.reshape(-1), topk)
+                rgr_fn = _select_ragged_gather_reduce(ragged_gather_reduce_version)
+                chunk_hidden = rgr_fn(gmm2_res, cur_indices,
+                                      cur_weights.reshape(-1),
+                                      cur_mask.reshape(-1), topk)
         else:
             chunk_hidden = dense_gather_reduce(
                 gmm2_res,
@@ -359,6 +372,7 @@ def tensor_parallel_gmm(
     scatter_results: bool = False,
     moe_chunk_size: int = 0,
     defer_all_reduce: bool = False,
+    ragged_gather_reduce_version: str | None = None,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
@@ -393,6 +407,7 @@ def tensor_parallel_gmm(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         ),
         mesh=mesh,
         in_specs=(
@@ -445,6 +460,7 @@ def expert_parallel_gmm(
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
     defer_all_reduce: bool = False,
+    ragged_gather_reduce_version: str | None = None,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -478,6 +494,7 @@ def expert_parallel_gmm(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         ),
         mesh=mesh,
         in_specs=(
@@ -547,6 +564,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
     "scatter_results",
     "moe_chunk_size",
     "defer_all_reduce",
+    "ragged_gather_reduce_version",
 ))
 def fused_moe_func(
     hidden_states: jax.Array,
@@ -573,6 +591,7 @@ def fused_moe_func(
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
     num_valid_tokens: jax.Array | None = None,
+    ragged_gather_reduce_version: str | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -769,6 +788,7 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         )
     else:
         x = tensor_parallel_gmm(
@@ -790,6 +810,7 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            ragged_gather_reduce_version=ragged_gather_reduce_version,
         )
 
     return x[:num_tokens, :hidden_size]
