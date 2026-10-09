@@ -441,6 +441,62 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                              len(axis_shapes))
 
 
+def attn_dp_ring_device_mesh(
+        mesh_shape: Sequence[int], axis_names: Sequence[str],
+        devices: Sequence[Any]) -> tuple[np.ndarray | None, str]:
+    """Lay out an attn_dp x model=4 mesh so each attn_dp group is a physical
+    ring, for a 2x2xZ slice of two-core chips (v7x) without wraparound.
+
+    XLA runs an attn_dp collective as a ring in the replica group's order.
+    jax's v7x layout puts attn_dp ranks 2h and 2h+1 on opposite corners of
+    host h's 2x2 chips, so no two consecutive ranks are linked, and the
+    concurrent groups' ring steps pile up on the same links. Here:
+      - attn_dp rank r sits at (x, z) = ring[r], where the ring goes up
+        z at x=0 and back down at x=1, so every step is one link;
+      - model index m sits at y = m // 2, core m % 2, so the two cores of a
+        chip are model indices 2k, 2k+1 (as the hierarchical MoE dispatch
+        and collect require) and the two chips of a model group are linked.
+
+    Returns (devices reshaped to mesh_shape, "") or (None, reason) when the
+    mesh or the devices don't fit.
+    """
+    shape = dict(zip(axis_names, mesh_shape))
+    dp, tp = shape.get("attn_dp", 1), shape.get("model", 1)
+    others = [
+        f"{n}={s}" for n, s in shape.items()
+        if n not in ("attn_dp", "model") and s > 1
+    ]
+    if tp != 4 or others:
+        return None, (f"it needs model=4 and no other axis than attn_dp "
+                      f"above 1, got {shape}")
+    if any(not hasattr(d, "coords") or not hasattr(d, "core_on_chip")
+           for d in devices):
+        return None, "the devices report no coords/core_on_chip"
+    coords = [tuple(d.coords) for d in devices]
+    lo = [min(c[i] for c in coords) for i in range(3)]
+    dims = [max(c[i] for c in coords) - lo[i] + 1 for i in range(3)]
+    pos = {
+        (c[0] - lo[0], c[1] - lo[1], c[2] - lo[2], d.core_on_chip): d
+        for c, d in zip(coords, devices)
+    }
+    num_z = dims[2]
+    if (dims[0], dims[1]) != (2, 2) or len(pos) != len(devices) or set(
+            k[3] for k in pos) != {0, 1} or len(devices) != 8 * num_z:
+        return None, (f"it needs every device of a 2x2xZ slice with two "
+                      f"cores per chip, got chip dims {dims} and "
+                      f"{len(devices)} devices")
+    if dp != 2 * num_z:
+        return None, (f"attn_dp={dp} does not cover the 2x{num_z} ring "
+                      f"of chip pairs")
+    ring = [(0, z) for z in range(num_z)] + [(1, z)
+                                             for z in reversed(range(num_z))]
+    grid = np.empty((dp, tp), dtype=object)
+    for r, (x, z) in enumerate(ring):
+        for m in range(tp):
+            grid[r, m] = pos[(x, m // 2, z, m % 2)]
+    return grid.reshape(mesh_shape), ""
+
+
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
     """
     Create a device array with the specified mesh and sharding.
