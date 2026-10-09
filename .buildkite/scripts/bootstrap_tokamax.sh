@@ -19,8 +19,9 @@
 # 2. Runs the JAX test suites against it.
 # 3. Only if every test passes, it pushes the requirements.txt bump to main.
 #
-# On kube (ci_fleet.sh) it runs the same suites as a shadow of the bare run:
-# no bump and, when scheduled, no notifications.
+# On kube (ci_fleet.sh) it runs the same suites. A kube run bumps main and,
+# when scheduled, notifies only if its schedule sets KUBE_OWNS_NIGHTLY=1;
+# without it, it is a shadow of the bare run.
 
 set -euo pipefail
 
@@ -56,10 +57,11 @@ notify:
     if: build.state == "failed"
 EOF
 fi
-# A scheduled kube run shadows the bare one, which reports the same failures.
-# Read from the schedule's env rather than ci_fleet.sh so nothing can fail
-# before the notifications are attached.
-if [[ "${BUILDKITE_SOURCE:-}" != "schedule" || "${CI_FLEET:-}" != "kube" ]]; then
+# A scheduled kube run without KUBE_OWNS_NIGHTLY=1 shadows the bare one, which
+# reports the same failures. Read from the schedule's env rather than
+# ci_fleet.sh so nothing can fail before the notifications are attached.
+if [[ "${BUILDKITE_SOURCE:-}" != "schedule" || "${CI_FLEET:-}" != "kube" || \
+      "${KUBE_OWNS_NIGHTLY:-0}" == "1" ]]; then
     upload_with_priority "${NOTIFY_FILE}" "${JOB_PRIORITY}"
 fi
 rm "${NOTIFY_FILE}"
@@ -182,14 +184,17 @@ echo "--- :kubernetes: Choosing bare metal or kube"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/ci_fleet.sh"
 resolve_ci_fleet
-if [[ "${CI_FLEET}" == "kube" ]]; then
+if [[ "${CI_FLEET}" == "kube" && "${KUBE_OWNS_NIGHTLY:-0}" != "1" ]]; then
     buildkite-agent annotate --style info --context ci-fleet \
         "Runs on the kube fleet (${CI_FLEET_REASON}) as a shadow: main is not bumped."
 fi
 
 # Buildkite inserts uploaded steps in reverse order, so the promote has to be
-# uploaded first for it to end up last. Only the bare run bumps main.
-if [[ "${CI_FLEET}" != "kube" ]]; then
+# uploaded first for it to end up last. The pin moves on the results of the run
+# that owns the integration: bare metal, unless the kube schedule sets
+# KUBE_OWNS_NIGHTLY=1. A kube run without it shadows the bare one and must not
+# bump to a tokamax the bare run has not passed.
+if [[ "${CI_FLEET}" != "kube" || "${KUBE_OWNS_NIGHTLY:-0}" == "1" ]]; then
     upload_with_priority .buildkite/integration_tokamax_promote.yml "${JOB_PRIORITY}"
 fi
 
