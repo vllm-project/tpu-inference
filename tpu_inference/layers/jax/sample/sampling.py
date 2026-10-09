@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
+from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
@@ -29,6 +30,8 @@ from tpu_inference.layers.common.binary_search import topk_mask, topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
+from tpu_inference.models.common.compiler_options import \
+    get_sampling_compiler_options
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import VllmSchedulerOutput
@@ -257,12 +260,10 @@ def _distributed_topk_sample(
     Returns sampled global token IDs and a replicated scalar indicating that
     the gathered candidates may not contain the complete top-k tie group.
     """
-    data_spec = P(ShardingAxisName.MLP_DATA)
-    logits_spec = P(ShardingAxisName.MLP_DATA, ShardingAxisName.MLP_TENSOR)
+    logits_spec = P(None, ShardingAxisName.MLP_TENSOR)
     replicated = P()
 
-    def local_sample(local_rng, local_logits, local_temperature, local_top_k,
-                     local_top_p):
+    def local_sample(local_logits, local_temperature):
         candidates_per_shard = _distributed_sampling_candidates_per_shard()
         local_vocab_size = local_logits.shape[-1]
         if local_vocab_size < candidates_per_shard:
@@ -270,12 +271,6 @@ def _distributed_topk_sample(
                 "Distributed top-k sampling requires at least "
                 f"{candidates_per_shard} logits per vocabulary shard")
 
-        data_axis = ShardingAxisName.MLP_DATA
-        if data_axis in mesh.axis_names and mesh.shape[data_axis] > 1:
-            local_rng = jax.random.fold_in(local_rng,
-                                           lax.axis_index(data_axis))
-        # Preserve the candidate sampler's existing key derivation.
-        sample_rng = jax.random.split(local_rng, 1)[0]
         shard_index = lax.axis_index(ShardingAxisName.MLP_TENSOR)
 
         # Greedy rows do not consume the categorical result. A safe positive
@@ -285,6 +280,10 @@ def _distributed_topk_sample(
             jnp.ones_like(local_temperature),
             local_temperature,
         )
+        # Constrain local_logits so the vocabulary reduction dimension is major
+        # and the batch dimension is minor across TPU vector lanes for top_k.
+        local_logits = with_layout_constraint(local_logits,
+                                              Layout(major_to_minor=(1, 0)))
         scaled_logits = local_logits / safe_temperature[:, None]
         local_values, local_ids = lax.top_k(scaled_logits,
                                             candidates_per_shard)
@@ -303,28 +302,38 @@ def _distributed_topk_sample(
             axis=-1,
             tiled=True,
         )
-        safe_top_k = jnp.clip(local_top_k, 1,
-                              _distributed_sampling_max_top_k())
-        filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
-            candidate_values, candidate_ids, safe_top_k, local_top_p)
-        incomplete = jnp.logical_and(incomplete, local_temperature
-                                     >= _SAMPLING_EPS)
-        sampled_positions = jax.random.categorical(sample_rng, filtered_values)
-        sampled_ids = jnp.take_along_axis(candidate_ids,
-                                          sampled_positions[:, None],
-                                          axis=-1)[:, 0]
-        return sampled_ids, jnp.any(incomplete)
+        return candidate_values, candidate_ids
 
-    return jax.shard_map(
+    candidate_values, candidate_ids = jax.shard_map(
         local_sample,
         mesh=mesh,
-        in_specs=(replicated, logits_spec, data_spec, data_spec, data_spec),
-        out_specs=(data_spec, replicated),
+        in_specs=(logits_spec, replicated),
+        out_specs=(replicated, replicated),
         check_vma=False,
-    )(rng, logits, temperature, top_k, top_p)
+    )(logits, temperature)
+
+    candidate_values = jax.lax.with_sharding_constraint(
+        candidate_values,
+        NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None)))
+    candidate_ids = jax.lax.with_sharding_constraint(
+        candidate_ids, NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA,
+                                             None)))
+
+    safe_top_k = jnp.clip(top_k, 1, _distributed_sampling_max_top_k())
+    filtered_values, candidate_ids, incomplete = _merge_topk_candidates(
+        candidate_values, candidate_ids, safe_top_k, top_p)
+    incomplete = jnp.logical_and(incomplete, temperature >= _SAMPLING_EPS)
+    sampled_positions = jax.random.categorical(rng, filtered_values)
+    sampled_ids = jnp.take_along_axis(candidate_ids,
+                                      sampled_positions[:, None],
+                                      axis=-1)[:, 0]
+    return sampled_ids, jnp.any(incomplete)
 
 
-@jax.jit(static_argnames=["mesh", "allow_distributed_sampling"])
+@jax.jit(
+    static_argnames=["mesh", "allow_distributed_sampling"],
+    compiler_options=get_sampling_compiler_options(),
+)
 def sample(
     rng: jax.Array,
     mesh: Mesh,

@@ -22,8 +22,8 @@ from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, SharedAttentionMetadata)
-from tpu_inference.models.common.compiler_options import \
-    get_step_fn_compiler_options
+from tpu_inference.models.common.compiler_options import (
+    get_sampling_compiler_options, get_step_fn_compiler_options)
 
 
 @functools.partial(
@@ -358,7 +358,10 @@ def _get_decode_core():
             "continue_decode_eos_check_interval",
         ),
         donate_argnames=("kv_caches", ),
-        compiler_options=get_step_fn_compiler_options(),
+        compiler_options={
+            **get_step_fn_compiler_options(),
+            **get_sampling_compiler_options(),
+        },
     )(_decode_core_impl)
 
 
@@ -435,6 +438,9 @@ def continue_decode(
       are padding (early EOS exit may stop before max_decode_steps), so the
       caller must trim with final_state.step_counter.
     """
+    from tpu_inference.layers.jax.sample.sampling import sample
+    if sample_fn is sample:
+        sample_fn = sample.__wrapped__
 
     batch_size = init_state.current_tokens.shape[0]
     seq_lens_size = init_state.attn_metadata.seq_lens.shape[0]
