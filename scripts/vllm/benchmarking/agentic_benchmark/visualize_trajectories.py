@@ -1037,8 +1037,8 @@ def generate_html(
       const span = Math.max(tEnd - tStart, 1.0);
 
       const pxPerSec = Math.max(30 * zoom, 0.1);
-      const svgWidth = Math.max(Math.round(span * pxPerSec) + labelW + 40, 600);
       const labelW = 120;
+      const svgWidth = Math.max(Math.round(span * pxPerSec) + labelW + 40, 600);
       const rowHeight = 22;
       const rowGap = 6;
       const headerH = 28;
@@ -1155,7 +1155,7 @@ def generate_html(
             turn.ttft_ms ? `TTFT: ${turn.ttft_ms} ms` : null,
             turn.tpot_ms ? `TPOT: ${turn.tpot_ms} ms` : null,
             `Start: ${turn.start_time_s.toFixed(3)} s -> End: ${turn.end_time_s.toFixed(3)} s`,
-          ].filter(Boolean).join("\n");
+          ].filter(Boolean).join("\\n");
 
           mRect.addEventListener("mousemove", (e) => showTip(e, tipText));
           mRect.addEventListener("mouseleave", hideTip);
@@ -1294,12 +1294,12 @@ def generate_html(
       const span = Math.max(tEnd - tStart, 1.0);
 
       const pxPerSec = Math.max(30 * zoom, 0.1);
-      const svgWidth = Math.max(Math.round(span * pxPerSec) + padL + padR, 600);
-      const svgHeight = 280;
       const padL = 70;
       const padR = 40;
       const padT = 24;
       const padB = 36;
+      const svgWidth = Math.max(Math.round(span * pxPerSec) + padL + padR, 600);
+      const svgHeight = 280;
       const plotW = svgWidth - padL - padR;
       const plotH = svgHeight - padT - padB;
 
