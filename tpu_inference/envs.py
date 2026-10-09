@@ -577,8 +577,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the two cores of two linked chips. The default layout puts consecutive
     # attn_dp ranks on unlinked chips, which doubles the load on the busiest
     # link for attn_dp all-gathers and reduce-scatters. Single slice only;
-    # other meshes keep the default layout. Takes precedence over
-    # TPU_MESH_SORT_BY_COORDS. See attn_dp_ring_device_mesh in utils.py.
+    # other meshes fall back to the regular layout. Takes precedence over
+    # TPU_MESH_SORT_BY_COORDS. On more than one host, each host's devices are
+    # no longer a contiguous block of the mesh, so jax's Mesh.local_mesh
+    # fails. See attn_dp_ring_device_mesh in utils.py.
     "TPU_MESH_ATTN_DP_RING":
     env_bool("TPU_MESH_ATTN_DP_RING", default=False),
     # Controls whether FP8 linear and MoE layers perform incremental weight

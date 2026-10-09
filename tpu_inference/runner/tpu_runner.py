@@ -909,8 +909,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                     mesh_shape, MESH_AXIS_NAMES, self.devices)
             except ValueError as e:
                 logger.warning(
-                    "TPU_MESH_ATTN_DP_RING is set but %s: keeping the default "
-                    "mesh.", e)
+                    "TPU_MESH_ATTN_DP_RING is set but %s: falling back to the "
+                    "regular mesh layout.", e)
             else:
                 rows = devices_array.reshape(sharding_config.attn_dp_size, -1)
                 logger.info(
@@ -945,6 +945,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             return np.array(self.devices).reshape(mesh_shape)
 
     def _create_multi_slice_mesh(self, num_slices: int) -> jax.Array:
+        if envs.TPU_MESH_ATTN_DP_RING:
+            logger.warning(
+                "TPU_MESH_ATTN_DP_RING is set but it only supports a single "
+                "slice, got NUM_SLICES=%d: using the regular mesh layout.",
+                num_slices)
         sharding_config: ShardingConfigManager = self.vllm_config.sharding_config
         dp_inner = sharding_config.model_dp_size // num_slices
 
@@ -979,6 +984,11 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 tuple(i * d for i, d in zip(ici_mesh_shape, dcn_mesh_shape)))
 
     def _create_2d_mesh(self) -> jax.sharding.Mesh:
+        if envs.TPU_MESH_ATTN_DP_RING:
+            logger.warning(
+                "TPU_MESH_ATTN_DP_RING is set but it needs NEW_MODEL_DESIGN "
+                "(the 2D mesh has no attn_dp axis): using the regular mesh "
+                "layout.")
 
         sharding_strategy: ShardingConfigManager = self.vllm_config.sharding_config
         mesh_shape = (

@@ -458,6 +458,13 @@ def attn_dp_ring_device_mesh(mesh_shape: Sequence[int],
         chip are model indices 2k, 2k+1 (as the hierarchical MoE dispatch
         and collect require) and the two chips of a model group are linked.
 
+    The cost: in a 2xZ grid of chip pairs the only ring of single links is
+    its outer edge, so host z holds attn_dp ranks z and 2Z-1-z, which are
+    not adjacent. On more than one host, a host's devices are then not a
+    contiguous block of the mesh, so jax's Mesh.local_mesh and the
+    host-local array helpers in multihost_utils fail, and RL weight sync
+    reports no host_subgrid.
+
     Returns the devices reshaped to mesh_shape. Raises ValueError with the
     reason when the mesh or the devices don't fit.
     """
@@ -476,15 +483,18 @@ def attn_dp_ring_device_mesh(mesh_shape: Sequence[int],
     # Key the devices by (x, y, z, core) from the slice's lowest corner, as
     # they may be part of a larger slice (e.g. one host's devices under PP).
     num_z = dp // 2
-    x0, y0, z0 = (min(c) for c in zip(*(d.coords for d in devices)))
+    xs, ys, zs = zip(*(d.coords for d in devices))
+    x0, y0, z0 = min(xs), min(ys), min(zs)
     pos = {}
     for d in devices:
         x, y, z = d.coords
         pos[x - x0, y - y0, z - z0, d.core_on_chip] = d
     if len(devices) != 8 * num_z or pos.keys() != set(
             itertools.product(range(2), range(2), range(num_z), range(2))):
+        chips = "x".join(str(max(c) - min(c) + 1) for c in (xs, ys, zs))
         raise ValueError(f"attn_dp={dp} needs both cores of every chip of a "
-                         f"2x2x{num_z} slice, got {len(devices)} devices")
+                         f"2x2x{num_z} slice, got {len(devices)} devices on "
+                         f"a {chips} chip grid")
 
     ring = [(0, z) for z in range(num_z)] + [(1, z)
                                              for z in reversed(range(num_z))]

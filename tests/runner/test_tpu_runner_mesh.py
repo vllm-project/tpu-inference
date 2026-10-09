@@ -288,7 +288,7 @@ class TestAttnDpRingDeviceMesh:
         devices = _v7x_devices(1) + _v7x_devices(1)
         for d in devices[8:]:
             d.coords = [d.coords[0] + 2, d.coords[1], 0]
-        with pytest.raises(ValueError, match="2x2x2 slice"):
+        with pytest.raises(ValueError, match="on a 4x2x1 chip grid"):
             attn_dp_ring_device_mesh((1, 4, 1, 1, 4, 1, 1), MESH_AXIS_NAMES,
                                      devices)
         # No topology information at all.
@@ -302,14 +302,25 @@ class TestAttnDpRingDeviceMesh:
         sc.model_dp_size, sc.attn_dp_size, sc.attn_dp_expert_size = 1, attn_dp, 1
         sc.expert_size, sc.tp_size = 1, tp
         sc.decode_cp_size, sc.prefill_cp_size = 1, 1
+        sc.device_indexes = None
         runner = Mock(spec=TPUModelRunner)
         runner.vllm_config = config
         runner.devices = devices
         return runner
 
-    def test_runner_uses_ring_layout(self):
+    @staticmethod
+    def _env(sort_by_coords):
+        return patch.dict(
+            os.environ, {
+                'TPU_MESH_ATTN_DP_RING': '1',
+                'TPU_MESH_SORT_BY_COORDS': sort_by_coords
+            })
+
+    @pytest.mark.parametrize("sort_by_coords", ["0", "1"])
+    def test_runner_uses_ring_layout(self, sort_by_coords):
+        # The ring layout takes precedence over TPU_MESH_SORT_BY_COORDS.
         runner = self._runner(8, 4, _v7x_devices(4))
-        with patch.dict(os.environ, {'TPU_MESH_ATTN_DP_RING': '1'}), \
+        with self._env(sort_by_coords), \
              patch('tpu_inference.runner.tpu_runner.mesh_utils') as mesh_utils, \
              patch('tpu_inference.runner.tpu_runner.logger'):
             arr = TPUModelRunner._create_single_slice_mesh(runner)
@@ -319,11 +330,40 @@ class TestAttnDpRingDeviceMesh:
 
     def test_runner_falls_back(self):
         runner = self._runner(4, 8, _v7x_devices(4))
-        with patch.dict(os.environ, {'TPU_MESH_ATTN_DP_RING': '1'}), \
+        with self._env("0"), \
              patch('tpu_inference.runner.tpu_runner.mesh_utils') as mesh_utils, \
              patch('tpu_inference.runner.tpu_runner.logger') as logger:
             mesh_utils.create_device_mesh.return_value = "default"
             assert TPUModelRunner._create_single_slice_mesh(
                 runner) == "default"
         mesh_utils.create_device_mesh.assert_called_once()
+        assert "TPU_MESH_ATTN_DP_RING" in logger.warning.call_args[0][0]
+
+    def test_runner_falls_back_to_sort_by_coords(self):
+        runner = self._runner(4, 8, _v7x_devices(4)[::-1])
+        with self._env("1"), \
+             patch('tpu_inference.runner.tpu_runner.mesh_utils') as mesh_utils, \
+             patch('tpu_inference.runner.tpu_runner.logger') as logger:
+            arr = TPUModelRunner._create_single_slice_mesh(runner)
+        mesh_utils.create_device_mesh.assert_not_called()
+        assert [d.id for d in arr.flat] == list(range(32))
+        assert "TPU_MESH_ATTN_DP_RING" in logger.warning.call_args[0][0]
+
+    def test_runner_warns_on_multi_slice(self):
+        runner = self._runner(8, 4, _v7x_devices(4) * 2)
+        runner.vllm_config.sharding_config.model_dp_size = 2
+        with self._env("0"), \
+             patch('tpu_inference.runner.tpu_runner.mesh_utils') as mesh_utils, \
+             patch('tpu_inference.runner.tpu_runner.logger') as logger:
+            TPUModelRunner._create_multi_slice_mesh(runner, 2)
+        mesh_utils.create_hybrid_device_mesh.assert_called_once()
+        assert "TPU_MESH_ATTN_DP_RING" in logger.warning.call_args[0][0]
+
+    def test_runner_warns_on_2d_mesh(self):
+        runner = self._runner(1, 8, _v7x_devices(1))
+        with self._env("0"), \
+             patch('tpu_inference.runner.tpu_runner.make_optimized_mesh') as make_mesh, \
+             patch('tpu_inference.runner.tpu_runner.logger') as logger:
+            TPUModelRunner._create_2d_mesh(runner)
+        make_mesh.assert_called_once()
         assert "TPU_MESH_ATTN_DP_RING" in logger.warning.call_args[0][0]
