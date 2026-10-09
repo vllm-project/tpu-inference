@@ -403,7 +403,7 @@ class Fp8BlockwiseMergedLinearMethod(Fp8BlockwiseLinearMethod):
     each projection (``gate_proj``, ``up_proj``) as a separate tensor with
     its own block-wise scale. ``create_weights_jax`` attaches a
     ``weight_loader`` that accumulates each projection's ``weight`` and
-    ``weight_scale_inv`` tensor (by ``shard_id``) and, once all projections
+    dequant-scale tensor (by ``shard_id``) and, once all projections
     for a given param have arrived, concatenates them in declaration order.
 
     Unlike the unquantized merge loader, this does not interleave shards for
@@ -451,12 +451,17 @@ class Fp8BlockwiseMergedLinearMethod(Fp8BlockwiseLinearMethod):
             functools.partial(self._load_merged_shard,
                               permute_dims=(1, 0),
                               param_name=layer.prefix + ".weight"))
-        layer.weight_scale_inv.set_metadata("_merged_shards", [None] * n_proj)
-        layer.weight_scale_inv.set_metadata(
+        # The dequant scale's param name is checkpoint-dependent (see
+        # weight_scale_name in Fp8BlockwiseLinearMethod.__init__), so look the
+        # param up by that name instead of hardcoding the DeepSeek one.
+        scale_param = getattr(layer, self.weight_scale_name)
+        scale_param.set_metadata("_merged_shards", [None] * n_proj)
+        scale_param.set_metadata(
             "weight_loader",
             functools.partial(self._load_merged_shard,
                               permute_dims=(1, 0),
-                              param_name=layer.prefix + ".weight_scale_inv"))
+                              param_name=layer.prefix + "." +
+                              self.weight_scale_name))
 
 
 class Fp8FusedMoEMethod(QuantizeMethodBase):
