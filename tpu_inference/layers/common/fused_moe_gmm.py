@@ -108,7 +108,8 @@ def gmm_wrapper(lhs,
                 group_sizes,
                 group_offset,
                 fuse_act=None,
-                preferred_element_type=None):
+                preferred_element_type=None,
+                lhs_scale=None):
     gmm_res = gmm_v2(
         lhs=lhs,
         rhs=rhs,
@@ -119,8 +120,22 @@ def gmm_wrapper(lhs,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,
+        # None keeps gmm_v2's dynamic lhs scale.
+        lhs_scale=lhs_scale,
     )
     return gmm_res
+
+
+def _prepare_lhs_scale(name: str,
+                       lhs_scale: jax.Array | None) -> jax.Array | None:
+    """Validates a static per-tensor lhs scale and returns it as f32 [1, 1]."""
+    if lhs_scale is None:
+        return None
+    if np.size(lhs_scale) != 1:
+        raise ValueError(
+            f"{name}: only a static per-tensor scale (one element) is "
+            f"supported, got shape {np.shape(lhs_scale)}.")
+    return jnp.asarray(lhs_scale, jnp.float32).reshape(1, 1)
 
 
 def valid_rows_mask(batch_size: int, group_sizes: jax.Array,
@@ -228,6 +243,8 @@ def moe_gmm_local(x: jax.Array,
                   group_offset: jax.Array,
                   topk_argsort_revert_indices: jax.Array,
                   topk_weights: jax.Array,
+                  w1_lhs_scale: jax.Array | None = None,
+                  w2_lhs_scale: jax.Array | None = None,
                   *,
                   activation: str,
                   topk: int,
@@ -255,6 +272,7 @@ def moe_gmm_local(x: jax.Array,
         group_offset,
         fuse_act=activation,
         preferred_element_type=x.dtype,
+        lhs_scale=w1_lhs_scale,
     )
 
     # When the parallelism is TP since w2_bias is not sharded, we should only apply bias
@@ -264,8 +282,13 @@ def moe_gmm_local(x: jax.Array,
         shard_id = jax.lax.axis_index(ShardingAxisName.MLP_TENSOR).sum()
         w2_bias = jnp.where(shard_id == 0, w2_bias, 0)
     gmm1_res = gmm1_res[:, :w2.shape[1]]  # trim to hidden size if padded
-    gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias, group_sizes,
-                           group_offset)
+    gmm2_res = gmm_wrapper(gmm1_res,
+                           w2,
+                           w2_scale,
+                           w2_bias,
+                           group_sizes,
+                           group_offset,
+                           lhs_scale=w2_lhs_scale)
 
     # Not gmm2_res.shape[0]: x may carry padding rows past the last group
     # (RAGGED_GATHER_TRIM_ROWS=False).
@@ -425,6 +448,8 @@ def tensor_parallel_gmm(
     scatter_results: bool = False,
     moe_chunk_size: int = 0,
     defer_all_reduce: bool = False,
+    w1_lhs_scale: jax.Array | None = None,
+    w2_lhs_scale: jax.Array | None = None,
 ) -> jax.Array:
     data_p_spec = P(ShardingAxisName.MLP_DATA)
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
@@ -473,6 +498,8 @@ def tensor_parallel_gmm(
             P(),
             data_p_spec,
             data_p_spec,
+            None if w1_lhs_scale is None else P(),
+            None if w2_lhs_scale is None else P(),
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -488,6 +515,8 @@ def tensor_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        w1_lhs_scale,
+        w2_lhs_scale,
     )
 
 
@@ -511,6 +540,8 @@ def expert_parallel_gmm(
     moe_chunk_size: int = 0,
     scatter_results: bool = False,
     defer_all_reduce: bool = False,
+    w1_lhs_scale: jax.Array | None = None,
+    w2_lhs_scale: jax.Array | None = None,
 ) -> jax.Array:
     ep_size = get_mesh_shape_product(mesh, ShardingAxisName.EXPERT)
     ep_p_spec = P(ShardingAxisName.EXPERT)
@@ -564,6 +595,8 @@ def expert_parallel_gmm(
             ep_p_spec,
             data_p_spec,
             data_p_spec,
+            None if w1_lhs_scale is None else P(),
+            None if w2_lhs_scale is None else P(),
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -579,6 +612,8 @@ def expert_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        w1_lhs_scale,
+        w2_lhs_scale,
     )
 
 
@@ -820,6 +855,8 @@ def fused_moe_func(
     expert_score_correction_bias: jax.Array | None = None,
     moe_chunk_size: int = 0,
     num_valid_tokens: jax.Array | None = None,
+    w1_lhs_scale: jax.Array | None = None,
+    w2_lhs_scale: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -840,6 +877,11 @@ def fused_moe_func(
         scoring_fn: scoring function to apply on gating_output.
         enable_rs_kernel: enable custom Hierarchical Reduce-Scatter kernel.
         use_gmm_fused_rs_kernel: enable fused GMM reduce-scatter kernel.
+        w1_lhs_scale: optional lhs_scale for the first GMM, used by gmm_v2 to
+            quantize its input (hidden_states) in-kernel. None (default) keeps
+            the kernel's dynamic scale. Currently only a static per-tensor
+            scale (one element) is supported in this file.
+        w2_lhs_scale: same for the second GMM's input (activation output).
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
@@ -854,6 +896,10 @@ def fused_moe_func(
             use_gmm_fused_rs_kernel)
 
     if use_ep and use_gmm_fused_rs_kernel:
+        if w1_lhs_scale is not None or w2_lhs_scale is not None:
+            raise NotImplementedError(
+                "w1_lhs_scale / w2_lhs_scale are not supported with "
+                "use_gmm_fused_rs_kernel.")
         from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
             fused_moe_func_rs
         logger.info("fused_moe_rs kernel in use")
@@ -875,6 +921,8 @@ def fused_moe_func(
     num_tokens, hidden_size = hidden_states.shape
     global_num_experts, padded_hidden_size, _ = w1.shape
     dtype = hidden_states.dtype
+    w1_lhs_scale = _prepare_lhs_scale("w1_lhs_scale", w1_lhs_scale)
+    w2_lhs_scale = _prepare_lhs_scale("w2_lhs_scale", w2_lhs_scale)
 
     assert (num_tokens * topk) % 16 == 0, (
         "The kernel requires num_tokens * topk to be a multiple of "
@@ -1032,6 +1080,8 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            w1_lhs_scale=w1_lhs_scale,
+            w2_lhs_scale=w2_lhs_scale,
         )
     else:
         x = tensor_parallel_gmm(
@@ -1053,6 +1103,8 @@ def fused_moe_func(
             scatter_results=scatter_results,
             moe_chunk_size=moe_chunk_size,
             defer_all_reduce=defer_all_reduce,
+            w1_lhs_scale=w1_lhs_scale,
+            w2_lhs_scale=w2_lhs_scale,
         )
 
     return x[:num_tokens, :hidden_size]
