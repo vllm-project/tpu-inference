@@ -37,6 +37,7 @@ from tpu_inference.layers.jax.norm import JaxRmsNorm
 from tpu_inference.layers.jax.pp_utils import make_layers
 from tpu_inference.layers.vllm.quantization.configs import VllmQuantConfig
 from tpu_inference.logger import init_logger
+from tpu_inference.models.common.kv_share import drop_shared_kv_weights
 from tpu_inference.models.jax.gemma4 import Gemma4ForCausalLM, Gemma4Model
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
@@ -730,6 +731,13 @@ class Gemma4ForConditionalGeneration(JaxModule, LoadableWithIterator):
                 ".output_min",
             ],
         )
+        # KV-shared text layers own no K/V params; a BF16 export still ships
+        # them. Unlike the text-only model this one really does load the
+        # vision tower, whose encoder layers have their own self_attn.k_proj —
+        # `drop_shared_kv_weights` is anchored on the language_model path so
+        # those are never touched.
+        text_config = self.vllm_config.model_config.hf_config.text_config
+        weights = drop_shared_kv_weights(text_config, weights)
         return loader.load_weights(mapper.apply(weights))
 
     def embed_input_ids(self,
