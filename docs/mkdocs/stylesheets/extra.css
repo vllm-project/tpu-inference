@@ -64,3 +64,36 @@ body[data-md-color-scheme="slate"] .md-nav__item--section > label.md-nav__link .
   background-color: #fef7e0;
   color: #f9ab00;
 }
+
+/* Composite header logo: vLLM + JAX (see docs/overrides/partials/logo.html) */
+.md-logo__composite {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.md-logo__plus {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1;
+  color: currentColor;
+}
+
+.md-header__button.md-logo .md-logo__composite img {
+  height: 1.2rem;
+  width: auto;
+}
+
+/* Mobile navigation drawer shows the logo larger */
+.md-nav__button.md-logo .md-logo__composite {
+  gap: 0.4rem;
+}
+
+.md-nav__button.md-logo .md-logo__composite img {
+  height: 2.4rem;
+  width: auto;
+}
+
+.md-nav__button.md-logo .md-logo__plus {
+  font-size: 1.6rem;
+}
