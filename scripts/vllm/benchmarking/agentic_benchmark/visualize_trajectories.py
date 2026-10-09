@@ -22,8 +22,9 @@ import json
 import os
 import re
 import socketserver
+import sys
 import webbrowser
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 def generate_single_demo_dataset(
@@ -36,14 +37,12 @@ def generate_single_demo_dataset(
     model_factor: float = 1.0,
     run_name: str = "Demo Run",
     dp_sched_prefill: bool = False,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     """Generates a realistic synthetic multi-batch agentic benchmark trajectory dataset."""
     import random
     rng = random.Random(seed)
 
-    batch_launch_times = [
-        round(b * time_between_batches, 3) for b in range(num_batches)
-    ]
+    batch_launch_times = [round(b * time_between_batches, 3) for b in range(num_batches)]
     trajectories = []
     turns_all = []
     traj_idx = 0
@@ -67,8 +66,7 @@ def generate_single_demo_dataset(
                 for turn in range(1, num_turns + 1):
                     # Turn 1 prefill is longer on cache miss
                     is_miss = (s == 0 and turn == 1)
-                    base_ttft = rng.uniform(
-                        0.4, 0.8) if is_miss else rng.uniform(0.05, 0.15)
+                    base_ttft = rng.uniform(0.4, 0.8) if is_miss else rng.uniform(0.05, 0.15)
                     if dp_sched_prefill and turn > 1:
                         # DP batch prefill batches prefills together, reducing tail TTFT under load
                         base_ttft *= 0.82
@@ -133,31 +131,18 @@ def generate_single_demo_dataset(
 
     total_duration = max((t["end_time_s"] for t in trajectories), default=1.0)
     meta = {
-        "run_name":
-        run_name,
-        "model":
-        "Qwen/Qwen3.5-397B-A17B-FP8",
-        "num_batches":
-        num_batches,
-        "concurrency":
-        concurrency,
-        "group_size":
-        group_size,
-        "time_between_batches_sec":
-        time_between_batches,
-        "batch_launch_times":
-        batch_launch_times,
-        "total_trajectories":
-        len(trajectories),
-        "total_turns":
-        len(turns_all),
-        "total_duration_sec":
-        total_duration,
-        "dp_sched_batch_prefill":
-        dp_sched_prefill,
-        "trace_file":
-        "gs://wenxindong-vm/rl/mlperf2026/agentic_benchmark/gbs1024_trace_file_tool_time.jsonl"
-        if has_tool_time else "gbs1024_trace_file.jsonl",
+        "run_name": run_name,
+        "model": "Qwen/Qwen3.5-397B-A17B-FP8",
+        "num_batches": num_batches,
+        "concurrency": concurrency,
+        "group_size": group_size,
+        "time_between_batches_sec": time_between_batches,
+        "batch_launch_times": batch_launch_times,
+        "total_trajectories": len(trajectories),
+        "total_turns": len(turns_all),
+        "total_duration_sec": total_duration,
+        "dp_sched_batch_prefill": dp_sched_prefill,
+        "trace_file": "gs://wenxindong-vm/rl/mlperf2026/agentic_benchmark/gbs1024_trace_file_tool_time.jsonl" if has_tool_time else "gbs1024_trace_file.jsonl",
     }
     return {
         "meta": meta,
@@ -166,42 +151,33 @@ def generate_single_demo_dataset(
     }
 
 
-def generate_demo_runs() -> dict[str, dict[str, Any]]:
+def generate_demo_runs() -> Dict[str, Dict[str, Any]]:
     """Generates synthetic runs comparing different benchmark configurations."""
     return {
-        "Demo: Tool Time (DP_SCHED=false)":
-        generate_single_demo_dataset(
-            seed=42,
-            has_tool_time=True,
-            dp_sched_prefill=False,
-            model_factor=1.0,
-            run_name="Demo: Tool Time (DP_SCHED=false)"),
-        "Demo: Tool Time (DP_SCHED=true)":
-        generate_single_demo_dataset(
-            seed=43,
-            has_tool_time=True,
-            dp_sched_prefill=True,
-            model_factor=0.92,
-            run_name="Demo: Tool Time (DP_SCHED=true)"),
-        "Demo: Baseline (No Tool Time)":
-        generate_single_demo_dataset(seed=44,
-                                     has_tool_time=False,
-                                     dp_sched_prefill=False,
-                                     model_factor=1.0,
-                                     run_name="Demo: Baseline (No Tool Time)"),
+        "Demo: Tool Time (DP_SCHED=false)": generate_single_demo_dataset(
+            seed=42, has_tool_time=True, dp_sched_prefill=False, model_factor=1.0,
+            run_name="Demo: Tool Time (DP_SCHED=false)"
+        ),
+        "Demo: Tool Time (DP_SCHED=true)": generate_single_demo_dataset(
+            seed=43, has_tool_time=True, dp_sched_prefill=True, model_factor=0.92,
+            run_name="Demo: Tool Time (DP_SCHED=true)"
+        ),
+        "Demo: Baseline (No Tool Time)": generate_single_demo_dataset(
+            seed=44, has_tool_time=False, dp_sched_prefill=False, model_factor=1.0,
+            run_name="Demo: Baseline (No Tool Time)"
+        ),
     }
 
 
-def parse_metrics_file(path: str,
-                       run_name: str | None = None) -> dict[str, Any]:
+def parse_metrics_file(path: str, run_name: Optional[str] = None) -> Dict[str, Any]:
     """Parses a trajectory metrics JSONL or text log file into structured records."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Input metrics file not found: {path}")
 
-    trajectories: dict[str, dict[str, Any]] = {}
-    turns: list[dict[str, Any]] = []
+    trajectories: Dict[str, Dict[str, Any]] = {}
+    turns: List[Dict[str, Any]] = []
     base_name = run_name or os.path.splitext(os.path.basename(path))[0]
-    meta: dict[str, Any] = {
+    meta: Dict[str, Any] = {
         "source_file": os.path.abspath(path),
         "run_name": base_name,
         "batch_launch_times": [],
@@ -244,44 +220,24 @@ def parse_metrics_file(path: str,
                     model_time = round(rec["total_time_ms"] / 1000.0, 4)
 
                 turn_rec = {
-                    "type":
-                    "turn",
-                    "batch_idx":
-                    b_idx,
-                    "group_idx":
-                    g_idx,
-                    "stream_idx":
-                    s_idx,
-                    "traj_id":
-                    traj_id,
-                    "turn":
-                    t_num,
-                    "num_turns":
-                    num_turns,
-                    "start_time_s":
-                    rec.get("start_time_s", 0.0),
-                    "end_time_s":
-                    rec.get("end_time_s", model_time or 0.0),
-                    "model_time_s":
-                    model_time or 0.0,
-                    "tool_time_s":
-                    rec.get("tool_time_s", 0.0),
-                    "prompt_tokens":
-                    rec.get("input_history_tokens")
-                    or rec.get("prompt_tokens", 0),
-                    "output_tokens":
-                    rec.get("output_tokens")
-                    or rec.get("completion_tokens", 0),
-                    "ttft_ms":
-                    rec.get("ttft_ms"),
-                    "tpot_ms":
-                    rec.get("tpot_ms"),
-                    "total_time_ms":
-                    rec.get("total_time_ms"),
-                    "success":
-                    rec.get("success", True),
-                    "error":
-                    rec.get("error"),
+                    "type": "turn",
+                    "batch_idx": b_idx,
+                    "group_idx": g_idx,
+                    "stream_idx": s_idx,
+                    "traj_id": traj_id,
+                    "turn": t_num,
+                    "num_turns": num_turns,
+                    "start_time_s": rec.get("start_time_s", 0.0),
+                    "end_time_s": rec.get("end_time_s", model_time or 0.0),
+                    "model_time_s": model_time or 0.0,
+                    "tool_time_s": rec.get("tool_time_s", 0.0),
+                    "prompt_tokens": rec.get("input_history_tokens") or rec.get("prompt_tokens", 0),
+                    "output_tokens": rec.get("output_tokens") or rec.get("completion_tokens", 0),
+                    "ttft_ms": rec.get("ttft_ms"),
+                    "tpot_ms": rec.get("tpot_ms"),
+                    "total_time_ms": rec.get("total_time_ms"),
+                    "success": rec.get("success", True),
+                    "error": rec.get("error"),
                 }
                 turns.append(turn_rec)
 
@@ -321,7 +277,7 @@ def parse_metrics_file(path: str,
                 })
 
     # Synthesize trajectory summary records if missing
-    traj_turns_map: dict[str, list[dict[str, Any]]] = {}
+    traj_turns_map: Dict[str, List[Dict[str, Any]]] = {}
     for t in turns:
         traj_turns_map.setdefault(t["traj_id"], []).append(t)
 
@@ -330,61 +286,38 @@ def parse_metrics_file(path: str,
             first = t_list[0]
             t_start = min((x["start_time_s"] for x in t_list), default=0.0)
             t_end = max((x["end_time_s"] for x in t_list), default=0.0)
-            tot_model = sum(x["model_time_s"] for x in t_list)
-            tot_tool = sum(x.get("tool_time_s", 0.0) for x in t_list)
-            tot_out = sum(x.get("output_tokens", 0) for x in t_list)
+            tot_model = sum((x["model_time_s"] for x in t_list))
+            tot_tool = sum((x.get("tool_time_s", 0.0) for x in t_list))
+            tot_out = sum((x.get("output_tokens", 0) for x in t_list))
             b_idx = first.get("batch_idx", 0)
             trajectories[traj_id] = {
-                "type":
-                "trajectory",
-                "traj_id":
-                traj_id,
-                "batch_idx":
-                b_idx,
-                "group_idx":
-                first.get("group_idx", 0),
-                "stream_idx":
-                first.get("stream_idx", 0),
-                "num_turns":
-                len(t_list),
-                "start_time_s":
-                round(t_start, 4),
-                "end_time_s":
-                round(t_end, 4),
-                "duration_s":
-                round(max(0.0, t_end - t_start), 4),
-                "model_time_s":
-                round(tot_model, 4),
-                "tool_time_s":
-                round(tot_tool, 4),
-                "prompt_tokens":
-                first.get("prompt_tokens", 0),
-                "output_tokens":
-                tot_out,
-                "status":
-                "COMPLETED" if all(x.get("success", False)
-                                   for x in t_list) else "FAILED",
+                "type": "trajectory",
+                "traj_id": traj_id,
+                "batch_idx": b_idx,
+                "group_idx": first.get("group_idx", 0),
+                "stream_idx": first.get("stream_idx", 0),
+                "num_turns": len(t_list),
+                "start_time_s": round(t_start, 4),
+                "end_time_s": round(t_end, 4),
+                "duration_s": round(max(0.0, t_end - t_start), 4),
+                "model_time_s": round(tot_model, 4),
+                "tool_time_s": round(tot_tool, 4),
+                "prompt_tokens": first.get("prompt_tokens", 0),
+                "output_tokens": tot_out,
+                "status": "COMPLETED" if all(x.get("success", False) for x in t_list) else "FAILED",
             }
 
     # Discover batch launch times if not explicitly recorded
-    batches_seen = sorted(
-        {t.get("batch_idx", 0)
-         for t in trajectories.values()})
+    batches_seen = sorted(set(t.get("batch_idx", 0) for t in trajectories.values()))
     if len(batches_seen) > 1 and len(meta.get("batch_launch_times", [])) <= 1:
         launch_times = []
         for b in batches_seen:
-            b_trajs = [
-                tr for tr in trajectories.values() if tr.get("batch_idx") == b
-            ]
-            launch_times.append(
-                min((tr.get("start_time_s", 0.0) for tr in b_trajs),
-                    default=0.0))
+            b_trajs = [tr for tr in trajectories.values() if tr.get("batch_idx") == b]
+            launch_times.append(min((tr.get("start_time_s", 0.0) for tr in b_trajs), default=0.0))
         meta["batch_launch_times"] = launch_times
         meta["num_batches"] = len(batches_seen)
 
-    total_duration = max(
-        (tr.get("end_time_s", 0.0) for tr in trajectories.values()),
-        default=1.0)
+    total_duration = max((tr.get("end_time_s", 0.0) for tr in trajectories.values()), default=1.0)
     meta["total_duration_sec"] = round(total_duration, 3)
     meta["total_trajectories"] = len(trajectories)
     meta["total_turns"] = len(turns)
@@ -397,34 +330,17 @@ def parse_metrics_file(path: str,
 
 
 def generate_html(
-    runs_data: dict[str, Any] | dict[str, dict[str, Any]],
+    runs_data: Union[Dict[str, Any], Dict[str, Dict[str, Any]]],
     title: str = "Agentic RL Trajectory Turn Waterfall",
 ) -> str:
     """Generates a standalone, dependency-free interactive HTML waterfall visualization."""
     if "trajectories" in runs_data and "turns" in runs_data:
-        single_name = runs_data.get("meta",
-                                    {}).get("run_name") or "Default Run"
-        all_runs: dict[str, dict[str, Any]] = {single_name: runs_data}
+        single_name = runs_data.get("meta", {}).get("run_name") or "Default Run"
+        all_runs: Dict[str, Dict[str, Any]] = {single_name: runs_data}
     else:
         all_runs = runs_data  # type: ignore
 
     runs_json = json.dumps(all_runs)
-
-    options_html = ""
-    for idx, k in enumerate(all_runs.keys()):
-        sel = " selected" if idx == 0 else ""
-        escaped_k = (k.replace("&", "&amp;").replace("<", "&lt;").replace(
-            ">", "&gt;").replace('"', "&quot;"))
-        options_html += f'<option value="{escaped_k}"{sel}>{escaped_k}</option>\n'
-
-    first_key = list(all_runs.keys())[0] if all_runs else "Default Run"
-    first_run = all_runs.get(first_key, {})
-    first_trajs = first_run.get("trajectories", [])
-    first_turns = first_run.get("turns", [])
-    first_meta = first_run.get("meta", {})
-    num_batches = first_meta.get("num_batches", 1)
-    tot_turns = first_meta.get("total_turns", len(first_turns))
-    chart_count_info = f"Showing {len(first_trajs)} trajectories ({tot_turns} total turns across {num_batches} batches)"
 
     html_template = """<!DOCTYPE html>
 <html lang="en">
@@ -639,6 +555,62 @@ def generate_html(
       margin-bottom: 8px;
       color: #fff;
     }
+    .btn-action {
+      background: #1e293b;
+      color: #38bdf8;
+      border: 1px solid #0284c7;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .btn-action:hover {
+      background: #0284c7;
+      color: #ffffff;
+    }
+    .btn-neutral {
+      background: #334155;
+      color: #f8fafc;
+      border: 1px solid #475569;
+      padding: 3px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-neutral:hover {
+      background: #475569;
+    }
+    .measure-hint {
+      font-size: 11px;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.08);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      padding: 3px 8px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      user-select: none;
+    }
+    .measure-hint kbd {
+      background: #0f172a;
+      border: 1px solid #38bdf8;
+      border-radius: 3px;
+      padding: 1px 5px;
+      font-family: monospace;
+      font-size: 10px;
+      color: #38bdf8;
+      font-weight: 700;
+    }
+    body.shift-measuring,
+    body.shift-measuring #scroll-box,
+    body.shift-measuring #throughput-scroll-box,
+    body.shift-measuring svg {
+      cursor: crosshair !important;
+    }
   </style>
 </head>
 <body>
@@ -661,9 +633,7 @@ def generate_html(
   <div class="controls">
     <div class="control-group" id="run-select-group">
       <label for="run-select" style="color:var(--accent); font-weight:700;">Run / Benchmark:</label>
-      <select id="run-select" style="font-weight:600; min-width: 220px;">
-        __RUN_OPTIONS__
-      </select>
+      <select id="run-select" style="font-weight:600; min-width: 220px;"></select>
     </div>
 
     <div class="control-group">
@@ -695,18 +665,23 @@ def generate_html(
       </label>
     </div>
 
-    <div class="control-group" style="margin-left: auto; display:flex; gap:8px; align-items:center;">
+    <div class="control-group" style="margin-left: auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <div class="measure-hint" id="measure-hint" title="Hold Shift and drag horizontally on either chart to measure elapsed time duration & turns">
+        <span>Hold <kbd>Shift</kbd> + Drag to measure &Delta;t</span>
+      </div>
       <label for="zoom-scale">Zoom:</label>
-      <input type="range" id="zoom-scale" min="0.5" max="3.0" step="0.1" value="1.0" style="width: 90px;">
-      <span id="zoom-val" style="font-size: 11px; color: var(--text-muted); width: 28px;">1.0x</span>
+      <input type="range" id="zoom-scale" min="0.02" max="3.0" step="0.02" value="1.0" style="width: 100px;">
+      <span id="zoom-val" style="font-size: 11px; color: var(--text-muted); min-width: 34px;">1.0x</span>
+      <button id="zoom-fit-btn" type="button" class="btn-action" title="Fit entire benchmark timeline horizontally to screen">Fit All</button>
+      <button id="zoom-reset-btn" type="button" class="btn-neutral" title="Reset zoom to 1.0x">1.0x</button>
       <input type="file" id="run-file-input" accept=".jsonl,.json" style="display:none;">
-      <button id="load-file-btn" type="button" style="background:#334155; color:#f8fafc; border:1px solid #475569; padding:4px 9px; border-radius:4px; font-size:11px; cursor:pointer;" title="Load local trajectory JSONL into visualizer">+ Add Run File</button>
+      <button id="load-file-btn" type="button" class="btn-neutral" title="Load local trajectory JSONL into visualizer">+ Add Run File</button>
     </div>
   </div>
 
   <div class="chart-container">
     <div class="chart-header">
-      <div id="chart-count-info" style="font-weight:600; color:var(--text);">__CHART_COUNT_INFO__</div>
+      <div id="chart-count-info" style="font-weight:600; color:var(--text);">Loading trajectories...</div>
       <div style="display:flex; gap:8px;">
         <span class="tag" style="background:#000; color:#fff; border:1px solid #475569;">Black line: Batch Dispatch Boundary</span>
       </div>
@@ -788,7 +763,14 @@ def generate_html(
     ];
 
     const tooltip = document.getElementById("tooltip");
+    let measurement = null; // { startSec: number, endSec: number, active: boolean }
+    let isShiftMeasuring = false;
+
     function showTip(e, text) {
+      if (e.shiftKey || (measurement && measurement.active) || isShiftMeasuring) {
+        hideTip();
+        return;
+      }
       tooltip.textContent = text;
       tooltip.style.display = "block";
       const x = Math.min(e.clientX + 14, window.innerWidth - 380);
@@ -1054,8 +1036,8 @@ def generate_html(
       const tEnd = Math.max(...trajs.map(t => t.end_time_s), RAW_DATA.meta.total_duration_sec || 1.0);
       const span = Math.max(tEnd - tStart, 1.0);
 
-      const pxPerSec = Math.max(30 * zoom, 12);
-      const svgWidth = Math.max(Math.round(span * pxPerSec) + 160, 900);
+      const pxPerSec = Math.max(30 * zoom, 0.1);
+      const svgWidth = Math.max(Math.round(span * pxPerSec) + labelW + 40, 600);
       const labelW = 120;
       const rowHeight = 22;
       const rowGap = 6;
@@ -1082,7 +1064,14 @@ def generate_html(
 
       // Time axis grid
       const axisG = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      const stepSec = span > 180 ? 30 : (span > 60 ? 10 : (span > 20 ? 5 : 1));
+      let stepSec = 30;
+      if (pxPerSec >= 25) stepSec = 5;
+      else if (pxPerSec >= 12) stepSec = 10;
+      else if (pxPerSec >= 5) stepSec = 20;
+      else if (pxPerSec >= 2) stepSec = 30;
+      else if (pxPerSec >= 0.8) stepSec = 60;
+      else stepSec = 120;
+
       for (let sec = 0; sec <= span; sec += stepSec) {
         const x = labelW + Math.round(sec * pxPerSec);
         const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -1143,7 +1132,7 @@ def generate_html(
 
         tList.forEach(turn => {
           const mX = labelW + Math.round((turn.start_time_s - tStart) * pxPerSec);
-          const mW = Math.max(Math.round(turn.model_time_s * pxPerSec), 2);
+          const mW = Math.max(Math.round(turn.model_time_s * pxPerSec), 1.5);
           const color = COLORS[turn.batch_idx % COLORS.length];
 
           // Model computation block
@@ -1166,7 +1155,7 @@ def generate_html(
             turn.ttft_ms ? `TTFT: ${turn.ttft_ms} ms` : null,
             turn.tpot_ms ? `TPOT: ${turn.tpot_ms} ms` : null,
             `Start: ${turn.start_time_s.toFixed(3)} s -> End: ${turn.end_time_s.toFixed(3)} s`,
-          ].filter(Boolean).join("\\n");
+          ].filter(Boolean).join("\n");
 
           mRect.addEventListener("mousemove", (e) => showTip(e, tipText));
           mRect.addEventListener("mouseleave", hideTip);
@@ -1189,7 +1178,7 @@ def generate_html(
           // Tool / environment idle block
           if (showTool && turn.tool_time_s > 0) {
             const toolX = mX + mW;
-            const toolW = Math.max(Math.round(turn.tool_time_s * pxPerSec), 2);
+            const toolW = Math.max(Math.round(turn.tool_time_s * pxPerSec), 1.5);
             const toolRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
             toolRect.setAttribute("x", toolX);
             toolRect.setAttribute("y", y + 2);
@@ -1201,8 +1190,8 @@ def generate_html(
             toolRect.setAttribute("stroke-width", "0.5");
             toolRect.style.cursor = "pointer";
 
-            const toolTip = `Tool Call Idle Gap (Turn ${turn.turn} -> ${turn.turn + 1})\\n` +
-                            `Duration: ${turn.tool_time_s.toFixed(3)} s\\n` +
+            const toolTip = `Tool Call Idle Gap (Turn ${turn.turn} -> ${turn.turn + 1})\n` +
+                            `Duration: ${turn.tool_time_s.toFixed(3)} s\n` +
                             `Time: ${(turn.end_time_s).toFixed(3)} s -> ${(turn.end_time_s + turn.tool_time_s).toFixed(3)} s`;
             toolRect.addEventListener("mousemove", (e) => showTip(e, toolTip));
             toolRect.addEventListener("mouseleave", hideTip);
@@ -1251,10 +1240,14 @@ def generate_html(
         badgeTxt.textContent = `b${bIdx}`;
         bG.appendChild(badgeTxt);
 
-        bG.addEventListener("mousemove", (e) => showTip(e, `Batch ${bIdx} Launch Boundary\\nTime: ${bTime.toFixed(2)}s`));
+        bG.addEventListener("mousemove", (e) => showTip(e, `Batch ${bIdx} Launch Boundary\nTime: ${bTime.toFixed(2)}s`));
         bG.addEventListener("mouseleave", hideTip);
         svg.appendChild(bG);
       });
+
+      const measureLayer = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      measureLayer.setAttribute("id", "waterfall-measure-layer");
+      svg.appendChild(measureLayer);
 
       host.appendChild(svg);
     }
@@ -1300,8 +1293,8 @@ def generate_html(
       const tEnd = Math.max(...trajs.map(t => t.end_time_s), RAW_DATA.meta.total_duration_sec || 1.0);
       const span = Math.max(tEnd - tStart, 1.0);
 
-      const pxPerSec = Math.max(30 * zoom, 12);
-      const svgWidth = Math.max(Math.round(span * pxPerSec) + 160, 900);
+      const pxPerSec = Math.max(30 * zoom, 0.1);
+      const svgWidth = Math.max(Math.round(span * pxPerSec) + padL + padR, 600);
       const svgHeight = 280;
       const padL = 70;
       const padR = 40;
@@ -1384,7 +1377,14 @@ def generate_html(
 
       // Time X-Axis
       const xAxisG = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      const stepSec = span > 180 ? 30 : (span > 60 ? 10 : (span > 20 ? 5 : 1));
+      let stepSec = 30;
+      if (pxPerSec >= 25) stepSec = 5;
+      else if (pxPerSec >= 12) stepSec = 10;
+      else if (pxPerSec >= 5) stepSec = 20;
+      else if (pxPerSec >= 2) stepSec = 30;
+      else if (pxPerSec >= 0.8) stepSec = 60;
+      else stepSec = 120;
+
       for (let sec = 0; sec <= span; sec += stepSec) {
         const x = scaleX(sec);
         const xLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
@@ -1585,7 +1585,248 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
 
       svg.appendChild(linesG);
       svg.appendChild(markersG);
+
+      const tMeasureLayer = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      tMeasureLayer.setAttribute("id", "throughput-measure-layer");
+      svg.appendChild(tMeasureLayer);
+
       host.appendChild(svg);
+      renderMeasurementOverlays();
+    }
+
+    function updateZoomDisplay(val) {
+      const zVal = parseFloat(val);
+      const zv = document.getElementById("zoom-val");
+      if (!zv) return;
+      if (zVal < 0.2) {
+        zv.textContent = zVal.toFixed(2) + "x";
+      } else {
+        zv.textContent = zVal.toFixed(1) + "x";
+      }
+    }
+
+    function fitAllHorizontal() {
+      const scrollBox = document.getElementById("scroll-box");
+      const containerW = (scrollBox && scrollBox.clientWidth > 100) ? scrollBox.clientWidth : (window.innerWidth - 60);
+      const trajs = RAW_DATA.trajectories || [];
+      const tEnd = Math.max(...trajs.map(t => t.end_time_s), RAW_DATA.meta.total_duration_sec || 1.0);
+      const span = Math.max(tEnd, 1.0);
+      const labelW = 120;
+      const availW = Math.max(containerW - labelW - 50, 400);
+      const targetPxPerSec = Math.max(availW / span, 0.1);
+      const targetZoom = Math.min(Math.max(targetPxPerSec / 30.0, 0.02), 3.0);
+      const zInput = document.getElementById("zoom-scale");
+      if (zInput) {
+        zInput.value = targetZoom.toFixed(3);
+        updateZoomDisplay(targetZoom);
+        renderChart();
+        renderThroughputChart();
+      }
+    }
+
+    function clearMeasurement() {
+      measurement = null;
+      renderMeasurementOverlays();
+    }
+
+    function renderMeasurementOverlays() {
+      renderMeasurementForChart("waterfall-measure-layer", 120, () => {
+        const zoom = parseFloat(document.getElementById("zoom-scale").value);
+        return Math.max(30 * zoom, 0.1);
+      });
+      renderMeasurementForChart("throughput-measure-layer", 70, () => {
+        const zoom = parseFloat(document.getElementById("zoom-scale").value);
+        return Math.max(30 * zoom, 0.1);
+      });
+    }
+
+    function renderMeasurementForChart(layerId, padLeft, getPxPerSec) {
+      const layer = document.getElementById(layerId);
+      if (!layer) return;
+      layer.innerHTML = "";
+      if (!measurement) return;
+
+      const svg = layer.ownerSVGElement;
+      if (!svg) return;
+      const svgHeight = parseFloat(svg.getAttribute("height")) || 300;
+      const svgWidth = parseFloat(svg.getAttribute("width")) || 900;
+      const pxPerSec = getPxPerSec();
+
+      const tMin = Math.max(0, Math.min(measurement.startSec, measurement.endSec));
+      const tMax = Math.max(0, Math.max(measurement.startSec, measurement.endSec));
+      const dt = tMax - tMin;
+
+      const x1 = padLeft + Math.round(tMin * pxPerSec);
+      const x2 = padLeft + Math.round(tMax * pxPerSec);
+      const width = Math.max(x2 - x1, 1);
+
+      // Shaded selection box
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", x1);
+      rect.setAttribute("y", 0);
+      rect.setAttribute("width", width);
+      rect.setAttribute("height", svgHeight);
+      rect.setAttribute("fill", "rgba(56, 189, 248, 0.18)");
+      rect.setAttribute("stroke", "#38bdf8");
+      rect.setAttribute("stroke-width", "1.5");
+      rect.setAttribute("stroke-dasharray", "4,3");
+      rect.style.pointerEvents = "none";
+      layer.appendChild(rect);
+
+      // Boundary vertical lines
+      [x1, x2].forEach(bx => {
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("x1", bx);
+        line.setAttribute("y1", 0);
+        line.setAttribute("x2", bx);
+        line.setAttribute("y2", svgHeight);
+        line.setAttribute("stroke", "#0284c7");
+        line.setAttribute("stroke-width", "2");
+        line.style.pointerEvents = "none";
+        layer.appendChild(line);
+      });
+
+      // Active turns / tokens overlapping this time window
+      const activeTurns = (RAW_DATA.turns || []).filter(t => t.start_time_s <= tMax && t.end_time_s >= tMin);
+      const activeTokens = activeTurns.reduce((acc, t) => acc + (t.output_tokens || 0), 0);
+
+      // Header measurement badge
+      const dtSecStr = dt >= 1.0 ? `${dt.toFixed(3)}s` : `${(dt * 1000).toFixed(1)}ms`;
+      const dtMsStr = dt >= 1.0 ? `(${(dt * 1000).toFixed(0)} ms)` : `(${dt.toFixed(4)}s)`;
+      const rangeStr = `${tMin.toFixed(2)}s → ${tMax.toFixed(2)}s`;
+      const turnStr = `${activeTurns.length} turns, ${activeTokens.toLocaleString()} tokens`;
+      const pillText = `Δt: ${dtSecStr} ${dtMsStr}  |  ${rangeStr}  |  ${turnStr}  [✕]`;
+
+      const pillG = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      pillG.style.cursor = "pointer";
+      pillG.setAttribute("title", "Click to clear measurement (or press Esc)");
+      pillG.onclick = (e) => {
+        e.stopPropagation();
+        clearMeasurement();
+      };
+
+      const approxW = Math.min(Math.max(pillText.length * 7 + 24, 250), svgWidth - 20);
+      const centerX = Math.max(Math.min((x1 + x2) / 2, svgWidth - approxW / 2 - 10), approxW / 2 + 10);
+      const pillY = 5;
+
+      const pillBg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      pillBg.setAttribute("x", centerX - approxW / 2);
+      pillBg.setAttribute("y", pillY);
+      pillBg.setAttribute("width", approxW);
+      pillBg.setAttribute("height", 22);
+      pillBg.setAttribute("rx", 4);
+      pillBg.setAttribute("fill", "#0f172a");
+      pillBg.setAttribute("stroke", "#38bdf8");
+      pillBg.setAttribute("stroke-width", "1.5");
+      pillG.appendChild(pillBg);
+
+      const txt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      txt.setAttribute("x", centerX);
+      txt.setAttribute("y", pillY + 15);
+      txt.setAttribute("fill", "#38bdf8");
+      txt.setAttribute("font-size", "11");
+      txt.setAttribute("font-weight", "700");
+      txt.setAttribute("font-family", "monospace");
+      txt.setAttribute("text-anchor", "middle");
+      txt.textContent = pillText;
+      pillG.appendChild(txt);
+
+      layer.appendChild(pillG);
+    }
+
+    function setupMeasuring() {
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Shift") {
+          isShiftMeasuring = true;
+          document.body.classList.add("shift-measuring");
+        }
+        if (e.key === "Escape") {
+          clearMeasurement();
+        }
+      });
+
+      window.addEventListener("keyup", (e) => {
+        if (e.key === "Shift") {
+          isShiftMeasuring = false;
+          document.body.classList.remove("shift-measuring");
+        }
+      });
+
+      attachChartMeasureListener("scroll-box", 120, () => {
+        const zoom = parseFloat(document.getElementById("zoom-scale").value);
+        return Math.max(30 * zoom, 0.1);
+      });
+
+      attachChartMeasureListener("throughput-scroll-box", 70, () => {
+        const zoom = parseFloat(document.getElementById("zoom-scale").value);
+        return Math.max(30 * zoom, 0.1);
+      });
+    }
+
+    function attachChartMeasureListener(containerId, padLeft, getPxPerSec) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+
+      let isDragging = false;
+
+      container.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        if (e.shiftKey) {
+          e.preventDefault();
+          isDragging = true;
+          const svg = container.querySelector("svg");
+          if (!svg) return;
+          const rect = svg.getBoundingClientRect();
+          const svgX = e.clientX - rect.left;
+          const pxPerSec = getPxPerSec();
+          const trajs = RAW_DATA.trajectories || [];
+          const tEnd = Math.max(...trajs.map(t => t.end_time_s), RAW_DATA.meta.total_duration_sec || 1.0);
+          const span = Math.max(tEnd, 1.0);
+          const t = Math.max(0, Math.min(span, (svgX - padLeft) / pxPerSec));
+          measurement = { startSec: t, endSec: t, active: true };
+          renderMeasurementOverlays();
+          container.setPointerCapture(e.pointerId);
+        } else {
+          if (measurement && !measurement.active) {
+            measurement = null;
+            renderMeasurementOverlays();
+          }
+        }
+      });
+
+      container.addEventListener("pointermove", (e) => {
+        if (isDragging && measurement && measurement.active) {
+          e.preventDefault();
+          const svg = container.querySelector("svg");
+          if (!svg) return;
+          const rect = svg.getBoundingClientRect();
+          const svgX = e.clientX - rect.left;
+          const pxPerSec = getPxPerSec();
+          const trajs = RAW_DATA.trajectories || [];
+          const tEnd = Math.max(...trajs.map(t => t.end_time_s), RAW_DATA.meta.total_duration_sec || 1.0);
+          const span = Math.max(tEnd, 1.0);
+          const t = Math.max(0, Math.min(span, (svgX - padLeft) / pxPerSec));
+          measurement.endSec = t;
+          renderMeasurementOverlays();
+        }
+      });
+
+      const stopMeasure = (e) => {
+        if (isDragging) {
+          isDragging = false;
+          try { container.releasePointerCapture(e.pointerId); } catch (_) {}
+          if (measurement) {
+            measurement.active = false;
+            if (Math.abs(measurement.endSec - measurement.startSec) < 0.005) {
+              measurement = null;
+            }
+            renderMeasurementOverlays();
+          }
+        }
+      };
+
+      container.addEventListener("pointerup", stopMeasure);
+      container.addEventListener("pointercancel", stopMeasure);
     }
 
     // Initialization
@@ -1597,6 +1838,7 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
       renderStats(RAW_DATA.trajectories, RAW_DATA.turns, RAW_DATA.meta);
       renderChart();
       renderThroughputChart();
+      setupMeasuring();
 
       document.getElementById("run-select").addEventListener("change", (e) => switchRun(e.target.value));
       document.getElementById("batch-filter").addEventListener("change", () => { renderChart(); renderThroughputChart(); });
@@ -1610,9 +1852,21 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
         document.getElementById("toggle-turn-labels").addEventListener("change", renderThroughputChart);
       }
       document.getElementById("zoom-scale").addEventListener("input", (e) => {
+        updateZoomDisplay(e.target.value);
         renderThroughputChart();
-        document.getElementById("zoom-val").textContent = parseFloat(e.target.value).toFixed(1) + "x";
         renderChart();
+      });
+      const fitBtn = document.getElementById("zoom-fit-btn");
+      if (fitBtn) fitBtn.addEventListener("click", fitAllHorizontal);
+      const resetBtn = document.getElementById("zoom-reset-btn");
+      if (resetBtn) resetBtn.addEventListener("click", () => {
+        const zInput = document.getElementById("zoom-scale");
+        if (zInput) {
+          zInput.value = "1.0";
+          updateZoomDisplay(1.0);
+          renderChart();
+          renderThroughputChart();
+        }
       });
 
       // Add Run file upload listener
@@ -1657,24 +1911,18 @@ Peak: ${maxAgg.toFixed(1)} tok/s`);
 </body>
 </html>
 """
-    return (html_template.replace("__TITLE__", title).replace(
-        "__RUN_OPTIONS__", options_html).replace("__CHART_COUNT_INFO__",
-                                                 chart_count_info).replace(
-                                                     "__RUNS_JSON__",
-                                                     runs_json))
+    return html_template.replace("__TITLE__", title).replace("__RUNS_JSON__", runs_json)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description=
-        "Visualize multi-turn agentic RL trajectories and turn latencies across one or more benchmark runs."
+        description="Visualize multi-turn agentic RL trajectories and turn latencies across one or more benchmark runs."
     )
     parser.add_argument(
         "inputs",
         nargs="*",
         default=[],
-        help=
-        "One or more input trajectory metrics JSONL files, or 'Run Label=path/to/file.jsonl'.",
+        help="One or more input trajectory metrics JSONL files, or 'Run Label=path/to/file.jsonl'.",
     )
     parser.add_argument(
         "--run",
@@ -1682,8 +1930,7 @@ def main():
         action="append",
         dest="explicit_runs",
         default=[],
-        help=
-        "Explicitly named run in format 'Run Label=path/to/file.jsonl' (can be specified multiple times).",
+        help="Explicitly named run in format 'Run Label=path/to/file.jsonl' (can be specified multiple times).",
     )
     parser.add_argument(
         "--output",
@@ -1701,8 +1948,7 @@ def main():
     parser.add_argument(
         "--demo",
         action="store_true",
-        help=
-        "Generate synthetic multi-run demo data to preview the comparison visualization.",
+        help="Generate synthetic multi-run demo data to preview the comparison visualization.",
     )
     parser.add_argument(
         "--serve",
@@ -1723,7 +1969,7 @@ def main():
 
     args = parser.parse_args()
 
-    runs_data: dict[str, dict[str, Any]] = {}
+    runs_data: Dict[str, Dict[str, Any]] = {}
 
     # 1. Parse explicitly named runs via -r / --run
     for item in args.explicit_runs:
@@ -1746,9 +1992,7 @@ def main():
     # 3. Fallback to demo mode if no inputs provided or --demo requested
     if args.demo or not runs_data:
         if not runs_data and not args.demo:
-            print(
-                "No input files provided. Generating interactive multi-run demo data (--demo)..."
-            )
+            print("No input files provided. Generating interactive multi-run demo data (--demo)...")
         demo_runs = generate_demo_runs()
         runs_data.update(demo_runs)
 
@@ -1756,14 +2000,10 @@ def main():
     with open(args.output, "w", encoding="utf-8") as f:
         f.write(html_content)
 
-    print(
-        f"Generated trajectory waterfall visualization: {os.path.abspath(args.output)}"
-    )
+    print(f"Generated trajectory waterfall visualization: {os.path.abspath(args.output)}")
     print(f"Total runs embedded: {len(runs_data)} -> {list(runs_data.keys())}")
     for name, rdata in runs_data.items():
-        print(
-            f"  - [{name}]: {len(rdata['trajectories'])} trajectories, {len(rdata['turns'])} turns"
-        )
+        print(f"  - [{name}]: {len(rdata['trajectories'])} trajectories, {len(rdata['turns'])} turns")
 
     if args.open:
         try:
@@ -1776,9 +2016,7 @@ def main():
         out_file = os.path.basename(args.output)
         os.chdir(out_dir)
         handler = http.server.SimpleHTTPRequestHandler
-        print(
-            f"Serving visualization at http://localhost:{args.port}/{out_file}"
-        )
+        print(f"Serving visualization at http://localhost:{args.port}/{out_file}")
         with socketserver.TCPServer(("", args.port), handler) as httpd:
             try:
                 httpd.serve_forever()
