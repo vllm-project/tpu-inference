@@ -582,8 +582,7 @@ def expert_parallel_gmm(
     )
 
 
-def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
-                          dtype: jnp.dtype) -> jax.Array:
+def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh) -> jax.Array:
     logger.info("Apply FP8 all-gather on input of MOE")
     hidden_states_q, scale = quantize_tensor(
         jnp.float8_e4m3fn,
@@ -595,7 +594,7 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
 
     # Dequantize if needed
     return jax.shard_map(
-        lambda x, s: (x.astype(jnp.float32) * s).astype(dtype),
+        lambda x, s: (x.astype(jnp.float32) * s).astype(hidden_states.dtype),
         mesh=mesh,
         in_specs=(
             P(ShardingAxisName.MLP_DATA, None),
@@ -603,6 +602,17 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh,
         ),
         out_specs=P(ShardingAxisName.MLP_DATA, None),
     )(hidden_states_q, scale)
+
+
+def _apply_one_step_dispatch_gather(hidden_states: jax.Array, mesh: Mesh,
+                                    fp8: bool) -> jax.Array:
+    """Hidden states for the one-step dispatch: with fp8=True the output of
+    _apply_all_gather_fp8, otherwise the input unchanged, and any all-gather
+    the mesh needs is the one XLA inserts for the caller's next shard_map.
+    """
+    if fp8:
+        return _apply_all_gather_fp8(hidden_states, mesh)
+    return hidden_states
 
 
 # The hierarchical gather splits the hidden columns in half; each half must be
@@ -686,18 +696,10 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
     _apply_all_gather_fp8's.
 
     If the mesh doesn't fit (see _hierarchical_dispatch_plan) or the hidden
-    size is not a multiple of 256, falls back to the one-step gather: returns
-    the input unchanged, so the caller's next shard_map makes XLA insert it,
-    or with fp8=True returns _apply_all_gather_fp8.
+    size is not a multiple of 256, falls back to _apply_one_step_dispatch_gather.
     """
     plan = _hierarchical_dispatch_plan(mesh)
     hidden = hidden_states.shape[-1]
-
-    def _fallback():
-        if fp8:
-            return _apply_all_gather_fp8(hidden_states, mesh,
-                                         hidden_states.dtype)
-        return hidden_states
 
     if plan is None:
         logger.warning_once(
@@ -706,14 +708,14 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
             "model axis whose adjacent indices are the two cores of one chip "
             "in every attention-data rank.",
             str(dict(mesh.shape)))  # *_once caches on args: hashable
-        return _fallback()
+        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8)
     if hidden % _HIERARCHICAL_HIDDEN_ALIGN:
         logger.warning_once(
             "MOE_HIERARCHICAL_DISPATCH is set but hidden=%d is not a "
             "multiple of %d, so its halves would not be whole 128-lane "
             "tiles: keeping the one-step dispatch all-gather.", hidden,
             _HIERARCHICAL_HIDDEN_ALIGN)
-        return _fallback()
+        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8)
     step1, pair_axis, perm = plan
     dtype = hidden_states.dtype
     logger.info_once(
@@ -983,8 +985,10 @@ def fused_moe_func(
         hidden_states = _apply_hierarchical_dispatch_gather(hidden_states,
                                                             mesh,
                                                             fp8=all_gather_fp8)
-    elif all_gather_fp8:
-        hidden_states = _apply_all_gather_fp8(hidden_states, mesh, dtype)
+    else:
+        hidden_states = _apply_one_step_dispatch_gather(hidden_states,
+                                                        mesh,
+                                                        fp8=all_gather_fp8)
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,
