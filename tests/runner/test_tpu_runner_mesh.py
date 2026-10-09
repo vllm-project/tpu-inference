@@ -200,3 +200,122 @@ class TestTPUModelRunnerMeshInit:
 
             # First dimension of intra_node_shape should be dp_inner
             assert intra_node_shape[0] == expected_dp_inner
+
+
+def _v7x_devices(num_z):
+    """Fake v7x devices of a 2x2xZ slice, in jax.devices() order."""
+    from types import SimpleNamespace
+    devices = []
+    for z in range(num_z):
+        for y in range(2):
+            for x in range(2):
+                for core in range(2):
+                    devices.append(
+                        SimpleNamespace(id=len(devices),
+                                        coords=[x, y, z],
+                                        core_on_chip=core))
+    return devices
+
+
+def _hops(a, b):
+    return sum(abs(p - q) for p, q in zip(a.coords, b.coords))
+
+
+class TestAttnDpRingDeviceMesh:
+    """attn_dp_ring_device_mesh (TPU_MESH_ATTN_DP_RING)."""
+
+    @pytest.mark.parametrize("num_z", [1, 2, 4])
+    def test_layout(self, num_z):
+        from tpu_inference.utils import attn_dp_ring_device_mesh
+        devices = _v7x_devices(num_z)
+        dp = 2 * num_z
+        mesh_shape = (1, dp, 1, 1, 4, 1, 1)
+        grid, why_not = attn_dp_ring_device_mesh(mesh_shape, MESH_AXIS_NAMES,
+                                                 devices)
+        assert why_not == ""
+        assert grid.shape == mesh_shape
+        grid = grid.reshape(dp, 4)
+        assert sorted(d.id for d in grid.flat) == list(range(len(devices)))
+        for r in range(dp):
+            row = grid[r]
+            # Model indices 2k, 2k+1 are the two cores of one chip, and the
+            # two chips of the model group are linked.
+            for k in (0, 2):
+                assert row[k].coords == row[k + 1].coords
+                assert {row[k].core_on_chip, row[k + 1].core_on_chip} == {0, 1}
+            assert _hops(row[0], row[2]) == 1
+            # A model group stays on one host (one z layer).
+            assert len({d.coords[2] for d in row}) == 1
+        for m in range(4):
+            col = grid[:, m]
+            # Every step of each attn_dp ring, wrap included, is one link.
+            for r in range(dp):
+                assert _hops(col[r], col[(r + 1) % dp]) == 1
+            assert len({d.core_on_chip for d in col}) == 1
+
+    def test_production_v7x_32(self):
+        from tpu_inference.utils import attn_dp_ring_device_mesh
+        grid, _ = attn_dp_ring_device_mesh((1, 8, 1, 1, 4, 1, 1),
+                                           MESH_AXIS_NAMES, _v7x_devices(4))
+        col = [tuple(d.coords) for d in grid.reshape(8, 4)[:, 0]]
+        assert col == [(0, 0, 0), (0, 0, 1), (0, 0, 2), (0, 0, 3), (1, 0, 3),
+                       (1, 0, 2), (1, 0, 1), (1, 0, 0)]
+
+    @pytest.mark.parametrize(
+        "mesh_shape,num_z",
+        [
+            ((1, 4, 1, 1, 8, 1, 1), 4),  # model=8
+            ((2, 4, 1, 1, 4, 1, 1), 4),  # a data axis in use
+            ((1, 2, 1, 1, 4, 1, 1), 2),  # attn_dp=2 on a 2x2x2 slice
+        ])
+    def test_unsupported_mesh(self, mesh_shape, num_z):
+        from tpu_inference.utils import attn_dp_ring_device_mesh
+        grid, why_not = attn_dp_ring_device_mesh(mesh_shape, MESH_AXIS_NAMES,
+                                                 _v7x_devices(num_z))
+        assert grid is None and why_not
+
+    def test_unsupported_devices(self):
+        from tpu_inference.utils import attn_dp_ring_device_mesh
+        # A 4x2x1 grid of chips (not 2x2xZ).
+        devices = _v7x_devices(1) + _v7x_devices(1)
+        for d in devices[8:]:
+            d.coords = [d.coords[0] + 2, d.coords[1], 0]
+        grid, why_not = attn_dp_ring_device_mesh((1, 4, 1, 1, 4, 1, 1),
+                                                 MESH_AXIS_NAMES, devices)
+        assert grid is None and "2x2xZ" in why_not
+        # No topology information at all.
+        grid, why_not = attn_dp_ring_device_mesh(
+            (1, 2, 1, 1, 4, 1, 1), MESH_AXIS_NAMES, [Mock(spec=["id"])] * 8)
+        assert grid is None and "coords" in why_not
+
+    def _runner(self, attn_dp, tp, devices):
+        config = Mock()
+        sc = config.sharding_config
+        sc.model_dp_size, sc.attn_dp_size, sc.attn_dp_expert_size = 1, attn_dp, 1
+        sc.expert_size, sc.tp_size = 1, tp
+        sc.decode_cp_size, sc.prefill_cp_size = 1, 1
+        runner = Mock(spec=TPUModelRunner)
+        runner.vllm_config = config
+        runner.devices = devices
+        return runner
+
+    def test_runner_uses_ring_layout(self):
+        runner = self._runner(8, 4, _v7x_devices(4))
+        with patch.dict(os.environ, {'TPU_MESH_ATTN_DP_RING': '1'}), \
+             patch('tpu_inference.runner.tpu_runner.mesh_utils') as mesh_utils, \
+             patch('tpu_inference.runner.tpu_runner.logger'):
+            arr = TPUModelRunner._create_single_slice_mesh(runner)
+        mesh_utils.create_device_mesh.assert_not_called()
+        assert arr.shape == (1, 8, 1, 1, 4, 1, 1)
+        assert tuple(arr.reshape(8, 4)[1, 0].coords) == (0, 0, 1)
+
+    def test_runner_falls_back(self):
+        runner = self._runner(4, 8, _v7x_devices(4))
+        with patch.dict(os.environ, {'TPU_MESH_ATTN_DP_RING': '1'}), \
+             patch('tpu_inference.runner.tpu_runner.mesh_utils') as mesh_utils, \
+             patch('tpu_inference.runner.tpu_runner.logger') as logger:
+            mesh_utils.create_device_mesh.return_value = "default"
+            assert TPUModelRunner._create_single_slice_mesh(
+                runner) == "default"
+        mesh_utils.create_device_mesh.assert_called_once()
+        assert "TPU_MESH_ATTN_DP_RING" in logger.warning.call_args[0][0]
