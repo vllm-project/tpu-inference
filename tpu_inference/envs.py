@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
+    TPU_ATTN_MOE_OVERLAP: bool = False
+    TPU_ATTN_MOE_OVERLAP_MIN_TOKENS: int = 2048
+    TPU_ATTN_MOE_OVERLAP_FP8_ALL_GATHER: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
@@ -281,6 +284,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
+    # Overlap Attention communication with MoE gating on Qwen3.5/Qwen3Next
+    "TPU_ATTN_MOE_OVERLAP":
+    env_bool("TPU_ATTN_MOE_OVERLAP", default=False),
+    "TPU_ATTN_MOE_OVERLAP_MIN_TOKENS":
+    lambda: int(os.getenv("TPU_ATTN_MOE_OVERLAP_MIN_TOKENS", "2048")),
+    "TPU_ATTN_MOE_OVERLAP_FP8_ALL_GATHER":
+    env_bool("TPU_ATTN_MOE_OVERLAP_FP8_ALL_GATHER", default=False),
     # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
     # using Unfused weights
     "USE_UNFUSED_MEGABLOCKS":

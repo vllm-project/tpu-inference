@@ -209,9 +209,18 @@ def patch_mm_model(
     return model, params_and_buffers
 
 
+def maybe_apply_qwen3_next_attn_moe_overlap_patches(vllm_model) -> None:
+    if envs.TPU_ATTN_MOE_OVERLAP:
+        from tpu_inference.models.vllm.qwen3_next_attn_moe_overlap import (
+            apply_qwen3_next_attn_moe_overlap_patch,
+        )
+        apply_qwen3_next_attn_moe_overlap_patch()
+
+
 def apply_model_specific_patches(vllm_model) -> None:
     """A consolidated entrypoint to apply model-specific JIT patches.
     """
     maybe_apply_qwen3_vl_patches(vllm_model)
     maybe_apply_qwen3_omni_patches(vllm_model)
     maybe_apply_gemma4_mm_patches(vllm_model)
+    maybe_apply_qwen3_next_attn_moe_overlap_patches(vllm_model)
