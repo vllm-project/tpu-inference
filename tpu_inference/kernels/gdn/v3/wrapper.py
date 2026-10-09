@@ -13,14 +13,45 @@
 # limitations under the License.
 
 import functools
+import os
 
 import jax
 import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
+from tpu_inference import envs
 from tpu_inference.kernels.gdn.v3 import (compute_conv1d, compute_gdn, config,
-                                          memory_ref, metadata, vmem_ldst)
+                                          memory_ref, metadata, tiling,
+                                          vmem_ldst)
+
+
+def _dynamic_tiling_enabled() -> bool:
+    if "TPU_ENABLE_GDN_DYNAMIC_TILING" in os.environ:
+        return os.environ.get("TPU_ENABLE_GDN_DYNAMIC_TILING", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+    return envs.TPU_ENABLE_GDN_DYNAMIC_TILING
+
+
+def _decode_tile_override() -> int:
+    if os.environ.get("TPU_GDN_SPEC_WINDOW_TILE1", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return 1
+    raw = os.environ.get("TPU_GDN_DECODE_TILE_SIZE") or os.environ.get(
+        "TPU_GDN_DECODE_TILE_OVERRIDE", "0"
+    )
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
 
 
 def inner_kernel(
@@ -394,29 +425,68 @@ def fused_conv1d_gdn(
     padded_batch_size = pl.cdiv(batch_size, packing) * packing
     decode_tile_size = min(decode_tile_size, batch_size)
     mixed_tile_size = min(mixed_tile_size, batch_size)
+    if mixed_tile_size > 16:
+        mixed_tile_size = (mixed_tile_size // 16) * 16
     aligned_num_v_heads = pl.cdiv(n_v, num_lanes) * num_lanes
 
+    vmem_capacity = pltpu.get_tpu_info().vmem_capacity_bytes
+    dynamic_tiling = _dynamic_tiling_enabled()
+    if dynamic_tiling:
+        window_size = num_spec_tokens + 1
+        dyn_decode_tile, mixed_tile_cap = tiling.get_tile_sizes(
+            num_seqs=num_seqs,
+            padded_batch_size=padded_batch_size,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+            conv_state_dim_size=dim,
+            act_out_bytes=jnp.dtype(act_out_dtype).itemsize,
+            rec_state_bytes=jnp.dtype(recurrent_state.dtype).itemsize,
+            num_lanes=num_lanes,
+            decode_vmem_limit_bytes=int(
+                (
+                    config.GDNConfig.WINDOWED_VMEM_FRACTION
+                    if window_size > 1
+                    else config.GDNConfig.DEFAULT_VMEM_FRACTION
+                )
+                * vmem_capacity
+            ),
+            mixed_vmem_limit_bytes=int(
+                config.GDNConfig.DEFAULT_VMEM_FRACTION * vmem_capacity
+            ),
+            window_size=window_size,
+        )
+        decode_tile_size = min(dyn_decode_tile, batch_size)
+        mixed_tile_size = min(mixed_tile_size, mixed_tile_cap)
+
+    spec_tile_cap = None
     if num_spec_tokens > 0:
-        # A verify window holds one state checkpoint per window position per
-        # sequence in VMEM, which multiplies the per-sequence footprint by
-        # the window size. Shrink the tile so the double-buffered windows
-        # fit in roughly half the scoped-VMEM budget (the rest goes to
-        # weights, activations scratch and compiler temporaries).
         window = num_spec_tokens + 1
-        num_buffers = config.GDNConfig.__dataclass_fields__[
-            "num_buffers"].default
-        bytes_per_seq = window * (
-            # Recurrent checkpoints (fp32) — the dominant term.
-            n_v * d_k * d_v * 4
-            # Conv checkpoints (fp32).
-            + (kernel_size - 1) * dim * 4
-            # qkv (fp32), b/a (fp32), out (act_out).
-            + dim * 4 + 2 * aligned_num_v_heads * 4 + n_v * d_v * 2)
-        vmem_budget = int(config.GDNConfig.WINDOWED_VMEM_FRACTION *
-                          pltpu.get_tpu_info().vmem_capacity_bytes)
-        spec_tile_budget = (vmem_budget // 2) // num_buffers
-        decode_tile_size = max(
-            1, min(decode_tile_size, spec_tile_budget // bytes_per_seq))
+        num_buffers = config.GDNConfig.__dataclass_fields__["num_buffers"].default
+        spec_tile_cap = tiling.spec_window_tile_cap(
+            window=window,
+            n_v=n_v,
+            d_k=d_k,
+            d_v=d_v,
+            kernel_size=kernel_size,
+            dim=dim,
+            aligned_num_v_heads=aligned_num_v_heads,
+            num_buffers=num_buffers,
+            vmem_budget=int(config.GDNConfig.WINDOWED_VMEM_FRACTION * vmem_capacity),
+        )
+
+    decode_tile_size = tiling.select_decode_tile_size(
+        default_tile=decode_tile_size,
+        dyn_tile=decode_tile_size if dynamic_tiling else None,
+        batch_size=batch_size,
+        num_spec_tokens=num_spec_tokens,
+        spec_tile_cap=spec_tile_cap,
+        is_kda=False,
+        override=_decode_tile_override(),
+        num_seqs=num_seqs,
+    )
 
     batch_padding_size = padded_batch_size - batch_size
     num_v_padding_size = aligned_num_v_heads - n_v

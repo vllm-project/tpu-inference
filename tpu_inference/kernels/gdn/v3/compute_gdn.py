@@ -171,7 +171,7 @@ def chunked_gdn_per_seq(
     t = jnp.where(identity_mask, 1, gating_beta_k_k_t)
 
     # [num_v_heads, chunk, chunk]
-    t_inv = invert_triangular_matrix(t)
+    t_inv = invert_triangular_matrix(t, block_size=cfg.triangular_block_size)
 
     # [num_v_heads, chunk, v_head_dim]
     v_beta_large = v_large * beta_large
