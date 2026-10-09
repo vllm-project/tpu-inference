@@ -28,8 +28,13 @@ x-shape-multi: &shape_multi "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
 
 # The timeout covers queueing for chips as well as running, so it is sized to
 # the fleet's worst case; a hung test is bounded by activeDeadlineSeconds.
+#
+# Every step soft-fails, as in pipeline_jax.yml, so a build goes red on the same
+# steps whichever fleet it lands on. The TPU Test Notification step still fails
+# unless every step passed, and the nightly's verified commit waits on it.
 .tpu_step: &tpu_step
   depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+  soft_fail: true
   timeout_in_minutes: 1440
   agents:
     queue: "kube"
@@ -176,6 +181,7 @@ steps:
     depends_on:
       - "${TPU_VERSION:-tpu6e}_test_7_1"
       - "${TPU_VERSION:-tpu6e}_test_7_2"
+    soft_fail: true
     agents:
       queue: "kube"
     commands:
@@ -412,11 +418,10 @@ steps:
   # default; this needs a slice, so it names a manifest and the slice it asks
   # for instead.
   #
-  # soft_fail and the tpu7x gate both match the bare-metal step: v7x-16 is the
-  # whole fleet, and on v6e there is nothing to run this on.
+  # The tpu7x gate matches the bare-metal step: on v6e there is nothing to run
+  # this on.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} E2E test for Ray-based multi-host"
     key: "${TPU_VERSION:-tpu6e}_test_26"
-    soft_fail: true
     if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
     env:
       TPU_VERSION: "${TPU_VERSION:-tpu6e}"
@@ -645,8 +650,10 @@ steps:
       - |
         .buildkite/kubernetes/run.sh bash /workspace/tpu_inference/tests/e2e/benchmarking/bm_qwen3_coder.sh --model Qwen/Qwen3.5-397B-A17B-FP8 --tp 8 --req_tput_limit 0.05  --output_token_tput_limit 70 --total_token_tput_limit 650 --input_len 8192 --output_len 1024 --use_moe_ep_kernel 0    --limit_mm_per_prompt '{"image": 0, "video": 0}' --block_size 256 --num_prompts 64 --gpu_memory_utilization 0.88
 
+  # Fails the build, as on bare metal.
   - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Test Kernel Tuner Runner"
     key: "${TPU_VERSION:-tpu6e}_test_36"
+    soft_fail: false
     if: '"${TPU_VERSION:-tpu6e}" == "tpu7x"'
     env:
       SHAPE: *shape_single
