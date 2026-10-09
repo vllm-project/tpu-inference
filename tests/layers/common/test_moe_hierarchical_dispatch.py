@@ -268,8 +268,7 @@ def _one_step_gather(x: jax.Array, mesh: Mesh, fp8: bool) -> jax.Array:
     output of _apply_all_gather_fp8."""
     if not fp8:
         return x
-    return jax.jit(
-        lambda h: fused_moe_gmm._apply_all_gather_fp8(h, mesh, h.dtype))(x)
+    return jax.jit(lambda h: fused_moe_gmm._apply_all_gather_fp8(h, mesh))(x)
 
 
 @requires_8_devices

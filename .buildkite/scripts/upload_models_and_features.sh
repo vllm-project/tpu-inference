@@ -49,6 +49,17 @@ failure_handler() {
 
 # Catch ERR signals
 trap 'failure_handler $LINENO' ERR
+
+# A kube build sends up the kube versions of the same suites.
+if [[ "${CI_FLEET:-bare}" == "kube" ]]; then
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/configs/pipeline_config.sh"
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/kube_suites.sh"
+  export JOB_PRIORITY="${JOB_PRIORITY:-1}"
+  upload_kube_nightly_suites
+  exit 0
+fi
 declare -a TARGET_FOLDERS=()
 
 # Append the kernel_microbenchmarks subdirectories
@@ -64,18 +75,15 @@ add_kernel_microbenchmarks() {
   fi
 }
 
-case "${MODEL_IMPL_TYPE}" in
-  "auto")
-    TARGET_FOLDERS=("parallelism" "models" "features" "rl")
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/nightly_suites.sh"
+for suite in $(nightly_suites); do
+  if [[ "${suite}" == "kernel_microbenchmarks" ]]; then
     add_kernel_microbenchmarks
-    ;;
-  "flax_nnx")
-    TARGET_FOLDERS=("quantization" "parallelism" "features")
-    ;;
-  "vllm")
-    TARGET_FOLDERS=("quantization" "parallelism" "models" "features")
-    ;;
-esac
+  else
+    TARGET_FOLDERS+=("${suite}")
+  fi
+done
 
 # Arrays to store YAML content fragments (without 'steps:' header)
 pipeline_v6e_fragments=()

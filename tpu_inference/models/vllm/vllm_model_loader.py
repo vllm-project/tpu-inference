@@ -28,6 +28,9 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
+from tpu_inference.models.common.layer_filter import (
+    filter_safetensors_by_layer, num_hidden_layers_override,
+    should_skip_layer_weight)
 
 
 def _patch_tied_embedding_mapper(model: torch.nn.Module) -> None:
@@ -93,6 +96,41 @@ class IncrementalModelLoader(DefaultModelLoader):
     def __init__(self, load_config: LoadConfig):
         load_config.load_format = "auto"
         super().__init__(load_config)
+        # Set in get_all_weights when hf_overrides truncates
+        # num_hidden_layers; None means no layer filtering.
+        self._num_hidden_layers: int | None = None
+
+    def _prepare_weights(
+        self,
+        model_name_or_path: str,
+        subfolder: str | None,
+        revision: str | None,
+        fall_back_to_pt: bool,
+        allow_patterns_overrides: list[str] | None,
+    ) -> tuple:
+        hf_folder, hf_weights_files, use_safetensors, *rest = (
+            super()._prepare_weights(model_name_or_path, subfolder, revision,
+                                     fall_back_to_pt,
+                                     allow_patterns_overrides))
+        # Keep only shards holding at least one needed tensor; shards made
+        # up entirely of layers >= the cap are never opened.
+        if self._num_hidden_layers is not None and use_safetensors:
+            hf_weights_files = filter_safetensors_by_layer(
+                hf_folder, hf_weights_files, self._num_hidden_layers)
+        return hf_folder, hf_weights_files, use_safetensors, *rest
+
+    def get_all_weights(
+        self,
+        model_config: ModelConfig,
+        model: torch.nn.Module,
+    ):
+        # Shards can mix kept and pruned layers, so also filter per tensor;
+        # otherwise AutoWeightsLoader fails on `layers.N` with N >= the cap.
+        self._num_hidden_layers = num_hidden_layers_override(model_config)
+        for name, param in super().get_all_weights(model_config, model):
+            if should_skip_layer_weight(name, self._num_hidden_layers):
+                continue
+            yield name, param
 
     def load_model(self,
                    vllm_config: VllmConfig,
