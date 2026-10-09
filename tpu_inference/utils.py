@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import itertools
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -441,9 +442,9 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                              len(axis_shapes))
 
 
-def attn_dp_ring_device_mesh(
-        mesh_shape: Sequence[int], axis_names: Sequence[str],
-        devices: Sequence[Any]) -> tuple[np.ndarray | None, str]:
+def attn_dp_ring_device_mesh(mesh_shape: Sequence[int],
+                             axis_names: Sequence[str],
+                             devices: Sequence[Any]) -> np.ndarray:
     """Lay out an attn_dp x model=4 mesh so each attn_dp group is a physical
     ring, for a 2x2xZ slice of two-core chips (v7x) without wraparound.
 
@@ -457,44 +458,38 @@ def attn_dp_ring_device_mesh(
         chip are model indices 2k, 2k+1 (as the hierarchical MoE dispatch
         and collect require) and the two chips of a model group are linked.
 
-    Returns (devices reshaped to mesh_shape, "") or (None, reason) when the
-    mesh or the devices don't fit.
+    Returns the devices reshaped to mesh_shape. Raises ValueError with the
+    reason when the mesh or the devices don't fit.
     """
     shape = dict(zip(axis_names, mesh_shape))
-    dp, tp = shape.get("attn_dp", 1), shape.get("model", 1)
-    others = [
-        f"{n}={s}" for n, s in shape.items()
-        if n not in ("attn_dp", "model") and s > 1
-    ]
-    if tp != 4 or others:
-        return None, (f"it needs model=4 and no other axis than attn_dp "
-                      f"above 1, got {shape}")
-    if any(not hasattr(d, "coords") or not hasattr(d, "core_on_chip")
-           for d in devices):
-        return None, "the devices report no coords/core_on_chip"
-    coords = [tuple(d.coords) for d in devices]
-    lo = [min(c[i] for c in coords) for i in range(3)]
-    dims = [max(c[i] for c in coords) - lo[i] + 1 for i in range(3)]
-    pos = {
-        (c[0] - lo[0], c[1] - lo[1], c[2] - lo[2], d.core_on_chip): d
-        for c, d in zip(coords, devices)
-    }
-    num_z = dims[2]
-    if (dims[0], dims[1]) != (2, 2) or len(pos) != len(devices) or set(
-            k[3] for k in pos) != {0, 1} or len(devices) != 8 * num_z:
-        return None, (f"it needs every device of a 2x2xZ slice with two "
-                      f"cores per chip, got chip dims {dims} and "
-                      f"{len(devices)} devices")
-    if dp != 2 * num_z:
-        return None, (f"attn_dp={dp} does not cover the 2x{num_z} ring "
-                      f"of chip pairs")
+    dp = shape["attn_dp"]
+    if dp % 2 or shape["model"] != 4 or any(
+            size > 1 for name, size in shape.items()
+            if name not in ("attn_dp", "model")):
+        raise ValueError(f"it needs an even attn_dp, model=4 and no other "
+                         f"axis above 1, got {shape}")
+    if not all(
+            hasattr(d, "coords") and hasattr(d, "core_on_chip")
+            for d in devices):
+        raise ValueError("the devices report no coords/core_on_chip")
+
+    # Key the devices by (x, y, z, core) from the slice's lowest corner, as
+    # they may be part of a larger slice (e.g. one host's devices under PP).
+    num_z = dp // 2
+    x0, y0, z0 = (min(c) for c in zip(*(d.coords for d in devices)))
+    pos = {}
+    for d in devices:
+        x, y, z = d.coords
+        pos[x - x0, y - y0, z - z0, d.core_on_chip] = d
+    if len(devices) != 8 * num_z or pos.keys() != set(
+            itertools.product(range(2), range(2), range(num_z), range(2))):
+        raise ValueError(f"attn_dp={dp} needs both cores of every chip of a "
+                         f"2x2x{num_z} slice, got {len(devices)} devices")
+
     ring = [(0, z) for z in range(num_z)] + [(1, z)
                                              for z in reversed(range(num_z))]
-    grid = np.empty((dp, tp), dtype=object)
-    for r, (x, z) in enumerate(ring):
-        for m in range(tp):
-            grid[r, m] = pos[(x, m // 2, z, m % 2)]
-    return grid.reshape(mesh_shape), ""
+    grid = [[pos[x, m // 2, z, m % 2] for m in range(4)] for x, z in ring]
+    return np.array(grid, dtype=object).reshape(mesh_shape)
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:

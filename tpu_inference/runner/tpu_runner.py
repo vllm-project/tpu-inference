@@ -904,11 +904,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         )
 
         if envs.TPU_MESH_ATTN_DP_RING:
-            devices_array, why_not = common_utils.attn_dp_ring_device_mesh(
-                mesh_shape, MESH_AXIS_NAMES, self.devices)
-            if devices_array is not None:
-                rows = np.asarray(devices_array).reshape(
-                    sharding_config.attn_dp_size, -1)
+            try:
+                devices_array = common_utils.attn_dp_ring_device_mesh(
+                    mesh_shape, MESH_AXIS_NAMES, self.devices)
+            except ValueError as e:
+                logger.warning(
+                    "TPU_MESH_ATTN_DP_RING is set but %s: keeping the default "
+                    "mesh.", e)
+            else:
+                rows = devices_array.reshape(sharding_config.attn_dp_size, -1)
                 logger.info(
                     "TPU_MESH_ATTN_DP_RING: attn_dp ranks in ring order, "
                     "model index across columns: %s", "; ".join(
@@ -917,9 +921,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                  f"c{d.core_on_chip}" for d in row)
                         for r, row in enumerate(rows)))
                 return devices_array
-            logger.warning(
-                "TPU_MESH_ATTN_DP_RING is set but %s: keeping the default "
-                "mesh.", why_not)
 
         if envs.TPU_MESH_SORT_BY_COORDS:
             sorted_devices = sorted(self.devices,

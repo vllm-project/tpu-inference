@@ -230,9 +230,7 @@ class TestAttnDpRingDeviceMesh:
         devices = _v7x_devices(num_z)
         dp = 2 * num_z
         mesh_shape = (1, dp, 1, 1, 4, 1, 1)
-        grid, why_not = attn_dp_ring_device_mesh(mesh_shape, MESH_AXIS_NAMES,
-                                                 devices)
-        assert why_not == ""
+        grid = attn_dp_ring_device_mesh(mesh_shape, MESH_AXIS_NAMES, devices)
         assert grid.shape == mesh_shape
         grid = grid.reshape(dp, 4)
         assert sorted(d.id for d in grid.flat) == list(range(len(devices)))
@@ -255,8 +253,8 @@ class TestAttnDpRingDeviceMesh:
 
     def test_production_v7x_32(self):
         from tpu_inference.utils import attn_dp_ring_device_mesh
-        grid, _ = attn_dp_ring_device_mesh((1, 8, 1, 1, 4, 1, 1),
-                                           MESH_AXIS_NAMES, _v7x_devices(4))
+        grid = attn_dp_ring_device_mesh((1, 8, 1, 1, 4, 1, 1), MESH_AXIS_NAMES,
+                                        _v7x_devices(4))
         col = [tuple(d.coords) for d in grid.reshape(8, 4)[:, 0]]
         assert col == [(0, 0, 0), (0, 0, 1), (0, 0, 2), (0, 0, 3), (1, 0, 3),
                        (1, 0, 2), (1, 0, 1), (1, 0, 0)]
@@ -267,26 +265,36 @@ class TestAttnDpRingDeviceMesh:
             ((1, 4, 1, 1, 8, 1, 1), 4),  # model=8
             ((2, 4, 1, 1, 4, 1, 1), 4),  # a data axis in use
             ((1, 2, 1, 1, 4, 1, 1), 2),  # attn_dp=2 on a 2x2x2 slice
+            ((1, 3, 1, 1, 4, 1, 1), 2),  # odd attn_dp
         ])
     def test_unsupported_mesh(self, mesh_shape, num_z):
         from tpu_inference.utils import attn_dp_ring_device_mesh
-        grid, why_not = attn_dp_ring_device_mesh(mesh_shape, MESH_AXIS_NAMES,
-                                                 _v7x_devices(num_z))
-        assert grid is None and why_not
+        with pytest.raises(ValueError):
+            attn_dp_ring_device_mesh(mesh_shape, MESH_AXIS_NAMES,
+                                     _v7x_devices(num_z))
+
+    def test_one_host_of_a_larger_slice(self):
+        # Under PP a stage gets one host's devices, here the z=2 layer.
+        from tpu_inference.utils import attn_dp_ring_device_mesh
+        grid = attn_dp_ring_device_mesh((1, 2, 1, 1, 4, 1, 1), MESH_AXIS_NAMES,
+                                        _v7x_devices(4)[16:24])
+        assert [tuple(d.coords)
+                for d in grid.reshape(2, 4)[:, 0]] == [(0, 0, 2), (1, 0, 2)]
 
     def test_unsupported_devices(self):
         from tpu_inference.utils import attn_dp_ring_device_mesh
+
         # A 4x2x1 grid of chips (not 2x2xZ).
         devices = _v7x_devices(1) + _v7x_devices(1)
         for d in devices[8:]:
             d.coords = [d.coords[0] + 2, d.coords[1], 0]
-        grid, why_not = attn_dp_ring_device_mesh((1, 4, 1, 1, 4, 1, 1),
-                                                 MESH_AXIS_NAMES, devices)
-        assert grid is None and "2x2xZ" in why_not
+        with pytest.raises(ValueError, match="2x2x2 slice"):
+            attn_dp_ring_device_mesh((1, 4, 1, 1, 4, 1, 1), MESH_AXIS_NAMES,
+                                     devices)
         # No topology information at all.
-        grid, why_not = attn_dp_ring_device_mesh(
-            (1, 2, 1, 1, 4, 1, 1), MESH_AXIS_NAMES, [Mock(spec=["id"])] * 8)
-        assert grid is None and "coords" in why_not
+        with pytest.raises(ValueError, match="coords"):
+            attn_dp_ring_device_mesh((1, 2, 1, 1, 4, 1, 1), MESH_AXIS_NAMES,
+                                     [Mock(spec=["id"])] * 8)
 
     def _runner(self, attn_dp, tp, devices):
         config = Mock()
