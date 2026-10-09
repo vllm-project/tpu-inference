@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     MOE_HIERARCHICAL_DISPATCH: bool = False
     MOE_HIERARCHICAL_COLLECT: bool = False
+    MOE_FOLD_ROUTING_INTO_DISPATCH: bool = False
     RAGGED_GATHER_MAX_ROW_SUBCHUNKS: int = 4
     RAGGED_GATHER_TRIM_ROWS: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -550,6 +551,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # USE_GMM_FUSED_RS_KERNEL. See fused_moe_gmm.py.
     "MOE_HIERARCHICAL_COLLECT":
     env_bool("MOE_HIERARCHICAL_COLLECT", default=False),
+    # When attention-data axes beyond MLP-data are sharded, carry the MoE
+    # top-k ids and weights as extra columns of the dispatch all-gather of the
+    # tokens (one-step or hierarchical, bf16 or fp8) instead of all-gathering
+    # them separately. Bitwise identical for non-NaN weights. See
+    # fused_moe_gmm.py.
+    "MOE_FOLD_ROUTING_INTO_DISPATCH":
+    env_bool("MOE_FOLD_ROUTING_INTO_DISPATCH", default=False),
     # EP dispatch permute gather: the ragged_gather_v2 kernel
     # (kernels/sparse_core/ragged_gather_v2.py), called from fused_moe_gmm.py.
     # max_row_subchunks: caps the SparseCore gather's block size; 1 gives the
