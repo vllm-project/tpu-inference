@@ -710,3 +710,77 @@ class TestTPUWorker:
 
         runner.delete_kv_cache.assert_not_called()
         runner.reinitialize_kv_cache.assert_not_called()
+
+    def test_bind_raiden_sync_and_deferred_h2d(self, mock_vllm_config):
+        """Tests RaidenWorkerSync auto_h2d=False binding, metadata, and deferred h2d."""
+        from types import SimpleNamespace
+        from tpu_inference.rl import raiden_worker_sync
+
+        worker = self._weight_update_worker(mock_vllm_config)
+        fake_mesh = SimpleNamespace(
+            axis_names=("data", ),
+            shape={"data": 1},
+            local_mesh=SimpleNamespace(devices=SimpleNamespace(shape=(1, ))),
+        )
+        fake_sharding = SimpleNamespace(
+            mesh=fake_mesh,
+            spec=("data", ),
+            shard_shape=lambda shape: shape,
+        )
+        fake_device = SimpleNamespace(platform="tpu")
+        fake_arr = SimpleNamespace(
+            shape=(2, 2),
+            ndim=2,
+            size=4,
+            dtype=raiden_worker_sync.jnp.dtype(raiden_worker_sync.jnp.float32),
+            devices=lambda: [fake_device],
+            sharding=fake_sharding,
+        )
+        worker.model_runner.state = {"w": fake_arr}
+        worker.model_runner.model = SimpleNamespace()
+
+        calls = []
+
+        class FakeNativeSync:
+
+            def __init__(self, arrays, **kwargs):
+                self.arrays = arrays
+                self.kwargs = kwargs
+                self.local_port = 5555
+                self.listener_port = 6666
+                self.num_shards = 1
+
+            def wait_for_transfer_completion(self, uuid):
+                calls.append(("wait", uuid))
+
+            def h2d(self):
+                calls.append(("h2d", None))
+
+        with patch.object(
+                raiden_worker_sync,
+                "_ws_lib",
+                SimpleNamespace(WeightSynchronizer=FakeNativeSync),
+        ), patch.object(raiden_worker_sync.jax,
+                        "block_until_ready"), patch.object(
+                            raiden_worker_sync.envs, "RAIDEN_H2D_SETTLE",
+                            False), patch(
+                                "tpu_inference.worker.tpu_worker.envs.VERIFY_WEIGHTS",
+                                False):
+            md = worker.bind_raiden_sync(
+                worker_index=2,
+                parallelism=4,
+                job_name="rollout_w2",
+                auto_h2d=False,
+            )
+            assert md["auto_h2d"] is False
+            assert worker._raiden_rl_weight_sync._sync.kwargs[
+                "auto_h2d"] is False
+
+            # Valid uuid triggers wait_for_transfer_completion(uuid) followed by h2d()
+            worker.raiden_h2d(uuid=9)
+            assert calls == [("wait", 9), ("h2d", None)]
+
+            # Missing or non-positive uuid raises ValueError when auto_h2d=False
+            for invalid_uuid in (None, 0, -1):
+                with pytest.raises(ValueError):
+                    worker.raiden_h2d(uuid=invalid_uuid)

@@ -239,6 +239,40 @@ class TestRaidenWorkerSyncH2D(unittest.TestCase):
             mock_block.assert_called_once_with(sync.arrays)
             mock_settle.assert_not_called()
 
+    def test_deferred_h2d_waits_for_transfer_completion_and_calls_h2d(self):
+        sync = rws.RaidenWorkerSync("rollout", auto_h2d=False)
+        mock_ws = unittest.mock.MagicMock()
+        sync._sync = mock_ws
+        sync.arrays = [SimpleNamespace()]
+
+        with unittest.mock.patch("jax.block_until_ready"
+                                 ) as mock_block, unittest.mock.patch.object(
+                                     rws.envs, "RAIDEN_H2D_SETTLE",
+                                     False), unittest.mock.patch.object(
+                                         sync,
+                                         "_wait_until_settled") as mock_settle:
+            sync.h2d(uuid=42)
+            mock_ws.wait_for_transfer_completion.assert_called_once_with(42)
+            mock_ws.h2d.assert_called_once()
+            mock_block.assert_called_once_with(sync.arrays)
+            mock_settle.assert_not_called()
+
+    def test_deferred_h2d_rejects_missing_or_non_positive_uuid(self):
+        sync = rws.RaidenWorkerSync("rollout", auto_h2d=False)
+        sync._sync = unittest.mock.MagicMock()
+        sync.arrays = [SimpleNamespace()]
+
+        for bad_uuid in (None, 0, -5):
+            with self.assertRaises(ValueError):
+                sync.h2d(uuid=bad_uuid)
+
+    def test_parallel_h2h_env_defaults_auto_h2d_to_false(self):
+        with unittest.mock.patch.dict("os.environ",
+                                      {"WEIGHT_SYNC_PARALLEL_H2H": "1"}):
+            sync = rws.RaidenWorkerSync("rollout")
+            self.assertFalse(sync._auto_h2d)
+            self.assertFalse(sync._effective_auto_h2d)
+
 
 if __name__ == "__main__":
     unittest.main()
