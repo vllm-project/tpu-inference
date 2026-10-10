@@ -233,14 +233,20 @@ def dcp_forward(
 ) -> tuple[jax.Array, jax.Array]:
   """DCP attention forward — single shard_map over the 'dcp' axis.
 
-  Inside the shard_map body:
+  Decode steps (``is_decode``, q_len=1 per sequence) take the write-first
+  single-pass path in ``dcp_forward_decode_only``: the new token's K/V is
+  DMA-written into the paged cache, then one CACHE_ONLY attention pass runs
+  over the updated cache, so there is no second (current-token) attention pass
+  and no LSE merge.
+
+  Mixed / prefill steps use the two-phase path below. Inside the shard_map body:
     1. all_gather Q heads    cache phase needs full head view per rank
     2. cache phase           attend full Q against this rank's KV cache
     3. _dcp_a2a_reduce       all_to_all: head slices become token slices
     4. current phase         attend local Q against this rank's new tokens
     5. merge_attn_states     lse-weighted combine
   """
-  if is_decode and envs.DCP_DECODE_ONLY_OPT:
+  if is_decode:
     return dcp_forward_decode_only(
         kv_cache=kv_cache,
         q=q,
