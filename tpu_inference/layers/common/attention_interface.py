@@ -47,21 +47,59 @@ MAX_ALLOWED_PAGE_INDICES_N = (
     128 * 1024
 )  # Based on experiments on v5e, 256x1024 results in smem oom but 128x1024 not. TODO: Adjust this based on TPU version.
 
-# NOTE: this kernel is experimental and not fully tested.  See
+# NOTE: the batched kernels are experimental and not fully tested.  See
 # tpu-inference/tpu_inference/kernels/experimental/batched_rpa/wrapper.py
-# for details
-if envs.USE_BATCHED_RPA_LONG_CTX_KERNEL:
-    import tpu_inference.kernels.experimental.batched_rpa_long_ctx.wrapper as rpa
-    logger.info_once("Using batched RPA long-ctx kernel")
-elif envs.USE_BATCHED_RPA_KERNEL:
-    import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
-    logger.info_once("Using experimental batched RPA kernel")
-else:
-    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
-    logger.info_once("Using default RPA kernel")
+# for details.
+#
+# The kernel is selected when attention is *called*, not when this module is
+# imported: the env vars may legitimately be set after import.  vLLM worker
+# startup imports this module early (flash_attn backend, model_loader), while
+# MaxText's vLLM adapter only exports USE_BATCHED_RPA_LONG_CTX_KERNEL /
+# USE_BATCHED_RPA_KERNEL from ``maxtext_config["attention"]`` while building
+# the model.  Binding at import time silently left those runs on the default
+# v3 kernel.
+RPA_KERNEL_V3 = "rpa_v3"
+RPA_KERNEL_BATCHED = "batched_rpa"
+RPA_KERNEL_BATCHED_LONG_CTX = "batched_rpa_long_ctx"
 
-ragged_paged_attention = rpa.ragged_paged_attention
-get_kv_cache_shape = rpa.get_kv_cache_shape
+
+def selected_rpa_kernel() -> str:
+    """Which RPA kernel the env currently selects (resolved on every call)."""
+    if envs.USE_BATCHED_RPA_LONG_CTX_KERNEL:
+        return RPA_KERNEL_BATCHED_LONG_CTX
+    if envs.USE_BATCHED_RPA_KERNEL:
+        return RPA_KERNEL_BATCHED
+    return RPA_KERNEL_V3
+
+
+@functools.cache
+def _rpa_kernel_module(kernel: str):
+    if kernel == RPA_KERNEL_BATCHED_LONG_CTX:
+        import tpu_inference.kernels.experimental.batched_rpa_long_ctx.wrapper as rpa
+        logger.info_once("Using batched RPA long-ctx kernel")
+    elif kernel == RPA_KERNEL_BATCHED:
+        import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+        logger.info_once("Using experimental batched RPA kernel")
+    else:
+        import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+        logger.info_once("Using default RPA kernel")
+    return rpa
+
+
+def rpa_kernel_module():
+    """The RPA kernel module selected by the env *right now*."""
+    return _rpa_kernel_module(selected_rpa_kernel())
+
+
+def ragged_paged_attention(*args, **kwargs):
+    """Dispatches to the RPA kernel selected by the env at call time."""
+    return rpa_kernel_module().ragged_paged_attention(*args, **kwargs)
+
+
+def get_kv_cache_shape(*args, **kwargs):
+    """KV cache shape of the RPA kernel selected by the env at call time."""
+    return rpa_kernel_module().get_kv_cache_shape(*args, **kwargs)
+
 
 ragged_paged_attention_hd64 = rpa_hd64.ragged_paged_attention_hd64
 get_kv_cache_shape_hd64 = rpa_hd64.get_kv_cache_shape
@@ -514,11 +552,13 @@ def sharded_ragged_paged_attention(
         if not use_hd64:
             kwargs["update_kv_cache"] = update_kv_cache
             kwargs["use_causal_mask"] = use_causal_mask
-            if envs.USE_BATCHED_RPA_KERNEL:
+            # Resolved per call, consistent with ragged_paged_attention().
+            kernel = selected_rpa_kernel()
+            if kernel == RPA_KERNEL_BATCHED:
                 kwargs["decode_query_size"] = decode_query_size
-            else:
+            elif kernel == RPA_KERNEL_V3:
                 # RPA_V3_*_BLOCK_SIZES are v3-kernel knobs; the experimental
-                # batched kernel takes its own BlockSizes configs instead.
+                # batched kernels take their own BlockSizes configs instead.
                 kwargs.update(rpa_block_size_kwargs())
         return func(*args, **kwargs)
 

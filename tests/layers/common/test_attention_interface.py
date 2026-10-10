@@ -654,3 +654,62 @@ def test_rpa_block_sizes_not_forwarded_to_batched_kernel(monkeypatch, mesh):
     kwargs = _capture_rpa_kwargs(monkeypatch, mesh)
     assert "d_block_sizes" not in kwargs
     assert "decode_query_size" in kwargs
+
+
+def test_rpa_kernel_selected_at_call_time(monkeypatch):
+    """The RPA kernel must follow the env at *call* time, not import time.
+
+    Regression test: `ragged_paged_attention` used to be bound to one kernel
+    module when attention_interface was first imported. vLLM worker startup
+    imports it early (flash_attn backend, model_loader), while MaxText's vLLM
+    adapter only sets USE_BATCHED_RPA_LONG_CTX_KERNEL from
+    maxtext_config["attention"] while building the model, so those runs
+    silently stayed on the v3 kernel.
+    """
+    import tpu_inference.kernels.experimental.batched_rpa.wrapper as batched
+    import tpu_inference.kernels.experimental.batched_rpa_long_ctx.wrapper as \
+        long_ctx
+    import tpu_inference.kernels.ragged_paged_attention.v3.kernel as v3
+    import tpu_inference.layers.common.attention_interface as ai
+
+    monkeypatch.delenv("USE_BATCHED_RPA_KERNEL", raising=False)
+    monkeypatch.delenv("USE_BATCHED_RPA_LONG_CTX_KERNEL", raising=False)
+    monkeypatch.delenv("USE_BATCHED_RPA_LONGCTX", raising=False)
+    assert ai.selected_rpa_kernel() == ai.RPA_KERNEL_V3
+    assert ai.rpa_kernel_module() is v3
+
+    # Set after import, as MaxText does: must take effect immediately.
+    monkeypatch.setenv("USE_BATCHED_RPA_LONG_CTX_KERNEL", "1")
+    assert ai.selected_rpa_kernel() == ai.RPA_KERNEL_BATCHED_LONG_CTX
+    assert ai.rpa_kernel_module() is long_ctx
+
+    monkeypatch.delenv("USE_BATCHED_RPA_LONG_CTX_KERNEL")
+    monkeypatch.setenv("USE_BATCHED_RPA_KERNEL", "1")
+    assert ai.selected_rpa_kernel() == ai.RPA_KERNEL_BATCHED
+    assert ai.rpa_kernel_module() is batched
+
+    # The module-level entry points dispatch to the selected kernel.
+    calls = []
+    monkeypatch.setattr(batched, "ragged_paged_attention",
+                        lambda *a, **k: calls.append(("batched", a, k)))
+    monkeypatch.setattr(batched, "get_kv_cache_shape", lambda *a, **k:
+                        ("batched-shape", a))
+    ai.ragged_paged_attention("q", sm_scale=0.5)
+    assert calls == [("batched", ("q", ), {"sm_scale": 0.5})]
+    assert ai.get_kv_cache_shape(1, 2) == ("batched-shape", (1, 2))
+
+    # Long-ctx wins when both are set (same precedence as before).
+    monkeypatch.setenv("USE_BATCHED_RPA_LONG_CTX_KERNEL", "1")
+    assert ai.rpa_kernel_module() is long_ctx
+
+
+def test_rpa_kwargs_follow_kernel_selected_at_call_time(monkeypatch, mesh):
+    """Per-kernel kwargs track the same call-time selection: the long-ctx
+    kernel gets neither the v3 block-size tuples nor `decode_query_size`."""
+    monkeypatch.setenv("USE_BATCHED_RPA_LONG_CTX_KERNEL", "1")
+    monkeypatch.delenv("USE_BATCHED_RPA_KERNEL", raising=False)
+    monkeypatch.setenv("RPA_V3_DECODE_BLOCK_SIZES", "1,16384,1,4096")
+    kwargs = _capture_rpa_kwargs(monkeypatch, mesh)
+    assert "d_block_sizes" not in kwargs
+    assert "decode_query_size" not in kwargs
+    assert kwargs["update_kv_cache"] is True
