@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
+    USE_BATCHED_RPA_LONG_CTX_KERNEL: bool = False
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
@@ -380,6 +381,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("CONTINUE_DECODE_EOS_CHECK_INTERVAL") or "1"),
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
+    "USE_BATCHED_RPA_LONG_CTX_KERNEL":
+    lambda: (
+        env_bool("USE_BATCHED_RPA_LONG_CTX_KERNEL")()
+        or env_bool("USE_BATCHED_RPA_LONGCTX")()
+    ),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
