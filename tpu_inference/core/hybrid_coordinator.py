@@ -810,16 +810,82 @@ class MambaPoolSyncExecutorMixin:
         if kv_cache_configs:
             propagate_mamba_num_blocks(self, kv_cache_configs[0],
                                        self.vllm_config)
+            # Last engine-core hook before vLLM constructs the Scheduler (and
+            # with it the KVCacheManager / coordinator): fail fast instead of
+            # silently scheduling with the stock coordinator.
+            verify_hybrid_coordinator_hooks(self.vllm_config,
+                                            kv_cache_configs[0])
+
+
+def needs_hybrid_coordinator_hooks(vllm_config: Any) -> bool:
+    """True when mamba prefix caching (align mode) is on, i.e. the scheduler
+    must use TPUHybridKVCacheCoordinator / TPUKVCacheManager."""
+    cache_config = vllm_config.cache_config
+    return bool(
+        cache_config.enable_prefix_caching
+        and getattr(cache_config, "mamba_cache_mode", "none") == "align")
 
 
 def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
     """Install the hooks when mamba prefix caching (align mode) is on. Called
     from the executors' `_init_executor`, which runs in the engine-core
     process; the platform config hook does not."""
-    cache_config = vllm_config.cache_config
-    if (cache_config.enable_prefix_caching
-            and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
+    if needs_hybrid_coordinator_hooks(vllm_config):
         install_hybrid_coordinator_hooks(vllm_config)
+
+
+def verify_hybrid_coordinator_hooks(vllm_config: Any,
+                                    kv_cache_config: Any) -> None:
+    """Assert, in the engine-core process, that the Scheduler about to be built
+    will pick up the TPU hybrid coordinator.
+
+    Must be called after the executor is initialised and before the Scheduler
+    is constructed. If a hybrid (mamba / linear-attention) model runs with
+    mamba prefix caching (align mode) but the hooks are not active, vLLM's
+    stock HybridKVCacheCoordinator would hand out mamba block ids from the
+    shared attention pool; those exceed the compact TPU mamba cache, get
+    clamped by the model, and different requests end up sharing one
+    recurrent-state slot (silent cross-request contamination). Raise instead.
+    """
+    if not needs_hybrid_coordinator_hooks(vllm_config):
+        return
+    if not any(is_mamba_group(g) for g in kv_cache_config.kv_cache_groups):
+        return
+
+    import sys
+
+    import vllm.v1.core.kv_cache_coordinator as coord_mod
+    import vllm.v1.core.kv_cache_manager as mgr_mod
+
+    problems = []
+    if not _HOOKS_INSTALLED:
+        problems.append("install_hybrid_coordinator_hooks() never ran in "
+                        "this process")
+    if coord_mod.get_kv_cache_coordinator is not tpu_get_kv_cache_coordinator:
+        problems.append("vllm.v1.core.kv_cache_coordinator."
+                        "get_kv_cache_coordinator is not the TPU factory")
+    if mgr_mod.KVCacheManager is not TPUKVCacheManager:
+        problems.append("vllm.v1.core.kv_cache_manager.KVCacheManager is not "
+                        "TPUKVCacheManager")
+    for mod_name in ("vllm.v1.core.sched.scheduler",
+                     "vllm.v1.core.sched.async_scheduler"):
+        bound = getattr(sys.modules.get(mod_name), "KVCacheManager", None)
+        if bound is not None and bound is not TPUKVCacheManager:
+            problems.append(f"{mod_name}.KVCacheManager was bound before the "
+                            "hooks were installed")
+    if problems:
+        raise RuntimeError(
+            "[tpu_inference] mamba prefix caching (mamba_cache_mode='align') "
+            "is enabled for a hybrid model, but the scheduler in this process "
+            "would not use TPUHybridKVCacheCoordinator: " +
+            "; ".join(problems) + ". The executor must call "
+            "maybe_install_hybrid_coordinator_hooks() in _init_executor "
+            "(see tpu_inference/executors/*_executor.py); otherwise requests "
+            "share mamba state slots and their outputs contaminate each "
+            "other.")
+    logger.info(
+        "[tpu_inference] Verified TPUHybridKVCacheCoordinator hooks are "
+        "active in the engine-core process.")
 
 
 def install_hybrid_coordinator_hooks(vllm_config: Any | None = None) -> None:

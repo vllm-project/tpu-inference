@@ -625,6 +625,8 @@ class TestHybridCoordinatorHooks:
                                                 mamba_num_blocks=None)
         vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
         vllm_config.cache_config.mamba_num_blocks = None
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
         calls = []
 
         class FakeBaseExecutor:
@@ -644,11 +646,123 @@ class TestHybridCoordinatorHooks:
             pass
 
         hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        install_hybrid_coordinator_hooks()
         FakeExecutor(vllm_config).initialize_from_config([cfg])
         assert calls == [("workers_allocated", [cfg])]
         assert cfg.mamba_num_blocks == 640
         assert vllm_config.cache_config.mamba_num_blocks == 640
         assert hc_mod.get_mamba_num_blocks() == 640
+
+    def test_executor_mixin_fails_fast_without_hooks(self):
+        """A hybrid model in align mode whose engine-core process never
+        installed the hooks must not reach the Scheduler: the stock
+        coordinator would hand out mamba block ids from the shared pool."""
+        from unittest.mock import patch
+
+        import vllm.v1.core.kv_cache_manager as mgr_mod
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            MambaPoolSyncExecutorMixin
+
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                mamba_num_blocks=None)
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.mamba_num_blocks = None
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+
+        class FakeBaseExecutor:
+
+            def __init__(self, vllm_config):
+                self.vllm_config = vllm_config
+
+            def initialize_from_config(self, kv_cache_configs):
+                pass
+
+            def collective_rpc(self, method):
+                return [640]
+
+        class FakeExecutor(MambaPoolSyncExecutorMixin, FakeBaseExecutor):
+            pass
+
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        with patch.object(hc_mod, "_HOOKS_INSTALLED", False), \
+                patch.object(mgr_mod, "KVCacheManager", hc_mod.KVCacheManager):
+            with pytest.raises(RuntimeError,
+                               match="would not use "
+                               "TPUHybridKVCacheCoordinator"):
+                FakeExecutor(vllm_config).initialize_from_config([cfg])
+
+    def test_verify_hooks(self):
+        from unittest.mock import patch
+
+        import vllm.v1.core.kv_cache_coordinator as coord_mod
+        import vllm.v1.core.kv_cache_manager as mgr_mod
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            verify_hybrid_coordinator_hooks
+
+        hybrid_cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                       mamba_num_blocks=16)
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+
+        # Hooks installed: passes.
+        install_hybrid_coordinator_hooks()
+        verify_hybrid_coordinator_hooks(vllm_config, hybrid_cfg)
+
+        # Hooks missing in this process: hybrid + align must raise ...
+        with patch.object(hc_mod, "_HOOKS_INSTALLED", False), \
+                patch.object(mgr_mod, "KVCacheManager", hc_mod.KVCacheManager), \
+                patch.object(coord_mod, "get_kv_cache_coordinator",
+                             hc_mod.orig_get_kv_cache_coordinator):
+            with pytest.raises(RuntimeError, match="never ran"):
+                verify_hybrid_coordinator_hooks(vllm_config, hybrid_cfg)
+
+            # ... but a model without mamba layers does not need them ...
+            attn_only = MagicMock()
+            attn_only.kv_cache_groups = [hybrid_cfg.kv_cache_groups[0]]
+            verify_hybrid_coordinator_hooks(vllm_config, attn_only)
+
+            # ... and neither does a hybrid model without mamba prefix caching.
+            vllm_config.cache_config.mamba_cache_mode = "none"
+            verify_hybrid_coordinator_hooks(vllm_config, hybrid_cfg)
+
+    def test_uniproc_executor_installs_hooks_before_scheduler(self):
+        """The single-host path uses vLLM's UniProcExecutor; the engine core
+        builds the Scheduler right after the executor, so the hooks must be
+        installed from the executor's _init_executor (as the multiproc and
+        Ray executors do), not from the platform config hook."""
+        from unittest.mock import patch
+
+        import vllm.v1.executor.uniproc_executor as vllm_uniproc
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        import tpu_inference.executors.uniproc_executor as tpu_uniproc
+        from tpu_inference.core.hybrid_coordinator import \
+            MambaPoolSyncExecutorMixin
+
+        assert issubclass(tpu_uniproc.UniProcExecutor,
+                          vllm_uniproc.UniProcExecutor)
+        assert issubclass(tpu_uniproc.UniProcExecutor,
+                          MambaPoolSyncExecutorMixin)
+
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        order = []
+        with patch.object(hc_mod, "install_hybrid_coordinator_hooks",
+                          side_effect=lambda cfg: order.append("hooks")), \
+                patch.object(vllm_uniproc.UniProcExecutor, "_init_executor",
+                             side_effect=lambda: order.append("base_init")):
+            executor = tpu_uniproc.UniProcExecutor.__new__(
+                tpu_uniproc.UniProcExecutor)
+            executor.vllm_config = vllm_config
+            executor._init_executor()
+        assert order == ["hooks", "base_init"]
 
     def test_tpu_get_kv_cache_coordinator_resolves_from_kv_cache_config(self):
         import tpu_inference.core.hybrid_coordinator as hc_mod
