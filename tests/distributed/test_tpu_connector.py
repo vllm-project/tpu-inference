@@ -15,7 +15,7 @@
 import threading
 import unittest
 from functools import partial
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, call, patch
 
 import numpy as np
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
@@ -643,6 +643,127 @@ class TestTPUConnectorWorker(unittest.TestCase):
             socket_type=self.all_mocks["zmq"].ROUTER,
             bind=True,
         )
+
+    def _make_producer(self):
+        self.vllm_config.kv_transfer_config.is_kv_producer = True
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker.kv_transfer_server = MagicMock()
+        self.all_mocks[
+            "jax"].profiler.TraceAnnotation.is_enabled.return_value = False
+        return worker
+
+    def test_process_send_load_for_consumer_full_prefix_hit_notifies(self):
+        """D notifies P even when it skipped the pull (full prefix-cache hit)."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker._maybe_build_notif_socket = MagicMock(return_value="socket")
+        worker._notify_pull_done = MagicMock()
+        meta = tpu_connector.TPUConnectorMetadata()
+        load_meta = tpu_connector.LoadMeta(uuid=10,
+                                           local_block_ids=[1],
+                                           remote_block_ids=None,
+                                           remote_host="host",
+                                           remote_port=123)
+        meta.reqs_to_load = {"req1": load_meta}
+
+        worker.process_send_load(meta)
+
+        self.all_mocks["insert_kv_chunks"].assert_not_called()
+        worker._maybe_build_notif_socket.assert_called_once_with(load_meta)
+        worker._notify_pull_done.assert_called_once_with("socket", "req1", 10)
+
+    def test_pull_done_releases_kv_and_drops_pull_entry(self):
+        """A notification frees P's copy and the transfer server's reference."""
+        worker = self._make_producer()
+        worker.host_kv_pool = MagicMock()
+        worker.reqs_wait_pull = {"req1": ["buf", 100, 3]}
+        worker.kv_pull_uuid_to_req_id_map = {7: "req1"}
+
+        worker._handle_pull_done(7)
+
+        self.assertEqual(worker.reqs_wait_pull["req1"][1:], [-1, -1])
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {})
+        worker.host_kv_pool.return_buffer.assert_called_once_with(3, "buf")
+        worker.kv_transfer_server.await_pull.assert_called_once_with(
+            7, [], timeout=ANY)
+
+    def test_pull_done_before_registration_released_after_await_pull(self):
+        """A notification that beats registration releases the KV right after."""
+        worker = self._make_producer()
+
+        worker._handle_pull_done(7)
+
+        self.assertIn(7, worker._early_pull_done)
+        worker.kv_transfer_server.await_pull.assert_not_called()
+
+        send_meta = tpu_connector.SendMeta(uuid=7,
+                                           local_block_ids=[1],
+                                           expiration_time=100)
+        worker._register_kv_for_pull("req1", send_meta, "kv", buffer_idx=-1)
+
+        self.assertEqual(
+            worker.kv_transfer_server.await_pull.call_args_list,
+            [call(7, "kv"), call(7, [], timeout=ANY)])
+        self.assertEqual(worker.reqs_wait_pull["req1"][1], -1)
+        self.assertEqual(worker._early_pull_done, {})
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {})
+
+    def test_register_kv_for_pull_without_notification(self):
+        """Without a notification the KV stays registered until D pulls it."""
+        worker = self._make_producer()
+        send_meta = tpu_connector.SendMeta(uuid=7,
+                                           local_block_ids=[1],
+                                           expiration_time=100)
+
+        worker._register_kv_for_pull("req1",
+                                     send_meta,
+                                     "host_kv",
+                                     buffer_idx=2,
+                                     pool_buffer="pool_buf")
+
+        worker.kv_transfer_server.await_pull.assert_called_once_with(
+            7, "host_kv")
+        self.assertEqual(worker.reqs_wait_pull["req1"], ["pool_buf", 100, 2])
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {7: "req1"})
+
+    def test_get_finished_timeout_drops_pull_entry(self):
+        """A pull timeout also frees the transfer server's reference."""
+        worker = self._make_producer()
+        self.all_mocks["time"].perf_counter.return_value = 1000
+        worker.reqs_wait_pull = {"req1": ["kv", 900, -1]}
+        worker.kv_pull_uuid_to_req_id_map = {7: "req1"}
+
+        done_sending, _ = worker.get_finished()
+
+        self.assertEqual(done_sending, {"req1"})
+        self.assertEqual(worker.kv_pull_uuid_to_req_id_map, {})
+        worker.kv_transfer_server.await_pull.assert_called_once_with(
+            7, [], timeout=ANY)
+
+    def test_get_finished_after_notification_keeps_pull_entry(self):
+        """A notified request is not treated as a timeout."""
+        worker = self._make_producer()
+        self.all_mocks["time"].perf_counter.return_value = 1000
+        worker.reqs_wait_pull = {"req1": ["kv", -1, -1]}
+
+        done_sending, _ = worker.get_finished()
+
+        self.assertEqual(done_sending, {"req1"})
+        worker.kv_transfer_server.await_pull.assert_not_called()
+
+    @patch(
+        'tpu_inference.distributed.tpu_connector.dist_utils.get_p2p_wait_pull_timeout',
+        return_value=180)
+    def test_get_finished_purges_stale_early_notifications(self, _):
+        """Unmatched notifications are dropped after the pull timeout."""
+        worker = self._make_producer()
+        self.all_mocks["time"].perf_counter.return_value = 1000
+        worker.reqs_wait_pull = {"req2": ["kv", 2000, -1]}
+        worker._early_pull_done = {7: 0.0, 8: 990.0}
+
+        worker.get_finished()
+
+        self.assertEqual(worker._early_pull_done, {8: 990.0})
 
 
 class TestTPUConnectorUtils(unittest.TestCase):
