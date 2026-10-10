@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
+    TPU_ENABLE_GDN_DYNAMIC_TILING: bool = False
     VERIFY_WEIGHTS: bool = False
     SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
@@ -543,6 +544,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Enables dynamic sequence/chunk tiling for fused GDN (Gated Delta Net) kernels.
+    "TPU_ENABLE_GDN_DYNAMIC_TILING":
+    env_bool("TPU_ENABLE_GDN_DYNAMIC_TILING", default=False),
     # Controls whether FP8 linear and MoE layers perform incremental weight
     # loading, sharding, and immediate host RAM cleanup. When enabled, weights
     # are sharded and transferred to TPU device memory layer-by-layer (or per

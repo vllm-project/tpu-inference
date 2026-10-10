@@ -110,6 +110,20 @@ class GDNConfig:
         num_lanes = tpu_info.num_lanes
         return pl.cdiv(self.num_v_heads, num_lanes) * num_lanes
 
+    @property
+    def triangular_block_size(self) -> int:
+        """Sub-block size of the chunked GDN intra-chunk solve.
+
+        The diagonal sub-blocks are evaluated on the VPU/XLU with exact
+        pairwise gate differences and the off-diagonal ones as MXU GEMMs,
+        so this trades the two units off against each other: raising it
+        moves work from MXU to XLU. More value heads already means more
+        XLU work, hence the smaller blocks there.
+        """
+        head_groups = pl.cdiv(self.num_v_heads, 8)
+        # GDN: between-block updates scale as 1 / B.
+        return max(2, min(16, 16 // head_groups))
+
     def get_kernel_name(self) -> str:
         # Windows of different sizes compile to different kernels; keep them
         # distinguishable in profiles.
