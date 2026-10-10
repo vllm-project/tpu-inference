@@ -29,6 +29,9 @@ from tpu_inference.kernels.experimental.moe_lowtok import (can_use_moe_lowtok,
                                                            moe_lowtok)
 from tpu_inference.kernels.experimental.moe_lowtok import \
     routing_table as moe_lowtok_routing_table
+from tpu_inference.kernels.experimental.small_collectives import \
+    small_all_reduce
+from tpu_inference.kernels.experimental.small_collectives.common import LANES
 from tpu_inference.kernels.router_topk import router_topk
 from tpu_inference.kernels.sparse_core.dense_gather_reduce import \
     dense_gather_reduce
@@ -551,8 +554,34 @@ def moe_gmm_local(
                 out = chunk_hidden.astype(x.dtype)
         else:
             if not defer_all_reduce:
-                out = jax.lax.psum(chunk_hidden,
-                                   axis_name=reduction_axis).astype(x.dtype)
+                can_use_small_ar = False
+                if envs.TPU_SMALL_ALL_REDUCE and jax.devices(
+                )[0].platform == "tpu":
+                    try:
+                        reduction_axes = (reduction_axis, ) if isinstance(
+                            reduction_axis, str) else tuple(reduction_axis)
+                        num_cores = 1
+                        for a in reduction_axes:
+                            num_cores *= jax.lax.axis_size(a)
+                        if (chunk_hidden.ndim == 2
+                                and chunk_hidden.dtype == jnp.bfloat16
+                                and chunk_hidden.shape[0]
+                                <= envs.TPU_SMALL_ALL_REDUCE_MAX_ROWS
+                                and num_cores > 1 and chunk_hidden.shape[1] %
+                            (num_cores * LANES) == 0):
+                            can_use_small_ar = True
+                    except Exception:
+                        can_use_small_ar = False
+
+                if can_use_small_ar:
+                    out = small_all_reduce(
+                        chunk_hidden,
+                        num_cores=num_cores,
+                        axis=reduction_axis,
+                    ).astype(x.dtype)
+                else:
+                    out = jax.lax.psum(
+                        chunk_hidden, axis_name=reduction_axis).astype(x.dtype)
             else:
                 out = chunk_hidden.astype(x.dtype)
         out_list.append(out)
