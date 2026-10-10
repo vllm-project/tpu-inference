@@ -18,15 +18,18 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference import envs
+from tpu_inference.layers.common.binary_search import topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
-    _can_sample_distributed, _merge_topk_candidates, compute_logprobs,
+    _can_sample_distributed, _merge_topk_candidates, _prefiltered_top_k,
+    _topk_prefilter_chunk, _topp_mask_sorted, compute_logprobs,
     compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
     sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
@@ -127,6 +130,84 @@ class TestSampling:
             jnp.array([0.95], dtype=jnp.float32),
         )
         assert bool(incomplete[0])
+
+    @staticmethod
+    def _check_prefiltered_top_k(values):
+        """Tied values may pick other ids, but each id points at its value."""
+        expected, _ = jax.lax.top_k(values, 128)
+        top_values, top_ids = _prefiltered_top_k(values, 128)
+        np.testing.assert_array_equal(top_values, expected)
+        # Sorted like lax.top_k: _merge_topk_candidates reads the last value
+        # as each shard's smallest candidate.
+        assert np.all(top_values[:, 1:] <= top_values[:, :-1])
+        top_ids = np.asarray(top_ids)
+        assert np.all((top_ids >= 0) & (top_ids < values.shape[1]))
+        np.testing.assert_array_equal(
+            np.take_along_axis(np.asarray(values), top_ids, axis=1),
+            top_values)
+        for row in top_ids:
+            assert len(set(row.tolist())) == row.size
+
+    # Per-shard vocab sizes of Qwen3 (151936) with 1, 2 and 8 vocab shards.
+    @pytest.mark.parametrize("num_values,chunk", [(151936, None), (151936, 16),
+                                                  (75968, None),
+                                                  (18992, None)])
+    def test_prefiltered_top_k_matches_lax_top_k(self, num_values, chunk):
+        # Rows of distinct values, so the ids must match lax.top_k too.
+        keys = jax.random.split(jax.random.key(3), 4)
+        values = jax.vmap(lambda key: jax.random.permutation(key, num_values))(
+            keys).astype(jnp.float32)
+        expected_values, expected_ids = jax.lax.top_k(values, 128)
+        top_values, top_ids = _prefiltered_top_k(values, 128, chunk=chunk)
+        np.testing.assert_array_equal(top_values, expected_values)
+        np.testing.assert_array_equal(top_ids, expected_ids)
+
+    @pytest.mark.parametrize("num_values", [151936, 18992])
+    def test_prefiltered_top_k_with_ties(self, num_values):
+        values = jax.random.randint(jax.random.key(5), (4, num_values), 0,
+                                    8).astype(jnp.float32)
+        self._check_prefiltered_top_k(values)
+
+    @pytest.mark.parametrize("num_allowed", [5, 300])
+    def test_prefiltered_top_k_with_masked_logits(self, num_allowed):
+        # Structured output sets the logits of disallowed tokens to -inf.
+        rng = np.random.default_rng(num_allowed)
+        allowed = np.zeros((4, 151936), dtype=bool)
+        for row in allowed:
+            row[rng.choice(row.size, num_allowed, replace=False)] = True
+        logits = jax.random.normal(jax.random.key(7),
+                                   allowed.shape,
+                                   dtype=jnp.float32)
+        self._check_prefiltered_top_k(jnp.where(allowed, logits, -jnp.inf))
+
+    def test_prefiltered_top_k_falls_back_to_lax_top_k(self):
+        # 4099 is prime, so no chunk size divides it.
+        values = jax.random.normal(jax.random.key(9), (2, 4099),
+                                   dtype=jnp.float32)
+        for actual, expected in zip(_prefiltered_top_k(values, 128),
+                                    jax.lax.top_k(values, 128)):
+            np.testing.assert_array_equal(actual, expected)
+
+    def test_topk_prefilter_chunk(self):
+        # 151936 = 128 * 1187: chunk 32 sorts 4748 maxima + 4096 candidates.
+        assert _topk_prefilter_chunk(151936, 128) == 32
+        assert _topk_prefilter_chunk(75968, 128) == 32
+        assert _topk_prefilter_chunk(18992, 128) == 16
+        # No divisor up to 256 leaves enough chunks: plain top-k.
+        assert _topk_prefilter_chunk(4099, 128) == 0
+        # Too few values for the prefilter to help.
+        assert _topk_prefilter_chunk(256, 128) == 0
+
+    def test_topp_mask_sorted_matches_topp_mask(self):
+        logits = jax.random.normal(jax.random.key(11), (4, 256),
+                                   dtype=jnp.float32) * 3.0
+        top_p = jnp.array([0.5, 0.8, 0.9, 0.95], dtype=jnp.float32)
+        expected = topp_mask(logits, top_p, replace_val=-1e12)
+        actual = _topp_mask_sorted(logits, top_p, -1e12)
+        np.testing.assert_array_equal(actual > -1e11, expected > -1e11)
+        np.testing.assert_array_equal(
+            jnp.where(actual > -1e11, actual, 0.0),
+            jnp.where(expected > -1e11, expected, 0.0))
 
     def test_compute_logprobs(self):
         logits = jnp.array([[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]],
