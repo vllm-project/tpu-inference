@@ -89,11 +89,9 @@ def run_correctness_check(kv_len: int, q_len: int = 1):
     v_dcp = jax.device_put(jnp.array(v_np, dtype=KV_DTYPE), NamedSharding(mesh_dcp, P(None, model_axis, None)))
     cache_dcp = jax.device_put(jnp.array(cache_dcp_np, dtype=KV_DTYPE), NamedSharding(mesh_dcp, P(None, dcp_axis, model_axis, None)))
 
-    from tpu_inference import envs
-    envs.DCP_DECODE_ONLY_OPT = True
-
-    # Run DCP Optimized (Write-first decode with batched_rpa_long_ctx)
-    print(f"Running DCP decode forward (DCP_DECODE_ONLY_OPT=1)...")
+    # Run DCP decode forward (write-first single-pass path, used for every
+    # decode step).
+    print("Running DCP decode forward (write-first)...")
 
     @jax.jit
     def run_dcp_optimized(c, q, k, v, bt, sl, qsl, dist):

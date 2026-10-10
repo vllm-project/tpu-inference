@@ -269,8 +269,7 @@ def bench_kv_len(global_kv_len: int):
     q_raw, k_raw, v_raw, bt_raw, sl_raw, qsl_raw, dist_raw = _make_inputs_raw(global_kv_len, PHYSICAL_BLOCK_SIZE)
     dcp_args = preshard_inputs(q_raw, k_raw, v_raw, bt_raw, sl_raw, qsl_raw, dist_raw, mesh)
 
-    def make_dcp_fn(decode_only_opt: bool):
-        os.environ["DCP_DECODE_ONLY_OPT"] = "1" if decode_only_opt else ""
+    def make_dcp_fn():
         os.environ.pop("VLLM_DCP_PROJ_REPLICATE", None)  # ensure regular DCP path
         @jax.jit(donate_argnums=(0,))
         def fn(cache, q, k, v, bt, sl, qsl, dist):
@@ -286,11 +285,10 @@ def bench_kv_len(global_kv_len: int):
             return updated_cache, out
         return fn
 
-    for decode_only_opt, label, tag in [
-        (True,  "DCP decode_only_opt  (write-first)", "decode_only"),
-        # (False, "DCP pure dcp_forward (two-phase)",   "dcp_forward"),
+    for label, tag in [
+        ("DCP decode (write-first)", "decode_only"),
     ]:
-        dcp_fn = make_dcp_fn(decode_only_opt)
+        dcp_fn = make_dcp_fn()
         dcp_cache = _bench(label, dcp_fn, dcp_cache, dcp_args)
         dcp_cache = _profile_fn(tag, dcp_fn, dcp_cache, dcp_args, f"{OUTPUT_DIR}/kv{kv_k}K/{tag}")
 
@@ -302,7 +300,6 @@ def bench_kv_len(global_kv_len: int):
     if PROJ_REPLICATE:
         proj_args = preshard_proj_inputs(bt_raw, sl_raw, qsl_raw, dist_raw, mesh)
 
-        os.environ["DCP_DECODE_ONLY_OPT"] = "1"
         os.environ["VLLM_DCP_PROJ_REPLICATE"] = "1"
 
         @jax.jit(donate_argnums=(0,))
