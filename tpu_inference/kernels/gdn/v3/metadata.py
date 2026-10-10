@@ -27,6 +27,7 @@ def compute_batched_seq_metadata(
     read_offsets: jax.Array,
     end_seq: jax.Array,
     read_indices: jax.Array,
+    has_prior_state: jax.Array | None = None,
 ) -> memory_ref.MetadataRef:
     """Metadata for computing multiple sequences per tile.
 
@@ -46,6 +47,11 @@ def compute_batched_seq_metadata(
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_valid_seqs = jnp.where(all_seqs < end_seq, True, False)
     has_initial_state = (seq_lens - query_lens) > 0
+    if has_prior_state is not None:
+        # A sequence resuming from a slot no forward pass ever checkpointed
+        # has no state to read: fall back to the fresh-sequence path rather
+        # than pull in whatever the slot's previous owner left behind.
+        has_initial_state = jnp.logical_and(has_initial_state, has_prior_state)
     all_valid_seqs = jnp.where(is_valid_seqs, all_seqs, 0)
 
     return memory_ref.MetadataRef.create(
@@ -71,6 +77,7 @@ def compute_per_seq_metadata(
     start_seq: jax.Array,
     end_seq: jax.Array,
     read_indices: jax.Array,
+    has_prior_state: jax.Array | None = None,
 ) -> memory_ref.MetadataRef:
     """Metadata for computing single sequence per tile."""
 
@@ -84,6 +91,8 @@ def compute_per_seq_metadata(
     seq_lens = jnp.roll(seq_lens, shift=-start_seq)
     state_indices = jnp.roll(state_indices, shift=-start_seq)
     read_indices = jnp.roll(read_indices, shift=-start_seq)
+    if has_prior_state is not None:
+        has_prior_state = jnp.roll(has_prior_state, shift=-start_seq)
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     # NOTE: query_lens is used for calculating num_tiles. Defensive programming
@@ -128,6 +137,10 @@ def compute_per_seq_metadata(
     # (chunked prefill, decode, etc). State is written if the program id is the
     # last tile of a sequence.
     has_initial_state = (seq_lens - query_lens) > 0
+    if has_prior_state is not None:
+        # See compute_batched_seq_metadata: an unwritten resume slot means
+        # this sequence starts fresh instead of reading stale state.
+        has_initial_state = jnp.logical_and(has_initial_state, has_prior_state)
     p_id_is_first_tile = p_id_to_t_id == 0
     p_id_is_last_tile = p_id_to_t_id == (s_idx_to_num_tiles[p_id_to_s_idx] - 1)
 

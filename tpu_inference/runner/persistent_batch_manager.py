@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict
+from typing import Dict, List, Optional
 
 import jax
 from vllm.v1.core.sched.output import SchedulerOutput as VllmSchedulerOutput
@@ -35,6 +35,41 @@ class PersistentBatchManager:
         self.uses_mrope = uses_mrope
         self.model_config = model_config
         self.is_last_rank = is_last_rank
+        # Set by the runner once the kv cache config is known, and only in
+        # align mode: outside align mode the mamba group's block ids are not
+        # the slots the kernel indexes (see `mamba_state_indices`).
+        self.mamba_kv_cache_group_id: Optional[int] = None
+        self.mamba_block_size: int = 0
+        # Mamba slots the scheduler handed to each request this step. The
+        # runner zeroes them before the forward pass; see
+        # `TPUModelRunner._zero_new_mamba_blocks`.
+        self.new_mamba_blocks: Dict[str, List[int]] = {}
+
+    def _record_new_mamba_blocks(self,
+                                 req_id: str,
+                                 block_ids_per_group,
+                                 num_computed_tokens: int = 0,
+                                 is_full_list: bool = False) -> None:
+        """Record the mamba slots freshly allocated to `req_id` this step.
+
+        A cached request's `new_block_ids` holds only the slots it just
+        gained. A new or resumed request instead carries its whole block
+        list, whose leading `num_computed_tokens // block_size` entries are
+        prefix-cache hits (and null placeholders standing in for them) -- the
+        checkpoints it is about to resume from. Zeroing those would destroy
+        the hit, so only the tail counts as new.
+        """
+        gid = self.mamba_kv_cache_group_id
+        if gid is None or not block_ids_per_group:
+            return
+        if gid >= len(block_ids_per_group):
+            return
+        new_ids = block_ids_per_group[gid]
+        if is_full_list:
+            assert self.mamba_block_size > 0
+            new_ids = new_ids[num_computed_tokens // self.mamba_block_size:]
+        if new_ids:
+            self.new_mamba_blocks.setdefault(req_id, []).extend(new_ids)
 
     def _reorder_batch(self, scheduler_output: "VllmSchedulerOutput") -> int:
         """ Reorder the sheduled requests to RPA kernel friendly distribution
@@ -116,6 +151,8 @@ class PersistentBatchManager:
             True if there is a new/resumed/paused/finished request.
             If False, we can skip copying SamplingMetadata to the TPU.
         """
+        self.new_mamba_blocks.clear()
+
         # Remove finished requests from the cached states.
         finished_req_states = {}
         for req_id in scheduler_output.finished_req_ids:
@@ -219,6 +256,12 @@ class PersistentBatchManager:
                 lora_request=new_req_data.lora_request,
             )
 
+            self._record_new_mamba_blocks(
+                req_id,
+                new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
+                is_full_list=True)
+
             req_ids_to_add.append(req_id)
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -271,11 +314,17 @@ class PersistentBatchManager:
                     for block_ids, new_ids in zip(req_state.block_ids,
                                                   new_block_ids):
                         block_ids.extend(new_ids)
+                    self._record_new_mamba_blocks(req_id, new_block_ids)
             else:
                 assert new_block_ids is not None
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
+                self._record_new_mamba_blocks(
+                    req_id,
+                    new_block_ids,
+                    num_computed_tokens=num_computed_tokens,
+                    is_full_list=True)
 
             if req_index is None:
                 # The request is not in the persistent batch.
