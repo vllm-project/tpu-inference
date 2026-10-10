@@ -33,6 +33,7 @@ for _mod in ("_tpu_raiden_jax", "_weight_synchronizer_ffi",
 # other modules are imported.
 import tpu_inference.env_override  # noqa: F401,E402
 from tpu_inference import envs  # noqa: E402
+from tpu_inference import gcs_cache  # noqa: E402
 from tpu_inference import tpu_info as ti  # noqa: E402
 from tpu_inference.logger import init_logger  # noqa: E402
 

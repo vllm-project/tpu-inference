@@ -74,6 +74,12 @@ class CompilationManager:
 
         if not vllm_envs.VLLM_DISABLE_COMPILE_CACHE:
             logger.info("Enabling JAX compile cache.")
+            try:
+                from tpu_inference import gcs_cache
+                gcs_cache.restore_jax_cache()
+                gcs_cache.register_auto_save()
+            except Exception as e:
+                logger.warning("Failed to initialize JAX compilation cache from GCS: %s", e)
             jax.config.update("jax_compilation_cache_dir",
                               vllm_envs.VLLM_XLA_CACHE_PATH)
             if vllm_envs.VLLM_XLA_CHECK_RECOMPILATION:
@@ -298,6 +304,11 @@ class CompilationManager:
                     self._flush_compilations()
         finally:
             self._finalize_compilation()
+            try:
+                from tpu_inference import gcs_cache
+                gcs_cache.save_jax_cache()
+            except Exception as e:
+                logger.warning("Failed to save JAX compilation cache to GCS: %s", e)
         elapsed = time.perf_counter() - compilation_start_time
         self.runner.vllm_config.compilation_config.compilation_time += elapsed
 

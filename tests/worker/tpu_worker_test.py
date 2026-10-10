@@ -626,6 +626,22 @@ class TestTPUWorker:
         worker.model_runner.capture_model.assert_called_once()
         worker.model_runner._init_random.assert_called_once()
 
+    def test_upload_and_restore_jax_cache(self, mock_vllm_config):
+        """Test JAX cache upload and restore passthrough on worker."""
+        worker = TPUWorker(vllm_config=mock_vllm_config,
+                           local_rank=0,
+                           rank=0,
+                           distributed_init_method="test")
+        with patch("tpu_inference.gcs_cache.save_jax_cache", return_value=True) as mock_save, \
+             patch("tpu_inference.gcs_cache.restore_jax_cache", return_value=True) as mock_restore:
+            assert worker.upload_jax_cache("gs://bucket/test", "/tmp/cache", "rollout") is True
+            mock_save.assert_called_once_with(
+                gcs_uri="gs://bucket/test", local_dir="/tmp/cache", role="rollout")
+
+            assert worker.restore_jax_cache("gs://bucket/test", "/tmp/cache", "rollout") is True
+            mock_restore.assert_called_once_with(
+                gcs_uri="gs://bucket/test", local_dir="/tmp/cache", role="rollout")
+
     def test_get_supported_tasks(self, mock_vllm_config):
         """Test get_supported_tasks passthrough to model runner."""
         worker = TPUWorker(vllm_config=mock_vllm_config,
