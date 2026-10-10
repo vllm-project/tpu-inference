@@ -39,6 +39,7 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
@@ -382,7 +383,8 @@ class CompilationManager:
                                     is_last_rank=True,
                                     num_reqs: int,
                                     pcp_has_cached_kv: bool = False,
-                                    pcp_num_reqs: int = 1) -> None:
+                                    pcp_num_reqs: int = 1,
+                                    is_decode: bool = False) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -482,6 +484,7 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
+                is_decode=is_decode,
             )
 
             return attention_metadata_gid
@@ -494,6 +497,7 @@ class CompilationManager:
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
+                is_decode=is_decode,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
@@ -690,8 +694,51 @@ class CompilationManager:
             num_spec_tokens=num_spec_tokens,
         )
 
+    def _decode_only_backbone_shapes(self) -> set[tuple[int, int]]:
+        """(padded num_tokens, padded num_reqs) pairs a decode-only step can take.
+
+        `is_decode` is a static field of the attention metadata, so the DCP
+        decode-only backbone is a separate compiled variant per padding pair
+        and every pair the runner can produce must be warmed up. This mirrors
+        `_prepare_inputs`: a decode-only step with `n` live requests on the
+        busiest DP rank schedules between `n` and `n * max_decode_tokens`
+        tokens, pads them with `num_tokens_paddings_per_dp` and the request
+        count with `attn_num_reqs_paddings_per_dp`, and scales both by
+        `dp_size`. In particular, the smallest request bucket pairs with the
+        smallest token bucket (e.g. 4 requests -> 16 tokens), which the old
+        `num_tokens == num_reqs` rule never covered and left to a ~30 s JIT
+        compile in the middle of serving.
+        """
+        runner = self.runner
+        dp_size = runner.dp_size
+        token_paddings = runner.num_tokens_paddings_per_dp
+        req_paddings = runner.attn_num_reqs_paddings_per_dp
+        max_decode_tokens = runner.input_batch.max_decode_tokens
+        shapes: set[tuple[int, int]] = set()
+        for num_live in range(1, max(req_paddings) + 1):
+            if num_live > token_paddings[-1]:
+                # One token per live request already exceeds the step's
+                # token budget; the scheduler never builds such a step.
+                break
+            padded_reqs = runner_utils.get_padded_token_len(
+                req_paddings, num_live)
+            lo = runner_utils.get_padded_token_len(token_paddings, num_live)
+            hi = runner_utils.get_padded_token_len(
+                token_paddings,
+                min(num_live * max_decode_tokens, token_paddings[-1]))
+            for padded_tokens in token_paddings:
+                if lo <= padded_tokens <= hi:
+                    shapes.add(
+                        (padded_tokens * dp_size, padded_reqs * dp_size))
+        return shapes
+
     def _precompile_backbone_text_only(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
+        dcp_enabled = ('dcp' in self.runner.mesh.shape
+                       and self.runner.mesh.shape['dcp'] > 1)
+        needs_decode_compile = dcp_enabled and not self.runner.enable_continue_decode
+        decode_shapes = (self._decode_only_backbone_shapes()
+                         if needs_decode_compile else set())
         for num_tokens in self.runner.num_tokens_paddings:
             for num_reqs in self.runner.attn_num_reqs_paddings:
                 dp_sharding = NamedSharding(
@@ -752,6 +799,17 @@ class CompilationManager:
                             num_reqs=num_reqs,
                             pcp_has_cached_kv=_has_cached_kv,
                             pcp_num_reqs=_pcp_reqs)
+                if (num_tokens, num_reqs) in decode_shapes:
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone decode",
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=None,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        is_decode=True)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
