@@ -532,6 +532,45 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # Re-verify and split groups so attention_groups binds to updated managers
         self.verify_and_split_kv_cache_groups()
 
+        # Under decode context parallelism vLLM scales the full-attention
+        # block to ``block_size * dcp`` while hashing stays at ``block_size``,
+        # and the upstream coordinator then enables fine-grained (sub-block)
+        # prefix hits.  Such a hit ends *inside* an attention block (and, in
+        # mamba "align" mode, inside a mamba block); vLLM resolves that by
+        # redirecting the request to a private copy-on-write block and asking
+        # the worker to copy src->dst (``SchedulerOutput.kv_cache_block_copies``).
+        # The TPU runner does not implement those copies, so the hitting
+        # request would read a stale block that still holds *another*
+        # request's KV / recurrent state: outputs of concurrent requests bleed
+        # into each other (observed with Qwen3.5-397B, dcp=4, prefix caching).
+        # Keep hits block-aligned at the DCP-scaled attention block instead;
+        # that path never needs a CoW copy.
+        self._dcp_hit_alignment_override = None
+        dcp_world_size = getattr(self, "dcp_world_size", 1)
+        if dcp_world_size > 1 and self.enable_caching:
+            # The largest manager block (the DCP-scaled full-attention block;
+            # vLLM may already have folded dcp into scheduler_block_size).
+            attn_block = max(m.block_size for m in self.single_type_managers)
+            if self.enable_partial_hash_hits or attn_block > self._cache_hit_alignment_tokens:
+                logger.warning(
+                    "[TPUHybridKVCacheCoordinator] dcp=%d: disabling "
+                    "fine-grained prefix-cache hits and aligning hits to %d "
+                    "tokens (the TPU runner does not apply kv_cache_block_copies, "
+                    "which sub-block hits require).", dcp_world_size,
+                    attn_block)
+            self.enable_partial_hash_hits = False
+            self._dcp_hit_alignment_override = attn_block
+            for manager in self.single_type_managers:
+                manager.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+
+    @property
+    def _cache_hit_alignment_tokens(self) -> int:
+        base = super()._cache_hit_alignment_tokens
+        override = getattr(self, "_dcp_hit_alignment_override", None)
+        if override is not None:
+            return max(base, override)
+        return base
+
     def can_allocate_tokens(
         self,
         request: Request,
