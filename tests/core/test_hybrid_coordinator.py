@@ -313,8 +313,8 @@ class TestTPUHybridKVCacheCoordinator:
                              kv_cache_tensors=[],
                              kv_cache_groups=groups)
 
-    def _make_coordinator(self, cfg):
-        return TPUHybridKVCacheCoordinator(
+    def _make_coordinator(self, cfg, **overrides):
+        kwargs = dict(
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
@@ -326,6 +326,58 @@ class TestTPUHybridKVCacheCoordinator:
             scheduler_block_size=16,
             hash_block_size=16,
         )
+        kwargs.update(overrides)
+        return TPUHybridKVCacheCoordinator(**kwargs)
+
+    def test_dcp_mamba_managers_and_block_aligned_hits(self):
+        """Under decode context parallelism vLLM scales the full-attention
+        block to block_size*dcp while hashing at block_size. The mamba
+        managers must still be built with dcp_world_size=1 (mamba state is
+        replicated across DCP ranks; vLLM's MambaManager asserts it), and
+        prefix-cache hits must stay aligned to the DCP-scaled attention block
+        with fine-grained (sub-block) hits disabled: those would require
+        SchedulerOutput.kv_cache_block_copies, which the TPU runner does not
+        implement."""
+        dcp = 4
+        # Specs carry the unscaled block size; vLLM's FullAttentionManager
+        # multiplies it by dcp_world_size.
+        attn_spec = FullAttentionSpec(block_size=16,
+                                      num_kv_heads=8,
+                                      head_size=128,
+                                      dtype=torch.bfloat16)
+        mamba_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                               dtypes=(torch.bfloat16, torch.float32),
+                               block_size=16,
+                               mamba_cache_mode="align")
+        set_mamba_num_blocks(50)
+        cfg = KVCacheConfig(num_blocks=500,
+                            kv_cache_tensors=[],
+                            kv_cache_groups=[
+                                KVCacheGroupSpec(["attn_0"], attn_spec),
+                                KVCacheGroupSpec(["mamba_0"], mamba_spec),
+                            ])
+        # vLLM sets scheduler_block_size to block_size*dcp (the LCM of all
+        # DCP-scaled group block sizes) while hashing stays at block_size.
+        coord = self._make_coordinator(cfg,
+                                       dcp_world_size=dcp,
+                                       scheduler_block_size=16 * dcp)
+
+        attn_mgr, mamba_mgr = coord.single_type_managers
+        assert attn_mgr.dcp_world_size == dcp
+        assert attn_mgr.block_size == 16 * dcp
+        assert mamba_mgr.dcp_world_size == 1
+        assert mamba_mgr.block_size == 16
+
+        assert coord.enable_partial_hash_hits is False
+        assert coord._cache_hit_alignment_tokens == 16 * dcp
+        for manager in coord.single_type_managers:
+            assert manager.cache_hit_alignment_tokens == 16 * dcp
+
+        # Without DCP nothing changes: hits align to the regular block.
+        set_mamba_num_blocks(50)
+        plain = self._make_coordinator(self._make_multi_mamba_group_config())
+        assert plain._dcp_hit_alignment_override is None
+        assert plain._cache_hit_alignment_tokens == 16
 
     def test_multiple_mamba_groups_are_mirrored_by_default(self):
         coord = self._make_coordinator(self._make_multi_mamba_group_config())
