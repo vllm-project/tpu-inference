@@ -42,7 +42,7 @@ logger = init_logger(__name__)
 
 
 def _select_ragged_gather_reduce(version: str | None = None):
-    v = (version or envs.RAGGED_GATHER_REDUCE_VERSION or "v2").lower()
+    v = (version or envs.RAGGED_GATHER_REDUCE_VERSION or "v3").lower()
     if v == "v3":
         return ragged_gather_reduce_v3
     return ragged_gather_reduce_v2
