@@ -114,6 +114,18 @@ def is_mamba_spec(spec: Any) -> bool:
     return False
 
 
+def _dcp_world_size_for_spec(spec: Any, dcp_world_size: int) -> int:
+    """DCP size that owns a KV cache group's block geometry (see vLLM's
+    ``dcp_world_size_for_kv_cache_spec``): the process DCP size for full
+    attention, 1 for everything else (mamba, sliding window, ...)."""
+    try:
+        from vllm.v1.core.kv_cache_utils import \
+            dcp_world_size_for_kv_cache_spec
+        return dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
+    except ImportError:
+        return 1 if is_mamba_spec(spec) else dcp_world_size
+
+
 def is_mamba_group(group: Any) -> bool:
     """Check if a KV cache group contains Mamba layers."""
     spec = getattr(group, "kv_cache_spec", group)
@@ -485,7 +497,12 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 block_pool=pool,
                 enable_caching=self.enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=getattr(self, "dcp_world_size", 1),
+                # Mamba state is replicated across DCP ranks: only full
+                # attention shards its KV over 'dcp', so a mamba manager must
+                # keep dcp_world_size=1 (vLLM's MambaManager asserts it and
+                # upstream derives it with dcp_world_size_for_kv_cache_spec).
+                dcp_world_size=_dcp_world_size_for_spec(
+                    spec, getattr(self, "dcp_world_size", 1)),
                 pcp_world_size=getattr(self, "pcp_world_size", 1),
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.
