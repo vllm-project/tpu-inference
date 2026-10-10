@@ -155,9 +155,13 @@ def general_device_put(tensor: jax.Array,
             source_mesh)
         # `t[i]` needs to be operated in the same mesh as `t`, which is provided as
         # `source_mesh`.
+        # Pass dtype explicitly: a host that owns no shard of `t` never calls
+        # the callback, so JAX cannot infer the dtype and raises ValueError.
         with ctx:
-            global_array = jax.make_array_from_callback(
-                t.shape, sharding, lambda index: t[index])
+            global_array = jax.make_array_from_callback(t.shape,
+                                                        sharding,
+                                                        lambda index: t[index],
+                                                        dtype=t.dtype)
         if layout is not None:
             dst_mesh = sharding.mesh
             with jax.set_mesh(dst_mesh):
