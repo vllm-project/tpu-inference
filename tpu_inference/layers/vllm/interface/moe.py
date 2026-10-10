@@ -141,7 +141,8 @@ def vllm_moe_apply(layer: RoutedExperts,
     # Route padding tokens to a single expert instead of activating unnecessary
     # experts. Applicable when DP attention size is 1 (pure TP attention, e.g.
     # TP8_EP), since with DP attention the padding for each rank is interleaved.
-    if envs.MOE_ROUTE_PADDING_TO_EXPERT0 and not is_dp:
+    if (envs.MOE_ROUTE_PADDING_TO_EXPERT0
+            or envs.TPU_MOE_SKIP_PADDED_TOKENS) and not is_dp:
         try:
             from vllm.forward_context import get_forward_context
             attn_meta = get_forward_context().attn_metadata

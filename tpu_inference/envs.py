@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     HASH_TABLE_ROW_MAJOR: bool = False
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
+    TPU_MOE_SKIP_PADDED_TOKENS: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -386,10 +387,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_LONG_CTX_KERNEL":
-    lambda: (
-        env_bool("USE_BATCHED_RPA_LONG_CTX_KERNEL")()
-        or env_bool("USE_BATCHED_RPA_LONGCTX")()
-    ),
+    lambda: (env_bool("USE_BATCHED_RPA_LONG_CTX_KERNEL")
+             () or env_bool("USE_BATCHED_RPA_LONGCTX")()),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
@@ -537,6 +536,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # is interleaved per rank and a single valid-token count cannot describe it.
     "MOE_ROUTE_PADDING_TO_EXPERT0":
     env_bool("MOE_ROUTE_PADDING_TO_EXPERT0", default=False),
+    "TPU_MOE_SKIP_PADDED_TOKENS":
+    env_bool("TPU_MOE_SKIP_PADDED_TOKENS", default=False),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
