@@ -23,7 +23,6 @@ from torchax.ops.mappings import t2j_dtype
 from vllm import envs as vllm_envs
 from vllm import utils
 
-from tpu_inference import envs
 from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 
@@ -185,36 +184,61 @@ def get_num_kv_heads_by_tp(num_kv_heads: int, tp_size: int) -> int:
         return tp_size
 
 
+def _local_memory_stats(device: Any) -> Optional[Tuple[int, int]]:
+    """Returns (bytes_in_use, bytes_limit) for an addressable device, or None
+    if the runtime does not report memory stats for it."""
+    try:
+        stats = device.memory_stats()
+        return stats["bytes_in_use"], stats["bytes_limit"]
+    except Exception as e:
+        logger.warning("Failed to get memory stats for device %s: %s", device,
+                       e)
+        return None
+
+
 def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
-    usage = []
+    """Returns (bytes_in_use, bytes_limit) for each device in `devices`.
+
+    Only the given devices are counted. Callers pass the worker's own devices,
+    which on a single host may be a subset of jax.local_devices() (e.g. TP=4 on
+    an 8-device host); counting the whole host would over-size the KV cache.
+
+    memory_stats() is only supported for addressable (this-process) devices.
+    On multi-host (Ray or native jax.distributed) remote devices reuse a local
+    device's stats, assuming all devices have similar usage. If no device
+    reports stats, usage falls back to live-array accounting with the
+    device-kind HBM limit instead of an empty list, which would budget 0 bytes.
+    """
+    devices = list(devices)
     if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
 
-    multihost_backend = envs.TPU_MULTIHOST_BACKEND
-    if multihost_backend == "ray":
-        # MemoryStats is only supported for addressable PjRt devices.
-        # Assume all the devices have similar memory usage for now.
-        # TODO(ranlihao): find a proper way to get the memory usage of each device.
-        for device in devices:
-            try:
-                hbm_used = device.memory_stats()["bytes_in_use"]
-                hbm_limit = device.memory_stats()["bytes_limit"]
-                logger.info(
-                    "Get memory stats for device %s. Assuming all devices have the same usage.",
-                    device)
-                usage.extend([(hbm_used, hbm_limit)] * len(devices))
-                break
-            except Exception as e:
-                logger.warning(
-                    "Failed to get memory stats for device %s: %s. ", device,
-                    e)
+    if jax.process_count() == 1:
+        # Single process: every device is addressable.
+        usage = [_local_memory_stats(device) for device in devices]
     else:
-        for device in devices:
-            hbm_used = device.memory_stats()["bytes_in_use"]
-            hbm_limit = device.memory_stats()["bytes_limit"]
-            usage.append((hbm_used, hbm_limit))
-
-    return usage
+        process_index = jax.process_index()
+        usage = [
+            _local_memory_stats(device)
+            if device.process_index == process_index else None
+            for device in devices
+        ]
+    sample = next((u for u in usage if u is not None), None)
+    if sample is None:
+        if devices:
+            logger.warning(
+                "No memory stats available for devices %s; estimating HBM "
+                "usage from live arrays and the device-kind HBM limit.",
+                devices)
+            return pathways_hbm_usage_gb(devices)
+        return []
+    # TODO(ranlihao): find a proper way to get the memory usage of each device.
+    if any(u is None for u in usage):
+        logger.info(
+            "Memory stats unavailable for %d of %d devices (non-addressable "
+            "or unsupported); assuming they match %s.",
+            sum(u is None for u in usage), len(usage), sample)
+    return [sample if u is None else u for u in usage]
 
 
 def get_device_name(num_devices: int | None = None):
