@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import itertools
 import time
 from collections import defaultdict
 from collections.abc import Sequence
@@ -439,6 +440,66 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
                              axis_names,
                              axis_types=(mesh_lib.AxisType.Auto, ) *
                              len(axis_shapes))
+
+
+def attn_dp_ring_device_mesh(mesh_shape: Sequence[int],
+                             axis_names: Sequence[str],
+                             devices: Sequence[Any]) -> np.ndarray:
+    """Lay out an attn_dp x model=4 mesh so each attn_dp group is a physical
+    ring, for a 2x2xZ slice of two-core chips (v7x) without wraparound.
+
+    XLA runs an attn_dp collective as a ring in the replica group's order.
+    jax's v7x layout puts attn_dp ranks 2h and 2h+1 on opposite corners of
+    host h's 2x2 chips, so no two consecutive ranks are linked, and the
+    concurrent groups' ring steps pile up on the same links. Here:
+      - attn_dp rank r sits at (x, z) = ring[r], where the ring goes up
+        z at x=0 and back down at x=1, so every step is one link;
+      - model index m sits at y = m // 2, core m % 2, so the two cores of a
+        chip are model indices 2k, 2k+1 (as the hierarchical MoE dispatch
+        and collect require) and the two chips of a model group are linked.
+
+    The cost: in a 2xZ grid of chip pairs the only ring of single links is
+    its outer edge, so host z holds attn_dp ranks z and 2Z-1-z, which are
+    not adjacent. On more than one host, a host's devices are then not a
+    contiguous block of the mesh, so jax's Mesh.local_mesh and the
+    host-local array helpers in multihost_utils fail, and RL weight sync
+    reports no host_subgrid.
+
+    Returns the devices reshaped to mesh_shape. Raises ValueError with the
+    reason when the mesh or the devices don't fit.
+    """
+    shape = dict(zip(axis_names, mesh_shape))
+    dp = shape["attn_dp"]
+    if dp % 2 or shape["model"] != 4 or any(
+            size > 1 for name, size in shape.items()
+            if name not in ("attn_dp", "model")):
+        raise ValueError(f"it needs an even attn_dp, model=4 and no other "
+                         f"axis above 1, got {shape}")
+    if not all(
+            hasattr(d, "coords") and hasattr(d, "core_on_chip")
+            for d in devices):
+        raise ValueError("the devices report no coords/core_on_chip")
+
+    # Key the devices by (x, y, z, core) from the slice's lowest corner, as
+    # they may be part of a larger slice (e.g. one host's devices under PP).
+    num_z = dp // 2
+    xs, ys, zs = zip(*(d.coords for d in devices))
+    x0, y0, z0 = min(xs), min(ys), min(zs)
+    pos = {}
+    for d in devices:
+        x, y, z = d.coords
+        pos[x - x0, y - y0, z - z0, d.core_on_chip] = d
+    if len(devices) != 8 * num_z or pos.keys() != set(
+            itertools.product(range(2), range(2), range(num_z), range(2))):
+        chips = "x".join(str(max(c) - min(c) + 1) for c in (xs, ys, zs))
+        raise ValueError(f"attn_dp={dp} needs both cores of every chip of a "
+                         f"2x2x{num_z} slice, got {len(devices)} devices on "
+                         f"a {chips} chip grid")
+
+    ring = [(0, z) for z in range(num_z)] + [(1, z)
+                                             for z in reversed(range(num_z))]
+    grid = [[pos[x, m // 2, z, m % 2] for m in range(4)] for x, z in ring]
+    return np.array(grid, dtype=object).reshape(mesh_shape)
 
 
 def device_array(mesh: Mesh, *args, sharding=None, **kwargs) -> jax.Array:
