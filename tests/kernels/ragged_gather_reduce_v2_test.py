@@ -24,6 +24,8 @@ from jax._src import test_util as jtu
 
 from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
     ragged_gather_reduce as ragged_gather_reduce_v2
+from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v3 import \
+    ragged_gather_reduce as ragged_gather_reduce_v3
 from tpu_inference.kernels.sparse_core.ragged_scatter import ragged_scatter
 
 jax.config.parse_flags_with_absl()
@@ -141,16 +143,19 @@ class ScatterTest(jtu.JaxTestCase):
         desired = reference_ragged_gather_reduce(x, indices, topk_weights,
                                                  valid_rows_mask,
                                                  reduce_group_size)
-        try:
-            actual = ragged_gather_reduce_v2(x, indices, topk_weights,
-                                             valid_rows_mask,
-                                             reduce_group_size)
-            np.testing.assert_allclose(actual, desired, atol=1e-2, rtol=1e-2)
-        except AssertionError:
-            raise
-        except Exception as e:  # pylint: disable=broad-except
-            print("Skipping ragged_gather_reduce_v2 correctness check due to "
-                  f"error: {e}")
+        for rgr, name in (
+            (ragged_gather_reduce_v2, "ragged_gather_reduce_v2"),
+            (ragged_gather_reduce_v3, "ragged_gather_reduce_v3"),
+        ):
+            try:
+                actual = rgr(x, indices, topk_weights,
+                             valid_rows_mask,
+                             reduce_group_size)
+                np.testing.assert_allclose(actual, desired, atol=1e-2, rtol=1e-2)
+            except AssertionError:
+                raise
+            except Exception as e:  # pylint: disable=broad-except
+                print(f"Skipping {name} correctness check due to error: {e}")
 
     # The first perf test case approximates the DeepSeekV3, 2k-batch-size, EP=16.
     # The second case approximates the Qwen3-Coder-480B, 2k-batch-size, EP=8.
