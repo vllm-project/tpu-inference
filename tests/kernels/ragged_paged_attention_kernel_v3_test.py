@@ -55,6 +55,8 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
         k_scale: float | None = None,
         v_scale: float | None = None,
         use_causal_mask: bool = True,
+        decode_only: bool = False,
+        use_default_block_sizes: bool = False,
     ):
         rng = np.random.default_rng(1234)
 
@@ -149,7 +151,11 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
                             (0, max_num_seq + 1 - cu_q_lens.shape[0]))
         kv_lens = jnp.array(kv_lens, dtype=jnp.int32)
         kv_lens = jnp.pad(kv_lens, (0, max_num_seq - kv_lens.shape[0]))
-        distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
+        if decode_only:
+            assert all(q_len == 1 for q_len, _ in seq_lens)
+            distribution = jnp.array([len(seq_lens)] * 3, dtype=jnp.int32)
+        else:
+            distribution = jnp.array([0, 0, len(seq_lens)], dtype=jnp.int32)
 
         args = (
             q,
@@ -176,10 +182,16 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             **kwargs,
         )
 
+        block_sizes_kwargs = {}
+        if not use_default_block_sizes:
+            block_sizes = (bq_sz, bkv_sz, bq_csz, bkv_csz)
+            block_sizes_kwargs["m_block_sizes"] = block_sizes
+            if decode_only:
+                block_sizes_kwargs["d_block_sizes"] = block_sizes
         output, updated_kv_cache = ragged_paged_attention(
             *args,
             **kwargs,
-            m_block_sizes=(bq_sz, bkv_sz, bq_csz, bkv_csz),
+            **block_sizes_kwargs,
             vmem_limit_bytes=vmem_limit_bytes,
         )
         output = output[:cu_q_lens[distribution[-1]]]
@@ -450,6 +462,33 @@ class RaggedPagedAttentionKernelTest(jtu.JaxTestCase):
             dtype,
             num_pages,
             sliding_window=sliding_window,
+        )
+
+    @parameterized.product(
+        dtype=[jnp.float32, jnp.bfloat16],
+        sliding_window=[None, 5, 128],
+    )
+    def test_decode_sliding_window_default_block_sizes(self, dtype,
+                                                       sliding_window):
+        # Decode-only through the heuristic block sizes (no *_block_sizes
+        # passed). With a window the heuristic caps bkv_sz at the window, so the
+        # kernel starts mid-sequence and must still match the reference.
+        num_seqs = 6
+        num_heads = (4, 2)
+        rng = np.random.default_rng(1234)
+        kv_lens = rng.integers(200, 1500, num_seqs)
+        seq_lens = [(1, int(kv_len)) for kv_len in kv_lens]
+        self._test_ragged_paged_attention(
+            seq_lens,
+            num_heads,
+            128,
+            16,
+            dtype,
+            dtype,
+            num_pages=1000,
+            sliding_window=sliding_window,
+            decode_only=True,
+            use_default_block_sizes=True,
         )
 
     @parameterized.product(soft_cap=[None, 50.0], )
@@ -766,7 +805,7 @@ class GetDefaultBlockSizesTest(parameterized.TestCase):
             p.stop()
         super().tearDown()
 
-    def _call(self, case):
+    def _call(self, case, sliding_window=None):
         return self._k.get_default_block_sizes(jnp.bfloat16,
                                                jnp.bfloat16,
                                                actual_num_q_heads=8,
@@ -776,7 +815,8 @@ class GetDefaultBlockSizesTest(parameterized.TestCase):
                                                max_num_tokens=512,
                                                max_num_seqs=256,
                                                pages_per_seq=1024,
-                                               case=case)
+                                               case=case,
+                                               sliding_window=sliding_window)
 
     def test_kernel_has_no_env_dependency(self):
         # The kernel module must not import tpu_inference.envs (self-contained).
@@ -791,6 +831,32 @@ class GetDefaultBlockSizesTest(parameterized.TestCase):
         self.assertEqual(bs["bkv_sz"], bs["bkv_csz"])
         self.assertEqual(bs["bq_sz"], 1)
         self.assertEqual(bs["bq_csz"], 1)
+
+    def test_decode_sliding_window_caps_kv_block_at_window(self):
+        # Without a window the decode block is the whole context (16384 here),
+        # so the kernel's skip of blocks before the window never fires (#2103).
+        full = self._call(self._k.RpaCase.DECODE)
+        self.assertEqual(full["bkv_sz"], 16 * 1024)
+        capped = self._call(self._k.RpaCase.DECODE, sliding_window=128)
+        self.assertEqual(capped["bkv_sz"], 128)
+        self.assertEqual(capped["bkv_csz"], 128)
+        self.assertEqual(capped["bq_sz"], full["bq_sz"])
+        self.assertEqual(capped["bq_csz"], full["bq_csz"])
+
+    def test_decode_sliding_window_rounds_up_to_page_size(self):
+        bs = self._call(self._k.RpaCase.DECODE, sliding_window=5)
+        self.assertEqual(bs["bkv_sz"], 16)  # page_size=16
+        self.assertEqual(bs["bkv_csz"], 16)
+
+    def test_decode_sliding_window_larger_than_context_is_a_noop(self):
+        self.assertEqual(
+            self._call(self._k.RpaCase.DECODE, sliding_window=10**7),
+            self._call(self._k.RpaCase.DECODE))
+
+    def test_sliding_window_does_not_change_prefill_or_mixed(self):
+        for case in (self._k.RpaCase.PREFILL, self._k.RpaCase.MIXED):
+            self.assertEqual(self._call(case, sliding_window=128),
+                             self._call(case))
 
     def test_all_cases_return_four_aligned_blocks(self):
         for case in (self._k.RpaCase.DECODE, self._k.RpaCase.PREFILL,
