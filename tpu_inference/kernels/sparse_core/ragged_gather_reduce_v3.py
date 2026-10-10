@@ -406,7 +406,18 @@ def ragged_gather_reduce(
     route_destinations = jnp.take_along_axis(destination_blocks, route_order, axis=1)
     weights_blocks = weights_2d.reshape(num_blocks, metadata_block_size)
     route_weights = jnp.take_along_axis(weights_blocks, route_order, axis=1)
-    route_indices = jnp.where(compact_valid, route_indices, 0).astype(jnp.int32)
+    # Invalid (compacted-out) slots must not point at an arbitrary row: under
+    # expert parallelism `x` (gmm2_res) rows outside this shard's expert range
+    # are *uninitialized* HBM (gmm_v2 runs with zero_initialize=False), so even
+    # a zero-weight route would turn stale NaN/Inf bits into NaN via 0 * NaN.
+    # This matters for the zero-weight sentinel route below, which the generic
+    # path does gather and scatter-add (its mask treats it as valid).  Point
+    # every invalid slot at the block's first *valid* source row instead; that
+    # row is initialized whenever the block has any valid route, which is the
+    # only case in which the sentinel can be emitted.
+    route_indices = route_indices.astype(jnp.int32)
+    safe_source = route_indices[:, :1]
+    route_indices = jnp.where(compact_valid, route_indices, safe_source)
     route_destinations = jnp.where(compact_valid, route_destinations, 0).astype(
         jnp.int32
     )

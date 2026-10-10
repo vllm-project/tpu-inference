@@ -157,6 +157,37 @@ class ScatterTest(jtu.JaxTestCase):
             except Exception as e:  # pylint: disable=broad-except
                 print(f"Skipping {name} correctness check due to error: {e}")
 
+    def test_sc_ragged_gather_reduce_v3_sentinel_does_not_read_uninitialized_rows(
+            self):
+        """Regression: a 64-token block with exactly 2*64 valid routes that are not
+        adjacent pairs makes v3 emit a zero-weight sentinel route. Under EP the
+        rows of `x` outside the local expert range are uninitialized HBM; the
+        sentinel must not gather such a row, otherwise 0 * NaN poisons token 0."""
+        num_tokens, topk, hidden = 2048, 10, 4096
+        n = num_tokens * topk
+        rng = np.random.default_rng(7)
+        perm = rng.permutation(n).astype(np.int32)
+        valid = (perm >= 2000) & (perm < 4600)
+        blk = valid[:64 * topk].reshape(64, topk)
+        blk[:] = False
+        blk[:, :2] = True
+        blk[0, 1] = False
+        # Still 128 valid routes, but token 0 has 1 and token 1 has 3.
+        blk[1, 2] = True
+        valid[:64 * topk] = blk.reshape(-1)
+        x = np.full((n, hidden), np.nan, np.float32)
+        x[perm[valid]] = rng.standard_normal((int(valid.sum()), hidden),
+                                             dtype=np.float32)
+        x = jnp.asarray(x, dtype=jnp.bfloat16)
+        indices = jnp.asarray(perm)
+        w = jnp.asarray(rng.standard_normal(n).astype(np.float32),
+                        dtype=jnp.bfloat16)
+        vm = jnp.asarray(valid)
+        desired = reference_ragged_gather_reduce(x, indices, w, vm, topk)
+        actual = ragged_gather_reduce_v3(x, indices, w, vm, topk)
+        self.assertFalse(bool(jnp.isnan(actual.astype(jnp.float32)).any()))
+        np.testing.assert_allclose(actual, desired, atol=1e-2, rtol=1e-2)
+
     # The first perf test case approximates the DeepSeekV3, 2k-batch-size, EP=16.
     # The second case approximates the Qwen3-Coder-480B, 2k-batch-size, EP=8.
     _perf_test_cases = [
