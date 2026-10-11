@@ -379,13 +379,18 @@ def test_fp8_per_tensor_linear(kind, num_devices):
 @pytest.mark.parametrize("num_devices", [1, 2])
 @pytest.mark.parametrize("disable_requant", [False, True])
 @pytest.mark.parametrize("load_mode", ["eager", "staged", "incremental"])
+@pytest.mark.parametrize("ray_backend", [False, True])
 def test_nvfp4_moe_checkpoint_layout(num_devices, disable_requant, load_mode,
-                                     monkeypatch):
+                                     ray_backend, monkeypatch):
     """eager: process after loading. staged: MOE_STAGE_WEIGHTS_ON_HOST.
     incremental: VLLM_INCREMENTAL_FP8_LOADING + MOE_STAGE_WEIGHTS_ON_HOST
     through the incremental loader wrapper, like the multi-host runs."""
     if disable_requant:
         monkeypatch.setenv("DISABLE_WEIGHT_REQUANTIZATION", "1")
+    if ray_backend:
+        # The multi-host placement path of general_device_put
+        # (make_array_from_callback); it must not run under jit.
+        monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "ray")
     if load_mode in ("staged", "incremental"):
         monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "1")
     if load_mode == "incremental":
@@ -475,7 +480,7 @@ def test_nvfp4_moe_checkpoint_layout(num_devices, disable_requant, load_mode,
     expected = expected.to(torch.float32)
     rel = ((actual - expected).norm() / expected.norm()).item()
     print(f"nvfp4 moe devices={num_devices} disable_requant={disable_requant}"
-          f" load_mode={load_mode} rel_err={rel:.4f}")
+          f" load_mode={load_mode} ray={ray_backend} rel_err={rel:.4f}")
     # Reference is the dequantized checkpoint, so only kernel / requant error
     # remains. Default requantization re-quantizes FP4 per row, which is
     # lossier than keeping the native 16-element blocks.

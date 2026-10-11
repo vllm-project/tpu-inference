@@ -556,13 +556,11 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
         requant_block_size = int(envs.MOE_REQUANTIZE_BLOCK_SIZE
                                  ) if envs.MOE_REQUANTIZE_BLOCK_SIZE else None
 
-        @jax.jit(static_argnames=("desired_quant_dtype", "requant_block_size"))
-        def unpack_and_process(
+        @jax.jit
+        def unpack_and_fold_scales(
             weights: FusedMoEWeights,
             w13_global_scale: jax.Array,
             w2_global_scale: jax.Array,
-            desired_quant_dtype: jnp.dtype | None,
-            requant_block_size: int | None,
         ) -> FusedMoEWeights:
             # Unpack packed uint8 -> native float4_e2m1fn (no value change).
             w13_fp4 = u8_unpack_e2m1(weights.w13_weight)
@@ -582,7 +580,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
             w2_scale_eff = weights.w2_weight_scale.astype(
                 jnp.float32) * w2_global_scale.reshape(-1, 1, 1)
 
-            weights_unpacked = FusedMoEWeights(
+            return FusedMoEWeights(
                 w13_weight=w13_fp4,
                 w13_weight_scale=w13_scale_eff,
                 w13_bias=weights.w13_bias,
@@ -591,22 +589,19 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
                 w2_bias=weights.w2_bias,
             )
 
-            return process_quantized_moe_weights(
-                weights=weights_unpacked,
-                moe_backend=self.moe_backend,
-                mesh=self.mesh,
-                activation=layer.activation,
-                weight_block_size=(1, 16),  # NVFP4 block size is 16
-                desired_quant_dtype=desired_quant_dtype,
-                requant_block_size=requant_block_size,
-            )
-
-        weights = unpack_and_process(
-            weights,
-            w13_global_scale,
-            w2_global_scale,
-            desired_quant_dtype,
-            requant_block_size,
+        weights = unpack_and_fold_scales(weights, w13_global_scale,
+                                         w2_global_scale)
+        # Outside jit, as in the FP8 MoE method: on multi-host slices
+        # process_quantized_moe_weights places weights with
+        # general_device_put, which needs concrete arrays.
+        weights = process_quantized_moe_weights(
+            weights=weights,
+            moe_backend=self.moe_backend,
+            mesh=self.mesh,
+            activation=layer.activation,
+            weight_block_size=(1, 16),  # NVFP4 block size is 16
+            desired_quant_dtype=desired_quant_dtype,
+            requant_block_size=requant_block_size,
         )
 
         weights = torch_view(weights)
