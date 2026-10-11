@@ -17,6 +17,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
+from tpu_inference import envs
 from tpu_inference.logger import init_logger
 
 logger = init_logger(__name__)
@@ -114,6 +115,18 @@ def is_mamba_spec(spec: Any) -> bool:
     return False
 
 
+def _dcp_world_size_for_spec(spec: Any, dcp_world_size: int) -> int:
+    """DCP size that owns a KV cache group's block geometry (see vLLM's
+    ``dcp_world_size_for_kv_cache_spec``): the process DCP size for full
+    attention, 1 for everything else (mamba, sliding window, ...)."""
+    try:
+        from vllm.v1.core.kv_cache_utils import \
+            dcp_world_size_for_kv_cache_spec
+        return dcp_world_size_for_kv_cache_spec(spec, dcp_world_size)
+    except ImportError:
+        return 1 if is_mamba_spec(spec) else dcp_world_size
+
+
 def is_mamba_group(group: Any) -> bool:
     """Check if a KV cache group contains Mamba layers."""
     spec = getattr(group, "kv_cache_spec", group)
@@ -204,21 +217,20 @@ class TPUMambaManager(MambaManager):
         kwargs.pop("max_model_len", None)
         valid_params = inspect.signature(
             SingleTypeKVCacheManager.__init__).parameters
-        has_var_keyword = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in valid_params.values())
+        has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD
+                              for p in valid_params.values())
         if not has_var_keyword:
             kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
         super().__init__(kv_cache_spec, block_pool, **kwargs)
 
     def cache_blocks(
-        self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
-        *,
-        replay_boundaries: Sequence[int] = (),
-        **kwargs,
+            self,
+            request: Request,
+            num_tokens: int,
+            retention_interval: int | None = None,
+            *,
+            replay_boundaries: Sequence[int] = (),
+            **kwargs,
     ) -> None:
         if num_tokens <= 0:
             return
@@ -231,7 +243,7 @@ class TPUMambaManager(MambaManager):
             )
             return
 
-        if not self.kv_cache_spec.prefix_cacheable:
+        if not getattr(self.kv_cache_spec, "prefix_cacheable", True):
             return
 
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
@@ -242,10 +254,8 @@ class TPUMambaManager(MambaManager):
             # token `num_tokens - 1`. Only this block holds valid state;
             # intermediate blocks were never checkpointed.
             written_block_idx = (num_tokens - 1) // self.block_size
-            block_mask = [
-                (num_cached_blocks + i) == written_block_idx
-                for i in range(num_full_blocks - num_cached_blocks)
-            ]
+            block_mask = [(num_cached_blocks + i) == written_block_idx
+                          for i in range(num_full_blocks - num_cached_blocks)]
 
             self.block_pool.cache_full_blocks(
                 request=request,
@@ -264,14 +274,18 @@ class TPUMambaManager(MambaManager):
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
                 if block.block_hash_num_tokens is not None:
-                    self._pending_boundary_state_offloads.append(
-                        (
+                    offload_target = getattr(
+                        self, "_pending_boundary_state_offloads", None)
+                    if offload_target is None:
+                        offload_target = getattr(
+                            self, "_pending_partial_tail_offloads", None)
+                    if offload_target is not None:
+                        offload_target.append((
                             request.request_id,
                             self.kv_cache_group_id,
                             block,
                             block.block_hash_num_tokens,
-                        )
-                    )
+                        ))
 
             self.num_cached_block[request.request_id] = num_full_blocks
 
@@ -485,7 +499,12 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 block_pool=pool,
                 enable_caching=self.enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=getattr(self, "dcp_world_size", 1),
+                # Mamba state is replicated across DCP ranks: only full
+                # attention shards its KV over 'dcp', so a mamba manager must
+                # keep dcp_world_size=1 (vLLM's MambaManager asserts it and
+                # upstream derives it with dcp_world_size_for_kv_cache_spec).
+                dcp_world_size=_dcp_world_size_for_spec(
+                    spec, getattr(self, "dcp_world_size", 1)),
                 pcp_world_size=getattr(self, "pcp_world_size", 1),
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.
@@ -531,6 +550,56 @@ class TPUHybridKVCacheCoordinator(HybridKVCacheCoordinator):
 
         # Re-verify and split groups so attention_groups binds to updated managers
         self.verify_and_split_kv_cache_groups()
+
+        # Under decode context parallelism vLLM scales the full-attention
+        # block to ``block_size * dcp`` while hashing stays at ``block_size``,
+        # and the upstream coordinator then enables fine-grained (sub-block)
+        # prefix hits. Such a hit ends *inside* an attention block (and, in
+        # mamba "align" mode, inside a mamba block); vLLM resolves that by
+        # redirecting the request to a private copy-on-write block and asking
+        # the worker to copy src->dst (``SchedulerOutput.kv_cache_block_copies``).
+        #
+        # When TPU_DCP_CACHE_GRANULARITY_256 is True:
+        # We enable fine-grained hits at 256 tokens (hash_block_size), and the
+        # TPU runner applies kv_cache_block_copies via JIT-compiled CoW buffers.
+        #
+        # When False (default):
+        # We keep hits block-aligned at the DCP-scaled attention block (e.g. 1024
+        # tokens for block_size=256 and dcp=4) so no CoW copies are emitted.
+        self._dcp_hit_alignment_override = None
+        dcp_world_size = getattr(self, "dcp_world_size", 1)
+        if dcp_world_size > 1 and self.enable_caching:
+            if envs.TPU_DCP_CACHE_GRANULARITY_256:
+                self.enable_partial_hash_hits = True
+                self._dcp_hit_alignment_override = self.hash_block_size
+                for manager in self.single_type_managers:
+                    manager.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+                logger.info(
+                    "[TPUHybridKVCacheCoordinator] dcp=%d: enabled 256-token "
+                    "prefix-cache hit granularity (TPU_DCP_CACHE_GRANULARITY_256=True); "
+                    "partial block hits will be copied via CoW on TPU.",
+                    dcp_world_size)
+            else:
+                attn_block = max(m.block_size
+                                 for m in self.single_type_managers)
+                if self.enable_partial_hash_hits or attn_block > self._cache_hit_alignment_tokens:
+                    logger.warning(
+                        "[TPUHybridKVCacheCoordinator] dcp=%d: disabling "
+                        "fine-grained prefix-cache hits and aligning hits to %d "
+                        "tokens (set TPU_DCP_CACHE_GRANULARITY_256=1 to enable "
+                        "256-token hit granularity with TPU CoW copies).",
+                        dcp_world_size, attn_block)
+                self.enable_partial_hash_hits = False
+                self._dcp_hit_alignment_override = attn_block
+                for manager in self.single_type_managers:
+                    manager.cache_hit_alignment_tokens = self._cache_hit_alignment_tokens
+
+    @property
+    def _cache_hit_alignment_tokens(self) -> int:
+        override = getattr(self, "_dcp_hit_alignment_override", None)
+        if override is not None:
+            return override
+        return super()._cache_hit_alignment_tokens
 
     def can_allocate_tokens(
         self,
@@ -810,16 +879,82 @@ class MambaPoolSyncExecutorMixin:
         if kv_cache_configs:
             propagate_mamba_num_blocks(self, kv_cache_configs[0],
                                        self.vllm_config)
+            # Last engine-core hook before vLLM constructs the Scheduler (and
+            # with it the KVCacheManager / coordinator): fail fast instead of
+            # silently scheduling with the stock coordinator.
+            verify_hybrid_coordinator_hooks(self.vllm_config,
+                                            kv_cache_configs[0])
+
+
+def needs_hybrid_coordinator_hooks(vllm_config: Any) -> bool:
+    """True when mamba prefix caching (align mode) is on, i.e. the scheduler
+    must use TPUHybridKVCacheCoordinator / TPUKVCacheManager."""
+    cache_config = vllm_config.cache_config
+    return bool(
+        cache_config.enable_prefix_caching
+        and getattr(cache_config, "mamba_cache_mode", "none") == "align")
 
 
 def maybe_install_hybrid_coordinator_hooks(vllm_config: Any) -> None:
     """Install the hooks when mamba prefix caching (align mode) is on. Called
     from the executors' `_init_executor`, which runs in the engine-core
     process; the platform config hook does not."""
-    cache_config = vllm_config.cache_config
-    if (cache_config.enable_prefix_caching
-            and getattr(cache_config, "mamba_cache_mode", "none") == "align"):
+    if needs_hybrid_coordinator_hooks(vllm_config):
         install_hybrid_coordinator_hooks(vllm_config)
+
+
+def verify_hybrid_coordinator_hooks(vllm_config: Any,
+                                    kv_cache_config: Any) -> None:
+    """Assert, in the engine-core process, that the Scheduler about to be built
+    will pick up the TPU hybrid coordinator.
+
+    Must be called after the executor is initialised and before the Scheduler
+    is constructed. If a hybrid (mamba / linear-attention) model runs with
+    mamba prefix caching (align mode) but the hooks are not active, vLLM's
+    stock HybridKVCacheCoordinator would hand out mamba block ids from the
+    shared attention pool; those exceed the compact TPU mamba cache, get
+    clamped by the model, and different requests end up sharing one
+    recurrent-state slot (silent cross-request contamination). Raise instead.
+    """
+    if not needs_hybrid_coordinator_hooks(vllm_config):
+        return
+    if not any(is_mamba_group(g) for g in kv_cache_config.kv_cache_groups):
+        return
+
+    import sys
+
+    import vllm.v1.core.kv_cache_coordinator as coord_mod
+    import vllm.v1.core.kv_cache_manager as mgr_mod
+
+    problems = []
+    if not _HOOKS_INSTALLED:
+        problems.append("install_hybrid_coordinator_hooks() never ran in "
+                        "this process")
+    if coord_mod.get_kv_cache_coordinator is not tpu_get_kv_cache_coordinator:
+        problems.append("vllm.v1.core.kv_cache_coordinator."
+                        "get_kv_cache_coordinator is not the TPU factory")
+    if mgr_mod.KVCacheManager is not TPUKVCacheManager:
+        problems.append("vllm.v1.core.kv_cache_manager.KVCacheManager is not "
+                        "TPUKVCacheManager")
+    for mod_name in ("vllm.v1.core.sched.scheduler",
+                     "vllm.v1.core.sched.async_scheduler"):
+        bound = getattr(sys.modules.get(mod_name), "KVCacheManager", None)
+        if bound is not None and bound is not TPUKVCacheManager:
+            problems.append(f"{mod_name}.KVCacheManager was bound before the "
+                            "hooks were installed")
+    if problems:
+        raise RuntimeError(
+            "[tpu_inference] mamba prefix caching (mamba_cache_mode='align') "
+            "is enabled for a hybrid model, but the scheduler in this process "
+            "would not use TPUHybridKVCacheCoordinator: " +
+            "; ".join(problems) + ". The executor must call "
+            "maybe_install_hybrid_coordinator_hooks() in _init_executor "
+            "(see tpu_inference/executors/*_executor.py); otherwise requests "
+            "share mamba state slots and their outputs contaminate each "
+            "other.")
+    logger.info(
+        "[tpu_inference] Verified TPUHybridKVCacheCoordinator hooks are "
+        "active in the engine-core process.")
 
 
 def install_hybrid_coordinator_hooks(vllm_config: Any | None = None) -> None:

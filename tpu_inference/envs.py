@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     MODEL_IMPL_TYPE: str = "auto"
     DRAFT_MODEL_IMPL_TYPE: str = "auto"
     NEW_MODEL_DESIGN: bool = False
+    TPU_DCP_CACHE_GRANULARITY_256: bool = False
     PHASED_PROFILING_DIR: str = ""
     AGGREGATED_STATS_DIR: str = ""
     PYTHON_TRACER_LEVEL: int = 1
@@ -589,6 +590,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Maximum hidden-state row count for dense expert MoE. 0 disables it.
     "TPU_MOE_DENSE_EXPERT_THRESHOLD":
     lambda: int(os.getenv("TPU_MOE_DENSE_EXPERT_THRESHOLD", "0")),
+    # When True, enables 256-token prefix cache hit granularity under Decode Context Parallelism (DCP)
+    # instead of the DCP-scaled attention block size (e.g. 1024 tokens for dcp=4).
+    # Partial block hits are copied into request-private blocks via TPU copy-on-write (CoW).
+    "TPU_DCP_CACHE_GRANULARITY_256":
+    env_bool("TPU_DCP_CACHE_GRANULARITY_256", default=False),
 }
 
 

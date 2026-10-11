@@ -313,8 +313,8 @@ class TestTPUHybridKVCacheCoordinator:
                              kv_cache_tensors=[],
                              kv_cache_groups=groups)
 
-    def _make_coordinator(self, cfg):
-        return TPUHybridKVCacheCoordinator(
+    def _make_coordinator(self, cfg, **overrides):
+        kwargs = dict(
             kv_cache_config=cfg,
             max_model_len=1024,
             max_in_flight_tokens=128,
@@ -326,6 +326,94 @@ class TestTPUHybridKVCacheCoordinator:
             scheduler_block_size=16,
             hash_block_size=16,
         )
+        kwargs.update(overrides)
+        return TPUHybridKVCacheCoordinator(**kwargs)
+
+    def test_dcp_mamba_managers_and_block_aligned_hits(self):
+        """Under decode context parallelism vLLM scales the full-attention
+        block to block_size*dcp while hashing at block_size. The mamba
+        managers must still be built with dcp_world_size=1 (mamba state is
+        replicated across DCP ranks; vLLM's MambaManager asserts it), and
+        prefix-cache hits must stay aligned to the DCP-scaled attention block
+        with fine-grained (sub-block) hits disabled by default."""
+        dcp = 4
+        attn_spec = FullAttentionSpec(block_size=16,
+                                      num_kv_heads=8,
+                                      head_size=128,
+                                      dtype=torch.bfloat16)
+        mamba_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                               dtypes=(torch.bfloat16, torch.float32),
+                               block_size=16,
+                               mamba_cache_mode="align")
+        set_mamba_num_blocks(50)
+        cfg = KVCacheConfig(num_blocks=500,
+                            kv_cache_tensors=[],
+                            kv_cache_groups=[
+                                KVCacheGroupSpec(["attn_0"], attn_spec),
+                                KVCacheGroupSpec(["mamba_0"], mamba_spec),
+                            ])
+        coord = self._make_coordinator(cfg,
+                                       dcp_world_size=dcp,
+                                       scheduler_block_size=16 * dcp)
+
+        attn_mgr, mamba_mgr = coord.single_type_managers
+        assert attn_mgr.dcp_world_size == dcp
+        assert attn_mgr.block_size == 16 * dcp
+        assert mamba_mgr.dcp_world_size == 1
+        assert mamba_mgr.block_size == 16
+
+        assert coord.enable_partial_hash_hits is False
+        assert coord._cache_hit_alignment_tokens == 16 * dcp
+        for manager in coord.single_type_managers:
+            assert manager.cache_hit_alignment_tokens == 16 * dcp
+
+        # Without DCP nothing changes: hits align to the regular block.
+        set_mamba_num_blocks(50)
+        plain = self._make_coordinator(self._make_multi_mamba_group_config())
+        assert plain._dcp_hit_alignment_override is None
+        assert plain._cache_hit_alignment_tokens == 16
+
+    def test_dcp_cache_granularity_256(self):
+        """When TPU_DCP_CACHE_GRANULARITY_256 is True under DCP, partial hash
+        hits are enabled and hit alignment stays at hash_block_size (16 tokens in test,
+        256 tokens in production), while mamba managers remain at dcp_world_size=1."""
+        from unittest.mock import patch
+
+        import tpu_inference.envs as envs
+
+        dcp = 4
+        attn_spec = FullAttentionSpec(block_size=16,
+                                      num_kv_heads=8,
+                                      head_size=128,
+                                      dtype=torch.bfloat16)
+        mamba_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                               dtypes=(torch.bfloat16, torch.float32),
+                               block_size=16,
+                               mamba_cache_mode="align")
+        set_mamba_num_blocks(50)
+        cfg = KVCacheConfig(num_blocks=500,
+                            kv_cache_tensors=[],
+                            kv_cache_groups=[
+                                KVCacheGroupSpec(["attn_0"], attn_spec),
+                                KVCacheGroupSpec(["mamba_0"], mamba_spec),
+                            ])
+
+        with patch.object(envs, "TPU_DCP_CACHE_GRANULARITY_256", True):
+            coord = self._make_coordinator(cfg,
+                                           dcp_world_size=dcp,
+                                           scheduler_block_size=16 * dcp,
+                                           hash_block_size=16)
+
+            attn_mgr, mamba_mgr = coord.single_type_managers
+            assert attn_mgr.dcp_world_size == dcp
+            assert attn_mgr.block_size == 16 * dcp
+            assert mamba_mgr.dcp_world_size == 1
+            assert mamba_mgr.block_size == 16
+
+            assert coord.enable_partial_hash_hits is True
+            assert coord._cache_hit_alignment_tokens == 16
+            for manager in coord.single_type_managers:
+                assert manager.cache_hit_alignment_tokens == 16
 
     def test_multiple_mamba_groups_are_mirrored_by_default(self):
         coord = self._make_coordinator(self._make_multi_mamba_group_config())
@@ -625,6 +713,8 @@ class TestHybridCoordinatorHooks:
                                                 mamba_num_blocks=None)
         vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
         vllm_config.cache_config.mamba_num_blocks = None
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
         calls = []
 
         class FakeBaseExecutor:
@@ -644,11 +734,123 @@ class TestHybridCoordinatorHooks:
             pass
 
         hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        install_hybrid_coordinator_hooks()
         FakeExecutor(vllm_config).initialize_from_config([cfg])
         assert calls == [("workers_allocated", [cfg])]
         assert cfg.mamba_num_blocks == 640
         assert vllm_config.cache_config.mamba_num_blocks == 640
         assert hc_mod.get_mamba_num_blocks() == 640
+
+    def test_executor_mixin_fails_fast_without_hooks(self):
+        """A hybrid model in align mode whose engine-core process never
+        installed the hooks must not reach the Scheduler: the stock
+        coordinator would hand out mamba block ids from the shared pool."""
+        from unittest.mock import patch
+
+        import vllm.v1.core.kv_cache_manager as mgr_mod
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            MambaPoolSyncExecutorMixin
+
+        cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                mamba_num_blocks=None)
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.mamba_num_blocks = None
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+
+        class FakeBaseExecutor:
+
+            def __init__(self, vllm_config):
+                self.vllm_config = vllm_config
+
+            def initialize_from_config(self, kv_cache_configs):
+                pass
+
+            def collective_rpc(self, method):
+                return [640]
+
+        class FakeExecutor(MambaPoolSyncExecutorMixin, FakeBaseExecutor):
+            pass
+
+        hc_mod._GLOBAL_MAMBA_NUM_BLOCKS = None
+        with patch.object(hc_mod, "_HOOKS_INSTALLED", False), \
+                patch.object(mgr_mod, "KVCacheManager", hc_mod.KVCacheManager):
+            with pytest.raises(RuntimeError,
+                               match="would not use "
+                               "TPUHybridKVCacheCoordinator"):
+                FakeExecutor(vllm_config).initialize_from_config([cfg])
+
+    def test_verify_hooks(self):
+        from unittest.mock import patch
+
+        import vllm.v1.core.kv_cache_coordinator as coord_mod
+        import vllm.v1.core.kv_cache_manager as mgr_mod
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        from tpu_inference.core.hybrid_coordinator import \
+            verify_hybrid_coordinator_hooks
+
+        hybrid_cfg = _make_mock_hybrid_kv_cache_config(num_attn_blocks=100,
+                                                       mamba_num_blocks=16)
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+
+        # Hooks installed: passes.
+        install_hybrid_coordinator_hooks()
+        verify_hybrid_coordinator_hooks(vllm_config, hybrid_cfg)
+
+        # Hooks missing in this process: hybrid + align must raise ...
+        with patch.object(hc_mod, "_HOOKS_INSTALLED", False), \
+                patch.object(mgr_mod, "KVCacheManager", hc_mod.KVCacheManager), \
+                patch.object(coord_mod, "get_kv_cache_coordinator",
+                             hc_mod.orig_get_kv_cache_coordinator):
+            with pytest.raises(RuntimeError, match="never ran"):
+                verify_hybrid_coordinator_hooks(vllm_config, hybrid_cfg)
+
+            # ... but a model without mamba layers does not need them ...
+            attn_only = MagicMock()
+            attn_only.kv_cache_groups = [hybrid_cfg.kv_cache_groups[0]]
+            verify_hybrid_coordinator_hooks(vllm_config, attn_only)
+
+            # ... and neither does a hybrid model without mamba prefix caching.
+            vllm_config.cache_config.mamba_cache_mode = "none"
+            verify_hybrid_coordinator_hooks(vllm_config, hybrid_cfg)
+
+    def test_uniproc_executor_installs_hooks_before_scheduler(self):
+        """The single-host path uses vLLM's UniProcExecutor; the engine core
+        builds the Scheduler right after the executor, so the hooks must be
+        installed from the executor's _init_executor (as the multiproc and
+        Ray executors do), not from the platform config hook."""
+        from unittest.mock import patch
+
+        import vllm.v1.executor.uniproc_executor as vllm_uniproc
+
+        import tpu_inference.core.hybrid_coordinator as hc_mod
+        import tpu_inference.executors.uniproc_executor as tpu_uniproc
+        from tpu_inference.core.hybrid_coordinator import \
+            MambaPoolSyncExecutorMixin
+
+        assert issubclass(tpu_uniproc.UniProcExecutor,
+                          vllm_uniproc.UniProcExecutor)
+        assert issubclass(tpu_uniproc.UniProcExecutor,
+                          MambaPoolSyncExecutorMixin)
+
+        vllm_config = _make_mock_vllm_config(dp_size=1, max_num_seqs=8)
+        vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.cache_config.mamba_cache_mode = "align"
+        order = []
+        with patch.object(hc_mod, "install_hybrid_coordinator_hooks",
+                          side_effect=lambda cfg: order.append("hooks")), \
+                patch.object(vllm_uniproc.UniProcExecutor, "_init_executor",
+                             side_effect=lambda: order.append("base_init")):
+            executor = tpu_uniproc.UniProcExecutor.__new__(
+                tpu_uniproc.UniProcExecutor)
+            executor.vllm_config = vllm_config
+            executor._init_executor()
+        assert order == ["hooks", "base_init"]
 
     def test_tpu_get_kv_cache_coordinator_resolves_from_kv_cache_config(self):
         import tpu_inference.core.hybrid_coordinator as hc_mod
@@ -769,3 +971,50 @@ class TestTPUKVCacheManager:
                                                  num_new_tokens=16)
         assert blocks_no_mamba is None
         coord.mamba_block_pool.free_blocks(allocated_mamba)
+
+
+class TestTPUModelRunnerCoW:
+
+    def test_apply_dense_kv_cache_block_copies(self):
+        import jax.numpy as jnp
+        from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+
+        from tpu_inference.runner.kv_cache_copy import \
+            apply_dense_kv_cache_block_copies
+
+        attn0 = jnp.zeros((64, 16, 4, 128), dtype=jnp.float32)
+        attn1 = jnp.zeros((64, 16, 4, 128), dtype=jnp.float32)
+        mamba_conv = jnp.zeros((32, 4, 64), dtype=jnp.float32)
+        mamba_ssm = jnp.zeros((32, 8, 16, 16), dtype=jnp.float32)
+
+        # Set distinctive values in src blocks
+        attn0 = attn0.at[5, 0, 0, 0].set(42.0)
+        attn1 = attn1.at[5, 0, 0, 0].set(84.0)
+        attn0 = attn0.at[7, 0, 0, 0].set(100.0)
+        attn1 = attn1.at[7, 0, 0, 0].set(200.0)
+        mamba_conv = mamba_conv.at[5, 0, 0].set(999.0)
+
+        kv_caches = [attn0, attn1, (mamba_conv, mamba_ssm)]
+
+        # Apply block copies: 5 -> 12, 7 -> 15
+        copies = [
+            KVCacheBlockCopy(src_block_id=5, dst_block_id=12),
+            KVCacheBlockCopy(src_block_id=7, dst_block_id=15),
+        ]
+        num_applied = apply_dense_kv_cache_block_copies(kv_caches, copies)
+        assert num_applied == 2
+
+        # Verify attention blocks were copied correctly
+        assert float(kv_caches[0][12, 0, 0, 0]) == 42.0
+        assert float(kv_caches[1][12, 0, 0, 0]) == 84.0
+        assert float(kv_caches[0][15, 0, 0, 0]) == 100.0
+        assert float(kv_caches[1][15, 0, 0, 0]) == 200.0
+
+        # Verify source blocks and other blocks are unchanged
+        assert float(kv_caches[0][5, 0, 0, 0]) == 42.0
+        assert float(kv_caches[0][0, 0, 0, 0]) == 0.0
+
+        # Verify mamba state was untouched
+        assert isinstance(kv_caches[2], tuple)
+        assert float(kv_caches[2][0][5, 0, 0]) == 999.0
+        assert float(kv_caches[2][0][12, 0, 0]) == 0.0

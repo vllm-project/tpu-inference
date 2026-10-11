@@ -18,7 +18,7 @@ import random
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, cast
 
 import jax
 import jax.numpy as jnp
@@ -77,6 +77,8 @@ from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.compilation_manager import CompilationManager
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
+from tpu_inference.runner.kv_cache_copy import (
+    apply_dense_kv_cache_block_copies, jitted_copy_kv_cache_blocks)
 from tpu_inference.runner.kv_cache_manager import KVCacheManager
 from tpu_inference.runner.lora_utils import LoraUtils
 from tpu_inference.runner.multimodal_manager import MultiModalManager
@@ -1670,6 +1672,36 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
         return placeholder_req_id_to_index
 
+    _jitted_copy_kv_cache_blocks = staticmethod(jitted_copy_kv_cache_blocks)
+
+    def _apply_dense_kv_cache_block_copies(
+        self,
+        block_copies: Sequence[Any],
+    ) -> None:
+        """Applies Copy-on-Write (CoW) block copies for partial prefix-cache hits.
+
+        When Decode Context Parallelism (DCP) prefix caching produces sub-block hits
+        (e.g. 256-token granularity inside 1024-token attention blocks), the scheduler
+        allocates a new private block and emits kv_cache_block_copies = [(src_block_id, dst_block_id)].
+        This method copies the existing KV content from src into dst across all attention layers
+        on TPU device memory before the forward pass executes.
+        """
+        if not block_copies or not self.kv_caches:
+            return
+        num_copies = apply_dense_kv_cache_block_copies(self.kv_caches,
+                                                       block_copies)
+        if num_copies > 0:
+            self._applied_cow_copies = getattr(self, "_applied_cow_copies",
+                                               0) + num_copies
+            if self._applied_cow_copies == num_copies:
+                logger.info(
+                    "Applied %d kv_cache_block_copies (CoW) for partial prefix hits across attention layers",
+                    num_copies)
+            else:
+                logger.debug(
+                    "Applied %d kv_cache_block_copies (CoW) (total_applied=%d)",
+                    num_copies, self._applied_cow_copies)
+
     def _execute_model(
         self,
         scheduler_output: "VllmSchedulerOutput",
@@ -1677,6 +1709,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
+        _copies = getattr(scheduler_output, "kv_cache_block_copies", None)
+        if _copies:
+            self._apply_dense_kv_cache_block_copies(_copies)
         if not scheduler_output.total_num_scheduled_tokens:
             if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
                 self._modify_prev_results()
