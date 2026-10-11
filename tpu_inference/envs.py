@@ -94,6 +94,11 @@ if TYPE_CHECKING:
     SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     RAIDEN_H2D_SETTLE: bool = True
+    TPU_MOE_SINGLE_SORT: bool = False
+    TPU_MOE_ROUTER_TOPK: str = "sort"
+    TPU_MOE_LOWTOK: bool = False
+    TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
+    TPU_MOE_DENSE_EXPERT_THRESHOLD: int = 0
 
 
 def env_with_choices(
@@ -386,10 +391,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "USE_BATCHED_RPA_KERNEL":
     env_bool("USE_BATCHED_RPA_KERNEL"),
     "USE_BATCHED_RPA_LONG_CTX_KERNEL":
-    lambda: (
-        env_bool("USE_BATCHED_RPA_LONG_CTX_KERNEL")()
-        or env_bool("USE_BATCHED_RPA_LONGCTX")()
-    ),
+    lambda: (env_bool("USE_BATCHED_RPA_LONG_CTX_KERNEL")
+             () or env_bool("USE_BATCHED_RPA_LONGCTX")()),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
     # Optional operator override for RPA v3 kernel block sizes, per case.
@@ -569,6 +572,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":
     env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # Build the MoE permutation, its inverse, and the sorted token ids from
+    # one packed sort instead of three.
+    "TPU_MOE_SINGLE_SORT":
+    env_bool("TPU_MOE_SINGLE_SORT", default=False),
+    # MoE router top-k implementation: "rowmax" is the sort-free k-pass
+    # selection, "sort" is jax.lax.top_k.
+    "TPU_MOE_ROUTER_TOPK":
+    env_with_choices("TPU_MOE_ROUTER_TOPK", "sort", ["sort", "rowmax"]),
+    # Experimental small-batch MoE (kernels/experimental/moe_lowtok) for EP
+    # calls of at most TPU_MOE_LOWTOK_MAX_TOKENS rows.
+    "TPU_MOE_LOWTOK":
+    env_bool("TPU_MOE_LOWTOK", default=False),
+    "TPU_MOE_LOWTOK_MAX_TOKENS":
+    lambda: int(os.getenv("TPU_MOE_LOWTOK_MAX_TOKENS", "128")),
+    # Maximum hidden-state row count for dense expert MoE. 0 disables it.
+    "TPU_MOE_DENSE_EXPERT_THRESHOLD":
+    lambda: int(os.getenv("TPU_MOE_DENSE_EXPERT_THRESHOLD", "0")),
 }
 
 
