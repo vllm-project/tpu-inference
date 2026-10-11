@@ -32,7 +32,8 @@ from typing import Optional, Sequence, Union
 import jax
 import jax.numpy as jnp
 import torch
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from torch.nn.parameter import Parameter
 from torchax.interop import jax_view, torch_view
 from vllm.model_executor.layers.attention import Attention
@@ -55,17 +56,24 @@ from tpu_inference.layers.common.process_weights.linear_weights import (
     LinearWeights, process_linear_weights, shard_linear_weights,
     to_parameter_list)
 from tpu_inference.layers.common.process_weights.moe_weights import (
-    FusedMoEWeights, process_quantized_moe_weights, shard_moe_weights_to_tpu)
+    FusedMoEWeights, _get_expert_shard_axis, process_quantized_moe_weights,
+    shard_moe_weights_to_tpu)
 from tpu_inference.layers.common.quant_methods import NVFP4
 from tpu_inference.layers.common.quantization import u8_unpack_e2m1
 from tpu_inference.layers.common.utils import \
     slice_sharded_tensor_for_concatenation
 from tpu_inference.layers.vllm.interface.moe import (
     select_moe_backend_from_fused_moe_config, vllm_moe_apply)
+from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
+    _tensor_is_in_cpu
+from tpu_inference.layers.vllm.quantization.base import VllmQuantizationMethod
 from tpu_inference.layers.vllm.quantization.configs import (
     VllmQuantConfig, VllmQuantLinearConfig)
+from tpu_inference.layers.vllm.quantization.fp8 import (_free_torch_storage,
+                                                        _release_host_memory)
 from tpu_inference.layers.vllm.quantization.unquantized import (
-    VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod)
+    VllmUnquantizedFusedMoEMethod, VllmUnquantizedLinearMethod,
+    _load_weight_for_layer)
 from tpu_inference.logger import init_logger
 from tpu_inference.utils import t2j, to_jax_dtype
 
@@ -296,7 +304,7 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         return jnp.concatenate(outs, axis=-1)
 
 
-class VllmNvfp4MoEMethod(FusedMoEMethodBase):
+class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
     """NVFP4 MoE for TPU.
 
     Reuses upstream ModelOptNvFp4FusedMoE.create_weights for parameter
@@ -304,7 +312,19 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
     Weights stay packed E2M1 in HBM; the FP32 global × FP8 block scales are
     combined into a single FP32 blockwise scale of size 16 and the matmul
     runs through gmm_v2's dequant-in-VMEM path.
+
+    Large checkpoints: with VLLM_INCREMENTAL_FP8_LOADING the layer is
+    processed as soon as all of its experts are loaded (freeing its host
+    copy), and with MOE_STAGE_WEIGHTS_ON_HOST each weight is placed straight
+    at its expert sharding instead of passing through one device. Both match
+    the FP8 MoE method.
     """
+
+    # Per-expert parameters the layer waits for before incremental
+    # processing, with the shard ids the MoE weight loader passes for them.
+    # Activation scales are not used on TPU, so they are not waited for.
+    _W13_PARAMS = ("w13_weight", "w13_weight_scale", "w13_weight_scale_2")
+    _W2_PARAMS = ("w2_weight", "w2_weight_scale", "w2_weight_scale_2")
 
     def __init__(self, quant_config, layer, mesh, ep_axis_name="model"):
         # Skip ModelOptNvFp4FusedMoE.__init__ (selects GPU experts backend).
@@ -367,23 +387,89 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(self, layer):
         return None
 
+    def maybe_process_weights(self, layer: torch.nn.Module, param_name: str,
+                              args, kwargs):
+        """Process the layer once every expert's weights are loaded.
+
+        Called by the incremental loader after each weight load. Reuses the
+        VLLM_INCREMENTAL_FP8_LOADING switch, which turns on incremental
+        processing for the quantized MoE layers.
+        """
+        if not envs.VLLM_INCREMENTAL_FP8_LOADING or self.moe.has_bias:
+            # Bias layers fall back to processing after the full load.
+            return
+
+        w13_shards = ("w1", "w3") if self.moe.is_act_and_mul else ("w1", )
+        if param_name in self._W13_PARAMS:
+            shard_ids = w13_shards
+        elif param_name in self._W2_PARAMS:
+            shard_ids = ("w2", )
+        else:
+            return
+        # The MoE weight loader's signature is
+        # (param, loaded_weight, weight_name, shard_id, expert_id, ...).
+        shard_id = kwargs.get("shard_id", args[1] if len(args) > 1 else None)
+        expert_id = kwargs.get("expert_id", args[2] if len(args) > 2 else None)
+        if expert_id is None or shard_id not in shard_ids:
+            return
+
+        if not hasattr(layer, "_loaded_weights"):
+            layer._loaded_weights = set()
+        layer._loaded_weights.add((param_name, expert_id, shard_id))
+
+        per_expert = (len(self._W13_PARAMS) * len(w13_shards) +
+                      len(self._W2_PARAMS))
+        if len(layer._loaded_weights) >= per_expert * layer.global_num_experts:
+            logger.debug("[nvfp4-incremental] Processing MoE layer %s",
+                         layer.layer_name)
+            self.process_weights_after_loading(layer)
+
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, RoutedExperts)
+        # Already processed during incremental loading.
+        if not hasattr(layer, "w13_weight") or not _tensor_is_in_cpu(
+                layer.w13_weight):
+            return
+
         # Drop unused activation-quant scales registered by upstream.
         for attr in ('w13_input_scale', 'w2_input_scale'):
             if hasattr(layer, attr):
                 delattr(layer, attr)
 
-        w13_weight = t2j(layer.w13_weight, use_dlpack=False)
-        w13_weight_scale = t2j(layer.w13_weight_scale, use_dlpack=False)
-        w2_weight = t2j(layer.w2_weight, use_dlpack=False)
-        w2_weight_scale = t2j(layer.w2_weight_scale, use_dlpack=False)
-        w13_global_scale = t2j(layer.w13_weight_scale_2, use_dlpack=False)
-        w2_global_scale = t2j(layer.w2_weight_scale_2, use_dlpack=False)
-        w13_bias = t2j(layer.w13_bias,
-                       use_dlpack=False) if self.moe.has_bias else None
-        w2_bias = t2j(layer.w2_bias,
-                      use_dlpack=False) if self.moe.has_bias else None
+        # With MOE_STAGE_WEIGHTS_ON_HOST each weight goes straight to the
+        # expert sharding that shard_moe_weights_to_tpu below would give it,
+        # without a full-size stop on one device.
+        expert_sharding = NamedSharding(self.mesh,
+                                        P(_get_expert_shard_axis(self.mesh)))
+        on_host = envs.MOE_STAGE_WEIGHTS_ON_HOST
+        param_names = [
+            "w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale",
+            "w13_weight_scale_2", "w2_weight_scale_2"
+        ]
+        if self.moe.has_bias:
+            param_names += ["w13_bias", "w2_bias"]
+        loaded = {
+            name:
+            _load_weight_for_layer(layer,
+                                   name,
+                                   expert_sharding,
+                                   stage_on_host=on_host)
+            for name in param_names
+        }
+        # Free the host copies now that the weights are on the TPU.
+        for name in param_names:
+            _free_torch_storage(getattr(layer, name))
+            delattr(layer, name)
+
+        w13_weight = loaded["w13_weight"]
+        w13_weight_scale = loaded["w13_weight_scale"]
+        w2_weight = loaded["w2_weight"]
+        w2_weight_scale = loaded["w2_weight_scale"]
+        w13_global_scale = loaded["w13_weight_scale_2"]
+        w2_global_scale = loaded["w2_weight_scale_2"]
+        w13_bias = loaded.get("w13_bias")
+        w2_bias = loaded.get("w2_bias")
+        del loaded
 
         # Create FusedMoEWeights with original weights
         weights = FusedMoEWeights(
@@ -469,6 +555,7 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase):
         if self.moe.has_bias:
             layer.w13_bias = Parameter(weights.w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(weights.w2_bias, requires_grad=False)
+        _release_host_memory()
 
     def apply_monolithic(self, layer, x, router_logits, **kwargs):
         weights = FusedMoEWeights(
