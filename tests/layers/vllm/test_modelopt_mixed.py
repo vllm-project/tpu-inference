@@ -480,3 +480,56 @@ def test_nvfp4_moe_checkpoint_layout(num_devices, disable_requant, load_mode,
     # remains. Default requantization re-quantizes FP4 per row, which is
     # lossier than keeping the native 16-element blocks.
     assert rel < (0.05 if disable_requant else 0.25), rel
+
+
+def test_nvfp4_moe_keeps_only_local_experts():
+    """On a multi-host slice each host copies only the experts it holds.
+
+    The single-host mask must cover every expert; a synthetic two-host mask
+    must leave the other host's experts unwritten while still acknowledging
+    their tensors to the model's weight loader.
+    """
+    num_experts, hidden, inter = 4, 256, 256
+    vllm_config = make_vllm_config()
+    mesh = test_utils.get_spmd_mesh(1)
+    qc = make_quant_config(vllm_config, mesh)
+    moe_layer = build_moe("model.layers.0.mlp.experts", qc, vllm_config,
+                          num_experts, 2, hidden, inter)
+    experts = moe_layer.routed_experts
+    qm = experts.quant_method
+    assert all(qm._local_expert_mask(num_experts))
+
+    local = [True, False, True, False]
+    qm._keep_local_experts_only(experts, local)
+    for name in ("w13_weight", "w2_weight", "w13_weight_scale_2",
+                 "w2_weight_scale_2"):
+        getattr(experts, name).data.zero_()
+
+    torch.manual_seed(0)
+    for e in range(num_experts):
+        for proj, shard_id, shape in (("gate_proj", "w1", (inter, hidden)),
+                                      ("up_proj", "w3", (inter, hidden)),
+                                      ("down_proj", "w2", (hidden, inter))):
+            packed, scale, global_scale = quantize_to_nvfp4(
+                torch.randn(shape) / 10, NVFP4_GROUP_SIZE)
+            w_prefix = "w2" if shard_id == "w2" else "w13"
+            for suffix, tensor in (("weight", packed), ("weight_scale", scale),
+                                   ("weight_scale_2",
+                                    global_scale.reshape(1))):
+                name = f"{w_prefix}_{suffix}"
+                param = getattr(experts, name)
+                assert param.weight_loader(
+                    param,
+                    tensor,
+                    f"model.layers.0.mlp.experts.{name}",
+                    shard_id=shard_id,
+                    expert_id=e,
+                    return_success=True) is True
+
+    for e in range(num_experts):
+        for name in ("w13_weight", "w2_weight", "w13_weight_scale_2",
+                     "w2_weight_scale_2"):
+            written = bool(getattr(experts, name).data[e].any())
+            assert written == local[e], (name, e)
+    # With only local experts kept, processing waits for the full load.
+    assert qm._defer_processing
