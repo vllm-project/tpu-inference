@@ -15,16 +15,18 @@
 # BF16_LINEAR_REQUANTIZE_PATTERNS now only matches the BF16 shared expert; the
 # attention / linear-attention projections are FP8 in this checkpoint.
 #
-# DISABLE_WEIGHT_REQUANTIZATION=1 keeps the experts' native NVFP4 block
-# scales. With the default MoE requantization they are re-quantized to one FP4
-# scale per row, which unit tests put at ~20% relative MoE error. A follow-up
-# build re-enables requantization.
+# This build: #79 with MoE weight requantization back on (the default):
+# DISABLE_WEIGHT_REQUANTIZATION is no longer set, so the experts' NVFP4
+# 16-element block scales are re-quantized to one FP4 scale per row. Unit
+# tests put that at ~20% relative MoE error vs ~0.8% with the native blocks.
+# #79 (native blocks): GSM8K 0.9795 / 0.9795, MMLU 0.8926.
 #
 # WHAT TO READ FIRST:
-#   1. "Disabled weight requantization" (moe_weights.py) and the absence of
-#      "Host staging unavailable" in the job log; weights loaded per host, and
-#      the "Init model" memory vs #72's 80.52 GiB/device.
-#   2. GSM8K flexible / strict and MMLU vs #72's 0.9803 / 0.9803 and 0.8940.
+#   1. "[MoE requantization]: re-quantizing MoE weights to float4_e2m1fn"
+#      (moe_weights.py) in the job log; the "Init model" memory vs #79's
+#      75.94 GiB/device (host 0: 63.14).
+#   2. GSM8K flexible / strict and MMLU vs #79's 0.9795 / 0.9795 and 0.8926
+#      and #72's (FP8) 0.9803 / 0.9803 and 0.8940.
 
 .docker_build_template: &docker_build_template
   agents:
@@ -46,7 +48,7 @@ steps:
       BM_INFRA: "true"
       TPU_VERSION: "tpu7x"
 
-  - label: ":kubernetes: Qwen3.8-2.4T-A95B-NVFP4 accuracy (kube v7x-32, modelopt_mixed, MoE requantization off): GSM8K + MMLU"
+  - label: ":kubernetes: Qwen3.8-2.4T-A95B-NVFP4 accuracy (kube v7x-32, modelopt_mixed, MoE requantization on): GSM8K + MMLU"
     key: qwen38_2p4t_nvfp4_kube_v7x32
     depends_on: "build_docker_tpu7x"
     # Counted from when the agent takes the job, so it includes any wait for
@@ -65,7 +67,7 @@ steps:
           podTemplate: tpu-launcher
     # /bin/sh: no bash arrays. MULTIHOST_ENV_B64 is every host's environment
     # (Ray workers load, shard and run the model). In order: runtime and
-    # loading, MoE requantization, the requantization patterns, #72's four MoE
+    # loading, the requantization patterns, #72's four MoE
     # options and two ragged-gather knobs, serve.sh, the legs (no perf sweep,
     # GSM8K + MMLU), and ART_DIR.
     commands:
@@ -86,7 +88,6 @@ steps:
           'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
           'RUNAI_STREAMER_LOG_LEVEL=INFO' \
           'RUNAI_STREAMER_LOG_TO_STDERR=1' \
-          'DISABLE_WEIGHT_REQUANTIZATION=1' \
           'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$' \
           'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512' \
           'SKIP_MAMBA_SCHEDULER_BLOCKS=true' \
