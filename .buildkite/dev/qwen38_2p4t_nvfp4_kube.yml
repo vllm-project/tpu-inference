@@ -1,0 +1,128 @@
+# Qwen3.8-2.4T-A95B-NVFP4 on the kube v7x-32 slice (tpu7x-standard-4t/2x2x4: 4
+# hosts, 16 chips, 32 devices): GSM8K + MMLU against one server, no perf legs.
+#
+# Checkpoint: nvidia/Qwen3.8-2.4T-A95B-NVFP4, a ModelOpt MIXED_PRECISION
+# checkpoint (vLLM: modelopt_mixed). NVFP4 (16-element blocks) routed experts,
+# per-tensor FP8 attention and linear-attention projections, BF16 elsewhere;
+# MTP excluded. Copied unchanged to MODEL_PATH below.
+#
+# Code under test: modelopt_mixed on TPU (VllmModelOptMixedConfig) and
+# host-staged / incremental loading of the NVFP4 experts
+# (MOE_STAGE_WEIGHTS_ON_HOST, VLLM_INCREMENTAL_FP8_LOADING).
+#
+# Serve configuration is #72's (the FP8 baseline: GSM8K 0.9803 / 0.9803, MMLU
+# 0.8940) with the checkpoint swapped and the perf and profiling legs off.
+# BF16_LINEAR_REQUANTIZE_PATTERNS now only matches the BF16 shared expert; the
+# attention / linear-attention projections are FP8 in this checkpoint.
+#
+# DISABLE_WEIGHT_REQUANTIZATION=1 keeps the experts' native NVFP4 block
+# scales. With the default MoE requantization they are re-quantized to one FP4
+# scale per row, which unit tests put at ~20% relative MoE error. A follow-up
+# build re-enables requantization.
+#
+# WHAT TO READ FIRST:
+#   1. "Disabled weight requantization" (moe_weights.py) and the absence of
+#      "Host staging unavailable" in the job log; weights loaded per host, and
+#      the "Init model" memory vs #72's 80.52 GiB/device.
+#   2. GSM8K flexible / strict and MMLU vs #72's 0.9803 / 0.9803 and 0.8940.
+
+.docker_build_template: &docker_build_template
+  agents:
+    queue: cpu_64_core
+  retry:
+    automatic:
+      - exit_status: "*"
+        limit: 3
+  commands:
+    - bash -c 'source .buildkite/scripts/setup_docker_env.sh && setup_environment "vllm-tpu" "false" "true"'
+
+steps:
+  # Publishes ci-image-tpu7x, from which run.sh names the workload image.
+  - label: ":docker: Build and Push Base Image (tpu7x)"
+    key: "build_docker_tpu7x"
+    <<: *docker_build_template
+    timeout_in_minutes: 60
+    env:
+      BM_INFRA: "true"
+      TPU_VERSION: "tpu7x"
+
+  - label: ":kubernetes: Qwen3.8-2.4T-A95B-NVFP4 accuracy (kube v7x-32, modelopt_mixed, MoE requantization off): GSM8K + MMLU"
+    key: qwen38_2p4t_nvfp4_kube_v7x32
+    depends_on: "build_docker_tpu7x"
+    # Counted from when the agent takes the job, so it includes any wait for
+    # the slice's quota; TPU_MAX_RUNTIME_SECONDS bounds the run itself.
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      TPU_VERSION: "tpu7x"
+      MULTIHOST_MANIFEST: "ray-multihost-slice.yaml"
+      MULTIHOST_SHAPE: "tpu7x-standard-4t/2x2x4"
+      ARTIFACTS_DIR: "dev_artifacts"
+      TPU_MAX_RUNTIME_SECONDS: "14400"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    # /bin/sh: no bash arrays. MULTIHOST_ENV_B64 is every host's environment
+    # (Ray workers load, shard and run the model). In order: runtime and
+    # loading, MoE requantization, the requantization patterns, #72's four MoE
+    # options and two ragged-gather knobs, serve.sh, the legs (no perf sweep,
+    # GSM8K + MMLU), and ART_DIR.
+    commands:
+      - |
+        set -euo pipefail
+        MULTIHOST_ENV_B64=$$(printf '%s\0' \
+          'MODEL_IMPL_TYPE=vllm' \
+          'NEW_MODEL_DESIGN=1' \
+          'USE_BATCHED_RPA_KERNEL=1' \
+          'USE_BATCHED_RPA_SEQ_ON_LANE=1' \
+          'USE_MOE_EP_KERNEL=0' \
+          'VLLM_INCREMENTAL_FP8_LOADING=1' \
+          'MOE_STAGE_WEIGHTS_ON_HOST=1' \
+          'VLLM_XLA_CHECK_RECOMPILATION=0' \
+          'SKIP_JAX_PRECOMPILE=0' \
+          'VLLM_ENGINE_READY_TIMEOUT_S=18000' \
+          'RUNAI_STREAMER_CONCURRENCY=16' \
+          'RUNAI_STREAMER_MEMORY_LIMIT=128000000000' \
+          'RUNAI_STREAMER_LOG_LEVEL=INFO' \
+          'RUNAI_STREAMER_LOG_TO_STDERR=1' \
+          'DISABLE_WEIGHT_REQUANTIZATION=1' \
+          'BF16_LINEAR_REQUANTIZE_PATTERNS=re:.*self_attn\..*,re:.*linear_attn.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)$$,re:.*\.mlp\.shared_expert\.(gate_up_proj|gate_proj|up_proj|down_proj)$$' \
+          'BF16_LINEAR_REQUANTIZE_BLOCK_SIZE=512' \
+          'SKIP_MAMBA_SCHEDULER_BLOCKS=true' \
+          'MOE_HIERARCHICAL_COLLECT=true' \
+          'MOE_HIERARCHICAL_DISPATCH=true' \
+          'MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8' \
+          'RAGGED_GATHER_MAX_ROW_SUBCHUNKS=1' \
+          'RAGGED_GATHER_TRIM_ROWS=0' \
+          'MODEL_PATH=gs://tpu-commons-ci/qwen/Qwen3.8-2.4T-A95B-NVFP4' \
+          'SERVED_NAME=nvidia/Qwen3.8-2.4T-A95B-NVFP4' \
+          'TOKENIZER=nvidia/Qwen3.8-2.4T-A95B-NVFP4' \
+          'TENSOR_PARALLEL_SIZE=32' \
+          'ATTN_DP_SIZE=8' \
+          'MAX_MODEL_LEN=40960' \
+          'MAX_NUM_SEQS=48' \
+          'NUM_GPU_BLOCKS_OVERRIDE=28928' \
+          'MAX_NUM_BATCHED_TOKENS=512' \
+          'COMPILATION_SIZES=384' \
+          'GPU_MEMORY_UTILIZATION=0.98' \
+          'BLOCK_SIZE=128' \
+          'KV_CACHE_DTYPE=fp8' \
+          'JAX_CACHE_GUARD=0' \
+          'SERVE_DEBUG_ERRORS=0' \
+          'BENCH_SWEEP=none' \
+          'STD_EVAL_SUITE=gsm8k,mmlu' \
+          'GSM8K_REASONING_EFFORT=low' \
+          'GSM8K_CONCURRENCY=64' \
+          'GSM8K_MAX_TOKENS=1024' \
+          'GSM8K_TIMEOUT_S=7200' \
+          'MMLU_BATCH_SIZE=8' \
+          'MMLU_CONCURRENCY=8' \
+          'MMLU_TIMEOUT_S=10800' \
+          'EVAL_SUITE=none' \
+          'ART_DIR=/workspace/tpu_inference/dev_artifacts' \
+          | base64 | tr -d '\n')
+        export MULTIHOST_ENV_B64
+        echo "--- effective MULTIHOST_ENV_B64"
+        printf '%s' "$$MULTIHOST_ENV_B64" | base64 -d | tr '\0' '\n'
+        .buildkite/kubernetes/run.sh bash .buildkite/dev/qwen38_2p4t_kube_head.sh
