@@ -304,6 +304,24 @@ class VllmNvfp4LinearMethod(VllmUnquantizedLinearMethod):
         return jnp.concatenate(outs, axis=-1)
 
 
+def _local_experts_loader(loader, local_mask: list[bool]):
+    """Wrap a MoE weight loader to skip experts outside `local_mask`."""
+
+    def weight_loader(param, loaded_weight, *args, **kwargs):
+        # The MoE weight loader's signature is
+        # (param, loaded_weight, weight_name, shard_id, expert_id,
+        #  return_success).
+        expert_id = kwargs.get("expert_id", args[2] if len(args) > 2 else None)
+        if expert_id is not None and not local_mask[expert_id]:
+            return_success = kwargs.get("return_success",
+                                        args[3] if len(args) > 3 else False)
+            # Handled: another host holds this expert.
+            return True if return_success else None
+        return loader(param, loaded_weight, *args, **kwargs)
+
+    return weight_loader
+
+
 class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
     """NVFP4 MoE for TPU.
 
@@ -384,6 +402,52 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
+        if jax.process_count() > 1:
+            self._keep_local_experts_only(layer,
+                                          self._local_expert_mask(num_experts))
+
+    def _expert_sharding(self) -> NamedSharding:
+        return NamedSharding(self.mesh, P(_get_expert_shard_axis(self.mesh)))
+
+    def _local_expert_mask(self, num_experts: int) -> list[bool]:
+        """Which experts this host's devices hold under the expert sharding."""
+        mask = [False] * num_experts
+        index_map = self._expert_sharding().addressable_devices_indices_map(
+            (num_experts, ))
+        for index in index_map.values():
+            for e in range(num_experts)[index[0]]:
+                mask[e] = True
+        return mask
+
+    def _keep_local_experts_only(self, layer: torch.nn.Module,
+                                 local_mask: list[bool]) -> None:
+        """Drop the checkpoint tensors of experts this host does not hold.
+
+        Every host loads the whole checkpoint, but the expert-sharded weights
+        are built with make_array_from_callback, which reads only this host's
+        shards. Not copying the other hosts' experts leaves their pages
+        untouched, so host memory holds 1/num_hosts of the experts. This
+        matters when a checkpoint scatters each layer's experts across many
+        files (as ModelOpt exports do): no layer is complete, and so none can
+        be processed and freed, until nearly the whole checkpoint is loaded.
+        """
+        if all(local_mask):
+            return
+        # Host memory is now bounded without incremental processing, which
+        # with such a checkpoint would only run at the very end anyway and in
+        # an order that can differ between hosts (whichever file finishes
+        # last). Leave processing to process_weights_after_loading, which
+        # visits the layers in the same order on every host.
+        self._defer_processing = True
+        for name in ("w13_weight", "w13_weight_scale", "w13_weight_scale_2",
+                     "w13_input_scale", "w2_weight", "w2_weight_scale",
+                     "w2_weight_scale_2", "w2_input_scale", "w13_bias",
+                     "w2_bias"):
+            param = getattr(layer, name, None)
+            loader = getattr(param, "weight_loader", None)
+            if loader is not None:
+                param.weight_loader = _local_experts_loader(loader, local_mask)
+
     def get_fused_moe_quant_config(self, layer):
         return None
 
@@ -395,8 +459,10 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
         VLLM_INCREMENTAL_FP8_LOADING switch, which turns on incremental
         processing for the quantized MoE layers.
         """
-        if not envs.VLLM_INCREMENTAL_FP8_LOADING or self.moe.has_bias:
-            # Bias layers fall back to processing after the full load.
+        if (not envs.VLLM_INCREMENTAL_FP8_LOADING or self.moe.has_bias
+                or getattr(self, "_defer_processing", False)):
+            # Bias layers, and hosts that keep only their own experts (see
+            # _keep_local_experts_only), process after the full load.
             return
 
         w13_shards = ("w1", "w3") if self.moe.is_act_and_mul else ("w1", )
