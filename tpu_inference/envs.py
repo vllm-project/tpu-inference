@@ -99,6 +99,8 @@ if TYPE_CHECKING:
     TPU_MOE_LOWTOK: bool = False
     TPU_MOE_LOWTOK_MAX_TOKENS: int = 128
     TPU_MOE_DENSE_EXPERT_THRESHOLD: int = 0
+    TPU_SMALL_ALL_REDUCE: bool = False
+    TPU_SMALL_ALL_REDUCE_MAX_ROWS: int = 128
 
 
 def env_with_choices(
@@ -589,6 +591,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Maximum hidden-state row count for dense expert MoE. 0 disables it.
     "TPU_MOE_DENSE_EXPERT_THRESHOLD":
     lambda: int(os.getenv("TPU_MOE_DENSE_EXPERT_THRESHOLD", "0")),
+    # Low-latency small collectives (all-reduce) via Pallas ICI remote DMA
+    "TPU_SMALL_ALL_REDUCE":
+    env_bool("TPU_SMALL_ALL_REDUCE", default=False),
+    "TPU_SMALL_ALL_REDUCE_MAX_ROWS":
+    lambda: int(os.getenv("TPU_SMALL_ALL_REDUCE_MAX_ROWS", "128")),
 }
 
 
