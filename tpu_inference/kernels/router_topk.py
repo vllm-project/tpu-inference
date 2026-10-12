@@ -148,13 +148,10 @@ def rowmax_topk(scores: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
 
 
 def router_topk(scores: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
-    """Sort-free router top-k with CPU fallback.
+    """Sort-free router top-k.
 
-    On TPU platform, calls the Pallas kernel. On other platforms (CPU),
-    falls back to the pure-JAX `rowmax_topk`.
+    Uses pure-JAX sort-free rowmax algorithm (rowmax_topk) which partitions
+    natively under auto-SPMD across any device mesh without Mosaic kernel
+    partitioning limitations.
     """
-    if jax.devices()[0].platform != "tpu":
-        return rowmax_topk(scores, k)
-    orig_dtype = scores.dtype
-    weights, ids = select(scores.astype(jnp.float32), k)
-    return weights.astype(orig_dtype), ids
+    return rowmax_topk(scores, k)
