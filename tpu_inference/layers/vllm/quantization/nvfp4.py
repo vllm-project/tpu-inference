@@ -322,6 +322,43 @@ def _local_experts_loader(loader, local_mask: list[bool]):
     return weight_loader
 
 
+# Module level, so it is traced and compiled once rather than once per MoE
+# layer (a jit defined inside the processing method is a new function on
+# every call).
+@jax.jit
+def _unpack_and_fold_scales(
+    weights: FusedMoEWeights,
+    w13_global_scale: jax.Array,
+    w2_global_scale: jax.Array,
+) -> FusedMoEWeights:
+    # Unpack packed uint8 -> native float4_e2m1fn (no value change).
+    w13_fp4 = u8_unpack_e2m1(weights.w13_weight)
+    w2_fp4 = u8_unpack_e2m1(weights.w2_weight)
+
+    # Combine FP32 global × FP8 block -> single FP32 block scale.
+    if w13_global_scale.ndim == 2:  # (E, 2) — separate w1/w3 globals.
+        half = weights.w13_weight_scale.shape[1] // 2
+        w1_eff = weights.w13_weight_scale[:, :half].astype(
+            jnp.float32) * w13_global_scale[:, 0:1].reshape(-1, 1, 1)
+        w3_eff = weights.w13_weight_scale[:, half:].astype(
+            jnp.float32) * w13_global_scale[:, 1:2].reshape(-1, 1, 1)
+        w13_scale_eff = jnp.concatenate([w1_eff, w3_eff], axis=1)
+    else:
+        w13_scale_eff = weights.w13_weight_scale.astype(
+            jnp.float32) * w13_global_scale.reshape(-1, 1, 1)
+    w2_scale_eff = weights.w2_weight_scale.astype(
+        jnp.float32) * w2_global_scale.reshape(-1, 1, 1)
+
+    return FusedMoEWeights(
+        w13_weight=w13_fp4,
+        w13_weight_scale=w13_scale_eff,
+        w13_bias=weights.w13_bias,
+        w2_weight=w2_fp4,
+        w2_weight_scale=w2_scale_eff,
+        w2_bias=weights.w2_bias,
+    )
+
+
 def _ignore_late_weight(param, loaded_weight, *args, **kwargs):
     """Weight loader of a parameter that is no longer used: accept and drop."""
     return_success = kwargs.get("return_success",
@@ -615,41 +652,8 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
         requant_block_size = int(envs.MOE_REQUANTIZE_BLOCK_SIZE
                                  ) if envs.MOE_REQUANTIZE_BLOCK_SIZE else None
 
-        @jax.jit
-        def unpack_and_fold_scales(
-            weights: FusedMoEWeights,
-            w13_global_scale: jax.Array,
-            w2_global_scale: jax.Array,
-        ) -> FusedMoEWeights:
-            # Unpack packed uint8 -> native float4_e2m1fn (no value change).
-            w13_fp4 = u8_unpack_e2m1(weights.w13_weight)
-            w2_fp4 = u8_unpack_e2m1(weights.w2_weight)
-
-            # Combine FP32 global × FP8 block -> single FP32 block scale.
-            if w13_global_scale.ndim == 2:  # (E, 2) — separate w1/w3 globals.
-                half = weights.w13_weight_scale.shape[1] // 2
-                w1_eff = weights.w13_weight_scale[:, :half].astype(
-                    jnp.float32) * w13_global_scale[:, 0:1].reshape(-1, 1, 1)
-                w3_eff = weights.w13_weight_scale[:, half:].astype(
-                    jnp.float32) * w13_global_scale[:, 1:2].reshape(-1, 1, 1)
-                w13_scale_eff = jnp.concatenate([w1_eff, w3_eff], axis=1)
-            else:
-                w13_scale_eff = weights.w13_weight_scale.astype(
-                    jnp.float32) * w13_global_scale.reshape(-1, 1, 1)
-            w2_scale_eff = weights.w2_weight_scale.astype(
-                jnp.float32) * w2_global_scale.reshape(-1, 1, 1)
-
-            return FusedMoEWeights(
-                w13_weight=w13_fp4,
-                w13_weight_scale=w13_scale_eff,
-                w13_bias=weights.w13_bias,
-                w2_weight=w2_fp4,
-                w2_weight_scale=w2_scale_eff,
-                w2_bias=weights.w2_bias,
-            )
-
-        weights = unpack_and_fold_scales(weights, w13_global_scale,
-                                         w2_global_scale)
+        weights = _unpack_and_fold_scales(weights, w13_global_scale,
+                                          w2_global_scale)
         # Outside jit, as in the FP8 MoE method: on multi-host slices
         # process_quantized_moe_weights places weights with
         # general_device_put, which needs concrete arrays.
