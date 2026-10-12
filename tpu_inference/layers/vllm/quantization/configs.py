@@ -43,9 +43,9 @@ class VllmQuantLinearConfig(QuantLinearConfig):
     def __init__(self, vllm_config: VllmConfig, mesh: Mesh, layer: LinearBase):
         assert isinstance(layer, LinearBase)
 
-        super().__init__(
-            enable_sp=vllm_config.compilation_config.pass_config.enable_sp,
-            output_sizes=[layer.output_size])
+        super().__init__(enable_sp=vllm_config.additional_config.get(
+            "enable_sp", False),
+                         output_sizes=[layer.output_size])
         self.mesh = mesh
         self.tp_size = get_mesh_shape_product(self.mesh,
                                               ShardingAxisName.MLP_TENSOR)
