@@ -437,12 +437,9 @@ def test_nvfp4_moe_checkpoint_layout(num_devices, disable_requant, load_mode,
                                    ("weight_scale_2", global_scale.reshape(1)),
                                    ("input_scale", torch.tensor([0.01]))):
                 name = f"{w_prefix}_{suffix}"
-                if not hasattr(experts, name):
-                    # Incremental: the layer was processed after its last
-                    # required weight; the remaining activation scales are
-                    # unused on TPU.
-                    assert load_mode == "incremental" and suffix == "input_scale"
-                    continue
+                # Incremental: the layer is processed after its last required
+                # weight, so the last expert's activation scales arrive late
+                # and must still be accepted (and dropped).
                 param = getattr(experts, name)
                 if (load_mode != "incremental" and name == "w13_weight_scale_2"
                         and shard_id == "w3"):
@@ -471,9 +468,12 @@ def test_nvfp4_moe_checkpoint_layout(num_devices, disable_requant, load_mode,
                                   moe_layer.activation.value)
 
     with torchax.default_env(), set_forward_context(None, vllm_config):
-        # A no-op if incremental loading already processed the layer.
+        # A no-op if incremental loading already processed the layer, apart
+        # from dropping the activation-scale parameters.
         experts.quant_method.process_weights_after_loading(experts)
         assert not _tensor_is_in_cpu(experts.w13_weight)
+        assert not hasattr(experts, "w13_input_scale")
+        assert not hasattr(experts, "w2_input_scale")
         actual = moe_layer(a.to("jax"), score.to("jax"))
         actual = j2t(jax_view(actual).astype(jax.numpy.float32))
 

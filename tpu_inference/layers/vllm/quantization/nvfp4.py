@@ -322,6 +322,13 @@ def _local_experts_loader(loader, local_mask: list[bool]):
     return weight_loader
 
 
+def _ignore_late_weight(param, loaded_weight, *args, **kwargs):
+    """Weight loader of a parameter that is no longer used: accept and drop."""
+    return_success = kwargs.get("return_success",
+                                args[3] if len(args) > 3 else False)
+    return True if return_success else None
+
+
 class _InOrderProcessing:
     """Process MoE layers as they finish loading, in the order they were made.
 
@@ -346,7 +353,7 @@ class _InOrderProcessing:
             ready, quant_method = self._entries[self._next]
             logger.debug("[nvfp4-incremental] Processing MoE layer %s",
                          ready.layer_name)
-            quant_method.process_weights_after_loading(ready)
+            quant_method._process_loaded_weights(ready)
             self._next += 1
 
 
@@ -523,19 +530,30 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
                 return
             logger.debug("[nvfp4-incremental] Processing MoE layer %s",
                          layer.layer_name)
-            self.process_weights_after_loading(layer)
+            self._process_loaded_weights(layer)
 
     def process_weights_after_loading(self, layer):
         assert isinstance(layer, RoutedExperts)
-        # Already processed during incremental loading.
-        if not hasattr(layer, "w13_weight") or not _tensor_is_in_cpu(
+        # Unless already processed during incremental loading.
+        if hasattr(layer, "w13_weight") and _tensor_is_in_cpu(
                 layer.w13_weight):
-            return
-
-        # Drop unused activation-quant scales registered by upstream.
+            self._process_loaded_weights(layer)
+        # The load is over, so no activation scale can still arrive.
         for attr in ('w13_input_scale', 'w2_input_scale'):
             if hasattr(layer, attr):
                 delattr(layer, attr)
+
+    def _process_loaded_weights(self, layer):
+        # Activation-quant scales registered by upstream are unused on TPU.
+        # Free them, but keep the parameters until the load is over: with
+        # incremental processing a layer can be processed before all of its
+        # input_scale tensors have streamed in, and RoutedExperts.load_weights
+        # fails on a missing parameter.
+        for attr in ('w13_input_scale', 'w2_input_scale'):
+            param = getattr(layer, attr, None)
+            if param is not None:
+                _free_torch_storage(param)
+                param.weight_loader = _ignore_late_weight
 
         # With MOE_STAGE_WEIGHTS_ON_HOST each weight goes straight to the
         # expert sharding that shard_moe_weights_to_tpu below would give it,
