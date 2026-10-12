@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     PYTHON_TRACER_LEVEL: int = 1
     USE_MOE_EP_KERNEL: bool = False
     USE_BATCHED_RPA_LONG_CTX_KERNEL: bool = False
+    RAGGED_GATHER_REDUCE_VERSION: str = "v3"
     USE_UNFUSED_MEGABLOCKS: bool = False
     USE_DENSE_MOE: bool = False
     NUM_SLICES: int = 1
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
     CONTINUE_DECODE_EOS_CHECK_INTERVAL: int = 1
     USE_BATCHED_RPA_KERNEL: bool = False
     USE_BATCHED_RPA_SEQ_ON_LANE: bool = False
+    DCP_PROJ_REPLICATE: bool = False
     # Optional operator override for the RPA v3 kernel block sizes, one per
     # case. Each is a comma-separated 4-tuple (bq_sz, bkv_sz, bq_csz, bkv_csz).
     # Empty (default) = use the built-in tuned/heuristic sizes.
@@ -282,6 +284,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use custom expert-parallel kernel for MoE (Mixture of Experts)
     "USE_MOE_EP_KERNEL":
     env_bool("USE_MOE_EP_KERNEL", default=False),
+    # Version of ragged gather reduce kernel to use for SparseCore combine ("v1", "v2", "v3")
+    "RAGGED_GATHER_REDUCE_VERSION":
+    env_with_choices("RAGGED_GATHER_REDUCE_VERSION", "v2", ["v1", "v2", "v3"]),
     # Enable megablocks for JAX sparse matmul for MoE (Mixture of Experts)
     # using Unfused weights
     "USE_UNFUSED_MEGABLOCKS":
@@ -388,6 +393,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "USE_BATCHED_RPA_SEQ_ON_LANE":
     env_bool("USE_BATCHED_RPA_SEQ_ON_LANE"),
+    "DCP_PROJ_REPLICATE":
+    lambda: (
+        env_bool("DCP_PROJ_REPLICATE")()
+        or env_bool("VLLM_DCP_PROJ_REPLICATE")()
+    ),
     # Optional operator override for RPA v3 kernel block sizes, per case.
     # Comma-separated 4-tuple: bq_sz,bkv_sz,bq_csz,bkv_csz. Empty = use the
     # built-in tuned/heuristic sizes. Lets operators retune the decode

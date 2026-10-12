@@ -1677,6 +1677,19 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
+        _copies = getattr(scheduler_output, "kv_cache_block_copies", None)
+        if _copies:
+            # vLLM asks the worker to copy a shared partial prefix-cache block
+            # into a request-private block (copy-on-write). The TPU runner
+            # has no implementation, so the request would read a stale block.
+            # The TPU hybrid coordinator keeps hits block-aligned so this
+            # should never fire; make it loud if it does.
+            self._dropped_cow_copies = getattr(self, "_dropped_cow_copies", 0) + len(_copies)
+            if self._dropped_cow_copies <= 5 * len(_copies):
+                logger.error(
+                    "TPU runner received %d kv_cache_block_copies (copy-on-write) "
+                    "it cannot apply; KV/mamba state of the affected requests is "
+                    "corrupt. total dropped so far: %d", len(_copies), self._dropped_cow_copies)
         if not scheduler_output.total_num_scheduled_tokens:
             if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
                 self._modify_prev_results()
@@ -3262,6 +3275,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
+        is_decode_only = (self.input_batch.request_distribution[0] ==
+                          self.input_batch.num_reqs)
+
         def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
@@ -3272,6 +3288,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
+                is_decode=is_decode_only,
             )
 
             return attention_metadata_gid
@@ -3284,6 +3301,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 request_distribution=request_distribution,
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
+                is_decode=is_decode_only,
             )
 
         attention_metadata: AttentionMetadata | dict[str, AttentionMetadata]
