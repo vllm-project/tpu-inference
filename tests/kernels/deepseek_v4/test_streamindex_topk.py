@@ -156,6 +156,22 @@ def streamindex_topk_ref(
         # Mixed batch: sequence 0 has 1 token (decode), sequence 1 has 5 tokens
         # (prefill)
         (2, 6, 64, 8, 4, 1, 64, 512, 2, 32, 2, [4, 6], [0, 1, 6]),
+        # Non-divisible decode batch remainder (B=6 -> 6 % 4 == 2)
+        (
+            6,
+            6,
+            64,
+            8,
+            4,
+            1,
+            64,
+            512,
+            2,
+            32,
+            2,
+            [8, 10, 12, 14, 16, 18],
+            [0, 1, 2, 3, 4, 5, 6],
+        ),
     ],
 )
 def test_streamindex_topk_shape(
