@@ -35,9 +35,18 @@ from tpu_inference.models.common.layer_filter import (
 
 def _patch_tied_embedding_mapper(model: torch.nn.Module) -> None:
     """Ensure checkpoint weights targeting lm_head are skipped when word embeddings are tied but self.lm_head is not defined."""
-    if hasattr(model, "hf_to_vllm_mapper") and not hasattr(model, "lm_head"):
-        model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
-            orig_to_new_prefix={"lm_head.": None})
+    if not hasattr(model, "hf_to_vllm_mapper") or hasattr(model, "lm_head"):
+        return
+    # Wrappers such as Qwen3_5ForConditionalGeneration keep their own lm_head
+    # in a submodule, and their mapper sends the checkpoint's lm_head.* there.
+    # Merging {"lm_head.": None} would override that mapping and drop the
+    # weights, leaving the lm_head zero.
+    if any(
+            name.rsplit(".", 1)[-1] == "lm_head"
+            for name, _ in model.named_modules()):
+        return
+    model.hf_to_vllm_mapper = model.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_prefix={"lm_head.": None})
 
 
 def attach_incremental_weight_loader(model: torch.nn.Module) -> None:
