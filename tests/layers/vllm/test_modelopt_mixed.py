@@ -536,5 +536,60 @@ def test_nvfp4_moe_keeps_only_local_experts():
                      "w2_weight_scale_2"):
             written = bool(getattr(experts, name).data[e].any())
             assert written == local[e], (name, e)
-    # With only local experts kept, processing waits for the full load.
-    assert qm._defer_processing
+    # With only local experts kept, layers are processed in model order.
+    assert qm._process_order is qm.quant_config._moe_process_order
+
+
+@pytest.mark.skipif(not jtu.is_device_tpu_at_least(version=7),
+                    reason="NVFP4 MoE needs TPUv7+")
+def test_nvfp4_moe_local_experts_process_in_model_order(monkeypatch):
+    """Hosts keeping only their own experts process each layer once it is
+    loaded, but never before the layers created ahead of it: every host must
+    issue the processing in the same order whatever order its files arrive.
+    """
+    monkeypatch.setenv("VLLM_INCREMENTAL_FP8_LOADING", "1")
+    monkeypatch.setenv("MOE_STAGE_WEIGHTS_ON_HOST", "1")
+    num_experts, hidden, inter = 4, 256, 256
+    vllm_config = make_vllm_config()
+    mesh = test_utils.get_spmd_mesh(1)
+    qc = make_quant_config(vllm_config, mesh)
+    layers = []
+    for i in range(2):
+        moe_layer = build_moe(f"model.layers.{i}.mlp.experts", qc, vllm_config,
+                              num_experts, 2, hidden, inter)
+        experts = moe_layer.routed_experts
+        # A synthetic second host holds experts 1 and 3. As in the real load,
+        # the incremental wrapper goes on top of the local-experts filter.
+        experts.quant_method._keep_local_experts_only(
+            experts, [True, False, True, False])
+        attach_incremental_weight_loader(moe_layer)
+        layers.append(experts)
+
+    def load(experts, prefix):
+        torch.manual_seed(0)
+        for e in range(num_experts):
+            for shard_id, shape in (("w1", (inter, hidden)),
+                                    ("w3", (inter, hidden)),
+                                    ("w2", (hidden, inter))):
+                packed, scale, global_scale = quantize_to_nvfp4(
+                    torch.randn(shape) / 10, NVFP4_GROUP_SIZE)
+                w_prefix = "w2" if shard_id == "w2" else "w13"
+                for suffix, tensor in (("weight", packed),
+                                       ("weight_scale", scale),
+                                       ("weight_scale_2",
+                                        global_scale.reshape(1))):
+                    name = f"{w_prefix}_{suffix}"
+                    param = getattr(experts, name)
+                    param.weight_loader(param,
+                                        tensor,
+                                        f"{prefix}.{name}",
+                                        shard_id=shard_id,
+                                        expert_id=e)
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        # Layer 1's file arrives first: it must wait for layer 0.
+        load(layers[1], "model.layers.1.mlp.experts")
+        assert _tensor_is_in_cpu(layers[1].w13_weight)
+        load(layers[0], "model.layers.0.mlp.experts")
+        assert not _tensor_is_in_cpu(layers[0].w13_weight)
+        assert not _tensor_is_in_cpu(layers[1].w13_weight)

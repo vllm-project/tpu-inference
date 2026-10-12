@@ -322,6 +322,34 @@ def _local_experts_loader(loader, local_mask: list[bool]):
     return weight_loader
 
 
+class _InOrderProcessing:
+    """Process MoE layers as they finish loading, in the order they were made.
+
+    On a multi-host slice every host must issue the layers' processing
+    (sharded JAX computations) in the same order, but each host finishes
+    loading layers in the order its files arrive. A loaded layer waits until
+    every layer created before it has been processed.
+    """
+
+    def __init__(self):
+        self._entries = []  # (layer, quant_method), in creation order
+        self._loaded = set()
+        self._next = 0
+
+    def register(self, layer, quant_method) -> None:
+        self._entries.append((layer, quant_method))
+
+    def mark_loaded(self, layer) -> None:
+        self._loaded.add(id(layer))
+        while (self._next < len(self._entries)
+               and id(self._entries[self._next][0]) in self._loaded):
+            ready, quant_method = self._entries[self._next]
+            logger.debug("[nvfp4-incremental] Processing MoE layer %s",
+                         ready.layer_name)
+            quant_method.process_weights_after_loading(ready)
+            self._next += 1
+
+
 class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
     """NVFP4 MoE for TPU.
 
@@ -433,12 +461,16 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
         """
         if all(local_mask):
             return
-        # Host memory is now bounded without incremental processing, which
-        # with such a checkpoint would only run at the very end anyway and in
-        # an order that can differ between hosts (whichever file finishes
-        # last). Leave processing to process_weights_after_loading, which
-        # visits the layers in the same order on every host.
-        self._defer_processing = True
+        # Incremental processing still frees each layer once it is loaded,
+        # but in model order (see _InOrderProcessing): hosts finish layers in
+        # whatever order their files arrive. With a checkpoint that stores
+        # each layer's experts together, host memory stays at about a layer.
+        order = getattr(self.quant_config, "_moe_process_order", None)
+        if order is None:
+            order = _InOrderProcessing()
+            self.quant_config._moe_process_order = order
+        order.register(layer, self)
+        self._process_order = order
         for name in ("w13_weight", "w13_weight_scale", "w13_weight_scale_2",
                      "w13_input_scale", "w2_weight", "w2_weight_scale",
                      "w2_weight_scale_2", "w2_input_scale", "w13_bias",
@@ -459,10 +491,8 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
         VLLM_INCREMENTAL_FP8_LOADING switch, which turns on incremental
         processing for the quantized MoE layers.
         """
-        if (not envs.VLLM_INCREMENTAL_FP8_LOADING or self.moe.has_bias
-                or getattr(self, "_defer_processing", False)):
-            # Bias layers, and hosts that keep only their own experts (see
-            # _keep_local_experts_only), process after the full load.
+        if not envs.VLLM_INCREMENTAL_FP8_LOADING or self.moe.has_bias:
+            # Bias layers process after the full load.
             return
 
         w13_shards = ("w1", "w3") if self.moe.is_act_and_mul else ("w1", )
@@ -486,6 +516,11 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
         per_expert = (len(self._W13_PARAMS) * len(w13_shards) +
                       len(self._W2_PARAMS))
         if len(layer._loaded_weights) >= per_expert * layer.global_num_experts:
+            order = getattr(self, "_process_order", None)
+            if order is not None:
+                # Hosts keeping only their own experts process in model order.
+                order.mark_loaded(layer)
+                return
             logger.debug("[nvfp4-incremental] Processing MoE layer %s",
                          layer.layer_name)
             self.process_weights_after_loading(layer)
