@@ -208,30 +208,34 @@ def hbm_usage_bytes(devices: Any) -> List[Tuple[int, int]]:
     device's stats, assuming all devices have similar usage. If no device
     reports stats, usage falls back to live-array accounting with the
     device-kind HBM limit instead of an empty list, which would budget 0 bytes.
+    Live arrays only cover addressable shards, so the same rule applies there:
+    remote devices reuse a local device's estimate instead of reading 0 used.
     """
     devices = list(devices)
     if vllm_envs.VLLM_TPU_USING_PATHWAYS:
         return pathways_hbm_usage_gb(devices)
+    if not devices:
+        return []
 
     if jax.process_count() == 1:
         # Single process: every device is addressable.
-        usage = [_local_memory_stats(device) for device in devices]
+        is_local = [True] * len(devices)
     else:
         process_index = jax.process_index()
-        usage = [
-            _local_memory_stats(device)
-            if device.process_index == process_index else None
-            for device in devices
-        ]
-    sample = next((u for u in usage if u is not None), None)
-    if sample is None:
-        if devices:
-            logger.warning(
-                "No memory stats available for devices %s; estimating HBM "
-                "usage from live arrays and the device-kind HBM limit.",
-                devices)
-            return pathways_hbm_usage_gb(devices)
-        return []
+        is_local = [d.process_index == process_index for d in devices]
+    usage = [
+        _local_memory_stats(device) if local else None
+        for device, local in zip(devices, is_local)
+    ]
+    if all(u is None for u in usage):
+        logger.warning(
+            "No memory stats available for devices %s; estimating HBM "
+            "usage from live arrays and the device-kind HBM limit.", devices)
+        estimate = pathways_hbm_usage_gb(devices)
+        if not any(is_local):
+            return estimate
+        usage = [e if local else None for e, local in zip(estimate, is_local)]
+    sample = next(u for u in usage if u is not None)
     # TODO(ranlihao): find a proper way to get the memory usage of each device.
     if any(u is None for u in usage):
         logger.info(

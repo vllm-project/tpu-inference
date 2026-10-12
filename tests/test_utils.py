@@ -92,16 +92,41 @@ def test_hbm_usage_bytes_remote_devices_listed_first(_):
 @patch("jax.process_count", return_value=2)
 def test_hbm_usage_bytes_falls_back_when_no_stats(_, mock_live_usage):
     """No device reports stats: estimate instead of returning an empty list,
-    which would budget 0 bytes for the KV cache."""
+    which would budget 0 bytes for the KV cache. Live-array accounting only
+    sees addressable shards, so remote devices reuse the local estimate."""
     local = MagicMock(process_index=jax.process_index())
     local.memory_stats.return_value = None
     remote = MagicMock(process_index=jax.process_index() + 1)
-    mock_live_usage.return_value = [(1 * GBYTES, 96 * GBYTES)] * 2
+    mock_live_usage.return_value = [(1 * GBYTES, 96 * GBYTES),
+                                    (0, 96 * GBYTES)]
 
     usage = hbm_usage_bytes([local, remote])
 
     mock_live_usage.assert_called_once_with([local, remote])
     assert usage == [(1 * GBYTES, 96 * GBYTES)] * 2
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("jax.live_arrays")
+@patch("jax.devices")
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_fallback_remote_not_counted_as_empty(
+        _, mock_devices, mock_live_arrays):
+    """End to end through the live-array estimator: a remote device must not
+    be reported as 0 bytes used, which would over-size the KV cache."""
+    mock_devices.return_value = [MagicMock(device_kind="TPU v6e")]
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = None
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    shard = MagicMock()
+    shard.data.device = local
+    shard.data.nbytes = 5 * GBYTES
+    mock_live_arrays.return_value = [MagicMock(addressable_shards=[shard])]
+
+    usage = hbm_usage_bytes([local, remote])
+
+    assert usage == [(5 * GBYTES, 32 * GBYTES)] * 2
+    remote.memory_stats.assert_not_called()
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
