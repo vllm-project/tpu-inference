@@ -348,11 +348,13 @@ class _InOrderProcessing:
 
     def mark_loaded(self, layer) -> None:
         self._loaded.add(id(layer))
+        logger.info("[nvfp4-inorder] loaded %s; %d/%d loaded, %d processed",
+                    getattr(layer, "layer_name", "?"), len(self._loaded),
+                    len(self._entries), self._next)
         while (self._next < len(self._entries)
                and id(self._entries[self._next][0]) in self._loaded):
             ready, quant_method = self._entries[self._next]
-            logger.debug("[nvfp4-incremental] Processing MoE layer %s",
-                         ready.layer_name)
+            logger.info("[nvfp4-inorder] processing %s", ready.layer_name)
             quant_method._process_loaded_weights(ready)
             self._next += 1
 
@@ -575,6 +577,10 @@ class VllmNvfp4MoEMethod(FusedMoEMethodBase, VllmQuantizationMethod):
                                    stage_on_host=on_host)
             for name in param_names
         }
+        # The host-to-device copies are asynchronous and read the torch
+        # storage until they finish; freeing it before then leaves its pages
+        # resident (several GiB per layer on a multi-host load).
+        jax.block_until_ready(list(loaded.values()))
         # Free the host copies now that the weights are on the TPU.
         for name in param_names:
             _free_torch_storage(getattr(layer, name))

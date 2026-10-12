@@ -229,6 +229,9 @@ class VllmFp8LinearMethod(
 
         weight = _load_weight_for_layer(layer, "weight", loading_sharding)
         weight = jnp.transpose(weight)
+        # Host-to-device copies are asynchronous and read the torch storage
+        # until they finish: wait before freeing it.
+        jax.block_until_ready(weight)
         _free_torch_storage(p_weight)
         delattr(layer, "weight")
 
@@ -243,6 +246,7 @@ class VllmFp8LinearMethod(
             weight_scale = _load_weight_for_layer(layer, "weight_scale_inv",
                                                   loading_sharding)
             weight_scale = jnp.transpose(weight_scale)
+            jax.block_until_ready(weight_scale)
             _free_torch_storage(layer.weight_scale_inv)
             delattr(layer, "weight_scale_inv")
         else:
@@ -254,6 +258,7 @@ class VllmFp8LinearMethod(
             scale_sharding = NamedSharding(self.linear_config.mesh, P(None))
             weight_scale = _load_weight_for_layer(layer, "weight_scale",
                                                   scale_sharding)
+            jax.block_until_ready(weight_scale)
             _free_torch_storage(layer.weight_scale)
             delattr(layer, "weight_scale")
 
@@ -494,6 +499,8 @@ class VllmFp8MoEMethod(vllm_fp8.Fp8MoEMethod, VllmQuantizationMethod):
         )
 
         # Free CPU memory now that weights have been safely transferred to TPU
+        # (the transfers are asynchronous: wait for them first).
+        jax.block_until_ready(weights)
         _free_torch_storage(layer.w13_weight)
         _free_torch_storage(layer.w2_weight)
         _free_torch_storage(p_w13_scale)
