@@ -976,11 +976,30 @@ def fused_moe_func(
                 k=topk,
                 recall_target=envs.MOE_APPROX_TOPK_RECALL_TARGET)
         else:
+            def _run_router_topk(
+                    scores: jax.Array) -> tuple[jax.Array, jax.Array]:
+                fn = functools.partial(router_topk, k=topk)
+                if mesh is not None:
+                    data_spec = P(
+                        ShardingAxisName.ATTN_DATA
+                        if get_mesh_shape_product(
+                            mesh, ShardingAxisName.ATTN_DATA) > 1 else
+                        ShardingAxisName.MLP_DATA,
+                        None,
+                    )
+                    fn = jax.shard_map(
+                        fn,
+                        mesh=mesh,
+                        in_specs=data_spec,
+                        out_specs=(data_spec, data_spec),
+                        check_vma=False,
+                    )
+                return fn(scores)
+
             if expert_score_correction_bias is not None:
                 if envs.TPU_MOE_ROUTER_TOPK == "rowmax":
-                    _, topk_indices = router_topk(
-                        topk_weights + expert_score_correction_bias[None, :],
-                        topk)
+                    _, topk_indices = _run_router_topk(
+                        topk_weights + expert_score_correction_bias[None, :])
                 else:
                     _, topk_indices = jax.lax.top_k(
                         topk_weights + expert_score_correction_bias[None, :],
@@ -990,8 +1009,7 @@ def fused_moe_func(
                                                    axis=-1)
             else:
                 if envs.TPU_MOE_ROUTER_TOPK == "rowmax":
-                    topk_weights, topk_indices = router_topk(
-                        topk_weights, topk)
+                    topk_weights, topk_indices = _run_router_topk(topk_weights)
                 else:
                     topk_weights, topk_indices = jax.lax.top_k(topk_weights,
                                                                k=topk)
