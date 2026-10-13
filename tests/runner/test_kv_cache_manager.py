@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -2081,8 +2082,12 @@ class TestKVCacheManager:
 
     def _init_ds_v4(self, kv_cache_config):
         self.runner.kv_cache_manager.use_mla = True
-        with patch('tpu_inference.runner.kv_cache_manager.is_ds_v4',
-                   return_value=True):
+        # The DSv4 path writes MLA_KV_PACKING_SIZE and MLA_TRANSPOSE_KV_CACHE
+        # into os.environ, where every later MLA test in the process would read
+        # them; patch.dict puts the environment back.
+        with patch.dict(os.environ), patch(
+                'tpu_inference.runner.kv_cache_manager.is_ds_v4',
+                return_value=True):
             self.runner.initialize_kv_cache(kv_cache_config)
 
     def _assert_ds_v4_overlays(self, num_blocks):

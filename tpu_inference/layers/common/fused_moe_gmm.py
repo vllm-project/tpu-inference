@@ -30,6 +30,7 @@ from tpu_inference.kernels.sparse_core.ragged_gather_reduce_v2 import \
     ragged_gather_reduce
 from tpu_inference.kernels.sparse_core.ragged_gather_v2 import \
     ragged_gather_v2 as ragged_gather
+from tpu_inference.layers.common.linear import _safe_calculate_tiling
 from tpu_inference.layers.common.quantization import quantize_tensor
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.logger import init_logger
@@ -116,6 +117,7 @@ def gmm_wrapper(lhs,
         rhs_bias=rhs_bias,
         group_sizes=group_sizes,
         group_offset=group_offset[0],
+        tile_info=_safe_calculate_tiling,
         zero_initialize=False,
         fuse_act=fuse_act,
         preferred_element_type=preferred_element_type,

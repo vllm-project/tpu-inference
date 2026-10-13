@@ -190,3 +190,38 @@ class RayDistributedExecutorV2(MambaPoolSyncExecutorMixin, RayExecutorV2):
     def _is_driver_worker(self, rank: int) -> bool:
         # All spawned workers are driver workers for their respective stages.
         return True
+
+    def shutdown(self) -> None:
+        """Properly shut down the executor and its workers.
+
+        Overrides RayExecutorV2.shutdown() to kill Ray worker actors and close
+        message queues before joining the monitor thread. Calling
+        _join_monitor_thread() first while actors are still running blocks for
+        up to the 5s ray.wait() poll timeout, which exceeds MPClient's default
+        5s EngineCore shutdown timeout and triggers force-kill races.
+        """
+        lock = getattr(self, "shutdown_lock", None)
+        if lock is None:
+            return
+
+        with lock:
+            if getattr(self, "shutting_down", False):
+                return
+            self.shutting_down = True
+
+        for handle in getattr(self, "ray_worker_handles", []):
+            try:
+                ray.kill(handle.actor)
+                logger.debug(f"Killed actor rank={handle.rank}")
+            except Exception:
+                logger.exception(f"Failed to kill actor rank={handle.rank}")
+
+        if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
+            rpc_broadcast_mq.shutdown()
+            self.rpc_broadcast_mq = None
+
+        for mq in getattr(self, "response_mqs", []):
+            mq.shutdown()
+        self.response_mqs = []
+
+        self._join_monitor_thread()

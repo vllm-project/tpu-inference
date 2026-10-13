@@ -149,3 +149,55 @@ class TestTpuRayDistributedExecutorV2(unittest.TestCase):
 
         mock_ray.util.placement_group.assert_not_called()
         self.assertEqual(executor.parallel_config.placement_group, existing_pg)
+
+    def test_shutdown_kills_actors_before_joining_monitor(
+            self, mock_wait_until_pg_ready, mock_get_ip, mock_platform,
+            mock_ray):
+        import threading
+
+        executor = self.RayDistributedExecutorV2(self.vllm_config)
+        executor.shutdown_lock = threading.Lock()
+        executor.shutting_down = False
+
+        call_order = []
+        handle_0 = MagicMock()
+        handle_0.rank = 0
+        handle_1 = MagicMock()
+        handle_1.rank = 1
+        executor.ray_worker_handles = [handle_0, handle_1]
+
+        mock_broadcast_mq = MagicMock()
+        mock_broadcast_mq.shutdown.side_effect = (
+            lambda: call_order.append("broadcast_mq_shutdown"))
+        executor.rpc_broadcast_mq = mock_broadcast_mq
+
+        mock_response_mq = MagicMock()
+        mock_response_mq.shutdown.side_effect = (
+            lambda: call_order.append("response_mq_shutdown"))
+        executor.response_mqs = [mock_response_mq]
+
+        mock_ray.kill.side_effect = lambda actor: call_order.append(
+            f"ray_kill_{actor}")
+        executor._join_monitor_thread = MagicMock(
+            side_effect=lambda: call_order.append("join_monitor"))
+
+        executor.shutdown()
+
+        self.assertTrue(executor.shutting_down)
+        self.assertIsNone(executor.rpc_broadcast_mq)
+        self.assertEqual(executor.response_mqs, [])
+        self.assertEqual(
+            call_order,
+            [
+                f"ray_kill_{handle_0.actor}",
+                f"ray_kill_{handle_1.actor}",
+                "broadcast_mq_shutdown",
+                "response_mq_shutdown",
+                "join_monitor",
+            ],
+        )
+
+        # Second call should be a no-op
+        call_order.clear()
+        executor.shutdown()
+        self.assertEqual(call_order, [])
