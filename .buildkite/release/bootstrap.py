@@ -13,85 +13,71 @@
 # limitations under the License.
 """Uploads the steps of one tpu-inference release build.
 
-The release pipeline runs this as its only configured step. It decides what
-the build publishes and uploads just those steps, so everything a release runs
-lives under .buildkite/release/, which has its own code owners.
+The release pipeline runs this as its only configured step. It checks what the
+build was asked to publish and uploads just that mode's steps, so everything a
+release runs lives under .buildkite/release/, which has its own code owners.
 
 RELEASE_MODE picks what to publish (default: nightly):
   nightly  vllm/vllm-tpu built from this commit and the vLLM LKG, pushed as
-           :nightly and a dated tag. Builds of main only.
+           :nightly and a dated tag (nightly_image.yml). Builds of main only.
 """
 
 import argparse
-import json
 import os
+import pathlib
 import subprocess
 import sys
+from typing import NamedTuple
 
-DOCKERHUB_USER = "tpuinference"
+RELEASE_DIR = pathlib.Path(__file__).resolve().parent
 
-# The Docker Hub token is a cluster secret, and the two clusters that can run
-# this pipeline name it differently: the TPU cluster's cpu queue reads
-# DOCKERHUB_TOKEN, and TPU Release, whose agents run nothing but release
-# pipelines, reads DOCKERHUB_TOKEN_TPU_INFERENCE. Keyed by the queue this
-# bootstrap runs on, which is also where the publish step runs.
-DOCKERHUB_SECRETS = {
-    "cpu": "DOCKERHUB_TOKEN",
-    "release-tpu-inference": "DOCKERHUB_TOKEN_TPU_INFERENCE",
+# Each mode's steps, in this directory.
+MODES = {
+    "nightly": "nightly_image.yml",
 }
 
-MODES = ("nightly", )
+# The queues this pipeline may run on: cpu in the TPU cluster, and
+# release-tpu-inference in TPU Release, whose agents run nothing but release
+# pipelines. The publish step runs on the queue this bootstrap runs on, so the
+# pipeline needs no setting to say which cluster it is in.
+RELEASE_QUEUES = ("cpu", "release-tpu-inference")
 
 
 class ReleaseError(Exception):
     pass
 
 
-def build_steps(mode: str, branch: str, queue: str) -> dict:
-    """Returns the pipeline to upload for one release build."""
+class Upload(NamedTuple):
+    pipeline: pathlib.Path
+    # Substituted into the pipeline file by `buildkite-agent pipeline upload`.
+    env: dict
+
+
+def plan(mode: str, branch: str, queue: str) -> Upload:
+    """Returns the pipeline file to upload and the values it needs."""
     if mode not in MODES:
         raise ReleaseError(f"unknown RELEASE_MODE {mode!r}; expected one of "
                            f"{', '.join(MODES)}")
-    if queue not in DOCKERHUB_SECRETS:
-        raise ReleaseError(
-            f"queue {queue!r} has no Docker Hub secret; expected one of "
-            f"{', '.join(DOCKERHUB_SECRETS)}")
+    if queue not in RELEASE_QUEUES:
+        raise ReleaseError(f"queue {queue!r} doesn't run releases; expected "
+                           f"one of {', '.join(RELEASE_QUEUES)}")
     if branch != "main":
         raise ReleaseError(
             f"the nightly image is published from main, not {branch!r}")
 
-    secret = DOCKERHUB_SECRETS[queue]
-    return {
-        "steps": [{
-            "label":
-            ":docker: Publish vllm/vllm-tpu nightly image",
-            "key":
-            "publish_nightly_image",
-            "agents": {
-                "queue": queue
-            },
-            "secrets": [secret],
-            "plugins": [{
-                "docker-login#v3.0.0": {
-                    "username": DOCKERHUB_USER,
-                    "password-env": secret,
-                }
-            }],
-            "command":
-            "python3 .buildkite/release/publish_image.py nightly",
-        }]
-    }
+    return Upload(pipeline=RELEASE_DIR / MODES[mode],
+                  env={"RELEASE_QUEUE": queue})
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run",
                         action="store_true",
-                        help="print the pipeline instead of uploading it")
+                        help="print what would be uploaded instead")
     args = parser.parse_args()
 
     try:
-        pipeline = build_steps(
+        upload = plan(
             mode=os.environ.get("RELEASE_MODE") or "nightly",
             branch=os.environ["BUILDKITE_BRANCH"],
             queue=os.environ["BUILDKITE_AGENT_META_DATA_QUEUE"],
@@ -100,14 +86,18 @@ def main() -> int:
         print(f"bootstrap: {e}", file=sys.stderr)
         return 1
 
-    text = json.dumps(pipeline, indent=2)
+    print(f"bootstrap: uploading {upload.pipeline.name} with "
+          f"{' '.join(f'{k}={v}' for k, v in upload.env.items())}")
     if args.dry_run:
-        print(text)
         return 0
-    subprocess.run(["buildkite-agent", "pipeline", "upload"],
-                   input=text,
-                   text=True,
-                   check=True)
+    subprocess.run(
+        ["buildkite-agent", "pipeline", "upload",
+         str(upload.pipeline)],
+        env={
+            **os.environ,
+            **upload.env
+        },
+        check=True)
     return 0
 
 

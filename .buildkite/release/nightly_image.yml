@@ -1,0 +1,30 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# RELEASE_MODE=nightly. Uploaded by bootstrap.py, which sets RELEASE_QUEUE to
+# the queue it runs on; `?` makes the upload fail if it is unset. The agent
+# doesn't substitute variables in `secrets`, so each cluster that can run this
+# holds the Docker Hub token under this one name.
+steps:
+  - label: ":docker: Publish vllm/vllm-tpu nightly image"
+    key: publish_nightly_image
+    agents:
+      queue: "${RELEASE_QUEUE?}"
+    secrets:
+      - DOCKERHUB_TOKEN_TPU_INFERENCE
+    plugins:
+      - docker-login#v3.0.0:
+          username: tpuinference
+          password-env: DOCKERHUB_TOKEN_TPU_INFERENCE
+    command: python3 .buildkite/release/publish_image.py nightly
