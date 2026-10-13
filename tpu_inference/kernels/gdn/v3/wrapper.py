@@ -269,6 +269,7 @@ def outer_kernel(
         "mixed_tile_size",
         "zero_initialize_out",
         "compute_precision",
+        "compact_conv_state",
     ),
 )
 def fused_conv1d_gdn(
@@ -299,6 +300,7 @@ def fused_conv1d_gdn(
     # TODO(kyuyeunk): Calculate tile size based on input dimensions.
     decode_tile_size: int = 4,
     mixed_tile_size: int = 64,
+    compact_conv_state: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
     """Perform conv1d and gdn in a single fused kernel.
 
@@ -352,6 +354,18 @@ def fused_conv1d_gdn(
         decode_tile_size: Tile size along sequence dimension for decode sequences.
         mixed_tile_size: Tile size along token/chunk dimension for prefill/mixed
             sequences.
+        compact_conv_state: Run the kernel on a gathered `[num_seqs, ...]` copy
+            of the conv-state slots this call touches instead of on the whole
+            cache, and scatter the updated slots back afterwards. The kernel
+            consumes the conv state in float32 with a `[*, K-1, 1, dim]`
+            layout, which differs from how the cache is stored (bfloat16,
+            `[*, K-1, dim]`), so operating on the full cache costs a full
+            dtype+layout round trip of every slot on every layer (~30us/layer
+            for a 449-slot cache on v7x) even though only `num_seqs` slots are
+            read or written. The compact path moves that work to the touched
+            slots only. Only used when `num_spec_tokens == 0`; speculative
+            windows address `num_spec_tokens + 1` consecutive slots per
+            request and keep the full-cache path.
 
     Returns:
         (new_conv_state, new_recurrent_state): Updated convolution state cache and
@@ -363,13 +377,32 @@ def fused_conv1d_gdn(
     conv_out_dtype = conv_state.dtype
     recurrent_out_dtype = recurrent_state.dtype
 
+    num_seqs = state_indices.size
+    read_state_indices = read_state_indices.astype(state_indices.dtype)
+
+    # Gather the conv-state slots this step touches into a compact buffer and
+    # remap the slot indices onto it (slot i <-> sequence i). The recurrent
+    # state is left alone: the kernel already reads and writes its slots in
+    # place with no conversion.
+    use_compact_conv_state = compact_conv_state and num_spec_tokens == 0
+    full_conv_state = conv_state
+    if use_compact_conv_state:
+        conv_state_indices = jnp.arange(num_seqs, dtype=state_indices.dtype)
+        conv_read_state_indices = conv_state_indices
+        conv_state = jnp.take(full_conv_state,
+                              read_state_indices,
+                              axis=0,
+                              mode="clip")
+    else:
+        conv_state_indices = state_indices
+        conv_read_state_indices = read_state_indices
+
     qkv = qkv.astype(jnp.float32)
     b = b.astype(jnp.float32)
     a = a.astype(jnp.float32)
     conv_state = conv_state.astype(jnp.float32)
 
     # Step 1: Validate inputs.
-    num_seqs = state_indices.size
     batch_size, dim = qkv.shape
     assert conv_weight.shape == (dim, 1, kernel_size)
     if conv_bias is not None:
@@ -385,7 +418,6 @@ def fused_conv1d_gdn(
     assert read_offsets.shape == (num_seqs, )
     read_offsets = read_offsets.astype(jnp.int32)
     assert read_state_indices.shape == (num_seqs, )
-    read_state_indices = read_state_indices.astype(state_indices.dtype)
     act_in_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
@@ -494,6 +526,8 @@ def fused_conv1d_gdn(
                 read_offsets=read_offsets,
                 end_seq=distribution[0],
                 read_indices=read_state_indices,
+                conv_state_indices=conv_state_indices,
+                conv_read_indices=conv_read_state_indices,
             )
         else:
             metadata_obj = metadata.compute_per_seq_metadata(
@@ -504,6 +538,8 @@ def fused_conv1d_gdn(
                 start_seq=distribution[0],
                 end_seq=distribution[-1],
                 read_indices=read_state_indices,
+                conv_state_indices=conv_state_indices,
+                conv_read_indices=conv_read_state_indices,
             )
 
         metadata_spec = jax.tree.map(lambda _: smem_spec, metadata_obj)
@@ -566,6 +602,20 @@ def fused_conv1d_gdn(
     out_act = out_act.reshape(padded_batch_size, -1)[:batch_size]
     out_conv_state = out_conv_state.astype(conv_out_dtype)
     out_conv_state = out_conv_state.reshape(conv_state_shape)
+    if use_compact_conv_state:
+        # Scatter the updated slots back into the (donated) cache. Slot i of
+        # the compact buffer belongs to sequence i. Only sequences the kernel
+        # processed (i < distribution[-1]) are written: entries of
+        # `state_indices` past the active count are padding and may hold
+        # stale slot ids (e.g. a live request's slot duplicated by
+        # `condense`), so they are routed to an out-of-range index and
+        # dropped rather than written.
+        num_slots = full_conv_state.shape[0]
+        is_active = jnp.arange(num_seqs, dtype=jnp.int32) < distribution[-1]
+        scatter_indices = jnp.where(is_active, state_indices,
+                                    num_slots).astype(jnp.int32)
+        out_conv_state = full_conv_state.at[scatter_indices].set(
+            out_conv_state, mode="drop")
     out_recurrent_state = out_recurrent_state.astype(recurrent_out_dtype)
 
     return (out_conv_state, out_recurrent_state), out_act

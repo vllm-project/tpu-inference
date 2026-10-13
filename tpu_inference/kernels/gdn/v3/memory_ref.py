@@ -157,6 +157,13 @@ class MetadataRef:
     # cached state block of the previous block boundary and checkpoints into
     # a different block (see `cache_config.mamba_cache_mode == "align"`).
     s_idx_to_read_indices: Any
+    # Slot indices for the *conv* state. They equal the two arrays above
+    # unless the wrapper runs the kernel on a compacted conv-state buffer
+    # (see `wrapper.fused_conv1d_gdn(compact_conv_state=True)`), in which
+    # case the conv state of sequence `s` lives at compact slot `s` while the
+    # recurrent state is still addressed through the cache's slot ids.
+    s_idx_to_conv_state_indices: Any
+    s_idx_to_conv_read_indices: Any
     shape: tuple[int, ...] = dataclasses.field(metadata=dict(static=True))
 
     def get_record(self, p_id, idx) -> PackedPIdRecord:
@@ -179,9 +186,15 @@ class MetadataRef:
         s_idx_to_state_indices: jax.Array,
         s_idx_to_read_offset: jax.Array,
         s_idx_to_read_indices: jax.Array,
+        s_idx_to_conv_state_indices: jax.Array | None = None,
+        s_idx_to_conv_read_indices: jax.Array | None = None,
     ):
         # NOTE: First dim does not matter when it comes to calculating stride.
         shape = (1, cfgs.seq_tile_size)
+        if s_idx_to_conv_state_indices is None:
+            s_idx_to_conv_state_indices = s_idx_to_state_indices
+        if s_idx_to_conv_read_indices is None:
+            s_idx_to_conv_read_indices = s_idx_to_read_indices
         assert s_idx_has_initial_state.shape[0] <= PackedPIdRecord.MAX_SEQS, (
             f"Number of sequences ({s_idx_has_initial_state.shape[0]}) exceeds"
             f" PackedPIdRecord limit ({PackedPIdRecord.MAX_SEQS}).")
@@ -213,6 +226,8 @@ class MetadataRef:
             s_idx_to_state_indices=s_idx_to_state_indices,
             s_idx_to_read_offset=s_idx_to_read_offset,
             s_idx_to_read_indices=s_idx_to_read_indices,
+            s_idx_to_conv_state_indices=s_idx_to_conv_state_indices,
+            s_idx_to_conv_read_indices=s_idx_to_conv_read_indices,
             shape=shape,
         )
 
@@ -239,6 +254,7 @@ class BaseBufferedRef(pltpu.BufferedRef):
         use_lookahead: bool,
         cfg: config.GDNConfig,
         metadata_ref: MetadataRef,
+        **extra_fields,
     ):
         standard_ref = pltpu.BufferedRef.create(
             spec=spec,
@@ -251,6 +267,7 @@ class BaseBufferedRef(pltpu.BufferedRef):
         return cls(
             cfg=cfg,
             metadata_ref=metadata_ref,
+            **extra_fields,
             **{
                 f.name: getattr(standard_ref, f.name)
                 for f in dataclasses.fields(pltpu.BufferedRef)
@@ -355,7 +372,24 @@ class StateBufferedRef(BaseBufferedRef):
     Without speculative decoding `window_size` is 1 and `read_offset` is 0,
     so this reduces to reading and writing the single state at
     `state_indices[s]`.
+
+    `is_conv_state` selects the conv-state slot tables of the metadata
+    (`s_idx_to_conv_*`), which differ from the shared ones only when the
+    wrapper compacts the conv state (see `MetadataRef`).
     """
+
+    is_conv_state: bool = dataclasses.field(default=False,
+                                            metadata=dict(static=True))
+
+    def _read_indices(self):
+        if self.is_conv_state:
+            return self.metadata_ref.s_idx_to_conv_read_indices
+        return self.metadata_ref.s_idx_to_read_indices
+
+    def _write_indices(self):
+        if self.is_conv_state:
+            return self.metadata_ref.s_idx_to_conv_state_indices
+        return self.metadata_ref.s_idx_to_state_indices
 
     def copy_in(self, src_ref: jax.Ref, grid_indices: tuple[int | jax.Array]):
         assert self.sem_recvs is not None
@@ -369,7 +403,7 @@ class StateBufferedRef(BaseBufferedRef):
             record = self.metadata_ref.get_record(p_id, idx)
             is_first_tile = record.is_first_tile
             s_idx = record.s_idx
-            state_idx = self.metadata_ref.s_idx_to_read_indices[s_idx]
+            state_idx = self._read_indices()[s_idx]
             has_initial_state = self.metadata_ref.s_idx_has_initial_state[
                 s_idx]
             should_read = jnp.logical_and(is_first_tile, has_initial_state)
@@ -421,7 +455,7 @@ class StateBufferedRef(BaseBufferedRef):
             is_last_tile = record.is_last_tile
             s_idx = record.s_idx
             r_size = record.r_size
-            state_idx = self.metadata_ref.s_idx_to_state_indices[s_idx]
+            state_idx = self._write_indices()[s_idx]
             # Write one checkpoint per valid window position, starting at the
             # group's base slot. `r_size` never exceeds `window_size` for
             # windowed sequences; the clamp is for PER_SEQ tiles, which hold
@@ -538,7 +572,8 @@ def create_allocs(
         metadata_ref=metadata_ref,
     )
     conv_alloc = state_buffered_partial(spec=conv_spec,
-                                        dtype_or_type=conv_state_ref)
+                                        dtype_or_type=conv_state_ref,
+                                        is_conv_state=True)
     recurrent_alloc = state_buffered_partial(spec=recurrent_spec,
                                              dtype_or_type=recurrent_state_ref)
 
