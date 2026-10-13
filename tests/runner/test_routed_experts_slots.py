@@ -382,6 +382,7 @@ class _Request:
 
     def __init__(self, req_id, num_prompt_tokens, prompt_start=0):
         self.request_id = req_id
+        self.num_prompt_tokens = num_prompt_tokens
         self.num_tokens = num_prompt_tokens
         self.num_output_tokens = 0
         self.block_hashes = []

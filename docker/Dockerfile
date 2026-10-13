@@ -66,6 +66,15 @@ RUN if [ "$IS_TEST" = "true" ]; then \
         rm /tmp/buildkite-agent; \
     fi
 
+# bktec, Buildkite Test Engine's client, which the sharded unit test steps run
+# in the pod to pick their share of the test files. Test image only, as above.
+COPY --from=buildkite/test-engine-client /usr/local/bin/bktec /tmp/bktec
+RUN if [ "$IS_TEST" = "true" ]; then \
+        mv /tmp/bktec /usr/local/bin/bktec; \
+    else \
+        rm /tmp/bktec; \
+    fi
+
 # Build vLLM
 WORKDIR /workspace/vllm
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git

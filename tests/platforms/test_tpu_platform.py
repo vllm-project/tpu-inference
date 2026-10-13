@@ -267,9 +267,14 @@ class TestTpuPlatform:
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
     )
+    # The real patch rewrites vLLM's Scheduler for the rest of the pytest
+    # process; tests/core/test_sched_utils.py then applies it a second time.
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_continue_decode"
+    )
     def test_check_and_update_config_hybrid_prefix_caching(
-            self, mock_update, mock_sharding, vllm_config, is_hybrid,
-            unsupported, expected_prefix_caching):
+            self, mock_continue_decode_patch, mock_update, mock_sharding,
+            vllm_config, is_hybrid, unsupported, expected_prefix_caching):
         """Hybrid (mamba/linear-attention) models keep prefix caching.
 
         Their recurrent state is addressed by block id in
