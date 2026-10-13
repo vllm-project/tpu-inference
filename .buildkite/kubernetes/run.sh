@@ -158,6 +158,18 @@ FORWARD=(
   ARTIFACTS_DIR
 )
 
+# The `tests` plugin on a sharded step mints these on the agent, and their
+# two-hour life starts before admission, node scale-up and the image pull.
+# Unset rather than forwarded: BUILDKITE_ANALYTICS_TOKEN then comes from Secret
+# Manager like on every other step, and bktec mints its own API token in the
+# pod.
+unset BUILDKITE_ANALYTICS_TOKEN BUILDKITE_TEST_ENGINE_API_ACCESS_TOKEN
+
+# Lets bktec mint that token: `oidc request-token` otherwise refuses without the
+# agent's log redactor, which lives behind the Job API socket the pod cannot
+# reach.
+export BUILDKITE_AGENT_OIDC_REQUEST_TOKEN_SKIP_TOKEN_REDACTION=true
+
 # The BUILDKITE_* the agent set are swept by the launcher itself, so only the
 # ones above that it cannot see - an unset name it resolves from Secret
 # Manager - still have to be named here.
