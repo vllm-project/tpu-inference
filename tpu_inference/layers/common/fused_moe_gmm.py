@@ -130,6 +130,32 @@ def _can_use_dense_expert_ep(
             and s1.dtype == jnp.float32 and s2.dtype == jnp.float32)
 
 
+def _add_partial_output(local_out: jax.Array,
+                        partial_local: jax.Array | None) -> jax.Array:
+    """Folds a caller-supplied per-device partial sum into ``local_out``.
+
+    ``partial_local`` is ``[num_tokens, hidden]`` and may have fewer columns
+    than ``local_out`` when the kernel runs on a lane-padded hidden size; the
+    extra columns are padding and are left untouched.
+    """
+    if partial_local is None:
+        return local_out
+    rows = min(local_out.shape[0], partial_local.shape[0])
+    cols = partial_local.shape[1]
+    if rows != partial_local.shape[0]:
+        raise ValueError(
+            f"partial_output_to_add has {partial_local.shape[0]} rows but the "
+            f"MoE output has {local_out.shape[0]}.")
+    if cols > local_out.shape[1]:
+        raise ValueError(
+            f"partial_output_to_add has {cols} columns but the MoE output has "
+            f"{local_out.shape[1]}.")
+    addend = partial_local.astype(local_out.dtype)
+    if cols == local_out.shape[1] and rows == local_out.shape[0]:
+        return local_out + addend
+    return local_out.at[:rows, :cols].add(addend)
+
+
 def _ep_kernel_local(
     hidden_local,
     w1_local,
@@ -138,6 +164,7 @@ def _ep_kernel_local(
     s2_local,
     topk_weights_local,
     topk_ids_local,
+    partial_local=None,
     *,
     kernel_mode: str,
     local_num_experts: int,
@@ -168,6 +195,9 @@ def _ep_kernel_local(
         )
 
     if scatter_results:
+        if partial_local is not None:
+            raise NotImplementedError(
+                "partial_output_to_add is not supported with scatter_results.")
         dp_axes = ShardingAxisName.ATTN_DATA
         if not isinstance(dp_axes, tuple):
             dp_axes = (dp_axes, )
@@ -192,6 +222,9 @@ def _ep_kernel_local(
         else:
             out = local_out
     else:
+        # Fold the caller's partial (e.g. a TP-sharded shared expert) into the
+        # local routed partial so both ride the same all-reduce.
+        local_out = _add_partial_output(local_out, partial_local)
         out = jax.lax.psum(local_out,
                            axis_name=ShardingAxisName.EXPERT).astype(
                                hidden_local.dtype)
@@ -206,6 +239,7 @@ def _ep_dispatch_kernel(
     w2_scale,
     topk_weights,
     topk_indices,
+    partial_output=None,
     *,
     mesh: Mesh,
     kernel_mode: str,
@@ -217,6 +251,7 @@ def _ep_dispatch_kernel(
     attn_data_p_spec = P(ShardingAxisName.ATTN_DATA)
     w1_scale_spec = None if w1_scale is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
+    partial_spec = None if partial_output is None else data_p_spec
 
     final_out_specs = attn_data_p_spec if scatter_results else data_p_spec
 
@@ -236,6 +271,7 @@ def _ep_dispatch_kernel(
             w2_scale_spec,
             data_p_spec,
             data_p_spec,
+            partial_spec,
         ),
         out_specs=final_out_specs,
         check_vma=False,
@@ -247,6 +283,7 @@ def _ep_dispatch_kernel(
         w2_scale,
         topk_weights,
         topk_indices,
+        partial_output,
     )
 
 
@@ -392,6 +429,7 @@ def moe_gmm_local(
         group_offset: jax.Array,
         topk_argsort_revert_indices: jax.Array,
         topk_weights: jax.Array,
+        partial_output: jax.Array | None = None,
         *,
         activation: str,
         topk: int,
@@ -405,9 +443,18 @@ def moe_gmm_local(
     """Main MoE logic on a local shard can run in TP or EP mode.
 
     Set parallelism for "tp" or "ep"
+
+    ``partial_output`` is an optional ``[num_tokens, hidden]`` per-device
+    partial sum (e.g. a TP-sharded shared expert) that is added to the local
+    routed-expert partial right before the reduction, so both are reduced by
+    the same all-reduce. Only supported on the plain all-reduce path.
     """
 
     assert parallelism in ["tp", "ep"]
+    if partial_output is not None and (enable_rs_kernel or scatter_results):
+        raise NotImplementedError(
+            "partial_output_to_add is only supported on the all-reduce path "
+            "(not with enable_rs_kernel or scatter_results).")
 
     # GMM1 computes x @ (W_up | W_gate) together and activation, output is [tokens,padded_intermediate_size]
     gmm1_res = gmm_wrapper(
@@ -553,6 +600,9 @@ def moe_gmm_local(
             else:
                 out = chunk_hidden.astype(x.dtype)
         else:
+            if partial_output is not None:
+                chunk_hidden = _add_partial_output(
+                    chunk_hidden, partial_output[start_tok:end_tok])
             if not defer_all_reduce:
                 can_use_small_ar = False
                 if envs.TPU_SMALL_ALL_REDUCE and jax.devices(
@@ -601,6 +651,7 @@ def tensor_parallel_gmm(
     group_sizes: jax.Array,
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
+    partial_output: jax.Array | None = None,
     *,
     activation: str,
     topk: int,
@@ -628,6 +679,7 @@ def tensor_parallel_gmm(
     w2_scale_spec = (None if num_blocks == 1 else P(
         None, ShardingAxisName.MLP_TENSOR, None, None))
     w2_bias_spec = None if w2_bias is None else P(None, None, None)
+    partial_spec = None if partial_output is None else data_p_spec
 
     if scatter_results:
         final_out_specs = attn_data_p_spec
@@ -660,6 +712,7 @@ def tensor_parallel_gmm(
             P(),
             data_p_spec,
             data_p_spec,
+            partial_spec,
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -675,6 +728,7 @@ def tensor_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        partial_output,
     )
 
 
@@ -689,6 +743,7 @@ def expert_parallel_gmm(
     group_sizes: jax.Array,
     topk_argsort_revert_indices: jax.Array,
     topk_weights: jax.Array,
+    partial_output: jax.Array | None = None,
     *,
     activation: str,
     topk: int,
@@ -713,6 +768,7 @@ def expert_parallel_gmm(
     w1_bias_spec = None if w1_bias is None else ep_p_spec
     w2_scale_spec = None if w2_scale is None else ep_p_spec
     w2_bias_spec = None if w2_bias is None else ep_p_spec
+    partial_spec = None if partial_output is None else data_p_spec
 
     if scatter_results:
         final_out_specs = attn_data_p_spec
@@ -747,6 +803,7 @@ def expert_parallel_gmm(
             ep_p_spec,
             data_p_spec,
             data_p_spec,
+            partial_spec,
         ),
         out_specs=(final_out_specs),
         check_vma=False,
@@ -762,6 +819,7 @@ def expert_parallel_gmm(
         group_offset,
         topk_argsort_revert_indices,
         topk_weights,
+        partial_output,
     )
 
 
@@ -842,6 +900,7 @@ def fused_moe_func(
     skip_padded_tokens: bool = False,
     num_primary_experts: int | None = None,
     use_sparse_core: bool = True,
+    partial_output_to_add: jax.Array | None = None,
 ) -> jax.Array:
     """Route tokens in hidden_states into each experts based on routing.
 
@@ -862,10 +921,31 @@ def fused_moe_func(
         scoring_fn: scoring function to apply on gating_output.
         enable_rs_kernel: enable custom Hierarchical Reduce-Scatter kernel.
         use_gmm_fused_rs_kernel: enable fused GMM reduce-scatter kernel.
+        partial_output_to_add: optional [num_tokens, hidden_size] *per-device
+            partial sum* that is added to the local routed-expert partial
+            before the MoE reduction, so that it is reduced by the same
+            all-reduce instead of a second one. The typical use is a shared
+            expert whose down projection is sharded over the same device
+            group the MoE reduces over (``ShardingAxisName.EXPERT`` for EP,
+            ``MLP_TENSOR`` for TP). The caller is responsible for that
+            invariant: the array is consumed as-is on every device. Only
+            supported on the plain all-reduce path (not with
+            ``scatter_results``, ``enable_rs_kernel`` or
+            ``use_gmm_fused_rs_kernel``).
 
     Returns:
         Output of moe operation [num_tokens, hidden_size]
     """
+
+    if partial_output_to_add is not None:
+        if partial_output_to_add.shape != hidden_states.shape:
+            raise ValueError(
+                "partial_output_to_add must match hidden_states shape "
+                f"{hidden_states.shape}, got {partial_output_to_add.shape}.")
+        if use_gmm_fused_rs_kernel or enable_rs_kernel or scatter_results:
+            raise NotImplementedError(
+                "partial_output_to_add is only supported on the all-reduce "
+                "MoE path.")
 
     if use_ep and use_gmm_fused_rs_kernel:
         from tpu_inference.kernels.experimental.fused_moe.fused_moe_rs import \
@@ -935,7 +1015,12 @@ def fused_moe_func(
             )
             route = moe_lowtok_routing_table(topk_ids_local, topk_weights,
                                              owned)
-            return moe_lowtok(hidden_states, route, w1, w1_scale, w2, w2_scale)
+            # These `experts_start` paths return the un-reduced local partial
+            # (the caller owns the reduction), so the extra partial is simply
+            # summed in.
+            return _add_partial_output(
+                moe_lowtok(hidden_states, route, w1, w1_scale, w2, w2_scale),
+                partial_output_to_add)
 
         if 0 < num_tokens <= envs.TPU_MOE_DENSE_EXPERT_THRESHOLD and can_use_dense_expert(
                 hidden_states,
@@ -950,16 +1035,17 @@ def fused_moe_func(
                 skip_padded_tokens=skip_padded_tokens,
         ):
             logger.info_once("Selected experimental dense-expert decode MoE")
-            return dense_expert_moe(
-                hidden_states,
-                w1,
-                w2,
-                w1_scale,
-                w2_scale,
-                topk_weights,
-                topk_ids_local,
-                num_primary_experts=owned,
-            )
+            return _add_partial_output(
+                dense_expert_moe(
+                    hidden_states,
+                    w1,
+                    w2,
+                    w1_scale,
+                    w2_scale,
+                    topk_weights,
+                    topk_ids_local,
+                    num_primary_experts=owned,
+                ), partial_output_to_add)
 
     if gating_output is not None:
         assert gating_output.shape == (num_tokens, global_num_experts)
@@ -1047,6 +1133,7 @@ def fused_moe_func(
                 w2_scale,
                 topk_weights,
                 topk_indices,
+                partial_output_to_add,
                 mesh=mesh,
                 kernel_mode="lowtok",
                 local_num_experts=local_num_experts,
@@ -1076,6 +1163,7 @@ def fused_moe_func(
                 w2_scale,
                 topk_weights,
                 topk_indices,
+                partial_output_to_add,
                 mesh=mesh,
                 kernel_mode="dense_expert",
                 local_num_experts=local_num_experts,
@@ -1209,6 +1297,7 @@ def fused_moe_func(
             group_sizes,
             topk_argsort_revert_indices,
             topk_weights,
+            partial_output_to_add,
             activation=activation,
             topk=topk,
             mesh=mesh,
@@ -1231,6 +1320,7 @@ def fused_moe_func(
             group_sizes,
             topk_argsort_revert_indices,
             topk_weights,
+            partial_output_to_add,
             activation=activation,
             topk=topk,
             mesh=mesh,
