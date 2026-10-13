@@ -445,13 +445,12 @@ def make_optimized_mesh(axis_shapes: Sequence[int],
 def attn_dp_ring_device_mesh(mesh_shape: Sequence[int],
                              axis_names: Sequence[str],
                              devices: Sequence[Any]) -> np.ndarray:
-    """Lay out an attn_dp x model=4 mesh so each attn_dp group is a physical
+    """Lay out an attn_dp x `model=4` mesh so each attn_dp group is a physical
     ring, for a 2x2xZ slice of two-core chips (v7x) without wraparound.
 
     XLA runs an attn_dp collective as a ring in the replica group's order.
     jax's v7x layout puts attn_dp ranks 2h and 2h+1 on opposite corners of
-    host h's 2x2 chips, so no two consecutive ranks are linked, and the
-    concurrent groups' ring steps pile up on the same links. Here:
+    host h's 2x2 chips, causing suboptimal performance on collectives. Here:
       - attn_dp rank r sits at (x, z) = ring[r], where the ring goes up
         z at x=0 and back down at x=1, so every step is one link;
       - model index m sits at y = m // 2, core m % 2, so the two cores of a

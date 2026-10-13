@@ -572,7 +572,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
-    # Lay out an attn_dp x model=4 mesh on a 2x2xZ v7x slice so that each
+    # Lay out an attn_dp x `model=4` mesh on a 2x2xZ v7x slice so that each
     # attn_dp group is a physical ring of linked chips and each model group is
     # the two cores of two linked chips. The default layout puts consecutive
     # attn_dp ranks on unlinked chips, which doubles the load on the busiest
