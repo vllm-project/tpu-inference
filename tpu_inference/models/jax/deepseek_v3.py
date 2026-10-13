@@ -509,19 +509,24 @@ class MLAEinsum(JaxEinsum):
         # Override, otherwise "mla_layer" will be visited, causing infinite recursion.
         yield from []
 
-    def load_weights(self, weights):
+    def load_weights(self, weights) -> set[str]:
+        # Return the loaded param names so vLLM's AutoWeightsLoader does not
+        # emit a per-layer "Unable to collect loaded parameters" warning
+        # (which dumps the full module repr for every decoder layer).
         named_params = dict(self.named_parameters())
         if len(self.loaded) >= 2:
             raise ValueError(
                 f"Expect at most 2 params to load for kv_b_proj, already got {self.loaded}, still have {[name for name, _ in weights]} coming."
             )
+        loaded_now = set()
         for name, weight in weights:
             param = named_params[name]
             weight_loader = getattr(param, "weight_loader")
             weight_loader(param, weight)
             self.loaded.add(name)
+            loaded_now.add(name)
         if len(self.loaded) != len(named_params):
-            return
+            return loaded_now
         assert self.quant_config is not None
         # After loading, split the weights into k/v
         with cpu_mesh_context():
@@ -581,6 +586,7 @@ class MLAEinsum(JaxEinsum):
         delattr(self, 'weight')
         delattr(self, 'weight_scale_inv')
         delattr(self, 'quant_method')
+        return loaded_now
 
 
 @dataclass(kw_only=True)
