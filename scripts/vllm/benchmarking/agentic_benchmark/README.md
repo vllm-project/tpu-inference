@@ -95,3 +95,33 @@ One JSON object per line, one line per trajectory:
 | `prompt_len` | Initial prompt length in tokens. Taken from the first stream of each group. |
 | `out_lens` | Assistant tokens generated on each turn, in order. Its length sets the turn count. |
 | `obs_lens` | Environment observation tokens appended after each turn, in order. |
+
+---
+
+## 4. Trajectory & Turn Waterfall Visualization Tool
+
+An interactive, self-contained HTML visualization tool is provided in `visualize_trajectories.py`.
+
+### Features
+- **Waterfall Swimlanes**: Trajectories are packed greedily into non-colliding swimlanes across the benchmark timeline.
+- **Turn-by-Turn Latency**: Divides each trajectory into model generation (solid colored block with turn number) and tool/environment idle time (translucent block).
+- **Batch Launch Markers**: Displays solid vertical lines at each batch dispatch boundary (`b0`, `b1`, `b2`...).
+- **Interactive Tooltips**: Hover over any turn to inspect model latency, prompt/completion tokens, throughput (tok/s), TTFT, TPOT, and tool time.
+- **Interactive Controls**: Filter by batch, search group/stream ID, sort by duration/turns/start, toggle tool time, and zoom in/out.
+- **Latency Profiling**: Summary metrics dashboard and turn-by-turn average latency breakdown.
+
+### Usage
+
+```bash
+# Visualize trajectories saved from benchmark_agentic.py
+python scripts/vllm/benchmarking/agentic_benchmark/visualize_trajectories.py \
+    trajectories.jsonl \
+    --output waterfall.html \
+    --open
+
+# Preview with synthetic demo data
+python scripts/vllm/benchmarking/agentic_benchmark/visualize_trajectories.py \
+    --demo \
+    --output waterfall.html \
+    --serve --port 8080
+```
