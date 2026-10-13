@@ -300,7 +300,7 @@ def test_row_parallel_linear(model, bias, mesh, enable_sp):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     vllm_config.model_config.dtype = dtype
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
@@ -339,7 +339,7 @@ def test_column_parallel_linear(model, bias, mesh, enable_sp):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -380,7 +380,7 @@ def test_qkv_parallel_linear(model, bias, mesh, enable_sp, fuse_matmuls):
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
@@ -425,7 +425,7 @@ def test_merged_column_parallel_linear(model, bias, mesh, fuse_matmuls,
         dtype='bfloat16',
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16

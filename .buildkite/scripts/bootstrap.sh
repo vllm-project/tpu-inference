@@ -363,9 +363,11 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     choose_ci_fleet
-    # The pin moves on the bare run's results. A kube run shadows it and must
-    # not promote a vLLM commit the bare run has not passed.
-    if [[ "${CI_FLEET}" != "kube" ]]; then
+    # The pin moves on the results of the run that owns the integration: bare
+    # metal, unless the kube schedule sets KUBE_OWNS_NIGHTLY=1. A kube run
+    # without it shadows the bare one and must not promote a vLLM commit the
+    # bare run has not passed.
+    if [[ "${CI_FLEET}" != "kube" || "${KUBE_OWNS_NIGHTLY:-0}" == "1" ]]; then
       # Note: upload are inserted in reverse order, so promote LKG should upload before tests
       upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
     fi

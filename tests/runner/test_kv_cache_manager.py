@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -2081,8 +2082,12 @@ class TestKVCacheManager:
 
     def _init_ds_v4(self, kv_cache_config):
         self.runner.kv_cache_manager.use_mla = True
-        with patch('tpu_inference.runner.kv_cache_manager.is_ds_v4',
-                   return_value=True):
+        # The DSv4 path writes MLA_KV_PACKING_SIZE and MLA_TRANSPOSE_KV_CACHE
+        # into os.environ, where every later MLA test in the process would read
+        # them; patch.dict puts the environment back.
+        with patch.dict(os.environ), patch(
+                'tpu_inference.runner.kv_cache_manager.is_ds_v4',
+                return_value=True):
             self.runner.initialize_kv_cache(kv_cache_config)
 
     def _assert_ds_v4_overlays(self, num_blocks):
@@ -2378,3 +2383,39 @@ class TestKVCacheManager:
 
         with pytest.raises(ValueError, match=r"\[kv-cache\].*state_cache"):
             self._init_ds_v4(kv_cache_config)
+
+    def test_maybe_reinitialize_input_batch_hybrid_mamba_dcp(self):
+        # Under DCP > 1, FullAttention groups scale their logical block size by
+        # KV_CONTEXT, whereas Mamba groups keep replicated per-rank state and
+        # retain their raw block size.
+        mamba_spec = MagicMock(spec=MambaSpec)
+        mamba_spec.block_size = 256
+        attn_spec = FullAttentionSpec(
+            block_size=256,
+            num_kv_heads=4,
+            head_size=128,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=100,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=["layers.0.mamba"],
+                                 kv_cache_spec=mamba_spec),
+                KVCacheGroupSpec(layer_names=["layers.1.attn"],
+                                 kv_cache_spec=attn_spec),
+            ],
+        )
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.get_mesh_shape_product",
+                return_value=4):
+            self.runner.kv_cache_manager.maybe_reinitialize_input_batch(
+                kv_cache_config)
+
+        block_tables = self.runner.input_batch.block_table.block_tables
+        assert len(block_tables) == 2
+        assert block_tables[0].max_num_blocks_per_req == (
+            self.runner.max_model_len // 256)
+        assert block_tables[1].max_num_blocks_per_req == (
+            self.runner.max_model_len // (256 * 4))

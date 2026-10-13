@@ -19,6 +19,15 @@ from unittest.mock import patch
 
 class TestPathwaysInit(unittest.TestCase):
 
+    def setUp(self):
+        import vllm.envs as envs
+
+        # vllm.envs computes this in its module __getattr__, and
+        # importlib.reload keeps the module's __dict__. A test that
+        # monkeypatched it earlier in the process leaves the old value behind
+        # as a plain attribute, which would hide __getattr__ here.
+        vars(envs).pop("VLLM_TPU_USING_PATHWAYS", None)
+
     @patch.dict("os.environ", {"JAX_PLATFORMS": "proxy,cpu"})
     def test_VLLM_TPU_USING_PATHWAYS_enabled(self):
         """Test when JAX_PLATFORMS contains 'proxy'."""
