@@ -144,7 +144,7 @@ def quantized_matmul_kernel(
 
             for i in range(steps_k):
                 k_start, k_end = i * block_size, (i + 1) * block_size
-                lhs_sub = lhs_ref[:, k_start:k_end].astype(jnp.float32)
+                lhs_sub = lhs_ref[:, k_start:k_end]
                 lhs_q, lhs_scale = util.quantize_block(lhs_sub, 1, x_q_dtype)
                 lhs_scale = lhs_scale.astype(acc_dtype)
 
