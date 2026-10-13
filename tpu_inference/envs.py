@@ -94,6 +94,7 @@ if TYPE_CHECKING:
     VERIFY_WEIGHTS: bool = False
     SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
+    ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
 
 
@@ -580,6 +581,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # read at trace time so candidate tensor shapes remain static.
     "DISTRIBUTED_SAMPLING_MAX_TOP_K":
     lambda: int(os.getenv("DISTRIBUTED_SAMPLING_MAX_TOP_K", "64")),
+    # Distributed candidate sampling: pick each vocab shard's candidates with
+    # the chunked top-k prefilter, and apply top-p to the merged candidates with
+    # one sort. Off by default. Read at trace time.
+    # Rule of thumb (micro-benchmarks, default k = 128): enable it when each
+    # device holds more than ~8K logits per row (vocab / TP); below that, plain
+    # lax.top_k is usually as fast or faster. The per-shard top-k is then
+    # 1.3-2.3x faster on TPU v6e and 2.4-7.8x on v7x at 9K-16K values, and
+    # 5-24x faster on both at 64K+ values (e.g. Qwen3 at TP 1 or 2).
+    "ENABLE_TOPK_PREFILTER":
+    env_bool("ENABLE_TOPK_PREFILTER", default=False),
     # RL weight sync: wait for the async Raiden H2D DMA to settle before
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":

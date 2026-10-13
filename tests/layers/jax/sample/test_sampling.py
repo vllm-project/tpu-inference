@@ -26,12 +26,13 @@ from vllm.v1.outputs import LogprobsTensors
 from tpu_inference import envs
 from tpu_inference.layers.common.binary_search import topp_mask
 from tpu_inference.layers.common.sharding import ShardingAxisName
+from tpu_inference.layers.jax.sample import sampling
 from tpu_inference.layers.jax.sample.sampling import (
     PromptLogprobsAsyncData, PromptLogprobsReqSnap, _apply_sampling_transforms,
     _can_sample_distributed, _merge_topk_candidates, _prefiltered_top_k,
-    _topk_prefilter_chunk, _topp_mask_sorted, compute_logprobs,
-    compute_prompt_logprobs, distributed_sampling_allowed, gather_logprobs,
-    sample)
+    _shard_topk_candidates, _topk_prefilter_chunk, _topp_mask_sorted,
+    compute_logprobs, compute_prompt_logprobs, distributed_sampling_allowed,
+    gather_logprobs, sample)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 
@@ -65,7 +66,9 @@ class TestSampling:
         )
         assert bool(_can_sample_distributed(greedy_metadata))
 
-    def test_distributed_candidates_match_full_vocab_filters(self):
+    @pytest.mark.parametrize("topk_prefilter", [False, True])
+    def test_distributed_candidates_match_full_vocab_filters(
+            self, topk_prefilter):
         batch_size = 2
         num_shards = 8
         shard_vocab_size = 256
@@ -91,8 +94,10 @@ class TestSampling:
         local_ids += shard_offsets[None, :, None]
         candidate_values = local_values.reshape(batch_size, -1)
         candidate_ids = local_ids.reshape(batch_size, -1)
-        filtered_values, filtered_ids, incomplete = (_merge_topk_candidates(
-            candidate_values, candidate_ids, metadata.top_k, top_p))
+        with mock.patch.object(envs, "ENABLE_TOPK_PREFILTER", topk_prefilter):
+            filtered_values, filtered_ids, incomplete = (
+                _merge_topk_candidates(candidate_values, candidate_ids,
+                                       metadata.top_k, top_p))
 
         actual = jnp.full_like(expected, -1e12)
         actual = actual.at[jnp.arange(batch_size)[:, None],
@@ -148,10 +153,13 @@ class TestSampling:
         for row in top_ids:
             assert len(set(row.tolist())) == row.size
 
-    # Per-shard vocab sizes of Qwen3 (151936) with 1, 2 and 8 vocab shards.
+    # Per-shard vocab sizes of Qwen3 (151936) with 1, 2 and 8 vocab shards,
+    # Qwen2.5 (152064) and Llama 4 with 16 vocab shards (12628: no multiple
+    # of 8 divides it, so it uses chunk 11).
     @pytest.mark.parametrize("num_values,chunk", [(151936, None), (151936, 16),
-                                                  (75968, None),
-                                                  (18992, None)])
+                                                  (75968, None), (18992, None),
+                                                  (152064, None),
+                                                  (12628, None)])
     def test_prefiltered_top_k_matches_lax_top_k(self, num_values, chunk):
         # Rows of distinct values, so the ids must match lax.top_k too.
         keys = jax.random.split(jax.random.key(3), 4)
@@ -193,10 +201,31 @@ class TestSampling:
         assert _topk_prefilter_chunk(151936, 128) == 32
         assert _topk_prefilter_chunk(75968, 128) == 32
         assert _topk_prefilter_chunk(18992, 128) == 16
+        # Multiples of 8 come first: chunk 33 would sort slightly fewer values
+        # for 152064, but 32 fills whole TPU tiles.
+        assert _topk_prefilter_chunk(152064, 128) == 32
+        # 12628 = 4 * 7 * 11 * 41: no multiple of 8 divides it, so any divisor.
+        assert _topk_prefilter_chunk(12628, 128) == 11
         # No divisor up to 256 leaves enough chunks: plain top-k.
         assert _topk_prefilter_chunk(4099, 128) == 0
         # Too few values for the prefilter to help.
         assert _topk_prefilter_chunk(256, 128) == 0
+
+    @pytest.mark.parametrize("topk_prefilter", [False, True])
+    def test_shard_topk_candidates_uses_prefilter_only_when_enabled(
+            self, topk_prefilter):
+        values = jax.random.normal(jax.random.key(13), (4, 151936),
+                                   dtype=jnp.float32)
+        with mock.patch.object(envs, "ENABLE_TOPK_PREFILTER",
+                               topk_prefilter), mock.patch.object(
+                                   sampling,
+                                   "_prefiltered_top_k",
+                                   wraps=_prefiltered_top_k) as prefilter:
+            top_values, top_ids = _shard_topk_candidates(values, 128)
+        assert prefilter.called == topk_prefilter
+        expected_values, expected_ids = jax.lax.top_k(values, 128)
+        np.testing.assert_array_equal(top_values, expected_values)
+        np.testing.assert_array_equal(top_ids, expected_ids)
 
     def test_topp_mask_sorted_matches_topp_mask(self):
         logits = jax.random.normal(jax.random.key(11), (4, 256),
