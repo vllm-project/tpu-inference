@@ -754,6 +754,115 @@ class GDNAttentionTest(parameterized.TestCase):
             atol=1e-5,
         )
 
+    def test_compact_conv_state_matches_full_cache(self):
+        """`compact_conv_state=True` must be indistinguishable from the full-cache path.
+
+        Exercises what the compact path has to get right beyond the happy
+        path: a bf16 cache much larger than the request bucket, prefix-cache
+        ("align") slots where a sequence reads one block and writes another,
+        a continuing sequence that has to pick up its initial state, a fresh
+        sequence landing on a stale slot, and padded request entries whose
+        `state_indices` are stale duplicates of a live request's slot, which
+        the scatter-back must *not* write.
+        """
+        kq_head_dim = 128
+        v_head_dim = 128
+        n_kq = 2
+        n_v = 8
+        kernel_size = 4
+        conv_dim = (n_kq * kq_head_dim) * 2 + n_v * v_head_dim
+
+        # Request bucket of 6 with 4 active: 2 decodes, 2 prefills.
+        max_reqs = 6
+        lengths = [1, 1, 48, 32]
+        q_loc = jnp.array([0, 1, 2, 50, 82, 82, 82], dtype=jnp.int32)
+        distribution = jnp.array([2, 4, 4], dtype=jnp.int32)
+        num_tokens = 82
+        num_blocks = 32
+
+        # Context lengths: decodes and the first prefill continue, the second
+        # prefill is brand new (has_initial_state False -> ignore the slot).
+        seq_lens = jnp.array([17, 9, 48 + 64, 32, 0, 0], dtype=jnp.int32)
+        # Write slots; the two padded entries deliberately duplicate the live
+        # slots of request 0 and request 2.
+        state_indices = jnp.array([5, 11, 20, 3, 5, 20], dtype=jnp.int32)
+        # Align-mode reads: request 0 and 2 resume from a different block.
+        read_state_indices = jnp.array([9, 11, 27, 3, 5, 20], dtype=jnp.int32)
+
+        rngs = iter(jax.random.split(jax.random.key(11), 16))
+        query = jax.random.normal(next(rngs), (num_tokens, n_kq * kq_head_dim))
+        key = jax.random.normal(next(rngs), (num_tokens, n_kq * kq_head_dim))
+        value = jax.random.normal(next(rngs), (num_tokens, n_v * v_head_dim))
+        b = jax.random.normal(next(rngs), (num_tokens, n_v))
+        a = jax.random.normal(next(rngs), (num_tokens, n_v))
+        mixed_qkv = jnp.concatenate([query, key, value], axis=-1)
+
+        conv_state = jax.random.normal(
+            next(rngs), (num_blocks, kernel_size - 1, conv_dim)).astype(
+                jnp.bfloat16)
+        recurrent_state = jax.random.normal(
+            next(rngs), (num_blocks, n_v, kq_head_dim, v_head_dim))
+
+        conv_weight = jax.random.normal(next(rngs), (conv_dim, 1, kernel_size))
+        conv_bias = jax.random.normal(next(rngs), (conv_dim, ))
+        A_log = jax.random.normal(next(rngs), (n_v, ))
+        dt_bias = jax.random.normal(next(rngs), (n_v, ))
+
+        common_kwargs = dict(
+            qkv=mixed_qkv,
+            b=b,
+            a=a,
+            conv_weight=conv_weight,
+            conv_bias=conv_bias,
+            a_log=A_log,
+            dt_bias=dt_bias,
+            query_start_loc=q_loc,
+            state_indices=state_indices,
+            distribution=distribution,
+            seq_lens=seq_lens,
+            read_state_indices=read_state_indices,
+            n_kq=n_kq,
+            n_v=n_v,
+            d_k=kq_head_dim,
+            d_v=v_head_dim,
+            kernel_size=kernel_size,
+        )
+
+        def run(compact):
+            fn = jax.jit(
+                wrapper.fused_conv1d_gdn,
+                static_argnames=[
+                    "n_kq", "n_v", "d_k", "d_v", "kernel_size",
+                    "compact_conv_state"
+                ],
+            )
+            return fn(
+                conv_state=jnp.array(conv_state),
+                recurrent_state=jnp.array(recurrent_state),
+                compact_conv_state=compact,
+                **common_kwargs,
+            )
+
+        (conv_full, rec_full), out_full = run(False)
+        (conv_compact, rec_compact), out_compact = run(True)
+
+        self.assertEqual(conv_compact.shape, conv_state.shape)
+        self.assertEqual(conv_compact.dtype, conv_state.dtype)
+        np.testing.assert_allclose(out_compact, out_full, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(rec_compact, rec_full, rtol=1e-5, atol=1e-5)
+        # Every slot, including the untouched ones and the live slots the
+        # padded entries alias, must match the full-cache result.
+        np.testing.assert_array_equal(np.asarray(conv_compact),
+                                      np.asarray(conv_full))
+        # And the two live slots aliased by the padded entries must hold the
+        # freshly written state, not the pre-step state.
+        for req, slot in ((0, 5), (2, 20)):
+            self.assertFalse(
+                np.array_equal(np.asarray(conv_compact[slot]),
+                               np.asarray(conv_state[slot])),
+                msg=f"slot {slot} of request {req} was not updated",
+            )
+
     def test_has_initial_state_preserves_continuation(self):
         """Ensure existing slots are read during multi-step execution.
         
