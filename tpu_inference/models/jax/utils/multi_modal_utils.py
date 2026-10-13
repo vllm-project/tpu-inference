@@ -306,18 +306,21 @@ def merge_multimodal_embeddings(
     )
 
 
+@jax.jit(static_argnames=("target_pad_len", ))
+def _jit_flatten_pad_mm_embeds(mm_embeds: tuple[jax.Array, ...],
+                               target_pad_len: int) -> jax.Array:
+    flattened_embeds = flatten_embeddings(mm_embeds)
+    pad_len = target_pad_len - flattened_embeds.shape[0]
+    if pad_len == 0:
+        return flattened_embeds
+    return jnp.pad(flattened_embeds, ((0, pad_len), (0, 0)))
+
+
 def flatten_pad_mm_embeds(mm_embeds: list[jax.Array] | None,
                           target_pad_len: int) -> jax.Array | None:
     if mm_embeds is None or len(mm_embeds) == 0:
         return None
-
-    flattened_embeds = flatten_embeddings(mm_embeds)
-
-    padding = jnp.zeros(
-        (target_pad_len - flattened_embeds.shape[0],
-         flattened_embeds.shape[1]),
-        dtype=flattened_embeds.dtype,
-    )
-    flattened_embeds = jnp.concatenate([flattened_embeds, padding], axis=0)
-
-    return flattened_embeds
+    if (len(mm_embeds) == 1 and mm_embeds[0].ndim == 2
+            and mm_embeds[0].shape[0] == target_pad_len):
+        return mm_embeds[0]
+    return _jit_flatten_pad_mm_embeds(tuple(mm_embeds), target_pad_len)
