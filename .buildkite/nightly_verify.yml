@@ -18,6 +18,10 @@ x-run-condition: &run-on-nightly-or-tag
 steps:
    - label: "Upload Tests for Models & Features (${MODEL_IMPL_TYPE:-auto})"
      <<: *run-on-nightly-or-tag
+     env:
+       # Which fleet's suites to send up: bootstrap.sh's choice, which can come
+       # from the commit message rather than the build's env.
+       CI_FLEET: "${CI_FLEET:-bare}"
      agents:
        queue: cpu
      commands:
@@ -70,7 +74,9 @@ steps:
      # commit_support_matrices and record_verified_commit_hashes push to the repo via
      # GitHub App credentials, which are only provisioned for main / release tags. Gate
      # them off release-branch nightlies (branch != main, no tag) to avoid a "secrets" failure.
-     if: (build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/
+     # One fleet commits: bare metal, or kube once its schedules set
+     # KUBE_OWNS_NIGHTLY=1 (and the bare-metal nightly schedules are off).
+     if: ((build.env("NIGHTLY") == "1" && build.branch == "main") || build.tag =~ /^v?[0-9]+(\.[a-zA-Z0-9]+)*([a-zA-Z]+[0-9]*)?$/) && ("${CI_FLEET:-bare}" != "kube" || "${KUBE_OWNS_NIGHTLY:-0}" == "1")
      key: commit_support_matrices
      depends_on:
        - "v6_generate_matrices"
@@ -94,7 +100,7 @@ steps:
 
    - label: "Record verified commit hashes"
      # GitHub App credentials are main/tag-only - see commit_support_matrices above.
-     if: build.env("NIGHTLY") == "1" && build.branch == "main" && "${MODEL_IMPL_TYPE:-auto}" == "auto"
+     if: build.env("NIGHTLY") == "1" && build.branch == "main" && "${MODEL_IMPL_TYPE:-auto}" == "auto" && ("${CI_FLEET:-bare}" != "kube" || "${KUBE_OWNS_NIGHTLY:-0}" == "1")
      key: record_verified_commit_hashes
      depends_on:
        - notify_test_results

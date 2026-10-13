@@ -37,7 +37,13 @@ KUBE_SHAPES = {
 
 # List of authorized command types
 ALLOWED_SERVER_COMMAND_TYPES = {"vllm_serve"}
-ALLOWED_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "lm_eval"}
+# local_benchmark_serving is this repo's scripts/vllm/benchmarking/
+# benchmark_serving.py, for datasets `vllm bench serve` no longer has (sonnet).
+ALLOWED_CLIENT_COMMAND_TYPES = {
+    "vllm_bench_serve", "local_benchmark_serving", "lm_eval"
+}
+# Clients that benchmark a server run_bm.sh starts, and so share its rules.
+SERVING_CLIENT_COMMAND_TYPES = {"vllm_bench_serve", "local_benchmark_serving"}
 
 
 def str2bool(v):
@@ -147,8 +153,8 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                 f"but for 'lm_eval', it must be one of {sorted(list(allowed_datasets))}."
             )
 
-    # Specific Rules for `vllm_bench_serve`
-    if client_cmd_type == "vllm_bench_serve":
+    # Specific Rules for the serving clients
+    if client_cmd_type in SERVING_CLIENT_COMMAND_TYPES:
         # Ensure percentile-metrics is present and contains 'e2el'
         percentile_metrics = client_args.get("percentile-metrics")
         if not percentile_metrics:
@@ -176,10 +182,10 @@ def validate_parameter_dependencies(case_data: Dict[str, Any], file_path: str,
                 f"Validation Error: Model mismatch in {file_path}. Server is '{server_model}' "
                 f"but client is '{client_model}'.")
 
-        # vllm_bench_serve requires a server to be defined
+        # A serving client requires a server to be defined
         if not case_data.get("server_command_options"):
             errors.append(
-                f"Validation Error: {file_path} uses 'vllm_bench_serve' but is missing 'server_command_options'. "
+                f"Validation Error: {file_path} uses '{client_cmd_type}' but is missing 'server_command_options'. "
                 "The infra requires a server to start for this benchmark type."
             )
 

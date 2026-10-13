@@ -27,6 +27,9 @@ x-disagg-image: &disagg_image "us-central1-docker.pkg.dev/cloud-ullm-inference-c
 steps:
   - label: ":docker: Build Disagg Benchmark Image"
     key: "build_kube_disagg_image"
+    # Not a build input: a step without depends_on would also wait on
+    # nightly_verify.yml's wait above it, until every suite had finished.
+    depends_on: "build_docker_tpu7x"
     agents:
       queue: cpu_64_core
     env:
