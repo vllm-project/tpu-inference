@@ -71,7 +71,7 @@ jobs:
       run: python3 -m build
 
     - name: Publish package distributions to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@2834a314042ef964da07689278dd1e9d773e8afd # v1.14.1
 
     - name: Publish completed message
       run: echo "---Build and publish completed successfully.---"
