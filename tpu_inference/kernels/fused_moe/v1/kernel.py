@@ -244,6 +244,7 @@ def _fused_ep_moe_kernel(
         top_k: int,
         renormalize_topk_logits: bool,
         ep_axis_name: str,
+        mesh_axis_names: tuple[str, ...] = ("data", "model"),
         act_fn: str,
         scoring_fn: str,
         subc_quant_w1_sz: int | None = None,
@@ -315,8 +316,9 @@ def _fused_ep_moe_kernel(
     num_bd2 = cdiv(hidden_size, bd2)
 
     def get_mesh_device_id(ep_rank):
-        dp_rank = jax.lax.axis_index("data")
-        return (dp_rank, ep_rank)
+        return tuple(ep_rank if axis_name ==
+                     ep_axis_name else jax.lax.axis_index(axis_name)
+                     for axis_name in mesh_axis_names)
 
     def sync_barrier():
         barrier_sem = pltpu.get_barrier_semaphore()
@@ -1272,16 +1274,9 @@ def fused_ep_moe(
     bd2c: int | None = None,
     ep_axis_name: str = "model",
 ):
-    # TODO(jevinjiang): move all these assertions to validation function.
-    if len(mesh.shape) != 2:
-        raise NotImplementedError("Only 2D mesh is supported.")
-
-    for axis_name in mesh.axis_names:
-        if axis_name == ep_axis_name:
-            continue
-        if mesh.shape[axis_name] != 1:
-            raise NotImplementedError(
-                f"Expected all non-ep axis to have size 1 in {mesh.shape=}")
+    if ep_axis_name not in mesh.axis_names:
+        raise ValueError(
+            f"Expected {ep_axis_name=} to be in {mesh.axis_names=}")
 
     ep_size = mesh.shape[ep_axis_name]
     num_devices = ep_size
@@ -1479,6 +1474,7 @@ def fused_ep_moe(
             top_k=top_k,
             renormalize_topk_logits=renormalize_topk_logits,
             ep_axis_name=ep_axis_name,
+            mesh_axis_names=tuple(mesh.axis_names),
             act_fn=act_fn,
             scoring_fn=scoring_fn,
             subc_quant_w1_sz=subc_quant_w1_sz,
