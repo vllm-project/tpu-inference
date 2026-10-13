@@ -49,7 +49,8 @@ DRAFT_LM_HEAD_PATHS = [
 ]
 
 TARGET_LM_HEAD_PATHS = [
-    "model.lm_head", "lm_head", "lm_head.weight", "lm_head.kernel",
+    "lm_head.weight", "lm_head.kernel", "model.lm_head.weight",
+    "model.lm_head.kernel", "model.lm_head", "lm_head",
     "model.embed_tokens.weight", "model.embed.embedding",
     "model.embed_tokens.embedding", "embed.embedding", "embed_tokens.embedding"
 ]
@@ -87,8 +88,9 @@ class DFlashProposer:
         hf_config = self.draft_model_config.hf_config
         self.block_size = getattr(hf_config, "block_size",
                                   self.num_speculative_tokens + 1)
-        dflash_config = getattr(hf_config, "dflash_config", {})
-        self.mask_token_id = dflash_config.get("mask_token_id", 0)
+        dflash_config = getattr(hf_config, "dflash_config", {}) or {}
+        self.mask_token_id = dflash_config.get(
+            "mask_token_id", getattr(hf_config, "mask_token_id", 0))
         self.hidden_size = hf_config.hidden_size
         self.num_layers = hf_config.num_hidden_layers
 
@@ -149,7 +151,15 @@ class DFlashProposer:
 
                 # 3. Check JAX nnx.State
                 param = _find_param(target, paths)
-                return param.value if param is not None else None
+                if param is None:
+                    return None
+                if hasattr(param, "value"):
+                    return param.value
+                leaves = jax.tree_util.tree_leaves(param)
+                if len(leaves) == 1:
+                    leaf = leaves[0]
+                    return leaf.value if hasattr(leaf, "value") else leaf
+                return None
 
             # Resolve draft and target embeddings
             draft_embed_param = _find_param(self.state, DRAFT_EMBED_PATHS)
