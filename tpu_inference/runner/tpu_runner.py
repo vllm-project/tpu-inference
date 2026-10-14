@@ -312,7 +312,8 @@ def _process_continue_decode_outputs(
             lp_ranks_list.append(lp_ranks_cpu[:actual_len, req_idx])
 
         if req_state is not None:
-            req_state.output_token_ids.extend(valid_tokens)
+            if not is_async:
+                req_state.output_token_ids.extend(valid_tokens)
 
             if all_expert_indices_cpu is not None and actual_len > 0:
                 # The on-device burst is not yet reflected in
@@ -437,6 +438,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                                             "routed_experts_attn_gid", 0),
             dp_rank_by_req=getattr(self._scheduler_output, "assigned_dp_rank",
                                    None),
+            scheduler_output=self._scheduler_output,
             is_async=True,
         )
 
@@ -1521,7 +1523,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             valid_lens, _ = _extract_valid_lengths_host(
                 generated_tokens_cpu, self.eos_token_id)
-            for pre_req_idx, req_state, _ in pre_request_seq_lens:
+            for pre_req_idx, req_state, start_idx in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
@@ -1531,15 +1533,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 valid_tokens = generated_tokens_cpu[
                     pre_req_idx, :actual_len].tolist()
 
-                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + actual_len
+                self.input_batch.token_ids_cpu[
+                    req_idx, start_idx:end_idx] = valid_tokens
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
+                self.input_batch.num_computed_tokens_cpu[req_idx] = end_idx - 1
+                req_state.num_computed_tokens = end_idx - 1
 
-                self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
-                                               actual_len] = valid_tokens
-                self.input_batch.num_tokens_no_spec[
-                    req_idx] = start_idx + actual_len
-                self.input_batch.num_tokens[req_idx] = start_idx + actual_len
-                self.input_batch.num_computed_tokens_cpu[
-                    req_idx] = start_idx + actual_len
+                num_prev_out = (start_idx -
+                                self.input_batch.num_prompt_tokens[req_idx])
+                del req_state.output_token_ids[num_prev_out:]
+                req_state.output_token_ids.extend(valid_tokens)
 
                 if pre_scheduler_output is not None:
                     pre_scheduler_output.num_scheduled_tokens[
@@ -1682,6 +1687,12 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if (is_decode_only and self.enable_continue_decode
                 and not has_structured_output):
             return self._execute_continue_decode(scheduler_output)
+
+        if (self.scheduler_config.async_scheduling
+                and self._pre_async_results is not None and getattr(
+                    self._pre_async_results, "is_continue_decode", False)):
+            self._modify_prev_results()
+            self._pre_async_results = None
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
@@ -1871,6 +1882,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | None:
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             self._modify_prev_results()
+            self._pre_async_results = None
 
         (
             input_ids,
@@ -1972,11 +1984,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             placeholder_req_id_to_index: dict[str, int] = {}
             for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
                 req_state = self.requests[req_id]
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
-                request_seq_lens.append((i, req_state, seq_len))
-
                 start_idx = self.input_batch.num_tokens_no_spec[i]
+                request_seq_lens.append((i, req_state, start_idx))
+
                 end_idx = start_idx + max_decode_steps
                 self.input_batch.num_tokens_no_spec[i] = end_idx
                 self.input_batch.num_tokens[i] = end_idx

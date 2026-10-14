@@ -281,15 +281,18 @@ def _scheduler_worker_process(
                     # num_stale_output_tokens, and schedule()
                     # then parks the request forever, waiting on output
                     # tokens that never arrive.
-                    for req_id, shortfall in shortfalls.items():
-                        request = scheduler.requests.get(req_id)
-                        if request is None:
-                            continue  # finished and dropped during the update
-                        request.num_in_flight_tokens = max(
-                            0, request.num_in_flight_tokens - shortfall)
-                        if request.num_stale_output_tokens > 0:
-                            request.num_stale_output_tokens = max(
-                                0, request.num_stale_output_tokens - shortfall)
+                    if getattr(scheduler_output,
+                               "_cd_orig_num_scheduled_tokens", None) is None:
+                        for req_id, shortfall in shortfalls.items():
+                            request = scheduler.requests.get(req_id)
+                            if request is None:
+                                continue  # finished and dropped during the update
+                            request.num_in_flight_tokens = max(
+                                0, request.num_in_flight_tokens - shortfall)
+                            if request.num_stale_output_tokens > 0:
+                                request.num_stale_output_tokens = max(
+                                    0, request.num_stale_output_tokens -
+                                    shortfall)
 
                     _send_result(result)
 

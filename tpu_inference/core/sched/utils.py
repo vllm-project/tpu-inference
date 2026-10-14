@@ -61,10 +61,55 @@ def patch_vllm_scheduler_for_continue_decode():
             diff = len(res_token_ids) - 1
             if diff > 0 and not stale:
                 request.num_computed_tokens += diff
+                if getattr(scheduler_self, "_cd_in_async_update", False):
+                    # In AsyncScheduler, _update_after_schedule() added 1 in-flight placeholder token.
+                    # original_async_update_req subtracts len(res_token_ids) (after stop-token
+                    # trimming) from num_output_placeholders. Pre-compensate by adding diff here
+                    # using the trimmed res_token_ids so num_output_placeholders decrements by 1.
+                    request.num_output_placeholders += diff
 
             return res_token_ids, stopped
 
         Scheduler._update_request_with_output = patched_update_base
+
+        original_update_after_schedule = Scheduler._update_after_schedule
+
+        def patched_update_after_schedule(scheduler_self, scheduler_output,
+                                          *args, **kwargs):
+            scheduler_output._cd_orig_num_scheduled_tokens = dict(
+                scheduler_output.num_scheduled_tokens)
+            return original_update_after_schedule(scheduler_self,
+                                                  scheduler_output, *args,
+                                                  **kwargs)
+
+        Scheduler._update_after_schedule = patched_update_after_schedule
+
+        original_update_from_output = Scheduler.update_from_output
+
+        def patched_update_from_output(scheduler_self, scheduler_output,
+                                       model_runner_output, *args, **kwargs):
+            orig_scheduled = getattr(scheduler_output,
+                                     "_cd_orig_num_scheduled_tokens", None)
+            if orig_scheduled is not None:
+                for req_id, actual in scheduler_output.num_scheduled_tokens.items(
+                ):
+                    orig = orig_scheduled.get(req_id, actual)
+                    extra = actual - orig
+                    if extra != 0:
+                        request = scheduler_self.requests.get(req_id)
+                        if request is not None:
+                            if request.num_stale_output_tokens > 0:
+                                request.num_stale_output_tokens = max(
+                                    0, request.num_stale_output_tokens + extra)
+                            else:
+                                request.num_in_flight_tokens = max(
+                                    0, request.num_in_flight_tokens + extra)
+            return original_update_from_output(scheduler_self,
+                                               scheduler_output,
+                                               model_runner_output, *args,
+                                               **kwargs)
+
+        Scheduler.update_from_output = patched_update_from_output
 
         original_init = Scheduler.__init__
 
@@ -76,8 +121,17 @@ def patch_vllm_scheduler_for_continue_decode():
                                                      DEFAULT_MAX_DECODE_STEPS)
             # Reserve max_decode_steps - 1 lookahead tokens so KVCacheManager allocates
             # sufficient blocks for up to max_decode_steps tokens before execution on TPU.
+            # Under async_scheduling, step T+1 is scheduled while step T's burst is still
+            # in flight, so reserve 2 * (max_decode_steps - 1) lookahead tokens.
+            is_async = getattr(
+                getattr(vllm_config, "scheduler_config", None),
+                "async_scheduling",
+                False,
+            )
+            lookahead = (2 * (max_decode_steps - 1) if is_async else
+                         (max_decode_steps - 1))
             scheduler_self.num_lookahead_tokens = max(
-                scheduler_self.num_lookahead_tokens, max_decode_steps - 1)
+                scheduler_self.num_lookahead_tokens, lookahead)
 
         Scheduler.__init__ = patched_init
 
@@ -91,17 +145,10 @@ def patch_vllm_scheduler_for_continue_decode():
                                                      new_token_ids,
                                                      is_stale=False,
                                                      **kwargs):
-            if len(new_token_ids) > 1 and not is_stale:
-                # In AsyncScheduler, _update_after_schedule() added 1 in-flight placeholder token.
-                # When N tokens return, original_async_update_req will subtract N from
-                # num_output_placeholders. Pre-compensate by adding (N - 1) first so that
-                # num_output_placeholders cleanly decrements by 1 without underflowing < 0.
-                # Placeholders are zeroed at preemption, so a stale delivery must
-                # not be pre-compensated (the original skips its decrement too).
-                request.num_output_placeholders += (len(new_token_ids) - 1)
             # The original's super() call does not forward is_stale, so the
-            # patched base can't see it as a parameter. Thread it through an
-            # instance flag for the duration of this call.
+            # patched base can't see it as a parameter. Thread it (and the
+            # async-update marker) through instance flags for this call.
+            scheduler_self._cd_in_async_update = True
             scheduler_self._cd_stale_in_flight = is_stale
             try:
                 return original_async_update_req(scheduler_self,
@@ -110,6 +157,7 @@ def patch_vllm_scheduler_for_continue_decode():
                                                  is_stale=is_stale,
                                                  **kwargs)
             finally:
+                scheduler_self._cd_in_async_update = False
                 scheduler_self._cd_stale_in_flight = False
 
         AsyncScheduler._update_request_with_output = patched_async_update_request_with_output
