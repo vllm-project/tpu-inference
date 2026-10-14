@@ -509,6 +509,67 @@ class TPUWorker(WorkerBase):
         jax_parallel_state.connect(self.pp_config.prev_worker_ip,
                                    self.rank - 1)
 
+    def _estimate_post_kv_cache_headroom_bytes(self) -> int:
+        """Estimate minimum per-device HBM headroom required after KV cache
+        allocation for backbone XLA executables and peak prefill activations."""
+
+        def _safe_int(val, default: int) -> int:
+            if isinstance(val, (list, tuple)):
+                val = max(val) if val else default
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                return default
+            return int(val) if int(val) > 0 else default
+
+        hf_cfg = getattr(self.model_config, "hf_config", None)
+        hf_text_cfg = (getattr(self.model_config, "hf_text_config", None)
+                       or getattr(hf_cfg, "text_config", None) or hf_cfg)
+        if not isinstance(getattr(hf_text_cfg, "hidden_size", None),
+                          (int, float)):
+            return 0
+
+        max_tokens = _safe_int(
+            getattr(self.scheduler_config, "max_num_batched_tokens", 2048),
+            2048)
+        tp_size = max(
+            1,
+            _safe_int(getattr(self.parallel_config, "tensor_parallel_size", 1),
+                      1))
+        hidden_size = _safe_int(getattr(hf_text_cfg, "hidden_size", None),
+                                4096)
+        inter_size = _safe_int(
+            getattr(hf_text_cfg, "intermediate_size", None)
+            or getattr(hf_text_cfg, "moe_intermediate_size", None),
+            hidden_size * 4,
+        )
+        num_q_heads = _safe_int(
+            getattr(hf_text_cfg, "num_attention_heads", None), 32)
+        if getattr(hf_text_cfg, "is_heterogeneous", False) is True:
+            head_dim = max(
+                _safe_int(getattr(lc, "head_dim", None), 128)
+                for lc in getattr(hf_text_cfg, "per_layer_config", ()))
+        else:
+            head_dim = _safe_int(
+                getattr(hf_text_cfg, "global_head_dim", None)
+                or getattr(hf_text_cfg, "head_dim", None),
+                hidden_size // max(1, num_q_heads),
+            )
+        dtype_bytes = 2  # bfloat16 activations
+        # Gate+Up output (2 * inter_size) + Gelu*Up input to Down (1 * inter_size)
+        mlp_act_bytes = (max_tokens * max(1, (3 * inter_size) // tp_size) *
+                         dtype_bytes)
+        attn_act_bytes = (max_tokens * max(1, num_q_heads // tp_size) *
+                          head_dim * dtype_bytes * 2)
+        residual_bytes = max_tokens * hidden_size * dtype_bytes * 2
+        single_bucket_temp_bytes = (mlp_act_bytes + attn_act_bytes +
+                                    residual_bytes)
+        # PJRT on TPU keeps the static temp buffer of every compiled power-of-2
+        # num_tokens bucket (16, 32, ..., max_tokens) resident in HBM:
+        # sum_{k=0..K} temp(max_tokens / 2^k) ~= 2.0 * temp(max_tokens).
+        all_buckets_temp_bytes = int(1.95 * single_bucket_temp_bytes)
+        exec_and_logits_headroom = int(0.65 * utils.GBYTES)
+        return max(int(2.25 * utils.GBYTES),
+                   all_buckets_temp_bytes + exec_and_logits_headroom)
+
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
         hbm_usage = utils.hbm_usage_bytes(self.devices)
@@ -517,7 +578,11 @@ class TPUWorker(WorkerBase):
             total_hbm_used += used
             total_hbm_limit += limit
 
-        total_hbm_limit_cap = total_hbm_limit * gpu_memory_utilization
+        per_device_headroom = self._estimate_post_kv_cache_headroom_bytes()
+        headroom_cap = max(
+            0, total_hbm_limit - per_device_headroom * len(hbm_usage))
+        total_hbm_limit_cap = min(total_hbm_limit * gpu_memory_utilization,
+                                  headroom_cap)
         total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
 
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
