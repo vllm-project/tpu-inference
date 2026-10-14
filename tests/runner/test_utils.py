@@ -612,6 +612,30 @@ def test_phased_profiler_full_cycle(profiler_fixture):
     ).write.call_count == PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR + 1
 
 
+def test_phased_profiler_target_concurrencies(profiler_fixture):
+    """PHASED_PROFILER_TARGET_CONCURRENCY takes a list: one capture each."""
+    profiler = profiler_fixture["profiler"]
+    mock_start = profiler_fixture["mock_start"]
+    mock_determine_phase = profiler_fixture["mock_determine_phase"]
+    profiler.only_phases = {"decode_only"}
+    profiler.target_concurrencies = {384, 768}
+    mock_determine_phase.return_value = InferencePhase.DECODE_ONLY
+
+    def run(num_reqs, steps):
+        for _ in range(steps):
+            profiler.step({"num_reqs": num_reqs,
+                           "total_num_scheduled_tokens": num_reqs})
+
+    run(500, 1)  # not a target
+    mock_start.assert_not_called()
+    run(384, PHASED_PROFILER_NUM_STEPS_TO_PROFILE_FOR + 1)
+    assert mock_start.call_count == 1
+    run(384, 2)  # already captured
+    run(768, 1)
+    assert mock_start.call_count == 2
+    assert profiler.current_phase == "decode_only_concur_768"
+
+
 def test_phased_profiler_ignores_initial_request(profiler_fixture):
     """Tests that profiling is not triggered for initial single-token requests."""
     profiler = profiler_fixture["profiler"]
