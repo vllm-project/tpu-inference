@@ -1149,3 +1149,78 @@ class TestTPUJaxRunnerDisableMM:
         runner.cache_config.mamba_cache_mode = "none"
         runner.input_batch.num_tokens = np.array([16, 20], dtype=np.int32)
         assert TPUModelRunner._get_min_remaining_slots(runner) == 1004
+
+    def test_precompile_continue_decode_variants(self):
+        """_precompile_continue_decode warms all (num_reqs, attn_padded_num_reqs) and (do_sampling, logprobs) combinations."""
+        from tpu_inference.runner.compilation_manager import CompilationManager
+
+        runner = MagicMock()
+        runner.mesh = self.mock_mesh
+        runner.vllm_config.sharding_config.total_dp_size = 1
+        runner.vllm_config.additional_config = {}
+        runner.vllm_config.parallel_config.tensor_parallel_size = 1
+        runner.num_reqs_paddings_per_dp = [8, 16]
+        runner.attn_num_reqs_paddings_per_dp = [4, 16]
+        runner.max_num_reqs = 16
+        runner.uses_mrope = False
+        runner.kv_cache_config.has_mamba_layers = False
+        runner.kv_cache_config.kv_cache_groups = []
+        runner.lora_utils.extract_lora_metadata.return_value = None
+        runner.state_leaves = {}
+        runner.kv_caches = []
+        runner.eos_token_id = (0, )
+        runner.pad_token_id = 0
+        runner.layer_name_to_kvcache_index = {}
+        runner.continue_decode_eos_check_interval = 1
+
+        cm = CompilationManager(runner)
+        recorded = []
+
+        def fake_run_compilation(name, fn, *args, **kwargs):
+            sampling_metadata = args[5]
+            init_state = args[6]
+            recorded.append({
+                "num_reqs":
+                init_state.current_tokens.shape[0],
+                "attn_padded_num_reqs":
+                init_state.attn_metadata.padded_num_reqs,
+                "do_sampling":
+                sampling_metadata.do_sampling,
+                "logprobs":
+                sampling_metadata.logprobs,
+                "dummy_shape":
+                sampling_metadata._cache_collision_dummy.shape,
+                "temp_shape": (None if sampling_metadata.temperature is None
+                               else sampling_metadata.temperature.shape),
+            })
+
+        with patch.object(
+                cm,
+                "_create_dummy_tensor",
+                side_effect=lambda shape, dtype, sharding=None: np.zeros(
+                    shape, dtype=dtype),
+        ), patch(
+                "tpu_inference.runner.compilation_manager.device_array",
+                side_effect=lambda mesh, x, sharding=None: x,
+        ), patch.object(cm,
+                        "_run_compilation",
+                        side_effect=fake_run_compilation):
+            cm._precompile_continue_decode()
+
+        expected_req_pairs = [(8, 4), (8, 16), (16, 16)]
+        expected_sampling = [(False, False), (False, True), (True, False),
+                             (True, True)]
+        assert len(
+            recorded) == len(expected_req_pairs) * len(expected_sampling)
+        idx = 0
+        for num_reqs, attn_padded in expected_req_pairs:
+            for do_sampling, logprobs in expected_sampling:
+                entry = recorded[idx]
+                idx += 1
+                assert entry["num_reqs"] == num_reqs
+                assert entry["attn_padded_num_reqs"] == attn_padded
+                assert entry["do_sampling"] == do_sampling
+                assert entry["logprobs"] == logprobs
+                assert entry["dummy_shape"] == (1 if logprobs else 2, )
+                assert entry["temp_shape"] == ((num_reqs, )
+                                               if do_sampling else None)

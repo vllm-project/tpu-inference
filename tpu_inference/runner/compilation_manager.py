@@ -43,6 +43,7 @@ from tpu_inference.models.jax.jax_intermediate_tensor import \
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.pcp_utils import (pcp_page_order, pcp_seq_arrays,
                                             pcp_token_layout)
+from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -1985,22 +1986,22 @@ class CompilationManager:
         user_max_decode_steps = self.runner.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
 
+        replicated_sharding = NamedSharding(self.runner.mesh, PartitionSpec())
+
         # We only need to compile once for user_max_decode_steps
 
-        # We also need to construct TPUSupportedSamplingMetadata
-        # For greedy decoding, we can use empty parameters
-        _cache_collision_dummy = jnp.zeros((2, ), dtype=jnp.int32)
-        _cache_collision_dummy = device_array(self.runner.mesh,
-                                              _cache_collision_dummy)
-        sampling_metadata = TPUSupportedSamplingMetadata(
-            temperature=None,
-            top_k=None,
-            top_p=None,
-            _cache_collision_dummy=_cache_collision_dummy,
-            do_sampling=False,
-            logprobs=False)
+        req_buckets_per_dp = sorted(
+            set(self.runner.num_reqs_paddings_per_dp)
+            | set(self.runner.attn_num_reqs_paddings_per_dp))
+        padded_req_pairs = list(
+            dict.fromkeys((
+                runner_utils.get_padded_token_len(
+                    self.runner.num_reqs_paddings_per_dp, r) * dp_size,
+                runner_utils.get_padded_token_len(
+                    self.runner.attn_num_reqs_paddings_per_dp, r) * dp_size,
+            ) for r in req_buckets_per_dp))
 
-        for num_reqs in self.runner.num_reqs_paddings:
+        for num_reqs, attn_padded_num_reqs in padded_req_pairs:
             init_tokens = self._create_dummy_tensor((num_reqs, ), jnp.int32,
                                                     dp_sharding)
             active_mask = self._create_dummy_tensor((num_reqs, ), jnp.bool_,
@@ -2013,10 +2014,6 @@ class CompilationManager:
                     (3, num_reqs), jnp.int32, mrope_sharding)
             else:
                 input_positions = init_tokens
-
-            attn_padded_num_reqs = runner_utils.get_padded_token_len(
-                self.runner.attn_num_reqs_paddings_per_dp,
-                num_reqs // dp_size) * dp_size
 
             seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                                  jnp.int32, dp_sharding)
@@ -2152,29 +2149,62 @@ class CompilationManager:
                 new_args[7] = self.runner.kv_caches
                 return _fn(*new_args, **_call_kwargs)
 
-            self._run_compilation(
-                f"worker{self.runner.rank} continue_decode_steps_{user_max_decode_steps}_reqs_{num_reqs}",
-                continue_decode_wrapper,
-                self.runner.state_leaves,
-                self.runner.model.step_fn_no_options,
-                self.runner.compute_logits_fn,
-                sample,
-                self.runner.mesh,
-                sampling_metadata,
-                init_state,
-                self.runner.kv_caches,
-                max_decode_steps_arr,
-                user_max_decode_steps,
-                self.runner.eos_token_id,
-                self.runner.pad_token_id,
-                self.runner.rng_params_for_sampling,
-                tuple(self.runner.layer_name_to_kvcache_index.items()),
-                lora_metadata,
-                self.runner.is_first_rank,
-                self.runner.is_last_rank,
-                self.runner.dp_size,
-                self.runner.vllm_config.aux_output_config.
-                enable_return_routed_experts,
-                self.runner.continue_decode_eos_check_interval,
-                warmup_handler=continue_decode_warmup,
-            )
+            for do_sampling in (False, True):
+                if do_sampling:
+                    temperature = self._create_dummy_tensor(
+                        (num_reqs, ), jnp.float32, sharding=dp_sharding)
+                    top_k = self._create_dummy_tensor((num_reqs, ),
+                                                      jnp.int32,
+                                                      sharding=dp_sharding)
+                    top_p = self._create_dummy_tensor((num_reqs, ),
+                                                      jnp.float32,
+                                                      sharding=dp_sharding)
+                else:
+                    temperature = None
+                    top_k = None
+                    top_p = None
+
+                for logprobs in (False, True):
+                    dummy_shape = (1 if logprobs else 2, )
+                    _cache_collision_dummy = self._create_dummy_tensor(
+                        dummy_shape, jnp.int32, sharding=replicated_sharding)
+                    sampling_metadata = TPUSupportedSamplingMetadata(
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        _cache_collision_dummy=_cache_collision_dummy,
+                        do_sampling=do_sampling,
+                        logprobs=logprobs)
+
+                    self._run_compilation(
+                        f"worker{self.runner.rank} continue_decode_steps_{user_max_decode_steps}_reqs_{num_reqs}",
+                        continue_decode_wrapper,
+                        self.runner.state_leaves,
+                        self.runner.model.step_fn_no_options,
+                        self.runner.compute_logits_fn,
+                        sample,
+                        self.runner.mesh,
+                        sampling_metadata,
+                        init_state,
+                        self.runner.kv_caches,
+                        max_decode_steps_arr,
+                        user_max_decode_steps,
+                        self.runner.eos_token_id,
+                        self.runner.pad_token_id,
+                        self.runner.rng_params_for_sampling,
+                        tuple(self.runner.layer_name_to_kvcache_index.items()),
+                        lora_metadata,
+                        self.runner.is_first_rank,
+                        self.runner.is_last_rank,
+                        self.runner.dp_size,
+                        getattr(self.runner.vllm_config.aux_output_config,
+                                "enable_return_routed_experts", False)
+                        if hasattr(self.runner.vllm_config, "aux_output_config") else
+                        getattr(self.runner.vllm_config.model_config,
+                                "enable_return_routed_experts", False),
+                        self.runner.continue_decode_eos_check_interval,
+                        warmup_handler=continue_decode_warmup,
+                        attn_padded_num_reqs=attn_padded_num_reqs,
+                        do_sampling=do_sampling,
+                        logprobs=logprobs,
+                    )
