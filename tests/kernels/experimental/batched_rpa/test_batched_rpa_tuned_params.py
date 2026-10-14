@@ -19,7 +19,7 @@ import pytest
 
 from tpu_inference.kernels.experimental.batched_rpa import configs
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
-    TunableParams, TuningKey, get_tuned_params)
+    TunableParams, TuningKey, calculate_block_sizes, get_tuned_params)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -169,3 +169,137 @@ def test_tunable_params_ge_le_single_dim_difference():
     assert (base >= bigger_bq) is False  # base.bq_sz < bigger_bq.bq_sz
     assert (bigger_bq >= base) is True  # all dims of bigger_bq ≥ base
     assert (bigger_bq <= base) is False  # bigger_bq.bq_sz > base.bq_sz
+
+
+def test_calculate_block_sizes_page_size_and_sliding_window():
+    """Verify bkv_sz is always a multiple of page_size and clamped to sliding_window."""
+    mock_info = mock.MagicMock()
+    mock_info.num_lanes = 128
+    mock_info.num_sublanes = 8
+    mock_info.mxu_column_size = 128
+    mock_info.generation = 6
+    mock_info.chip_version = "v6e"
+    mock_info.fp8_ops_per_second = 2
+    mock_info.bf16_ops_per_second = 1
+
+    with mock.patch("jax.experimental.pallas.tpu.get_tpu_info",
+                    return_value=mock_info):
+        # 1. Sliding window layer across TP=1..8 (page_size=256, sliding_window=1024)
+        for tp in (1, 2, 4, 8):
+            m_sw = configs.ModelConfigs(
+                num_q_heads=32 // tp,
+                num_kv_heads=16 // tp,
+                head_dim=256,
+                mask_value=-1e9,
+                sliding_window=1024,
+            )
+            s_sw = configs.ServingConfigs(
+                num_seqs=64,
+                page_size=256,
+                total_q_tokens=2048,
+                num_page_indices=64 * 32,
+                dtype_q=jnp.bfloat16,
+                dtype_kv=jnp.float8_e4m3fn,
+                dtype_out=jnp.bfloat16,
+            )
+            d_sw, p_sw = calculate_block_sizes(m_sw,
+                                               s_sw,
+                                               vmem_limit_bytes=128 * 1024 *
+                                               1024)
+            assert d_sw.bkv_sz % s_sw.page_size == 0
+            assert p_sw.bkv_sz % s_sw.page_size == 0
+            assert d_sw.bkv_sz == 256
+            assert p_sw.bkv_sz <= 1024
+
+        # 2. Global layer across TP=1..4 & dtypes (head_dim=512, page_size=512)
+        for tp in (1, 2, 4):
+            for kv_dtype in (jnp.float8_e4m3fn, jnp.bfloat16):
+                for kv_layout in (configs.KVLayout.HEAD_ALONG_SUBLANE,
+                                  configs.KVLayout.SEQ_ALONG_LANE):
+                    m_gl = configs.ModelConfigs(
+                        num_q_heads=16 // tp,
+                        num_kv_heads=max(1, 4 // tp),
+                        head_dim=512,
+                        mask_value=-1e9,
+                        sliding_window=None,
+                    )
+                    s_gl = configs.ServingConfigs(
+                        num_seqs=64,
+                        page_size=512,
+                        total_q_tokens=2048,
+                        num_page_indices=64 * 16,
+                        dtype_q=jnp.bfloat16,
+                        dtype_kv=kv_dtype,
+                        dtype_out=jnp.bfloat16,
+                        kv_layout=kv_layout,
+                    )
+                    d_gl, p_gl = calculate_block_sizes(m_gl,
+                                                       s_gl,
+                                                       vmem_limit_bytes=128 *
+                                                       1024 * 1024)
+                    assert d_gl.bkv_sz % s_gl.page_size == 0
+                    assert p_gl.bkv_sz % s_gl.page_size == 0
+
+        # 3. Tight VMEM (64 MiB v7x / 128 MiB v6e with page_size=512/1024) and
+        # non-power-of-two page_size=48 must stay aligned without VMEM OOM.
+        for vmem_mb, page_sz in ((64, 512), (64, 1024), (128, 1024), (128,
+                                                                      48)):
+            m_tight = configs.ModelConfigs(
+                num_q_heads=16,
+                num_kv_heads=4,
+                head_dim=512,
+                mask_value=-1e9,
+                sliding_window=None,
+            )
+            s_tight = configs.ServingConfigs(
+                num_seqs=64,
+                page_size=page_sz,
+                total_q_tokens=2048,
+                num_page_indices=64 * 16,
+                dtype_q=jnp.bfloat16,
+                dtype_kv=jnp.bfloat16,
+                dtype_out=jnp.bfloat16,
+            )
+            d_t, p_t = calculate_block_sizes(m_tight,
+                                             s_tight,
+                                             vmem_limit_bytes=vmem_mb * 1024 *
+                                             1024)
+            assert d_t.bkv_sz % page_sz == 0
+            assert d_t.bkv_sz % 128 == 0
+            assert p_t.bkv_sz % page_sz == 0
+            assert p_t.bkv_sz % 128 == 0
+            assert p_t.bq_sz % 128 == 0
+
+    # 4. SFS (v8i) prefill max_bq_sz=512 cap is preserved even when page_size=1024.
+    mock_sfs = mock.MagicMock()
+    mock_sfs.num_lanes = 128
+    mock_sfs.num_sublanes = 8
+    mock_sfs.mxu_column_size = 128
+    mock_sfs.generation = 8
+    mock_sfs.fp8_ops_per_second = 2
+    mock_sfs.bf16_ops_per_second = 1
+    with mock.patch("jax.experimental.pallas.tpu.get_tpu_info",
+                    return_value=mock_sfs), \
+         mock.patch.object(configs, "is_sfs", return_value=True):
+        m_sfs = configs.ModelConfigs(
+            num_q_heads=8,
+            num_kv_heads=2,
+            head_dim=256,
+            mask_value=-1e9,
+        )
+        s_sfs = configs.ServingConfigs(
+            num_seqs=64,
+            page_size=1024,
+            total_q_tokens=4096,
+            num_page_indices=64 * 16,
+            dtype_q=jnp.bfloat16,
+            dtype_kv=jnp.float8_e4m3fn,
+            dtype_out=jnp.bfloat16,
+        )
+        d_sfs, p_sfs = calculate_block_sizes(m_sfs,
+                                             s_sfs,
+                                             vmem_limit_bytes=256 * 1024 *
+                                             1024)
+        assert d_sfs.bkv_sz % 1024 == 0
+        assert p_sfs.bkv_sz % 1024 == 0
+        assert p_sfs.bq_sz <= configs.SFS_PREFILL_MAX_BQ_SZ
