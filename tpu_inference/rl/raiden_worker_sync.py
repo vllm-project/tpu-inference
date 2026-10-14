@@ -153,23 +153,102 @@ def _axis_name(axis: Any) -> str:
     return ",".join(axis)
 
 
-def _tensor_metadata_dict(name: str, arr: Any, layer_idx: int) -> dict:
+def _global_shard_index(
+    name: str,
+    slices: Tuple[slice, ...],
+    shape: Tuple[int, ...],
+    mesh_shape: Tuple[int, ...],
+) -> int:
+    """Row-major index of a device's slice in the variable's shard grid.
+
+    The controller enumerates a variable's slices in row-major order over
+    `mesh_shape` with tile `shape[i] // mesh_shape[i]` along each dimension
+    (`nd_slice_math.compute_nd_shard_slices`); this returns the position of
+    `slices` in that enumeration. A replicated dimension has mesh size 1 and
+    coordinate 0, so replicated devices share an index.
+
+    Args:
+      name: Variable name, for error messages.
+      slices: The device's slice per tensor dimension, as returned by
+        `Sharding.devices_indices_map`. `start=None` means 0.
+      shape: Global tensor shape.
+      mesh_shape: The variable's logical mesh shape (shards per dimension).
+
+    Returns:
+      The flat row-major shard index in `[0, prod(mesh_shape))`.
+
+    Raises:
+      ValueError: If the ranks disagree, or a slice does not start on a tile
+        boundary inside the grid (ragged shardings are not representable).
+    """
+    if not len(slices) == len(shape) == len(mesh_shape):
+        raise ValueError(
+            f"variable {name!r}: slices {slices}, shape {shape} and mesh_shape"
+            f" {mesh_shape} must have the same rank")
+    flat_index = 0
+    for dim_slice, dim_size, dim_shards in zip(slices, shape, mesh_shape):
+        tile = dim_size // dim_shards
+        if tile == 0:
+            raise ValueError(
+                f"variable {name!r}: mesh_shape {mesh_shape} splits shape"
+                f" {shape} into more shards than elements")
+        start = 0 if dim_slice.start is None else int(dim_slice.start)
+        coord = start // tile
+        if start % tile != 0 or not 0 <= coord < dim_shards:
+            raise ValueError(
+                f"variable {name!r}: slice {slices} is not a tile of shape"
+                f" {shape} sharded as mesh_shape {mesh_shape}; shard start"
+                f" {start} must be a multiple of tile {tile} below"
+                f" {dim_shards} tiles")
+        flat_index = flat_index * dim_shards + coord
+    return flat_index
+
+
+def _tensor_metadata_dict(name: str, arr: Any, layer_idx: int,
+                          shard_devices: List[Any]) -> dict:
+    """Describes `arr` for registration.
+
+    Args:
+      name: Variable name.
+      arr: The bound array.
+      layer_idx: Stable batching ordinal.
+      shard_devices: The devices behind the work unit's `shards`, in `shards`
+        order; `global_shard_indices[j]` describes `shard_devices[j]`. Empty
+        when the unit publishes no shards.
+
+    Returns:
+      The variable's metadata. `global_shard_indices` is populated only when
+      `arr` carries a real sharding; otherwise it is left empty and the
+      controller falls back to its own placement inference.
+    """
     sharding: Any = getattr(arr, "sharding", None)
     spec = tuple(getattr(sharding, "spec", ()) or ())
     spec = (spec + (None, ) * arr.ndim)[:arr.ndim]
+    shape = tuple(arr.shape)
+    global_shard_indices: Tuple[int, ...] = ()
     try:
-        local = sharding.shard_shape(tuple(arr.shape))
-        mesh_shape = tuple(g // s for g, s in zip(arr.shape, local))
+        local = sharding.shard_shape(shape)
+        mesh_shape = tuple(g // s for g, s in zip(shape, local))
     except Exception:  # pylint: disable=broad-exception-caught
         mesh_shape = (1, ) * arr.ndim
+    else:
+        # Which slice of the shard grid each local shard holds. Derived from
+        # the array's own sharding rather than from the host's position in
+        # the device mesh: with expert parallelism or a non-identity device
+        # order, the controller cannot recover it from `mesh_shape` alone.
+        devices_indices_map = sharding.devices_indices_map(shape)
+        global_shard_indices = tuple(
+            _global_shard_index(name, devices_indices_map[d], shape,
+                                mesh_shape) for d in shard_devices)
     return {
         "name": name,
-        "shape": list(arr.shape),
+        "shape": list(shape),
         "mesh_shape": list(mesh_shape),
         "layout": list(reversed(range(arr.ndim))),
         "item_size": arr.dtype.itemsize,
         "layer_idx": layer_idx,
         "sharding_spec": [_axis_name(a) for a in spec],
+        "global_shard_indices": list(global_shard_indices),
     }
 
 
@@ -310,21 +389,37 @@ class RaidenWorkerSync:
         out["__element_count__"] = int(sum(a.size for a in self.arrays))
         return out
 
+    def _shard_devices(self) -> List[Any]:
+        """Devices behind `shards`, in the order `metadata_dict` lists them.
+
+        Empty when the unit publishes no shards (nothing bound, or the
+        transport is not up yet), so the variables' `global_shard_indices`
+        stay empty too.
+
+        Raises:
+          RuntimeError: If the local shard count disagrees with the native
+            synchronizer's `num_shards`.
+        """
+        if not self.arrays or self._sync is None:
+            return []
+        # The native layer stages local shard j from `addressable_shards[j]`,
+        # and `shards` repeats this host's data address once per such shard.
+        devices = [shard.device for shard in self.arrays[0].addressable_shards]
+        if len(devices) != self._sync.num_shards:
+            raise RuntimeError(
+                f"{self.job_name}: {len(devices)} addressable shard(s) on"
+                f" {self.names[0]!r} but the native synchronizer reports"
+                f" num_shards={self._sync.num_shards}")
+        return devices
+
     def metadata_dict(self) -> dict:
         """Wire-safe registration metadata, shaped for tunix's
         `weight_sync.dict_to_metadata`."""
-        # Positional index, not name-derived -- must match tunix's side.
-        variables = [
-            _tensor_metadata_dict(name, arr, idx)
-            for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
-        ]
         mesh_axes: tuple = ()
         mesh_shape = None
-        bound_mesh = None
         for arr in self.arrays:
             mesh = getattr(getattr(arr, "sharding", None), "mesh", None)
             if mesh is not None:
-                bound_mesh = mesh
                 mesh_axes = tuple(mesh.axis_names)
                 mesh_shape = tuple(mesh.shape[a] for a in mesh.axis_names)
                 break
@@ -334,19 +429,27 @@ class RaidenWorkerSync:
                 "cannot determine mesh_shape/mesh_axes for registration "
                 "metadata.")
 
-        host_subgrid = None
-        try:
-            if (bound_mesh is not None and hasattr(bound_mesh, "local_mesh")
-                    and bound_mesh.local_mesh is not None
-                    and hasattr(bound_mesh.local_mesh, "devices")):
-                host_subgrid = list(bound_mesh.local_mesh.devices.shape)
-        except (AttributeError, ValueError, TypeError):
-            host_subgrid = None
+        shard_devices = self._shard_devices()
+        # Positional index, not name-derived -- must match tunix's side.
+        variables = [
+            _tensor_metadata_dict(name, arr, idx, shard_devices)
+            for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
+        ]
 
         data_addr = f"{self.ip}:{self._sync.local_port}" if self._sync else ""
         control_addr = (f"{self.ip}:{self._sync.listener_port}"
                         if self._sync and self._sync.listener_port else "")
         num_shards = self._sync.num_shards if self._sync else 1
+        shards = [data_addr] * num_shards if data_addr else []
+        # The controller reads `global_shard_indices[j]` as the slice behind
+        # `shards[j]`; a length mismatch would silently misplace every shard.
+        if shards:
+            for variable in variables:
+                if len(variable["global_shard_indices"]) != len(shards):
+                    raise RuntimeError(
+                        f"{self.job_name}: variable {variable['name']!r}"
+                        f" publishes {len(variable['global_shard_indices'])}"
+                        f" global_shard_indices for {len(shards)} shards")
         return {
             "unit": {
                 "job_name":
@@ -354,10 +457,9 @@ class RaidenWorkerSync:
                 "job_replica_id":
                 str(self.worker_index) if self.worker_index else "",
             },
-            "shards": [data_addr] * num_shards if data_addr else [],
+            "shards": shards,
             "control_plane_rpc_address": control_addr,
             "mesh_shape": list(mesh_shape),
             "variables": variables,
             "mesh_axes": list(mesh_axes) if mesh_axes else None,
-            "host_subgrid": host_subgrid,
         }

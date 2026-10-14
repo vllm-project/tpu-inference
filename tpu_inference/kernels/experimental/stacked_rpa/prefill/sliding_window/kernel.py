@@ -44,7 +44,7 @@ def _normalize_and_store_chunk(
             or cfgs.serve.dtype_out == chunk_l.dtype == jnp.bfloat16):
         result = lax.div(acc_value, chunk_l)
     else:
-        result = acc_value.astype(jnp.float32) * pl.reciprocal(
+        result = acc_value.astype(jnp.float32) * pltpu.reciprocal(
             chunk_l.astype(jnp.float32), approx=True)
     out = result.astype(cfgs.serve.dtype_out)
     if cfgs.aligned_q_head_dim != cfgs.aligned_kv_head_dim:
