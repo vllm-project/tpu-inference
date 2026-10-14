@@ -496,6 +496,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # locality. Count matches load only for uniform requests submitted as
     # one batch to idle ranks -- use it for bulk homogeneous workloads
     # (e.g. RL rollouts, where the per-request all-rank query dominates).
+    # round_robin also sends new requests as one message per rank, right
+    # before the next scheduler command, instead of one round trip each.
     # Keep least_loaded for heterogeneous or streaming traffic, or
     # shared-prefix (system-prompt / few-shot / multi-turn) workloads.
     "DP_SCHED_ROUTING":
