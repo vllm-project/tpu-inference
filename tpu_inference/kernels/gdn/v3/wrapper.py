@@ -287,6 +287,7 @@ def fused_conv1d_gdn(
     seq_lens: jax.Array,  # [num_seqs]
     read_state_indices: jax.Array,  # [num_seqs]
     read_offsets: jax.Array | None = None,  # [num_seqs]
+    has_prior_state: jax.Array | None = None,  # [num_seqs] bool
     *,
     n_kq: int,
     n_v: int,
@@ -386,6 +387,9 @@ def fused_conv1d_gdn(
     read_offsets = read_offsets.astype(jnp.int32)
     assert read_state_indices.shape == (num_seqs, )
     read_state_indices = read_state_indices.astype(state_indices.dtype)
+    if has_prior_state is not None:
+        assert has_prior_state.shape == (num_seqs, )
+        has_prior_state = has_prior_state.astype(jnp.bool_)
     act_in_dtype = qkv.dtype
     assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
@@ -494,6 +498,7 @@ def fused_conv1d_gdn(
                 read_offsets=read_offsets,
                 end_seq=distribution[0],
                 read_indices=read_state_indices,
+                has_prior_state=has_prior_state,
             )
         else:
             metadata_obj = metadata.compute_per_seq_metadata(
@@ -504,6 +509,7 @@ def fused_conv1d_gdn(
                 start_seq=distribution[0],
                 end_seq=distribution[-1],
                 read_indices=read_state_indices,
+                has_prior_state=has_prior_state,
             )
 
         metadata_spec = jax.tree.map(lambda _: smem_spec, metadata_obj)
