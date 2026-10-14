@@ -79,6 +79,7 @@ if hasattr(torch, "accelerator") and hasattr(torch.accelerator, "synchronize"):
             jax.effects_barrier()
 
     torch.accelerator.synchronize = _patched_synchronize
+
 from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
@@ -152,6 +153,63 @@ else:
     ProcessorInputs = None
 
 logger = init_logger(__name__)
+
+
+def _install_tpu_kv_cache_utils_hooks() -> None:
+    """Install TPU hybrid KV cache hooks into vllm.v1.core.kv_cache_utils."""
+    import dataclasses
+
+    import vllm.v1.core.kv_cache_utils as kv_cache_utils
+    from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
+
+    os.environ.setdefault("TPU_SKIP_MDS_QUERY", "true")
+
+    if getattr(kv_cache_utils, "_tpu_kv_cache_hooks_installed", False):
+        return
+
+    orig_unify = kv_cache_utils.unify_kv_cache_spec_page_size
+    orig_max_admission = SlidingWindowSpec.max_admission_blocks_per_request
+
+    def _tpu_unify_kv_cache_spec_page_size(kv_cache_spec):
+        page_sizes = {
+            layer.page_size_bytes
+            for layer in kv_cache_spec.values()
+        }
+        if len(page_sizes) > 1:
+            max_page_size = max(page_sizes)
+            kv_cache_spec = {
+                name: (dataclasses.replace(
+                    spec,
+                    block_size=spec.block_size *
+                    (max_page_size // spec.page_size_bytes),
+                    page_size_padded=max_page_size,
+                ) if isinstance(spec, AttentionSpec)
+                       and spec.page_size_padded is not None
+                       and spec.page_size_bytes < max_page_size
+                       and max_page_size % spec.page_size_bytes == 0 else spec)
+                for name, spec in kv_cache_spec.items()
+            }
+        return orig_unify(kv_cache_spec)
+
+    def _tpu_sliding_max_admission_blocks_per_request(
+        self: SlidingWindowSpec,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+    ) -> int:
+        # On TPU with Pallas ragged_paged_attention v3, a single admitted
+        # sequence only needs its active sliding window plus one block of
+        # boundary alignment.
+        return orig_max_admission(
+            self,
+            min(max_in_flight_tokens, self.block_size),
+            max_model_len,
+        )
+
+    setattr(SlidingWindowSpec, "max_admission_blocks_per_request",
+            _tpu_sliding_max_admission_blocks_per_request)
+    setattr(kv_cache_utils, "unify_kv_cache_spec_page_size",
+            _tpu_unify_kv_cache_spec_page_size)
+    setattr(kv_cache_utils, "_tpu_kv_cache_hooks_installed", True)
 
 
 @contextlib.contextmanager
@@ -355,6 +413,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        _install_tpu_kv_cache_utils_hooks()
 
         cls._resolve_multiprocess_dp(vllm_config)
 

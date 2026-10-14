@@ -19,7 +19,7 @@ import pytest
 
 from tpu_inference.kernels.experimental.batched_rpa import configs
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
-    TunableParams, TuningKey, get_tuned_params)
+    TunableParams, TuningKey, calculate_block_sizes, get_tuned_params)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -194,3 +194,62 @@ def test_tunable_params_ge_le_single_dim_difference():
     assert (base >= bigger_bq) is False  # base.bq_sz < bigger_bq.bq_sz
     assert (bigger_bq >= base) is True  # all dims of bigger_bq ≥ base
     assert (bigger_bq <= base) is False  # bigger_bq.bq_sz > base.bq_sz
+
+
+def test_calculate_block_sizes_page_size_and_sliding_window():
+    """Verify bkv_sz is always a multiple of page_size and clamped to sliding_window."""
+    mock_info = mock.MagicMock()
+    mock_info.num_lanes = 128
+    mock_info.num_sublanes = 8
+    mock_info.mxu_column_size = 128
+    mock_info.generation = 6
+
+    with mock.patch("jax.experimental.pallas.tpu.get_tpu_info",
+                    return_value=mock_info):
+        # 1. Sliding window layer (page_size=256, sliding_window=1024)
+        m_sw = configs.ModelConfigs(
+            num_q_heads=32,
+            num_kv_heads=16,
+            head_dim=256,
+            mask_value=-1e9,
+            sliding_window=1024,
+        )
+        s_sw = configs.ServingConfigs(
+            num_seqs=64,
+            page_size=256,
+            total_q_tokens=2048,
+            num_page_indices=1024,
+            dtype_q=jnp.bfloat16,
+            dtype_kv=jnp.float8_e4m3fn,
+            dtype_out=jnp.bfloat16,
+        )
+        d_sw, p_sw = calculate_block_sizes(m_sw,
+                                           s_sw,
+                                           vmem_limit_bytes=128 * 1024 * 1024)
+        assert d_sw.bkv_sz % s_sw.page_size == 0
+        assert p_sw.bkv_sz % s_sw.page_size == 0
+        assert d_sw.bkv_sz == 256
+        assert p_sw.bkv_sz <= 1024
+
+        # 2. Global layer (head_dim=512, page_size=512)
+        m_gl = configs.ModelConfigs(
+            num_q_heads=16,
+            num_kv_heads=4,
+            head_dim=512,
+            mask_value=-1e9,
+            sliding_window=None,
+        )
+        s_gl = configs.ServingConfigs(
+            num_seqs=64,
+            page_size=512,
+            total_q_tokens=2048,
+            num_page_indices=1024,
+            dtype_q=jnp.bfloat16,
+            dtype_kv=jnp.float8_e4m3fn,
+            dtype_out=jnp.bfloat16,
+        )
+        d_gl, p_gl = calculate_block_sizes(m_gl,
+                                           s_gl,
+                                           vmem_limit_bytes=128 * 1024 * 1024)
+        assert d_gl.bkv_sz % s_gl.page_size == 0
+        assert p_gl.bkv_sz % s_gl.page_size == 0
