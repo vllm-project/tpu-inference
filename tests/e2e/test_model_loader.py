@@ -199,7 +199,9 @@ def _run_server_and_bench(model_name: str, model_impl_type: str,
                 f"Server failed to start within timeout.\nStdout: {stdout}\nStderr: {stderr}"
             )
 
-        print(f"Server is ready. Running warmup benchmark ({model_impl_type})...")
+        print(
+            f"Server is ready. Running warmup benchmark ({model_impl_type})..."
+        )
 
         # Run benchmark
         bench_cmd = [
@@ -285,8 +287,7 @@ def test_flax_nnx_vs_vllm_performance():
 
     assert slowdown < max_slowdown_threshold, (
         f"flax_nnx is significantly slower than vllm. "
-        f"Slowdown: {slowdown:.2%}, Threshold: {max_slowdown_threshold:.2%}"
-    )
+        f"Slowdown: {slowdown:.2%}, Threshold: {max_slowdown_threshold:.2%}")
     assert percentage_diff < percentage_difference_threshold, (
         f"The performance difference between flax_nnx and vllm is too high. "
         f"Difference: {percentage_diff:.2%}, Threshold: {percentage_difference_threshold:.2%}"
