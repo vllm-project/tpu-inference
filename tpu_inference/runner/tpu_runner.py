@@ -295,6 +295,17 @@ def _process_continue_decode_outputs(
     num_eos_hits = int(has_eos.sum())
     requests_dict = requests if requests is not None and hasattr(
         requests, "get") else None
+    chunk_start: Dict[str, int] = {}
+    if all_expert_indices_cpu is not None and scheduler_output is not None:
+        cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
+        if (cached_reqs is not None
+                and isinstance(getattr(cached_reqs, "req_ids", None),
+                               (list, tuple))
+                and isinstance(
+                    getattr(cached_reqs, "num_computed_tokens", None),
+                    (list, tuple))):
+            chunk_start = dict(
+                zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
 
     for req_idx, req_id in enumerate(req_ids):
         req_state = requests_dict.get(
@@ -303,8 +314,6 @@ def _process_continue_decode_outputs(
         valid_tokens = generated_tokens_cpu[req_idx, :actual_len].tolist()
         sampled_token_ids.append(valid_tokens)
 
-        if scheduler_output is not None:
-            scheduler_output.num_scheduled_tokens[req_id] = actual_len
 
         if lp_token_ids_cpu is not None:
             lp_token_ids_list.append(lp_token_ids_cpu[:actual_len, req_idx])
@@ -323,13 +332,13 @@ def _process_continue_decode_outputs(
                         req_id=req_id,
                         rows=all_expert_indices_cpu[:actual_len, :,
                                                     req_idx, :],
-                        token_start=req_state.num_computed_tokens,
+                        token_start=chunk_start.get(
+                            req_id, req_state.num_computed_tokens),
                         num_accepted=actual_len,
                         block_ids=_block_ids_for_group(
                             req_state, routed_experts_attn_gid),
                         dp_rank=dp_rank_by_req.get(req_id, 0),
                     ))
-
             if input_batch is not None:
                 start_idx = input_batch.num_tokens_no_spec[req_idx]
                 end_idx = start_idx + actual_len
@@ -1545,10 +1554,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                 self.input_batch.num_prompt_tokens[req_idx])
                 del req_state.output_token_ids[num_prev_out:]
                 req_state.output_token_ids.extend(valid_tokens)
-
-                if pre_scheduler_output is not None:
-                    pre_scheduler_output.num_scheduled_tokens[
-                        req_id] = actual_len
             return
 
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(

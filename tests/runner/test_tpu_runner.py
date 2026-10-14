@@ -320,9 +320,9 @@ class TestTPUJaxRunner:
             np.testing.assert_array_equal(aux_output[req_id].rows,
                                           mock_experts_cpu[:, :, req_idx, :])
 
-        # Verify scheduler_output.num_scheduled_tokens is mutated to actual_steps = 5
-        assert scheduler_output.num_scheduled_tokens["req1"] == 5
-        assert scheduler_output.num_scheduled_tokens["req2"] == 5
+        # Verify scheduler_output.num_scheduled_tokens is not mutated by the runner
+        assert scheduler_output.num_scheduled_tokens["req1"] == 1
+        assert scheduler_output.num_scheduled_tokens["req2"] == 1
 
     @patch('tpu_inference.runner.tpu_runner.continue_decode')
     @patch('jax.device_get')
@@ -1114,6 +1114,7 @@ class TestTPUJaxRunnerDisableMM:
         scheduler_output_structured = MagicMock()
         scheduler_output_structured.has_structured_output_requests = True
         scheduler_output_structured.finished_req_ids = []
+        scheduler_output_structured.kv_cache_block_copies = None
         TPUModelRunner._execute_model(runner, scheduler_output_structured)
         runner._execute_continue_decode.assert_not_called()
 
@@ -1121,6 +1122,7 @@ class TestTPUJaxRunnerDisableMM:
         scheduler_output_normal = MagicMock()
         scheduler_output_normal.has_structured_output_requests = False
         scheduler_output_normal.finished_req_ids = []
+        scheduler_output_normal.kv_cache_block_copies = None
         TPUModelRunner._execute_model(runner, scheduler_output_normal)
         runner._execute_continue_decode.assert_called_once_with(
             scheduler_output_normal)

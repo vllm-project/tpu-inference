@@ -78,15 +78,16 @@ def _run_inference_and_return_outputs(
     try:
         start_time = time.time()
         outputs = llm.generate(prompts, sampling_params)
-        if follow_up_prompts is not None:
-            turn2_outputs = llm.generate(follow_up_prompts, sampling_params)
-            outputs = list(outputs) + list(turn2_outputs)
-        elif follow_up_suffix is not None:
-            turn2_prompts = [
+        if follow_up_suffix is not None and follow_up_prompts is None:
+            follow_up_prompts = [
                 p + out.outputs[0].text + follow_up_suffix
                 for p, out in zip(prompts, outputs)
             ]
-            turn2_outputs = llm.generate(turn2_prompts, sampling_params)
+        if follow_up_prompts is not None:
+            llm.enqueue(follow_up_prompts[:1], sampling_params)
+            time.sleep(0.04 if config.async_scheduling else 0.07)
+            llm.enqueue(follow_up_prompts[1:], sampling_params)
+            turn2_outputs = llm.wait_for_completion()
             outputs = list(outputs) + list(turn2_outputs)
         latency = time.time() - start_time
         return outputs, latency
@@ -512,33 +513,22 @@ def test_continue_decode_gdn_hybrid(enable_prefix_caching, async_scheduling):
             assert (out.num_cached_tokens or 0) >= 192, (
                 f"Expected Turn 2 to hit decode-generated Mamba cache block "
                 f"(>=192 cached tokens), got {out.num_cached_tokens}")
-        # Verify Turn-2 outputs (which resumed from continue_decode's cached
-        # Mamba blocks) against a fresh uncached baseline run on the exact same
-        # Turn-2 prompts.
-        turn2_prompts = [out.prompt for out in turn2_outputs]
-        baseline_config = InferenceConfig(
-            model_name=config.model_name,
-            impl_type=config.impl_type,
-            tensor_parallel_size=config.tensor_parallel_size,
-            data_parallel_size=config.data_parallel_size,
-            max_model_len=config.max_model_len,
-            max_num_batched_tokens=config.max_num_batched_tokens,
-            max_num_seqs=config.max_num_seqs,
-            async_scheduling=config.async_scheduling,
-            enable_prefix_caching=False,
-            limit_mm_per_prompt=config.limit_mm_per_prompt,
-            additional_config={"enable_continue_decode": False},
-        )
-        baseline_outputs, _ = _run_inference_and_return_outputs(
-            baseline_config,
-            prompts,
-            params,
-            enable_export=False,
-            follow_up_prompts=turn2_prompts)
+        turn2_prompts = [
+            p + out.outputs[0].text + follow_up
+            for p, out in zip(prompts, continue_decode_outputs[:len(prompts)])
+        ]
     else:
-        config.additional_config = {"enable_continue_decode": False}
-        baseline_outputs, _ = _run_inference_and_return_outputs(
-            config, prompts, params, enable_export=False)
+        turn2_prompts = None
+
+    config.async_scheduling = False
+    config.enable_prefix_caching = False
+    config.additional_config = {"enable_continue_decode": False}
+    baseline_outputs, _ = _run_inference_and_return_outputs(
+        config,
+        prompts,
+        params,
+        enable_export=False,
+        follow_up_prompts=turn2_prompts)
 
     _check_correctness(
         f"Continue decode GDN (prefix_caching={enable_prefix_caching}, async={async_scheduling})",
