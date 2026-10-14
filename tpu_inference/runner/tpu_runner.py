@@ -312,7 +312,8 @@ def _process_continue_decode_outputs(
             lp_ranks_list.append(lp_ranks_cpu[:actual_len, req_idx])
 
         if req_state is not None:
-            req_state.output_token_ids.extend(valid_tokens)
+            if not is_async:
+                req_state.output_token_ids.extend(valid_tokens)
 
             if (all_expert_indices_cpu is not None and actual_len > 0):
                 slots_arr = _reconstruct_slots_for_request(
@@ -1550,25 +1551,43 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             valid_lens, _ = _extract_valid_lengths_host(
                 generated_tokens_cpu, self.eos_token_id)
-            for pre_req_idx, req_state, _ in pre_request_seq_lens:
+            for pre_req_idx, req_state, pre_start_idx in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
                 req_idx = self.input_batch.req_id_to_index[req_id]
 
                 actual_len = int(valid_lens[pre_req_idx])
+                if actual_len <= 0:
+                    continue
                 valid_tokens = generated_tokens_cpu[
                     pre_req_idx, :actual_len].tolist()
 
-                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-
-                self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
-                                               actual_len] = valid_tokens
-                self.input_batch.num_tokens_no_spec[
-                    req_idx] = start_idx + actual_len
-                self.input_batch.num_tokens[req_idx] = start_idx + actual_len
+                end_idx = min(pre_start_idx + actual_len, self.max_model_len)
+                num_valid = max(0, end_idx - pre_start_idx)
+                if num_valid > 0:
+                    self.input_batch.token_ids_cpu[
+                        req_idx,
+                        pre_start_idx:end_idx] = valid_tokens[:num_valid]
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
+                computed_tokens = max(0, end_idx - 1)
                 self.input_batch.num_computed_tokens_cpu[
-                    req_idx] = start_idx + actual_len
+                    req_idx] = computed_tokens
+                req_state.num_computed_tokens = computed_tokens
+
+                num_prompt_tokens = getattr(self.input_batch,
+                                            "num_prompt_tokens", None)
+                if isinstance(num_prompt_tokens, (np.ndarray, list)):
+                    output_start_idx = max(
+                        0, pre_start_idx - int(num_prompt_tokens[req_idx]))
+                else:
+                    output_start_idx = max(
+                        0,
+                        len(req_state.output_token_ids) -
+                        self._pre_async_results.continue_decode_max_steps)
+                del req_state.output_token_ids[output_start_idx:]
+                req_state.output_token_ids.extend(valid_tokens[:num_valid])
 
                 if pre_scheduler_output is not None:
                     pre_scheduler_output.num_scheduled_tokens[
@@ -1678,18 +1697,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         _copies = getattr(scheduler_output, "kv_cache_block_copies", None)
-        if _copies:
+        if isinstance(_copies, (list, tuple, dict)) and _copies:
             # vLLM asks the worker to copy a shared partial prefix-cache block
             # into a request-private block (copy-on-write). The TPU runner
             # has no implementation, so the request would read a stale block.
             # The TPU hybrid coordinator keeps hits block-aligned so this
             # should never fire; make it loud if it does.
-            self._dropped_cow_copies = getattr(self, "_dropped_cow_copies", 0) + len(_copies)
+            self._dropped_cow_copies = getattr(self, "_dropped_cow_copies",
+                                               0) + len(_copies)
             if self._dropped_cow_copies <= 5 * len(_copies):
                 logger.error(
                     "TPU runner received %d kv_cache_block_copies (copy-on-write) "
                     "it cannot apply; KV/mamba state of the affected requests is "
-                    "corrupt. total dropped so far: %d", len(_copies), self._dropped_cow_copies)
+                    "corrupt. total dropped so far: %d", len(_copies),
+                    self._dropped_cow_copies)
         if not scheduler_output.total_num_scheduled_tokens:
             if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
                 self._modify_prev_results()
@@ -1721,6 +1742,13 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         if (is_decode_only and self.enable_continue_decode
                 and not has_structured_output):
             return self._execute_continue_decode(scheduler_output)
+
+        if (self.scheduler_config.async_scheduling
+                and self._pre_async_results is not None
+                and getattr(self._pre_async_results, "is_continue_decode",
+                            False) is True):
+            self._modify_prev_results()
+            self._pre_async_results = None
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
         (
@@ -1885,10 +1913,28 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _get_min_remaining_slots(self) -> int:
         # Conservatively calculate the minimum remaining token capacity based on max_model_len.
-        num_tokens = self.input_batch.num_tokens[:self.input_batch.num_reqs]
+        num_tokens = np.asarray(
+            self.input_batch.num_tokens[:self.input_batch.num_reqs])
         remaining_slots = self.max_model_len - num_tokens
         if len(remaining_slots) == 0:
             return 0
+        kv_cache_config = getattr(self, "kv_cache_config", None)
+        cache_config = getattr(self, "cache_config", None)
+        mamba_block_size = getattr(cache_config, "mamba_block_size", None)
+        if (getattr(kv_cache_config, "has_mamba_layers", False) and getattr(
+                cache_config, "mamba_cache_mode", "none") == "align"
+                and isinstance(mamba_block_size, int)
+                and mamba_block_size > 0):
+            # Cap continue_decode so it never crosses a mamba_block_size boundary
+            # mid-burst. In async scheduling, stop 1 token before the boundary
+            # when mamba_remaining > 1 so the already-scheduled in-flight step k+1
+            # executes the boundary token using the current mamba block.
+            mamba_remaining = (mamba_block_size - (
+                (np.maximum(num_tokens, 1) - 1) % mamba_block_size))
+            scheduler_config = getattr(self, "scheduler_config", None)
+            if getattr(scheduler_config, "async_scheduling", False):
+                mamba_remaining = np.maximum(1, mamba_remaining - 1)
+            remaining_slots = np.minimum(remaining_slots, mamba_remaining)
         return int(np.min(remaining_slots))
 
     def _execute_continue_decode(
@@ -1897,6 +1943,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | None:
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             self._modify_prev_results()
+            self._pre_async_results = None
 
         (
             input_ids,
@@ -2000,11 +2047,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             placeholder_req_id_to_index: dict[str, int] = {}
             for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
                 req_state = self.requests[req_id]
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
-                request_seq_lens.append((i, req_state, seq_len))
+                start_idx = int(self.input_batch.num_tokens_no_spec[i])
+                request_seq_lens.append((i, req_state, start_idx))
 
-                start_idx = self.input_batch.num_tokens_no_spec[i]
                 end_idx = start_idx + max_decode_steps
                 self.input_batch.num_tokens_no_spec[i] = end_idx
                 self.input_batch.num_tokens[i] = end_idx

@@ -480,6 +480,181 @@ class TestTPUJaxRunner:
 
     @patch('tpu_inference.runner.tpu_runner.continue_decode')
     @patch('jax.device_get')
+    def test_execute_continue_decode_grouped_attention_metadata(
+            self, mock_device_get, mock_continue_decode):
+        """_execute_continue_decode() should accept GroupedAttentionMetadata for hybrid GDN models."""
+        from tpu_inference.layers.common.attention_metadata import (
+            AttentionMetadata, GroupedAttentionMetadata)
+
+        runner = MagicMock()
+        runner.scheduler_config.async_scheduling = False
+        runner.max_num_reqs = 4
+        runner.max_model_len = 512
+        runner.dp_size = 1
+        runner.vllm_config.parallel_config.data_parallel_size = 1
+        runner.vllm_config.parallel_config.is_moe_model = False
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.req_ids = ["req1", "req2"]
+        runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
+        runner.input_batch.token_ids_cpu = np.zeros((4, 512), dtype=np.int32)
+        runner.input_batch.num_tokens = np.array([10, 20, 0, 0],
+                                                 dtype=np.int32)
+        runner.input_batch.num_tokens_no_spec = np.array([10, 20, 0, 0],
+                                                         dtype=np.int32)
+
+        req_mock1 = MagicMock(output_token_ids=[1, 2])
+        req_mock2 = MagicMock(output_token_ids=[3])
+        runner.requests = {"req1": req_mock1, "req2": req_mock2}
+
+        runner._get_min_remaining_slots.return_value = 3
+        runner.vllm_config.additional_config = {"max_decode_steps": 4}
+        runner.static_max_decode_steps = 4
+        runner.eos_token_id = (999, )
+        runner.pad_token_id = 0
+        runner.layer_name_to_kvcache_index = {
+            "layers.0.attn": 0,
+            "layers.1.gdn": 1,
+        }
+        runner.continue_decode_eos_check_interval = 1
+
+        g0 = AttentionMetadata(
+            input_positions=jnp.array([9, 19, 0, 0], dtype=jnp.int32),
+            block_tables=jnp.zeros((4, 16), dtype=jnp.int32),
+            seq_lens=jnp.array([10, 20, 0, 0], dtype=jnp.int32),
+            query_start_loc=jnp.array([0, 1, 2, 2, 2], dtype=jnp.int32),
+            request_distribution=jnp.array([2, 0, 2], dtype=jnp.int32),
+            mamba_state_indices=jnp.array([2, 0, 1, 3], dtype=jnp.int32),
+            padded_num_reqs=4,
+            is_decode=True,
+        )
+        g1 = AttentionMetadata(
+            input_positions=g0.input_positions,
+            block_tables=jnp.zeros((4, 2), dtype=jnp.int32),
+            seq_lens=g0.seq_lens,
+            query_start_loc=g0.query_start_loc,
+            request_distribution=g0.request_distribution,
+            mamba_state_indices=g0.mamba_state_indices,
+            padded_num_reqs=4,
+            is_decode=True,
+        )
+        grouped_attn = GroupedAttentionMetadata(
+            groups=(g0, g1),
+            layer_names_per_group=(("layers.0.attn", ), ("layers.1.gdn", )),
+        )
+
+        mock_generated_tokens = MagicMock()
+        mock_final_state = MagicMock()
+        mock_final_state.step_counter = jnp.array(3, dtype=jnp.int32)
+        mock_continue_decode.return_value = (
+            mock_generated_tokens,
+            MagicMock(),
+            mock_final_state,
+            MagicMock(),
+            None,
+            None,
+        )
+
+        mock_tokens_cpu = np.zeros((3, 4), dtype=np.int32)
+        mock_tokens_cpu[:, 0] = [101, 102, 103]
+        mock_tokens_cpu[:, 1] = [201, 999, 0]
+
+        def device_get_side_effect(arg):
+            if isinstance(arg, tuple) and len(arg) == 2:
+                tokens_arg, _ = arg
+                if tokens_arg is mock_generated_tokens:
+                    return mock_tokens_cpu, np.int32(3)
+            return arg
+
+        mock_device_get.side_effect = device_get_side_effect
+
+        scheduler_output = MagicMock()
+        scheduler_output.num_scheduled_tokens = {"req1": 1, "req2": 1}
+
+        runner._prepare_inputs.return_value = (
+            np.zeros(4, dtype=np.int32),
+            None,
+            grouped_attn,
+            None,
+            np.array([0, 1, -1, -1], dtype=np.int32),
+            None,
+            None,
+            4,
+            None,
+            None,
+            None,
+            None,
+        )
+
+        TPUModelRunner._execute_continue_decode(runner, scheduler_output)
+
+        mock_continue_decode.assert_called_once()
+        called_init_state = mock_continue_decode.call_args.kwargs["init_state"]
+        assert isinstance(called_init_state.attn_metadata,
+                          GroupedAttentionMetadata)
+        assert called_init_state.attn_metadata.padded_num_reqs == 4
+        output = runner._continue_decode_output
+        assert output.sampled_token_ids[0] == [101, 102, 103]
+        assert output.sampled_token_ids[1] == [201, 999]
+        assert scheduler_output.num_scheduled_tokens["req1"] == 3
+        assert scheduler_output.num_scheduled_tokens["req2"] == 2
+
+    def test_get_min_remaining_slots_mamba_align_sync_and_async(self):
+        """_get_min_remaining_slots() should cap steps to not cross mamba_block_size boundaries in align mode."""
+        self.runner.max_model_len = 512
+        self.runner.input_batch = MagicMock()
+        self.runner.input_batch.num_reqs = 2
+        self.runner.input_batch.num_tokens = np.array([13, 20, 0, 0],
+                                                      dtype=np.int32)
+
+        # 1. Without mamba align mode: capped only by max_model_len (512 - 20 = 492)
+        self.runner.kv_cache_config = MagicMock(has_mamba_layers=False)
+        self.runner.cache_config.mamba_cache_mode = "none"
+        self.runner.cache_config.mamba_block_size = None
+        self.runner.scheduler_config.async_scheduling = False
+        assert self.runner._get_min_remaining_slots() == 492
+
+        # 2. Sync scheduling with mamba_cache_mode="align", mamba_block_size=16:
+        # num_tokens=13 -> mamba_remaining = 16 - 12 = 4 (stops at token 16)
+        # num_tokens=20 -> mamba_remaining = 16 - 3 = 13 (stops at token 32)
+        self.runner.kv_cache_config = MagicMock(has_mamba_layers=True)
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.mamba_block_size = 16
+        self.runner.scheduler_config.async_scheduling = False
+        assert self.runner._get_min_remaining_slots() == 4
+
+        # At exact block boundary token (seq_len=16 -> last token of block 0):
+        # mamba_remaining = 16 - ((16 - 1) % 16) = 1
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.num_tokens = np.array([16, 0], dtype=np.int32)
+        assert self.runner._get_min_remaining_slots() == 1
+
+        # First token of block 1 (seq_len=17): mamba_remaining = 16
+        self.runner.input_batch.num_tokens = np.array([17, 0], dtype=np.int32)
+        assert self.runner._get_min_remaining_slots() == 16
+
+        # 3. Async scheduling with mamba_cache_mode="align", mamba_block_size=16:
+        # When mamba_remaining > 1, caps at max(1, mamba_remaining - 1) so step k
+        # stops 1 token before the boundary and in-flight step k+1 executes the
+        # single boundary token using the current mamba block.
+        self.runner.scheduler_config.async_scheduling = True
+        self.runner.input_batch.num_reqs = 2
+        self.runner.input_batch.num_tokens = np.array([13, 20, 0, 0],
+                                                      dtype=np.int32)
+        assert self.runner._get_min_remaining_slots() == 3
+
+        # When step k+1 arrives at the boundary token (seq_len=16, mamba_remaining=1):
+        # max(1, 1 - 1) = 1 step
+        self.runner.input_batch.num_reqs = 1
+        self.runner.input_batch.num_tokens = np.array([16, 0], dtype=np.int32)
+        assert self.runner._get_min_remaining_slots() == 1
+
+        # First token of block 1 in async mode (seq_len=17, mamba_remaining=16):
+        # max(1, 16 - 1) = 15 steps (stops at token 31)
+        self.runner.input_batch.num_tokens = np.array([17, 0], dtype=np.int32)
+        assert self.runner._get_min_remaining_slots() == 15
+
+    @patch('tpu_inference.runner.tpu_runner.continue_decode')
+    @patch('jax.device_get')
     def test_execute_continue_decode_eos_check_interval_config(
             self, mock_device_get, mock_continue_decode):
         """_execute_continue_decode() should pass continue_decode_eos_check_interval (sourced from the CONTINUE_DECODE_EOS_CHECK_INTERVAL env var) through to continue_decode."""
@@ -793,6 +968,209 @@ class TestTPUJaxRunner:
         model_runner_output = async_out.get_output()
         assert model_runner_output.sampled_token_ids[0] == [101, 102, 999]
         assert model_runner_output.sampled_token_ids[1] == [201, 202, 203]
+
+    @patch('tpu_inference.runner.tpu_runner.continue_decode')
+    @patch('jax.device_get')
+    @patch('jax.copy_to_host_async', side_effect=lambda x: x)
+    def test_execute_continue_decode_async_multistep_mamba_boundary(
+            self, mock_copy_async, mock_device_get, mock_continue_decode):
+        """Multi-step async continue_decode with GDN mamba_cache_mode='align'
+        must accurately track token_ids_cpu, num_tokens, num_computed_tokens_cpu,
+        and output_token_ids across update_states and never cross a mamba_block_size
+        boundary."""
+        self.runner.scheduler_config.async_scheduling = True
+        self.runner.speculative_config = None
+        self.runner.enable_continue_decode = True
+        self.runner.static_max_decode_steps = 5
+        self.runner.continue_decode_eos_check_interval = 1
+        self.runner.eos_token_id = 999
+        self.runner.pad_token_id = 0
+        self.runner.max_model_len = 512
+        self.runner.kv_cache_config = MagicMock(has_mamba_layers=True)
+        self.runner.cache_config.mamba_cache_mode = "align"
+        self.runner.cache_config.mamba_block_size = 16
+        self.runner.layer_name_to_kvcache_index = {}
+        self.runner.model = MagicMock()
+
+        # Setup 1 request in input_batch:
+        # 10 prompt tokens [10..19], plus 3 output tokens already generated [20, 21, 22]
+        # so before Step 1, token_ids_cpu[0, :13] = [10..22], num_tokens = 13,
+        # num_computed_tokens_cpu = 12 (token at index 12 is the input to Step 1).
+        req_id = "req1"
+        req_state = MagicMock()
+        req_state.req_id = req_id
+        req_state.prompt_token_ids = list(range(10, 20))
+        req_state.num_prompt_tokens = 10
+        req_state.output_token_ids = [20, 21, 22]
+        req_state.num_computed_tokens = 12
+        req_state.block_ids = ([1], [1])
+        req_state.mrope_positions = None
+        req_state.mrope_position_delta = None
+        self.runner.requests = {req_id: req_state}
+
+        ib = self.runner.input_batch
+        ib.num_reqs = 1
+        ib._req_ids = [req_id]
+        ib.req_id_to_index = {req_id: 0}
+        ib.num_prompt_tokens[0] = 10
+        ib.token_ids_cpu[0, :13] = np.arange(10, 23, dtype=np.int32)
+        ib.num_tokens[0] = 13
+        ib.num_tokens_no_spec[0] = 13
+        ib.num_computed_tokens_cpu[0] = 12
+        ib.request_distribution = [1, 1, 1]
+        ib.has_mamba_layers = False
+        self.runner._pre_async_results = None
+
+        captured_steps = []
+
+        def fake_prepare_inputs(sched_out):
+            idx = 0
+            pos = int(ib.num_computed_tokens_cpu[idx])
+            tok = int(ib.token_ids_cpu[idx, pos])
+            seq_len = pos + int(sched_out.num_scheduled_tokens[req_id])
+            captured_steps.append((pos, tok, seq_len, int(ib.num_tokens[idx])))
+            attn_meta = MagicMock()
+            attn_meta.seq_lens_cpu = np.array([seq_len], dtype=np.int32)
+            return (
+                jnp.array([tok] + [0] * 7, dtype=jnp.int32),
+                jnp.array([pos] + [0] * 7, dtype=jnp.int32),
+                attn_meta,
+                MagicMock(),
+                jnp.array([0] + [-1] * 7, dtype=jnp.int32),
+                None,
+                None,
+                8,
+                {
+                    0: [req_id]
+                },
+                8,
+                None,
+                MagicMock(),
+            )
+
+        self.runner._prepare_inputs = fake_prepare_inputs
+
+        # --- Step 1: starts at num_tokens=13 (pos=12, seq_len=13) ---
+        # mamba_remaining = 16 - ((13 - 1) % 16) = 4 -> async cap = max(1, 4 - 1) = 3
+        # Generates 3 tokens: [101, 102, 103] (for seq_len = 13, 14, 15, stopping 1 before 16)
+        step1_tokens = np.zeros((5, 8), dtype=np.int32)
+        step1_tokens[:3, 0] = [101, 102, 103]
+        step1_state = MagicMock()
+        step1_state.step_counter = jnp.array(3, dtype=jnp.int32)
+        mock_continue_decode.return_value = (
+            step1_tokens,
+            MagicMock(),
+            step1_state,
+            MagicMock(),
+            None,
+            None,
+        )
+        sched_out1 = MagicMock()
+        sched_out1.num_scheduled_tokens = {req_id: 1}
+        self.runner._execute_continue_decode(sched_out1)
+
+        assert int(
+            mock_continue_decode.call_args.kwargs["max_decode_steps"]) == 3
+        assert captured_steps[-1] == (12, 22, 13, 13)
+        # Placeholders added at end of Step 1: 13 + 3 = 16
+        assert ib.num_tokens[0] == 16
+        assert len(req_state.output_token_ids) == 6
+
+        # --- Host schedules Step 2 while Step 1 is in flight ---
+        # Host only knows 1 token was scheduled in Step 1:
+        # num_computed_tokens = 13, num_output_tokens = 4 (3 prior + 1 placeholder)
+        cached_reqs2 = MagicMock()
+        cached_reqs2.req_ids = [req_id]
+        cached_reqs2.num_computed_tokens = [13]
+        cached_reqs2.new_block_ids = [None]
+        cached_reqs2.resumed_req_ids = set()
+        cached_reqs2.num_output_tokens = [4]
+        sched_out2 = MagicMock()
+        sched_out2.finished_req_ids = set()
+        sched_out2.free_encoder_mm_hashes = []
+        sched_out2.num_scheduled_tokens = {req_id: 1}
+        sched_out2.total_num_scheduled_tokens = 1
+        sched_out2.scheduled_new_reqs = []
+        sched_out2.scheduled_cached_reqs = cached_reqs2
+        sched_out2.scheduled_spec_decode_tokens = {}
+        sched_out2.preempted_req_ids = set()
+
+        self.runner.persistent_batch_manager.update_states(sched_out2, None)
+        # update_states truncated num_tokens to 10 + 4 = 14 (off from 13!)
+        assert ib.num_tokens_no_spec[0] == 14
+        assert ib.num_computed_tokens_cpu[0] == 13
+
+        # --- Step 2: _modify_prev_results resolves Step 1 ([101, 102, 103]) ---
+        # Must write [101, 102, 103] at 13:16, set num_tokens=16, num_computed_tokens_cpu=15,
+        # and run 1 boundary step (seq_len=16, mamba_remaining=1 -> async cap=1).
+        mock_device_get.side_effect = lambda arg: (step1_tokens, np.int32(3))
+        step2_tokens = np.zeros((5, 8), dtype=np.int32)
+        step2_tokens[0, 0] = 104
+        step2_state = MagicMock()
+        step2_state.step_counter = jnp.array(1, dtype=jnp.int32)
+        mock_continue_decode.return_value = (
+            step2_tokens,
+            MagicMock(),
+            step2_state,
+            MagicMock(),
+            None,
+            None,
+        )
+        self.runner._execute_continue_decode(sched_out2)
+
+        assert int(
+            mock_continue_decode.call_args.kwargs["max_decode_steps"]) == 1
+        # Verify _prepare_inputs saw pos=15, tok=103, seq_len=16, num_tokens=16
+        assert captured_steps[-1] == (15, 103, 16, 16)
+        np.testing.assert_array_equal(ib.token_ids_cpu[0, 13:16],
+                                      [101, 102, 103])
+        assert sched_out1.num_scheduled_tokens[req_id] == 3
+
+        # --- Host schedules Step 3 after Step 1 output returned (Step 2 in flight) ---
+        cached_reqs3 = MagicMock()
+        cached_reqs3.req_ids = [req_id]
+        cached_reqs3.num_computed_tokens = [16]
+        cached_reqs3.new_block_ids = [None]
+        cached_reqs3.resumed_req_ids = set()
+        cached_reqs3.num_output_tokens = [7]
+        sched_out3 = MagicMock()
+        sched_out3.finished_req_ids = set()
+        sched_out3.free_encoder_mm_hashes = []
+        sched_out3.num_scheduled_tokens = {req_id: 1}
+        sched_out3.total_num_scheduled_tokens = 1
+        sched_out3.scheduled_new_reqs = []
+        sched_out3.scheduled_cached_reqs = cached_reqs3
+        sched_out3.scheduled_spec_decode_tokens = {}
+        sched_out3.preempted_req_ids = set()
+
+        self.runner.persistent_batch_manager.update_states(sched_out3, None)
+
+        # --- Step 3: _modify_prev_results resolves Step 2 ([104] at index 16) ---
+        # Starts at num_tokens=17 (pos=16, seq_len=17, first token of mamba block 1).
+        # mamba_remaining = 16 -> async cap = 15 -> capped by static_max_decode_steps=5 to 5.
+        mock_device_get.side_effect = lambda arg: (step2_tokens, np.int32(1))
+        step3_tokens = np.zeros((5, 8), dtype=np.int32)
+        step3_tokens[:5, 0] = [105, 106, 107, 108, 109]
+        step3_state = MagicMock()
+        step3_state.step_counter = jnp.array(5, dtype=jnp.int32)
+        mock_continue_decode.return_value = (
+            step3_tokens,
+            MagicMock(),
+            step3_state,
+            MagicMock(),
+            None,
+            None,
+        )
+        self.runner._execute_continue_decode(sched_out3)
+
+        assert int(
+            mock_continue_decode.call_args.kwargs["max_decode_steps"]) == 5
+        assert captured_steps[-1] == (16, 104, 17, 17)
+        assert ib.token_ids_cpu[0, 16] == 104
+        assert sched_out2.num_scheduled_tokens[req_id] == 1
+        assert req_state.output_token_ids[:7] == [
+            20, 21, 22, 101, 102, 103, 104
+        ]
 
     def test_mesh_devices_sorting(self):
 
@@ -1115,3 +1493,19 @@ class TestTPUJaxRunnerDisableMM:
         TPUModelRunner._execute_model(runner, scheduler_output_normal)
         runner._execute_continue_decode.assert_called_once_with(
             scheduler_output_normal)
+
+        # 3. When async_scheduling is True and previous step was continue_decode,
+        # bypassing continue_decode (e.g. structured output or mixed prefill) must
+        # still call _modify_prev_results() and clear _pre_async_results before _prepare_inputs.
+        runner.scheduler_config.async_scheduling = True
+        runner._pre_async_results = MagicMock(is_continue_decode=True)
+        call_order = []
+        runner._modify_prev_results.side_effect = lambda: call_order.append(
+            "modify_prev")
+        runner._prepare_inputs.side_effect = lambda *a, **kw: (
+            call_order.append("prepare_inputs") or
+            (MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+             None, None, 2, {}, 2, None, MagicMock()))
+        TPUModelRunner._execute_model(runner, scheduler_output_structured)
+        assert call_order == ["modify_prev", "prepare_inputs"]
+        assert runner._pre_async_results is None

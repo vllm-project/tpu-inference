@@ -48,7 +48,7 @@ from tpu_inference import envs
 from tpu_inference.distributed.jax_parallel_state import \
     get_pp_group as jax_get_pp_group
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.vllm.process_weights.cleanup_sharding import \
     shard_model_to_tpu
@@ -353,7 +353,7 @@ class VllmModelWrapper:
             params_and_buffers,  # This has been wrapped into torchax TorchValue
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
-            attn_metadata: AttentionMetadata,
+            attn_metadata: AttentionMetadata | GroupedAttentionMetadata,
             input_embeds: jax.Array,
             input_positions: jax.Array,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
@@ -377,7 +377,7 @@ class VllmModelWrapper:
             # padded token count.
             num_tokens = input_positions.shape[-1]
             with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=kv_caches,
+                    kv_caches=list(kv_caches),
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index,
                     vllm_config=self.vllm_config,
@@ -436,7 +436,7 @@ class VllmModelWrapper:
             kv_caches: List[jax.Array],
             input_ids: jax.Array,
             hidden_states: jax.Array,
-            attn_metadata: AttentionMetadata,
+            attn_metadata: AttentionMetadata | GroupedAttentionMetadata,
             layer_name_to_kvcache_index: Sequence[Tuple[str, int]],
             spec_step_idx: int = 0,
         ) -> Tuple[List[jax.Array], jax.Array, List[jax.Array],
@@ -446,7 +446,7 @@ class VllmModelWrapper:
             # num_tokens for the MoE sequence-parallel DP-metadata path.
             num_tokens = attn_metadata.input_positions.shape[-1]
             with torchax.default_env(), set_vllm_model_wrapper_context(
-                    kv_caches=kv_caches,
+                    kv_caches=list(kv_caches),
                     mesh=self.mesh,
                     layer_name_to_kvcache_index=layer_name_to_kvcache_index
             ), set_forward_context(attn_metadata=attn_metadata,

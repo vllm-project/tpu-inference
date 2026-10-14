@@ -17,13 +17,28 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, GroupedAttentionMetadata)
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.runner.decode_loop import (TpuSamplingState,
-                                              _decode_core_impl, _split_rngs,
+                                              _decode_core_impl,
+                                              _get_decode_core, _split_rngs,
                                               _update_loop_state,
                                               continue_decode)
+
+
+@pytest.fixture(autouse=True)
+def _clear_tpu_compiler_options_on_cpu(monkeypatch):
+    if jax.default_backend() != "tpu":
+        monkeypatch.setattr(
+            "tpu_inference.runner.decode_loop.get_step_fn_compiler_options",
+            lambda: {},
+        )
+        _get_decode_core.cache_clear()
+    yield
+    if jax.default_backend() != "tpu":
+        _get_decode_core.cache_clear()
 
 
 def test_update_loop_state_basic():
@@ -620,42 +635,44 @@ def _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top):
         return next_tokens, processed_logits
 
     step_rngs, _ = _split_rngs(jax.random.PRNGKey(0), 1, 1)
-    outputs = _decode_core_impl(
-        state={},
-        kv_caches=[jnp.zeros((2, 10))],
-        step_rngs=step_rngs,
-        sampling_metadata=TPUSupportedSamplingMetadata(logprobs=True),
-        inputs_embeds=None,
-        lora_metadata=None,
-        intermediate_tensors=None,
-        block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
-        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
-        request_distribution=jnp.array([0, 0], dtype=jnp.int32),
-        mamba_state_indices=None,
-        current_tokens=jnp.array([10, 20], dtype=jnp.int32),
-        active_mask=jnp.array([True, True], dtype=jnp.bool_),
-        input_positions=jnp.array([0, 0], dtype=jnp.int32),
-        seq_lens=jnp.array([1, 1], dtype=jnp.int32),
-        model_fn=mock_model_fn,
-        compute_logits_fn=mock_compute_logits_fn,
-        sample_fn=mock_sample_fn,
-        mesh=None,
-        max_decode_steps=1,
-        static_max_decode_steps=1,
-        eos_token_id=(99, ),
-        padding_token_id=-1,
-        dp_size=1,
-        pad_len=0,
-        has_experts=False,
-        expert_shape=None,
-        expert_dtype=None,
-        layer_name_to_kvcache_index=(),
-        is_first_rank=True,
-        is_last_rank=True,
-        max_logprobs=1,
-        logprobs_mode=logprobs_mode,
-        continue_decode_eos_check_interval=-1,
-    )
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data", ))
+    with jax.set_mesh(mesh):
+        outputs = _decode_core_impl(
+            state={},
+            kv_caches=[jnp.zeros((2, 10))],
+            step_rngs=step_rngs,
+            sampling_metadata=TPUSupportedSamplingMetadata(logprobs=True),
+            inputs_embeds=None,
+            lora_metadata=None,
+            intermediate_tensors=None,
+            block_tables=jnp.zeros((2, 16), dtype=jnp.int32),
+            query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+            request_distribution=jnp.array([0, 0], dtype=jnp.int32),
+            mamba_state_indices=None,
+            current_tokens=jnp.array([10, 20], dtype=jnp.int32),
+            active_mask=jnp.array([True, True], dtype=jnp.bool_),
+            input_positions=jnp.array([0, 0], dtype=jnp.int32),
+            seq_lens=jnp.array([1, 1], dtype=jnp.int32),
+            model_fn=mock_model_fn,
+            compute_logits_fn=mock_compute_logits_fn,
+            sample_fn=mock_sample_fn,
+            mesh=mesh,
+            max_decode_steps=1,
+            static_max_decode_steps=1,
+            eos_token_id=(99, ),
+            padding_token_id=-1,
+            dp_size=1,
+            pad_len=0,
+            has_experts=False,
+            expert_shape=None,
+            expert_dtype=None,
+            layer_name_to_kvcache_index=(),
+            is_first_rank=True,
+            is_last_rank=True,
+            max_logprobs=1,
+            logprobs_mode=logprobs_mode,
+            continue_decode_eos_check_interval=-1,
+        )
     # logprob_token_ids buffer is (steps, batch, max_logprobs + 1); column 0 is
     # the sampled token, column 1 the top-1 index.
     return np.asarray(outputs[8])[0, :, 1]
@@ -679,3 +696,235 @@ def test_decode_loop_processed_modes_use_sample_output(logprobs_mode):
     raw_top, processed_top = 7, 13
     top1 = _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top)
     assert np.all(top1 == processed_top)
+
+
+def test_grouped_attention_metadata_properties_and_pytree():
+    g0 = AttentionMetadata(
+        input_positions=jnp.array([5, 6], dtype=jnp.int32),
+        block_tables=jnp.ones((2, 8), dtype=jnp.int32),
+        seq_lens=jnp.array([6, 7], dtype=jnp.int32),
+        query_start_loc=jnp.array([0, 1, 2], dtype=jnp.int32),
+        request_distribution=jnp.array([2, 0, 2], dtype=jnp.int32),
+        mamba_state_indices=jnp.array([1, 0], dtype=jnp.int32),
+        padded_num_reqs=4,
+        is_decode=True,
+    )
+    g1 = AttentionMetadata(
+        input_positions=g0.input_positions,
+        block_tables=jnp.zeros((2, 2), dtype=jnp.int32),
+        seq_lens=g0.seq_lens,
+        query_start_loc=g0.query_start_loc,
+        request_distribution=g0.request_distribution,
+        mamba_state_indices=g0.mamba_state_indices,
+        padded_num_reqs=4,
+        is_decode=True,
+    )
+    layer_names_per_group = (("layer.0", "layer.2"), ("layer.1", ))
+    grouped = GroupedAttentionMetadata((g0, g1), layer_names_per_group)
+
+    assert np.array_equal(grouped.input_positions, [5, 6])
+    assert np.array_equal(grouped.seq_lens, [6, 7])
+    assert np.array_equal(grouped.query_start_loc, [0, 1, 2])
+    assert np.array_equal(grouped.request_distribution, [2, 0, 2])
+    assert np.array_equal(grouped.mamba_state_indices, [1, 0])
+    assert grouped.padded_num_reqs == 4
+    assert grouped.is_decode is True
+
+    leaves, treedef = jax.tree_util.tree_flatten(grouped)
+    unflattened = jax.tree_util.tree_unflatten(treedef, leaves)
+    assert isinstance(unflattened, GroupedAttentionMetadata)
+    assert unflattened.layer_names_per_group == layer_names_per_group
+    assert unflattened["layer.0"] is unflattened["layer.2"]
+    assert unflattened["layer.0"].block_tables.shape == (2, 8)
+    assert unflattened["layer.1"].block_tables.shape == (2, 2)
+
+
+def test_continue_decode_grouped_attention_metadata_and_gdn_state():
+    batch_size = 2
+    max_decode_steps = 3
+    static_max_decode_steps = 4
+    padded_num_reqs = 2
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+
+    input_positions = jnp.array([4, 7], dtype=jnp.int32)
+    seq_lens = jnp.array([5, 8], dtype=jnp.int32)
+    query_start_loc = jnp.array([0, 1, 2], dtype=jnp.int32)
+    request_distribution = jnp.array([2, 0, 2], dtype=jnp.int32)
+    mamba_state_indices = jnp.array([3, 1], dtype=jnp.int32)
+
+    # Full-attention group and GDN group have distinct block_tables shapes.
+    bt_attn = jnp.arange(32, dtype=jnp.int32).reshape(2, 16)
+    bt_gdn = jnp.arange(8, dtype=jnp.int32).reshape(2, 4)
+
+    g_attn = AttentionMetadata(
+        input_positions=input_positions,
+        block_tables=bt_attn,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution,
+        mamba_state_indices=mamba_state_indices,
+        padded_num_reqs=padded_num_reqs,
+        is_decode=True,
+    )
+    g_gdn = AttentionMetadata(
+        input_positions=input_positions,
+        block_tables=bt_gdn,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution,
+        mamba_state_indices=mamba_state_indices,
+        padded_num_reqs=padded_num_reqs,
+        is_decode=True,
+    )
+    layer_names_per_group = (
+        ("layers.0.attn", "layers.2.attn"),
+        ("layers.1.gdn", "layers.3.gdn"),
+    )
+    grouped_attn = GroupedAttentionMetadata(
+        groups=(g_attn, g_gdn),
+        layer_names_per_group=layer_names_per_group,
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=grouped_attn,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    # Hybrid kv_caches: attention layers hold single Arrays, GDN layers hold
+    # (conv_state, recurrent_state) tuples indexed by mamba_state_indices.
+    kv_caches = [
+        jnp.zeros((16, 8), dtype=jnp.float32),
+        (
+            jnp.zeros((6, 4), dtype=jnp.float32),
+            jnp.zeros((6, 8), dtype=jnp.float32),
+        ),
+        jnp.zeros((16, 8), dtype=jnp.float32),
+        (
+            jnp.zeros((6, 4), dtype=jnp.float32),
+            jnp.zeros((6, 8), dtype=jnp.float32),
+        ),
+    ]
+    layer_name_to_kvcache_index = (
+        ("layers.0.attn", 0),
+        ("layers.1.gdn", 1),
+        ("layers.2.attn", 2),
+        ("layers.3.gdn", 3),
+    )
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata, *args,
+                      **kwargs):
+        assert isinstance(attn_metadata, GroupedAttentionMetadata)
+        assert attn_metadata.padded_num_reqs == padded_num_reqs
+        assert attn_metadata.is_decode is True
+
+        shared_am = kwargs.get("shared_attention_metadata")
+        assert shared_am is not None
+        assert shared_am.padded_num_reqs == padded_num_reqs
+        assert shared_am.is_decode is True
+
+        attn_meta = attn_metadata["layers.0.attn"]
+        gdn_meta = attn_metadata["layers.1.gdn"]
+        assert attn_meta is attn_metadata["layers.2.attn"]
+        assert gdn_meta is attn_metadata["layers.3.gdn"]
+        assert attn_meta.block_tables.shape == (2, 16)
+        assert gdn_meta.block_tables.shape == (2, 4)
+        assert gdn_meta.padded_num_reqs == padded_num_reqs
+
+        # Simulate GDN state update using mamba_state_indices and padded_num_reqs
+        state_indices = gdn_meta.mamba_state_indices[:gdn_meta.padded_num_reqs]
+        new_kv_caches = list(kv_caches)
+        for gdn_idx in (1, 3):
+            conv_state, recurrent_state = new_kv_caches[gdn_idx]
+            new_conv = conv_state.at[state_indices].add(
+                current_tokens.astype(jnp.float32)[:, None])
+            new_rec = recurrent_state.at[state_indices].add(
+                gdn_meta.seq_lens.astype(jnp.float32)[:, None])
+            new_kv_caches[gdn_idx] = (new_conv, new_rec)
+
+        hidden_states = attn_metadata.input_positions.astype(jnp.float32)[:,
+                                                                          None,
+                                                                          None]
+        experts = (jnp.ones((2, batch_size, 2), dtype=jnp.int32) *
+                   attn_metadata.input_positions[None, :, None])
+        return new_kv_caches, hidden_states, None, experts
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        pos = hidden_states[:, 0, 0]
+        logits = jnp.zeros((batch_size, 100))
+        return logits.at[:, 0].set(pos)
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        # Step 0 -> [11, 21], Step 1 -> [12, 22], Step 2 -> [13, 23]
+        pos = logits[:, 0].astype(jnp.int32)
+        step = pos - jnp.array([4, 7], dtype=jnp.int32)
+        next_tokens = jnp.array([11, 21], dtype=jnp.int32) + step
+        return next_tokens, None
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        _,
+        all_expert_indices,
+        _,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=jax.random.PRNGKey(0),
+        mesh=None,
+        sampling_metadata=None,
+        layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+        collect_expert_indices=True,
+    )
+
+    assert int(final_state.step_counter) == 3
+    expected_tokens = np.array(
+        [[11, 21], [12, 22], [13, 23], [-1, -1]],
+        dtype=np.int32,
+    )
+    assert np.array_equal(token_buffer, expected_tokens)
+
+    # Verify final_state preserves GroupedAttentionMetadata structure and fields
+    assert isinstance(final_state.attn_metadata, GroupedAttentionMetadata)
+    assert final_state.attn_metadata.layer_names_per_group == layer_names_per_group
+    assert final_state.attn_metadata.padded_num_reqs == padded_num_reqs
+    assert final_state.attn_metadata.is_decode is True
+    assert np.array_equal(final_state.attn_metadata.input_positions, [7, 10])
+    assert np.array_equal(final_state.attn_metadata.seq_lens, [8, 11])
+    assert np.array_equal(final_state.attn_metadata.mamba_state_indices,
+                          [3, 1])
+    assert np.array_equal(
+        final_state.attn_metadata["layers.0.attn"].block_tables, bt_attn)
+    assert np.array_equal(
+        final_state.attn_metadata["layers.1.gdn"].block_tables, bt_gdn)
+
+    # Verify GDN (conv_state, recurrent_state) updates across the 3 decode steps:
+    # current_tokens fed to steps 0, 1, 2:
+    # req 0 (slot 3): 10 + 11 + 12 = 33
+    # req 1 (slot 1): 20 + 21 + 22 = 63
+    # seq_lens fed to steps 0, 1, 2:
+    # req 0 (slot 3): 5 + 6 + 7 = 18
+    # req 1 (slot 1): 8 + 9 + 10 = 27
+    for gdn_idx in (1, 3):
+        conv_state, recurrent_state = final_kv_caches[gdn_idx]
+        assert np.allclose(conv_state[3], 33.0)
+        assert np.allclose(conv_state[1], 63.0)
+        assert np.allclose(conv_state[0], 0.0)
+        assert np.allclose(recurrent_state[3], 18.0)
+        assert np.allclose(recurrent_state[1], 27.0)
+        assert np.allclose(recurrent_state[0], 0.0)
+
+    assert all_expert_indices is not None
+    assert all_expert_indices.shape == (4, 2, 2, 2)

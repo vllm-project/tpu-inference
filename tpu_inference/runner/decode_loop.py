@@ -21,7 +21,7 @@ import jax.numpy as jnp
 from vllm.v1.outputs import LogprobsTensors
 
 from tpu_inference.layers.common.attention_metadata import (
-    AttentionMetadata, SharedAttentionMetadata)
+    AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.models.common.compiler_options import \
     get_step_fn_compiler_options
 
@@ -42,10 +42,60 @@ class TpuSamplingState:
     current_tokens: jax.Array
     # (batch_size,)
     active_mask: jax.Array
-    # AttentionMetadata PyTree
-    attn_metadata: AttentionMetadata
+    # AttentionMetadata or GroupedAttentionMetadata PyTree
+    attn_metadata: AttentionMetadata | GroupedAttentionMetadata
     # scalar
     step_counter: jax.Array
+
+
+def _build_step_attn_metadata(
+    *,
+    input_positions: jax.Array,
+    block_tables: jax.Array | tuple[jax.Array | None, ...] | None,
+    seq_lens: jax.Array,
+    query_start_loc: jax.Array | None,
+    request_distribution: jax.Array | None,
+    mamba_state_indices: jax.Array | None,
+    padded_num_reqs: int,
+    layer_names_per_group: tuple[tuple[str, ...], ...] | None,
+) -> tuple[AttentionMetadata | GroupedAttentionMetadata,
+           SharedAttentionMetadata]:
+    shared_attn_metadata = SharedAttentionMetadata(
+        input_positions=input_positions,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
+        request_distribution=request_distribution,
+        mamba_state_indices=mamba_state_indices,
+        padded_num_reqs=padded_num_reqs,
+        is_decode=True,
+    )
+    if layer_names_per_group is None:
+        attn_metadata: AttentionMetadata | GroupedAttentionMetadata = (
+            AttentionMetadata(
+                input_positions=input_positions,
+                block_tables=block_tables,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=padded_num_reqs,
+                is_decode=True,
+            ))
+    else:
+        assert isinstance(block_tables, tuple)
+        groups = tuple(
+            AttentionMetadata(
+                input_positions=input_positions,
+                block_tables=bt,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=padded_num_reqs,
+                is_decode=True,
+            ) for bt in block_tables)
+        attn_metadata = GroupedAttentionMetadata(groups, layer_names_per_group)
+    return attn_metadata, shared_attn_metadata
 
 
 @functools.partial(
@@ -130,6 +180,8 @@ def _decode_core_impl(
     max_logprobs,
     logprobs_mode,
     continue_decode_eos_check_interval: int = 1,
+    padded_num_reqs: int = -1,
+    layer_names_per_group: tuple[tuple[str, ...], ...] | None = None,
 ):
     has_logprobs = False if sampling_metadata is None else sampling_metadata.logprobs
     from tpu_inference.layers.jax.sample.sampling import \
@@ -139,22 +191,15 @@ def _decode_core_impl(
 
     def _run_one_step(step_idx, ct, am, pos, sl, kvc):
         step_rng = step_rngs[step_idx]
-        attn_metadata = AttentionMetadata(
+        attn_metadata, shared_attn_metadata = _build_step_attn_metadata(
             input_positions=pos,
             block_tables=block_tables,
             seq_lens=sl,
             query_start_loc=query_start_loc,
             request_distribution=request_distribution,
             mamba_state_indices=mamba_state_indices,
-            is_decode=True,
-        )
-        shared_attn_metadata = SharedAttentionMetadata(
-            input_positions=pos,
-            seq_lens=sl,
-            query_start_loc=query_start_loc,
-            request_distribution=request_distribution,
-            mamba_state_indices=mamba_state_indices,
-            is_decode=True,
+            padded_num_reqs=padded_num_reqs,
+            layer_names_per_group=layer_names_per_group,
         )
         kvc, hidden_states, _, expert_indices_step = model_fn(
             state,
@@ -162,7 +207,7 @@ def _decode_core_impl(
             ct,
             attn_metadata,
             inputs_embeds,
-            attn_metadata.input_positions,
+            pos,
             layer_name_to_kvcache_index,
             lora_metadata,
             intermediate_tensors,
@@ -358,6 +403,8 @@ def _get_decode_core():
             "max_logprobs",
             "logprobs_mode",
             "continue_decode_eos_check_interval",
+            "padded_num_reqs",
+            "layer_names_per_group",
         ),
         donate_argnames=("kv_caches", ),
         compiler_options=get_step_fn_compiler_options(),
@@ -446,6 +493,15 @@ def continue_decode(
                                          max_decode_steps)
 
     attn = init_state.attn_metadata
+    if isinstance(attn, GroupedAttentionMetadata):
+        block_tables: jax.Array | tuple[jax.Array | None, ...] | None = tuple(
+            g.block_tables for g in attn.groups)
+        layer_names_per_group: tuple[tuple[str, ...], ...] | None = (
+            attn.layer_names_per_group)
+    else:
+        block_tables = attn.block_tables
+        layer_names_per_group = None
+    padded_num_reqs = attn.padded_num_reqs
 
     # Discover the per-step expert-indices shape without executing a step.
     # Gated by the caller's config flag so the abstract trace is skipped for
@@ -458,29 +514,22 @@ def continue_decode(
 
         def _model_experts_only(current_tokens, input_positions, seq_lens,
                                 kv_caches):
-            am = AttentionMetadata(
+            am, shared_am = _build_step_attn_metadata(
                 input_positions=input_positions,
-                block_tables=attn.block_tables,
+                block_tables=block_tables,
                 seq_lens=seq_lens,
                 query_start_loc=attn.query_start_loc,
                 request_distribution=attn.request_distribution,
                 mamba_state_indices=attn.mamba_state_indices,
-                is_decode=True,
-            )
-            shared_am = SharedAttentionMetadata(
-                input_positions=input_positions,
-                seq_lens=seq_lens,
-                query_start_loc=attn.query_start_loc,
-                request_distribution=attn.request_distribution,
-                mamba_state_indices=attn.mamba_state_indices,
-                is_decode=True,
+                padded_num_reqs=padded_num_reqs,
+                layer_names_per_group=layer_names_per_group,
             )
             _, _, _, experts = model_fn(state,
                                         kv_caches,
                                         current_tokens,
                                         am,
                                         inputs_embeds,
-                                        am.input_positions,
+                                        input_positions,
                                         layer_name_to_kvcache_index,
                                         lora_metadata,
                                         intermediate_tensors,
@@ -501,57 +550,65 @@ def continue_decode(
             expert_shape = tuple(expert_struct.shape)
             expert_dtype = expert_struct.dtype
 
-    (step_counter, current_tokens, active_mask, positions, seq_lens, kv_caches,
-     token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
-     lp_ranks_buffer) = _get_decode_core()(
-         state=state,
-         kv_caches=kv_caches,
-         step_rngs=step_rngs,
-         sampling_metadata=sampling_metadata,
-         inputs_embeds=inputs_embeds,
-         lora_metadata=lora_metadata,
-         intermediate_tensors=intermediate_tensors,
-         block_tables=attn.block_tables,
-         query_start_loc=attn.query_start_loc,
-         request_distribution=attn.request_distribution,
-         mamba_state_indices=attn.mamba_state_indices,
-         current_tokens=init_state.current_tokens,
-         active_mask=init_state.active_mask,
-         input_positions=attn.input_positions,
-         seq_lens=attn.seq_lens,
-         model_fn=model_fn,
-         compute_logits_fn=compute_logits_fn,
-         sample_fn=sample_fn,
-         mesh=mesh,
-         max_decode_steps=max_decode_steps,
-         static_max_decode_steps=static_max_decode_steps,
-         eos_token_id=eos_token_id,
-         padding_token_id=padding_token_id,
-         dp_size=dp_size,
-         pad_len=pad_len,
-         has_experts=has_experts,
-         expert_shape=expert_shape,
-         expert_dtype=expert_dtype,
-         layer_name_to_kvcache_index=layer_name_to_kvcache_index,
-         is_first_rank=is_first_rank,
-         is_last_rank=is_last_rank,
-         max_logprobs=max_logprobs,
-         logprobs_mode=logprobs_mode,
-         continue_decode_eos_check_interval=continue_decode_eos_check_interval,
-     )
+    from contextlib import nullcontext
+    mesh_ctx = jax.set_mesh(mesh) if mesh is not None else nullcontext()
+    with mesh_ctx:
+        (step_counter, current_tokens, active_mask, positions, seq_lens,
+         kv_caches, token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
+         lp_ranks_buffer) = _get_decode_core()(
+             state=state,
+             kv_caches=kv_caches,
+             step_rngs=step_rngs,
+             sampling_metadata=sampling_metadata,
+             inputs_embeds=inputs_embeds,
+             lora_metadata=lora_metadata,
+             intermediate_tensors=intermediate_tensors,
+             block_tables=block_tables,
+             query_start_loc=attn.query_start_loc,
+             request_distribution=attn.request_distribution,
+             mamba_state_indices=attn.mamba_state_indices,
+             current_tokens=init_state.current_tokens,
+             active_mask=init_state.active_mask,
+             input_positions=attn.input_positions,
+             seq_lens=attn.seq_lens,
+             model_fn=model_fn,
+             compute_logits_fn=compute_logits_fn,
+             sample_fn=sample_fn,
+             mesh=mesh,
+             max_decode_steps=max_decode_steps,
+             static_max_decode_steps=static_max_decode_steps,
+             eos_token_id=eos_token_id,
+             padding_token_id=padding_token_id,
+             dp_size=dp_size,
+             pad_len=pad_len,
+             has_experts=has_experts,
+             expert_shape=expert_shape,
+             expert_dtype=expert_dtype,
+             layer_name_to_kvcache_index=layer_name_to_kvcache_index,
+             is_first_rank=is_first_rank,
+             is_last_rank=is_last_rank,
+             max_logprobs=max_logprobs,
+             logprobs_mode=logprobs_mode,
+             continue_decode_eos_check_interval=
+             continue_decode_eos_check_interval,
+             padded_num_reqs=padded_num_reqs,
+             layer_names_per_group=layer_names_per_group,
+         )
 
+    final_attn_metadata, _ = _build_step_attn_metadata(
+        input_positions=positions,
+        block_tables=block_tables,
+        seq_lens=seq_lens,
+        query_start_loc=attn.query_start_loc,
+        request_distribution=attn.request_distribution,
+        mamba_state_indices=attn.mamba_state_indices,
+        padded_num_reqs=padded_num_reqs,
+        layer_names_per_group=layer_names_per_group,
+    )
     final_state = TpuSamplingState(
         current_tokens=current_tokens,
         active_mask=active_mask,
-        attn_metadata=AttentionMetadata(
-            input_positions=positions,
-            block_tables=attn.block_tables,
-            seq_lens=seq_lens,
-            query_start_loc=attn.query_start_loc,
-            request_distribution=attn.request_distribution,
-            mamba_state_indices=attn.mamba_state_indices,
-            is_decode=True,
-        ),
+        attn_metadata=final_attn_metadata,
         step_counter=step_counter.astype(jnp.int32),
     )
 

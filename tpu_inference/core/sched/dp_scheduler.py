@@ -260,8 +260,16 @@ def _scheduler_worker_process(
                                     original = (scheduler_output.
                                                 num_scheduled_tokens[req_id])
                                     if original != num_sampled:
-                                        shortfalls[req_id] = (original -
-                                                              num_sampled)
+                                        shortfall = original - num_sampled
+                                        if shortfall < 0:
+                                            request = scheduler.requests.get(
+                                                req_id)
+                                            if request is not None:
+                                                request.num_in_flight_tokens -= shortfall
+                                                if request.num_stale_output_tokens > 0:
+                                                    request.num_stale_output_tokens -= shortfall
+                                        else:
+                                            shortfalls[req_id] = shortfall
                                     scheduler_output.num_scheduled_tokens[
                                         req_id] = num_sampled
 

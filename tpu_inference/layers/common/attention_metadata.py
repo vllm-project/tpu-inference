@@ -171,6 +171,34 @@ class GroupedAttentionMetadata(dict):
             for name in names
         })
 
+    @property
+    def input_positions(self) -> jax.Array:
+        return self.groups[0].input_positions
+
+    @property
+    def seq_lens(self) -> jax.Array:
+        return self.groups[0].seq_lens
+
+    @property
+    def query_start_loc(self) -> jax.Array:
+        return self.groups[0].query_start_loc
+
+    @property
+    def request_distribution(self) -> jax.Array:
+        return self.groups[0].request_distribution
+
+    @property
+    def mamba_state_indices(self) -> jax.Array | None:
+        return self.groups[0].mamba_state_indices
+
+    @property
+    def padded_num_reqs(self) -> int:
+        return self.groups[0].padded_num_reqs
+
+    @property
+    def is_decode(self) -> bool:
+        return self.groups[0].is_decode
+
 
 jax.tree_util.register_pytree_node(
     GroupedAttentionMetadata,

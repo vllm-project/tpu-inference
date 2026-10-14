@@ -566,6 +566,8 @@ class CompilationManager:
     def _precompile_substitute_placeholder_token(self) -> None:
         dp_sharding = NamedSharding(
             self.runner.mesh, PartitionSpec(ShardingAxisName.ATTN_DATA, ))
+        metadata_attn_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
         replicated_sharding = NamedSharding(self.runner.mesh,
                                             PartitionSpec(None))
         indices_sharding = NamedSharding(self.runner.mesh, PartitionSpec(None))
@@ -610,8 +612,8 @@ class CompilationManager:
             spec_next_tokens_size = self.runner.max_num_reqs * (
                 num_spec_tokens + 1)
             for num_tokens in all_token_sizes:
-                _compile_one(num_tokens, dp_sharding, spec_next_tokens_size,
-                             dp_sharding)
+                _compile_one(num_tokens, metadata_attn_sharding,
+                             spec_next_tokens_size, dp_sharding)
             for num_logits in self.runner.num_logits_paddings:
                 _compile_one(num_logits, replicated_sharding,
                              spec_next_tokens_size, dp_sharding)
@@ -620,9 +622,10 @@ class CompilationManager:
                 # Precompile matching token shapes (next_tokens_size == num_tokens).
                 # Rationale: Off-diagonal shapes (where next_tokens_size differs from prompt num_tokens) are
                 # only required when speculative draft token counts vary.
-                _compile_one(num_tokens, dp_sharding, num_tokens, dp_sharding)
+                _compile_one(num_tokens, metadata_attn_sharding, num_tokens,
+                             dp_sharding)
                 for num_reqs in self.runner.num_reqs_paddings:
-                    _compile_one(num_tokens, dp_sharding, num_reqs,
+                    _compile_one(num_tokens, metadata_attn_sharding, num_reqs,
                                  replicated_sharding)
 
     def _precompile_subtract_num_rejected_tokens(self) -> None:
@@ -2018,11 +2021,50 @@ class CompilationManager:
                 warmup_handler=self._skip_self_arg_warmup_handler,
             )
 
+    def _continue_decode_shapes(self) -> list[tuple[int, int]]:
+        """(padded_num_reqs, attn_padded_num_reqs) pairs `continue_decode` can take.
+
+        `_prepare_input_metadata` pads the batch/token dimension (`init_tokens`,
+        `positions`, `active_mask`, `sampling_metadata`) with
+        `num_reqs_paddings_per_dp`, while `AttentionMetadata.padded_num_reqs`
+        (a static `meta_field` threaded into `_get_decode_core` and used by GDN
+        and RPA kernels) is padded with `attn_num_reqs_paddings_per_dp`.
+        By default (`ATTN_BUCKETIZED_NUM_REQS=False`), `attn_num_reqs_paddings`
+        is `[max_num_reqs]` while `num_reqs_paddings` is power-of-2 buckets, so
+        every reachable `(num_reqs, attn_num_reqs)` pair must be precompiled.
+        """
+        runner = self.runner
+        dp_size = getattr(runner, "dp_size", 1)
+        req_paddings = getattr(runner, "num_reqs_paddings_per_dp", None)
+        if not req_paddings:
+            return [(n, n) for n in runner.num_reqs_paddings]
+        attn_req_paddings = getattr(runner, "attn_num_reqs_paddings_per_dp",
+                                    None) or req_paddings
+        max_live = max(max(req_paddings), max(attn_req_paddings))
+        shapes: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for num_live in range(1, max_live + 1):
+            if num_live > req_paddings[-1] or num_live > attn_req_paddings[-1]:
+                break
+            padded_reqs = runner_utils.get_padded_token_len(
+                req_paddings, num_live)
+            attn_padded_reqs = runner_utils.get_padded_token_len(
+                attn_req_paddings, num_live)
+            pair = (padded_reqs * dp_size, attn_padded_reqs * dp_size)
+            if pair not in seen:
+                seen.add(pair)
+                shapes.append(pair)
+        return shapes
+
     def _precompile_continue_decode(self) -> None:
         logger.info("Precompiling continue_decode loop.")
         dp_size = self.runner.vllm_config.sharding_config.total_dp_size
         dp_spec = PartitionSpec(ShardingAxisName.ATTN_DATA, )
         dp_sharding = NamedSharding(self.runner.mesh, dp_spec)
+        metadata_attn_sharding = NamedSharding(
+            self.runner.mesh, PartitionSpec(ShardingAxisName.BATCH))
+        attn_seqs = getattr(self.runner, "attn_max_num_seqs",
+                            self.runner.max_num_reqs)
 
         user_max_decode_steps = self.runner.vllm_config.additional_config.get(
             "max_decode_steps", DEFAULT_MAX_DECODE_STEPS)
@@ -2033,7 +2075,10 @@ class CompilationManager:
         # For greedy decoding, we can use empty parameters
         _cache_collision_dummy = jnp.zeros((2, ), dtype=jnp.int32)
         _cache_collision_dummy = device_array(self.runner.mesh,
-                                              _cache_collision_dummy)
+                                              _cache_collision_dummy,
+                                              sharding=NamedSharding(
+                                                  self.runner.mesh,
+                                                  PartitionSpec()))
         sampling_metadata = TPUSupportedSamplingMetadata(
             temperature=None,
             top_k=None,
@@ -2042,22 +2087,32 @@ class CompilationManager:
             do_sampling=False,
             logprobs=False)
 
-        for num_reqs in self.runner.num_reqs_paddings:
+        for num_reqs, attn_num_reqs in self._continue_decode_shapes():
             init_tokens = self._create_dummy_tensor((num_reqs, ), jnp.int32,
-                                                    dp_sharding)
+                                                    metadata_attn_sharding)
+            if getattr(self.runner, "uses_mrope", False):
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                positions = self._create_dummy_tensor((3, num_reqs), jnp.int32,
+                                                      mrope_sharding)
+            else:
+                positions = self._create_dummy_tensor((num_reqs, ), jnp.int32,
+                                                      dp_sharding)
             active_mask = self._create_dummy_tensor((num_reqs, ), jnp.bool_,
-                                                    dp_sharding)
+                                                    metadata_attn_sharding)
 
-            seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
-                                                 jnp.int32, dp_sharding)
+            seq_lens = self._create_dummy_tensor((attn_seqs, ), jnp.int32,
+                                                 metadata_attn_sharding)
             query_start_loc = self._create_dummy_tensor(
-                (self.runner.max_num_reqs + dp_size, ), jnp.int32, dp_sharding)
+                (attn_seqs + dp_size, ), jnp.int32, metadata_attn_sharding)
 
             request_distribution = np.array([0, 0, 0] * dp_size,
                                             dtype=np.int32)
-            request_distribution = device_array(self.runner.mesh,
-                                                request_distribution,
-                                                sharding=dp_sharding)
+            request_distribution = device_array(
+                self.runner.mesh,
+                request_distribution,
+                sharding=metadata_attn_sharding)
 
             if (self.runner.kv_cache_config.has_mamba_layers
                     and getattr(self.runner.cache_config, "mamba_cache_mode",
@@ -2065,20 +2120,19 @@ class CompilationManager:
                 mamba_state_indices = device_array(
                     self.runner.mesh,
                     np.zeros(self.runner.max_num_reqs, dtype=np.int32),
-                    sharding=dp_sharding)
+                    sharding=metadata_attn_sharding)
             else:
                 mamba_state_indices = None
 
             def build_block_table(kv_cache_gid: int) -> jax.Array:
                 block_table_obj = self.runner.input_batch.block_table[
                     kv_cache_gid]
-                shape = (self.runner.max_num_reqs,
-                         block_table_obj.max_num_blocks_per_req)
+                shape = (attn_seqs, block_table_obj.max_num_blocks_per_req)
                 block_tables = np.zeros(shape, dtype=np.int32)
                 block_tables = block_tables.reshape(-1)
                 block_tables = device_array(self.runner.mesh,
                                             block_tables,
-                                            sharding=dp_sharding)
+                                            sharding=metadata_attn_sharding)
                 return block_tables
 
             if len(self.runner.kv_cache_config.kv_cache_groups) <= 1:
@@ -2087,25 +2141,27 @@ class CompilationManager:
                 block_tables = build_block_table(
                     0) if not no_kv_cache else None
                 attn_metadata = AttentionMetadata(
-                    input_positions=init_tokens,
+                    input_positions=positions,
                     block_tables=block_tables,
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
-                    padded_num_reqs=num_reqs,
+                    padded_num_reqs=attn_num_reqs,
+                    is_decode=True,
                 )
             else:
                 attn_metadata = GroupedAttentionMetadata(
                     groups=tuple(
                         AttentionMetadata(
-                            input_positions=init_tokens,
+                            input_positions=positions,
                             block_tables=build_block_table(gid),
                             seq_lens=seq_lens,
                             query_start_loc=query_start_loc,
                             request_distribution=request_distribution,
                             mamba_state_indices=mamba_state_indices,
-                            padded_num_reqs=num_reqs,
+                            padded_num_reqs=attn_num_reqs,
+                            is_decode=True,
                         ) for gid in range(
                             len(self.runner.kv_cache_config.kv_cache_groups))),
                     layer_names_per_group=tuple(
@@ -2206,5 +2262,7 @@ class CompilationManager:
                 getattr(self.runner.vllm_config.model_config,
                         "enable_return_routed_experts", False),
                 self.runner.continue_decode_eos_check_interval,
+                num_reqs=num_reqs,
+                attn_num_reqs=attn_num_reqs,
                 warmup_handler=continue_decode_warmup,
             )
