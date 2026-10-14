@@ -1124,3 +1124,28 @@ class TestTPUJaxRunnerDisableMM:
         TPUModelRunner._execute_model(runner, scheduler_output_normal)
         runner._execute_continue_decode.assert_called_once_with(
             scheduler_output_normal)
+
+    def test_get_min_remaining_slots_mamba_align_mode(self):
+        """In mamba align mode, _get_min_remaining_slots caps steps at block boundaries."""
+        runner = MagicMock()
+        runner.max_model_len = 1024
+        runner.block_size = 16
+        runner.kv_cache_config.has_mamba_layers = True
+        runner.cache_config.mamba_cache_mode = "align"
+        runner.cache_config.mamba_block_size = 16
+        runner.input_batch.num_reqs = 2
+
+        # 1. Not at boundary (num_tokens = [13, 20]):
+        #    16 - (13 % 16) = 3, 16 - (20 % 16) = 12 -> min = 3
+        runner.input_batch.num_tokens = np.array([13, 20], dtype=np.int32)
+        assert TPUModelRunner._get_min_remaining_slots(runner) == 3
+
+        # 2. Exactly at boundary (num_tokens = [16, 20]):
+        #    16 % 16 == 0 -> must run only 1 step to write the boundary checkpoint
+        runner.input_batch.num_tokens = np.array([16, 20], dtype=np.int32)
+        assert TPUModelRunner._get_min_remaining_slots(runner) == 1
+
+        # 3. Non-align mode ("none"): only capped by max_model_len
+        runner.cache_config.mamba_cache_mode = "none"
+        runner.input_batch.num_tokens = np.array([16, 20], dtype=np.int32)
+        assert TPUModelRunner._get_min_remaining_slots(runner) == 1004

@@ -2005,6 +2005,18 @@ class CompilationManager:
                                                     dp_sharding)
             active_mask = self._create_dummy_tensor((num_reqs, ), jnp.bool_,
                                                     dp_sharding)
+            if self.runner.uses_mrope:
+                mrope_sharding = NamedSharding(
+                    self.runner.mesh,
+                    PartitionSpec(None, ShardingAxisName.ATTN_DATA))
+                input_positions = self._create_dummy_tensor(
+                    (3, num_reqs), jnp.int32, mrope_sharding)
+            else:
+                input_positions = init_tokens
+
+            attn_padded_num_reqs = runner_utils.get_padded_token_len(
+                self.runner.attn_num_reqs_paddings_per_dp,
+                num_reqs // dp_size) * dp_size
 
             seq_lens = self._create_dummy_tensor((self.runner.max_num_reqs, ),
                                                  jnp.int32, dp_sharding)
@@ -2045,25 +2057,25 @@ class CompilationManager:
                 block_tables = build_block_table(
                     0) if not no_kv_cache else None
                 attn_metadata = AttentionMetadata(
-                    input_positions=init_tokens,
+                    input_positions=input_positions,
                     block_tables=block_tables,
                     seq_lens=seq_lens,
                     query_start_loc=query_start_loc,
                     request_distribution=request_distribution,
                     mamba_state_indices=mamba_state_indices,
-                    padded_num_reqs=num_reqs,
+                    padded_num_reqs=attn_padded_num_reqs,
                 )
             else:
                 attn_metadata = GroupedAttentionMetadata(
                     groups=tuple(
                         AttentionMetadata(
-                            input_positions=init_tokens,
+                            input_positions=input_positions,
                             block_tables=build_block_table(gid),
                             seq_lens=seq_lens,
                             query_start_loc=query_start_loc,
                             request_distribution=request_distribution,
                             mamba_state_indices=mamba_state_indices,
-                            padded_num_reqs=num_reqs,
+                            padded_num_reqs=attn_padded_num_reqs,
                         ) for gid in range(
                             len(self.runner.kv_cache_config.kv_cache_groups))),
                     layer_names_per_group=tuple(

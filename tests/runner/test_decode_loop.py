@@ -17,7 +17,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tpu_inference.layers.common.attention_metadata import AttentionMetadata
+from tpu_inference.layers.common.attention_metadata import (
+    AttentionMetadata, GroupedAttentionMetadata)
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
@@ -691,3 +692,123 @@ def test_decode_loop_processed_modes_use_sample_output(logprobs_mode):
     raw_top, processed_top = 7, 13
     top1 = _run_decode_core_for_logprobs(logprobs_mode, raw_top, processed_top)
     assert np.all(top1 == processed_top)
+
+
+@pytest.mark.parametrize("uses_mrope", [False, True])
+def test_continue_decode_grouped_attention_metadata_gdn(uses_mrope):
+    """Hybrid GDN + full-attention models pass GroupedAttentionMetadata with
+    per-group block_tables, mamba_state_indices, and padded_num_reqs into
+    continue_decode (with 1-D positions for Qwen3-Next and 2-D M-RoPE
+    positions for Qwen3.5).
+    """
+    batch_size = 2
+    max_decode_steps = 3
+    static_max_decode_steps = 3
+    padded_num_reqs = 8
+
+    init_tokens = jnp.array([10, 20], dtype=jnp.int32)
+    active_mask = jnp.array([True, True], dtype=jnp.bool_)
+    if uses_mrope:
+        input_positions = jnp.zeros((3, batch_size), dtype=jnp.int32)
+    else:
+        input_positions = jnp.zeros((batch_size, ), dtype=jnp.int32)
+    seq_lens = jnp.array([1, 1], dtype=jnp.int32)
+    query_start_loc = jnp.array([0, 1, 2], dtype=jnp.int32)
+    request_distribution = jnp.array([2, 2, 2], dtype=jnp.int32)
+    mamba_state_indices = jnp.array([3, 7], dtype=jnp.int32)
+
+    bt_attn = jnp.ones((2, 16), dtype=jnp.int32)
+    bt_gdn = jnp.full((2, 4), 2, dtype=jnp.int32)
+
+    grouped_attn = GroupedAttentionMetadata(
+        groups=(
+            AttentionMetadata(
+                input_positions=input_positions,
+                block_tables=bt_attn,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=padded_num_reqs,
+            ),
+            AttentionMetadata(
+                input_positions=input_positions,
+                block_tables=bt_gdn,
+                seq_lens=seq_lens,
+                query_start_loc=query_start_loc,
+                request_distribution=request_distribution,
+                mamba_state_indices=mamba_state_indices,
+                padded_num_reqs=padded_num_reqs,
+            ),
+        ),
+        layer_names_per_group=(("layer.0", ), ("layer.1", )),
+    )
+
+    init_state = TpuSamplingState(
+        current_tokens=init_tokens,
+        active_mask=active_mask,
+        attn_metadata=grouped_attn,
+        step_counter=jnp.array(0, dtype=jnp.int32),
+    )
+
+    kv_caches = [jnp.zeros((2, 10)), jnp.zeros((2, 4))]
+
+    def mock_model_fn(state, kv_caches, current_tokens, attn_metadata,
+                      inputs_embeds, positions, *args, **kwargs):
+        assert isinstance(attn_metadata, GroupedAttentionMetadata)
+        attn_layer0 = attn_metadata["layer.0"]
+        attn_layer1 = attn_metadata["layer.1"]
+        assert attn_layer0.padded_num_reqs == padded_num_reqs
+        assert attn_layer1.padded_num_reqs == padded_num_reqs
+        shared_am = kwargs.get("shared_attention_metadata")
+        assert shared_am is not None
+        assert shared_am.padded_num_reqs == padded_num_reqs
+        pos_1d = positions[0] if positions.ndim == 2 else positions
+        hidden_states = (pos_1d + attn_layer1.mamba_state_indices).astype(
+            jnp.float32)[:, None, None]
+        experts = jnp.ones((1, batch_size, 2), dtype=jnp.int32)
+        return kv_caches, hidden_states, None, experts
+
+    def mock_compute_logits_fn(state, hidden_states, _):
+        return jnp.zeros((batch_size, 100))
+
+    def mock_sample_fn(rng, mesh, logits, sampling_metadata, **kwargs):
+        return jnp.array([42, 43], dtype=jnp.int32), None
+
+    (
+        token_buffer,
+        final_kv_caches,
+        final_state,
+        current_rng,
+        all_expert_indices,
+        logprobs_tensors,
+    ) = continue_decode(
+        state={},
+        model_fn=mock_model_fn,
+        compute_logits_fn=mock_compute_logits_fn,
+        sample_fn=mock_sample_fn,
+        init_state=init_state,
+        kv_caches=kv_caches,
+        max_decode_steps=max_decode_steps,
+        static_max_decode_steps=static_max_decode_steps,
+        eos_token_id=(99, ),
+        padding_token_id=-1,
+        rng=jax.random.PRNGKey(0),
+        mesh=None,
+        sampling_metadata=None,
+        collect_expert_indices=True,
+    )
+
+    assert int(final_state.step_counter) == 3
+    assert isinstance(final_state.attn_metadata, GroupedAttentionMetadata)
+    assert final_state.attn_metadata[
+        "layer.0"].padded_num_reqs == padded_num_reqs
+    expected_positions = ([[3, 3], [3, 3], [3, 3]] if uses_mrope else [3, 3])
+    assert np.array_equal(
+        final_state.attn_metadata["layer.0"].input_positions,
+        expected_positions,
+    )
+    assert np.array_equal(final_state.attn_metadata["layer.1"].seq_lens,
+                          [4, 4])
+    assert all_expert_indices is not None
+    assert all_expert_indices.shape == (3, 1, 2, 2)

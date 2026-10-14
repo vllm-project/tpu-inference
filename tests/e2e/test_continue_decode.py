@@ -32,6 +32,8 @@ class InferenceConfig:
     gpu_memory_utilization: float = 0.85
     additional_config: dict = field(default_factory=dict)
     async_scheduling: bool = False
+    enable_prefix_caching: bool = False
+    limit_mm_per_prompt: dict | None = None
 
 
 def _run_inference_and_return_outputs(
@@ -41,7 +43,7 @@ def _run_inference_and_return_outputs(
         enable_export: bool = True):
     os.environ['MODEL_IMPL_TYPE'] = config.impl_type
 
-    llm = LLM(
+    llm_kwargs = dict(
         model=config.model_name,
         max_model_len=config.max_model_len,
         tensor_parallel_size=config.tensor_parallel_size,
@@ -53,7 +55,12 @@ def _run_inference_and_return_outputs(
         enable_expert_parallel=config.enable_expert_parallel,
         additional_config=config.additional_config,
         async_scheduling=config.async_scheduling,
+        enable_prefix_caching=config.enable_prefix_caching,
     )
+    if config.limit_mm_per_prompt is not None:
+        llm_kwargs["limit_mm_per_prompt"] = config.limit_mm_per_prompt
+
+    llm = LLM(**llm_kwargs)
 
     if enable_export:
         # TODO(#3636): this no longer enables anything. vLLM #45635 moved the
@@ -436,4 +443,53 @@ def test_continue_decode_performance_overhead(perf_case):
         latency_continue_decode,
         len(prompts),
         min_speedup=1.05,
+    )
+
+
+@pytest.mark.parametrize("enable_prefix_caching", [False, True],
+                         ids=["mamba_none", "mamba_align"])
+def test_continue_decode_gdn_hybrid(enable_prefix_caching):
+    """Verify continue_decode correctness on hybrid GDN (full attention + linear attention) models."""
+    os.environ['SKIP_JAX_PRECOMPILE'] = '1'
+    os.environ['VLLM_XLA_CHECK_RECOMPILATION'] = '0'
+
+    config = InferenceConfig(
+        model_name="Qwen/Qwen3.5-4B",
+        impl_type="vllm",
+        tensor_parallel_size=1,
+        data_parallel_size=1,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        max_num_seqs=8,
+        enable_prefix_caching=enable_prefix_caching,
+        limit_mm_per_prompt={
+            "image": 0,
+            "video": 0,
+        },
+        additional_config={},
+    )
+
+    prompts = generate_test_prompts(4)
+    # Use max_tokens=64 so decode crosses the 64-token mamba_block_size boundary
+    # (prompt ~82 tokens -> ~146 total tokens, crossing boundary 128).
+    params = SamplingParams(
+        temperature=0.0,
+        max_tokens=64,
+        ignore_eos=True,
+        logprobs=1,
+        seed=42,
+    )
+
+    config.additional_config = {"enable_continue_decode": False}
+    baseline_outputs, _ = _run_inference_and_return_outputs(
+        config, prompts, params, enable_export=False)
+
+    config.additional_config = {"enable_continue_decode": True}
+    continue_decode_outputs, _ = _run_inference_and_return_outputs(
+        config, prompts, params, enable_export=False)
+
+    _check_correctness(
+        f"Continue decode GDN (prefix_caching={enable_prefix_caching})",
+        baseline_outputs,
+        continue_decode_outputs,
     )

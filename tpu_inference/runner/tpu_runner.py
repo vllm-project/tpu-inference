@@ -1850,7 +1850,20 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         remaining_slots = self.max_model_len - num_tokens
         if len(remaining_slots) == 0:
             return 0
-        return int(np.min(remaining_slots))
+        min_remaining = int(np.min(remaining_slots))
+        if (self.kv_cache_config.has_mamba_layers and getattr(
+                self.cache_config, "mamba_cache_mode", "none") == "align"):
+            # In mamba align mode (prefix caching), MambaManager does not
+            # pre-allocate lookahead blocks and TPUMambaManager only caches
+            # state checkpoints at block boundaries (seq_len % mamba_block_size == 0).
+            # Stop at or just before each block boundary so the scheduler
+            # allocates and caches the boundary block on the next step.
+            mamba_block_size = getattr(self.cache_config, "mamba_block_size",
+                                       None) or self.block_size
+            rem = num_tokens % mamba_block_size
+            steps_to_boundary = np.where(rem == 0, 1, mamba_block_size - rem)
+            min_remaining = min(min_remaining, int(np.min(steps_to_boundary)))
+        return min_remaining
 
     def _execute_continue_decode(
         self,
