@@ -86,16 +86,19 @@ if TYPE_CHECKING:
     MIN_TOKEN_BUCKET: int = 16
     MOE_ROUTE_PADDING_TO_EXPERT0: bool = False
     MOE_HIERARCHICAL_DISPATCH: bool = False
+    MOE_HIERARCHICAL_COLLECT: bool = False
     RAGGED_GATHER_MAX_ROW_SUBCHUNKS: int = 4
     RAGGED_GATHER_TRIM_ROWS: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
+    TPU_MESH_ATTN_DP_RING: bool = False
     VERIFY_WEIGHTS: bool = False
     SAMPLING_MICROBATCH_SIZE: int = 0
     DISTRIBUTED_SAMPLING_MAX_TOP_K: int = 64
     ENABLE_TOPK_PREFILTER: bool = False
     RAIDEN_H2D_SETTLE: bool = True
+    SKIP_MAMBA_SCHEDULER_BLOCKS: bool = False
 
 
 def env_with_choices(
@@ -536,12 +539,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # columns over the attention-data axes, then swap halves on-chip. Halves
     # the cross-chip traffic. Applies only when the model axis pairs a chip's
     # two cores at adjacent indices and the hidden size is a multiple of 256;
-    # otherwise the one-step gather is kept. Only the expert-parallel GMM path
-    # uses it: not GMM_TP or FUSED_MOE, and not with the fp8 all-gather
-    # (MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8) or USE_GMM_FUSED_RS_KERNEL.
-    # See fused_moe_gmm.py.
+    # otherwise the one-step gather is kept. With the fp8 all-gather
+    # (MOE_ALL_GATHER_ACTIVATION_DTYPE=fp8) both steps move fp8. Only the
+    # expert-parallel GMM path uses it: not GMM_TP or FUSED_MOE, and not with
+    # USE_GMM_FUSED_RS_KERNEL. See fused_moe_gmm.py.
     "MOE_HIERARCHICAL_DISPATCH":
     env_bool("MOE_HIERARCHICAL_DISPATCH", default=False),
+    # The reverse for the EP collect: each chip's two cores add column halves
+    # on-chip, then reduce-scatter half the columns over the attention-data
+    # axes. Same mesh and hidden-size conditions as MOE_HIERARCHICAL_DISPATCH.
+    # Not bitwise identical: the sum is added in a different order. Not with
+    # USE_GMM_FUSED_RS_KERNEL. See fused_moe_gmm.py.
+    "MOE_HIERARCHICAL_COLLECT":
+    env_bool("MOE_HIERARCHICAL_COLLECT", default=False),
     # EP dispatch permute gather: the ragged_gather_v2 kernel
     # (kernels/sparse_core/ragged_gather_v2.py), called from fused_moe_gmm.py.
     # max_row_subchunks: caps the SparseCore gather's block size; 1 gives the
@@ -563,6 +573,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Currently, it only supports a single host set up.
     "TPU_MESH_SORT_BY_COORDS":
     env_bool("TPU_MESH_SORT_BY_COORDS", default=False),
+    # Lay out an attn_dp x `model=4` mesh on a 2x2xZ v7x slice so that each
+    # attn_dp group is a physical ring of linked chips and each model group is
+    # the two cores of two linked chips. The default layout puts consecutive
+    # attn_dp ranks on unlinked chips, which doubles the load on the busiest
+    # link for attn_dp all-gathers and reduce-scatters. Single slice only;
+    # other meshes fall back to the regular layout. Takes precedence over
+    # TPU_MESH_SORT_BY_COORDS. On more than one host, each host's devices are
+    # no longer a contiguous block of the mesh, so jax's Mesh.local_mesh
+    # fails. See attn_dp_ring_device_mesh in utils.py.
+    "TPU_MESH_ATTN_DP_RING":
+    env_bool("TPU_MESH_ATTN_DP_RING", default=False),
     # Controls whether FP8 linear and MoE layers perform incremental weight
     # loading, sharding, and immediate host RAM cleanup. When enabled, weights
     # are sharded and transferred to TPU device memory layer-by-layer (or per
@@ -595,6 +616,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # letting the rollout resume. See RaidenWorkerSync._wait_until_settled.
     "RAIDEN_H2D_SETTLE":
     env_bool("RAIDEN_H2D_SETTLE", default=True),
+    # With prefix caching off, stop the scheduler from charging GDN layers one
+    # block per group per request from the attention pool. The TPU runner keeps
+    # GDN state in its own arrays and never reads those blocks. Applies to GDN
+    # layers only; other mamba layers keep their blocks. Ignored with prefix
+    # caching, speculative decoding or a KV connector. Read by the model runner;
+    # TpuPlatform.additional_env_vars carries it to Ray workers on other hosts.
+    # See core/runner_slot_mamba.py.
+    "SKIP_MAMBA_SCHEDULER_BLOCKS":
+    env_bool("SKIP_MAMBA_SCHEDULER_BLOCKS", default=False),
 }
 
 

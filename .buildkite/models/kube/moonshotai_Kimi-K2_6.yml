@@ -1,0 +1,147 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The kube steps for ../moonshotai_Kimi-K2_6.yml, with the same keys. See README.md.
+
+steps:
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Unit tests for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest"
+    depends_on: "build_docker_${TPU_VERSION:-tpu6e}"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
+      NEW_MODEL_DESIGN: "1"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      MODEL_IMPL_TYPE: "vllm"
+      USE_V7X8_QUEUE: "True"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mlperf.sh -m "gs://tpu-commons-ci/moonshootai/kimi/2.6" -t 2750
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record unit test result for moonshotai/Kimi-K2_6"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_UnitTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-K2.6"
+      CI_STAGE: "UnitTest"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_UnitTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Accuracy for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_UnitTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    env:
+      SHAPE: "${KUBE_SHAPE_MULTI:-ct6e-standard-8t/2x4}"
+      NEW_MODEL_DESIGN: "1"
+      USE_V6E8_QUEUE: "False"
+      TPU_VERSION: "tpu7x"
+      SKIP_ACCURACY_TESTS: "False"
+      VLLM_MLA_DISABLE: "0"
+      MOE_REQUANTIZE_BLOCK_SIZE: "512"
+      MOE_REQUANTIZE_WEIGHT_DTYPE: "fp4"
+      DEVICE_COUNT: "8"
+      MODEL_IMPL_TYPE: "vllm"
+      USE_V7X8_QUEUE: "True"
+      MINIMUM_ACCURACY_THRESHOLD: "0.86"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        if [ "${TPU_VERSION:-tpu6e}" = "tpu6e" ]; then
+          buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy" "not enough HBM"
+        else
+          .buildkite/kubernetes/run.sh \
+            bash /workspace/tpu_inference/tests/e2e/benchmarking/mmlu.sh -m  "gs://tpu-commons-ci/moonshootai/kimi/2.6" -n 14042 -l 4
+        fi
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record accuracy result for moonshotai/Kimi-K2_6"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Accuracy"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-K2.6"
+      CI_STAGE: "Accuracy/Correctness"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Accuracy
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance benchmarks for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark"
+    depends_on: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Accuracy"
+    agents:
+      queue: "kube"
+    env:
+      TEST_MODEL: "moonshotai/Kimi-K2.6"
+      TENSOR_PARALLEL_SIZE: "${TENSOR_PARALLEL_SIZE_SINGLE:-1}"
+      MINIMUM_THROUGHPUT_THRESHOLD: "0"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        buildkite-agent meta-data set "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark" "unverified"
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance benchmark result for moonshotai/Kimi-K2.6"
+    key: "${TPU_VERSION:-tpu6e}_record_moonshotai_Kimi-K2_6_Benchmark"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark"
+        allow_failure: true
+    agents:
+      queue: "kube"
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "moonshotai/Kimi-K2.6"
+      CI_STAGE: "Benchmark"
+      CI_CATEGORY: "text-only"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - |
+        .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}_moonshotai_Kimi-K2_6_Benchmark

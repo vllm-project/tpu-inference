@@ -156,35 +156,222 @@ class TestRaidenWorkerSyncMetadataDict(unittest.TestCase):
         sync.names = ["w"]
         self.assertTrue(sync.bound)
 
-    def test_metadata_dict_extracts_host_subgrid_from_local_mesh(self):
-        sync = rws.RaidenWorkerSync("rollout")
+    def test_metadata_dict_publishes_one_global_shard_index_per_shard(self):
+        """Index j describes shards[j], i.e. addressable_shards[j]'s slice."""
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="1.2.3.4")
         sync.names = ["w"]
-        mock_devices = unittest.mock.MagicMock()
-        mock_devices.shape = (1, 4)
-        mock_local_mesh = SimpleNamespace(devices=mock_devices)
-        mock_mesh = SimpleNamespace(
-            axis_names=("x", "y"),
-            shape={
-                "x": 1,
-                "y": 4
-            },
-            local_mesh=mock_local_mesh,
-        )
+        dev0, dev1 = object(), object()
+        # (8, 8) sharded P("x", "y") on a 2x2 mesh; this host owns the x=1 row:
+        # (1,0) -> rows 4:8 / cols 0:4 and (1,1) -> rows 4:8 / cols 4:8.
+        indices_map = {
+            object(): (slice(0, 4), slice(0, 4)),
+            object(): (slice(0, 4), slice(4, 8)),
+            dev0: (slice(4, 8), slice(0, 4)),
+            dev1: (slice(4, 8), slice(4, 8)),
+        }
         mock_sharding = SimpleNamespace(
-            mesh=mock_mesh,
-            spec=(),
-            shard_shape=lambda shape: shape,
+            mesh=SimpleNamespace(axis_names=("x", "y"), shape={
+                "x": 2,
+                "y": 2
+            }),
+            spec=("x", "y"),
+            shard_shape=lambda shape: (4, 4),
+            devices_indices_map=lambda shape: indices_map,
         )
         sync.arrays = [
             SimpleNamespace(
-                shape=(2, 4),
+                shape=(8, 8),
                 dtype=SimpleNamespace(itemsize=4),
                 sharding=mock_sharding,
                 ndim=2,
+                addressable_shards=[
+                    SimpleNamespace(device=dev0),
+                    SimpleNamespace(device=dev1),
+                ],
             )
         ]
+        sync._sync = SimpleNamespace(num_shards=2,
+                                     local_port=12345,
+                                     listener_port=23456)
         meta = sync.metadata_dict()
-        self.assertEqual(meta["host_subgrid"], [1, 4])
+        self.assertEqual(meta["shards"], ["1.2.3.4:12345"] * 2)
+        self.assertEqual(meta["mesh_shape"], [2, 2])
+        self.assertEqual(meta["variables"][0]["mesh_shape"], [2, 2])
+        # Row-major over the (2, 2) shard grid: (1,0) -> 2, (1,1) -> 3.
+        self.assertEqual(meta["variables"][0]["global_shard_indices"], [2, 3])
+        self.assertNotIn("host_subgrid", meta)
+
+    def test_metadata_dict_indices_follow_addressable_shard_order(self):
+        """The index list follows addressable_shards, not the mesh order."""
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="1.2.3.4")
+        sync.names = ["w"]
+        dev0, dev1 = object(), object()
+        indices_map = {
+            dev0: (slice(4, 8), slice(0, 4)),
+            dev1: (slice(4, 8), slice(4, 8)),
+        }
+        mock_sharding = SimpleNamespace(
+            mesh=SimpleNamespace(axis_names=("x", "y"), shape={
+                "x": 2,
+                "y": 2
+            }),
+            spec=("x", "y"),
+            shard_shape=lambda shape: (4, 4),
+            devices_indices_map=lambda shape: indices_map,
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(8, 8),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=2,
+                addressable_shards=[
+                    SimpleNamespace(device=dev1),
+                    SimpleNamespace(device=dev0),
+                ],
+            )
+        ]
+        sync._sync = SimpleNamespace(num_shards=2,
+                                     local_port=12345,
+                                     listener_port=23456)
+        meta = sync.metadata_dict()
+        self.assertEqual(meta["variables"][0]["global_shard_indices"], [3, 2])
+
+    def test_metadata_dict_replicated_variable_repeats_index_zero(self):
+        """Every local shard of a fully replicated variable holds slice 0."""
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="1.2.3.4")
+        sync.names = ["w"]
+        dev0, dev1 = object(), object()
+        indices_map = {
+            dev0: (slice(None), slice(None)),
+            dev1: (slice(None), slice(None)),
+        }
+        mock_sharding = SimpleNamespace(
+            mesh=SimpleNamespace(axis_names=("x", "y"), shape={
+                "x": 1,
+                "y": 2
+            }),
+            spec=(),
+            shard_shape=lambda shape: shape,
+            devices_indices_map=lambda shape: indices_map,
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(8, 8),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=2,
+                addressable_shards=[
+                    SimpleNamespace(device=dev0),
+                    SimpleNamespace(device=dev1),
+                ],
+            )
+        ]
+        sync._sync = SimpleNamespace(num_shards=2,
+                                     local_port=12345,
+                                     listener_port=23456)
+        meta = sync.metadata_dict()
+        self.assertEqual(meta["variables"][0]["mesh_shape"], [1, 1])
+        self.assertEqual(meta["variables"][0]["global_shard_indices"], [0, 0])
+
+    def test_metadata_dict_rejects_a_num_shards_mismatch(self):
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="1.2.3.4")
+        sync.names = ["w"]
+        dev0 = object()
+        mock_sharding = SimpleNamespace(
+            mesh=SimpleNamespace(axis_names=("x", ), shape={"x": 1}),
+            spec=(),
+            shard_shape=lambda shape: shape,
+            devices_indices_map=lambda shape: {dev0: (slice(None), )},
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(8, ),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=1,
+                addressable_shards=[SimpleNamespace(device=dev0)],
+            )
+        ]
+        sync._sync = SimpleNamespace(num_shards=2,
+                                     local_port=12345,
+                                     listener_port=23456)
+        with self.assertRaisesRegex(RuntimeError,
+                                    "1 addressable shard.*num_shards=2"):
+            sync.metadata_dict()
+
+    def test_metadata_dict_rejects_an_index_count_mismatch(self):
+        sync = rws.RaidenWorkerSync("rollout", bind_ip="1.2.3.4")
+        sync.names = ["w"]
+        mock_sharding = SimpleNamespace(
+            mesh=SimpleNamespace(axis_names=("x", ), shape={"x": 1}),
+            spec=(),
+            shard_shape=lambda shape: shape,
+            devices_indices_map=lambda shape: {},
+        )
+        sync.arrays = [
+            SimpleNamespace(
+                shape=(8, ),
+                dtype=SimpleNamespace(itemsize=4),
+                sharding=mock_sharding,
+                ndim=1,
+                addressable_shards=[SimpleNamespace(device=object())],
+            )
+        ]
+        sync._sync = SimpleNamespace(num_shards=1,
+                                     local_port=12345,
+                                     listener_port=23456)
+        with unittest.mock.patch.object(sync,
+                                        "_shard_devices",
+                                        return_value=[]):
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    "'w' publishes 0 global_shard_indices for 1 shards"):
+                sync.metadata_dict()
+
+
+class TestGlobalShardIndex(unittest.TestCase):
+
+    def test_1d(self):
+        index = rws._global_shard_index
+        self.assertEqual(index("w", (slice(0, 2), ), (8, ), (4, )), 0)
+        self.assertEqual(index("w", (slice(6, 8), ), (8, ), (4, )), 3)
+
+    def test_2d_is_row_major(self):
+        self.assertEqual(
+            rws._global_shard_index("w", (slice(4, 8), slice(2, 4)), (8, 8),
+                                    (2, 4)), 1 * 4 + 1)
+
+    def test_replicated_dimension_is_coordinate_zero(self):
+        index = rws._global_shard_index
+        self.assertEqual(
+            index("w", (slice(None), slice(4, 8)), (8, 8), (1, 2)), 1)
+        self.assertEqual(
+            index("w", (slice(4, 8), slice(None)), (8, 8), (2, 1)), 1)
+
+    def test_rejects_misaligned_start(self):
+        with self.assertRaisesRegex(ValueError, "'w'.*multiple of tile 2"):
+            rws._global_shard_index("w", (slice(1, 3), ), (8, ), (4, ))
+
+    def test_rejects_start_beyond_the_grid(self):
+        with self.assertRaisesRegex(ValueError, "'w'.*below 2 tiles"):
+            rws._global_shard_index("w", (slice(8, 12), ), (8, ), (2, ))
+
+    def test_rejects_rank_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "same rank"):
+            rws._global_shard_index("w", (slice(0, 4), ), (8, 8), (2, 1))
+
+
+class TestTensorMetadataDict(unittest.TestCase):
+
+    def test_without_real_sharding_leaves_indices_empty(self):
+        arr = SimpleNamespace(shape=(8, ),
+                              dtype=SimpleNamespace(itemsize=4),
+                              sharding=None,
+                              ndim=1)
+        md = rws._tensor_metadata_dict("w", arr, 0, [object()])
+        self.assertEqual(md["mesh_shape"], [1])
+        self.assertEqual(md["global_shard_indices"], [])
 
 
 class TestRaidenWorkerSyncH2D(unittest.TestCase):

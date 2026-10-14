@@ -144,6 +144,9 @@ echo "Using vLLM hash: $(git rev-parse HEAD)"
 
 # Overwrite a few of the vLLM benchmarking scripts with the TPU Commons ones
 cp -r "$root_dir"/tpu_inference/scripts/vllm/benchmarking/*.py "$root_dir"/vllm/benchmarks/
+# vLLM no longer ships benchmarks/sonnet.txt (vllm #60129); the default
+# dataset_path above still points there, so the copy kept here takes its place.
+cp "$root_dir"/tpu_inference/scripts/vllm/benchmarking/sonnet.txt "$root_dir"/vllm/benchmarks/
 echo "Using TPU Inference hash: $(git -C "$root_dir"/tpu_inference rev-parse HEAD)"
 
 checkThroughput() {

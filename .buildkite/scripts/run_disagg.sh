@@ -16,6 +16,10 @@
 
 set -ex
 
+if [ -n "${BUILDKITE:-}" ]; then
+  export USE_PREBUILT_IMAGE="${USE_PREBUILT_IMAGE:-1}"
+fi
+
 IMAGE_NAME='vllm-tpu'
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # Source the environment setup script

@@ -56,8 +56,11 @@ echo "[INFO] Dynamic mapping complete: $ci_queue -> $DEVICE"
 # are per-run values only this script computes. The pod starts in the image's
 # WORKDIR, the checkout run_bm.sh's relative paths expect.
 #
-# UPLOAD_DB is off unless the build turns it on: a kube row would land under
-# the bare-metal device name with nothing marking it as kube.
+# UPLOAD_DB is off unless the build turns it on, so an ad hoc kube run writes
+# nothing; the scheduled daily turns it on. report_result.sh writes only when
+# the case's GCP_* names are set too, so they go into the pod with it, and
+# CI_RUNNER=kube marks each row so it reads apart from bare-metal history under
+# the same device name.
 #
 # run_bm.sh writes its logs under ARTIFACT_FOLDER/temp_logs, which run.sh then
 # uploads through ARTIFACTS_DIR: the server and benchmark logs run_job.sh
@@ -104,6 +107,13 @@ exec .buildkite/kubernetes/run.sh env \
     JOB_REFERENCE="$JOB_REFERENCE" \
     EXTRA_ENVS="${EXTRA_ENVS:-}" \
     UPLOAD_DB="${UPLOAD_DB:-false}" \
+    GCP_PROJECT_ID="${GCP_PROJECT_ID:-}" \
+    GCP_INSTANCE_ID="${GCP_INSTANCE_ID:-}" \
+    GCP_DATABASE_ID="${GCP_DATABASE_ID:-}" \
+    BQ_UPLOAD_ENABLED="${BQ_UPLOAD_ENABLED:-}" \
+    BQ_TABLE="${BQ_TABLE:-}" \
+    BQ_PROJECT_ID="${BQ_PROJECT_ID:-}" \
+    CI_RUNNER=kube \
     BM_INFRA=true \
     BUILDKITE_AGENT_META_DATA_QUEUE="$ci_queue" \
     BUILDKITE_RETRY_COUNT="${BUILDKITE_RETRY_COUNT:-0}" \

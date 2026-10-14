@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from unittest.mock import MagicMock, patch
 
 import jax
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.sampling_params import SamplingType
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor,
                                         MambaSpec, MLAAttentionSpec,
@@ -34,6 +36,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.request import Request
 
 from tpu_inference import utils as common_utils
+from tpu_inference.core.runner_slot_mamba import RunnerSlotMambaSpec
 from tpu_inference.runner.input_batch import CachedRequestState
 from tpu_inference.runner.kv_cache import (_get_mamba_cache_allocator,
                                            get_attention_page_size_bytes)
@@ -1049,6 +1052,38 @@ class TestKVCacheManager:
         assert len(kv_cache_spec) == 1
         assert kv_cache_spec['layer.0'] == mock_mamba_spec
 
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_get_kv_cache_spec_gdn_runner_slot_flag(self, monkeypatch, flag):
+        """SKIP_MAMBA_SCHEDULER_BLOCKS: GDN specs go to vLLM as
+        RunnerSlotMambaSpec (prefix caching off, no MTP, no KV connector)."""
+        if flag:
+            monkeypatch.setenv("SKIP_MAMBA_SCHEDULER_BLOCKS", "1")
+        else:
+            monkeypatch.delenv("SKIP_MAMBA_SCHEDULER_BLOCKS", raising=False)
+        gdn_spec = MambaSpec(shapes=((3, 64), (8, 64, 16)),
+                             dtypes=(torch.bfloat16, torch.float32),
+                             block_size=1024,
+                             mamba_type=MambaAttentionBackendEnum.GDN_ATTN)
+        mock_gdn_module = MagicMock(spec=MambaBase)
+        mock_gdn_module.get_kv_cache_spec.return_value = gdn_spec
+
+        def get_layers_side_effect(vllm_config, attn_cls):
+            if MambaBase in attn_cls:
+                return {'layer.0': mock_gdn_module}
+            return {}
+
+        self.runner.vllm_config.compilation_config.static_forward_context = {
+            'layer.0': mock_gdn_module
+        }
+
+        with patch(
+                'tpu_inference.runner.kv_cache_manager.get_layers_from_vllm_config',
+                side_effect=get_layers_side_effect):
+            kv_cache_spec = self.runner.get_kv_cache_spec()
+
+        expected_cls = RunnerSlotMambaSpec if flag else MambaSpec
+        assert type(kv_cache_spec['layer.0']) is expected_cls
+
     def test_initialize_kv_cache_mamba(self):
         num_blocks = 100
         page_size_bytes = 16 * 1024
@@ -2047,8 +2082,12 @@ class TestKVCacheManager:
 
     def _init_ds_v4(self, kv_cache_config):
         self.runner.kv_cache_manager.use_mla = True
-        with patch('tpu_inference.runner.kv_cache_manager.is_ds_v4',
-                   return_value=True):
+        # The DSv4 path writes MLA_KV_PACKING_SIZE and MLA_TRANSPOSE_KV_CACHE
+        # into os.environ, where every later MLA test in the process would read
+        # them; patch.dict puts the environment back.
+        with patch.dict(os.environ), patch(
+                'tpu_inference.runner.kv_cache_manager.is_ds_v4',
+                return_value=True):
             self.runner.initialize_kv_cache(kv_cache_config)
 
     def _assert_ds_v4_overlays(self, num_blocks):
@@ -2344,3 +2383,39 @@ class TestKVCacheManager:
 
         with pytest.raises(ValueError, match=r"\[kv-cache\].*state_cache"):
             self._init_ds_v4(kv_cache_config)
+
+    def test_maybe_reinitialize_input_batch_hybrid_mamba_dcp(self):
+        # Under DCP > 1, FullAttention groups scale their logical block size by
+        # KV_CONTEXT, whereas Mamba groups keep replicated per-rank state and
+        # retain their raw block size.
+        mamba_spec = MagicMock(spec=MambaSpec)
+        mamba_spec.block_size = 256
+        attn_spec = FullAttentionSpec(
+            block_size=256,
+            num_kv_heads=4,
+            head_size=128,
+            dtype=torch.bfloat16,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=100,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(layer_names=["layers.0.mamba"],
+                                 kv_cache_spec=mamba_spec),
+                KVCacheGroupSpec(layer_names=["layers.1.attn"],
+                                 kv_cache_spec=attn_spec),
+            ],
+        )
+
+        with patch(
+                "tpu_inference.runner.kv_cache_manager.utils.get_mesh_shape_product",
+                return_value=4):
+            self.runner.kv_cache_manager.maybe_reinitialize_input_batch(
+                kv_cache_config)
+
+        block_tables = self.runner.input_batch.block_table.block_tables
+        assert len(block_tables) == 2
+        assert block_tables[0].max_num_blocks_per_req == (
+            self.runner.max_model_len // 256)
+        assert block_tables[1].max_num_blocks_per_req == (
+            self.runner.max_model_len // (256 * 4))

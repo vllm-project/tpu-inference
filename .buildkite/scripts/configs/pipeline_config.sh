@@ -14,7 +14,10 @@
 # limitations under the License.
 
 # Priority constants for pipeline jobs.
-# Post-merge > Pre-merge > Integration pipeline > Benchmark > Other/Default > Nightly
+# On-call fix > Post-merge > Pre-merge > Integration pipeline > Benchmark > Other/Default > Nightly
+# vllm-torchtpu uses 12 for on-call fixes too, so an on-call fix in either repo
+# runs ahead of both repos' post-merge builds on the shared TPU queues.
+export PRIORITY_ONCALL_FIX=12
 export PRIORITY_POST_MERGE=10
 export PRIORITY_PRE_MERGE=5
 export PRIORITY_INTEGRATION=3

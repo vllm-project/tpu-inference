@@ -131,7 +131,7 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = False
+    vllm_config.additional_config["enable_sp"] = False
 
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16

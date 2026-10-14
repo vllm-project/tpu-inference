@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
-from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import gmm_v2
+from tokamax._src.ops.experimental.gmm_v2.gmm_v2 import (calculate_tiling,
+                                                         gmm_v2)
 
 from tpu_inference.kernels.quantized_matmul.util import (
     quantize_tensor, xla_quantized_batched_matmul)
@@ -25,6 +28,32 @@ from tpu_inference.logger import init_logger
 from tpu_inference.utils import get_mesh_shape_product
 
 logger = init_logger(__name__)
+
+# Headroom reserved when validating whether tokamax's opportunistic
+# triple-buffered LHS (lhs_buffer_count=3) fits in VMEM. tokamax's
+# _gmm_vmem_estimate omits scratch buffers such as partial_out_ref and compiler
+# stack overhead, which can otherwise push the kernel slightly past
+# CompilerParams.vmem_limit_bytes (e.g., 57.64 MiB vs 57.60 MiB on TPU v7x).
+_GMM_TILING_VMEM_HEADROOM_BYTES = 1024 * 1024
+
+
+def _safe_calculate_tiling(
+    dims,
+    lhs_cfgs,
+    rhs_cfgs,
+    vmem_limit_bytes: int,
+    fuse_act: str | None = None,
+):
+    tiles = calculate_tiling(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes,
+                             fuse_act)
+    if getattr(tiles, "lhs_buffer_count", 2) > 2:
+        conservative_limit = max(
+            1, vmem_limit_bytes - _GMM_TILING_VMEM_HEADROOM_BYTES)
+        conservative_tiles = calculate_tiling(dims, lhs_cfgs, rhs_cfgs,
+                                              conservative_limit, fuse_act)
+        if conservative_tiles != tiles:
+            tiles = dataclasses.replace(tiles, lhs_buffer_count=2)
+    return tiles
 
 
 def xla_quantized_matmul(
@@ -229,6 +258,7 @@ def sharded_quantized_matmul(x: jax.Array,
                 rhs_scale=w_s if w_s.ndim == 4 else jnp.expand_dims(w_s, 0),
                 rhs_bias=None,
                 group_offset=jnp.array([0], dtype=jnp.int32),
+                tile_info=_safe_calculate_tiling,
                 zero_initialize=False,
                 preferred_element_type=x.dtype,
                 maybe_quantize_lhs=maybe_quantize_x,

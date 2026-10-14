@@ -1529,7 +1529,7 @@ def _ragged_paged_attention_kernel_loop(
             acc = acc_ref[...]
             l = broadcast_minor(l_ref[...], acc.shape)  # noqa
             l_safe = jnp.where(l == 0.0, 1.0, l)
-            out = (acc * pl.reciprocal(l_safe, approx=True) if
+            out = (acc * pltpu.reciprocal(l_safe, approx=True) if
                    (l.dtype == jnp.float32 and out_dtype != jnp.float32) else
                    lax.div(acc, l_safe)).astype(out_dtype)
 

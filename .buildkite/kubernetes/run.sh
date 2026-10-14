@@ -23,6 +23,18 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
+# A step that sets no TPU_VERSION runs as the generation its shape names. The
+# kube nightly uploads both generations into one build, so no build-wide value
+# can say which a step is; its shape, filled in at upload, does.
+infer_tpu_version() {
+  if [[ -z "${TPU_VERSION:-}" ]]; then
+    case "$1" in
+      tpu7x-*) export TPU_VERSION=tpu7x ;;
+      ct6e-*) export TPU_VERSION=tpu6e ;;
+    esac
+  fi
+}
+
 # A manifest carries its own nodeSelector, so it answers the shape question
 # that SHAPE answers for a plain Job; asking for both would let them disagree.
 if [[ -z "${MULTIHOST_MANIFEST:-}" ]]; then
@@ -35,6 +47,7 @@ if [[ -z "${MULTIHOST_MANIFEST:-}" ]]; then
     echo "$0: SHAPE must be <machine-type>/<topology>, got '${shape}'" >&2
     exit 2
   fi
+  infer_tpu_version "$machine_type"
 
   # TPU_VERSION only labels and gates steps; the hardware comes from the shape.
   # Setting one without the other runs v7x-gated tests on v6e chips and reports
@@ -76,6 +89,7 @@ else
          "slice spanning two or more hosts, got '${shape}'" >&2
     exit 2
   fi
+  infer_tpu_version "$machine_type"
   # The manifests here are tpu7x slices. Same mislabelling risk as above.
   if [[ "${TPU_VERSION:-tpu6e}" != "tpu7x" || "$machine_type" != tpu7x-* ]]; then
     echo "$0: ${MULTIHOST_MANIFEST} is a tpu7x slice; TPU_VERSION=${TPU_VERSION:-tpu6e}," \
@@ -143,6 +157,18 @@ FORWARD=(
   # multihost_entry.sh.
   ARTIFACTS_DIR
 )
+
+# The `tests` plugin on a sharded step mints these on the agent, and their
+# two-hour life starts before admission, node scale-up and the image pull.
+# Unset rather than forwarded: BUILDKITE_ANALYTICS_TOKEN then comes from Secret
+# Manager like on every other step, and bktec mints its own API token in the
+# pod.
+unset BUILDKITE_ANALYTICS_TOKEN BUILDKITE_TEST_ENGINE_API_ACCESS_TOKEN
+
+# Lets bktec mint that token: `oidc request-token` otherwise refuses without the
+# agent's log redactor, which lives behind the Job API socket the pod cannot
+# reach.
+export BUILDKITE_AGENT_OIDC_REQUEST_TOKEN_SKIP_TOKEN_REDACTION=true
 
 # The BUILDKITE_* the agent set are swept by the launcher itself, so only the
 # ones above that it cannot see - an unset name it resolves from Secret

@@ -375,6 +375,19 @@ CLEANUP_DONE="false"
 # Safely parse EXTRA_DOCKER_ARGS into an array to prevent word-splitting on spaces
 eval "declare -a EXTRA_DOCKER_ARGS_ARRAY=(${EXTRA_DOCKER_ARGS:-})"
 
+# Optional extra container environment for BOTH the head and the worker nodes.
+# MULTIHOST_ENV_VARS is a newline-separated list of KEY=VALUE pairs; values may
+# contain spaces. Env vars inlined into the serve command only reach the head
+# process, so anything the Ray workers read (e.g. weight-loading knobs) has to
+# be in their container environment. JSON case mode gets this from the case's
+# server env above; this gives the direct CLI mode the same.
+if [ -n "${MULTIHOST_ENV_VARS:-}" ]; then
+    while IFS= read -r env_item; do
+        [ -z "${env_item}" ] && continue
+        DOCKER_ENV_ARGS+=("-e" "${env_item}")
+    done <<< "${MULTIHOST_ENV_VARS}"
+fi
+
 # Serialize DOCKER_ENV_ARGS safely for SSH injection to Worker Nodes.
 if [ ${#DOCKER_ENV_ARGS[@]} -gt 0 ]; then
     DOCKER_ENV_STR=$(printf '%q ' "${DOCKER_ENV_ARGS[@]}")

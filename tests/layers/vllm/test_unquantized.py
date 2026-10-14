@@ -175,7 +175,7 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     with set_current_vllm_config(vllm_config):
         row_linear = RowParallelLinear(
@@ -331,7 +331,7 @@ def test_column_parallel_linear(model, bias, num_devices, enable_sp,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     with set_current_vllm_config(vllm_config):
         column_linear = ColumnParallelLinear(
@@ -408,7 +408,7 @@ def test_qkv_parallel_linear(model, bias, num_devices, enable_sp, fuse_matmuls,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     with set_current_vllm_config(vllm_config):
         qkv_linear = QKVParallelLinear(
@@ -491,7 +491,7 @@ def test_merged_column_parallel_linear(model, bias, num_devices, fuse_matmuls,
         max_num_seqs=4,
     )
     vllm_config = engine_args.create_engine_config()
-    vllm_config.compilation_config.pass_config.enable_sp = enable_sp
+    vllm_config.additional_config["enable_sp"] = enable_sp
 
     # Call vLLM code
     with set_current_vllm_config(vllm_config):
