@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import vllm.envs as vllm_envs
+from jax.experimental import multihost_utils
 from jax.sharding import NamedSharding, PartitionSpec
 from vllm.utils.math_utils import round_down
 
@@ -65,6 +66,16 @@ def _describe_signature(kwargs: dict[str, Any]) -> dict[str, Any]:
         for k, v in kwargs.items()
         if v is None or isinstance(v, (int, float, bool, str))
     }
+
+
+def _sync_hosts(name: str) -> None:
+    """Barrier across hosts on multi-host; no-op on a single host.
+
+    Every host runs the same precompile sequence (same model, config and
+    shapes), so every host reaches each barrier the same number of times.
+    """
+    if jax.process_count() > 1:
+        multihost_utils.sync_global_devices(name)
 
 
 class CompilationManager:
@@ -203,6 +214,10 @@ class CompilationManager:
 
         if self._compile_executor is None:
             _compile(lowered, log_name, self.runner.mesh)
+            # Keep hosts in lockstep: a host that runs ahead can enter the
+            # multi-host warmup collective while a peer is still compiling,
+            # deadlocking the PJRT stream.
+            _sync_hosts("compile_step")
         else:
             future = self._compile_executor.submit(_compile, lowered, log_name,
                                                    self.runner.mesh)
@@ -227,6 +242,9 @@ class CompilationManager:
                     "runs all compilations sequentially in the main thread)."
                 ) from e
 
+        # Every host must finish compiling before any host starts the warmup
+        # collectives.
+        _sync_hosts("flush_pre_warmup")
         warmup_start = time.perf_counter()
         with jax.set_mesh(self.runner.mesh):
             for name, fn, args, call_kwargs, warmup_handler in tasks:
