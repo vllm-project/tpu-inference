@@ -269,6 +269,8 @@ def outer_kernel(
         "mixed_tile_size",
         "zero_initialize_out",
         "compute_precision",
+        "has_decode_seqs",
+        "has_prefill_seqs",
     ),
 )
 def fused_conv1d_gdn(
@@ -299,6 +301,8 @@ def fused_conv1d_gdn(
     # TODO(kyuyeunk): Calculate tile size based on input dimensions.
     decode_tile_size: int = 4,
     mixed_tile_size: int = 64,
+    has_decode_seqs: bool = True,
+    has_prefill_seqs: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
     """Perform conv1d and gdn in a single fused kernel.
 
@@ -352,6 +356,15 @@ def fused_conv1d_gdn(
         decode_tile_size: Tile size along sequence dimension for decode sequences.
         mixed_tile_size: Tile size along token/chunk dimension for prefill/mixed
             sequences.
+        has_decode_seqs: Set to False when the caller knows the batch holds no
+            decode (or speculative verify) sequences, i.e. `distribution[0] ==
+            0`. The decode kernel is then not emitted at all, which saves its
+            launch. Passing False for a batch that does have decode sequences
+            silently drops them.
+        has_prefill_seqs: Set to False when the caller knows the batch holds no
+            prefill/mixed sequences, i.e. `distribution[-1] == distribution[0]`.
+            The prefill kernel is then not emitted at all. Passing False for a
+            batch that does have prefill sequences silently drops them.
 
     Returns:
         (new_conv_state, new_recurrent_state): Updated convolution state cache and
@@ -496,12 +509,14 @@ def fused_conv1d_gdn(
                 read_indices=read_state_indices,
             )
         else:
+            start_seq = (distribution[0] if has_decode_seqs else
+                         jnp.zeros_like(distribution[0]))
             metadata_obj = metadata.compute_per_seq_metadata(
                 cfg=cfg,
                 seq_lens=seq_lens,
                 query_start_loc=query_start_loc,
                 state_indices=state_indices,
-                start_seq=distribution[0],
+                start_seq=start_seq,
                 end_seq=distribution[-1],
                 read_indices=read_state_indices,
             )
@@ -558,10 +573,35 @@ def fused_conv1d_gdn(
 
     # The first segment holds verify windows of up to `num_spec_tokens + 1`
     # tokens, or plain 1-token decodes without speculative decoding.
-    out_act, out_conv_state, out_recurrent_state = call_kernel(
-        conv_state, recurrent_state, None, config.GDNMode.BATCHED)
-    out_act, out_conv_state, out_recurrent_state = call_kernel(
-        out_conv_state, out_recurrent_state, out_act, config.GDNMode.PER_SEQ)
+    #
+    # NOTE: A batch is very often either pure-prefill (`distribution[0] == 0`)
+    # or pure-decode (`distribution[-1] == distribution[0]`), leaving one of
+    # the two kernels with nothing to do. Such a launch still runs its grid
+    # over zero tiles, but it is far from free: it keeps the (large) activation
+    # and output buffers live across an extra custom call, which costs up to
+    # ~130us per layer for an 8K-token prefill. Since the caller knows on the
+    # host whether either segment is empty, it can say so statically and the
+    # corresponding `pallas_call` is then simply not emitted.
+    #
+    # This is deliberately a trace-time decision rather than a `jax.lax.cond`
+    # on `distribution`: a `pallas_call` inside a conditional branch loses its
+    # `input_output_aliases`, so every state cache slot that the kernel does
+    # not write comes back as garbage instead of being preserved in place.
+    assert has_decode_seqs or has_prefill_seqs, (
+        "At least one of has_decode_seqs / has_prefill_seqs must be True.")
+
+    out_act = None
+    out_conv_state, out_recurrent_state = conv_state, recurrent_state
+
+    if has_decode_seqs:
+        out_act, out_conv_state, out_recurrent_state = call_kernel(
+            out_conv_state, out_recurrent_state, out_act,
+            config.GDNMode.BATCHED)
+
+    if has_prefill_seqs:
+        out_act, out_conv_state, out_recurrent_state = call_kernel(
+            out_conv_state, out_recurrent_state, out_act,
+            config.GDNMode.PER_SEQ)
 
     out_act = out_act.reshape(padded_batch_size, -1)[:batch_size]
     out_conv_state = out_conv_state.astype(conv_out_dtype)
