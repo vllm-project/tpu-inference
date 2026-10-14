@@ -627,8 +627,12 @@ class PhasedBasedProfiler:
             for p in os.getenv("PHASED_PROFILER_ONLY_PHASES", "").split(",")
             if p.strip()
         }
-        self.target_concurrency: int = int(
-            os.getenv("PHASED_PROFILER_TARGET_CONCURRENCY", "0"))
+        # Comma-separated: one capture per listed concurrency.
+        self.target_concurrencies: set[int] = {
+            int(c)
+            for c in os.getenv("PHASED_PROFILER_TARGET_CONCURRENCY",
+                               "").split(",") if c.strip() and int(c) > 0
+        }
         self.profile_dir: str = profile_dir
         # NOTE: we purposely don't have AMBIGUOUS here
         self.inference_phases_profiled: set = set()
@@ -664,9 +668,9 @@ class PhasedBasedProfiler:
         if self.only_phases:
             logger.info("Will only profile phases: %s.",
                         ", ".join(sorted(self.only_phases)))
-        if self.target_concurrency:
-            logger.info("Will only profile at concurrency %d.",
-                        self.target_concurrency)
+        if self.target_concurrencies:
+            logger.info("Will only profile at concurrency %s.",
+                        ", ".join(map(str, sorted(self.target_concurrencies))))
 
     def _write_batch_composition_stats_to_file_helper(
             self, batch_composition_stats: dict) -> None:
@@ -714,8 +718,8 @@ class PhasedBasedProfiler:
             # is still eligible.
             if self.only_phases and phase.name.lower() not in self.only_phases:
                 continue
-            if (self.target_concurrency
-                    and concurrency != self.target_concurrency):
+            if (self.target_concurrencies
+                    and concurrency not in self.target_concurrencies):
                 continue
 
             # Skip a configurable number of decode-heavy steps before profiling
