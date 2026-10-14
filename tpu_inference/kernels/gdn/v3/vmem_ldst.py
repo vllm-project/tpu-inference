@@ -193,25 +193,23 @@ def load_and_select_states(
             prev_conv_state = jnp.where(is_first_tile, prev_conv_state,
                                         prev_tile_conv)
 
-        hbm_recurrent_state = recurrent_slot_ref[idx, 0]
-        prev_recurrent_state = jnp.where(has_initial_state,
-                                         hbm_recurrent_state, 0)
-
-        if carry_recurrent_scratch_ref is not None:
-            prev_tile_recurrent_scratch = carry_recurrent_scratch_ref[idx]
-            prev_recurrent_state = jnp.where(is_first_tile,
-                                             prev_recurrent_state,
-                                             prev_tile_recurrent_scratch)
+        def _load_rec(idx=idx,
+                      has_init=has_initial_state,
+                      is_first=is_first_tile):
+            s = jnp.where(has_init, recurrent_slot_ref[idx, 0], 0)
+            if carry_recurrent_scratch_ref is not None:
+                s = jnp.where(is_first, s, carry_recurrent_scratch_ref[idx])
+            return s
 
         real_sizes_list.append(real_sizes)
         prev_conv_state_list.append(prev_conv_state)
-        prev_recurrent_state_list.append(prev_recurrent_state)
+        prev_recurrent_state_list.append(_load_rec)
 
     real_sizes = jnp.stack(real_sizes_list, axis=0)
     prev_conv_state = jnp.stack(prev_conv_state_list, axis=0)
-    prev_recurrent_state = jnp.stack(prev_recurrent_state_list, axis=0)
 
-    return real_sizes, prev_conv_state, prev_recurrent_state
+    return real_sizes, prev_conv_state, lambda idx: prev_recurrent_state_list[
+        idx]()
 
 
 def load_activation_as_compact(

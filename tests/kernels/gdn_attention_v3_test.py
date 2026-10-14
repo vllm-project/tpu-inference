@@ -319,6 +319,16 @@ class GDNAttentionTest(parameterized.TestCase):
             distribution=[64, 64, 64],
         ),
         dict(
+            # 15 tokens => mixed_tile_size == 15, an odd chunk. The block
+            # forward-substitution in `solve_triangular` splits the chunk in
+            # half, and the two halves are not the same length here.
+            testcase_name="prefill_odd_tokens",
+            max_reqs=2,
+            lengths=[9, 6],
+            q_loc=[0, 9, 15],
+            distribution=[0, 2, 2],
+        ),
+        dict(
             testcase_name="prefill_fused",
             max_reqs=1,
             lengths=[8192],
@@ -995,3 +1005,18 @@ class GDNAttentionTest(parameterized.TestCase):
         self.assertTrue(
             np.any(np.asarray(rec_after_b[write_slot]) != 0.0),
             "write_slot should hold the step's final recurrent state")
+
+    def test_solve_triangular_corner_chunks(self):
+        """Verify solve_triangular across small, odd, and full chunk sizes."""
+        from tpu_inference.kernels.gdn.v3 import compute_gdn
+
+        for chunk in (4, 15, 16, 64):
+            t_mat = np.zeros((1, chunk, chunk), dtype=np.float32)
+            for r in range(1, chunk):
+                t_mat[0, r, r - 1] = 0.25
+            expected = np.linalg.inv(
+                np.eye(chunk, dtype=np.float32) + t_mat[0])[None, ...]
+            rhs = jnp.eye(chunk, dtype=jnp.float32)[None, ...]
+            got = np.asarray(
+                jax.jit(compute_gdn.solve_triangular)(jnp.asarray(t_mat), rhs))
+            np.testing.assert_allclose(got, expected, rtol=1e-6, atol=1e-6)

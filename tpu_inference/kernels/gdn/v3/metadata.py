@@ -75,9 +75,15 @@ def compute_per_seq_metadata(
     """Metadata for computing single sequence per tile."""
 
     max_seqs = seq_lens.size
-    max_tokens = cfg.batch_size
+    # Each sequence contributes `cdiv(query_len, chunk_size)` tiles, so the
+    # whole grid is bounded by `cdiv(total_tokens, chunk_size)` plus at most one
+    # partial tile per sequence. Sizing the tables off `batch_size` instead
+    # (one entry per *token*) inflates `jnp.repeat` and the SMEM record table by
+    # `chunk_size`x: a 4K-token prefill allocates 4096 entries where 72 suffice.
+    max_tiles = min(cfg.batch_size,
+                    pl.cdiv(cfg.batch_size, cfg.chunk_size) + max_seqs)
     all_seqs = jnp.arange(max_seqs)
-    all_tokens = jnp.arange(max_tokens)
+    all_tiles = jnp.arange(max_tiles)
 
     # Shift to ensure first element is for start_seq.
     query_start_loc = jnp.roll(query_start_loc, shift=-start_seq)
@@ -111,9 +117,9 @@ def compute_per_seq_metadata(
     # will not impact kernel execution.
     p_id_to_s_idx = jnp.repeat(all_seqs,
                                s_idx_to_num_tiles,
-                               total_repeat_length=max_tokens)
+                               total_repeat_length=max_tiles)
     # Map program id (p_id) to tile id of a sequence.
-    p_id_to_t_id = all_tokens - s_idx_to_start_p_id[p_id_to_s_idx]
+    p_id_to_t_id = all_tiles - s_idx_to_start_p_id[p_id_to_s_idx]
     # Map tile index to starting row of its activation.
     p_id_to_r_base = (query_start_loc[p_id_to_s_idx] +
                       p_id_to_t_id * cfg.chunk_size)
