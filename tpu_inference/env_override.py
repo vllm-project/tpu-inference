@@ -32,5 +32,9 @@ try:
     if not hasattr(vllm, "SamplingStatus"):
         from vllm.sampling_params import RequestOutputKind
         vllm.RequestOutputKind = RequestOutputKind
-except ImportError:
+except (ImportError, AttributeError):
+    # AttributeError is raised when vllm.sampling_params is only partially
+    # initialized (e.g. `from vllm import SamplingParams` triggers
+    # `vllm.config` -> `vllm.platforms.current_platform` -> `tpu_inference`
+    # before `SamplingParams` is defined in `vllm.sampling_params`).
     pass
