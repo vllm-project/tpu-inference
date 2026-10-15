@@ -52,6 +52,7 @@ def _make_request(num_computed_tokens=10, num_output_placeholders=1):
     request = mock.MagicMock()
     request.num_computed_tokens = num_computed_tokens
     request.num_output_placeholders = num_output_placeholders
+    request.async_tokens_to_discard = 0
     return request
 
 
@@ -330,10 +331,13 @@ class TestContinueDecodeSchedulerPatch:
         def fake_orig_update(sched_self, sched_out, runner_out, *args,
                              **kwargs):
             # Simulate upstream vLLM slicing the tail [end - len(new_token_ids) : end]
+            # and mutating runner_out.sampled_token_ids in-place via del new_token_ids[2:].
             end = sched_out.num_scheduled_tokens["req1"]
+            del runner_out.sampled_token_ids[0][2:]
             out = mock.MagicMock()
             out.request_id = "req1"
-            out.new_token_ids = [10, 20]  # trimmed from 4 to 2 by check_stop
+            out.new_token_ids = runner_out.sampled_token_ids[
+                0]  # trimmed in-place from 4 to 2
             out.routed_experts = runner_out.routed_experts.routing_data[end -
                                                                         2:end]
             engine_outputs = mock.MagicMock()

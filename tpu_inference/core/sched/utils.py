@@ -82,6 +82,7 @@ def patch_vllm_scheduler_for_continue_decode():
         def patched_update_from_output(scheduler_self, scheduler_output,
                                        model_runner_output, *args, **kwargs):
             orig_num_scheduled = {}
+            sampled_token_counts = {}
             routing_offsets = {}
             if (getattr(model_runner_output, "routed_experts", None)
                     is not None and model_runner_output.sampled_token_ids):
@@ -103,6 +104,7 @@ def patch_vllm_scheduler_for_continue_decode():
                             req_id)
                         if orig is not None and num_sampled > orig:
                             orig_num_scheduled[req_id] = orig
+                            sampled_token_counts[req_id] = num_sampled
                             scheduler_output.num_scheduled_tokens[
                                 req_id] = num_sampled
                             extra = num_sampled - orig
@@ -135,11 +137,8 @@ def patch_vllm_scheduler_for_continue_decode():
                                 req_id = out.request_id
                                 if (req_id in orig_num_scheduled
                                         and out.routed_experts is not None):
-                                    req_idx = (model_runner_output.
-                                               req_id_to_index[req_id])
-                                    num_sampled = len(
-                                        model_runner_output.
-                                        sampled_token_ids[req_idx])
+                                    num_sampled = sampled_token_counts.get(
+                                        req_id, 0)
                                     num_kept = len(out.new_token_ids)
                                     if 0 < num_kept < num_sampled:
                                         req_offset = routing_offsets[req_id]

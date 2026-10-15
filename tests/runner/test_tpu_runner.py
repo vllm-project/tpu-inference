@@ -214,10 +214,14 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
+        runner.model_config.enable_return_routed_experts = True
+        runner.vllm_config.model_config.enable_return_routed_experts = True
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
         runner.input_batch.num_tokens_no_spec = [10, 20]
+        runner.input_batch.num_computed_tokens_cpu = np.zeros(8,
+                                                              dtype=np.int32)
         runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
         runner.requests = {"req1": MagicMock(), "req2": MagicMock()}
         runner._get_min_remaining_slots.return_value = 30
@@ -336,6 +340,8 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
+        runner.model_config.enable_return_routed_experts = False
+        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.input_batch.num_reqs = 3
         runner.input_batch.req_ids = ["req1", "req2", "req3"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1, "req3": 2}
@@ -498,6 +504,8 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
+        runner.model_config.enable_return_routed_experts = False
+        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.scheduler_config.async_scheduling = False
         runner.vllm_config.additional_config = {
             "enable_continue_decode": True,
@@ -578,6 +586,8 @@ class TestTPUJaxRunner:
         runner.dp_size = 2
         runner.vllm_config.parallel_config.data_parallel_size = 2
         runner.vllm_config.parallel_config.is_moe_model = False
+        runner.model_config.enable_return_routed_experts = False
+        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.input_batch.num_reqs = 3
         runner.input_batch.req_ids = ["req1", "req2", "req3"]
         # req1 and req2 are in Rank 0 (slots 0, 1)
@@ -720,6 +730,8 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
+        runner.model_config.enable_return_routed_experts = False
+        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.scheduler_config.async_scheduling = True
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]
@@ -1109,6 +1121,12 @@ class TestTPUJaxRunnerDisableMM:
         runner.is_last_rank = True
         runner.speculative_config = None
         runner.execute_model_state = None
+        runner._can_use_continue_decode = lambda s: TPUModelRunner._can_use_continue_decode(
+            runner, s)
+        runner.input_batch.num_computed_tokens_cpu = np.array([10, 20],
+                                                              dtype=np.int32)
+        runner.input_batch.num_prompt_tokens = np.array([10, 20],
+                                                        dtype=np.int32)
 
         # 1. Batch has structured output requests -> continue decode MUST be bypassed
         scheduler_output_structured = MagicMock()
@@ -1126,6 +1144,153 @@ class TestTPUJaxRunnerDisableMM:
         TPUModelRunner._execute_model(runner, scheduler_output_normal)
         runner._execute_continue_decode.assert_called_once_with(
             scheduler_output_normal)
+
+    def test_can_use_continue_decode(self):
+        """_can_use_continue_decode checks enable flag, distribution, structured outputs, and prompt chunking."""
+        runner = MagicMock()
+        runner.enable_continue_decode = True
+        runner.input_batch.num_reqs = 2
+        runner.input_batch.request_distribution = [2, 0, 2]  # decode only
+        runner.input_batch.num_computed_tokens_cpu = np.array([10, 20],
+                                                              dtype=np.int32)
+        runner.input_batch.num_prompt_tokens = np.array([10, 20],
+                                                        dtype=np.int32)
+
+        sched_out = MagicMock()
+        sched_out.has_structured_output_requests = False
+
+        # 1. Nominal case: decode-only, tokens computed >= prompt tokens -> True
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is True
+
+        # 2. Disabled flag -> False
+        runner.enable_continue_decode = False
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is False
+        runner.enable_continue_decode = True
+
+        # 3. Empty batch -> False
+        runner.input_batch.num_reqs = 0
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is False
+        runner.input_batch.num_reqs = 2
+
+        # 4. Mixed prefill batch (distribution != num_reqs) -> False
+        runner.input_batch.request_distribution = [1, 1, 2]
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is False
+        runner.input_batch.request_distribution = [2, 0, 2]
+
+        # 5. Structured outputs -> False
+        sched_out.has_structured_output_requests = True
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is False
+        sched_out.has_structured_output_requests = False
+
+        # 6. Prefill chunking (num_computed_tokens_cpu < num_prompt_tokens for a 1-token chunk) -> False
+        runner.input_batch.num_computed_tokens_cpu = np.array([9, 20],
+                                                              dtype=np.int32)
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is False
+
+        # 7. Completed prefill chunk (>= num_prompt_tokens) -> True
+        runner.input_batch.num_computed_tokens_cpu = np.array([10, 25],
+                                                              dtype=np.int32)
+        assert TPUModelRunner._can_use_continue_decode(runner,
+                                                       sched_out) is True
+
+    def test_execute_model_reconciles_continue_decode_before_update_states(
+            self):
+        """_execute_model reconciles async continue_decode results BEFORE update_states
+        and syncs scheduled_cached_reqs with the updated request states."""
+        runner = MagicMock()
+        runner.scheduler_config.async_scheduling = True
+        runner.speculative_config = None
+        runner.execute_model_state = None
+        runner._can_use_continue_decode = lambda s: True
+        runner._execute_continue_decode = MagicMock(return_value="done")
+
+        req1_state = MagicMock()
+        req1_state.num_computed_tokens = 25
+        req1_state.output_token_ids = [10] * 5
+
+        runner.requests = {"req1": req1_state}
+        runner._pre_async_results = MagicMock()
+        runner._pre_async_results.is_continue_decode = True
+        runner._pre_async_results.req_ids = ["req1"]
+
+        call_order = []
+
+        def mock_modify_prev_results():
+            call_order.append("modify_prev_results")
+
+        runner._modify_prev_results = mock_modify_prev_results
+
+        def mock_update_states(scheduler_output, *args, **kwargs):
+            call_order.append("update_states")
+
+        runner.persistent_batch_manager.update_states = mock_update_states
+
+        cached_reqs = SimpleNamespace(
+            req_ids=["req1"],
+            num_computed_tokens=[10],  # Stale, should be updated to 25
+            num_output_tokens=[0],  # Stale, should be updated to 5
+            resumed_req_ids=set(),
+        )
+        scheduler_output = MagicMock()
+        scheduler_output.total_num_scheduled_tokens = 1
+        scheduler_output.scheduled_cached_reqs = cached_reqs
+        scheduler_output.kv_cache_block_copies = None
+
+        TPUModelRunner._execute_model(runner, scheduler_output)
+
+        assert call_order == ["modify_prev_results", "update_states"]
+        assert runner._pre_async_results is None
+        assert cached_reqs.num_computed_tokens[0] == 25
+        assert cached_reqs.num_output_tokens[0] == 5
+
+    def test_process_continue_decode_outputs_routed_experts(self):
+        """_process_continue_decode_outputs uses reconciled
+        scheduled_cached_reqs.num_computed_tokens to compute token_start."""
+        from tpu_inference.runner.tpu_runner import \
+            _process_continue_decode_outputs
+
+        generated_tokens = np.array([[101], [102]], dtype=np.int32)
+        actual_steps = 2
+        req_ids = ["req1"]
+        eos_token_id = 999
+        expert_indices = np.zeros(
+            (2, 2, 1, 4), dtype=np.int32)  # [steps, layers, reqs, top_k]
+
+        req_state = SimpleNamespace(
+            num_computed_tokens=0,
+            output_token_ids=[],
+            block_ids=[[3, 4]],
+        )
+        scheduler_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req1"],
+                num_computed_tokens=[20],  # Reconciled chunk_start
+            ))
+
+        tokens, logprobs, routed_experts_entries, steps, eos_hits = _process_continue_decode_outputs(
+            generated_tokens=generated_tokens,
+            actual_steps=actual_steps,
+            req_ids=req_ids,
+            eos_token_id=eos_token_id,
+            expert_indices=expert_indices,
+            enable_return_routed_experts=True,
+            requests={"req1": req_state},
+            routed_experts_attn_gid=0,
+            scheduler_output=scheduler_output,
+        )
+
+        assert len(routed_experts_entries) == 1
+        entry = routed_experts_entries[0]
+        assert entry.token_start == 20
+        assert entry.num_accepted == 2
+        assert entry.block_ids == [3, 4]
+        np.testing.assert_array_equal(entry.rows, expert_indices[:2, :, 0, :])
 
     def test_get_min_remaining_slots_mamba_align_mode(self):
         """In mamba align mode, _get_min_remaining_slots caps steps at block boundaries."""
