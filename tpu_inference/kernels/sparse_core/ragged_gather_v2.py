@@ -34,7 +34,7 @@ def calculate_col_size(hidden_size: int, packing: int) -> int:
     match tpu_info.generation:
         case 6:
             target_bytes = (256 * 1024) * 0.8
-        case 7:
+        case 7 | 8:
             target_bytes = (512 * 1024) * 0.8
         case _:
             target_bytes = (128 * 1024) * 0.8
@@ -62,10 +62,11 @@ def main_kernel_v2(
     start_vmem_ref: jax.Ref,
     end_vmem_ref: jax.Ref,
     sem_ref: jax.Ref,
-    *,
+    *gather_scratch: jax.Ref,
     core_axis_name: str,
     subcore_axis_name: str,
     num_row_subchunks: int,
+    row_dma_gather: bool,
 ):
     tpu_info = pltpu.get_tpu_info()
     sc_info = tpu_info.sparse_core
@@ -85,9 +86,10 @@ def main_kernel_v2(
 
     recv_sem = sem_ref.at[0]
 
-    copy_start = pltpu.make_async_copy(start_ref, start_vmem_ref.at[:1],
+    n = start_ref.shape[0]
+    copy_start = pltpu.make_async_copy(start_ref, start_vmem_ref.at[:n],
                                        recv_sem)
-    copy_end = pltpu.make_async_copy(end_ref, end_vmem_ref.at[:1], recv_sem)
+    copy_end = pltpu.make_async_copy(end_ref, end_vmem_ref.at[:n], recv_sem)
     copy_start.start()
     copy_end.start()
     copy_start.wait()
@@ -152,9 +154,10 @@ def main_kernel_v2(
                         packed_row, jnp.left_shift(val, pack_shift))
                 out_ref[pl.ds(i, 1), col_slice] = packed_row
 
-    def inner_pipeline(gather_ref, out_ref, idx_ref, unpack_col_chunk):
-        row_slice = pl.ds(
-            pl.program_id(0) * row_subchunk_size, row_subchunk_size)
+    def inner_pipeline(gather_ref, out_ref, idx_ref, unpack_col_chunk, r=None):
+        if r is None:
+            r = pl.program_id(0)
+        row_slice = pl.ds(r * row_subchunk_size, row_subchunk_size)
         subchunk_idxs = idx_ref[row_slice]
         if packing > 1:
             # Equivalent to `subchunk_idxs % packing`
@@ -179,6 +182,56 @@ def main_kernel_v2(
         unpack_col_chunk = 128
         assert num_phys_cols % unpack_col_chunk == 0
         shift_amount = packing.bit_length() - 1
+        if row_dma_gather:
+            # Plain loops with one regular DMA per gathered row and manual
+            # writes of each output block: see _use_row_dma_gather.
+            gather_vmem_ref, out_vmem_ref, gather_sem_ref = gather_scratch
+            out_rows = row_subchunk_size // packing
+            # One HBM tile of rows per output DMA: 8 rows of the dtype, i.e.
+            # 8 // packing rows of the int32 view.
+            write_rows = min(out_rows, max(1, 8 // packing))
+
+            @pl.loop(0, num_row_subchunks)
+            def _(r):
+                rows = jnp.bitwise_right_shift(
+                    idx_ref[pl.ds(r * row_subchunk_size, row_subchunk_size)],
+                    shift_amount)
+                out_row = (
+                    (b_global * num_cores + core_index) * num_row_subchunks +
+                    r) * out_rows
+
+                @pl.loop(0, num_cols)
+                def _(col_id):
+                    cols = pl.ds(pl.multiple_of(col_id * num_phys_cols, 128),
+                                 num_phys_cols)
+                    copies = [
+                        pltpu.make_async_copy(
+                            in_hbm_i32.at[pl.ds(rows[i], 1), cols],
+                            gather_vmem_ref.at[pl.ds(i, 1)],
+                            gather_sem_ref.at[0],
+                        ) for i in range(row_subchunk_size)
+                    ]
+                    for copy in copies:
+                        copy.start()
+                    for copy in copies:
+                        copy.wait()
+                    inner_pipeline(gather_vmem_ref, out_vmem_ref, idx_ref,
+                                   unpack_col_chunk, r)
+                    copies = [
+                        pltpu.make_async_copy(
+                            out_vmem_ref.at[pl.ds(i, write_rows)],
+                            out_hbm_i32.at[pl.ds(out_row + i, write_rows),
+                                           cols],
+                            gather_sem_ref.at[0],
+                        ) for i in range(0, out_rows, write_rows)
+                    ]
+                    for copy in copies:
+                        copy.start()
+                    for copy in copies:
+                        copy.wait()
+
+            return
+
         pltpu.emit_pipeline(
             functools.partial(inner_pipeline,
                               idx_ref=idx_ref,
@@ -213,6 +266,22 @@ def main_kernel_v2(
             lambda b: ((b + block_start) * num_cores + core_index, ),
         ),
     )(indices_hbm_ref)
+
+
+def _use_row_dma_gather() -> bool:
+    """Whether to gather with one DMA per row and write outputs per HBM tile.
+
+    On TPU8i (libtpu 2026-10-14), from the second TensorCore of a chip
+    (core_on_chip == 1):
+    - an indirect DMA gathers the wrong rows;
+    - a DMA of a block narrower than the array that spans more than one HBM
+      tile of rows (8 rows of the dtype) is not performed, or moves the wrong
+      data. The pipelined output blocks (num_lanes rows) are such DMAs.
+    So the kernel gathers each row with its own DMA and writes each output
+    block one tile of rows at a time, at some cost in DMA descriptors and
+    overlap.
+    """
+    return pltpu.get_tpu_info().generation >= 8
 
 
 @functools.partial(jax.jit, static_argnames=("max_row_subchunks", "trim_rows"))
@@ -258,6 +327,13 @@ def ragged_gather_v2(x: jax.Array,
     if sc_info is None:
         return x[indices]
 
+    # The kernel DMAs start and end into VMEM. TPU8i's SparseCore rejects a
+    # DMA whose contiguous inner slice is not a multiple of 32 bytes, so each
+    # goes as one whole DMA granule of int32, zero-padded.
+    granule = max(1, sc_info.dma_granule_size_bytes // 4)
+    start = jnp.pad(start.reshape(-1)[:1].astype(jnp.int32), (0, granule - 1))
+    end = jnp.pad(end.reshape(-1)[:1].astype(jnp.int32), (0, granule - 1))
+
     hidden_size = x.shape[-1]
     out_size = indices.size
 
@@ -290,12 +366,19 @@ def ragged_gather_v2(x: jax.Array,
         core_axis_name="core",
         subcore_axis_name="subcore",
     )
+    row_dma_gather = _use_row_dma_gather()
+    gather_scratch = [
+        pltpu.VMEM((row_subchunk_size, col_size), jnp.int32),
+        pltpu.VMEM((row_subchunk_size // packing, col_size), jnp.int32),
+        pltpu.SemaphoreType.DMA((1, )),
+    ] if row_dma_gather else []
     out = core_map_helper.kernel(
         functools.partial(
             main_kernel_v2,
             core_axis_name=vector_mesh.core_axis_name,
             subcore_axis_name=vector_mesh.subcore_axis_name,
             num_row_subchunks=num_row_subchunks,
+            row_dma_gather=row_dma_gather,
         ),
         out_type=jax.ShapeDtypeStruct(
             (out_size + out_pad_size, aligned_hidden_size), dtype),
@@ -305,9 +388,10 @@ def ragged_gather_v2(x: jax.Array,
             disable_bounds_checks=True,
         ),
         scratch_types=[
-            pltpu.VMEM((16, ), jnp.int32),
-            pltpu.VMEM((16, ), jnp.int32),
+            pltpu.VMEM((max(16, granule), ), jnp.int32),
+            pltpu.VMEM((max(16, granule), ), jnp.int32),
             pltpu.SemaphoreType.DMA((1, )),
+            *gather_scratch,
         ],
         mesh=vector_mesh,
         name="sc_ragged_gather_v2",
