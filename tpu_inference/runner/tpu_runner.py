@@ -297,13 +297,8 @@ def _process_continue_decode_outputs(
         requests, "get") else None
     chunk_start: Dict[str, int] = {}
     if all_expert_indices_cpu is not None and scheduler_output is not None:
-        cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs", None)
-        if (cached_reqs is not None
-                and isinstance(getattr(cached_reqs, "req_ids", None),
-                               (list, tuple))
-                and isinstance(
-                    getattr(cached_reqs, "num_computed_tokens", None),
-                    (list, tuple))):
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        if cached_reqs is not None:
             chunk_start = dict(
                 zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
 
@@ -313,7 +308,6 @@ def _process_continue_decode_outputs(
         actual_len = int(valid_lens[req_idx])
         valid_tokens = generated_tokens_cpu[req_idx, :actual_len].tolist()
         sampled_token_ids.append(valid_tokens)
-
 
         if lp_token_ids_cpu is not None:
             lp_token_ids_list.append(lp_token_ids_cpu[:actual_len, req_idx])

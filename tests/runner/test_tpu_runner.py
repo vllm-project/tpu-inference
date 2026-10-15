@@ -214,14 +214,10 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
-        runner.model_config.enable_return_routed_experts = True
-        runner.vllm_config.model_config.enable_return_routed_experts = True
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1}
         runner.input_batch.num_tokens_no_spec = [10, 20]
-        runner.input_batch.num_computed_tokens_cpu = np.zeros(8,
-                                                              dtype=np.int32)
         runner.input_batch.token_ids_cpu = np.zeros((8, 512), dtype=np.int32)
         runner.requests = {"req1": MagicMock(), "req2": MagicMock()}
         runner._get_min_remaining_slots.return_value = 30
@@ -340,8 +336,6 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
-        runner.model_config.enable_return_routed_experts = False
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.input_batch.num_reqs = 3
         runner.input_batch.req_ids = ["req1", "req2", "req3"]
         runner.input_batch.req_id_to_index = {"req1": 0, "req2": 1, "req3": 2}
@@ -504,8 +498,6 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
-        runner.model_config.enable_return_routed_experts = False
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.scheduler_config.async_scheduling = False
         runner.vllm_config.additional_config = {
             "enable_continue_decode": True,
@@ -586,8 +578,6 @@ class TestTPUJaxRunner:
         runner.dp_size = 2
         runner.vllm_config.parallel_config.data_parallel_size = 2
         runner.vllm_config.parallel_config.is_moe_model = False
-        runner.model_config.enable_return_routed_experts = False
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.input_batch.num_reqs = 3
         runner.input_batch.req_ids = ["req1", "req2", "req3"]
         # req1 and req2 are in Rank 0 (slots 0, 1)
@@ -730,8 +720,6 @@ class TestTPUJaxRunner:
         runner.dp_size = 1
         runner.vllm_config.parallel_config.data_parallel_size = 1
         runner.vllm_config.parallel_config.is_moe_model = False
-        runner.model_config.enable_return_routed_experts = False
-        runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.scheduler_config.async_scheduling = True
         runner.input_batch.num_reqs = 2
         runner.input_batch.req_ids = ["req1", "req2"]

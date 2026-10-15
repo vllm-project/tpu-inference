@@ -40,10 +40,10 @@ from tpu_inference.layers.jax.sample.sampling_metadata import \
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.jax_intermediate_tensor import \
     JaxIntermediateTensors
+from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
 from tpu_inference.runner.pcp_utils import (pcp_page_order, pcp_seq_arrays,
                                             pcp_token_layout)
-from tpu_inference.runner import utils as runner_utils
 from tpu_inference.runner.utils import SpecDecodeMetadata
 from tpu_inference.spec_decode.jax.utils import (
     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
@@ -2197,11 +2197,8 @@ class CompilationManager:
                         self.runner.is_first_rank,
                         self.runner.is_last_rank,
                         self.runner.dp_size,
-                        getattr(self.runner.vllm_config.aux_output_config,
-                                "enable_return_routed_experts", False)
-                        if hasattr(self.runner.vllm_config, "aux_output_config") else
-                        getattr(self.runner.vllm_config.model_config,
-                                "enable_return_routed_experts", False),
+                        self.runner.vllm_config.aux_output_config.
+                        enable_return_routed_experts,
                         self.runner.continue_decode_eos_check_interval,
                         warmup_handler=continue_decode_warmup,
                         attn_padded_num_reqs=attn_padded_num_reqs,
