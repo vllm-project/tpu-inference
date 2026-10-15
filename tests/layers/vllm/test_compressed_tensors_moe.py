@@ -136,6 +136,8 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
     # Call tpu_inference code
     vllm_config.model_config.dtype = torch.bfloat16
     quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    weight_quant = quant_config.target_scheme_map['Linear']['weights']
+    input_quant = quant_config.target_scheme_map['Linear']['input_activations']
 
     with set_current_vllm_config(vllm_config):
         layer = FusedMoEFactory(num_experts=num_experts,
@@ -143,11 +145,9 @@ def test_fused_moe_method(mesh, num_tokens, intermediate_size, hidden_size,
                                 hidden_size=hidden_size,
                                 intermediate_size=intermediate_size)
         layer.moe_config.moe_parallel_config.use_ep = use_ep
-    weight_quant = quant_config.target_scheme_map['Linear']['weights']
-    input_quant = quant_config.target_scheme_map['Linear']['input_activations']
-    moe = quant_config.get_moe_config(layer.routed_experts)
-    method = VllmCompressedTensorsW8A8Fp8MoEMethod(weight_quant, input_quant,
-                                                   moe, mesh)
+        moe = quant_config.get_moe_config(layer.routed_experts)
+        method = VllmCompressedTensorsW8A8Fp8MoEMethod(weight_quant,
+                                                       input_quant, moe, mesh)
     method.create_weights(layer.routed_experts,
                           num_experts,
                           hidden_size,
