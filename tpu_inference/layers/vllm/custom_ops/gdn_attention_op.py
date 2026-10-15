@@ -23,6 +23,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
     QwenGatedDeltaNetAttention
 
+from tpu_inference.layers.common.attention_backend import (
+    attention_backend_name, create_linear_attention_backend)
 from tpu_inference.layers.common.gdn_attention import run_jax_gdn_attention
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.common.utils import (
@@ -192,6 +194,8 @@ def gdn_attention_core_tpu(
          kernel_size,
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
+         gdn_kernel=create_linear_attention_backend(
+             attention_backend_name(vllm_context.vllm_config)).gdn_kernel(),
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]

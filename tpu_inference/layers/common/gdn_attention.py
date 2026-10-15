@@ -22,7 +22,8 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
-from tpu_inference.kernels.gdn.v3 import wrapper
+from tpu_inference.layers.common.attention_backend import (
+    GDNKernel, LinearAttentionBackend)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.utils import get_mesh_shape_product
 
@@ -48,6 +49,7 @@ def run_jax_gdn_attention(
     kernel_size: int,
     mesh: jax.sharding.Mesh,
     read_state_indices: Optional[jnp.ndarray] = None,
+    gdn_kernel: Optional[GDNKernel] = None,
 ) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray], jnp.ndarray]:
     """Runs the Jax GDN attention mechanism.
 
@@ -88,6 +90,8 @@ def run_jax_gdn_attention(
           prefix caching passes a different slot here, since a request
           resumes from the cached state block of the last block boundary and
           checkpoints into the block covering its current position.
+        gdn_kernel: The linear attention backend's fused conv1d + GDN kernel.
+          Defaults to the GDN v3 kernel.
 
     Returns:
         A tuple containing:
@@ -133,7 +137,7 @@ def run_jax_gdn_attention(
     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
 
     p_run_jax_gdn_attention_local = functools.partial(
-        wrapper.fused_conv1d_gdn,
+        gdn_kernel or LinearAttentionBackend().gdn_kernel(),
         n_kq=n_kq // tp_size,
         n_v=n_v // tp_size,
         d_k=d_k,

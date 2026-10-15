@@ -19,6 +19,8 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tpu_inference import utils
+from tpu_inference.layers.common.attention_backend import \
+    create_attention_backend
 from tpu_inference.layers.common.attention_interface import (
     attention, encoder_only_attention)
 from tpu_inference.layers.common.attention_metadata import (
@@ -144,6 +146,10 @@ class PallasAttentionBackend(AttentionBackend):
 
 
 class PallasAttentionBackendImpl(AttentionImpl):
+
+    # The TPU attention backend (attention_backend.ATTENTION_BACKENDS) this
+    # impl runs; an adapter for another backend overrides it.
+    attention_backend: str = "rpa"
 
     def __init__(
         self,
@@ -287,6 +293,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                     v_scale,
                     self.sliding_window,
                     update_kv_cache=update_kv_cache,
+                    attention_backend=self.attention_backend,
                 )
                 # With update_kv_cache=False the kernel returns the cache
                 # unchanged; still store the returned array (kv_cache is a
@@ -347,6 +354,7 @@ def _format_attention_output(
         "sliding_window",
         "soft_cap",
         "update_kv_cache",
+        "attention_backend",
     ),
     donate_argnames=("kv_cache"),
 )
@@ -369,6 +377,7 @@ def _jax_attn_func(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     update_kv_cache: bool = True,
+    attention_backend: str = "rpa",
 ) -> Tuple[jax.Array, jax.Array]:
     q_len = q.shape[0]
     if k is None or v is None:
@@ -393,6 +402,7 @@ def _jax_attn_func(
         attn_logits_soft_cap=soft_cap,
         update_kv_cache=update_kv_cache,
         shared_attention_metadata=shared_attention_metadata,
+        attention_backend=create_attention_backend(attention_backend),
     )
 
     formatted_outputs = _format_attention_output(outputs, q_len, num_heads,
