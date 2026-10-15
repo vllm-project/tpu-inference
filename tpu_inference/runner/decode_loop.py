@@ -582,7 +582,6 @@ def continue_decode(
     step_rngs, current_rng = _split_rngs(rng, static_max_decode_steps,
                                          max_decode_steps)
 
-
     (step_counter, current_tokens, active_mask, positions, seq_lens, kv_caches,
      token_buffer, expert_buffer, lp_ids_buffer, lp_val_buffer,
      lp_ranks_buffer) = _get_decode_core()(
