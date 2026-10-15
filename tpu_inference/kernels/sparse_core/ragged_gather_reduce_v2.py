@@ -36,6 +36,7 @@ class _Config:
     col_chunk_size: int
     num_row_subchunks: int
     num_simd_lanes: int
+    row_dma_gather: bool
     topk_dtype: Any
     in_dtype: Any
     core_axis_name: str
@@ -193,7 +194,7 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
     match generation:
         case 6:
             target_bytes = int(256 * 1024 * 0.95)
-        case 7:
+        case 7 | 8:
             target_bytes = int(512 * 1024 * 0.95)
         case _:
             target_bytes = int(128 * 1024 * 0.95)
@@ -217,7 +218,8 @@ def _preprocess(
     num_row_partitions: int,
     num_simd_lanes: int,
     row_chunk_size: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    payloads: tuple[jax.Array, ...] = (),
+) -> tuple[jax.Array, jax.Array, jax.Array, list[jax.Array]]:
     """Sorts valid source rows to the front of each row partition.
 
   Returns:
@@ -226,27 +228,50 @@ def _preprocess(
     num_src_rows_per_row_partition: valid row count per partition, padded to
       ``num_simd_lanes`` so the kernel can load it as a single vector.
     mask: per output group, whether the group has any valid source row.
+    sorted_payloads: each of ``payloads`` (one value per source row) in the
+      order and layout of ``sorted_by_validity``.
   """
     row_partition_size = valid_rows_mask.shape[0] // num_row_partitions
     valid_rows_mask_2d = valid_rows_mask.reshape(num_row_partitions, -1)
 
     # Stable sort of a boolean key is a stable partition: valid rows keep their
     # relative order and move ahead of the invalid ones.
-    sorted_by_validity = jnp.argsort(~valid_rows_mask_2d,
-                                     descending=False,
-                                     stable=True,
-                                     axis=-1)
+    if payloads:
+        # Payloads ride along in the sort: on TPU8i this costs far less than
+        # gathering them by the permutation afterwards.
+        _, sorted_by_validity, *sorted_payloads = jax.lax.sort(
+            (
+                ~valid_rows_mask_2d,
+                jax.lax.broadcasted_iota(jnp.int32, valid_rows_mask_2d.shape,
+                                         1),
+                *(a.reshape(num_row_partitions, -1) for a in payloads),
+            ),
+            dimension=1,
+            is_stable=True,
+            num_keys=1,
+        )
+    else:
+        sorted_by_validity = jnp.argsort(~valid_rows_mask_2d,
+                                         descending=False,
+                                         stable=True,
+                                         axis=-1)
+        sorted_payloads = []
     sorted_by_validity += (jnp.arange(num_row_partitions)[:, None] *
                            row_partition_size)
 
     pad_to = _align_to(row_partition_size, row_chunk_size)
-    if pad_to > row_partition_size:
-        sorted_by_validity = jnp.pad(
-            sorted_by_validity,
-            ((0, 0), (0, pad_to - row_partition_size)),
-            constant_values=0,
-        )
-    sorted_by_validity = sorted_by_validity.reshape(-1)
+
+    def _pad_and_flatten(a):
+        if pad_to > row_partition_size:
+            a = jnp.pad(
+                a,
+                ((0, 0), (0, pad_to - row_partition_size)),
+                constant_values=0,
+            )
+        return a.reshape(-1)
+
+    sorted_by_validity = _pad_and_flatten(sorted_by_validity)
+    sorted_payloads = [_pad_and_flatten(a) for a in sorted_payloads]
 
     num_src_rows_per_row_partition = jnp.pad(
         jnp.sum(valid_rows_mask_2d, axis=-1).astype(jnp.int32),
@@ -257,6 +282,7 @@ def _preprocess(
         sorted_by_validity.astype(jnp.int32),
         num_src_rows_per_row_partition,
         mask,
+        sorted_payloads,
     )
 
 
@@ -293,7 +319,7 @@ def main_kernel(
     inputs: _Inputs,
     out_hbm_ref: jax.Ref,
     scratch: _Scratch,
-    *,
+    *gather_scratch: jax.Ref,
     cfg: _Config,
 ):
     # Step 1: Resolve this core's row/column partition and its column slice.
@@ -351,15 +377,25 @@ def main_kernel(
     # Sentinel for the cross-block reduction carry (no previous group).
     scratch.prev_dst_row_smem[0] = -1
 
-    # One gather per sub-chunk for ``indices``, then the same for
-    # ``topk_weights``.
-    row_pipeline_in_specs = (tuple(
-        _row_gather_spec(
-            scratch.sorted_by_validity_vmem,
-            sub,
-            num_simd_lanes=num_simd_lanes,
-            row_chunk_size=row_chunk_size,
-        ) for sub in range(num_row_subchunks)) * 2)
+    if cfg.row_dma_gather:
+        # ``indices`` and ``topk_weights`` arrive already in sorted order, laid
+        # out as sorted_by_validity (see the wrapper): read them linearly.
+        first_block = row_start_padded // num_simd_lanes
+        row_pipeline_in_specs = (tuple(
+            pl.BlockSpec(
+                (num_simd_lanes, ),
+                lambda i, s=sub: (first_block + i * num_row_subchunks + s, ),
+            ) for sub in range(num_row_subchunks)) * 2)
+    else:
+        # One gather per sub-chunk for ``indices``, then the same for
+        # ``topk_weights``.
+        row_pipeline_in_specs = (tuple(
+            _row_gather_spec(
+                scratch.sorted_by_validity_vmem,
+                sub,
+                num_simd_lanes=num_simd_lanes,
+                row_chunk_size=row_chunk_size,
+            ) for sub in range(num_row_subchunks)) * 2)
 
     @functools.partial(
         pltpu.emit_pipeline,
@@ -476,27 +512,9 @@ def main_kernel(
             dma_dst_row_vmem_sc[sub] = _pack_scalars_to_vector(
                 dma_dst_rows[s], num_simd_lanes)
 
-        @functools.partial(
-            pltpu.emit_pipeline,
-            grid=(num_row_subchunks, num_col_chunks),
-            in_specs=pl.BlockSpec(
-                (pl.Indirect(num_simd_lanes), col_chunk_size),
-                lambda s, c: (
-                    jnp.bitwise_right_shift(
-                        src_indices_vmem_sc[pl.ds(s * num_simd_lanes,
-                                                  num_simd_lanes)],
-                        cfg.row_shift,
-                    ),
-                    col_start // col_chunk_size + c,
-                ),
-            ),
-            out_specs=(),
-        )
-        def col_pipeline(gather_ref, sem_inner):
-            s = pl.program_id(0)
-            c = pl.program_id(1)
+        def col_body(gather_ref, s, c):
             col_hbm_start = col_start + c * col_chunk_size
-            send_sem = sem_inner.at[1]
+            send_sem = sem_sc.at[1]
 
             row_slice = pl.ds(s * num_simd_lanes, num_simd_lanes)
             tw_slice = tw_f32_vmem_sc[row_slice]
@@ -573,7 +591,58 @@ def main_kernel(
             for copy in copies:
                 copy.wait()
 
-        col_pipeline(in_32b_hbm_ref, scratches=(sem_sc, ))
+        if cfg.row_dma_gather:
+            # One regular DMA per gathered row: see _use_row_dma_gather.
+            (gather_vmem_ref, ) = gather_scratch
+
+            @pl.loop(0, num_row_subchunks)
+            def _(s):
+                rows = jnp.bitwise_right_shift(
+                    src_indices_vmem_sc[pl.ds(s * num_simd_lanes,
+                                              num_simd_lanes)],
+                    cfg.row_shift,
+                )
+
+                @pl.loop(0, num_col_chunks)
+                def _(c):
+                    cols = pl.ds(
+                        pl.multiple_of(col_start + c * col_chunk_size, 128),
+                        col_chunk_size)
+                    copies = [
+                        pltpu.make_async_copy(
+                            in_32b_hbm_ref.at[pl.ds(rows[i], 1), cols],
+                            gather_vmem_ref.at[pl.ds(i, 1)],
+                            sem_sc.at[0],
+                        ) for i in range(num_simd_lanes)
+                    ]
+                    for copy in copies:
+                        copy.start()
+                    for copy in copies:
+                        copy.wait()
+                    col_body(gather_vmem_ref, s, c)
+        else:
+
+            @functools.partial(
+                pltpu.emit_pipeline,
+                grid=(num_row_subchunks, num_col_chunks),
+                in_specs=pl.BlockSpec(
+                    (pl.Indirect(num_simd_lanes), col_chunk_size),
+                    lambda s, c: (
+                        jnp.bitwise_right_shift(
+                            src_indices_vmem_sc[pl.ds(s * num_simd_lanes,
+                                                      num_simd_lanes)],
+                            cfg.row_shift,
+                        ),
+                        col_start // col_chunk_size + c,
+                    ),
+                ),
+                out_specs=(),
+            )
+            def col_pipeline(gather_ref, sem_inner):
+                del sem_inner  # sem_sc, as passed below.
+                col_body(gather_ref, pl.program_id(0), pl.program_id(1))
+
+            col_pipeline(in_32b_hbm_ref, scratches=(sem_sc, ))
         scratch.prev_dst_row_smem[0] = dst_indices_list[-1][num_simd_lanes - 1]
 
     row_pipeline(
@@ -590,6 +659,20 @@ def main_kernel(
             scratch.sem,
         ),
     )
+
+
+def _use_row_dma_gather() -> bool:
+    """Whether to avoid indirect DMAs.
+
+    On TPU8i (libtpu 2026-10-14):
+    - an indirect DMA of single 4-byte elements (the row gather of indices and
+      topk_weights) fails with bad_stream_length_in_4B;
+    - an indirect DMA issued from the second TensorCore of a chip
+      (core_on_chip == 1) gathers the wrong rows.
+    So the wrapper sorts indices and topk_weights along with the validity sort,
+    and the kernel gathers each row of x with its own DMA.
+    """
+    return pltpu.get_tpu_info().generation >= 8
 
 
 @functools.partial(
@@ -650,6 +733,11 @@ def ragged_gather_reduce(
             dtype=jnp.dtype(x.dtype).name,
         )
         tunable_params = get_tuned_params(tuning_key)
+        # The tuned entries assume a worker count (v7x: 32 vector subcores).
+        if (tunable_params is not None
+                and tunable_params.num_column_partitions *
+                tunable_params.num_row_partitions != num_cores):
+            tunable_params = None
 
     if tunable_params is not None:
         num_column_partitions = tunable_params.num_column_partitions
@@ -693,13 +781,24 @@ def ragged_gather_reduce(
         constant_values=False,
     )
 
-    sorted_by_validity, num_src_rows_per_row_partition, mask = _preprocess(
-        valid_rows_mask,
-        reduce_group_size,
-        num_row_partitions,
-        num_simd_lanes,
-        row_chunk_size,
-    )
+    # Without indirect DMAs, the kernel reads indices and topk_weights in
+    # sorted_by_validity's order.
+    row_dma_gather = _use_row_dma_gather()
+    payloads = tuple(
+        jnp.pad(a, (0, padded_input_size - input_size))
+        for a in (indices, topk_weights_u32)) if row_dma_gather else ()
+
+    (sorted_by_validity, num_src_rows_per_row_partition, mask,
+     sorted_payloads) = _preprocess(
+         valid_rows_mask,
+         reduce_group_size,
+         num_row_partitions,
+         num_simd_lanes,
+         row_chunk_size,
+         payloads,
+     )
+    if row_dma_gather:
+        indices, topk_weights_u32 = sorted_payloads
 
     # Step 4: Launch the SparseCore kernel.
     vector_mesh = plsc.VectorSubcoreMesh(
@@ -717,12 +816,16 @@ def ragged_gather_reduce(
         col_chunk_size=col_chunk_size,
         num_row_subchunks=num_row_subchunks,
         num_simd_lanes=num_simd_lanes,
+        row_dma_gather=row_dma_gather,
         topk_dtype=topk_weights.dtype,
         in_dtype=x.dtype,
         core_axis_name=vector_mesh.core_axis_name,
         subcore_axis_name=vector_mesh.subcore_axis_name,
     )
 
+    gather_scratch = [
+        pltpu.VMEM((num_simd_lanes, col_chunk_size), jnp.uint32),
+    ] if row_dma_gather else []
     # The output gets one extra row: the kernel's garbage scatter destination.
     out = core_map_helper.kernel(
         functools.partial(main_kernel, cfg=cfg),
@@ -751,7 +854,7 @@ def ragged_gather_reduce(
             prev_dst_val_vmem=pltpu.VMEM((row_chunk_size, ), jnp.int32),
             out_vmem=pltpu.VMEM((num_simd_lanes, col_chunk_size), jnp.float32),
             sem=pltpu.SemaphoreType.DMA((2, )),
-        ), ),
+        ), *gather_scratch),
         mesh=vector_mesh,
         name="sc_ragged_gather_reduce_v2",
     )(_Inputs(
