@@ -1,0 +1,91 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# The kube steps for ../KV_Cache_Offload.yml, with the same keys. See README.md.
+
+steps:
+  # Eight chips, because the offload tests shard across a whole node. Always
+  # a v6e-8 node, in a v7x build too, as bare metal pins KV_Cache_Offload.yml
+  # to tpu_v6e_8_queue: on v7x the accuracy test fails (issue #3683). The
+  # workload runs as tpu6e on the tpu6e image, which run.sh requires for a v6e
+  # shape; the keys keep the build's generation so the record steps match.
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Correctness tests for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
+    env:
+      SHAPE: "ct6e-standard-8t/2x4"
+      TPU_VERSION: "tpu6e"
+      USE_V6E8_QUEUE: "True"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    depends_on: "build_docker_tpu6e"
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_accuracy_test.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record correctness test result for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "KV Cache Offload"
+      CI_STAGE: "CorrectnessTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_CorrectnessTest
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Performance tests for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
+    env:
+      SHAPE: "ct6e-standard-8t/2x4"
+      TPU_VERSION: "tpu6e"
+      USE_V6E8_QUEUE: "True"
+    depends_on:
+      - "build_docker_tpu6e"
+      - "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_CorrectnessTest"
+    timeout_in_minutes: 1440
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - .buildkite/kubernetes/run.sh python3 -m pytest -s -v /workspace/tpu_inference/tests/offload/tpu_offload_performance_test.py
+
+  - label: ":kubernetes: ${TPU_VERSION:-tpu6e} Record performance test result for KV Cache Offload"
+    key: "${TPU_VERSION:-tpu6e}record_KV_Cache_Offload_PerformanceTest"
+    depends_on:
+      - step: "${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest"
+        allow_failure: true
+    env:
+      CI_TPU_VERSION: "${TPU_VERSION:-tpu6e}"
+      CI_TARGET: "KV Cache Offload"
+      CI_STAGE: "PerformanceTest"
+      CI_CATEGORY: "feature support matrix"
+    agents:
+      queue: "kube"
+    plugins:
+      - kubernetes:
+          podTemplate: tpu-launcher
+    commands:
+      - .buildkite/scripts/record_step_result.sh ${TPU_VERSION:-tpu6e}KV_Cache_Offload_PerformanceTest

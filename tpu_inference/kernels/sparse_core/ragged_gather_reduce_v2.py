@@ -384,11 +384,21 @@ def main_kernel(
         row_block_id = pl.program_id(0)
 
         # Destination output row of each source row in this block.
+        # Use unsigned division (uint32) because SparseCore natively supports
+        # vector MULHU for lowering unsigned division by non-power-of-2
+        # constants, whereas signed vector division triggers an unsupported
+        # vector MULHS split in LLVM SelectionDAG.
         dst_indices_list = [
-            scratch.sorted_by_validity_vmem[pl.ds(
-                row_block_id * row_chunk_size + s * num_simd_lanes,
-                num_simd_lanes,
-            )] // cfg.reduce_group_size for s in range(num_row_subchunks)
+            plsc.bitcast(
+                plsc.bitcast(
+                    scratch.sorted_by_validity_vmem[pl.ds(
+                        row_block_id * row_chunk_size + s * num_simd_lanes,
+                        num_simd_lanes,
+                    )],
+                    jnp.uint32,
+                ) // jnp.uint32(cfg.reduce_group_size),
+                jnp.int32,
+            ) for s in range(num_row_subchunks)
         ]
 
         # Stage the gathered indices/weights and the destinations in VMEM.

@@ -256,6 +256,7 @@ class Attention(nnx.Module):
                 q_scale=q_scale,
                 k_scale=k_scale,
                 v_scale=v_scale,
+                use_causal_mask=attention_metadata.use_causal_mask,
                 **block_size_kwargs,
             )
 

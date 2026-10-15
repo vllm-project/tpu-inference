@@ -108,6 +108,11 @@ class TestTpuPlatform:
         assert "MOE_HIERARCHICAL_DISPATCH" in TpuPlatform.additional_env_vars
         assert "MOE_HIERARCHICAL_DISPATCH" in envs.environment_variables
 
+    def test_additional_env_vars_covers_moe_hierarchical_collect(self):
+        """The collect is traced in the workers, so they must see the flag."""
+        assert "MOE_HIERARCHICAL_COLLECT" in TpuPlatform.additional_env_vars
+        assert "MOE_HIERARCHICAL_COLLECT" in envs.environment_variables
+
     def test_get_device_total_memory(self):
         with pytest.raises(NotImplementedError):
             TpuPlatform.get_device_total_memory()
@@ -262,9 +267,14 @@ class TestTpuPlatform:
     @patch(
         "tpu_inference.core.sched.dp_scheduler.update_vllm_config_for_dp_scheduler"
     )
+    # The real patch rewrites vLLM's Scheduler for the rest of the pytest
+    # process; tests/core/test_sched_utils.py then applies it a second time.
+    @patch(
+        "tpu_inference.core.sched.utils.patch_vllm_scheduler_for_continue_decode"
+    )
     def test_check_and_update_config_hybrid_prefix_caching(
-            self, mock_update, mock_sharding, vllm_config, is_hybrid,
-            unsupported, expected_prefix_caching):
+            self, mock_continue_decode_patch, mock_update, mock_sharding,
+            vllm_config, is_hybrid, unsupported, expected_prefix_caching):
         """Hybrid (mamba/linear-attention) models keep prefix caching.
 
         Their recurrent state is addressed by block id in
@@ -848,3 +858,84 @@ class TestTorchAcceleratorGetMemoryInfoShim:
                           return_value=(1, 2)) as orig:
             assert torch.accelerator.get_memory_info(0) == (1, 2)
             orig.assert_called_once_with(0)
+
+
+class TestDisableUniprocStartupThreadCap:
+    """vllm#58946 startup thread cap is disabled for the TPU UniProc path."""
+
+    def _fake_engine_utils(self, monkeypatch, with_helper=True):
+        import contextlib
+        import sys
+        import types
+        fake = types.ModuleType("vllm.v1.engine.utils")
+        calls = []
+        if with_helper:
+
+            @contextlib.contextmanager
+            def _orig(executor_class, local_engine_count):
+                calls.append((executor_class, local_engine_count))
+                yield
+
+            fake._configure_uniproc_startup_threads = _orig
+        monkeypatch.setitem(sys.modules, "vllm.v1.engine.utils", fake)
+        return fake, calls
+
+    def test_replaces_vllm_helper_with_noop(self, monkeypatch):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        fake, calls = self._fake_engine_utils(monkeypatch)
+
+        tpu_platform._disable_uniproc_startup_thread_cap()
+
+        assert (fake._configure_uniproc_startup_threads
+                is tpu_platform._no_uniproc_startup_threads)
+        threads = torch.get_num_threads()
+        with fake._configure_uniproc_startup_threads(object, 1):
+            assert torch.get_num_threads() == threads
+        assert calls == []
+
+    def test_is_idempotent(self, monkeypatch):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        fake, _ = self._fake_engine_utils(monkeypatch)
+
+        tpu_platform._disable_uniproc_startup_thread_cap()
+        tpu_platform._disable_uniproc_startup_thread_cap()
+
+        assert (fake._configure_uniproc_startup_threads
+                is tpu_platform._no_uniproc_startup_threads)
+
+    def test_noop_when_vllm_has_no_helper(self, monkeypatch):
+        import tpu_inference.platforms.tpu_platform as tpu_platform
+        fake, _ = self._fake_engine_utils(monkeypatch, with_helper=False)
+
+        tpu_platform._disable_uniproc_startup_thread_cap()
+
+        assert not hasattr(fake, "_configure_uniproc_startup_threads")
+
+
+class TestEnvOverrideSamplingParamsCircularImport:
+    """`from vllm import SamplingParams` in a fresh process loads
+    `vllm.sampling_params`, which imports `vllm.config` -> `current_platform`
+    -> `tpu_inference.env_override` before `SamplingParams` is defined on
+    `vllm.sampling_params`. `env_override` must not raise `AttributeError`
+    (which `from vllm.platforms import current_platform` turns into
+    `ImportError: cannot import name 'current_platform'`)."""
+
+    def test_partially_initialized_sampling_params_does_not_raise(
+            self, monkeypatch):
+        import importlib
+        import sys
+        import types
+
+        import tpu_inference.env_override as env_override
+
+        fake_vllm = types.ModuleType("vllm")
+        partial_sampling_params = types.ModuleType("vllm.sampling_params")
+        fake_vllm.sampling_params = partial_sampling_params
+
+        monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+        monkeypatch.setitem(sys.modules, "vllm.sampling_params",
+                            partial_sampling_params)
+
+        # Should not raise AttributeError when SamplingParams is not yet
+        # defined on vllm.sampling_params.
+        importlib.reload(env_override)

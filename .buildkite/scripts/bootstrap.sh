@@ -22,6 +22,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source the shared pipeline config file.
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/configs/pipeline_config.sh"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/kube_suites.sh"
 
 determine_job_priority() {
   local priority=""
@@ -185,28 +187,6 @@ set_jax_envs() {
     esac
 }
 
-# One generation of pipeline_jax_kube.yml: the kube shapes in place of the bare
-# queues set_jax_envs names.
-set_kube_jax_envs() {
-    case $1 in
-        v6)
-            export TPU_VERSION="tpu6e"
-            export KUBE_SHAPE_SINGLE="ct6e-standard-1t/1x1"
-            export KUBE_SHAPE_MULTI="ct6e-standard-8t/2x4"
-            export TENSOR_PARALLEL_SIZE_SINGLE=1
-            ;;
-        v7)
-            export TPU_VERSION="tpu7x"
-            export KUBE_SHAPE_SINGLE="tpu7x-standard-1t/1x1x1"
-            export KUBE_SHAPE_MULTI="tpu7x-standard-4t/2x2x1"
-            export TENSOR_PARALLEL_SIZE_SINGLE=2
-            ;;
-        unset)
-            unset TPU_VERSION KUBE_SHAPE_SINGLE KUBE_SHAPE_MULTI TENSOR_PARALLEL_SIZE_SINGLE
-            ;;
-    esac
-}
-
 # The kube files in place of upload_pipeline's. A scheduled kube run sets
 # CI_LANES to some of jax, models, features, parallelism and rl, and runs the
 # one generation its schedule names (TPU_VERSION and the KUBE_SHAPE_* env); any
@@ -223,7 +203,7 @@ upload_kube_pipeline() {
                     fi
                     ;;
                 models|features|parallelism|rl)
-                    upload_with_priority ".buildkite/pipeline_${lane}_kube.yml" "$JOB_PRIORITY"
+                    upload_kube_lane "${lane}"
                     ;;
                 *)
                     echo "ERROR: CI_LANES has '${lane}'; the kube lanes are jax, models, features, parallelism and rl" >&2
@@ -240,15 +220,20 @@ upload_kube_pipeline() {
       set_kube_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"
       set_kube_jax_envs unset
-      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
       upload_with_priority .buildkite/pipeline_pypi_kube.yml "$JOB_PRIORITY"
     fi
-    # nightly_verify.yml runs only on nightly and tag builds. On kube its suites
-    # run as separate CI_LANES builds, one generation each, and the support
-    # matrices are built on bare metal only.
+    # Nightly and tag builds: nightly_verify.yml, as on bare metal. Its "Upload
+    # Tests" step sends up the kube suites (upload_kube_nightly_suites).
     if [[ "${NIGHTLY:-0}" == "1" || -n "${BUILDKITE_TAG:-}" ]]; then
-      buildkite-agent annotate --style warning --context ci-fleet-gaps \
-        "Not in this kube build: nightly_verify.yml. Its models, features, parallelism and rl suites run on kube as CI_LANES builds; the support matrices are bare-metal only."
+      # The P/D benchmark, once a day: it is a v7x workload whatever the
+      # generation, and the vllm and flax_nnx nightlies would run it again on
+      # the same code. Each upload lands above the ones before it, so this sits
+      # below nightly_verify.yml's wait and the support matrices do not wait out
+      # its hours; its steps have depends_on, so the wait does not hold them.
+      if [ "${MODEL_IMPL_TYPE:-auto}" == "auto" ]; then
+        upload_with_priority .buildkite/pipeline_disagg_kube.yml "$JOB_PRIORITY"
+      fi
+      upload_with_priority .buildkite/nightly_verify.yml "$JOB_PRIORITY"
     fi
 }
 
@@ -269,7 +254,6 @@ upload_pipeline() {
       set_jax_envs unset
 
       # buildkite-agent pipeline upload .buildkite/pipeline_torch.yml
-      upload_with_priority .buildkite/nightly_releases.yml "$JOB_PRIORITY"
       upload_with_priority .buildkite/pipeline_pypi.yml "$JOB_PRIORITY"
     fi
 
@@ -363,9 +347,11 @@ EOF
 
 fi
 
-# A scheduled kube lane (CI_LANES set) gates nothing yet, so it notifies
-# no one, as it did before it went through this script.
-if [[ -z "${CI_LANES:-}" ]]; then
+# A scheduled kube build notifies no one unless its schedule sets
+# KUBE_OWNS_NIGHTLY=1: a lane (CI_LANES set), a shadow of the bare integration
+# run, or a nightly the bare-metal nightly still reports for.
+if [[ -z "${CI_LANES:-}" ]] && \
+   [[ "${CI_FLEET:-}" != "kube" || "$BUILDKITE_SOURCE" != "schedule" || "${KUBE_OWNS_NIGHTLY:-0}" == "1" ]]; then
   upload_with_priority "$NOTIFY_FILE" "$JOB_PRIORITY"
 fi
 rm "$NOTIFY_FILE"
@@ -377,8 +363,14 @@ if [[ $BUILDKITE_PIPELINE_SLUG == "tpu-vllm-integration" ]]; then
     buildkite-agent meta-data set "VLLM_COMMIT_HASH" "${VLLM_COMMIT_HASH}"
     echo "Using vllm commit hash: $(buildkite-agent meta-data get "VLLM_COMMIT_HASH")"
     choose_ci_fleet
-    # Note: upload are inserted in reverse order, so promote LKG should upload before tests
-    upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
+    # The pin moves on the results of the run that owns the integration: bare
+    # metal, unless the kube schedule sets KUBE_OWNS_NIGHTLY=1. A kube run
+    # without it shadows the bare one and must not promote a vLLM commit the
+    # bare run has not passed.
+    if [[ "${CI_FLEET}" != "kube" || "${KUBE_OWNS_NIGHTLY:-0}" == "1" ]]; then
+      # Note: upload are inserted in reverse order, so promote LKG should upload before tests
+      upload_with_priority .buildkite/integration_promote.yml "$JOB_PRIORITY"
+    fi
     if [[ "${CI_FLEET}" == "kube" ]]; then
       set_kube_jax_envs v7
       upload_with_priority .buildkite/pipeline_jax_kube.yml "$JOB_PRIORITY"

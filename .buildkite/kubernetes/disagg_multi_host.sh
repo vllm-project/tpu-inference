@@ -70,21 +70,30 @@ COMMON_SIDE_PORT=8900
 PIDS=()
 
 dump_logs() {
+  local rc=$1
   echo "--- Script exiting, displaying logs ---"
-  for f in prefill.txt decode.txt proxy.txt benchmark.txt correctness.txt; do
+  for f in ray-prefill.txt ray-decode.txt prefill.txt decode.txt proxy.txt benchmark.txt correctness.txt; do
     echo "--- $LOG_DIR/$f ---"
     [ -f "$LOG_DIR/$f" ] && cat "$LOG_DIR/$f" || echo "File not found."
   done
-  echo "--- ray ---"
-  for d in /tmp/ray-prefill* /tmp/ray-decode*; do
-    [ -d "$d" ] && find "$d" -name "raylet.err" -exec tail -20 {} + 2>/dev/null || true
-  done
+  # A Ray node's own errors stay in its session directory: the files above only
+  # hold what `ray start` printed and what vLLM saw from the outside. Only on
+  # failure, since a passing run would print them for every node.
+  if [ "$rc" -ne 0 ]; then
+    for f in /tmp/ray-prefill-*/session_latest/logs/{ray_process_exit.log,gcs_server.out,gcs_server.err,raylet.out,raylet.err,dashboard_agent.log} \
+             /tmp/ray-decode-*/session_latest/logs/{ray_process_exit.log,gcs_server.out,gcs_server.err,raylet.out,raylet.err,dashboard_agent.log}; do
+      [ -s "$f" ] || continue
+      echo "--- $f (last 40 lines) ---"
+      tail -n 40 "$f"
+    done
+  fi
   echo "--- End of logs ---"
 }
 
 cleanup() {
+  local rc=$?
   set +e
-  dump_logs
+  dump_logs "$rc"
   # Ray first: it supervises the per-chip workers, and killing it before the
   # vLLM servers avoids a page of connection errors in the logs above.
   ray stop --force >/dev/null 2>&1
@@ -152,7 +161,7 @@ check_failed_requests() {
 }
 
 mkdir -p "$LOG_DIR"
-rm -f "$LOG_DIR"/{prefill,decode,proxy,benchmark,correctness}.txt
+rm -f "$LOG_DIR"/{ray-prefill,ray-decode,prefill,decode,proxy,benchmark,correctness}.txt
 rm -rf /tmp/ray-prefill* /tmp/ray-decode* /tmp/libtpu_lockfile
 ray stop --force >/dev/null 2>&1 || true
 
@@ -173,7 +182,12 @@ start_instance() {
     # sharing one collide and workers attach to the wrong raylet.
     local cmd="ray start --block --temp-dir=${tmpdir}-${i}"
     if [ "$i" -eq 0 ]; then
-      cmd="$cmd --head --port=${ray_port}"
+      # No dashboard: nothing here uses it, and both heads would default to
+      # port 8265. `ray start` test-binds that port and the dashboard process
+      # binds it seconds later, so two heads started close together can both
+      # pass the test and race for the port. The loser's dashboard exits, and
+      # --block then kills every process of that head, GCS included.
+      cmd="$cmd --head --port=${ray_port} --include-dashboard=false"
       [ "$role" = "decode" ] && cmd="$cmd --min-worker-port=20000 --max-worker-port=29999"
     else
       cmd="$cmd --address=127.0.0.1:${ray_port}"
