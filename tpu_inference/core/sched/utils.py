@@ -21,17 +21,13 @@ def patch_vllm_scheduler_for_continue_decode():
     In Continue Decode, the host schedules 1 step while the TPU runner executes
     up to max_decode_steps (N) decode iterations on-device in a single step.
 
-    This function applies four patches:
+    This function applies three patches:
     1. patched_init: Forces KVCacheManager to reserve enough KV cache blocks for
-       all N tokens during schedule() (num_lookahead_tokens = max_decode_steps - 1).
+       all N tokens during schedule() (num_lookahead_tokens = max_decode_steps - 1,
+       or 2 * (max_decode_steps - 1) under async_scheduling).
     2. patched_update_base: Reconciles request.num_computed_tokens on host by
        adding the extra (N - 1) tokens generated on-device once model output returns.
-    3. patched_update_from_output: When routed_experts are returned, temporarily
-       sets scheduler_output.num_scheduled_tokens[req_id] to the sampled token
-       count (and pre-compensates num_in_flight_tokens / num_stale_output_tokens)
-       so vLLM's _extract_routed_experts slices all N tokens, then restores
-       num_scheduled_tokens in a finally block.
-    4. patched_async_update_request_with_output: Pre-compensates in-flight
+    3. patched_async_update_request_with_output: Pre-compensates in-flight
        num_output_placeholders in AsyncScheduler by adding (N - 1) before
        subtracting N, preventing placeholder underflow in async mode.
     """
@@ -76,84 +72,6 @@ def patch_vllm_scheduler_for_continue_decode():
             return res_token_ids, stopped
 
         Scheduler._update_request_with_output = patched_update_base
-
-        original_update_from_output = Scheduler.update_from_output
-
-        def patched_update_from_output(scheduler_self, scheduler_output,
-                                       model_runner_output, *args, **kwargs):
-            orig_num_scheduled = {}
-            sampled_token_counts = {}
-            routing_offsets = {}
-            if (getattr(model_runner_output, "routed_experts", None)
-                    is not None and model_runner_output.sampled_token_ids):
-                cached_data = getattr(scheduler_output,
-                                      "scheduled_cached_reqs", None)
-                num_output_tokens_dict = (dict(
-                    zip(cached_data.req_ids, cached_data.num_output_tokens))
-                                          if cached_data is not None else {})
-                spec_decode_tokens = getattr(scheduler_output,
-                                             "scheduled_spec_decode_tokens",
-                                             None) or {}
-                for req_id, req_idx in model_runner_output.req_id_to_index.items(
-                ):
-                    if (num_output_tokens_dict.get(req_id, 0) > 0
-                            and not spec_decode_tokens.get(req_id)):
-                        num_sampled = len(
-                            model_runner_output.sampled_token_ids[req_idx])
-                        orig = scheduler_output.num_scheduled_tokens.get(
-                            req_id)
-                        if orig is not None and num_sampled > orig:
-                            orig_num_scheduled[req_id] = orig
-                            sampled_token_counts[req_id] = num_sampled
-                            scheduler_output.num_scheduled_tokens[
-                                req_id] = num_sampled
-                            extra = num_sampled - orig
-                            request = scheduler_self.requests.get(req_id)
-                            if request is not None:
-                                request.num_in_flight_tokens += extra
-                                if request.num_stale_output_tokens > 0:
-                                    request.num_stale_output_tokens += extra
-                if orig_num_scheduled:
-                    offset = 0
-                    for req_id in (getattr(model_runner_output, "req_ids",
-                                           None)
-                                   or model_runner_output.req_id_to_index):
-                        routing_offsets[req_id] = offset
-                        offset += scheduler_output.num_scheduled_tokens.get(
-                            req_id, 0)
-            try:
-                outputs = original_update_from_output(scheduler_self,
-                                                      scheduler_output,
-                                                      model_runner_output,
-                                                      *args, **kwargs)
-                if (orig_num_scheduled and getattr(
-                        scheduler_self, "enable_return_routed_experts", False)
-                        and isinstance(outputs, dict)):
-                    routing_data = getattr(model_runner_output.routed_experts,
-                                           "routing_data", None)
-                    if routing_data is not None:
-                        for engine_outputs in outputs.values():
-                            for out in getattr(engine_outputs, "outputs", ()):
-                                req_id = out.request_id
-                                if (req_id in orig_num_scheduled
-                                        and out.routed_experts is not None):
-                                    num_sampled = sampled_token_counts.get(
-                                        req_id, 0)
-                                    num_kept = len(out.new_token_ids)
-                                    if 0 < num_kept < num_sampled:
-                                        req_offset = routing_offsets[req_id]
-                                        out.routed_experts = routing_data[
-                                            req_offset:req_offset +
-                                            num_kept].astype(
-                                                out.routed_experts.dtype,
-                                                copy=False)
-                return outputs
-            finally:
-                if orig_num_scheduled:
-                    scheduler_output.num_scheduled_tokens.update(
-                        orig_num_scheduled)
-
-        Scheduler.update_from_output = patched_update_from_output
 
         original_init = Scheduler.__init__
 
