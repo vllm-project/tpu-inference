@@ -30,6 +30,7 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
+from tpu_inference.utils import TPU_SECOND_LAST_MINOR
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import VllmSchedulerOutput
@@ -39,6 +40,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
+
+# Largest chunk size the top-k prefilter tries.
+_MAX_PREFILTER_CHUNK = 256
 
 
 def _distributed_sampling_max_top_k() -> int:
@@ -100,13 +104,15 @@ def _topk_prefilter_enabled() -> bool:
 def _topk_prefilter_chunk(num_values: int, k: int) -> int:
     """Returns the chunk size that sorts the fewest values, or 0 to skip.
 
-    Multiples of 8 fill whole float32 TPU tiles, so they are tried first: in
-    micro-benchmarks on TPU v6e and v7x, this made the picked chunk 8-13%
-    faster on average at 64-256 rows per core, with no change at 16 rows. If
-    none divides the shard, any divisor is used: the prefilter still beats
-    lax.top_k (e.g. 2-3x for 12628 values with chunk 11).
+    Multiples of 8 (`TPU_SECOND_LAST_MINOR`) fill whole float32 TPU tiles, so
+    they are tried first (they were faster in micro-benchmarks). If none
+    divides the shard, any divisor is used (e.g. chunk 11 for 12628 values),
+    which still beats lax.top_k.
     """
-    for candidates in (range(8, 257, 8), range(2, 257)):
+    tile = TPU_SECOND_LAST_MINOR
+    multiples_of_tile = range(tile, _MAX_PREFILTER_CHUNK + 1, tile)
+    any_size = range(2, _MAX_PREFILTER_CHUNK + 1)
+    for candidates in (multiples_of_tile, any_size):
         best_chunk, best_cost = 0, num_values
         for candidate in candidates:
             if num_values % candidate or num_values // candidate < k:
@@ -128,8 +134,7 @@ def _prefiltered_top_k(
 
     Chunk c holds values c, c + num_chunks, c + 2 * num_chunks, ..., so the
     chunk maxima are an elementwise max across rows. On TPU7x this layout is
-    faster than contiguous chunks: for a [32, 75968] shard with k=128 it takes
-    128us, versus 160us with contiguous chunks and 700us for `lax.top_k`.
+    faster than contiguous chunks.
 
     Like `lax.top_k`, the values come back in descending order;
     `_merge_topk_candidates` relies on this. Indices of tied values may differ
@@ -140,9 +145,9 @@ def _prefiltered_top_k(
         chunk = _topk_prefilter_chunk(num_values, k)
     if chunk == 0:
         logger.warning_once(
-            "Top-k prefilter skipped: no chunk size from 2 to 256 helps for "
-            "%d values per vocab shard, so sampling uses lax.top_k.",
-            num_values)
+            "Top-k prefilter skipped: no chunk size up to %d helps for %d "
+            "values per vocab shard, so sampling uses lax.top_k.",
+            _MAX_PREFILTER_CHUNK, num_values)
         return lax.top_k(values, k)
     num_chunks = num_values // chunk
     # chunks[b, r, c] = values[b, r * num_chunks + c].

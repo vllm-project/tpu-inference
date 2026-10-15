@@ -196,20 +196,26 @@ class TestSampling:
                                     jax.lax.top_k(values, 128)):
             np.testing.assert_array_equal(actual, expected)
 
-    def test_topk_prefilter_chunk(self):
-        # 151936 = 128 * 1187: chunk 32 sorts 4748 maxima + 4096 candidates.
-        assert _topk_prefilter_chunk(151936, 128) == 32
-        assert _topk_prefilter_chunk(75968, 128) == 32
-        assert _topk_prefilter_chunk(18992, 128) == 16
-        # Multiples of 8 come first: chunk 33 would sort slightly fewer values
-        # for 152064, but 32 fills whole TPU tiles.
-        assert _topk_prefilter_chunk(152064, 128) == 32
-        # 12628 = 4 * 7 * 11 * 41: no multiple of 8 divides it, so any divisor.
-        assert _topk_prefilter_chunk(12628, 128) == 11
-        # No divisor up to 256 leaves enough chunks: plain top-k.
-        assert _topk_prefilter_chunk(4099, 128) == 0
-        # Too few values for the prefilter to help.
-        assert _topk_prefilter_chunk(256, 128) == 0
+    @pytest.mark.parametrize(
+        "num_values,expected",
+        [
+            # 151936 = 128 * 1187: chunk 32 sorts 4748 maxima + 4096
+            # candidates.
+            pytest.param(151936, 32, id="qwen3_tp1"),
+            pytest.param(75968, 32, id="qwen3_tp2"),
+            pytest.param(18992, 16, id="qwen3_tp8"),
+            # Multiples of 8 come first: chunk 33 would sort slightly fewer
+            # values for 152064, but 32 fills whole TPU tiles.
+            pytest.param(152064, 32, id="qwen2_5_tp1_multiple_of_8_first"),
+            # 12628 = 4 * 7 * 11 * 41: no multiple of 8 divides it.
+            pytest.param(12628, 11, id="llama4_tp16_any_divisor"),
+            # No divisor up to 256 leaves enough chunks: plain top-k.
+            pytest.param(4099, 0, id="no_divisor"),
+            # Too few values for the prefilter to help.
+            pytest.param(256, 0, id="too_few_values"),
+        ])
+    def test_topk_prefilter_chunk(self, num_values, expected):
+        assert _topk_prefilter_chunk(num_values, 128) == expected
 
     @pytest.mark.parametrize("topk_prefilter", [False, True])
     def test_shard_topk_candidates_uses_prefilter_only_when_enabled(
