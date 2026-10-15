@@ -54,15 +54,18 @@ def test_enable_and_get_megacore():
 def test_hbm_usage_bytes_ray_backend():
     """Tests hbm_usage_bytes when TPU_MULTIHOST_BACKEND is ray."""
     mock_device1 = MagicMock()
+    mock_device1.process_index = 0
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
     mock_device2 = MagicMock()
+    mock_device2.process_index = 0
     mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
 
     devices = [mock_device1, mock_device2]
-    usage = hbm_usage_bytes(devices)
+    with patch("jax.process_index", return_value=0):
+        usage = hbm_usage_bytes(devices)
 
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (100 * GBYTES, 128 * GBYTES)]
@@ -73,22 +76,114 @@ def test_hbm_usage_bytes_ray_backend():
 def test_hbm_usage_bytes_pathways_disabled():
     """Tests hbm_usage_bytes when VLLM_TPU_USING_PATHWAYS is False."""
     mock_device1 = MagicMock()
+    mock_device1.process_index = 0
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
     mock_device2 = MagicMock()
+    mock_device2.process_index = 0
     mock_device2.memory_stats.return_value = {
         "bytes_in_use": 50 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
 
     devices = [mock_device1, mock_device2]
-    usage = hbm_usage_bytes(devices)
+    with patch("jax.process_index", return_value=0):
+        usage = hbm_usage_bytes(devices)
 
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (50 * GBYTES, 128 * GBYTES)]
     assert usage == expected_usage
+
+
+def test_hbm_usage_bytes_with_peak_memory():
+    """Tests that hbm_usage_bytes selects peak_bytes_in_use to reserve XLA workspace."""
+    mock_device1 = MagicMock()
+    mock_device1.process_index = 0
+    mock_device1.memory_stats.return_value = {
+        "bytes_in_use": 10 * GBYTES,
+        "peak_bytes_in_use": 25 * GBYTES,
+        "bytes_limit": 32 * GBYTES,
+    }
+    mock_device2 = MagicMock()
+    mock_device2.process_index = 0
+    mock_device2.memory_stats.return_value = {
+        "bytes_in_use": 12 * GBYTES,
+        "peak_bytes_in_use": 20 * GBYTES,
+        "bytes_limit": 32 * GBYTES,
+    }
+
+    devices = [mock_device1, mock_device2]
+    with patch("jax.process_index", return_value=0):
+        usage = hbm_usage_bytes(devices)
+
+    assert len(usage) == 2
+    assert usage[0] == (25 * GBYTES, 32 * GBYTES)
+    assert usage[1] == (20 * GBYTES, 32 * GBYTES)
+
+
+def test_hbm_usage_bytes_multihost_process_index_filtering():
+    """Tests that devices from other process_index are filtered out and padded with local stats."""
+    mock_dev_local = MagicMock()
+    mock_dev_local.process_index = 0
+    mock_dev_local.memory_stats.return_value = {
+        "bytes_in_use": 8 * GBYTES,
+        "peak_bytes_in_use": 16 * GBYTES,
+        "bytes_limit": 32 * GBYTES,
+    }
+
+    mock_dev_remote = MagicMock()
+    mock_dev_remote.process_index = 1  # Remote host process
+
+    devices = [mock_dev_local, mock_dev_remote]
+    with patch("jax.process_index", return_value=0):
+        usage = hbm_usage_bytes(devices)
+
+    mock_dev_remote.memory_stats.assert_not_called()
+    assert len(usage) == 2
+    assert usage[0] == (16 * GBYTES, 32 * GBYTES)
+    assert usage[1] == (16 * GBYTES, 32 * GBYTES)
+
+
+def test_hbm_usage_bytes_remote_device_side_effect():
+    """Tests that PJRT runtime errors on remote devices are caught and padded gracefully."""
+    mock_dev_local = MagicMock()
+    mock_dev_local.process_index = 0
+    mock_dev_local.memory_stats.return_value = {
+        "bytes_in_use": 10 * GBYTES,
+        "peak_bytes_in_use": 18 * GBYTES,
+        "bytes_limit": 32 * GBYTES,
+    }
+
+    mock_dev_remote = MagicMock()
+    # Simulates a device that passes locality but raises in PJRT driver
+    mock_dev_remote.process_index = 0
+    mock_dev_remote.memory_stats.side_effect = RuntimeError("PJRT INVALID_ARGUMENT: non-addressable device")
+
+    devices = [mock_dev_local, mock_dev_remote]
+    with patch("jax.process_index", return_value=0):
+        usage = hbm_usage_bytes(devices)
+
+    assert len(usage) == 2
+    assert usage[0] == (18 * GBYTES, 32 * GBYTES)
+    assert usage[1] == (18 * GBYTES, 32 * GBYTES)
+
+
+def test_hbm_usage_bytes_all_devices_fail_raises_runtime_error():
+    """Tests that if memory_stats fails on all devices, a RuntimeError is re-raised."""
+    mock_dev1 = MagicMock()
+    mock_dev1.process_index = 0
+    mock_dev1.memory_stats.side_effect = RuntimeError("PJRT driver unavailable")
+
+    mock_dev2 = MagicMock()
+    mock_dev2.process_index = 0
+    mock_dev2.memory_stats.side_effect = RuntimeError("PJRT driver unavailable")
+
+    devices = [mock_dev1, mock_dev2]
+    with patch("jax.process_index", return_value=0):
+        with pytest.raises(RuntimeError, match="Failed to retrieve TPU memory stats"):
+            hbm_usage_bytes(devices)
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
@@ -153,18 +248,21 @@ def test_hbm_usage_bytes_pathways_enabled(mock_devices, mock_live_arrays):
 def test_hbm_usage_gb_pathways_disabled():
     """Tests hbm_usage_gb when VLLM_TPU_USING_PATHWAYS is False."""
     mock_device1 = MagicMock()
+    mock_device1.process_index = 0
     mock_device1.memory_stats.return_value = {
         "bytes_in_use": 100 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
     mock_device2 = MagicMock()
+    mock_device2.process_index = 0
     mock_device2.memory_stats.return_value = {
         "bytes_in_use": 50.5 * GBYTES,
         "bytes_limit": 128.0 * GBYTES
     }
 
     devices = [mock_device1, mock_device2]
-    usage = hbm_usage_gb(devices)
+    with patch("jax.process_index", return_value=0):
+        usage = hbm_usage_gb(devices)
 
     expected_usage = [(100.0, 128.0), (50.5, 128.0)]
     assert usage == expected_usage
