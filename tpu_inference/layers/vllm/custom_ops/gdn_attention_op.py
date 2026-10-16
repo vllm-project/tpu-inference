@@ -194,8 +194,7 @@ def gdn_attention_core_tpu(
          kernel_size,
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
-         gdn_kernel=create_linear_attention_backend(
-             attention_backend_name(vllm_context.vllm_config)).gdn_kernel(),
+         gdn_kernel=layer_module.linear_attention_backend.gdn_kernel(),
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]
@@ -212,6 +211,13 @@ def gdn_attention_core_tpu(
 
 @QwenGatedDeltaNetAttention.register_oot
 class VllmGatedDeltaNetAttention(QwenGatedDeltaNetAttention):
+
+    def __init__(self, config, vllm_config, *args, **kwargs) -> None:
+        super().__init__(config, vllm_config, *args, **kwargs)
+        # The linear attention backend --attention-backend selects, whose
+        # kernel gdn_attention_core_tpu runs.
+        self.linear_attention_backend = create_linear_attention_backend(
+            attention_backend_name(vllm_config))
 
     def forward(
         self,

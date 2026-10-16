@@ -83,7 +83,7 @@ from vllm.platforms.interface import Platform, PlatformEnum
 
 from tpu_inference import envs
 from tpu_inference.layers.common.attention_backend import (
-    VLLM_ATTENTION_BACKENDS, check_attention_backend_config)
+    check_attention_backend_config, is_registered_attention_backend)
 from tpu_inference.layers.common.sharding import ShardingConfigManager
 from tpu_inference.logger import init_logger
 
@@ -237,9 +237,9 @@ class TpuPlatform(Platform):
         use_mla = attn_selector_config.use_mla
         if use_mla:
             selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
-        elif (selected_backend is not None
-              and selected_backend.name.lower() in VLLM_ATTENTION_BACKENDS):
-            # A TPU backend; its name resolves to its own adapter class.
+        elif is_registered_attention_backend(selected_backend):
+            # A registered TPU backend; its name resolves to its own vLLM
+            # attention backend class.
             pass
         elif selected_backend != AttentionBackendEnum.FLASH_ATTN:
             logger.info("Cannot use %s backend on TPU. Setting to FLASH_ATTN.",

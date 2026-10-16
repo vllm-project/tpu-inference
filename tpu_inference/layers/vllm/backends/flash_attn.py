@@ -19,8 +19,8 @@ from vllm.v1.attention.backends.registry import (AttentionBackendEnum,
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from tpu_inference import utils
-from tpu_inference.layers.common.attention_backend import \
-    create_attention_backend
+from tpu_inference.layers.common.attention_backend import (
+    RPAAttentionBackend, create_attention_backend)
 from tpu_inference.layers.common.attention_interface import (
     attention, encoder_only_attention)
 from tpu_inference.layers.common.attention_metadata import (
@@ -147,9 +147,9 @@ class PallasAttentionBackend(AttentionBackend):
 
 class PallasAttentionBackendImpl(AttentionImpl):
 
-    # The TPU attention backend (attention_backend.ATTENTION_BACKENDS) this
-    # impl runs; an adapter for another backend overrides it.
-    attention_backend: str = "rpa"
+    # The name of the TPU attention backend this impl runs. The vLLM backend
+    # class of a registered backend returns an impl that overrides it.
+    attention_backend: str = RPAAttentionBackend.name
 
     def __init__(
         self,
@@ -377,7 +377,7 @@ def _jax_attn_func(
     sliding_window: int | None = None,
     soft_cap: float | None = None,
     update_kv_cache: bool = True,
-    attention_backend: str = "rpa",
+    attention_backend: str = RPAAttentionBackend.name,
 ) -> Tuple[jax.Array, jax.Array]:
     q_len = q.shape[0]
     if k is None or v is None:

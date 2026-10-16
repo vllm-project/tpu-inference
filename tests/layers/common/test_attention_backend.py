@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The TPU attention backend plugin points, exercised with a fake backend."""
+"""The TPU attention backend interface, exercised with a fake backend."""
 
 from types import SimpleNamespace
 
@@ -21,29 +21,34 @@ import numpy as np
 import pytest
 from jax.sharding import Mesh
 from vllm.config.attention import AttentionConfig
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import \
+    QwenGatedDeltaNetAttention
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa_hd64
 from tpu_inference.kernels.gdn.v3 import wrapper as v3_gdn
 from tpu_inference.layers.common import (attention_backend,
                                          attention_interface, gdn_attention)
+from tpu_inference.layers.common.attention_backend import (
+    GDNLinearAttentionBackend, RPAAttentionBackend)
 from tpu_inference.layers.common.attention_metadata import AttentionMetadata
 from tpu_inference.layers.common.sharding import MESH_AXIS_NAMES
 from tpu_inference.layers.vllm.backends.flash_attn import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
+from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
+    VllmGatedDeltaNetAttention
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 from tpu_inference.runner import kv_cache as kv_cache_mod
 
 FAKE = "fake"
+FAKE_VLLM_BACKEND = f"{__name__}.FakePallasAttentionBackend"
 FAKE_OUTPUT = 7
 NUM_TOKENS, NUM_HEADS, HEAD_DIM, KERNEL_SIZE = 8, 2, 128, 4
 QKV_DIM = 3 * NUM_HEADS * HEAD_DIM
 NUM_STATE_SLOTS, WRITE_SLOT, READ_SLOT = 4, 2, 1
 V3_MARKER, FAKE_MARKER = 1, 2
-
-needs_register = pytest.mark.skipif(
-    not hasattr(AttentionBackendEnum, "register"),
-    reason="vLLM before vllm#41091 cannot add a backend name")
 
 
 def stub_gdn_kernel(marker: int):
@@ -65,7 +70,6 @@ def stub_gdn_kernel(marker: int):
 
 
 class FakeAttentionBackend(attention_backend.AttentionBackend):
-    name = FAKE
 
     def get_kv_cache_shape(self, total_num_pages, page_size, num_kv_heads,
                            head_dim, kv_dtype):
@@ -76,7 +80,6 @@ class FakeAttentionBackend(attention_backend.AttentionBackend):
 
 
 class FakeLinearAttentionBackend(attention_backend.LinearAttentionBackend):
-    name = FAKE
 
     def gdn_kernel(self):
         return stub_gdn_kernel(FAKE_MARKER)
@@ -97,19 +100,18 @@ class FakePallasAttentionBackend(PallasAttentionBackend):
         return FakePallasAttentionBackendImpl
 
 
+def register_fake() -> None:
+    attention_backend.register_attention_backend(
+        FAKE,
+        attention=FakeAttentionBackend,
+        linear_attention=FakeLinearAttentionBackend,
+        vllm_backend=FAKE_VLLM_BACKEND)
+
+
 @pytest.fixture(autouse=True)
 def fake_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(attention_backend.ATTENTION_BACKENDS, FAKE,
-                        FakeAttentionBackend)
-    monkeypatch.setitem(attention_backend.LINEAR_ATTN_BACKENDS, FAKE,
-                        FakeLinearAttentionBackend)
-    monkeypatch.setitem(attention_backend.VLLM_ATTENTION_BACKENDS, FAKE,
-                        f"{__name__}.FakePallasAttentionBackend")
-
-
-@pytest.fixture
-def registered(fake_backend) -> None:
-    attention_backend.register_vllm_attention_backends()
+    monkeypatch.setattr(attention_backend, "_REGISTERED_BACKENDS", {})
+    register_fake()
 
 
 @pytest.fixture
@@ -186,9 +188,17 @@ def test_kv_cache_shape_comes_from_the_given_backend(mesh):
         kv_cache_mod.get_kv_cache_shape_with_mesh(*args)) != tuple(shape)
 
 
+@pytest.mark.parametrize(("head_dim", "kernel"), [(128, rpa), (64, rpa_hd64)])
+def test_rpa_kv_cache_shape(head_dim, kernel):
+    args = (8, 16, 4, head_dim, jnp.bfloat16)
+
+    assert tuple(RPAAttentionBackend().get_kv_cache_shape(*args)) == tuple(
+        kernel.get_kv_cache_shape(*args))
+
+
 @pytest.mark.parametrize(("backend_cls", "marker"), [
     (None, V3_MARKER),
-    (attention_backend.LinearAttentionBackend, V3_MARKER),
+    (GDNLinearAttentionBackend, V3_MARKER),
     (FakeLinearAttentionBackend, FAKE_MARKER),
 ])
 def test_gdn_runs_the_given_kernel(mesh, monkeypatch, backend_cls, marker):
@@ -205,26 +215,45 @@ def test_gdn_runs_the_given_kernel(mesh, monkeypatch, backend_cls, marker):
             np.asarray(state[WRITE_SLOT], np.float32), READ_SLOT + marker)
 
 
-@needs_register
-def test_register_lets_vllm_parse_the_name(registered):
-    # Idempotent: vLLM calls the plugin hook in every process, and more than
-    # once in one.
-    attention_backend.register_vllm_attention_backends()
+@pytest.mark.parametrize(("backend", "expected"), [
+    (FAKE, FakeLinearAttentionBackend),
+    (None, GDNLinearAttentionBackend),
+])
+def test_gdn_layer_resolves_its_backend_at_init(monkeypatch, backend,
+                                                expected):
+    monkeypatch.setattr(QwenGatedDeltaNetAttention, "__init__",
+                        lambda self, config, vllm_config, *args: None)
+    layer = VllmGatedDeltaNetAttention.__new__(VllmGatedDeltaNetAttention)
+
+    VllmGatedDeltaNetAttention.__init__(layer, None, make_vllm_config(backend))
+
+    assert type(layer.linear_attention_backend) is expected
+
+
+def test_register_lets_vllm_parse_the_name():
+    # vLLM runs the plugins in every process, and more than once in one.
+    register_fake()
 
     assert (AttentionConfig.validate_backend_before(FAKE)
             is AttentionBackendEnum.FAKE)
-    assert (AttentionBackendEnum.FAKE.get_path() ==
-            attention_backend.VLLM_ATTENTION_BACKENDS[FAKE])
+    assert AttentionBackendEnum.FAKE.get_path() == FAKE_VLLM_BACKEND
 
 
-@needs_register
+def test_register_rejects_a_vllm_backend_name():
+    with pytest.raises(ValueError, match="FLASH_ATTN"):
+        attention_backend.register_attention_backend(
+            "flash_attn",
+            attention=FakeAttentionBackend,
+            vllm_backend=FAKE_VLLM_BACKEND)
+
+
 @pytest.mark.parametrize(("backend", "name"), [
     (FAKE, FAKE),
     (None, "rpa"),
     ("FLASH_ATTN", "rpa"),
     ("TRITON_ATTN", "rpa"),
 ])
-def test_attention_backend_name(registered, backend, name):
+def test_attention_backend_name(backend, name):
     assert attention_backend.attention_backend_name(
         make_vllm_config(backend)) == name
 
@@ -235,19 +264,18 @@ def test_one_name_selects_both_backends():
     assert isinstance(attention_backend.create_linear_attention_backend(FAKE),
                       FakeLinearAttentionBackend)
     assert type(attention_backend.create_attention_backend(
-        "rpa")) is attention_backend.AttentionBackend
+        "rpa")) is RPAAttentionBackend
     assert type(attention_backend.create_linear_attention_backend(
-        "rpa")) is attention_backend.LinearAttentionBackend
+        "rpa")) is GDNLinearAttentionBackend
 
 
-@needs_register
 @pytest.mark.parametrize(("backend", "use_mla", "expected"), [
     ("FAKE", False, FakePallasAttentionBackend),
     ("FLASH_ATTN", False, PallasAttentionBackend),
     ("TRITON_ATTN", False, PallasAttentionBackend),
     ("FAKE", True, None),
 ])
-def test_platform_selects_the_adapter(registered, backend, use_mla, expected):
+def test_platform_selects_the_vllm_backend(backend, use_mla, expected):
     path = TpuPlatform.get_attn_backend_cls(AttentionBackendEnum[backend],
                                             SimpleNamespace(use_mla=use_mla))
 
@@ -261,13 +289,12 @@ def test_default_impl_runs_rpa():
     assert PallasAttentionBackendImpl.attention_backend == "rpa"
 
 
-@needs_register
 @pytest.mark.parametrize(("env", "value"), [
     ("TPU_MULTIHOST_BACKEND", "ray"),
     ("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
 ])
 def test_rejects_a_config_that_crosses_a_process_boundary(
-        registered, monkeypatch, env, value):
+        monkeypatch, env, value):
     monkeypatch.setenv(env, value)
 
     with pytest.raises(ValueError, match=f"{env}={value}"):

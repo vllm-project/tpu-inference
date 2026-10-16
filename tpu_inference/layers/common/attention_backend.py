@@ -11,109 +11,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The TPU attention backends, selected with --attention-backend <name>, which
-picks the attention and the linear attention backend of that name.
+"""The TPU attention backends that --attention-backend <name> selects.
 
-To add a backend, use one lowercase name as the key in:
-- ATTENTION_BACKENDS (required): its AttentionBackend, whose hooks the
-  runner, the KV cache allocator and attention() call.
-- LINEAR_ATTN_BACKENDS (optional): its LinearAttentionBackend, the GDN
-  kernel of hybrid models. Without one, the name runs GDN v3.
-- VLLM_ATTENTION_BACKENDS (required): the class path of its vLLM adapter,
-  the class vLLM's Attention layer builds: a PallasAttentionBackend
-  subclass whose get_impl_cls returns an impl with attention_backend set
-  to the name.
-
-vLLM's --attention-backend picks the framework adapter, not the TPU kernel
-behind it. register_vllm_attention_backends adds the names of
-VLLM_ATTENTION_BACKENDS to vLLM's AttentionBackendEnum, so that the flag
-accepts them, and TpuPlatform.get_attn_backend_cls maps each name to its
-adapter: PallasAttentionBackend with an impl that passes the name on to
-attention_interface.attention. The runner, the KV cache allocator and the GDN
-op read the same name from vllm_config (attention_backend_name). JAX
-(flax_nnx) models call attention() without a backend and run RPA.
-
-AttentionBackend itself is the default "rpa" backend: each hook returns
-nothing to add, and the RPA code inline in the platform, the runner, the
-compilation manager and attention_interface runs as it is. Another backend
-overrides the hooks it needs, the way a vLLM backend implements
-validate_configuration / get_kv_cache_shape / AttentionMetadataBuilder.build /
-build_for_cudagraph_capture / AttentionImpl.forward.
-
-The linear attention layers of a hybrid model have kernels of their own, in
-LINEAR_ATTN_BACKENDS; for now one name selects both families. A name without
-a linear attention backend keeps LinearAttentionBackend, the "default"
-backend, the GDN v3 kernel.
+An AttentionBackend runs the kernel of the attention layers and lays out their
+KV cache. A LinearAttentionBackend runs the kernel of the GDN linear attention
+layers of hybrid models. By default the layers run RPAAttentionBackend (RPA v3)
+and GDNLinearAttentionBackend (GDN v3); register_attention_backend adds
+another pair under a name.
 """
 
-from collections.abc import Callable, Mapping, Sequence
+import abc
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
+from vllm import envs as vllm_envs
+from vllm.ray.lazy_utils import is_in_ray_actor
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+from tpu_inference import envs
 
 if TYPE_CHECKING:
     import jax
     import jax.numpy as jnp
-    from jax.sharding import Mesh, NamedSharding
+    from jax.sharding import Mesh
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
     from tpu_inference.layers.common.attention_metadata import (
         AttentionMetadata, SharedAttentionMetadata)
-    from tpu_inference.utils import DeviceBuffer
-
-AttentionFields = Callable[[Mapping[str, "jax.Array"], int],
-                           dict[str, "str | int | jax.Array | None"]]
 
 
-def no_attention_fields(metadata: Mapping[str, "jax.Array"],
-                        gid: int) -> dict[str, "str | int | jax.Array | None"]:
-    del metadata, gid
-    return {}
+class AttentionBackend(abc.ABC):
+    """The kernel of the attention layers and the layout of their KV cache."""
 
-
-@dataclass(frozen=True)
-class HostStepInputs:
-    """The host arrays TPUModelRunner._prepare_inputs has filled for one step.
-
-    They follow its per-DP-rank layout: rank r's requests start at
-    r * max_num_reqs_per_dp_rank in seq_lens and the block tables, and at
-    r * (max_num_reqs_per_dp_rank + 1) in query_start_loc. request_distribution
-    is the flat (dp_size * 3,) [num_decode, num_decode, num_reqs] per rank, and
-    block_tables maps a KV cache group id to its (max_num_seqs,
-    max_num_blocks_per_req) view.
-    """
-    kv_cache_groups: "Sequence[KVCacheGroupSpec]"
-    block_tables: Mapping[int, np.ndarray]
-    query_start_loc: np.ndarray
-    seq_lens: np.ndarray
-    request_distribution: np.ndarray
-    scheduled_tokens_per_dp_rank: Mapping[int, Sequence[int]]
-    dp_size: int
-    max_num_reqs_per_dp_rank: int
-    padded_num_scheduled_tokens_per_dp_rank: int
-
-
-class AttentionBackend:
-    """The default "rpa" backend; see the module docstring."""
-
-    name = "rpa"
-
-    zero_warmup_lengths = False
-
-    def check_config(self, vllm_config: "VllmConfig") -> None:
-        """Raise for an engine configuration this backend cannot serve; may
-        adjust it (e.g. the block size). Runs in
-        TpuPlatform.check_and_update_config, before any worker starts."""
-
+    @abc.abstractmethod
     def get_kv_cache_shape(self, total_num_pages: int, page_size: int,
                            num_kv_heads: int, head_dim: int,
-                           kv_dtype: "jnp.dtype") -> tuple[int, ...] | None:
-        """One shard's KV cache shape for num_kv_heads heads, or None for the
-        RPA shape."""
-        return None
+                           kv_dtype: "jnp.dtype") -> tuple[int, ...]:
+        """One shard's KV cache shape for num_kv_heads heads, which
+        kv_cache.get_kv_cache_shape_with_mesh scales to the mesh."""
 
+    @abc.abstractmethod
     def attention(
         self,
         kv_cache: "jax.Array",
@@ -124,6 +62,7 @@ class AttentionBackend:
         shared_md: "AttentionMetadata | SharedAttentionMetadata",
         mesh: "Mesh",
         *,
+        head_dim_original: int,
         sm_scale: float,
         attention_chunk_size: int | None,
         q_scale: float | None,
@@ -134,125 +73,143 @@ class AttentionBackend:
         use_causal_mask: bool,
         attn_logits_soft_cap: float | None,
         decode_query_size: int,
-    ) -> tuple["jax.Array", "jax.Array"] | None:
-        """(kv_cache, output) of attention_interface.attention, or None for
-        its RPA path."""
-        return None
-
-    def prepare_step(self, step: HostStepInputs,
-                     device_buffer: "DeviceBuffer") -> AttentionFields:
-        """Host-side metadata of one step. Arrays the device needs go into
-        device_buffer, which reaches the device in the step's one transfer;
-        the returned fields read them back from the unpacked buffer, per KV
-        cache group."""
-        return no_attention_fields
-
-    def warmup_variants(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
-                        num_tokens: int, num_tokens_paddings: Sequence[int],
-                        max_num_reqs: int,
-                        dp_size: int) -> list[AttentionFields]:
-        """The fields of each backbone executable a step at this token bucket
-        can ask for; the warmup compiles each one."""
-        return [no_attention_fields]
-
-    def warmup_arrays(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
-                      num_tokens: int, max_num_reqs: int, dp_size: int,
-                      mesh: "Mesh",
-                      sharding: "NamedSharding") -> Mapping[str, "jax.Array"]:
-        """Dummy arrays for the warmup_variants fields to read, shaped like
-        prepare_step's so serving reuses the executable."""
-        return {}
+    ) -> tuple["jax.Array", "jax.Array"]:
+        """(kv_cache, output) of attention_interface.attention."""
 
 
-ATTENTION_BACKENDS: dict[str, Callable[[], AttentionBackend]] = {
-    "rpa": AttentionBackend,
-}
+class RPAAttentionBackend(AttentionBackend):
+    """The default attention backend: ragged paged attention v3."""
+
+    name = "rpa"
+
+    def get_kv_cache_shape(self, total_num_pages: int, page_size: int,
+                           num_kv_heads: int, head_dim: int,
+                           kv_dtype: "jnp.dtype") -> tuple[int, ...]:
+        # Note: the kernels are imported here so that the platform, which
+        # imports this module, does not load them.
+        # NOTE(chengjiyao): Currently, the attention kernel is tailored to the
+        # specific model, rather than being determined by the head_dim. If new
+        # models are introduced with a head_dim of 64, this will require
+        # additional model-specific adjustments.
+        if head_dim == 64:
+            import tpu_inference.kernels.ragged_paged_attention.v3.kernel_hd64 as rpa
+        elif envs.USE_BATCHED_RPA_KERNEL:
+            import tpu_inference.kernels.experimental.batched_rpa.wrapper as rpa
+        else:
+            import tpu_inference.kernels.ragged_paged_attention.v3.kernel as rpa
+        return rpa.get_kv_cache_shape(total_num_pages, page_size, num_kv_heads,
+                                      head_dim, kv_dtype)
+
+    def attention(self, *args, **kwargs) -> tuple["jax.Array", "jax.Array"]:
+        # Note: imported here so that the platform, which imports this module,
+        # does not load the kernels.
+        from tpu_inference.layers.common.attention_interface import \
+            rpa_attention
+        return rpa_attention(*args, **kwargs)
+
 
 GDNKernel = Callable[..., tuple[tuple["jax.Array", "jax.Array"], "jax.Array"]]
 
 
-class LinearAttentionBackend:
-    """The default linear attention backend; see the module docstring."""
+class LinearAttentionBackend(abc.ABC):
+    """The kernel of the GDN linear attention layers of hybrid models."""
 
-    name = "default"
-
-    def check_config(self, vllm_config: "VllmConfig") -> None:
-        """Same contract as AttentionBackend.check_config."""
-
+    @abc.abstractmethod
     def gdn_kernel(self) -> GDNKernel:
         """The fused conv1d + GDN kernel run_jax_gdn_attention shard-maps,
         with the signature of kernels.gdn.v3.wrapper.fused_conv1d_gdn."""
+
+
+class GDNLinearAttentionBackend(LinearAttentionBackend):
+    """The default linear attention backend: the GDN v3 kernel."""
+
+    def gdn_kernel(self) -> GDNKernel:
         # Note (david): imported here so that the platform, which imports this
         # module, does not load the Pallas kernels.
         from tpu_inference.kernels.gdn.v3 import wrapper
         return wrapper.fused_conv1d_gdn
 
 
-LINEAR_ATTN_BACKENDS: dict[str, Callable[[], LinearAttentionBackend]] = {
-    "default": LinearAttentionBackend,
-}
-
-# The vLLM backend class that TpuPlatform.get_attn_backend_cls returns for each
-# name besides "rpa" (vLLM's FLASH_ATTN, PallasAttentionBackend).
-VLLM_ATTENTION_BACKENDS: dict[str, str] = {}
+@dataclass(frozen=True)
+class _RegisteredBackend:
+    attention: Callable[[], AttentionBackend]
+    linear_attention: Callable[[], LinearAttentionBackend]
 
 
-def register_vllm_attention_backends() -> None:
-    """Add the names of VLLM_ATTENTION_BACKENDS to vLLM's AttentionBackendEnum,
-    so that --attention-backend accepts them. Runs from the
-    vllm.general_plugins hook, which vLLM calls in every process, and before
-    it parses the flag."""
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
-    if not hasattr(AttentionBackendEnum, "register"):
-        # vLLM before vllm#41091 cannot add a name.
-        return
-    for name, class_path in VLLM_ATTENTION_BACKENDS.items():
-        if name.upper() not in AttentionBackendEnum.__members__:
-            AttentionBackendEnum.register(name.upper(), class_path)
+_REGISTERED_BACKENDS: dict[str, _RegisteredBackend] = {}
+
+
+def register_attention_backend(
+    name: str,
+    *,
+    attention: Callable[[], AttentionBackend],
+    vllm_backend: str,
+    linear_attention: Callable[
+        [], LinearAttentionBackend] = GDNLinearAttentionBackend
+) -> None:
+    """Make --attention-backend <name> run these backends.
+
+    vllm_backend is the class path of the vLLM attention backend that
+    TpuPlatform.get_attn_backend_cls gives the attention layers: a
+    PallasAttentionBackend subclass whose get_impl_cls returns a
+    PallasAttentionBackendImpl subclass with attention_backend = name.
+
+    Call it from a vllm.general_plugins entry point, which vLLM runs in every
+    process before it parses --attention-backend, and may run more than once
+    in one process."""
+    name = name.lower()
+    member = AttentionBackendEnum.__members__.get(name.upper())
+    if member is None:
+        AttentionBackendEnum.register(name.upper(), vllm_backend)
+    elif member.get_path() != vllm_backend:
+        raise ValueError(f"vLLM already has an attention backend named "
+                         f"{name.upper()}, at {member.get_path()}.")
+    _REGISTERED_BACKENDS[name] = _RegisteredBackend(attention,
+                                                    linear_attention)
+
+
+def is_registered_attention_backend(
+        backend: AttentionBackendEnum | None) -> bool:
+    """Whether vLLM's backend is one of register_attention_backend."""
+    return backend is not None and backend.name.lower() in _REGISTERED_BACKENDS
 
 
 def attention_backend_name(vllm_config: "VllmConfig") -> str:
-    """The backend --attention-backend selects: a name of
-    VLLM_ATTENTION_BACKENDS, else "rpa" (FLASH_ATTN, no flag, or a backend vLLM
-    picked itself, such as TRITON_ATTN for Gemma-4)."""
+    """The backend --attention-backend selects: a registered name, else "rpa"
+    (FLASH_ATTN, no flag, or a backend vLLM picked itself, such as TRITON_ATTN
+    for Gemma-4)."""
     backend = vllm_config.attention_config.backend
-    if backend is not None and backend.name.lower() in VLLM_ATTENTION_BACKENDS:
+    if is_registered_attention_backend(backend):
         return backend.name.lower()
-    return AttentionBackend.name
+    return RPAAttentionBackend.name
 
 
 def create_attention_backend(name: str) -> AttentionBackend:
     """The attention backend of that name."""
-    return ATTENTION_BACKENDS[name]()
+    if name == RPAAttentionBackend.name:
+        return RPAAttentionBackend()
+    return _REGISTERED_BACKENDS[name].attention()
 
 
 def create_linear_attention_backend(name: str) -> LinearAttentionBackend:
-    """The linear attention backend of that name, or the default one when the
-    name only selects an attention backend."""
-    return LINEAR_ATTN_BACKENDS.get(name, LinearAttentionBackend)()
+    """The linear attention backend of that name."""
+    if name == RPAAttentionBackend.name:
+        return GDNLinearAttentionBackend()
+    return _REGISTERED_BACKENDS[name].linear_attention()
 
 
 def check_attention_backend_config(vllm_config: "VllmConfig") -> None:
-    """Raise for an engine configuration the selected backends cannot serve.
-    Runs in TpuPlatform.check_and_update_config, before any worker starts."""
+    """Raise if a registered backend is selected for an engine whose processes
+    cannot rebuild its name. Runs in TpuPlatform.check_and_update_config,
+    before any worker starts.
+
+    register_attention_backend adds the name to AttentionBackendEnum at
+    runtime. Enum members pickle by value, and a process that unpickles
+    vllm_config before it loads the plugins, a spawned EngineCore or a Ray
+    worker, cannot rebuild the member. A forked process inherits it."""
     name = attention_backend_name(vllm_config)
-    if name != AttentionBackend.name:
-        check_forked_single_host(name)
-    create_attention_backend(name).check_config(vllm_config)
-    create_linear_attention_backend(name).check_config(vllm_config)
-
-
-def check_forked_single_host(name: str) -> None:
-    """Raise unless vllm_config only reaches forked processes.
-
-    register_vllm_attention_backends adds the member for name at runtime.
-    Enum members pickle by value, and a process that unpickles vllm_config
-    before it loads the plugins, a spawned EngineCore or a Ray worker, cannot
-    rebuild the member. A forked process inherits it."""
-    from vllm import envs as vllm_envs
-    from vllm.ray.lazy_utils import is_in_ray_actor
-
-    from tpu_inference import envs
+    if name == RPAAttentionBackend.name:
+        return
     reasons = []
     if envs.TPU_MULTIHOST_BACKEND == "ray":
         reasons.append("TPU_MULTIHOST_BACKEND=ray")

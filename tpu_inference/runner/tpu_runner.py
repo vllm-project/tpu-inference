@@ -52,7 +52,7 @@ import tpu_inference.envs as envs
 from tpu_inference import utils as common_utils
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
 from tpu_inference.layers.common.attention_backend import (
-    HostStepInputs, attention_backend_name, create_attention_backend)
+    attention_backend_name, create_attention_backend)
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import (MESH_AXIS_NAMES,
@@ -789,8 +789,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         is_last_rank: bool = True,
     ):
         self.vllm_config = vllm_config
-        # The step metadata, the warmup and the KV cache layout of the TPU
-        # attention backend --attention-backend selects.
+        # The KV cache layout of the TPU attention backend --attention-backend
+        # selects.
         self.attention_backend = create_attention_backend(
             attention_backend_name(vllm_config))
         self.model_config = vllm_config.model_config
@@ -3033,7 +3033,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                                      sharding=data_parallel_attn_sharding)
 
         # Collect block tables host arrays loops zone presence zones legality
-        def build_block_table_host(kv_cache_gid: int) -> np.ndarray:
+        def build_block_table_host(kv_cache_gid: int) -> None:
 
             block_table_obj = self.input_batch.block_table[kv_cache_gid]
             block_tables_view = self.device_buffer.get_view(
@@ -3066,31 +3066,15 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 block_tables_view[:2 * n] = np.repeat(block_tables_view[:n],
                                                       2,
                                                       axis=0)
-            return block_tables_view
 
-        block_tables_views: dict[int, np.ndarray] = {}
         if len(self.kv_cache_config.kv_cache_groups) <= 1:
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             if not no_kv_cache:
-                block_tables_views[0] = build_block_table_host(0)
+                build_block_table_host(0)
         else:
             for gid, kv_cache_group in enumerate(
                     self.kv_cache_config.kv_cache_groups):
-                block_tables_views[gid] = build_block_table_host(gid)
-
-        attention_fields = self.attention_backend.prepare_step(
-            HostStepInputs(
-                kv_cache_groups=self.kv_cache_config.kv_cache_groups,
-                block_tables=block_tables_views,
-                query_start_loc=query_start_loc_view,
-                seq_lens=seq_lens_view,
-                request_distribution=request_distribution,
-                scheduled_tokens_per_dp_rank=scheduled_tokens_per_dp_rank,
-                dp_size=dp_size,
-                max_num_reqs_per_dp_rank=max_num_reqs_per_dp_rank,
-                padded_num_scheduled_tokens_per_dp_rank=(
-                    padded_num_scheduled_tokens_per_dp_rank),
-            ), self.device_buffer)
+                build_block_table_host(gid)
 
         metadata_blob, metadata_layout = self.device_buffer.build()
 
@@ -3143,8 +3127,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             seq_lens, positions = self._subtract_num_rejected_tokens(
                 seq_lens, positions, req_ids_dp, scheduled_tokens_per_dp_rank)
 
-        def build_attn(block_tables: jax.Array | None,
-                       gid: int) -> AttentionMetadata:
+        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -3154,7 +3137,6 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
-                **attention_fields(metadata, gid),
             )
 
             return attention_metadata_gid
@@ -3176,7 +3158,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             no_kv_cache = len(self.kv_cache_config.kv_cache_groups) == 0
             block_tables = metadata.get(
                 "block_tables_gid_0") if not no_kv_cache else None
-            attention_metadata = build_attn(block_tables, 0)
+            attention_metadata = build_attn(block_tables)
             shared_attention_metadata = build_shared_attn()
         else:
             # One AttentionMetadata per group, layers of a group
@@ -3184,8 +3166,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             # sharing across the jit boundary. See its docstring.
             attention_metadata = GroupedAttentionMetadata(
                 groups=tuple(
-                    build_attn(metadata[f"block_tables_gid_{gid}"], gid) for
-                    gid in range(len(self.kv_cache_config.kv_cache_groups))),
+                    build_attn(metadata[f"block_tables_gid_{gid}"]) for gid in
+                    range(len(self.kv_cache_config.kv_cache_groups))),
                 layer_names_per_group=tuple(
                     tuple(group.layer_names)
                     for group in self.kv_cache_config.kv_cache_groups),

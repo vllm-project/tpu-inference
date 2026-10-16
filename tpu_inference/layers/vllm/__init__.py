@@ -24,8 +24,3 @@ def register_layers():
     # that vLLM invokes at startup, before any model is loaded.
     from tpu_inference.models.vllm.experimental import register_models
     register_models()
-
-    # Let --attention-backend name the TPU attention kernels.
-    from tpu_inference.layers.common.attention_backend import \
-        register_vllm_attention_backends
-    register_vllm_attention_backends()
