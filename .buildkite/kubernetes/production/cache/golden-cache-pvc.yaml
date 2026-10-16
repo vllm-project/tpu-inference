@@ -1,0 +1,25 @@
+# Warm read-only base every TPU job clones from.
+#
+# Each test Job's ephemeral volume sets this PVC as its dataSource, so a job
+# starts with a populated compilation cache instead of an empty disk and pays a
+# CSI clone rather than a download of tens of thousands of small objects.
+#
+# The disk is zonal and per-cluster. MultiKueue does not move a
+# PersistentVolume between clusters, so every worker needs its own copy under
+# this same name; that is what makes the pipeline's volume definition portable
+# across workers without naming a region.
+#
+# Sizing must exceed the largest expected cache generation with headroom, and
+# must match the storage request of the cloning ephemeral volumes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: golden-jax-cache-pvc
+  namespace: buildkite
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: premium-rwo
+  resources:
+    requests:
+      storage: 500Gi

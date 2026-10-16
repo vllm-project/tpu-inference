@@ -1,0 +1,39 @@
+# Apply as a Helm post-render/Kustomize patch to the manager release only.
+# Replace the image with a reviewed, signed digest; never deploy this placeholder.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multikueue-fleet-controller-manager
+  namespace: kueue-system
+spec:
+  template:
+    spec:
+      volumes:
+        - name: clusterprofile-plugins
+          emptyDir: {}
+      initContainers:
+        - name: add-gcp-auth-plugin
+          image: REGION-docker.pkg.dev/PROJECT/tpu-ci-images/gcp-auth-plugin@sha256:REPLACE
+          command:
+            - cp
+          args:
+            - /gcp-auth-plugin
+            - /plugins/gcp-auth-plugin
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: clusterprofile-plugins
+              mountPath: /plugins
+      containers:
+        - name: manager
+          volumeMounts:
+            - name: clusterprofile-plugins
+              mountPath: /plugins
+              readOnly: true
