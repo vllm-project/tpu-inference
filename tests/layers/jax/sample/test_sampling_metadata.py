@@ -331,16 +331,17 @@ def test_from_input_batch_with_logprobs(mesh: Mesh):
     )
     assert metadata_with.logprobs, "logprobs should be True when max_num_logprobs > 0"
 
-    # Case 2: Logprobs are not requested (max_num_logprobs is 0)
+    # Case 2: Logprobs are requested with zero alternatives (logprobs=0);
+    # the sampled token's logprob must still be returned.
     mock_batch_id_logprobs_zero = MockInputBatch(all_greedy=True,
                                                  max_num_logprobs=0)
-    metadata_without_zero = TPUSupportedSamplingMetadata.from_input_batch(
+    metadata_zero = TPUSupportedSamplingMetadata.from_input_batch(
         mesh=mesh,
         input_batch=mock_batch_id_logprobs_zero,
         padded_num_reqs=4,
         req_indices_dp=req_indices_dp,
     )
-    assert not metadata_without_zero.logprobs, "logprobs should be False when max_num_logprobs is 0"
+    assert metadata_zero.logprobs, "logprobs should be True when max_num_logprobs is 0"
 
     # Case 3: Logprobs are not requested (max_num_logprobs is None)
     mock_batch_id_logprobs_none = MockInputBatch(all_greedy=True,
