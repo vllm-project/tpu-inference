@@ -39,6 +39,7 @@ from tpu_inference.layers.vllm.backends.flash_attn import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
 from tpu_inference.layers.vllm.custom_ops.gdn_attention_op import \
     VllmGatedDeltaNetAttention
+from tpu_inference.models.common import model_loader
 from tpu_inference.platforms.tpu_platform import TpuPlatform
 from tpu_inference.runner import kv_cache as kv_cache_mod
 
@@ -307,3 +308,56 @@ def test_default_backend_skips_the_process_check(monkeypatch):
     monkeypatch.setenv("TPU_MULTIHOST_BACKEND", "ray")
 
     attention_backend.check_attention_backend_config(make_vllm_config(None))
+
+
+def test_default_backend_has_no_step_metadata():
+    backend = RPAAttentionBackend()
+
+    assert (backend.prepare_step(None, None)
+            is attention_backend.no_attention_fields)
+    assert backend.warmup_variants([],
+                                   num_tokens=16,
+                                   num_tokens_paddings=[16],
+                                   max_num_reqs=8,
+                                   dp_size=1) == [
+                                       attention_backend.no_attention_fields
+                                   ]
+    assert backend.warmup_arrays([],
+                                 num_tokens=16,
+                                 max_num_reqs=8,
+                                 dp_size=1,
+                                 mesh=None,
+                                 sharding=None) == {}
+    assert attention_backend.no_attention_fields({}, 0) == {}
+
+
+def test_config_check_runs_the_selected_backend_check(monkeypatch):
+    checked = []
+    monkeypatch.setattr(FakeAttentionBackend, "check_config",
+                        lambda self, vllm_config: checked.append(vllm_config))
+    vllm_config = make_vllm_config(FAKE)
+
+    attention_backend.check_attention_backend_config(vllm_config)
+
+    assert checked == [vllm_config]
+
+
+def test_rejects_a_jax_model(monkeypatch):
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "flax_nnx")
+
+    with pytest.raises(ValueError, match="MODEL_IMPL_TYPE=flax_nnx"):
+        attention_backend.check_attention_backend_config(
+            make_vllm_config(FAKE))
+
+
+@pytest.mark.parametrize(("backend", "impl"), [
+    (FAKE, "vllm"),
+    (None, "flax_nnx"),
+])
+def test_auto_model_impl_picks_the_vllm_model(monkeypatch, backend, impl):
+    monkeypatch.setenv("MODEL_IMPL_TYPE", "auto")
+    monkeypatch.setattr(model_loader, "resolve_model_architecture",
+                        lambda vllm_config, is_draft_model: "flax_nnx")
+
+    assert model_loader.resolve_model_impl_type(
+        make_vllm_config(backend)) == impl
