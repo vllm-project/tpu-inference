@@ -1705,7 +1705,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        if self._can_use_continue_decode(scheduler_output):
+        if TPUModelRunner._can_use_continue_decode(self, scheduler_output):
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
@@ -1892,7 +1892,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
     def _can_use_continue_decode(
             self, scheduler_output: "VllmSchedulerOutput") -> bool:
-        if not self.enable_continue_decode:
+        if self.enable_continue_decode is not True:
             return False
         num_reqs = self.input_batch.num_reqs
         if num_reqs <= 0 or self.input_batch.request_distribution[
@@ -2596,7 +2596,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_num_reqs_across_dp = max(
             len(req_ids) for req_ids in req_ids_dp.values())
 
-        use_continue_decode = self._can_use_continue_decode(scheduler_output)
+        use_continue_decode = TPUModelRunner._can_use_continue_decode(
+            self, scheduler_output)
 
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)

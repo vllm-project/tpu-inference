@@ -1109,8 +1109,6 @@ class TestTPUJaxRunnerDisableMM:
         runner.is_last_rank = True
         runner.speculative_config = None
         runner.execute_model_state = None
-        runner._can_use_continue_decode = lambda s: TPUModelRunner._can_use_continue_decode(
-            runner, s)
         runner.input_batch.num_computed_tokens_cpu = np.array([10, 20],
                                                               dtype=np.int32)
         runner.input_batch.num_prompt_tokens = np.array([10, 20],
@@ -1195,7 +1193,12 @@ class TestTPUJaxRunnerDisableMM:
         runner.scheduler_config.async_scheduling = True
         runner.speculative_config = None
         runner.execute_model_state = None
-        runner._can_use_continue_decode = lambda s: True
+        runner.enable_continue_decode = True
+        runner.input_batch.num_reqs = 1
+        runner.input_batch.request_distribution = [1, 0, 1]
+        runner.input_batch.num_computed_tokens_cpu = np.array([25],
+                                                              dtype=np.int32)
+        runner.input_batch.num_prompt_tokens = np.array([10], dtype=np.int32)
         runner._execute_continue_decode = MagicMock(return_value="done")
 
         req1_state = MagicMock()
@@ -1229,6 +1232,7 @@ class TestTPUJaxRunnerDisableMM:
         scheduler_output.total_num_scheduled_tokens = 1
         scheduler_output.scheduled_cached_reqs = cached_reqs
         scheduler_output.kv_cache_block_copies = None
+        scheduler_output.has_structured_output_requests = False
 
         TPUModelRunner._execute_model(runner, scheduler_output)
 
