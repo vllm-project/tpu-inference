@@ -16,7 +16,6 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import torch
 import vllm.envs as vllm_envs
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -63,41 +62,13 @@ from tpu_inference.layers.vllm.quantization.configs import (
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
-from tpu_inference.utils import (_NUMPY_UNSUPPORTED_DTYPES,
-                                 get_mesh_shape_product, to_jax_dtype)
+from tpu_inference.utils import free_host_tensor, get_mesh_shape_product
+from tpu_inference.utils import host_numpy_view as _host_numpy_view
+from tpu_inference.utils import pathways_device_put, to_jax_dtype
 
 P = PartitionSpec
 
 logger = init_logger(__name__)
-
-
-def _host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
-    """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
-
-    numpy has no scalar type for bf16 or the fp8 formats, so those travel as
-    uint8 and are reinterpreted with the ml_dtypes type JAX already uses for
-    them -- the same bit cast `tpu_inference.utils.t2j` does, and unlike the
-    torchax `t2j` this module falls back to, which widens them to float32 on
-    the host first. Reinterpreting scales the trailing dimension by the element
-    width on the way out and the numpy view undoes it exactly, but torch can
-    only do it on contiguous data.
-
-    Note that handing torch storage to numpy makes it non-resizable for good,
-    so `untyped_storage().resize_(0)` on the viewed tensor raises from here on.
-    The fp8 MoE callers free through `_free_torch_storage`, which falls back to
-    `set_()` and frees the buffer just the same, but a caller that resizes
-    unguarded cannot be given `stage_on_host`.
-    """
-    t = tensor.detach()
-    if t.device.type != "cpu":
-        return None
-
-    jax_dtype = _NUMPY_UNSUPPORTED_DTYPES.get(t.dtype)
-    if jax_dtype is None:
-        return t.numpy()
-    if not t.dim() or not t.is_contiguous():
-        return None
-    return t.view(torch.uint8).numpy().view(jax_dtype)
 
 
 def _load_weight_on_host(tensor: torch.Tensor,
@@ -202,9 +173,7 @@ def _load_weight_for_layer(
         )
 
     # Pathways real-weight path
-    dtype = to_jax_dtype(tensor.dtype)
-    np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-    return jax.device_put(np_tensor, sharding).astype(dtype)
+    return pathways_device_put(tensor, sharding)
 
 
 def _prefix_matches(prefix: str, patterns: Sequence[str]) -> bool:
@@ -377,7 +346,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
         weight = jnp.transpose(weight)
 
         # Free CPU memory immediately
-        layer.weight.untyped_storage().resize_(0)
+        free_host_tensor(layer.weight)
         delattr(layer, 'weight')
         if layer.bias is not None and not layer.skip_bias_add:
             if layer.return_bias:
@@ -385,7 +354,7 @@ class VllmUnquantizedLinearMethod(vllm_linear.UnquantizedLinearMethod,
             bias_sharding = NamedSharding(self.linear_config.mesh,
                                           self.linear_config.bias_sharding)
             bias = _load_weight_for_layer(layer, "bias", bias_sharding)
-            layer.bias.untyped_storage().resize_(0)
+            free_host_tensor(layer.bias)
             delattr(layer, 'bias')
         else:
             bias = None
@@ -671,16 +640,16 @@ class VllmUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod,
         w13_weight = _load_weight_for_layer(layer, "w13_weight", ep_sharding)
         w2_weight = _load_weight_for_layer(layer, "w2_weight", ep_sharding)
         # Free CPU memory immediately
-        layer.w13_weight.untyped_storage().resize_(0)
-        layer.w2_weight.untyped_storage().resize_(0)
+        free_host_tensor(layer.w13_weight)
+        free_host_tensor(layer.w2_weight)
         delattr(layer, 'w13_weight')
         delattr(layer, 'w2_weight')
 
         if self.moe.has_bias:
             w13_bias = _load_weight_for_layer(layer, "w13_bias", ep_sharding)
             w2_bias = _load_weight_for_layer(layer, "w2_bias", ep_sharding)
-            layer.w13_bias.untyped_storage().resize_(0)
-            layer.w2_bias.untyped_storage().resize_(0)
+            free_host_tensor(layer.w13_bias)
+            free_host_tensor(layer.w2_bias)
             delattr(layer, 'w13_bias')
             delattr(layer, 'w2_bias')
         else:

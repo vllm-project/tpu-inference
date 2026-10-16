@@ -32,7 +32,7 @@ from tpu_inference.layers.common.utils import general_device_put
 from tpu_inference.logger import init_logger
 from tpu_inference.models.common.pathways_dummy_loader import (
     create_dummy_weights_on_tpu, is_pathways_dummy_load)
-from tpu_inference.utils import t2j, to_jax_dtype
+from tpu_inference.utils import pathways_device_put, t2j, to_jax_dtype
 
 P = PartitionSpec
 
@@ -105,10 +105,7 @@ def _convert_to_torchax_and_shard(tensor: torch.Tensor,
                     weight_dtype=to_jax_dtype(tensor.dtype),
                 ))
         else:
-            dtype = to_jax_dtype(tensor.dtype)
-            np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
-            return torch_view(
-                jax.device_put(np_tensor, sharding).astype(dtype))
+            return torch_view(pathways_device_put(tensor, sharding))
     if isinstance(tensor, torchax.tensor.Tensor):
         tensor = jax_view(tensor)
     else:
