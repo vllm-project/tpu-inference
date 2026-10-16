@@ -95,10 +95,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 WHEEL_UTILS="${SCRIPT_DIR}/wheel_utils.py"
-# The vLLM commit CI tests against. Read directly instead of through
-# get_vllm_commit_hash, which falls back to vLLM's current HEAD when the file
-# is missing; a release must never build an untested vLLM.
-VLLM_LKG_FILE="${REPO_ROOT}/.buildkite/vllm_lkg.version"
+# Provides get_vllm_commit_hash (the vLLM commit in .buildkite/vllm_lkg.version).
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/configs/pipeline_config.sh"
 
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/dist}"
@@ -158,11 +157,14 @@ CORE_VERSION=$1
 [[ -n "${CORE_VERSION}" ]] || die "<version> must not be empty."
 WHEEL_VERSION="${CORE_VERSION}"
 
-# The vLLM ref CI tested: vllm_lkg.version, unless overridden.
-[[ -f "${VLLM_LKG_FILE}" ]] \
-    || die "${VLLM_LKG_FILE} not found; it pins the vLLM commit to build."
-PINNED_VLLM_REF="$(tr -d '[:space:]' < "${VLLM_LKG_FILE}")"
-[[ -n "${PINNED_VLLM_REF}" ]] || die "${VLLM_LKG_FILE} is empty."
+# The vLLM ref CI tested (vllm_lkg.version), unless overridden.
+# get_vllm_commit_hash reads a path relative to the repo root, so run it there.
+[[ -f "${REPO_ROOT}/.buildkite/vllm_lkg.version" ]] \
+    || echo "WARNING: .buildkite/vllm_lkg.version not found;" \
+            "get_vllm_commit_hash falls back to vLLM's current HEAD." >&2
+PINNED_VLLM_REF="$(cd "${REPO_ROOT}" && get_vllm_commit_hash)" \
+    || die "could not resolve the vLLM commit (get_vllm_commit_hash)."
+[[ -n "${PINNED_VLLM_REF}" ]] || die "get_vllm_commit_hash returned nothing."
 VLLM_REF="${VLLM_REF_OVERRIDE:-${PINNED_VLLM_REF}}"
 if [[ "${VLLM_REF}" != "${PINNED_VLLM_REF}" ]]; then
     echo "WARNING: building vLLM ${VLLM_REF} (VLLM_REF_OVERRIDE), not the" \
