@@ -376,6 +376,49 @@ class TestPersistentBatchManager(unittest.TestCase):
         self.assertEqual(manager.input_batch.num_tokens[0], 3)
         self.assertEqual(manager.input_batch.num_tokens_no_spec[0], 3)
 
+    def test_update_states_non_last_rank_empty_new_token_ids(self):
+        req_id = "req_pp_empty"
+        initial_prompt_tokens = [1, 2, 3]
+        initial_output_tokens = []
+        req_state = _create_cached_request(req_id)
+        req_state.prompt_token_ids = initial_prompt_tokens
+        req_state.output_token_ids = list(initial_output_tokens)
+        requests = {req_id: req_state}
+
+        input_batch = InputBatch(
+            max_num_reqs=4,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            pin_memory=False,
+            vocab_size=128,
+            block_sizes=[16],
+        )
+        input_batch.add_request(req_state)
+
+        manager = PersistentBatchManager(requests,
+                                         input_batch,
+                                         encoder_cache={},
+                                         uses_mrope=False,
+                                         model_config=MagicMock(),
+                                         is_last_rank=False)
+
+        scheduler_output = MagicMock()
+        req_data = MagicMock()
+        req_data.req_ids = [req_id]
+        req_data.num_computed_tokens = [3]
+        req_data.new_token_ids = [[]]
+        req_data.new_block_ids = [None]
+        req_data.num_output_tokens = [0]
+        scheduler_output.scheduled_cached_reqs = req_data
+        scheduler_output.scheduled_spec_decode_tokens = {}
+        scheduler_output.num_scheduled_tokens = {req_id: 1}
+        scheduler_output.total_num_scheduled_tokens = 1
+
+        manager.update_states(scheduler_output, None)
+
+        # Output tokens should remain empty and not fail on slice assignment
+        self.assertEqual(req_state.output_token_ids, [])
+
     def test_assert_mamba_state_invariants_conditional_execution(self):
         req = _create_cached_request("req-0")
         requests = {req.req_id: req}
