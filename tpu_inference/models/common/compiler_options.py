@@ -59,3 +59,18 @@ def get_step_fn_compiler_options():
                 threshold_bytes)
 
     return compiler_options
+
+
+def get_sampling_compiler_options():
+    """Returns compiler options for the sampling function.
+
+    Disables SparseCore all-gather collective offload inside `sample()` so that
+    `all-gather` collectives inside conditional fallback branches (`lax.cond`)
+    stay on TensorCore and do not trigger a SparseCore program barrier deadlock
+    on TPU v7x.
+    """
+    return {
+        "xla_tpu_enable_sparse_core_collective_offload_all_gather": "false",
+        "xla_tpu_enable_sparse_core_collective_offload_2d_all_gather": "false",
+        "xla_tpu_enable_sparse_core_collective_offload_3d_all_gather": "false",
+    }

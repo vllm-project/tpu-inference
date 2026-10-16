@@ -58,7 +58,8 @@ def test_hbm_usage_bytes_ray_backend():
         "bytes_in_use": 100 * GBYTES,
         "bytes_limit": 128 * GBYTES
     }
-    mock_device2 = MagicMock()
+    mock_device1.process_index = jax.process_index()
+    mock_device2 = MagicMock(process_index=jax.process_index())
     mock_device2.memory_stats.side_effect = Exception("Memory stats failed")
 
     devices = [mock_device1, mock_device2]
@@ -67,6 +68,65 @@ def test_hbm_usage_bytes_ray_backend():
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (100 * GBYTES, 128 * GBYTES)]
     assert usage == expected_usage
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_remote_devices_listed_first(_):
+    """A non-leader host whose devices come after remote ones in the list."""
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = {
+        "bytes_in_use": 3 * GBYTES,
+        "bytes_limit": 96 * GBYTES
+    }
+
+    usage = hbm_usage_bytes([remote, remote, local, local])
+
+    assert usage == [(3 * GBYTES, 96 * GBYTES)] * 4
+    remote.memory_stats.assert_not_called()
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("tpu_inference.utils.pathways_hbm_usage_gb")
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_falls_back_when_no_stats(_, mock_live_usage):
+    """No device reports stats: estimate instead of returning an empty list,
+    which would budget 0 bytes for the KV cache. Live-array accounting only
+    sees addressable shards, so remote devices reuse the local estimate."""
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = None
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    mock_live_usage.return_value = [(1 * GBYTES, 96 * GBYTES),
+                                    (0, 96 * GBYTES)]
+
+    usage = hbm_usage_bytes([local, remote])
+
+    mock_live_usage.assert_called_once_with([local, remote])
+    assert usage == [(1 * GBYTES, 96 * GBYTES)] * 2
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("jax.live_arrays")
+@patch("jax.devices")
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_fallback_remote_not_counted_as_empty(
+        _, mock_devices, mock_live_arrays):
+    """End to end through the live-array estimator: a remote device must not
+    be reported as 0 bytes used, which would over-size the KV cache."""
+    mock_devices.return_value = [MagicMock(device_kind="TPU v6e")]
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = None
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    shard = MagicMock()
+    shard.data.device = local
+    shard.data.nbytes = 5 * GBYTES
+    mock_live_arrays.return_value = [MagicMock(addressable_shards=[shard])]
+
+    usage = hbm_usage_bytes([local, remote])
+
+    assert usage == [(5 * GBYTES, 32 * GBYTES)] * 2
+    remote.memory_stats.assert_not_called()
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
@@ -83,12 +143,51 @@ def test_hbm_usage_bytes_pathways_disabled():
         "bytes_limit": 128 * GBYTES
     }
 
+    mock_device1.process_index = jax.process_index()
+    mock_device2.process_index = jax.process_index()
+
     devices = [mock_device1, mock_device2]
     usage = hbm_usage_bytes(devices)
 
     expected_usage = [(100 * GBYTES, 128 * GBYTES),
                       (50 * GBYTES, 128 * GBYTES)]
     assert usage == expected_usage
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+def test_hbm_usage_bytes_counts_only_given_devices():
+    """A worker using a subset of the host's devices counts only that subset."""
+    used = MagicMock(process_index=jax.process_index())
+    used.memory_stats.return_value = {
+        "bytes_in_use": 1 * GBYTES,
+        "bytes_limit": 96 * GBYTES
+    }
+    unused = MagicMock(process_index=jax.process_index())
+
+    with patch("jax.local_devices", return_value=[used, unused]):
+        usage = hbm_usage_bytes([used])
+
+    assert usage == [(1 * GBYTES, 96 * GBYTES)]
+    unused.memory_stats.assert_not_called()
+
+
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", False)
+@patch("jax.process_count", return_value=2)
+def test_hbm_usage_bytes_non_addressable_devices(_):
+    """Remote devices are not queried and reuse a local device's stats."""
+    local = MagicMock(process_index=jax.process_index())
+    local.memory_stats.return_value = {
+        "bytes_in_use": 2 * GBYTES,
+        "bytes_limit": 96 * GBYTES
+    }
+    remote = MagicMock(process_index=jax.process_index() + 1)
+    remote.memory_stats.side_effect = RuntimeError(
+        "MemoryStats is only supported for addressable PjRt devices.")
+
+    usage = hbm_usage_bytes([local, remote])
+
+    assert usage == [(2 * GBYTES, 96 * GBYTES)] * 2
+    remote.memory_stats.assert_not_called()
 
 
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
