@@ -19,6 +19,14 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# httpx caps a client at 100 connections by default. A decode request holds its
+# connection for the whole stream, so with more than 100 requests in flight the
+# extras wait in the proxy after their prefill finished, while P only keeps their
+# KV for P2P_WAIT_PULL_TIMEOUT. When they finally reach D the KV is gone and the
+# pull fails. Concurrency is bounded by the client, not the proxy.
+CLIENT_LIMITS = httpx.Limits(max_connections=None,
+                             max_keepalive_connections=None)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,7 +42,9 @@ async def lifespan(app: FastAPI):
         prefiller_base_url = f'http://{host}:{port}'
         app.state.prefill_clients.append({
             'client':
-            httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
+            httpx.AsyncClient(timeout=None,
+                              limits=CLIENT_LIMITS,
+                              base_url=prefiller_base_url),
             'host':
             host,
             'port':
@@ -48,7 +58,9 @@ async def lifespan(app: FastAPI):
         decoder_base_url = f'http://{host}:{port}'
         app.state.decode_clients.append({
             'client':
-            httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
+            httpx.AsyncClient(timeout=None,
+                              limits=CLIENT_LIMITS,
+                              base_url=decoder_base_url),
             'host':
             host,
             'port':
