@@ -245,86 +245,79 @@ def _tc_local_moe(tokens: jax.Array, token_indices_sorted: jax.Array,
     """This EP shard's experts with the permute and combine on the TensorCore.
 
     The shard's rows are [start, end) of the expert-sorted order. They are
-    gathered into a compact buffer, which gmm_v2 reads from row 0 once the
-    sizes of the groups before the shard are zeroed (it places group g at
+    gathered `capacity` at a time into a compact buffer, which gmm_v2 reads
+    from row 0 given each group's rows in that chunk (it places group g at
     sum(group_sizes[:g])). The combine is a one-hot matmul over the buffer:
     out[t] = sum_j sel[t, j] * gmm2[j], with sel[t, j] = topk_weights[t, k] for
-    the k whose sorted row is start + j. A shard with more than `capacity` rows
-    uses a buffer of all the rows instead, combined `capacity` rows at a time.
+    the k whose sorted row is the chunk's row j. Usually one chunk holds all
+    of the shard's rows; a shard with more loops over chunks, so no buffer is
+    ever larger than `capacity` rows.
 
     Returns the shard's partial sums, [num_tokens, hidden].
     """
     num_rows = token_indices_sorted.shape[0]
     num_tokens = tokens.shape[0]
+    capacity = min(capacity, num_rows)
     group_start = group_offset[0]
     group_offsets = jnp.cumulative_sum(group_sizes, include_initial=True)
     start = group_offsets[group_start]
     end = group_offsets[group_start + w1.shape[0]]
-    compact_group_sizes = jnp.where(
-        jnp.arange(group_sizes.size) < group_start, 0, group_sizes)
-    revert = topk_argsort_revert_indices.reshape(num_tokens, topk)
-    weights = topk_weights.reshape(num_tokens, topk)
+    # Each group's rows relative to the shard's first row; other groups empty.
+    groups = jnp.arange(group_sizes.size)
+    local = (groups >= group_start) & (groups < group_start + w1.shape[0])
+    group_lo = jnp.where(local, group_offsets[:-1] - start, 0)
+    group_hi = jnp.where(local, group_offsets[1:] - start, 0)
+    padded_indices = jnp.pad(token_indices_sorted, (0, capacity))
+    revert = topk_argsort_revert_indices.reshape(num_tokens, topk) - start
+    weights = topk_weights.reshape(num_tokens, topk).astype(tokens.dtype)
 
-    def select(base: jax.Array, lo: jax.Array, hi: jax.Array) -> jax.Array:
-        """sel[t, j] for buffer rows base + j whose shard row is in [lo, hi)."""
-        row = revert - start
-        rel = jnp.where((row >= lo) & (row < hi), row - base, -1)
-        onehot = jax.nn.one_hot(rel, capacity, dtype=tokens.dtype)
-        return (onehot * weights[..., None].astype(tokens.dtype)).sum(axis=1)
+    def chunk(k: jax.Array) -> jax.Array:
+        """Partial sums from shard rows [k * capacity, (k + 1) * capacity)."""
+        lo = k * capacity
+        idx = jax.lax.dynamic_slice(padded_indices, (start + lo, ),
+                                    (capacity, ))
+        if num_tokens <= _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS:
+            x = jnp.dot(jax.nn.one_hot(idx, num_tokens, dtype=tokens.dtype),
+                        tokens,
+                        preferred_element_type=jnp.float32).astype(
+                            tokens.dtype)
+        else:
+            x = tokens[idx]
+        chunk_group_sizes = (jnp.clip(group_hi - lo, 0, capacity) -
+                             jnp.clip(group_lo - lo, 0, capacity))
+        gmm1_res = gmm_wrapper(x,
+                               w1,
+                               w1_scale,
+                               w1_bias,
+                               chunk_group_sizes,
+                               group_offset,
+                               fuse_act=activation,
+                               preferred_element_type=x.dtype)
+        gmm1_res = gmm1_res[:, :w2.shape[1]]
+        gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias,
+                               chunk_group_sizes, group_offset)
+        # gmm_v2 runs with zero_initialize=False: rows past the chunk's are
+        # stale HBM, and 0 * NaN in the matmul below would spread.
+        gmm2_res = jnp.where((jnp.arange(capacity)
+                              < end - start - lo)[:, None], gmm2_res, 0)
+        rel = jnp.where((revert >= lo) & (revert < lo + capacity), revert - lo,
+                        -1)
+        sel = (jax.nn.one_hot(rel, capacity, dtype=tokens.dtype) *
+               weights[..., None]).sum(axis=1)
+        return jnp.dot(sel, gmm2_res, preferred_element_type=jnp.float32)
 
-    def run(buffer_rows: int):
+    def all_chunks() -> jax.Array:
+        return jax.lax.fori_loop(
+            0, (end - start + capacity - 1) // capacity,
+            lambda k, acc: acc + chunk(k),
+            jnp.zeros((num_tokens, w2.shape[2]), jnp.float32))
 
-        def f():
-            idx = jax.lax.dynamic_slice(
-                jnp.pad(token_indices_sorted, (0, buffer_rows)), (start, ),
-                (buffer_rows, ))
-            if num_tokens <= _TC_PERMUTE_ONEHOT_GATHER_MAX_TOKENS:
-                x = jnp.dot(
-                    jax.nn.one_hot(idx, num_tokens, dtype=tokens.dtype),
-                    tokens,
-                    preferred_element_type=jnp.float32).astype(tokens.dtype)
-            else:
-                x = tokens[idx]
-            gmm1_res = gmm_wrapper(x,
-                                   w1,
-                                   w1_scale,
-                                   w1_bias,
-                                   compact_group_sizes,
-                                   group_offset,
-                                   fuse_act=activation,
-                                   preferred_element_type=x.dtype)
-            gmm1_res = gmm1_res[:, :w2.shape[1]]
-            gmm2_res = gmm_wrapper(gmm1_res, w2, w2_scale, w2_bias,
-                                   compact_group_sizes, group_offset)
-            # gmm_v2 runs with zero_initialize=False: rows past the shard's are
-            # stale HBM, and 0 * NaN in the matmul below would spread.
-            gmm2_res = jnp.where((jnp.arange(buffer_rows)
-                                  < end - start)[:, None], gmm2_res, 0)
-            if buffer_rows == capacity:
-                return jnp.dot(select(0, 0, capacity),
-                               gmm2_res,
-                               preferred_element_type=jnp.float32).astype(
-                                   gmm2_res.dtype)
-
-            def body(k, acc):
-                lo = k * capacity
-                base = jnp.minimum(lo, buffer_rows - capacity)
-                rows = jax.lax.dynamic_slice(gmm2_res, (base, 0),
-                                             (capacity, gmm2_res.shape[1]))
-                return acc + jnp.dot(select(base, lo, lo + capacity),
-                                     rows,
-                                     preferred_element_type=jnp.float32)
-
-            acc = jax.lax.fori_loop(
-                0, (end - start + capacity - 1) // capacity, body,
-                jnp.zeros((num_tokens, gmm2_res.shape[1]), jnp.float32))
-            return acc.astype(gmm2_res.dtype)
-
-        return f
-
-    if capacity >= num_rows:
-        return run(num_rows)()
-    return jax.lax.cond(end - start <= capacity, run(capacity), run(num_rows))
+    if capacity == num_rows:
+        out = chunk(0)
+    else:
+        out = jax.lax.cond(end - start <= capacity, lambda: chunk(0),
+                           all_chunks)
+    return out.astype(tokens.dtype)
 
 
 def moe_gmm_local(x: jax.Array,
