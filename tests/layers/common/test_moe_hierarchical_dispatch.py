@@ -11,7 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for MOE_HIERARCHICAL_DISPATCH, the hierarchical MoE dispatch gather.
+"""Tests for MOE_HIERARCHICAL_DISPATCH, the hierarchical MoE dispatch gather,
+and MOE_FOLD_ROUTING_INTO_DISPATCH, which folds the routing into it (and into
+the one-step gather).
 
 The plan tests use fake devices and run anywhere. The gather tests need 8
 devices; the ones that check the real core-pairing check additionally need two
@@ -456,3 +458,118 @@ def test_fused_moe_skips_hierarchical_gather():
         _, calls = _run_fused_moe(mesh, enabled=True, use_ep=False)
     assert calls == 0
     assert _warned_ignored(logger)
+
+
+# --- MOE_FOLD_ROUTING_INTO_DISPATCH -----------------------------------------
+
+_FOLD_MESH_SIZES = [dict(attn_dp=8)] + _MESH_SIZES
+
+
+def _sharded_routing(mesh: Mesh, num_tokens: int = 64, topk: int = 10):
+    """Top-k ids with arbitrary bits, and weights in [0, 1). Not NaN weights:
+    on TPU the separate gather turns them into the canonical NaN, while the
+    fold keeps their bits."""
+    k1, k2 = jax.random.split(jax.random.key(2))
+    rows = NamedSharding(mesh, P(ShardingAxisName.ATTN_DATA, None))
+    ids = jax.random.bits(k1, (num_tokens, topk), jnp.uint32).view(jnp.int32)
+    weights = jax.random.uniform(k2, (num_tokens, topk), jnp.float32)
+    return jax.device_put(ids, rows), jax.device_put(weights, rows)
+
+
+def _bits(x: jax.Array) -> np.ndarray:
+    x = np.asarray(x)
+    return x.view(f"u{x.dtype.itemsize}")
+
+
+def _dispatch_gather(hierarchical: bool):
+    return (fused_moe_gmm._apply_hierarchical_dispatch_gather
+            if hierarchical else fused_moe_gmm._apply_one_step_dispatch_gather)
+
+
+def _gather_then_routing(x, routing, mesh, hierarchical: bool, fp8: bool):
+    """The unfolded path: the token gather, and a separate routing gather."""
+    x = _dispatch_gather(hierarchical)(x, mesh, fp8=fp8)
+    x = jax.lax.with_sharding_constraint(
+        x, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
+    return (x, *fused_moe_gmm.all_gather_topk_indices_and_weights(
+        *routing, jnp.float32, mesh))
+
+
+@requires_8_devices
+@pytest.mark.parametrize("hierarchical", [False, True],
+                         ids=["one_step", "hierarchical"])
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+@pytest.mark.parametrize("sizes", _FOLD_MESH_SIZES, ids=_mesh_id)
+def test_fold_matches_separate_routing_gather(sizes, fp8, hierarchical):
+    """Same tokens, ids and weights, bit for bit and in layout, as the token
+    gather plus all_gather_topk_indices_and_weights; in one all-gather."""
+    mesh = _make_mesh(**sizes)
+    plan = _logical_plan(mesh)
+    if hierarchical and plan is None:
+        pytest.skip("the mesh has no hierarchical plan")
+    x = _sharded_hidden_states(mesh)
+    routing = _sharded_routing(mesh)
+    with mock.patch.object(fused_moe_gmm,
+                           "_hierarchical_dispatch_plan",
+                           return_value=plan):
+        new = jax.jit(lambda x, r: _dispatch_gather(hierarchical)
+                      (x, mesh, fp8=fp8, routing=r))
+        old = jax.jit(
+            lambda *a: _gather_then_routing(*a, mesh, hierarchical, fp8))
+        got, want = new(x, routing), old(x, routing)
+        hlo = new.lower(x, routing).as_text()
+
+    assert hlo.count("stablehlo.all_gather") == 1
+    assert ("collective_permute" in hlo) == hierarchical
+    for g, w in zip(got, want, strict=True):
+        assert g.dtype == w.dtype
+        assert g.sharding.is_equivalent_to(w.sharding, g.ndim)
+        np.testing.assert_array_equal(_bits(g), _bits(w))
+
+
+def _run_fused_moe_fold(mesh: Mesh, fold: bool, hierarchical: bool, **kwargs):
+    """Run fused_moe_func with MOE_FOLD_ROUTING_INTO_DISPATCH set to `fold`.
+
+    Returns (output, times the separate routing gather was traced).
+    """
+    spy = mock.Mock(wraps=fused_moe_gmm.all_gather_topk_indices_and_weights)
+    with (mock.patch("tpu_inference.envs.MOE_FOLD_ROUTING_INTO_DISPATCH",
+                     fold),
+          mock.patch.object(fused_moe_gmm,
+                            "all_gather_topk_indices_and_weights", spy),
+          mock.patch.object(fused_moe_gmm,
+                            "_hierarchical_dispatch_plan",
+                            return_value=_logical_plan(mesh))):
+        out, _ = _run_fused_moe(mesh, hierarchical, **kwargs)
+    return out, spy.call_count
+
+
+@requires_8_devices
+@pytest.mark.parametrize("use_ep, hierarchical", [
+    (True, True),
+    (True, False),
+    (False, False),
+],
+                         ids=["ep_hierarchical", "ep_one_step", "tp"])
+@pytest.mark.parametrize("fp8", [False, True], ids=["bf16", "fp8"])
+@pytest.mark.parametrize("sizes", _FOLD_MESH_SIZES, ids=_mesh_id)
+def test_fused_moe_fold_output_is_unchanged(sizes, fp8, use_ep, hierarchical):
+    mesh = _make_mesh(**sizes)
+    if hierarchical and _logical_plan(mesh) is None:
+        pytest.skip("the mesh has no hierarchical plan")
+    kwargs = dict(use_ep=use_ep, all_gather_fp8=fp8)
+    expected, calls = _run_fused_moe_fold(mesh, False, hierarchical, **kwargs)
+    assert calls == 1
+    actual, calls = _run_fused_moe_fold(mesh, True, hierarchical, **kwargs)
+    assert calls == 0
+    _assert_bitwise_equal(actual, expected)
+
+
+@requires_8_devices
+def test_fused_moe_fold_needs_attention_only_axes():
+    # Attention data here is only the MLP-data axis: nothing to gather.
+    mesh = _make_mesh(data=2, model=4)
+    expected, _ = _run_fused_moe_fold(mesh, False, False, use_ep=True)
+    actual, calls = _run_fused_moe_fold(mesh, True, False, use_ep=True)
+    assert calls == 1
+    _assert_bitwise_equal(actual, expected)

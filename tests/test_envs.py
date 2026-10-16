@@ -172,6 +172,21 @@ def test_moe_hierarchical_collect(monkeypatch: pytest.MonkeyPatch):
     assert envs.MOE_HIERARCHICAL_COLLECT is False
 
 
+def test_moe_fold_routing_into_dispatch(monkeypatch: pytest.MonkeyPatch):
+    """MOE_FOLD_ROUTING_INTO_DISPATCH is opt-in: off unless it is asked for."""
+    monkeypatch.delenv("MOE_FOLD_ROUTING_INTO_DISPATCH", raising=False)
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is False
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "1")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is True
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "true")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is True
+
+    monkeypatch.setenv("MOE_FOLD_ROUTING_INTO_DISPATCH", "0")
+    assert envs.MOE_FOLD_ROUTING_INTO_DISPATCH is False
+
+
 def test_dp_sched_routing(monkeypatch: pytest.MonkeyPatch):
     """DP_SCHED_ROUTING defaults to least_loaded and only accepts known policies."""
     monkeypatch.delenv("DP_SCHED_ROUTING", raising=False)

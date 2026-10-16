@@ -89,6 +89,40 @@ publish_result() {
   fi
 }
 
+# Tokens decode has generated so far, summed over its engines; empty when its
+# metrics endpoint cannot be reached.
+generation_tokens() {
+  curl -fsS -m 10 "http://$decode_host:8000/metrics" 2>/dev/null \
+    | awk '/^vllm:generation_tokens_total/ { s += $NF; seen = 1 } END { if (seen) printf "%.0f", s }'
+}
+
+# vllm bench serve has no per-request timeout, so if the engines stop
+# generating it waits on its open requests until the JobSet deadline. Decode
+# generates without pause from a cell's first request (a minute or two after
+# the cell starts, warm-up included) to its last, so a long flat token count
+# means the serving path is stuck; fail the cell rather than hold both slices
+# for hours.
+stall_seconds=900
+run_cell() {
+  "$@" &
+  local bench_pid=$! last now last_change=$SECONDS
+  last=$(generation_tokens)
+  while kill -0 "$bench_pid" 2>/dev/null; do
+    sleep 10
+    now=$(generation_tokens)
+    if [ -n "$now" ] && [ "$now" != "$last" ]; then
+      last=$now
+      last_change=$SECONDS
+    elif [ $((SECONDS - last_change)) -ge "$stall_seconds" ]; then
+      echo "ERROR: decode generated no tokens for ${stall_seconds}s (count ${last:-unreachable}); stopping the benchmark."
+      kill "$bench_pid" 2>/dev/null || true
+      wait "$bench_pid" 2>/dev/null || true
+      exit 1
+    fi
+  done
+  wait "$bench_pid"
+}
+
 # Each cell writes its own file and is then appended to the file for the whole
 # input shape, <I>_<O>.json, which is the name parse_gke_results.py reads its
 # lengths from. Cells are published as they finish, so a sweep cut short still
@@ -110,7 +144,7 @@ run_sweep() {
     local cell="/tmp/benchmark_results/pd_disagg_c${concurrency}_i${input_len}_o${output_len}.json"
 
     echo "Starting benchmark cell: c=$concurrency, i=$input_len, o=$output_len, n=$effective"
-    vllm bench serve \
+    run_cell vllm bench serve \
       --model="$model" \
       --dataset-name=random \
       --num-warmups 10 \
