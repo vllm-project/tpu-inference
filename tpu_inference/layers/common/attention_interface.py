@@ -623,8 +623,9 @@ def rpa_attention(
     attn_logits_soft_cap: float | None,
     decode_query_size: int,
 ) -> Tuple[jax.Array, jax.Array]:
-    """RPAAttentionBackend.attention: ragged paged attention, or
-    dcp_forward / pcp_forward under decode / prefill context parallelism."""
+    """The body of RPAAttentionBackend.attention, its only caller: ragged
+    paged attention, or dcp_forward / pcp_forward under decode / prefill
+    context parallelism."""
     if 'dcp' in mesh.shape and mesh.shape['dcp'] > 1:
         if not use_causal_mask:
             raise NotImplementedError(

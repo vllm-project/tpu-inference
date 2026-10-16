@@ -236,6 +236,11 @@ class TpuPlatform(Platform):
 
         use_mla = attn_selector_config.use_mla
         if use_mla:
+            # MLA layers do not run a registered backend.
+            if is_registered_attention_backend(selected_backend):
+                raise ValueError(
+                    f"--attention-backend {selected_backend.name.lower()} "
+                    "does not support MLA models.")
             selected_backend = AttentionBackendEnum.FLASH_ATTN_MLA
         elif is_registered_attention_backend(selected_backend):
             # A registered TPU backend; its name resolves to its own vLLM

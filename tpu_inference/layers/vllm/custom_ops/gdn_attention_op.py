@@ -172,6 +172,7 @@ def gdn_attention_core_tpu(
                                                        dp_size)
         read_state_indices_sliced = state_indices_sliced
 
+    linear_attention_backend = layer_module.linear_attention_backend
     (new_conv_state_extracted,
      new_recurrent_state), j_output = run_jax_gdn_attention(
          j_mixed_qkv,
@@ -194,7 +195,7 @@ def gdn_attention_core_tpu(
          kernel_size,
          mesh=mesh,
          read_state_indices=read_state_indices_sliced,
-         gdn_kernel=layer_module.linear_attention_backend.gdn_kernel(),
+         conv1d_gdn_kernel=linear_attention_backend.conv1d_gdn_kernel(),
      )
     if state_len > kernel_size - 1:
         remaining_old_state = conv_state[:, kernel_size - 1:, :]

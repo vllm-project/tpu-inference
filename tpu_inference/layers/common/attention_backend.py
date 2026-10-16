@@ -108,24 +108,28 @@ class RPAAttentionBackend(AttentionBackend):
         return rpa_attention(*args, **kwargs)
 
 
-GDNKernel = Callable[..., tuple[tuple["jax.Array", "jax.Array"], "jax.Array"]]
+# A fused conv1d + GDN kernel, with the signature of
+# kernels.gdn.v3.wrapper.fused_conv1d_gdn. It returns
+# ((new_conv_state, new_recurrent_state), output): the updated conv state and
+# recurrent state caches, and the output of the GDN layer.
+Conv1dGDNKernel = Callable[..., tuple[tuple["jax.Array", "jax.Array"],
+                                      "jax.Array"]]
 
 
 class LinearAttentionBackend(abc.ABC):
     """The kernel of the GDN linear attention layers of hybrid models."""
 
     @abc.abstractmethod
-    def gdn_kernel(self) -> GDNKernel:
-        """The fused conv1d + GDN kernel run_jax_gdn_attention shard-maps,
-        with the signature of kernels.gdn.v3.wrapper.fused_conv1d_gdn."""
+    def conv1d_gdn_kernel(self) -> Conv1dGDNKernel:
+        """The fused conv1d + GDN kernel run_jax_gdn_attention shard-maps."""
 
 
 class GDNLinearAttentionBackend(LinearAttentionBackend):
     """The default linear attention backend: the GDN v3 kernel."""
 
-    def gdn_kernel(self) -> GDNKernel:
-        # Note (david): imported here so that the platform, which imports this
-        # module, does not load the Pallas kernels.
+    def conv1d_gdn_kernel(self) -> Conv1dGDNKernel:
+        # Note: imported here so that the platform, which imports this module,
+        # does not load the Pallas kernels.
         from tpu_inference.kernels.gdn.v3 import wrapper
         return wrapper.fused_conv1d_gdn
 
@@ -206,7 +210,11 @@ def check_attention_backend_config(vllm_config: "VllmConfig") -> None:
     register_attention_backend adds the name to AttentionBackendEnum at
     runtime. Enum members pickle by value, and a process that unpickles
     vllm_config before it loads the plugins, a spawned EngineCore or a Ray
-    worker, cannot rebuild the member. A forked process inherits it."""
+    worker, cannot rebuild the member. A forked process inherits it.
+
+    TODO: support spawn and Ray. vLLM must rebuild a registered
+    AttentionBackendEnum member when it unpickles it, e.g. by loading the
+    general plugins first."""
     name = attention_backend_name(vllm_config)
     if name == RPAAttentionBackend.name:
         return

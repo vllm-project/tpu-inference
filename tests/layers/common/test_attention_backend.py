@@ -81,7 +81,7 @@ class FakeAttentionBackend(attention_backend.AttentionBackend):
 
 class FakeLinearAttentionBackend(attention_backend.LinearAttentionBackend):
 
-    def gdn_kernel(self):
+    def conv1d_gdn_kernel(self):
         return stub_gdn_kernel(FAKE_MARKER)
 
 
@@ -203,11 +203,10 @@ def test_rpa_kv_cache_shape(head_dim, kernel):
 ])
 def test_gdn_runs_the_given_kernel(mesh, monkeypatch, backend_cls, marker):
     monkeypatch.setattr(v3_gdn, "fused_conv1d_gdn", stub_gdn_kernel(V3_MARKER))
-    gdn_kernel = backend_cls().gdn_kernel() if backend_cls else None
+    kernel = backend_cls().conv1d_gdn_kernel() if backend_cls else None
 
-    states, output = gdn_attention.run_jax_gdn_attention(**make_gdn_inputs(
-        mesh),
-                                                         gdn_kernel=gdn_kernel)
+    states, output = gdn_attention.run_jax_gdn_attention(
+        **make_gdn_inputs(mesh), conv1d_gdn_kernel=kernel)
 
     np.testing.assert_array_equal(output.astype(jnp.float32), marker)
     for state in states:
@@ -269,20 +268,22 @@ def test_one_name_selects_both_backends():
         "rpa")) is GDNLinearAttentionBackend
 
 
-@pytest.mark.parametrize(("backend", "use_mla", "expected"), [
-    ("FAKE", False, FakePallasAttentionBackend),
-    ("FLASH_ATTN", False, PallasAttentionBackend),
-    ("TRITON_ATTN", False, PallasAttentionBackend),
-    ("FAKE", True, None),
+@pytest.mark.parametrize(("backend", "expected"), [
+    ("FAKE", FakePallasAttentionBackend),
+    ("FLASH_ATTN", PallasAttentionBackend),
+    ("TRITON_ATTN", PallasAttentionBackend),
 ])
-def test_platform_selects_the_vllm_backend(backend, use_mla, expected):
+def test_platform_selects_the_vllm_backend(backend, expected):
     path = TpuPlatform.get_attn_backend_cls(AttentionBackendEnum[backend],
-                                            SimpleNamespace(use_mla=use_mla))
+                                            SimpleNamespace(use_mla=False))
 
-    if expected is None:
-        assert path == AttentionBackendEnum.FLASH_ATTN_MLA.get_path()
-    else:
-        assert resolve_obj_by_qualname(path) is expected
+    assert resolve_obj_by_qualname(path) is expected
+
+
+def test_platform_rejects_a_registered_backend_for_mla():
+    with pytest.raises(ValueError, match="does not support MLA"):
+        TpuPlatform.get_attn_backend_cls(AttentionBackendEnum.FAKE,
+                                         SimpleNamespace(use_mla=True))
 
 
 def test_default_impl_runs_rpa():
