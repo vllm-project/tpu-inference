@@ -115,7 +115,8 @@ class KVCacheManager:
         if self.use_mla:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
-                self.runner.kv_cache_dtype, True)
+                self.runner.kv_cache_dtype, True,
+                self.runner.attention_backend)
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
@@ -129,7 +130,8 @@ class KVCacheManager:
         else:
             page_size_bytes = get_attention_page_size_bytes(
                 self.runner.mesh, block_size, num_kv_heads, head_size,
-                self.runner.kv_cache_dtype, False)
+                self.runner.kv_cache_dtype, False,
+                self.runner.attention_backend)
             page_size_padded = (self._hybrid_uniform_page_size_bytes
                                 if self._hybrid_uniform_page_size_bytes
                                 is not None else int(page_size_bytes))
@@ -207,7 +209,8 @@ class KVCacheManager:
             first_attn_module.head_size)
         attn_page_size_bytes = get_attention_page_size_bytes(
             self.runner.mesh, self.runner.cache_config.block_size,
-            num_kv_heads, head_size, self.runner.kv_cache_dtype, False)
+            num_kv_heads, head_size, self.runner.kv_cache_dtype, False,
+            self.runner.attention_backend)
 
         mamba_modules = [
             module for module in layers.values()
@@ -855,7 +858,7 @@ class KVCacheManager:
                             total_group_page_size += get_attention_page_size_bytes(
                                 self.runner.mesh, spec.block_size,
                                 spec.num_kv_heads, spec.head_size, spec.dtype,
-                                self.use_mla)
+                                self.use_mla, self.runner.attention_backend)
                     tensor_num_blocks = kv_cache_tensor.size // total_group_page_size
                 alloc_per_layer = True
             else:
@@ -998,6 +1001,7 @@ class KVCacheManager:
                     layer_names=[first_layer_name],
                     cache_dtype=t2j_dtype(layer_spec.dtype),
                     use_mla=self.use_mla,
+                    attention_backend=self.runner.attention_backend,
                 )[0]
                 kv_caches.append(kv_cache)
 
