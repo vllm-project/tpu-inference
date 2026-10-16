@@ -31,9 +31,9 @@ from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax.sample.sampling_metadata import \
     TPUSupportedSamplingMetadata
 from tpu_inference.logger import init_logger
-from tpu_inference.utils import TPU_SECOND_LAST_MINOR
 from tpu_inference.models.common.compiler_options import \
     get_sampling_compiler_options
+from tpu_inference.utils import TPU_SECOND_LAST_MINOR
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import VllmSchedulerOutput
