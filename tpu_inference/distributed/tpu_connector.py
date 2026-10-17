@@ -234,6 +234,15 @@ class TPUConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """
+        Blocks of requests whose KV pull from P failed. The scheduler fails or
+        recomputes those requests according to kv_load_failure_policy.
+        """
+        if self.connector_worker is None:
+            return set()
+        return self.connector_worker.get_block_ids_with_load_errors()
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
         Get the KV transfer stats for the connector.
@@ -486,6 +495,8 @@ class TPUConnectorWorker:
         # req_id: (pull_thread_future, kv, block_ids)
         self.reqs_pulling: dict[ReqId, list[Future, list[jax.Array],
                                             list[int]]] = {}
+        # D: local blocks of failed pulls, not yet reported to the scheduler.
+        self._invalid_block_ids: set[int] = set()
 
         # req_id: (kv, indices)
         self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
@@ -858,7 +869,14 @@ class TPUConnectorWorker:
             )
         return conn
 
-    def _pull_kv(self, req_id: str, conn: Any, req_meta: LoadMeta):
+    def _pull_kv(self, req_id: str, conn: Any,
+                 req_meta: LoadMeta) -> list[jax.Array] | None:
+        """Pull the request's KV from P.
+
+        Returns None if the pull failed. The arrays of a pull that never
+        completes never become ready, so they must not be inserted into the
+        KV cache: every later step would wait on them and hang the engine.
+        """
         # The local allocated blocks which don't hit prefix caching.
         local_block_ids = req_meta.local_block_ids
         # The remote computed blocks which need to pull from P.
@@ -872,19 +890,26 @@ class TPUConnectorWorker:
             f"Worker {self.node_id} --> kv transfer | start pull req_id={req_id} | uuid={req_meta.uuid}"
         )
         start_time = time.perf_counter()
-        if jax.profiler.TraceAnnotation.is_enabled():
-            dims_str, expected_bytes = get_kv_transfer_metadata(kv_spec)
-            with jax.profiler.TraceAnnotation(
-                    "KV_Cache_Pull",
-                    uuid=req_meta.uuid,
-                    request_id=trim_request_id_suffix(req_id),
-                    bytes=expected_bytes,
-                    dimensions=dims_str,
-                    source=dist_utils.format_host_port(req_meta.remote_host,
-                                                       req_meta.remote_port)):
+        try:
+            if jax.profiler.TraceAnnotation.is_enabled():
+                dims_str, expected_bytes = get_kv_transfer_metadata(kv_spec)
+                with jax.profiler.TraceAnnotation(
+                        "KV_Cache_Pull",
+                        uuid=req_meta.uuid,
+                        request_id=trim_request_id_suffix(req_id),
+                        bytes=expected_bytes,
+                        dimensions=dims_str,
+                        source=dist_utils.format_host_port(
+                            req_meta.remote_host, req_meta.remote_port)):
+                    kv = conn.pull(req_meta.uuid, kv_spec)
+            else:
                 kv = conn.pull(req_meta.uuid, kv_spec)
-        else:
-            kv = conn.pull(req_meta.uuid, kv_spec)
+        except Exception:
+            logger.exception(
+                f"Worker {self.node_id} --> kv transfer | failed to start pull req_id={req_id} | "
+                f"uuid={req_meta.uuid}")
+            self.transfer_stats.record_failed_transfer()
+            return None
         kv_size_mb = sum(k.nbytes for k in kv) / (1024 * 1024)
         end_time_0, end_time_1 = time.perf_counter(), None
         prepare_time_ms = (end_time_0 - start_time) * 1000
@@ -912,6 +937,7 @@ class TPUConnectorWorker:
                     f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
                     f"size={kv_size_mb:.2f}MB")
                 self.transfer_stats.record_failed_transfer()
+                return None
         else:
             logger.info(
                 f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
@@ -968,8 +994,29 @@ class TPUConnectorWorker:
             if self.reqs_pulling[req_id][1] is None:
                 future = self.reqs_pulling[req_id][0]
                 if future.done():
-                    kv = future.result()
-                    self.reqs_pulling[req_id][1] = kv
+                    try:
+                        kv = future.result()
+                    except Exception:
+                        logger.exception(
+                            f"Worker {self.node_id} --> kv transfer | pull raised for req_id={req_id}"
+                        )
+                        kv = None
+                    if kv is None:
+                        # The pull failed. Drop the request's pull state so its
+                        # unready KV is never inserted, and report its blocks
+                        # through get_block_ids_with_load_errors() in this same
+                        # step, so the scheduler applies kv_load_failure_policy
+                        # (fail or recompute) to the request.
+                        _, _, block_ids = self.reqs_pulling.pop(req_id)
+                        self._invalid_block_ids.update(
+                            _flatten_block_ids(block_ids))
+                        logger.warning(
+                            f"Worker {self.node_id} --> kv transfer | reporting load error for req_id={req_id}"
+                        )
+                    else:
+                        self.reqs_pulling[req_id][1] = kv
+                    # Reported either way: the scheduler needs the request
+                    # finished receiving to act on the load error.
                     done_recving.add(req_id)
 
         # Mark a req as done seding when it's expired.
@@ -1009,6 +1056,23 @@ class TPUConnectorWorker:
             logger.info(
                 f"Worker {self.node_id} -->  done_recving={done_recving}")
         return done_sending, done_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return, and forget, the local blocks of pulls that failed.
+
+        vLLM reads this right after get_finished() in the same step, so a
+        failed request's blocks arrive with its done_recving entry.
+        """
+        invalid_block_ids = self._invalid_block_ids
+        self._invalid_block_ids = set()
+        return invalid_block_ids
+
+
+def _flatten_block_ids(block_ids: list[int] | list[list[int]]) -> list[int]:
+    """Flatten per-kv-cache-group block ids (HMA) into a single list."""
+    if block_ids and isinstance(block_ids[0], (list, tuple)):
+        return [b for group in block_ids for b in group]
+    return list(block_ids)
 
 
 def get_uuid() -> int:
