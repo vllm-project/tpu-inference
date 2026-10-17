@@ -80,6 +80,9 @@ def is_ds_v4(vllm_config):
 class KVCacheManager:
 
     def __init__(self, runner: "TPUModelRunner"):
+        from tpu_inference.platforms import tpu_platform
+
+        tpu_platform._install_tpu_kv_cache_utils_hooks()
         self.runner = runner
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -566,8 +569,9 @@ class KVCacheManager:
                     num_kv_heads = common_utils.get_padded_num_heads(
                         num_kv_heads, model_cnt)
                     head_size = common_utils.get_padded_head_dim(head_size)
-                    # TODO(kwang3939): Re-enable sliding_window once mixed dims with sliding_window is supported.
-                    sliding_window = None
+                    sliding_window = (getattr(text_config, "sliding_window",
+                                              None) if layer_type
+                                      == "sliding_attention" else None)
                     kv_cache_spec[f"layer.{i}"] = self._create_attention_spec(
                         block_size,
                         num_kv_heads,
@@ -631,20 +635,7 @@ class KVCacheManager:
                 # be unified.
                 self.update_mamba_page_size_padded(layers)
 
-            # TODO(yuyanpeng): enable sliding windows once mixed dims support
-            # Currently, with sliding windows, there is
-            # shared_kv_cache_layers among each group.
-            # The shared kv_cache_layers do not support mixed dims for
-            # TPU for now. If share kv_cache, the attention kernel would
-            # throw exception for non-matched dimension between kv_cache
-            # and actual dims. Disable sliding window for workaround.
-            head_size_set = {
-                common_utils.get_padded_head_dim(
-                    getattr(attn_module, "head_size", 0))
-                for attn_module in layers.values()
-                if not isinstance(attn_module, MambaBase)
-            }
-            disable_sliding_window = len(head_size_set) > 1
+            disable_sliding_window = False
 
             logger.warning(f"Compilation num_layers = {len(layers)}")
 
@@ -931,8 +922,7 @@ class KVCacheManager:
                     elif not alloc_per_layer:
                         # Legacy single-cache aliasing for this tensor
                         slot_key = (f"tensor_{i}", 0,
-                                    getattr(spec, 'num_kv_heads', None),
-                                    getattr(spec, 'head_size', None),
+                                    getattr(spec, 'page_size_bytes', None),
                                     getattr(spec, 'dtype', None))
                         slot_num_blocks[slot_key] = tensor_num_blocks
                     else:
@@ -941,8 +931,7 @@ class KVCacheManager:
                         slot_key = (
                             layer_offset,
                             block_stride,
-                            getattr(spec, 'num_kv_heads', None),
-                            getattr(spec, 'head_size', None),
+                            getattr(spec, 'page_size_bytes', None),
                             getattr(spec, 'dtype', None),
                         )
                         slot_num_blocks[slot_key] = tensor_num_blocks
@@ -951,7 +940,11 @@ class KVCacheManager:
 
         # Pass 2: Allocate one physical cache per unique slot and map layers
         for slot_key, layer_names in slots.items():
-            first_layer_name = layer_names[0]
+            first_layer_name = max(
+                layer_names,
+                key=lambda ln: getattr(layer_name_to_spec[ln], 'num_kv_heads',
+                                       0),
+            )
             layer_spec = layer_name_to_spec[first_layer_name]
             num_blocks = slot_num_blocks[slot_key]
 

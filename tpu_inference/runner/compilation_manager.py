@@ -245,19 +245,22 @@ class CompilationManager:
         # Every host must finish compiling before any host starts the warmup
         # collectives.
         _sync_hosts("flush_pre_warmup")
+        num_tasks = len(tasks)
         warmup_start = time.perf_counter()
         with jax.set_mesh(self.runner.mesh):
-            for name, fn, args, call_kwargs, warmup_handler in tasks:
+            while tasks:
+                _name, fn, args, call_kwargs, warmup_handler = tasks.pop(0)
                 if warmup_handler is not None:
                     out = warmup_handler(fn, args, call_kwargs)
                 else:
                     out = fn(*args, **call_kwargs)
                 jax.tree.map(lambda r: r.block_until_ready(), out)
+                del out, args, call_kwargs, warmup_handler, fn
         warmup_elapsed = time.perf_counter() - warmup_start
-        if tasks:
+        if num_tasks:
             logger.info(
                 "Warm-up call pass finished in %.2f [secs] over %d tasks.",
-                warmup_elapsed, len(tasks))
+                warmup_elapsed, num_tasks)
 
     @time_function
     def capture_model(self) -> None:
@@ -337,6 +340,8 @@ class CompilationManager:
 
     def _precompile_input_embeddings_merger(self) -> None:
         for num_tokens in self.runner.num_tokens_paddings:
+            if num_tokens > 1024:
+                continue
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
             hf_conf = self.runner.vllm_config.model_config.hf_config
@@ -795,6 +800,8 @@ class CompilationManager:
 
         for h_size in hidden_sizes_to_compile:
             for num_tokens in self.runner.num_tokens_paddings:
+                if num_tokens > 1024:
+                    continue
                 for num_reqs in self.runner.attn_num_reqs_paddings:
                     sharding = NamedSharding(
                         self.runner.mesh,

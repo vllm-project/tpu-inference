@@ -230,7 +230,8 @@ class WNA16LinearMethod(QuantizeMethodBase):
             mesh=self.linear_config.mesh,
             defer_all_reduce=self.linear_config.defer_all_reduce,
             maybe_quantize_x=False)
-        if len(self.linear_config.output_sizes) > 1:
+        if (len(self.linear_config.output_sizes) > 1
+                and self.linear_config.n_shards > 1):
             out = jnp.concatenate(slice_sharded_tensor_for_concatenation(
                 out, self.linear_config.output_sizes,
                 self.linear_config.n_shards),
