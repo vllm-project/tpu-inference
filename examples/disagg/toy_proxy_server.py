@@ -34,7 +34,14 @@ async def lifespan(app: FastAPI):
         prefiller_base_url = f'http://{host}:{port}'
         app.state.prefill_clients.append({
             'client':
-            httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
+            httpx.AsyncClient(
+                timeout=None,
+                base_url=prefiller_base_url,
+                limits=httpx.Limits(
+                    max_connections=None,
+                    max_keepalive_connections=None,
+                ),
+            ),
             'host':
             host,
             'port':
@@ -48,7 +55,14 @@ async def lifespan(app: FastAPI):
         decoder_base_url = f'http://{host}:{port}'
         app.state.decode_clients.append({
             'client':
-            httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
+            httpx.AsyncClient(
+                timeout=None,
+                base_url=decoder_base_url,
+                limits=httpx.Limits(
+                    max_connections=None,
+                    max_keepalive_connections=None,
+                ),
+            ),
             'host':
             host,
             'port':
@@ -173,9 +187,12 @@ async def send_request_to_prefill(client_info: dict, endpoint: str,
     response = await client_info['client'].post(endpoint,
                                                 json=req_data,
                                                 headers=headers)
-    response.raise_for_status()
-
-    return response
+    try:
+        response.raise_for_status()
+        await response.aread()
+        return response
+    finally:
+        await response.aclose()
 
 
 async def stream_from_decode(client_info: dict, endpoint: str, req_data: dict,
