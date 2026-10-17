@@ -1,0 +1,28 @@
+# Collocated GRPO async-overlap reproduction — config keys that matter.
+# See README.md for the measured result and the issue references (#3455, #3456).
+# This shows the async-overlap DELTA vs examples/dapo_tpu/config_template.yaml;
+# copy that base recipe and set the keys below.
+
+# --- workload (decode-light GRPO, held frozen) ---
+batch_size: 1024
+num_generations: 8              # GRPO group size (= rollout.n)
+max_prefill_predict_length: 512 # prompt cap
+max_target_length: 576          # 512 prompt + 64 response
+decode_sampling_temperature: 0.7
+
+# --- collocated placement: trainer + rollout share all 64 chips ---
+trainer_devices_fraction: 1.0
+sampler_devices_fraction: 1.0
+rollout_data_parallelism: 16
+rollout_tensor_parallelism: 8
+train_micro_batch_size: 8
+rollout_micro_batch_size: 256
+hbm_utilization_vllm: 0.75
+max_num_batched_tokens: 8192
+enable_continue_decode: true    # fused on-device decode loop
+
+# --- THE ASYNC-OVERLAP LEVER (issue #3456) ---
+# On a current vLLM LKG (UniProcExecutor.supports_async_scheduling()==True) this
+# is honored on the single-host uni path and enables rollout wave N+1 to enqueue
+# while wave N's device_get is in flight.
+async_scheduling: true
