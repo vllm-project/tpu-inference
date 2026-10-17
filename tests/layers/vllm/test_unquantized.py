@@ -806,22 +806,49 @@ def test_load_weight_for_layer_non_pathways(dtype):
     np.testing.assert_array_equal(np.asarray(result), np.asarray(expected))
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize(
+    "dtype", [torch.float32, torch.bfloat16, torch.float8_e4m3fn, torch.int32])
 @patch(
     "tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
     return_value=False)
 @patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
 def test_load_weight_for_layer_pathways_real_weights(_, dtype):
-    """_load_weight_for_layer converts via numpy + device_put under Pathways (real weights)."""
-    layer = _make_layer_with_weight((4, 8), dtype)
+    """Under Pathways (real weights) the native dtype is transferred bit-exactly."""
+    from tpu_inference.utils import free_host_tensor, to_jax_dtype
+    src = (torch.randn((4, 8)) * 4).to(dtype)
+    layer = torch.nn.Module()
+    layer.weight = torch.nn.Parameter(src.clone(), requires_grad=False)
     mesh = test_utils.get_spmd_mesh(1)
     sharding = NamedSharding(mesh, P(None, None))
     result = _load_weight_for_layer(layer, "weight", sharding)
-    # Check shape and values are preserved (converted through float32 intermediate)
     assert result.shape == (4, 8)
-    # Under Pathways path the dtype is converted via to_jax_dtype
-    from tpu_inference.utils import to_jax_dtype
     assert result.dtype == to_jax_dtype(dtype)
+    expected = src.to(torch.float32).numpy()
+    np.testing.assert_array_equal(
+        np.asarray(result).astype(np.float32), expected)
+    # The host storage is now viewed by numpy, but must still be freeable.
+    free_host_tensor(layer.weight)
+    assert layer.weight.untyped_storage().size() == 0
+    np.testing.assert_array_equal(
+        np.asarray(result).astype(np.float32), expected)
+
+
+@patch(
+    "tpu_inference.layers.vllm.quantization.unquantized.is_pathways_dummy_load",
+    return_value=False)
+@patch("vllm.envs.VLLM_TPU_USING_PATHWAYS", True)
+def test_load_weight_for_layer_pathways_non_contiguous_falls_back(_):
+    """Tensors without a zero-copy view fall back to the float32 transfer."""
+    from tpu_inference.utils import to_jax_dtype
+    layer = torch.nn.Module()
+    layer.weight = torch.randn((8, 4)).to(torch.bfloat16).t()
+    mesh = test_utils.get_spmd_mesh(1)
+    sharding = NamedSharding(mesh, P(None, None))
+    result = _load_weight_for_layer(layer, "weight", sharding)
+    assert result.dtype == to_jax_dtype(torch.bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(result).astype(np.float32),
+        layer.weight.to(torch.float32).numpy())
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

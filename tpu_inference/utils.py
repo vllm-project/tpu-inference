@@ -140,6 +140,67 @@ _NUMPY_UNSUPPORTED_DTYPES = {
 }
 
 
+def host_numpy_view(tensor: torch.Tensor) -> Optional[np.ndarray]:
+    """Zero-copy numpy view of a CPU torch tensor, or None if there isn't one.
+
+    numpy has no scalar type for bf16 or the fp8 formats, so those travel as
+    uint8 and are reinterpreted with the ml_dtypes type JAX already uses for
+    them -- the same bit cast `tpu_inference.utils.t2j` does, and unlike the
+    torchax `t2j` this module falls back to, which widens them to float32 on
+    the host first. Reinterpreting scales the trailing dimension by the element
+    width on the way out and the numpy view undoes it exactly, but torch can
+    only do it on contiguous data.
+
+    Note that handing torch storage to numpy makes it non-resizable for good,
+    so `untyped_storage().resize_(0)` on the viewed tensor raises from here on.
+    Free such tensors with `free_host_tensor` (or fp8's `_free_torch_storage`),
+    which fall back to `set_()` and free the buffer just the same.
+    """
+    t = tensor.detach()
+    if t.device.type != "cpu":
+        return None
+
+    jax_dtype = _NUMPY_UNSUPPORTED_DTYPES.get(t.dtype)
+    if jax_dtype is None:
+        return t.numpy()
+    if not t.dim() or not t.is_contiguous():
+        return None
+    return t.view(torch.uint8).numpy().view(jax_dtype)
+
+
+def pathways_device_put(tensor: torch.Tensor,
+                        sharding: NamedSharding) -> jax.Array:
+    """Puts a CPU tensor at `sharding` under Pathways, in its own dtype.
+
+    Sends the tensor's native bytes (1 byte/element for fp8, 2 for bf16)
+    instead of widening it to float32 on the host and casting back on device,
+    which costs host CPU time plus 4x (fp8) or 2x (bf16) the host-to-device
+    bytes. Tensors without a zero-copy view (0-dim or non-contiguous) fall back
+    to the float32 path. Values are bit-identical either way.
+    """
+    np_view = host_numpy_view(tensor)
+    if np_view is None:
+        dtype = to_jax_dtype(tensor.dtype)
+        np_tensor = tensor.detach().cpu().to(torch.float32).numpy()
+        return jax.device_put(np_tensor, sharding).astype(dtype)
+    array = jax.device_put(np_view, sharding)
+    # np_view aliases the torch storage and callers free that storage as soon
+    # as this returns, so the asynchronous copy has to be forced here.
+    jax.block_until_ready(array)
+    return array
+
+
+def free_host_tensor(tensor: Optional[torch.Tensor]) -> None:
+    """Frees the CPU storage of `tensor`, including storage viewed by numpy."""
+    if tensor is None:
+        return
+    try:
+        tensor.untyped_storage().resize_(0)
+    except RuntimeError:
+        # Storage handed to numpy (see `host_numpy_view`) is not resizable.
+        tensor.set_(torch.storage.UntypedStorage())
+
+
 def t2j(t: torch.Tensor, use_dlpack=False):
     # torchax's t2j is not efficient to handle types in
     # _NUMPY_UNSUPPORTED_DTYPES, it need to convert to
