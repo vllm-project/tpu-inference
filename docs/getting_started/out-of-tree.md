@@ -1,6 +1,6 @@
 # Custom JAX Model Onboarding as a Plugin
 
-This guide walks you through the steps to implement a basic JAX model to TPU Inference.
+This guide walks you through the steps to implement a basic JAX model to vLLM JAX.
 
 ## 1. Bring your model code
 
@@ -54,9 +54,9 @@ You now need to implement the `load_weights` method in your `*ForCausalLM` class
 
 ## 4. Register your model
 
-TPU Inference relies on a model registry to determine how to run each model. A list of pre-registered architectures can be found [here](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/model_loader.py#L22).
+vLLM JAX relies on a model registry to determine how to run each model. A list of pre-registered architectures can be found [here](https://github.com/vllm-project/tpu-inference/blob/aad6cc2a36a2cf0de681f76055ce632d5abeca5f/tpu_inference/models/jax/model_loader.py#L22).
 
-If your model is not on this list, you must register it to TPU Inference. You can load an external model using a plugin (similar to [vLLM’s plugins](https://docs.vllm.ai/en/latest/contributing/model/registration.html)) without modifying the TPU Inference codebase.
+If your model is not on this list, you must register it to vLLM JAX. You can load an external model using a plugin (similar to [vLLM’s plugins](https://docs.vllm.ai/en/latest/contributing/model/registration.html)) without modifying the vLLM JAX codebase.
 
 Structure your plugin as following:
 
@@ -84,7 +84,7 @@ def register():
 
 ## 5. Install and run your model
 
-Ensure that you `pip install .` your model from within the same Python environment as vllm/tpu inference. Then to run your model:
+Ensure that you `pip install .` your model from within the same Python environment as vllm/vllm-jax. Then to run your model:
 
 ```shell
 HF_TOKEN=token TPU_BACKEND_TYPE=jax \
