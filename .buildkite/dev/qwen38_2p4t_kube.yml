@@ -19,9 +19,14 @@
 #           #3783 merged it.
 #   after   the same + "[Refactor] Fold MoE routing through one row-gather
 #           primitive" (fused_moe_gmm.py only).
-#   control before's code with MOE_FOLD_ROUTING_INTO_DISPATCH=false (this
-#           commit reverts the refactor and flips the flag): the fold's own
-#           effect on this main, and the link to #75.
+#   control before's code with MOE_FOLD_ROUTING_INTO_DISPATCH=false (the
+#           commit after "after" reverts the refactor and flips the flag):
+#           the fold's own effect on this main, and the link to #75.
+#   off-after
+#           after's code with MOE_FOLD_ROUTING_INTO_DISPATCH=false (this
+#           commit re-applies the refactor on top of control). The refactor
+#           also rewrites the fold-off hierarchical fp8 gather, #75's
+#           production path, so control vs off-after is its effect there.
 #
 # Serving configuration: #75's, plus MOE_FOLD_ROUTING_INTO_DISPATCH=true. The
 # top-k ids and weights then ride as extra columns of the hierarchical fp8
@@ -189,7 +194,7 @@ steps:
       BM_INFRA: "true"
       TPU_VERSION: "tpu7x"
 
-  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 (kube v7x-32, model=4 x attn_dp=8, C=384, hierarchical dispatch+collect, fp8 dispatch gather, skip-mamba blocks, ragged gather subchunks=1 no-trim, attn_dp ring mesh, fold routing OFF (control), GSM8K+MMLU, decode profile)"
+  - label: ":kubernetes: Qwen3.8-2.4T-A95B-FP8 (kube v7x-32, model=4 x attn_dp=8, C=384, hierarchical dispatch+collect, fp8 dispatch gather, skip-mamba blocks, ragged gather subchunks=1 no-trim, attn_dp ring mesh, fold routing OFF + refactor (off-after), GSM8K+MMLU, decode profile)"
     key: qwen38_2p4t_kube_v7x32
     depends_on: "build_docker_tpu7x"
     # Counted from when the agent takes the job, so it includes any wait for
