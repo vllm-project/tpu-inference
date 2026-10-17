@@ -295,6 +295,12 @@ def _process_continue_decode_outputs(
     num_eos_hits = int(has_eos.sum())
     requests_dict = requests if requests is not None and hasattr(
         requests, "get") else None
+    chunk_start: Dict[str, int] = {}
+    if all_expert_indices_cpu is not None and scheduler_output is not None:
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        if cached_reqs is not None:
+            chunk_start = dict(
+                zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens))
 
     for req_idx, req_id in enumerate(req_ids):
         req_state = requests_dict.get(
@@ -303,16 +309,14 @@ def _process_continue_decode_outputs(
         valid_tokens = generated_tokens_cpu[req_idx, :actual_len].tolist()
         sampled_token_ids.append(valid_tokens)
 
-        if scheduler_output is not None:
-            scheduler_output.num_scheduled_tokens[req_id] = actual_len
-
         if lp_token_ids_cpu is not None:
             lp_token_ids_list.append(lp_token_ids_cpu[:actual_len, req_idx])
             lp_vals_list.append(lp_vals_cpu[:actual_len, req_idx])
             lp_ranks_list.append(lp_ranks_cpu[:actual_len, req_idx])
 
         if req_state is not None:
-            req_state.output_token_ids.extend(valid_tokens)
+            if not is_async:
+                req_state.output_token_ids.extend(valid_tokens)
 
             if all_expert_indices_cpu is not None and actual_len > 0:
                 # The on-device burst is not yet reflected in
@@ -322,13 +326,13 @@ def _process_continue_decode_outputs(
                         req_id=req_id,
                         rows=all_expert_indices_cpu[:actual_len, :,
                                                     req_idx, :],
-                        token_start=req_state.num_computed_tokens,
+                        token_start=chunk_start.get(
+                            req_id, req_state.num_computed_tokens),
                         num_accepted=actual_len,
                         block_ids=_block_ids_for_group(
                             req_state, routed_experts_attn_gid),
                         dp_rank=dp_rank_by_req.get(req_id, 0),
                     ))
-
             if input_batch is not None:
                 start_idx = input_batch.num_tokens_no_spec[req_idx]
                 end_idx = start_idx + actual_len
@@ -437,6 +441,7 @@ class AsyncTPUModelRunnerOutput(AsyncModelRunnerOutput):
                                             "routed_experts_attn_gid", 0),
             dp_rank_by_req=getattr(self._scheduler_output, "assigned_dp_rank",
                                    None),
+            scheduler_output=self._scheduler_output,
             is_async=True,
         )
 
@@ -1521,7 +1526,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
 
             valid_lens, _ = _extract_valid_lengths_host(
                 generated_tokens_cpu, self.eos_token_id)
-            for pre_req_idx, req_state, _ in pre_request_seq_lens:
+            for pre_req_idx, req_state, start_idx in pre_request_seq_lens:
                 req_id = pre_req_ids[pre_req_idx]
                 if req_id not in self.input_batch.req_id_to_index:
                     continue
@@ -1531,19 +1536,18 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 valid_tokens = generated_tokens_cpu[
                     pre_req_idx, :actual_len].tolist()
 
-                start_idx = self.input_batch.num_tokens_no_spec[req_idx]
+                end_idx = start_idx + actual_len
+                self.input_batch.token_ids_cpu[
+                    req_idx, start_idx:end_idx] = valid_tokens
+                self.input_batch.num_tokens_no_spec[req_idx] = end_idx
+                self.input_batch.num_tokens[req_idx] = end_idx
+                self.input_batch.num_computed_tokens_cpu[req_idx] = end_idx - 1
+                req_state.num_computed_tokens = end_idx - 1
 
-                self.input_batch.token_ids_cpu[req_idx, start_idx:start_idx +
-                                               actual_len] = valid_tokens
-                self.input_batch.num_tokens_no_spec[
-                    req_idx] = start_idx + actual_len
-                self.input_batch.num_tokens[req_idx] = start_idx + actual_len
-                self.input_batch.num_computed_tokens_cpu[
-                    req_idx] = start_idx + actual_len
-
-                if pre_scheduler_output is not None:
-                    pre_scheduler_output.num_scheduled_tokens[
-                        req_id] = actual_len
+                num_prev_out = (start_idx -
+                                self.input_batch.num_prompt_tokens[req_idx])
+                del req_state.output_token_ids[num_prev_out:]
+                req_state.output_token_ids.extend(valid_tokens)
             return
 
         valid_sampled_token_ids = runner_utils.host_extract_sampled_tokens(
@@ -1646,6 +1650,35 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         scheduler_output: "VllmSchedulerOutput",
         intermediate_tensors: Optional[JaxIntermediateTensors] = None,
     ) -> JaxIntermediateTensors | ModelRunnerOutput | None:
+        # Under async_scheduling, step T is scheduled on the host while step
+        # T-1's multi-step continue_decode burst is still in flight on the TPU,
+        # so scheduler_output.scheduled_cached_reqs only accounts for 1
+        # placeholder token instead of the K tokens actually generated.
+        # Reconcile step T-1's results BEFORE update_states() so that:
+        # 1. All requests from step T-1 (including any about to be unscheduled
+        #    or finished in step T) have their output_token_ids and
+        #    num_computed_tokens updated while still in self.input_batch.
+        # 2. scheduled_cached_reqs carries the true post-burst token counts into
+        #    update_states() and downstream routed_experts slot reconstruction.
+        if (self.scheduler_config.async_scheduling
+                and self._pre_async_results is not None and getattr(
+                    self._pre_async_results, "is_continue_decode", False)):
+            pre_req_ids = set(self._pre_async_results.req_ids)
+            self._modify_prev_results()
+            self._pre_async_results = None
+            cached_reqs = getattr(scheduler_output, "scheduled_cached_reqs",
+                                  None)
+            if cached_reqs is not None:
+                resumed = getattr(cached_reqs, "resumed_req_ids", None) or ()
+                for i, req_id in enumerate(cached_reqs.req_ids):
+                    if req_id in pre_req_ids and req_id not in resumed:
+                        req_state = self.requests.get(req_id)
+                        if req_state is not None:
+                            cached_reqs.num_computed_tokens[
+                                i] = req_state.num_computed_tokens
+                            cached_reqs.num_output_tokens[i] = len(
+                                req_state.output_token_ids)
+
         self.persistent_batch_manager.update_states(
             scheduler_output, self.get_mrope_input_positions_fn)
         if self.aux_output_worker is not None:
@@ -1672,15 +1705,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 #     "Should not schedule a request that does nothing!")
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # Check if the entire batch is in the decode phase.
-        # request_distribution[0] tracks the number of decode requests.
-        is_decode_only = self.input_batch.request_distribution[
-            0] == self.input_batch.num_reqs
-        has_structured_output = getattr(scheduler_output,
-                                        "has_structured_output_requests",
-                                        False)
-        if (is_decode_only and self.enable_continue_decode
-                and not has_structured_output):
+        if TPUModelRunner._can_use_continue_decode(self, scheduler_output):
             return self._execute_continue_decode(scheduler_output)
 
         # TODO(pooyam): I guess we can remove returning sampling_metadata in `_prepare_inputs` after https://github.com/njhill/vllm/commit/b7433ca1a47732394b1bdea4099d98389515954b
@@ -1850,7 +1875,34 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         remaining_slots = self.max_model_len - num_tokens
         if len(remaining_slots) == 0:
             return 0
-        return int(np.min(remaining_slots))
+        min_remaining = int(np.min(remaining_slots))
+        if (self.kv_cache_config.has_mamba_layers and getattr(
+                self.cache_config, "mamba_cache_mode", "none") == "align"):
+            # In mamba align mode (prefix caching), MambaManager does not
+            # pre-allocate lookahead blocks and TPUMambaManager only caches
+            # state checkpoints at block boundaries (seq_len % mamba_block_size == 0).
+            # Stop at or just before each block boundary so the scheduler
+            # allocates and caches the boundary block on the next step.
+            mamba_block_size = getattr(self.cache_config, "mamba_block_size",
+                                       None) or self.block_size
+            rem = num_tokens % mamba_block_size
+            steps_to_boundary = np.where(rem == 0, 1, mamba_block_size - rem)
+            min_remaining = min(min_remaining, int(np.min(steps_to_boundary)))
+        return min_remaining
+
+    def _can_use_continue_decode(
+            self, scheduler_output: "VllmSchedulerOutput") -> bool:
+        if self.enable_continue_decode is not True:
+            return False
+        num_reqs = self.input_batch.num_reqs
+        if num_reqs <= 0 or self.input_batch.request_distribution[
+                0] != num_reqs:
+            return False
+        if getattr(scheduler_output, "has_structured_output_requests", False):
+            return False
+        return bool(
+            np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] >=
+                   self.input_batch.num_prompt_tokens[:num_reqs]))
 
     def _execute_continue_decode(
         self,
@@ -1858,6 +1910,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | None:
         if self.scheduler_config.async_scheduling and self._pre_async_results is not None:
             self._modify_prev_results()
+            self._pre_async_results = None
 
         (
             input_ids,
@@ -1959,11 +2012,9 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
             placeholder_req_id_to_index: dict[str, int] = {}
             for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
                 req_state = self.requests[req_id]
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
-                request_seq_lens.append((i, req_state, seq_len))
-
                 start_idx = self.input_batch.num_tokens_no_spec[i]
+                request_seq_lens.append((i, req_state, start_idx))
+
                 end_idx = start_idx + max_decode_steps
                 self.input_batch.num_tokens_no_spec[i] = end_idx
                 self.input_batch.num_tokens[i] = end_idx
@@ -2545,13 +2596,8 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
         max_num_reqs_across_dp = max(
             len(req_ids) for req_ids in req_ids_dp.values())
 
-        is_decode_only = (self.input_batch.request_distribution[0] ==
-                          self.input_batch.num_reqs)
-        has_structured_output = getattr(scheduler_output,
-                                        "has_structured_output_requests",
-                                        False)
-        use_continue_decode = (is_decode_only and self.enable_continue_decode
-                               and not has_structured_output)
+        use_continue_decode = TPUModelRunner._can_use_continue_decode(
+            self, scheduler_output)
 
         padded_num_reqs_per_dp_rank = runner_utils.get_padded_token_len(
             self.num_reqs_paddings_per_dp, max_num_reqs_across_dp)
