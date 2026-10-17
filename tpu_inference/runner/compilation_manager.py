@@ -29,6 +29,7 @@ from vllm.utils.math_utils import round_down
 import tpu_inference.envs as envs
 from tpu_inference.core.disagg_utils import is_disagg_enabled
 from tpu_inference.core.sched.utils import DEFAULT_MAX_DECODE_STEPS
+from tpu_inference.layers.common.attention_backend import AttentionFields
 from tpu_inference.layers.common.attention_metadata import (
     AttentionMetadata, GroupedAttentionMetadata, SharedAttentionMetadata)
 from tpu_inference.layers.common.sharding import ShardingAxisName
@@ -402,7 +403,8 @@ class CompilationManager:
                                     is_last_rank=True,
                                     num_reqs: int,
                                     pcp_has_cached_kv: bool = False,
-                                    pcp_num_reqs: int = 1) -> None:
+                                    pcp_num_reqs: int = 1,
+                                    attention_fields: AttentionFields) -> None:
         num_tokens = None
         if input_ids is not None:
             num_tokens = input_ids.shape[0]
@@ -426,10 +428,21 @@ class CompilationManager:
         # Under PCP each request becomes two fused seqs, so the attention
         # metadata buffers are twice as wide (see runner.attn_max_num_seqs).
         attn_seqs = self.runner.attn_max_num_seqs
-        seq_lens = self._create_dummy_tensor((attn_seqs, ), jnp.int32,
-                                             metadata_attn_sharding)
-        query_start_loc = self._create_dummy_tensor(
-            (attn_seqs + dp_size, ), jnp.int32, metadata_attn_sharding)
+        attention_arrays = self.runner.attention_backend.warmup_arrays(
+            self.runner.kv_cache_config.kv_cache_groups,
+            num_tokens=num_tokens,
+            max_num_reqs=self.runner.max_num_reqs,
+            dp_size=dp_size,
+            mesh=self.runner.mesh,
+            sharding=metadata_attn_sharding)
+        seq_lens = attention_arrays.get("seq_lens")
+        if seq_lens is None:
+            seq_lens = self._create_dummy_tensor((attn_seqs, ), jnp.int32,
+                                                 metadata_attn_sharding)
+        query_start_loc = attention_arrays.get("query_start_loc")
+        if query_start_loc is None:
+            query_start_loc = self._create_dummy_tensor(
+                (attn_seqs + dp_size, ), jnp.int32, metadata_attn_sharding)
 
         # Keep existing pattern for specific value arrays
         request_distribution = np.array([0, 0, 0] * dp_size, dtype=np.int32)
@@ -493,7 +506,8 @@ class CompilationManager:
                                         sharding=metadata_attn_sharding)
             return block_tables
 
-        def build_attn(block_tables: jax.Array | None) -> AttentionMetadata:
+        def build_attn(block_tables: jax.Array | None,
+                       gid: int) -> AttentionMetadata:
             attention_metadata_gid = AttentionMetadata(
                 input_positions=positions,
                 block_tables=block_tables,
@@ -503,6 +517,7 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
+                backend_metadata=attention_fields(attention_arrays, gid),
             )
 
             return attention_metadata_gid
@@ -523,14 +538,14 @@ class CompilationManager:
             # Pooling model will not using kv cache
             no_kv_cache = len(self.runner.kv_cache_config.kv_cache_groups) == 0
             block_tables = build_block_table(0) if not no_kv_cache else None
-            attention_metadata = build_attn(block_tables)
+            attention_metadata = build_attn(block_tables, 0)
             shared_attention_metadata = build_shared_attn()
         else:
             # Must mirror the runtime structure built in `_prepare_inputs`, or
             # the precompiled executable does not match and we recompile.
             attention_metadata = GroupedAttentionMetadata(
                 groups=tuple(
-                    build_attn(build_block_table(gid)) for gid in range(
+                    build_attn(build_block_table(gid), gid) for gid in range(
                         len(self.runner.kv_cache_config.kv_cache_groups))),
                 layer_names_per_group=tuple(
                     tuple(group.layer_names)
@@ -752,22 +767,36 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
+                attention_variants = self._attention_warmup_variants(
+                    num_tokens)
                 _pcp = self.runner.vllm_config.sharding_config.prefill_cp_size
                 # has_cached_kv is a static field; non-PCP runs never read it.
                 _cache_rungs = (False, True) if _pcp > 1 else (False, )
                 for _has_cached_kv in _cache_rungs:
                     for _pcp_reqs in self.runner.pcp_num_reqs_paddings:
-                        self._precompile_backbone_helper(
-                            f"worker{self.runner.rank} backbone",
-                            input_ids=input_ids,
-                            positions=positions,
-                            inputs_embeds=None,
-                            intermediate_tensors=intermediate_tensors,
-                            is_first_rank=is_first_rank,
-                            is_last_rank=is_last_rank,
-                            num_reqs=num_reqs,
-                            pcp_has_cached_kv=_has_cached_kv,
-                            pcp_num_reqs=_pcp_reqs)
+                        for attention_fields in attention_variants:
+                            self._precompile_backbone_helper(
+                                f"worker{self.runner.rank} backbone",
+                                input_ids=input_ids,
+                                positions=positions,
+                                inputs_embeds=None,
+                                intermediate_tensors=intermediate_tensors,
+                                is_first_rank=is_first_rank,
+                                is_last_rank=is_last_rank,
+                                num_reqs=num_reqs,
+                                pcp_has_cached_kv=_has_cached_kv,
+                                pcp_num_reqs=_pcp_reqs,
+                                attention_fields=attention_fields)
+
+    def _attention_warmup_variants(self,
+                                   num_tokens: int) -> list[AttentionFields]:
+        """The attention backend's executables at this token bucket."""
+        return self.runner.attention_backend.warmup_variants(
+            self.runner.kv_cache_config.kv_cache_groups,
+            num_tokens=num_tokens,
+            num_tokens_paddings=self.runner.num_tokens_paddings,
+            max_num_reqs=self.runner.max_num_reqs,
+            dp_size=self.runner.vllm_config.sharding_config.total_dp_size)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -832,15 +861,18 @@ class CompilationManager:
                         })
                 else:
                     intermediate_tensors = None
-                self._precompile_backbone_helper(
-                    f"worker{self.runner.rank} backbone with embeds",
-                    input_ids=None,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    intermediate_tensors=intermediate_tensors,
-                    is_first_rank=is_first_rank,
-                    is_last_rank=is_last_rank,
-                    num_reqs=num_reqs)
+                for attention_fields in self._attention_warmup_variants(
+                        num_tokens):
+                    self._precompile_backbone_helper(
+                        f"worker{self.runner.rank} backbone with embeds",
+                        input_ids=None,
+                        positions=positions,
+                        inputs_embeds=inputs_embeds,
+                        intermediate_tensors=intermediate_tensors,
+                        is_first_rank=is_first_rank,
+                        is_last_rank=is_last_rank,
+                        num_reqs=num_reqs,
+                        attention_fields=attention_fields)
 
     def _precompile_select_from_array_helper(
         self,
