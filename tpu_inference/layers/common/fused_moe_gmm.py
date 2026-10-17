@@ -584,31 +584,60 @@ def expert_parallel_gmm(
     )
 
 
-def _pack_rows(arrays, unit: jnp.dtype):
-    """Pack [n, ...] arrays side by side as the raw bits of `unit` columns.
+def _concat_bits(arrays, unit: jnp.dtype) -> jax.Array:
+    """Concatenate [n, m_i] arrays as their raw bits, in `unit` columns.
 
-    Returns (packed, unpack): unpack splits packed rows (e.g. after a row
-    all-gather) back into arrays of the original dtypes and shapes. Bit-cast
-    scales and ids can spell float NaNs, which float ops may not preserve bit
-    for bit; integer columns keep every bit.
+    Bit-cast scales and ids can spell float NaNs, which float ops may not
+    preserve bit for bit; integer columns keep every bit.
     """
-    unit = jnp.dtype(unit)
-    specs = [(a.dtype, a.shape[1:]) for a in arrays]
-    cols = [
+    return jnp.concatenate([
         jax.lax.bitcast_convert_type(a, unit).reshape(a.shape[0], -1)
         for a in arrays
-    ]
-    splits = np.cumsum([c.shape[1] for c in cols])[:-1].tolist()
+    ],
+                           axis=1)
 
-    def unpack(packed: jax.Array) -> list[jax.Array]:
-        out = []
-        for (dtype, shape), c in zip(specs, jnp.split(packed, splits, axis=1)):
-            words = dtype.itemsize // unit.itemsize
-            c = c.reshape(-1, *shape, *([words] if words > 1 else []))
-            out.append(jax.lax.bitcast_convert_type(c, dtype))
-        return out
 
-    return jnp.concatenate(cols, axis=1), unpack
+def _split_bits(row: jax.Array, like) -> list[jax.Array]:
+    """Inverse of _concat_bits: split `row` into arrays with the dtypes and
+    widths of `like`."""
+    out, start = [], 0
+    for a in like:
+        words = a.dtype.itemsize // row.dtype.itemsize
+        width = a.shape[1] * words
+        b = row[:, start:start + width]
+        start += width
+        if words > 1:
+            b = b.reshape(b.shape[0], -1, words)
+        out.append(jax.lax.bitcast_convert_type(b, a.dtype))
+    return out
+
+
+def _one_step_all_gather_as_bits(arrays, mesh: Mesh, unit: jnp.dtype) -> tuple:
+    """All-gather `arrays` in one collective.
+
+    The arrays come row-sharded over MLP-data and the attention-only axes. Each
+    row's values are concatenated as raw `unit` bits, so one all-gather over the
+    attention-only axes moves them all, bitwise unchanged. Returns the arrays
+    with rows split only over MLP-data (the model replicas) and replicated over
+    every other axis.
+    """
+    axes = _attn_only_axes(mesh)
+    mlp = _as_axes(ShardingAxisName.MLP_DATA)
+
+    def _gather(*local):
+        row = jax.lax.all_gather(_concat_bits(local, unit),
+                                 axes,
+                                 axis=0,
+                                 tiled=True)
+        return tuple(_split_bits(row, local))
+
+    return jax.shard_map(
+        _gather,
+        mesh=mesh,
+        in_specs=(P(mlp + axes, None), ) * len(arrays),
+        out_specs=(P(ShardingAxisName.MLP_DATA, None), ) * len(arrays),
+        check_vma=False,
+    )(*arrays)
 
 
 def _dequantize_fp8(q: jax.Array, scale: jax.Array,
@@ -617,7 +646,15 @@ def _dequantize_fp8(q: jax.Array, scale: jax.Array,
     return (q.astype(jnp.float32) * scale).astype(dtype)
 
 
-def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh) -> jax.Array:
+def _apply_all_gather_fp8(hidden_states: jax.Array,
+                          mesh: Mesh,
+                          routing: tuple = ()):
+    """One-step fp8 all-gather of the tokens.
+
+    Returns the gathered hidden_states. With routing=(int32 ids, f32 weights),
+    the routing rides in the same all-gather and it returns
+    (hidden_states, ids, weights).
+    """
     logger.info("Apply FP8 all-gather on input of MOE")
     hidden_states_q, scale = quantize_tensor(
         jnp.float8_e4m3fn,
@@ -626,6 +663,15 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh) -> jax.Array:
     )
     # quantize_tensor squeezes the scale if axis is int. We need to expand it back.
     scale = jnp.expand_dims(scale, -1)
+
+    if routing:
+        # Keeps q and scale bitwise identical to the no-routing path below.
+        hidden_states_q, scale = jax.lax.optimization_barrier(
+            (hidden_states_q, scale))
+        hidden_states_q, scale, *routing = _one_step_all_gather_as_bits(
+            (hidden_states_q, scale, *routing), mesh, jnp.uint8)
+        return (_dequantize_fp8(hidden_states_q, scale,
+                                hidden_states.dtype), *routing)
 
     # Dequantize if needed
     return jax.shard_map(
@@ -642,20 +688,21 @@ def _apply_all_gather_fp8(hidden_states: jax.Array, mesh: Mesh) -> jax.Array:
 def _apply_one_step_dispatch_gather(hidden_states: jax.Array,
                                     mesh: Mesh,
                                     fp8: bool,
-                                    tail: tuple = ()) -> tuple:
-    """Hidden states for the one-step dispatch, and the `tail` arrays (rows
-    sharded like them) gathered with them. Returns (hidden_states, tail).
+                                    routing: tuple = ()):
+    """Hidden states for the one-step dispatch.
 
-    Without a tail: with fp8=True the output of _apply_all_gather_fp8,
+    Without routing: with fp8=True the output of _apply_all_gather_fp8,
     otherwise the input unchanged, and any all-gather the mesh needs is the one
-    XLA inserts for the caller's next shard_map. With a tail, one explicit
-    all-gather moves both: see _gather_tokens.
+    XLA inserts for the caller's next shard_map. With routing=(int32 ids, f32
+    weights), fp8 or not, gathers the tokens explicitly in one all-gather with
+    the routing and returns (hidden_states, ids, weights).
     """
-    if tail:
-        return _gather_tokens(hidden_states, mesh, fp8, tail)
     if fp8:
-        return _apply_all_gather_fp8(hidden_states, mesh), ()
-    return hidden_states, ()
+        return _apply_all_gather_fp8(hidden_states, mesh, routing)
+    if routing:
+        return _one_step_all_gather_as_bits((hidden_states, *routing), mesh,
+                                            jnp.uint16)
+    return hidden_states
 
 
 # The hierarchical gather splits the hidden columns in half; each half must be
@@ -688,12 +735,16 @@ def _hierarchical_dispatch_plan(mesh: Mesh):
     checked from each device's coords, core_on_chip and slice_index, not
     assumed.
     """
-    step1 = _attn_only_axes(mesh)
+    # Step 1 axes: attention-data axes that are not in MLP-data.
+    mlp = set(_as_axes(ShardingAxisName.MLP_DATA))
+    attn = [a for a in _as_axes(ShardingAxisName.ATTN_DATA) if a not in mlp]
+    step1 = tuple(a for a in attn if mesh.shape.get(a, 1) > 1)
     # Step 2 needs exactly one remaining axis (the one the hidden states are
     # replicated across), of even size.
-    data = set(_as_axes(ShardingAxisName.MLP_DATA)) | set(
-        _as_axes(ShardingAxisName.ATTN_DATA))
-    rest = [a for a in mesh.axis_names if a not in data and mesh.shape[a] > 1]
+    rest = [
+        a for a in mesh.axis_names
+        if a not in mlp and a not in attn and mesh.shape[a] > 1
+    ]
     if not step1 or len(rest) != 1:
         return None
     pair_axis = rest[0]
@@ -724,82 +775,10 @@ def _hierarchical_dispatch_plan(mesh: Mesh):
     return step1, pair_axis, perm
 
 
-def _gather_rows(body: jax.Array,
-                 tail: tuple,
-                 mesh: Mesh,
-                 pair: tuple | None = None) -> tuple:
-    """All-gather `body` and the `tail` arrays over the attention-only axes,
-    in one collective.
-
-    Every array's rows come split over MLP-data and the attention-only axes;
-    returns (body, *tail) with rows split only over MLP-data. They all move as
-    the raw bits of body's dtype, so they arrive bitwise unchanged.
-
-    With pair=(pair_axis, perm) from _hierarchical_dispatch_plan, each core of
-    a chip gathers half of body's columns, plus the whole tail, then the two
-    cores swap their halves on-chip.
-    """
-    axes = _attn_only_axes(mesh)
-    unit = jnp.dtype(f"uint{8 * body.dtype.itemsize}")
-
-    def _gather(x, *tail):
-        x = jax.lax.bitcast_convert_type(x, unit)
-        if pair:
-            pair_axis, perm = pair
-            half = x.shape[1] // 2
-            core = jax.lax.axis_index(pair_axis) % 2
-            x = jax.lax.dynamic_slice_in_dim(x, core * half, half, axis=1)
-        # jnp.concatenate results in an in-memory copy (so does the after-AG
-        # slice), but the cost is small compared to a separate AG for the tail.
-        row, unpack = _pack_rows((x, *tail), unit)
-        x, *tail = unpack(jax.lax.all_gather(row, axes, axis=0, tiled=True))
-        if pair:
-            # Exchange the halves between two cores on the same chip.
-            theirs = jax.lax.ppermute(x, pair_axis, perm)
-            first = core == 0
-            x = jnp.concatenate([
-                jnp.where(first, x, theirs),
-                jnp.where(first, theirs, x),
-            ],
-                                axis=1)
-        return jax.lax.bitcast_convert_type(x, body.dtype), *tail
-
-    n = 1 + len(tail)
-    return jax.shard_map(
-        _gather,
-        mesh=mesh,
-        in_specs=(P(_as_axes(ShardingAxisName.MLP_DATA) + axes, None), ) * n,
-        out_specs=(P(ShardingAxisName.MLP_DATA, None), ) * n,
-        check_vma=False,
-    )(body, *tail)
-
-
-def _gather_tokens(hidden_states: jax.Array,
-                   mesh: Mesh,
-                   fp8: bool,
-                   tail: tuple,
-                   pair: tuple | None = None) -> tuple:
-    """Gather hidden_states with the `tail` arrays in one explicit all-gather
-    (see _gather_rows). Returns (hidden_states, tail).
-
-    With fp8=True, quantizes as _apply_all_gather_fp8 does, so the gather moves
-    fp8 bytes, and each row's scale rides as one more tail array.
-    """
-    if not fp8:
-        hidden_states, *tail = _gather_rows(hidden_states, tail, mesh, pair)
-        return hidden_states, tuple(tail)
-    q, scale = quantize_tensor(jnp.float8_e4m3fn, hidden_states, axis=-1)
-    # Unfused from the packing, the quantization compiles as in
-    # _apply_all_gather_fp8, so q and scale are bitwise identical to its own.
-    q, scale = jax.lax.optimization_barrier((q, scale))
-    q, scale, *tail = _gather_rows(q, (scale[:, None], *tail), mesh, pair)
-    return _dequantize_fp8(q, scale, hidden_states.dtype), tuple(tail)
-
-
 def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
                                         mesh: Mesh,
                                         fp8: bool = False,
-                                        tail: tuple = ()) -> tuple:
+                                        routing: tuple = ()):
     """Replicate attention-data-sharded hidden states in a hierarchical gather.
 
     Replaces the one all-gather XLA would insert, which every model shard of a
@@ -808,14 +787,20 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
     two cores swap halves on-chip. Cross-chip traffic halves. Both column halves
     keep the one-step row order, and the result is bitwise identical.
 
-    With fp8=True the rows are first quantized as _apply_all_gather_fp8 does
-    (one scale per row, over the full row), so both steps move fp8 bytes, and
-    each row's scale rides as 4 extra byte columns of the step-1 payload
-    instead of a separate collective. The `tail` arrays (rows sharded like
-    hidden_states) ride the same way. Returns (hidden_states, tail).
+    With fp8=True each core first quantizes its rows as _apply_all_gather_fp8
+    does (one scale per row, over the full row), so both steps move fp8 bytes,
+    and each row's scale rides as 4 extra byte columns of the step-1 payload
+    instead of a separate collective. XLA may compile the two quantizations
+    differently, so some values can land one fp8 step away from
+    _apply_all_gather_fp8's.
 
     If the mesh doesn't fit (see _hierarchical_dispatch_plan) or the hidden
     size is not a multiple of 256, falls back to _apply_one_step_dispatch_gather.
+
+    routing=(int32 ids, f32 weights) rides as extra integer columns of the
+    step-1 payload (after the scale with fp8), instead of a separate
+    all_gather_topk_indices_and_weights: step 1 gathers rows over the same
+    axes. Then returns (hidden_states, ids, weights).
     """
     plan = _hierarchical_dispatch_plan(mesh)
     hidden = hidden_states.shape[-1]
@@ -827,52 +812,90 @@ def _apply_hierarchical_dispatch_gather(hidden_states: jax.Array,
             "model axis whose adjacent indices are the two cores of one chip "
             "in every attention-data rank.",
             str(dict(mesh.shape)))  # *_once caches on args: hashable
-        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8, tail)
+        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8,
+                                               routing)
     if hidden % _HIERARCHICAL_HIDDEN_ALIGN:
         logger.warning_once(
             "MOE_HIERARCHICAL_DISPATCH is set but hidden=%d is not a "
             "multiple of %d, so its halves would not be whole 128-lane "
             "tiles: keeping the one-step dispatch all-gather.", hidden,
             _HIERARCHICAL_HIDDEN_ALIGN)
-        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8, tail)
+        return _apply_one_step_dispatch_gather(hidden_states, mesh, fp8,
+                                               routing)
     step1, pair_axis, perm = plan
+    dtype = hidden_states.dtype
     logger.info_once(
         "MOE_HIERARCHICAL_DISPATCH: each chip's two cores gather half of the "
         "%d hidden columns over %s, then swap halves on-chip along '%s' "
         "(pairs %s), in %s.", hidden, str(step1), pair_axis, str(perm),
-        "fp8" if fp8 else str(hidden_states.dtype))
-    return _gather_tokens(hidden_states, mesh, fp8, tail, (pair_axis, perm))
+        "fp8" if fp8 else str(dtype))
+    half = hidden // 2
+    mlp = ShardingAxisName.MLP_DATA
 
+    def _gather(x, *routing):
+        # All gather across step 1 axes.
+        core = jax.lax.axis_index(pair_axis) % 2
+        mine = jax.lax.dynamic_slice_in_dim(x, core * half, half, axis=1)
+        if routing:
+            # The routing rides as extra columns; all move as raw bits.
+            row = jax.lax.all_gather(_concat_bits((mine, *routing),
+                                                  jnp.uint16),
+                                     step1,
+                                     axis=0,
+                                     tiled=True)
+            mine, *routing = _split_bits(row, (mine, *routing))
+        else:
+            mine = jax.lax.all_gather(mine, step1, axis=0, tiled=True)
+        # Exchange the halves between two cores on the same chip.
+        theirs = jax.lax.ppermute(mine, pair_axis, perm)
+        first = core == 0
+        out = jnp.concatenate([
+            jnp.where(first, mine, theirs),
+            jnp.where(first, theirs, mine),
+        ],
+                              axis=1)
+        return (out, *routing) if routing else out
 
-def _dispatch_gather(hidden_states: jax.Array, topk_indices: jax.Array,
-                     topk_weights: jax.Array, mesh: Mesh, hierarchical: bool,
-                     fp8: bool) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Replicate the tokens and their top-k ids and weights over the
-    attention-data axes that are not MLP-data, for the dispatch.
+    def _gather_fp8(x, *routing):
+        q, scale = quantize_tensor(jnp.float8_e4m3fn, x, axis=-1)
+        # Move the bytes as uint8: the scale's bytes can be fp8 NaNs, which
+        # fp8 ops may not preserve bit for bit.
+        q = jax.lax.bitcast_convert_type(q, jnp.uint8)
+        # The scale's 4 bytes ride as 4 extra columns, then the routing's.
+        tail = _concat_bits((scale[:, None], *routing), jnp.uint8)
+        # All gather across step 1 axes, with the scale tail.
+        core = jax.lax.axis_index(pair_axis) % 2
+        mine = jax.lax.dynamic_slice_in_dim(q, core * half, half, axis=1)
+        # jnp.concatenate results in an in-memory copy (so does the after-AG
+        # slice), but the cost is small compared to a separate AG for the scale.
+        mine = jax.lax.all_gather(jnp.concatenate([mine, tail], axis=1),
+                                  step1,
+                                  axis=0,
+                                  tiled=True)
+        scale, *routing = _split_bits(mine[:, half:],
+                                      (scale[:, None], *routing))
+        mine = mine[:, :half]
+        # Exchange the halves between two cores on the same chip.
+        theirs = jax.lax.ppermute(mine, pair_axis, perm)
+        first = core == 0
+        q = jnp.concatenate([
+            jnp.where(first, mine, theirs),
+            jnp.where(first, theirs, mine),
+        ],
+                            axis=1)
+        q = jax.lax.bitcast_convert_type(q, jnp.float8_e4m3fn)
+        out = _dequantize_fp8(q, scale, dtype)
+        return (out, *routing) if routing else out
 
-    With MOE_FOLD_ROUTING_INTO_DISPATCH the routing rides as extra columns of
-    the token all-gather (bitwise identical for non-NaN weights); otherwise
-    all_gather_topk_indices_and_weights gathers it separately.
-    """
-    gather = (_apply_hierarchical_dispatch_gather
-              if hierarchical else _apply_one_step_dispatch_gather)
-    if envs.MOE_FOLD_ROUTING_INTO_DISPATCH and _attn_only_axes(mesh):
-        logger.info_once(
-            "MOE_FOLD_ROUTING_INTO_DISPATCH: the top-k ids and weights ride "
-            "in the %s dispatch all-gather of the tokens.",
-            "hierarchical" if hierarchical else "one-step")
-        # The same dtypes all_gather_topk_indices_and_weights gathers in.
-        routing = (topk_indices.astype(jnp.int32),
-                   topk_weights.astype(jnp.float32))
-        hidden_states, (topk_indices,
-                        topk_weights) = gather(hidden_states, mesh, fp8,
-                                               routing)
-        return hidden_states, topk_indices, topk_weights
-    if get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
-        topk_indices, topk_weights = all_gather_topk_indices_and_weights(
-            topk_indices, topk_weights, hidden_states.dtype, mesh)
-    hidden_states, _ = gather(hidden_states, mesh, fp8)
-    return hidden_states, topk_indices, topk_weights
+    args = (hidden_states, *routing)
+    in_spec, out_spec = P(tuple(_as_axes(mlp)) + step1, None), P(mlp, None)
+    return jax.shard_map(
+        _gather_fp8 if fp8 else _gather,
+        mesh=mesh,
+        in_specs=(in_spec, ) * len(args),
+        out_specs=(out_spec, ) * len(args) if routing else out_spec,
+        check_vma=False,
+    )(*args)
 
 
 @jax.jit(static_argnames=(
@@ -1005,15 +1028,26 @@ def fused_moe_func(
         token_valid = (jnp.arange(num_tokens) < num_valid_tokens)[:, None]
         topk_indices = jnp.where(token_valid, topk_indices, 0)
         topk_weights = jnp.where(token_valid, topk_weights, 0.0)
-    # All gathering the tokens, topk_indices and topk_weights if attention dp
-    # is used.
-    hidden_states, topk_indices, topk_weights = _dispatch_gather(
-        hidden_states,
-        topk_indices,
-        topk_weights,
-        mesh,
-        hierarchical=use_ep and envs.MOE_HIERARCHICAL_DISPATCH,
-        fp8=all_gather_fp8)
+    # All gathering topk_indices and topk_weights if attention dp is used.
+    # MOE_FOLD_ROUTING_INTO_DISPATCH gathers them in the token all-gather.
+    hierarchical = use_ep and envs.MOE_HIERARCHICAL_DISPATCH
+    dispatch_gather = (_apply_hierarchical_dispatch_gather
+                       if hierarchical else _apply_one_step_dispatch_gather)
+    fold_routing = (envs.MOE_FOLD_ROUTING_INTO_DISPATCH
+                    and bool(_attn_only_axes(mesh)))
+    if fold_routing:
+        logger.info_once(
+            "MOE_FOLD_ROUTING_INTO_DISPATCH: the top-k ids and weights ride "
+            "in the %s dispatch all-gather of the tokens.",
+            "hierarchical" if hierarchical else "one-step")
+        # The same dtypes all_gather_topk_indices_and_weights gathers in.
+        routing = (topk_indices.astype(jnp.int32),
+                   topk_weights.astype(jnp.float32))
+        hidden_states, topk_indices, topk_weights = dispatch_gather(
+            hidden_states, mesh, fp8=all_gather_fp8, routing=routing)
+    elif get_mesh_shape_product(mesh, ShardingAxisName.ATTN_DATA) > 1:
+        topk_indices, topk_weights = all_gather_topk_indices_and_weights(
+            topk_indices, topk_weights, dtype, mesh)
     topk_weights = topk_weights.astype(dtype)
     topk_weights = jax.lax.with_sharding_constraint(
         topk_weights, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
@@ -1080,6 +1114,11 @@ def fused_moe_func(
             x = hidden_states_local[token_indices_sorted]
 
         return x, group_sizes_local, topk_argsort_revert_indices
+
+    if not fold_routing:
+        hidden_states = dispatch_gather(hidden_states,
+                                        mesh,
+                                        fp8=all_gather_fp8)
 
     x, group_sizes, topk_argsort_revert_indices = jax.shard_map(
         _process_tokens_locally,

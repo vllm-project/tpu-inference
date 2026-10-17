@@ -207,8 +207,7 @@ def test_gather_fallback_warning_names_the_reason(plan, hidden, reason):
     with mock.patch.object(fused_moe_gmm, "_hierarchical_dispatch_plan",
                            return_value=plan), \
             mock.patch.object(fused_moe_gmm, "logger") as logger:
-        assert fused_moe_gmm._apply_hierarchical_dispatch_gather(x,
-                                                                 mesh)[0] is x
+        assert fused_moe_gmm._apply_hierarchical_dispatch_gather(x, mesh) is x
     logger.warning_once.assert_called_once()
     message, *args = logger.warning_once.call_args.args
     assert reason in message % tuple(args)
@@ -241,6 +240,19 @@ def _assert_bitwise_equal(actual: jax.Array, expected: jax.Array):
         np.asarray(expected).view(np.uint16))
 
 
+def _assert_gather_matches(actual: jax.Array, expected: jax.Array, fp8: bool):
+    """bf16 must match bit for bit. With fp8, the two paths quantize in
+    different XLA programs, which may round a value to a neighbouring fp8
+    value: at most 2**-3 of it (3 mantissa bits)."""
+    if not fp8:
+        _assert_bitwise_equal(actual, expected)
+        return
+    np.testing.assert_allclose(np.asarray(actual, np.float32),
+                               np.asarray(expected, np.float32),
+                               rtol=2**-3,
+                               atol=0)
+
+
 def _logical_plan(mesh: Mesh):
     """The plan for `mesh` if its model axis did pair the cores of a chip."""
     return fused_moe_gmm._hierarchical_dispatch_plan(
@@ -249,7 +261,7 @@ def _logical_plan(mesh: Mesh):
 
 def _run_gather(x: jax.Array, mesh: Mesh, fp8: bool = False):
     gather = jax.jit(lambda h: fused_moe_gmm.
-                     _apply_hierarchical_dispatch_gather(h, mesh, fp8=fp8)[0])
+                     _apply_hierarchical_dispatch_gather(h, mesh, fp8=fp8))
     return gather(x), gather.lower(x).as_text()
 
 
@@ -278,7 +290,7 @@ def test_gather_matches_one_step_gather(sizes, fp8):
     assert "collective_permute" in hlo
     assert out.sharding.is_equivalent_to(
         NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)), out.ndim)
-    _assert_bitwise_equal(out, _one_step_gather(x, mesh, fp8))
+    _assert_gather_matches(out, _one_step_gather(x, mesh, fp8), fp8)
 
 
 @requires_8_devices
@@ -307,7 +319,7 @@ def test_gather_applies_on_dual_core_chips(sizes, fp8):
     x = _sharded_hidden_states(mesh)
     out, hlo = _run_gather(x, mesh, fp8)
     assert "collective_permute" in hlo
-    _assert_bitwise_equal(out, _one_step_gather(x, mesh, fp8))
+    _assert_gather_matches(out, _one_step_gather(x, mesh, fp8), fp8)
 
 
 @requires_dual_core_chips
@@ -318,7 +330,7 @@ def test_gather_falls_back_when_model_axis_spans_chips():
     shape = tuple(dict(attn_dp=2, model=4).get(a, 1) for a in MESH_AXIS_NAMES)
     mesh = Mesh(np.array(devices[:8]).reshape(shape), MESH_AXIS_NAMES)
     x = _sharded_hidden_states(mesh)
-    assert fused_moe_gmm._apply_hierarchical_dispatch_gather(x, mesh)[0] is x
+    assert fused_moe_gmm._apply_hierarchical_dispatch_gather(x, mesh) is x
 
 
 @requires_dual_core_chips
@@ -328,7 +340,7 @@ def test_gather_falls_back_on_misaligned_hidden_size(hidden):
     mesh = _make_mesh(attn_dp=2, model=4)
     assert fused_moe_gmm._hierarchical_dispatch_plan(mesh) is not None
     x = _sharded_hidden_states(mesh, hidden=hidden)
-    assert fused_moe_gmm._apply_hierarchical_dispatch_gather(x, mesh)[0] is x
+    assert fused_moe_gmm._apply_hierarchical_dispatch_gather(x, mesh) is x
 
 
 # --- fused_moe_func integration ---------------------------------------------
@@ -404,11 +416,23 @@ def _warned_ignored(logger: mock.Mock) -> bool:
 def test_fused_moe_output_is_unchanged(sizes, fp8):
     mesh = _make_mesh(**sizes)
     x = _sharded_hidden_states(mesh)
+    reference_x = x
+    if fp8:
+        # The two fp8 gathers may differ by one fp8 step, and the MoE matmuls
+        # spread that with no fixed bound. So check the hierarchical fp8 gather
+        # here, and use the bf16 MoE on its output as the reference.
+        with mock.patch.object(fused_moe_gmm,
+                               "_hierarchical_dispatch_plan",
+                               return_value=_logical_plan(mesh)):
+            gathered, _ = _run_gather(x, mesh, fp8=True)
+        _assert_gather_matches(gathered,
+                               _one_step_gather(x, mesh, fp8=True),
+                               fp8=True)
+        reference_x = jax.device_put(gathered, x.sharding)
     expected, calls = _run_fused_moe(mesh,
                                      enabled=False,
-                                     hidden_states=x,
-                                     use_ep=True,
-                                     all_gather_fp8=fp8)
+                                     hidden_states=reference_x,
+                                     use_ep=True)
     assert calls == 0
 
     # Force the plan so the hierarchical path is exercised on any hardware.
@@ -457,19 +481,14 @@ def _bits(x: jax.Array) -> np.ndarray:
     return x.view(f"u{x.dtype.itemsize}")
 
 
-def _token_gather(hierarchical: bool):
+def _dispatch_gather(hierarchical: bool):
     return (fused_moe_gmm._apply_hierarchical_dispatch_gather
             if hierarchical else fused_moe_gmm._apply_one_step_dispatch_gather)
 
 
-def _flat(gathered):
-    x, tail = gathered
-    return (x, *tail)
-
-
 def _gather_then_routing(x, routing, mesh, hierarchical: bool, fp8: bool):
     """The unfolded path: the token gather, and a separate routing gather."""
-    x, _ = _token_gather(hierarchical)(x, mesh, fp8=fp8)
+    x = _dispatch_gather(hierarchical)(x, mesh, fp8=fp8)
     x = jax.lax.with_sharding_constraint(
         x, NamedSharding(mesh, P(ShardingAxisName.MLP_DATA, None)))
     return (x, *fused_moe_gmm.all_gather_topk_indices_and_weights(
@@ -493,8 +512,8 @@ def test_fold_matches_separate_routing_gather(sizes, fp8, hierarchical):
     with mock.patch.object(fused_moe_gmm,
                            "_hierarchical_dispatch_plan",
                            return_value=plan):
-        new = jax.jit(lambda x, r: _flat(
-            _token_gather(hierarchical)(x, mesh, fp8=fp8, tail=r)))
+        new = jax.jit(lambda x, r: _dispatch_gather(hierarchical)
+                      (x, mesh, fp8=fp8, routing=r))
         old = jax.jit(
             lambda *a: _gather_then_routing(*a, mesh, hierarchical, fp8))
         got, want = new(x, routing), old(x, routing)
