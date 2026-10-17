@@ -517,7 +517,7 @@ class CompilationManager:
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=num_reqs,
                 pcp=pcp,
-                **attention_fields(attention_arrays, gid),
+                backend_metadata=attention_fields(attention_arrays, gid),
             )
 
             return attention_metadata_gid
@@ -767,13 +767,8 @@ class CompilationManager:
                             "hidden_states": hidden_states,
                             "residual": residual
                         })
-                attention_variants = self.runner.attention_backend.warmup_variants(
-                    self.runner.kv_cache_config.kv_cache_groups,
-                    num_tokens=num_tokens,
-                    num_tokens_paddings=self.runner.num_tokens_paddings,
-                    max_num_reqs=self.runner.max_num_reqs,
-                    dp_size=self.runner.vllm_config.sharding_config.
-                    total_dp_size)
+                attention_variants = self._attention_warmup_variants(
+                    num_tokens)
                 _pcp = self.runner.vllm_config.sharding_config.prefill_cp_size
                 # has_cached_kv is a static field; non-PCP runs never read it.
                 _cache_rungs = (False, True) if _pcp > 1 else (False, )
@@ -792,6 +787,16 @@ class CompilationManager:
                                 pcp_has_cached_kv=_has_cached_kv,
                                 pcp_num_reqs=_pcp_reqs,
                                 attention_fields=attention_fields)
+
+    def _attention_warmup_variants(self,
+                                   num_tokens: int) -> list[AttentionFields]:
+        """The attention backend's executables at this token bucket."""
+        return self.runner.attention_backend.warmup_variants(
+            self.runner.kv_cache_config.kv_cache_groups,
+            num_tokens=num_tokens,
+            num_tokens_paddings=self.runner.num_tokens_paddings,
+            max_num_reqs=self.runner.max_num_reqs,
+            dp_size=self.runner.vllm_config.sharding_config.total_dp_size)
 
     def _precompile_backbone_with_inputs_embeds(self) -> None:
         hidden_size = self.runner.model_config.get_hidden_size()
@@ -856,14 +861,8 @@ class CompilationManager:
                         })
                 else:
                     intermediate_tensors = None
-                attention_variants = self.runner.attention_backend.warmup_variants(
-                    self.runner.kv_cache_config.kv_cache_groups,
-                    num_tokens=num_tokens,
-                    num_tokens_paddings=self.runner.num_tokens_paddings,
-                    max_num_reqs=self.runner.max_num_reqs,
-                    dp_size=self.runner.vllm_config.sharding_config.
-                    total_dp_size)
-                for attention_fields in attention_variants:
+                for attention_fields in self._attention_warmup_variants(
+                        num_tokens):
                     self._precompile_backbone_helper(
                         f"worker{self.runner.rank} backbone with embeds",
                         input_ids=None,

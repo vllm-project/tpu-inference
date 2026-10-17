@@ -14,6 +14,7 @@
 
 import functools
 from dataclasses import dataclass
+from typing import Any
 
 import jax
 
@@ -67,17 +68,12 @@ class PCPMetadata:
         "request_distribution",
         "mamba_state_indices",
         "pcp",
-        "kv_write_slices",
-        "kv_write_num_slices",
+        "backend_metadata",
     ],
     meta_fields=[
         "padded_num_reqs",
         "pcp_cache_pages",
         "use_causal_mask",
-        "dense_batch_size",
-        "dense_seq_len",
-        "varlen_block_span",
-        "attention_phase",
     ],
 )
 @dataclass
@@ -118,30 +114,9 @@ class AttentionMetadata(object):
     # STATIC: controls JIT specialization without adding a runtime array.
     use_causal_mask: bool = True
 
-    # Note: flywheel backend only (attention_backend = "flywheel");
-    # every other backend leaves the defaults below.
-
-    # STATIC: (batch, seq_len) of a uniform prefill step that runs the dense
-    # kernel; -1 when the ragged kernel runs instead.
-    dense_batch_size: int = -1
-    dense_seq_len: int = -1
-
-    # STATIC: cap on the ragged prefill kernel's block sizes; -1 on dense
-    # prefill and decode steps.
-    varlen_block_span: int = -1
-
-    # STATIC: "prefill", "decode" or "extend".
-    # Note: static, so each phase traces only its own kernels;
-    # selecting the branch on the device made XLA copy the whole KV cache
-    # once per layer.
-    attention_phase: str = ""
-
-    # The KV writer's slice table, flat (dp_size * 3 * bound,) int32 and
-    # (dp_size,) int32, split per DP rank like block_tables.
-    # Note: built on the host so the device never scans the page
-    # table.
-    kv_write_slices: jax.Array | None = None
-    kv_write_num_slices: jax.Array | None = None
+    # The selected TPU attention backend's own metadata of this step, a pytree
+    # of its own type (AttentionBackend.prepare_step); None for RPA.
+    backend_metadata: Any = None
 
 
 @functools.partial(

@@ -27,8 +27,6 @@ from vllm.model_executor.model_loader.runai_streamer_loader import \
 from vllm.utils.func_utils import supports_kw
 
 from tpu_inference import envs
-from tpu_inference.layers.common.attention_backend import (
-    RPAAttentionBackend, attention_backend_name)
 from tpu_inference.layers.common.sharding import ShardingAxisName
 from tpu_inference.layers.jax import JaxModule
 from tpu_inference.layers.jax.quantization import get_tpu_quantization_config
@@ -716,12 +714,7 @@ def resolve_model_impl_type(vllm_config: VllmConfig,
     impl = (envs.DRAFT_MODEL_IMPL_TYPE
             if is_draft_model else envs.MODEL_IMPL_TYPE)
     if impl == "auto":
-        if attention_backend_name(vllm_config) != RPAAttentionBackend.name:
-            # A registered attention backend runs in the vLLM models'
-            # attention layers; the JAX models' layers run RPA.
-            impl = "vllm"
-        else:
-            impl = resolve_model_architecture(vllm_config, is_draft_model)
+        impl = resolve_model_architecture(vllm_config, is_draft_model)
         logger.info("Resolved MODEL_IMPL_TYPE 'auto' to '%s'", impl)
     return impl
 

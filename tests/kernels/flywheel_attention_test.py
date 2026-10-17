@@ -51,8 +51,8 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
         """Run one step of seq_lens [(q_len, kv_len)], decode rows first, and
         compare output and updated cache against ref_ragged_paged_attention.
 
-        is_dense routes the prefill through the dense kernel, which needs every
-        request fresh, of one length, and filling num_tokens exactly. phase
+        is_dense routes the prefill through the dense kernel, which takes one
+        fresh request as a (1, num_tokens) row. phase
         overrides the one the runner picks for these lengths, as a DP step
         does when its ranks disagree.
         """
@@ -119,12 +119,9 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
 
         static_kwargs = dict(phase=phase, sm_scale=sm_scale)
         if is_dense:
-            assert num_decode == 0
-            assert len({q_len for q_len, _ in seq_lens}) == 1
-            assert all(q_len == kv_len for q_len, kv_len in seq_lens)
-            assert len(seq_lens) * seq_lens[0][0] == num_tokens
-            static_kwargs.update(dense_batch_size=len(seq_lens),
-                                 dense_seq_len=seq_lens[0][0])
+            assert num_decode == 0 and len(seq_lens) == 1
+            assert seq_lens[0][0] == seq_lens[0][1]
+            static_kwargs["dense_prefill"] = True
         elif phase == fa.PREFILL_PHASE:
             static_kwargs["varlen_block_span"] = fa.varlen_block_span(
                 [[q_len for q_len, _ in seq_lens]], num_tokens)
@@ -187,15 +184,11 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
     def test_prefill_at_a_host_chosen_block_span(self, seq_lens):
         self.run_case(seq_lens, 0, (24, 4), 128)
 
-    @parameterized.product(num_heads=[(24, 4), (16, 4)],
-                           shape=[(2, 512), (8, 128)])
-    def test_dense_prefill(self, num_heads, shape):
-        batch, seq_len = shape
-        self.run_case([(seq_len, seq_len)] * batch,
-                      0,
-                      num_heads,
-                      128,
-                      is_dense=True)
+    # Note: the request need not fill the bucket; the causal mask
+    # keeps its queries off the padded tail.
+    @parameterized.product(num_heads=[(24, 4), (16, 4)], seq_len=[1024, 700])
+    def test_dense_prefill(self, num_heads, seq_len):
+        self.run_case([(seq_len, seq_len)], 0, num_heads, 128, is_dense=True)
 
     @parameterized.named_parameters(
         ("decode", [(1, 300), (1, 129)], 2),

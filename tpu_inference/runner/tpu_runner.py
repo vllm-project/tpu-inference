@@ -3154,7 +3154,7 @@ class TPUModelRunner(KVConnectorModelRunnerMixin, LoRAModelRunnerMixin):
                 mamba_state_indices=mamba_state_indices,
                 padded_num_reqs=attn_padded_num_reqs,
                 pcp=pcp_metadata,
-                **attention_fields(metadata, gid),
+                backend_metadata=attention_fields(metadata, gid),
             )
 
             return attention_metadata_gid

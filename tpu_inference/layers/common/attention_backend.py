@@ -43,17 +43,15 @@ if TYPE_CHECKING:
         AttentionMetadata, SharedAttentionMetadata)
     from tpu_inference.utils import DeviceBuffer
 
-# A backend's fields of one KV cache group's AttentionMetadata in one step,
-# given the step's unpacked device buffer and the group id.
-AttentionFields = Callable[[Mapping[str, "jax.Array"], int],
-                           dict[str, "str | int | jax.Array | None"]]
+# A backend's own metadata of one KV cache group in one step, given the step's
+# unpacked device buffer and the group id: one pytree, of the backend's own
+# type, that the runner puts in AttentionMetadata.backend_metadata, or None.
+AttentionFields = Callable[[Mapping[str, "jax.Array"], int], object]
 
 
-def no_attention_fields(metadata: Mapping[str, "jax.Array"],
-                        gid: int) -> dict[str, "str | int | jax.Array | None"]:
+def no_attention_fields(metadata: Mapping[str, "jax.Array"], gid: int) -> None:
     """The AttentionFields of a backend without metadata of its own."""
-    del metadata, gid
-    return {}
+    return None
 
 
 @dataclass(frozen=True)
@@ -129,7 +127,6 @@ class AttentionBackend(abc.ABC):
         device needs go into device_buffer, which reaches the device in the
         step's one transfer; the returned AttentionFields reads them back from
         the unpacked buffer, per KV cache group."""
-        del step, device_buffer
         return no_attention_fields
 
     def warmup_variants(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
@@ -137,10 +134,8 @@ class AttentionBackend(abc.ABC):
                         max_num_reqs: int,
                         dp_size: int) -> list[AttentionFields]:
         """The AttentionFields of every executable a step at this token bucket
-        can run; the warmup compiles each one. A static field of
-        prepare_step's AttentionFields compiles one executable per value."""
-        del (kv_cache_groups, num_tokens, num_tokens_paddings, max_num_reqs,
-             dp_size)
+        can run; the warmup compiles each one. Each value of a static (meta)
+        field of the backend's metadata compiles its own executable."""
         return [no_attention_fields]
 
     def warmup_arrays(self, kv_cache_groups: "Sequence[KVCacheGroupSpec]", *,
@@ -152,7 +147,6 @@ class AttentionBackend(abc.ABC):
         serving reuses the warmed up executables. "seq_lens" and
         "query_start_loc", if present, replace the warmup's own dummy ones
         (all ones), for a backend whose kernels need other values there."""
-        del kv_cache_groups, num_tokens, max_num_reqs, dp_size, mesh, sharding
         return {}
 
 
@@ -309,7 +303,9 @@ def check_attention_backend_config(vllm_config: "VllmConfig") -> None:
             f"--attention-backend {name} supports a single host with forked "
             f"processes only, not: {', '.join(reasons)}.")
     # A JAX (flax_nnx) model's attention layers run RPA, whatever KV cache
-    # layout the runner allocates; MODEL_IMPL_TYPE=auto picks the vLLM model.
+    # layout the runner allocates. Under MODEL_IMPL_TYPE=auto a model whose
+    # default is the JAX one fails in the warmup instead, on RPA's KV cache
+    # shape.
     if envs.MODEL_IMPL_TYPE == "flax_nnx":
         raise ValueError(f"--attention-backend {name} runs in vLLM models "
                          "only, not with MODEL_IMPL_TYPE=flax_nnx.")

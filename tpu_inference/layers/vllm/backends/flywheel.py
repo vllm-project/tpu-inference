@@ -19,11 +19,11 @@ from tpu_inference.layers.common.attention_backend import (
 from tpu_inference.layers.vllm.backends.flash_attn import (
     PallasAttentionBackend, PallasAttentionBackendImpl)
 
-FLYWHEEL = "flywheel"
+FLYWHEEL_BACKEND_NAME = "flywheel"
 
 
 class FlywheelPallasAttentionBackendImpl(PallasAttentionBackendImpl):
-    attention_backend = FLYWHEEL
+    attention_backend = FLYWHEEL_BACKEND_NAME
 
 
 class FlywheelPallasAttentionBackend(PallasAttentionBackend):
@@ -32,7 +32,7 @@ class FlywheelPallasAttentionBackend(PallasAttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return FLYWHEEL.upper()
+        return FLYWHEEL_BACKEND_NAME.upper()
 
     @staticmethod
     def get_impl_cls() -> type[FlywheelPallasAttentionBackendImpl]:
@@ -57,7 +57,7 @@ def register_flywheel_attention_backend() -> None:
     """Make --attention-backend flywheel run the FlyWheel kernels. Called from
     the register_layers vllm.general_plugins entry point."""
     register_attention_backend(
-        FLYWHEEL,
+        FLYWHEEL_BACKEND_NAME,
         attention=create_flywheel_attention_backend,
         vllm_backend=f"{__name__}.FlywheelPallasAttentionBackend",
         linear_attention=create_flywheel_linear_attention_backend)
