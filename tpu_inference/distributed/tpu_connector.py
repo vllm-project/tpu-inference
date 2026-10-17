@@ -104,6 +104,10 @@ from tpu_inference.utils import device_array
 
 ReqId = str
 
+# Marks a request in `reqs_pulling` whose KV pull did not complete. It stands in
+# for the KV arrays so nothing is inserted into the cache for that request.
+_PULL_FAILED = object()
+
 # Feature requests:
 # 1. support async pulling natively
 # 2. partial pulling (like RDMA)
@@ -233,6 +237,11 @@ class TPUConnector(KVConnectorBase_V1):
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.connector_worker is None:
+            return set()
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -486,6 +495,9 @@ class TPUConnectorWorker:
         # req_id: (pull_thread_future, kv, block_ids)
         self.reqs_pulling: dict[ReqId, list[Future, list[jax.Array],
                                             list[int]]] = {}
+        # D: local block ids whose KV pull failed, reported to the scheduler by
+        # get_block_ids_with_load_errors. Only touched from the runner thread.
+        self._load_error_block_ids: set[int] = set()
 
         # req_id: (kv, indices)
         self.reqs_ready_to_insert: dict[ReqId, tuple[list[jax.Array],
@@ -737,7 +749,11 @@ class TPUConnectorWorker:
                 if req_id in self.reqs_pulling:
                     assert self.reqs_pulling[req_id][1] is not None
                     _, kv, block_numbers = self.reqs_pulling.pop(req_id)
-                    if len(block_numbers) > 0:
+                    if kv is _PULL_FAILED:
+                        logger.warning(
+                            f"TPUConnector Worker {self.node_id} --> req_id={req_id}, pull failed, skip insert_kv_chunks."
+                        )
+                    elif len(block_numbers) > 0:
                         start_time = time.perf_counter()
                         self.runner.kv_caches = insert_kv_chunks(
                             self.runner.kv_caches, kv, block_numbers,
@@ -758,6 +774,11 @@ class TPUConnectorWorker:
                     )
                     socket = self._maybe_build_notif_socket(req_meta)
                     self._notify_pull_done(socket, req_id, req_meta.uuid)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Returns, and clears, the local block ids whose KV pull failed."""
+        failed, self._load_error_block_ids = self._load_error_block_ids, set()
+        return failed
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -912,6 +933,8 @@ class TPUConnectorWorker:
                     f"uuid={req_meta.uuid} | prepare time={prepare_time_ms:.2f}ms | "
                     f"size={kv_size_mb:.2f}MB")
                 self.transfer_stats.record_failed_transfer()
+                # The arrays were never filled; the caller must not use them.
+                return None
         else:
             logger.info(
                 f"Worker {self.node_id} --> kv transfer | done pull req_id={req_id} | "
@@ -968,7 +991,21 @@ class TPUConnectorWorker:
             if self.reqs_pulling[req_id][1] is None:
                 future = self.reqs_pulling[req_id][0]
                 if future.done():
-                    kv = future.result()
+                    try:
+                        kv = future.result()
+                    except Exception:
+                        logger.exception(
+                            f"Worker {self.node_id} --> kv transfer | pull raised for req_id={req_id}"
+                        )
+                        kv = None
+                    if kv is None:
+                        # The request is still reported as received, as vLLM
+                        # requires, but its blocks are flagged invalid so the
+                        # scheduler recomputes or fails it instead of decoding
+                        # from KV that never arrived.
+                        self._load_error_block_ids.update(
+                            self.reqs_pulling[req_id][2])
+                        kv = _PULL_FAILED
                     self.reqs_pulling[req_id][1] = kv
                     done_recving.add(req_id)
 
