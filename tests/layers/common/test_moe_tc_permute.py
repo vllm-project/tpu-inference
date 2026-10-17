@@ -59,6 +59,33 @@ def test_capacity(num_rows, num_shards, factor, expected):
                                                  num_shards) == expected
 
 
+@pytest.mark.parametrize(
+    "num_tokens, num_rows, hot_block",
+    [
+        (4096, 1024, None),  # rows spread over the blocks: one window each
+        (2304, 768, None),  # tokens not a multiple of the 512-token block
+        (4096, 1024, 3),  # most rows in block 3: several windows
+    ])
+def test_banded_combine(num_tokens, num_rows, hot_block):
+    """_tc_banded_combine against a scatter-add of the weighted rows."""
+    rng = np.random.default_rng(0)
+    row_tokens = rng.integers(0, num_tokens, num_rows)
+    if hot_block is not None:
+        hot = rng.integers(hot_block * 512, (hot_block + 1) * 512, num_rows)
+        row_tokens = np.where(rng.random(num_rows) < 0.75, hot, row_tokens)
+    row_valid = rng.random(num_rows) < 0.9
+    rows = jnp.asarray(rng.standard_normal((num_rows, 256)), jnp.bfloat16)
+    weights = jnp.asarray(rng.random(num_rows), jnp.float32)
+    combine = jax.jit(fused_moe_gmm._tc_banded_combine, static_argnums=4)
+    out = combine(rows, jnp.asarray(row_tokens, jnp.int32), weights,
+                  jnp.asarray(row_valid), num_tokens)
+    weighted = (np.asarray(rows, np.float32) *
+                np.asarray(weights.astype(jnp.bfloat16), np.float32)[:, None])
+    expected = np.zeros((num_tokens, 256), np.float32)
+    np.add.at(expected, row_tokens[row_valid], weighted[row_valid])
+    np.testing.assert_allclose(np.asarray(out), expected, rtol=1e-5, atol=1e-5)
+
+
 def _moe_inputs(mesh: Mesh,
                 num_tokens: int,
                 skew: bool,
@@ -115,14 +142,18 @@ def _run_fused_moe(mesh: Mesh, tc_permute: bool, num_tokens: int,
 @pytest.mark.parametrize("skew", [False, True], ids=["compact", "fallback"])
 @pytest.mark.parametrize(
     "num_tokens",
-    [512, 1536],
-    ids=["onehot-gather", "plain-gather"],
+    [512, 1536, 4096, 4352],
+    ids=[
+        "onehot-gather", "plain-gather", "banded-combine",
+        "banded-combine-partial-block"
+    ],
 )
 @pytest.mark.parametrize("sizes", _MESH_SIZES, ids=_mesh_id)
 def test_fused_moe_matches_onehot_permute(sizes, num_tokens, skew):
     """Same output as the one-hot permute. 512 tokens x top-2 over 8 shards
-    gives a 512-row buffer, 1536 tokens a 768-row one; with skew one shard has
-    every row and takes the all-rows fallback (combined in 2-4 chunks)."""
+    gives a 512-row buffer, 1536 tokens a 768-row one; from 4096 tokens the
+    combine is banded. With skew one shard has every row and takes the
+    all-rows fallback (combined in 2-4 chunks)."""
     mesh = _make_mesh(**sizes)
     expected = _run_fused_moe(mesh, False, num_tokens, skew)
     actual = _run_fused_moe(mesh, True, num_tokens, skew)
