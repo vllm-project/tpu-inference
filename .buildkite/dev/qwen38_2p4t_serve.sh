@@ -67,6 +67,13 @@ VLLM_EXTRA_ARGS=()
 if [[ -n "${NUM_GPU_BLOCKS_OVERRIDE}" ]]; then
   VLLM_EXTRA_ARGS+=(--num-gpu-blocks-override "${NUM_GPU_BLOCKS_OVERRIDE}")
 fi
+# Optional --limit-mm-per-prompt (JSON). '{"image":0,"video":0}' serves the model
+# text-only: the runner then skips the multimodal precompiles (the vision encoder
+# and the backbone with inputs_embeds), which a text benchmark never uses.
+LIMIT_MM_PER_PROMPT="${LIMIT_MM_PER_PROMPT:-}"
+if [[ -n "${LIMIT_MM_PER_PROMPT}" ]]; then
+  VLLM_EXTRA_ARGS+=(--limit-mm-per-prompt "${LIMIT_MM_PER_PROMPT}")
+fi
 
 # ---------------------------------------------------------------------------
 # Where the weights come from.
