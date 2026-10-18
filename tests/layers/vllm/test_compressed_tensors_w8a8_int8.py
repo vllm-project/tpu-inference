@@ -223,6 +223,40 @@ def test_row_parallel_linear(model, bias, num_devices, enable_sp,
 
 
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("reduce_results", [False, True])
+def test_row_parallel_linear_defer_all_reduce(model, reduce_results):
+    """reduce_results=False must reach the scheme's linear_config, which is
+    where compressed-tensors keeps it (the quant method is vLLM's
+    CompressedTensorsLinearMethod, which has no linear_config)."""
+    mesh = test_utils.get_spmd_mesh(1)
+    dtype = torch.bfloat16
+
+    engine_args = EngineArgs(
+        model=model,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+    )
+    vllm_config = engine_args.create_engine_config()
+    vllm_config.model_config.dtype = dtype
+    quant_config = get_tpu_quantization_config(vllm_config, mesh)
+    with set_current_vllm_config(vllm_config):
+        jax_row_linear = RowParallelLinear(
+            input_size=4096,
+            output_size=8192,
+            bias=False,
+            params_dtype=dtype,
+            reduce_results=reduce_results,
+            return_bias=False,
+            quant_config=quant_config,
+        )
+
+    assert isinstance(jax_row_linear.scheme, VllmCompressedTensorsW8A8Int8)
+    assert jax_row_linear.scheme.linear_config.defer_all_reduce == (
+        not reduce_results)
+
+
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize("num_devices", [1, jax.local_device_count()])
 @pytest.mark.parametrize("enable_sp", [False, True])
