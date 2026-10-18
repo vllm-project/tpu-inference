@@ -1506,6 +1506,23 @@ def static_validate_inputs(
     del v_scale
 
 
+# Minimum KV tile size aligned to the TPU MXU/lane dimension (128).
+_MIN_KV_TILE_SIZE = 128
+
+
+def _clamp_bkv_for_sliding_window(
+    bkv_sz: int,
+    page_size: int,
+    sliding_window: int | None,
+    case: RpaCase,
+) -> int:
+    if sliding_window is None:
+        return bkv_sz
+    min_tile = (max(page_size, _MIN_KV_TILE_SIZE) if case == RpaCase.DECODE
+                else max(page_size, _MIN_KV_TILE_SIZE, sliding_window))
+    return min(bkv_sz, align_to(min_tile, page_size))
+
+
 def get_default_block_sizes(
     q_dtype,
     kv_dtype,
@@ -1529,7 +1546,7 @@ def get_default_block_sizes(
     kv_packing = get_dtype_packing(kv_dtype)
     num_kv_heads_x2 = next_power_of_2(
         align_to(actual_num_kv_heads * 2, kv_packing))
-    head_dim = align_to(head_dim, 128)
+    head_dim = align_to(head_dim, _MIN_KV_TILE_SIZE)
     num_q_heads_per_kv_head = next_power_of_2(actual_num_q_heads //
                                               actual_num_kv_heads)
 
@@ -1543,42 +1560,32 @@ def get_default_block_sizes(
         case 5 | 6:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
-                if sliding_window is not None:
-                    bkv_sz = min(bkv_sz,
-                                 align_to(max(page_size, 128), page_size))
+                bkv_sz = _clamp_bkv_for_sliding_window(
+                    min(min_bkv_sz_to_peak, max_kv), page_size, sliding_window,
+                    case)
                 bq_csz = 1
                 bkv_csz = bkv_sz
             else:
                 bq_sz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(1024, max_kv)
-                if sliding_window is not None:
-                    bkv_sz = min(
-                        bkv_sz,
-                        align_to(max(page_size, 128, sliding_window),
-                                 page_size),
-                    )
+                bkv_sz = _clamp_bkv_for_sliding_window(min(1024,
+                                                           max_kv), page_size,
+                                                       sliding_window, case)
                 bq_csz = min(512 // num_q_heads_per_kv_head, max_q)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         # TODO(amandaliang): Update the default tiling for v8i.
         case 7 | 8:
             if case == RpaCase.DECODE:
                 bq_sz = 1
-                bkv_sz = min(min_bkv_sz_to_peak, max_kv)
-                if sliding_window is not None:
-                    bkv_sz = min(bkv_sz,
-                                 align_to(max(page_size, 128), page_size))
+                bkv_sz = _clamp_bkv_for_sliding_window(
+                    min(min_bkv_sz_to_peak, max_kv), page_size, sliding_window,
+                    case)
                 bq_csz = 1
                 bkv_csz = bkv_sz
             else:
                 bq_sz = min(2048 // num_q_heads_per_kv_head, max_q // 2)
-                bkv_sz = min(2048, max_kv // 2)
-                if sliding_window is not None:
-                    bkv_sz = min(
-                        bkv_sz,
-                        align_to(max(page_size, 128, sliding_window),
-                                 page_size),
-                    )
+                bkv_sz = _clamp_bkv_for_sliding_window(min(2048, max_kv // 2),
+                                                       page_size,
+                                                       sliding_window, case)
                 bq_csz = min(1024 // num_q_heads_per_kv_head, max_q // 2)
                 bkv_csz = min(512, align_to(max_kv // 2, page_size))
         case _:

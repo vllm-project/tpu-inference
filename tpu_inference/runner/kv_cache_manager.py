@@ -80,9 +80,6 @@ def is_ds_v4(vllm_config):
 class KVCacheManager:
 
     def __init__(self, runner: "TPUModelRunner"):
-        from tpu_inference.platforms import tpu_platform
-
-        tpu_platform._install_tpu_kv_cache_utils_hooks()
         self.runner = runner
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
