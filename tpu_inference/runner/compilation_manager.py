@@ -57,6 +57,11 @@ logger = init_logger(__name__)
 
 # Constants for block bucketing in disaggregated utilities
 BLOCK_BUCKETS = [1, 2, 4, 8, 16, 32, 64]
+# Default upper bound on num_tokens buckets precompiled for the secondary
+# multimodal inputs_embeds backbone and merger (matching MAX_PRECOMPILE_PROMPT_TOKENS)
+# so large multimodal models do not duplicate multi-GiB PJRT backbone executables
+# across high-token text prefill buckets.
+DEFAULT_MAX_MM_PRECOMPILE_TOKENS = 1024
 
 
 def _describe_signature(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -249,6 +254,12 @@ class CompilationManager:
         warmup_start = time.perf_counter()
         with jax.set_mesh(self.runner.mesh):
             while tasks:
+                # Pop each task and explicitly delete `out` and input references
+                # at the end of each iteration. `tasks` holds materialized HBM
+                # device arrays across all buckets simultaneously, and Python
+                # evaluates the RHS call `warmup_handler(...)` before rebinding
+                # `out`, so `del out` frees the previous bucket's output buffer
+                # before the next (larger) bucket compiles and executes.
                 _name, fn, args, call_kwargs, warmup_handler = tasks.pop(0)
                 if warmup_handler is not None:
                     out = warmup_handler(fn, args, call_kwargs)
@@ -338,9 +349,25 @@ class CompilationManager:
                 pass
             self._prev_stack_size = None
 
+    def _get_max_mm_precompile_tokens(self) -> int:
+        """Derive the multimodal inputs_embeds precompilation token cap from
+        vision_config, floored at DEFAULT_MAX_MM_PRECOMPILE_TOKENS."""
+        hf_conf = getattr(self.runner.vllm_config.model_config, "hf_config",
+                          None)
+        vision_cfg = getattr(hf_conf, "vision_config", None)
+        mm_tokens = 0
+        for attr in ("default_output_length", "mm_tokens_per_image",
+                     "num_image_tokens"):
+            val = getattr(vision_cfg, attr, None)
+            if type(val) is int and val > 0:
+                mm_tokens = val
+                break
+        return max(DEFAULT_MAX_MM_PRECOMPILE_TOKENS, mm_tokens)
+
     def _precompile_input_embeddings_merger(self) -> None:
+        max_mm_tokens = self._get_max_mm_precompile_tokens()
         for num_tokens in self.runner.num_tokens_paddings:
-            if num_tokens > 1024:
+            if num_tokens > max_mm_tokens:
                 continue
             hidden_size = self.runner.vllm_config.model_config.get_hidden_size(
             )
@@ -798,9 +825,10 @@ class CompilationManager:
         if embeds_hidden_size != hidden_size:
             hidden_sizes_to_compile.append(embeds_hidden_size)
 
+        max_mm_tokens = self._get_max_mm_precompile_tokens()
         for h_size in hidden_sizes_to_compile:
             for num_tokens in self.runner.num_tokens_paddings:
-                if num_tokens > 1024:
+                if num_tokens > max_mm_tokens:
                     continue
                 for num_reqs in self.runner.attn_num_reqs_paddings:
                     sharding = NamedSharding(

@@ -19,7 +19,11 @@ import pytest
 
 from tpu_inference.kernels.experimental.batched_rpa import configs
 from tpu_inference.kernels.experimental.batched_rpa.tuned_params import (
-    TunableParams, TuningKey, calculate_block_sizes, get_tuned_params)
+    TunableParams,
+    TuningKey,
+    calculate_block_sizes,
+    get_tuned_params,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -158,10 +158,36 @@ logger = init_logger(__name__)
 
 
 def _install_tpu_kv_cache_utils_hooks() -> None:
-    """Install TPU hybrid KV cache hooks into vllm.v1.core.kv_cache_utils."""
+    """Install TPU hybrid KV cache hooks into vllm.v1.core.kv_cache_utils.
+
+    1. `unify_kv_cache_spec_page_size`:
+       `KVCacheManager._create_attention_spec` sets `page_size_padded` on every
+       `AttentionSpec` to the physical TPU page size. Upstream vLLM's
+       `unify_kv_cache_spec_page_size` (`vllm/v1/core/kv_cache_utils.py:1444`)
+       calls `dataclasses.replace(layer_spec, block_size=new_block_size)`
+       without scaling `page_size_padded` (unlike `_ensure_min_page_size` at
+       lines 2305-2308), tripping `assert self.page_size_padded >=
+       self.unpadded_page_size_bytes` on hybrid models with mixed KV geometries.
+       TODO(tpu-inference): Upstream scaling of `page_size_padded` in
+       `unify_kv_cache_spec_page_size` to `vllm-project/vllm` and remove this
+       wrapper once released.
+
+    2. `SlidingWindowSpec.max_admission_blocks_per_request`:
+       Upstream (`vllm-project/vllm#39734`) passes the batch-wide token budget
+       `max_num_batched_tokens` as `max_in_flight_tokens` for every request,
+       charging the entire batch's prefill token limit to each individual
+       request across all sliding-window KV cache groups. Because the scheduler
+       already bounds total in-flight tokens across the whole batch by
+       `max_num_batched_tokens` and each decoding sequence has at most one
+       block of in-flight tokens, clamping per-request `max_in_flight_tokens`
+       to `self.block_size` reflects the true steady-state per-request sliding
+       window footprint (`cdiv(sliding_window, block_size) + 1` blocks).
+       TODO(tpu-inference): Upstream batch-wide vs. per-request in-flight SWA
+       admission accounting to `vllm-project/vllm`.
+    """
     import dataclasses
 
-    import vllm.v1.core.kv_cache_utils as kv_cache_utils
+    from vllm.v1.core import kv_cache_utils
     from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
 
     os.environ.setdefault("TPU_SKIP_MDS_QUERY", "true")
@@ -198,20 +224,17 @@ def _install_tpu_kv_cache_utils_hooks() -> None:
         max_in_flight_tokens: int,
         max_model_len: int,
     ) -> int:
-        # On TPU with Pallas ragged_paged_attention v3, a single admitted
-        # sequence only needs its active sliding window plus one block of
-        # boundary alignment.
         return orig_max_admission(
             self,
             min(max_in_flight_tokens, self.block_size),
             max_model_len,
         )
 
-    setattr(SlidingWindowSpec, "max_admission_blocks_per_request",
-            _tpu_sliding_max_admission_blocks_per_request)
-    setattr(kv_cache_utils, "unify_kv_cache_spec_page_size",
-            _tpu_unify_kv_cache_spec_page_size)
-    setattr(kv_cache_utils, "_tpu_kv_cache_hooks_installed", True)
+    SlidingWindowSpec.max_admission_blocks_per_request = (
+        _tpu_sliding_max_admission_blocks_per_request)
+    kv_cache_utils.unify_kv_cache_spec_page_size = (
+        _tpu_unify_kv_cache_spec_page_size)
+    kv_cache_utils._tpu_kv_cache_hooks_installed = True
 
 
 @contextlib.contextmanager

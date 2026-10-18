@@ -35,6 +35,26 @@ from tpu_inference.runner.tpu_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
+# Fallback transformer dimensions when model/scheduler config fields are omitted.
+_DEFAULT_MAX_BATCHED_TOKENS = 2048
+_DEFAULT_HIDDEN_SIZE = 4096
+_DEFAULT_NUM_Q_HEADS = 32
+_DEFAULT_HEAD_DIM = 128
+
+# Post-KV-cache XLA compilation headroom constants (per TPU device):
+# 1. PJRT keeps the static activation buffer of every compiled power-of-2
+#    token bucket (16, 32, ..., max_tokens) resident in HBM simultaneously.
+#    The geometric sum_{k=0..K} (max_tokens / 2^k) = (2 - 16/max_tokens) *
+#    max_tokens is ~1.95x the largest single-bucket activation buffer.
+_MULTI_BUCKET_TEMP_MULTIPLIER = 1.95
+# 2. Non-backbone executables compiled after KV cache sizing (lm_head logits,
+#    sampling, gather_logprobs over vocab_size, multimodal embed merger, and
+#    PJRT HLO program tables) consume ~0.65 GiB per device.
+_EXEC_AND_LOGITS_HEADROOM_BYTES = int(0.65 * utils.GBYTES)
+# 3. Empirical minimum post-KV-cache compilation footprint on TPU across text +
+#    multimodal backbone precompilation and warmup (~2.25 GiB per device).
+_MIN_POST_KV_HEADROOM_BYTES = int(2.25 * utils.GBYTES)
+
 
 @dataclass
 class PPConfig:
@@ -513,46 +533,44 @@ class TPUWorker(WorkerBase):
         """Estimate minimum per-device HBM headroom required after KV cache
         allocation for backbone XLA executables and peak prefill activations."""
 
-        def _safe_int(val, default: int) -> int:
-            if isinstance(val, (list, tuple)):
-                val = max(val) if val else default
-            if isinstance(val, bool) or not isinstance(val, (int, float)):
-                return default
-            return int(val) if int(val) > 0 else default
+        def _safe_int(val: Any, default: int) -> int:
+            return int(val) if type(val) in (int,
+                                             float) and val > 0 else default
 
         hf_cfg = getattr(self.model_config, "hf_config", None)
         hf_text_cfg = (getattr(self.model_config, "hf_text_config", None)
                        or getattr(hf_cfg, "text_config", None) or hf_cfg)
-        if not isinstance(getattr(hf_text_cfg, "hidden_size", None),
-                          (int, float)):
+        if type(getattr(hf_text_cfg, "hidden_size", None)) not in (int, float):
             return 0
 
         max_tokens = _safe_int(
-            getattr(self.scheduler_config, "max_num_batched_tokens", 2048),
-            2048)
-        tp_size = max(
-            1,
-            _safe_int(getattr(self.parallel_config, "tensor_parallel_size", 1),
-                      1))
-        hidden_size = _safe_int(getattr(hf_text_cfg, "hidden_size", None),
-                                4096)
-        inter_size = _safe_int(
-            getattr(hf_text_cfg, "intermediate_size", None)
-            or getattr(hf_text_cfg, "moe_intermediate_size", None),
-            hidden_size * 4,
+            getattr(self.scheduler_config, "max_num_batched_tokens",
+                    _DEFAULT_MAX_BATCHED_TOKENS),
+            _DEFAULT_MAX_BATCHED_TOKENS,
         )
-        num_q_heads = _safe_int(
-            getattr(hf_text_cfg, "num_attention_heads", None), 32)
-        if getattr(hf_text_cfg, "is_heterogeneous", False) is True:
-            head_dim = max(
-                _safe_int(getattr(lc, "head_dim", None), 128)
-                for lc in getattr(hf_text_cfg, "per_layer_config", ()))
-        else:
-            head_dim = _safe_int(
-                getattr(hf_text_cfg, "global_head_dim", None)
-                or getattr(hf_text_cfg, "head_dim", None),
-                hidden_size // max(1, num_q_heads),
-            )
+        tp_size = _safe_int(
+            getattr(self.parallel_config, "tensor_parallel_size", 1), 1)
+        hidden_size = _safe_int(getattr(hf_text_cfg, "hidden_size", None),
+                                _DEFAULT_HIDDEN_SIZE)
+        layer_cfgs = ((getattr(hf_text_cfg, "per_layer_config", None) or
+                       (hf_text_cfg, )) if getattr(
+                           hf_text_cfg, "is_heterogeneous", False) is True else
+                      (hf_text_cfg, ))
+        inter_size = max(
+            _safe_int(
+                getattr(lc, "intermediate_size", None)
+                or getattr(lc, "moe_intermediate_size", None),
+                hidden_size * 4,
+            ) for lc in layer_cfgs)
+        num_q_heads = max(
+            _safe_int(getattr(lc, "num_attention_heads", None),
+                      _DEFAULT_NUM_Q_HEADS) for lc in layer_cfgs)
+        head_dim = max(
+            _safe_int(
+                getattr(lc, "global_head_dim", None)
+                or getattr(lc, "head_dim", None),
+                hidden_size // max(1, num_q_heads) or _DEFAULT_HEAD_DIM,
+            ) for lc in layer_cfgs)
         dtype_bytes = 2  # bfloat16 activations
         # Gate+Up output (2 * inter_size) + Gelu*Up input to Down (1 * inter_size)
         mlp_act_bytes = (max_tokens * max(1, (3 * inter_size) // tp_size) *
@@ -562,13 +580,10 @@ class TPUWorker(WorkerBase):
         residual_bytes = max_tokens * hidden_size * dtype_bytes * 2
         single_bucket_temp_bytes = (mlp_act_bytes + attn_act_bytes +
                                     residual_bytes)
-        # PJRT on TPU keeps the static temp buffer of every compiled power-of-2
-        # num_tokens bucket (16, 32, ..., max_tokens) resident in HBM:
-        # sum_{k=0..K} temp(max_tokens / 2^k) ~= 2.0 * temp(max_tokens).
-        all_buckets_temp_bytes = int(1.95 * single_bucket_temp_bytes)
-        exec_and_logits_headroom = int(0.65 * utils.GBYTES)
-        return max(int(2.25 * utils.GBYTES),
-                   all_buckets_temp_bytes + exec_and_logits_headroom)
+        all_buckets_temp_bytes = int(_MULTI_BUCKET_TEMP_MULTIPLIER *
+                                     single_bucket_temp_bytes)
+        return max(_MIN_POST_KV_HEADROOM_BYTES,
+                   all_buckets_temp_bytes + _EXEC_AND_LOGITS_HEADROOM_BYTES)
 
     def determine_available_memory(self) -> int:
         gpu_memory_utilization = self.cache_config.gpu_memory_utilization
@@ -578,12 +593,33 @@ class TPUWorker(WorkerBase):
             total_hbm_used += used
             total_hbm_limit += limit
 
-        per_device_headroom = self._estimate_post_kv_cache_headroom_bytes()
-        headroom_cap = max(
-            0, total_hbm_limit - per_device_headroom * len(hbm_usage))
-        total_hbm_limit_cap = min(total_hbm_limit * gpu_memory_utilization,
-                                  headroom_cap)
-        total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used)
+        total_hbm_limit_cap = total_hbm_limit * gpu_memory_utilization
+        # On GPU, vLLM runs profile_run() inside determine_available_memory()
+        # and subtracts peak activation + compilation memory from
+        # requested_memory (total_hbm_limit * gpu_memory_utilization).
+        # On TPU, XLA compilation of backbone buckets and sampling/logprobs
+        # runs *after* determine_available_memory() (in initialize_from_config
+        # and compile_or_warm_up_model), so total_hbm_used here reflects only
+        # model weights. When the unreserved HBM above total_hbm_limit_cap is
+        # smaller than the required post-KV-cache compilation headroom, deduct
+        # the shortfall so XLA compilation does not OOM.
+        post_kv_headroom_bytes = (
+            self._estimate_post_kv_cache_headroom_bytes() * len(hbm_usage))
+        unreserved_hbm_bytes = max(0.0, total_hbm_limit - total_hbm_limit_cap)
+        headroom_shortfall_bytes = max(
+            0.0, post_kv_headroom_bytes - unreserved_hbm_bytes)
+        if headroom_shortfall_bytes > 0:
+            logger.info(
+                "Post-KV-cache XLA compilation headroom (%.2f GiB) exceeds "
+                "unreserved HBM (%.2f GiB) at gpu_memory_utilization=%.2f; "
+                "reserving %.2f GiB from available KV cache memory.",
+                post_kv_headroom_bytes / utils.GBYTES,
+                unreserved_hbm_bytes / utils.GBYTES,
+                gpu_memory_utilization,
+                headroom_shortfall_bytes / utils.GBYTES,
+            )
+        total_hbm_avail = int(total_hbm_limit_cap - total_hbm_used -
+                              headroom_shortfall_bytes)
 
         total_hbm_limit_gb = round(total_hbm_limit / utils.GBYTES, 2)
         total_hbm_limit_cap_gb = round(total_hbm_limit_cap / utils.GBYTES, 2)
