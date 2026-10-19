@@ -125,6 +125,10 @@ class TestTPUConnector(unittest.TestCase):
         connector.get_finished(set())
         mock_worker_instance.get_finished.assert_called_once_with()
 
+        connector.get_block_ids_with_load_errors()
+        mock_worker_instance.get_block_ids_with_load_errors.assert_called_once_with(
+        )
+
 
 @patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAWorker")
 @patch("tpu_inference.distributed.tpu_connector_hma.TPUConnectorHMAScheduler")
@@ -533,6 +537,85 @@ class TestTPUConnectorWorker(unittest.TestCase):
         self.assertEqual(worker.reqs_pulling['req1'][1],
                          ('kv_data', 'indices', [1]))
         self.all_mocks['insert_kv_chunks'].assert_not_called()
+
+    def test_get_finished_failed_pull_reports_load_errors(self):
+        """A pull that did not complete is reported received, with its blocks flagged invalid."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+
+        failed_future = MagicMock()
+        failed_future.done.return_value = True
+        failed_future.result.return_value = None
+        raising_future = MagicMock()
+        raising_future.done.return_value = True
+        raising_future.result.side_effect = RuntimeError("pull failed")
+        worker.reqs_pulling = {
+            'req1': [failed_future, None, [1, 2]],
+            'req2': [raising_future, None, [3]],
+        }
+
+        _, done_recving = worker.get_finished()
+
+        self.assertEqual(done_recving, {'req1', 'req2'})
+        self.assertIs(worker.reqs_pulling['req1'][1],
+                      tpu_connector._PULL_FAILED)
+        self.assertIs(worker.reqs_pulling['req2'][1],
+                      tpu_connector._PULL_FAILED)
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {1, 2, 3})
+        # Reported once, then cleared.
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
+
+    def test_process_send_load_failed_pull_skips_insert_but_notifies(self):
+        """A failed pull is never inserted into the cache; P is still told to free its KV."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker._maybe_build_notif_socket = MagicMock(return_value="socket")
+        worker._notify_pull_done = MagicMock()
+        meta = tpu_connector.TPUConnectorMetadata()
+        meta.reqs_to_load = {
+            "req1":
+            tpu_connector.LoadMeta(uuid=10,
+                                   local_block_ids=None,
+                                   remote_block_ids=None,
+                                   remote_host="host",
+                                   remote_port=123)
+        }
+        worker.reqs_pulling = {
+            "req1": [None, tpu_connector._PULL_FAILED, [1]]
+        }
+
+        worker.process_send_load(meta)
+
+        self.all_mocks['insert_kv_chunks'].assert_not_called()
+        self.assertNotIn("req1", worker.reqs_pulling)
+        worker._notify_pull_done.assert_called_once_with("socket", "req1", 10)
+
+    def test_pull_kv_timeout_returns_none(self):
+        """_pull_kv returns None, not the unfilled arrays, when the pull times out."""
+        self.vllm_config.kv_transfer_config.is_kv_producer = False
+        worker = tpu_connector.TPUConnectorWorker(self.vllm_config)
+        worker._get_kv_spec = MagicMock(return_value=[])
+        never_ready = MagicMock()
+        never_ready.is_ready.return_value = False
+        never_ready.nbytes = 1024
+        conn = MagicMock()
+        conn.pull.return_value = [never_ready]
+        # start, after pull, wait-loop check, then past the timeout.
+        self.all_mocks['time'].perf_counter.side_effect = [0.0, 0.1, 0.2, 10.0]
+        load_meta = tpu_connector.LoadMeta(uuid=1,
+                                           local_block_ids=[1],
+                                           remote_block_ids=[10],
+                                           remote_host="host",
+                                           remote_port=123)
+
+        with patch(
+                'tpu_inference.distributed.tpu_connector.dist_utils.get_enable_block_kv_transfer',
+                return_value=True), patch(
+                    'tpu_inference.distributed.tpu_connector.dist_utils.get_p2p_wait_pull_timeout',
+                    return_value=1.0):
+            result = worker._pull_kv("req1", conn, load_meta)
+
+        self.assertIsNone(result)
 
     def test_get_finished_sending_expired(self):
         """Tests get_finished for a request that has expired."""
