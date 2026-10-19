@@ -63,7 +63,7 @@ def build_metadata() -> tuple[AttentionMetadata, SharedAttentionMetadata]:
                            query_start_loc=query_start_loc,
                            request_distribution=distribution,
                            backend_metadata=fa.FlywheelMetadata(
-                               attention_phase=fa.PREFILL_PHASE,
+                               attention_phase=fa._PREFILL_PHASE,
                                kv_write_slices=jnp.zeros(
                                    (3 * KV_WRITE_BOUND, ), jnp.int32),
                                kv_write_num_slices=jnp.zeros((1, ), jnp.int32),
@@ -124,7 +124,7 @@ class TestDispatch:
         assert kv_write_num_slices.shape == (1, )
         np.testing.assert_array_equal(distribution, [0, 0, NUM_SEQS])
         assert kwargs == {
-            "phase": fa.PREFILL_PHASE,
+            "phase": fa._PREFILL_PHASE,
             "sm_scale": HEAD_DIM**-0.5,
             "dense_prefill": False,
             "varlen_block_span": TOTAL_TOKENS,
@@ -256,10 +256,10 @@ def test_kv_write_slices_match_a_token_by_token_reference(page_size, seed):
 
 
 @pytest.mark.parametrize(("num_decode", "seq_lens", "phase"), [
-    (2, [(1, 300), (1, 129)], fa.DECODE_PHASE),
-    (0, [(300, 300), (129, 129)], fa.PREFILL_PHASE),
-    (1, [(1, 300), (129, 129)], fa.EXTEND_PHASE),
-    (0, [(200, 457)], fa.EXTEND_PHASE),
+    (2, [(1, 300), (1, 129)], fa._DECODE_PHASE),
+    (0, [(300, 300), (129, 129)], fa._PREFILL_PHASE),
+    (1, [(1, 300), (129, 129)], fa._EXTEND_PHASE),
+    (0, [(200, 457)], fa._EXTEND_PHASE),
 ])
 def test_attention_phase(num_decode, seq_lens, phase):
     q_lens = [q_len for q_len, _ in seq_lens]
@@ -307,6 +307,19 @@ def test_dense_prefill_for_one_request_per_rank(scheduled_tokens_per_dp_rank,
 def test_varlen_block_span(scheduled_tokens_per_dp_rank, bucket, span):
     assert fa.varlen_block_span(scheduled_tokens_per_dp_rank, bucket) == span
     assert span in fa.varlen_block_spans(bucket)
+
+
+def test_varlen_block_span_tie_goes_to_the_wider_span(monkeypatch):
+    monkeypatch.setattr(fa, "ragged_step_cost", lambda *args: 1)
+
+    assert fa.varlen_block_span([[1000]], 2048) == 2048
+
+
+def test_block_sizes_come_from_flywheel():
+    # The cost model was fitted with these, so a flywheel-tpu change to
+    # FWD_BLOCKS should be a deliberate change here as well.
+    assert fa._VARLEN_BLOCK_SPANS == (256, 512, 1024, 2048)
+    assert (fa._DENSE_PAD_MULTIPLE, fa._DENSE_MAX_BLOCK) == (128, 2048)
 
 
 PAGE_SIZES = (128, 256)
@@ -391,7 +404,7 @@ class TestPrepareStep:
 
         fields, arrays = prepare(step)
 
-        assert fields.attention_phase == fa.EXTEND_PHASE
+        assert fields.attention_phase == fa._EXTEND_PHASE
         assert not fields.dense_prefill
         assert fields.varlen_block_span is None
 
@@ -405,7 +418,7 @@ class TestPrepareStep:
         for gid, page_size in enumerate(PAGE_SIZES):
             md = fields(arrays, gid)
             assert isinstance(md, fa.FlywheelMetadata)
-            assert md.attention_phase == fa.EXTEND_PHASE
+            assert md.attention_phase == fa._EXTEND_PHASE
             bound = fa.kv_write_slice_bound(256, MAX_REQS_PER_RANK, page_size)
             slices = np.asarray(md.kv_write_slices).reshape(2, 3, bound)
             for rank, requests in enumerate(seq_lens_per_rank):
@@ -427,7 +440,7 @@ class TestPrepareStep:
                                                   dense, span):
         fields, _ = prepare(host_step(seq_lens_per_rank, bucket=1024))
 
-        assert fields.attention_phase == fa.PREFILL_PHASE
+        assert fields.attention_phase == fa._PREFILL_PHASE
         assert fields.dense_prefill is dense
         assert fields.varlen_block_span == span
 

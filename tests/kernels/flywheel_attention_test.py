@@ -122,7 +122,7 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
             assert num_decode == 0 and len(seq_lens) == 1
             assert seq_lens[0][0] == seq_lens[0][1]
             static_kwargs["dense_prefill"] = True
-        elif phase == fa.PREFILL_PHASE:
+        elif phase == fa._PREFILL_PHASE:
             static_kwargs["varlen_block_span"] = fa.varlen_block_span(
                 [[q_len for q_len, _ in seq_lens]], num_tokens)
         run = jax.jit(fa.flywheel_tpu_attention,
@@ -226,7 +226,7 @@ class FlywheelTpuWrapperTest(jtu.JaxTestCase):
                       2,
                       num_heads,
                       128,
-                      phase=fa.EXTEND_PHASE)
+                      phase=fa._EXTEND_PHASE)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@
 (--attention-backend flywheel)."""
 
 import functools
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -26,6 +25,8 @@ import jax.numpy as jnp
 import numpy as np
 import torch
 from flywheel_tpu import flash_attn_func, flash_attn_with_kvcache
+from flywheel_tpu.flash_attn_interface import PAGE_SIZE_MULTIPLE
+from flywheel_tpu.pallas.block_sizes import FWD_BLOCKS, NUM_LANES
 from flywheel_tpu.pallas.kv_cache_write import write_kv_cache_pages
 from jax import lax
 from jax.sharding import Mesh, NamedSharding
@@ -70,7 +71,7 @@ def align_head_dim(head_dim: int) -> int:
 
 # Note: at a padded head_dim with 2 KV heads per chip the decode
 # kernel's rows come out near zero, so it runs only where no padding is needed.
-DECODE_HEAD_DIMS = (128, 256)
+_DECODE_HEAD_DIMS = (128, 256)
 
 
 def kv_write_slice_bound(num_tokens: int, max_num_seqs: int,
@@ -124,27 +125,18 @@ def build_kv_write_slices(
     return total
 
 
-# Note: these kernels tile the KV token axis in 128-token blocks, so a
-# page that is not a whole number of blocks cannot be indexed.
-PAGE_SIZE_MULTIPLE = 128
+_PREFILL_PHASE = "prefill"
+_DECODE_PHASE = "decode"
+_EXTEND_PHASE = "extend"
+_ATTENTION_PHASES = (_PREFILL_PHASE, _DECODE_PHASE, _EXTEND_PHASE)
 
-PREFILL_PHASE = "prefill"
-DECODE_PHASE = "decode"
-EXTEND_PHASE = "extend"
-ATTENTION_PHASES = (PREFILL_PHASE, DECODE_PHASE, EXTEND_PHASE)
-
-DENSE_MIN_SEQ_LEN = 128
-
-# Note: the dense kernel's largest physical block. A longer axis that
-# is not a whole number of these falls to a smaller divisor, a schedule the
-# cost model does not describe, so such a bucket stays ragged.
-DENSE_MAX_BLOCK = 2048
-
-# Note: flash_attn_with_kvcache reads the cache in the largest KV
-# block up to its VMEM target that divides the row capacity, so each row is
-# padded until every power-of-two block up to this many tokens divides it;
-# otherwise a prime page count leaves only one-page blocks.
-DECODE_CAPACITY_ALIGN_TOKENS = 4096
+# Note: flash_attn_func pads the sequence axis to a multiple of
+# NUM_LANES, then runs one block up to the largest of FWD_BLOCKS (the forward
+# kernels' block sizes), else whole blocks of the largest FWD_BLOCKS size
+# that divides the axis. The dense cost model describes an unpadded bucket of
+# whole min(bucket, largest) blocks only, so any other bucket stays ragged.
+_DENSE_PAD_MULTIPLE = NUM_LANES
+_DENSE_MAX_BLOCK = max(FWD_BLOCKS)
 
 
 def select_attention_phase(num_decode: int, cu_q_lens: np.ndarray,
@@ -165,15 +157,15 @@ def select_attention_phase(num_decode: int, cu_q_lens: np.ndarray,
             f"q_lens {q_lens[:num_decode].tolist()} for the leading "
             f"{num_decode}.")
     elif num_decode == kv_lens.size:
-        return DECODE_PHASE
+        return _DECODE_PHASE
     elif num_decode > 0 or np.any(kv_lens != q_lens):
         # Note: a mixed step is EXTEND even when its prefill requests
         # are fresh. The ragged kernel would need the decode rows merged into
         # its output, an extra [T, N, D] copy per layer that blocks the MLP
         # weight prefetch.
-        return EXTEND_PHASE
+        return _EXTEND_PHASE
     else:
-        return PREFILL_PHASE
+        return _PREFILL_PHASE
 
 
 def use_dense_prefill(
@@ -195,28 +187,33 @@ def use_dense_prefill(
         return False
     # Note: both kernels pay for the bucket's pad tail. The dense cost
     # has no per-step overhead term because its schedule is built on the host.
-    block = min(bucket, DENSE_MAX_BLOCK)
+    block = min(bucket, _DENSE_MAX_BLOCK)
     num_blocks = bucket // block
     dense_cost = num_blocks * (num_blocks + 1) // 2 * block * block
     return dense_cost <= ragged_step_cost(scheduled_tokens_per_dp_rank, bucket,
                                           ragged_block_span)
 
 
-# Note: the ragged kernel's own block sizes without 128, which 256
-# matches or beats. A span reaches the kernel as max_seqlen_q/k, which it
-# turns into the q/kv block cap.
-VARLEN_BLOCK_SPANS = (256, 512, 1024, 2048)
+# Note: the varlen kernel caps its q/kv block at max_seqlen_q/k, picking
+# from FWD_BLOCKS, so a span is one of those block sizes. The smallest, 128,
+# is left out, saving a backbone per bucket: on v6e 256 matched or beat it on
+# every sampled batch, and on v7x 128 won only small buckets packed with short
+# requests.
+_VARLEN_BLOCK_SPANS = tuple(
+    sorted(block for block in FWD_BLOCKS if block > min(FWD_BLOCKS)))
 
-# Note: fixed cost of one ragged kernel step, as the side of a tile of
-# equal compute, fitted on v6e. It belongs to the schedule rather than to the
-# head count or head_dim, so the host model needs neither.
-VARLEN_STEP_OVERHEAD_TOKENS = 704
+# Note: fixed cost of one ragged kernel step, written as the side of a
+# square tile of equal cost. It was fitted on v6e; on v7x it also picks the
+# fastest span on nearly every sampled batch. It belongs to the kernel's
+# schedule rather than to the head count or head_dim, so the host model needs
+# neither.
+_VARLEN_STEP_OVERHEAD_TOKENS = 704
 
 
 def varlen_block_spans(padded_num_tokens_per_dp_rank: int) -> tuple[int, ...]:
     """Every block span varlen_block_span can return at this token bucket,
     which is the set of ragged prefill backbones the warmup compiles."""
-    spans = tuple(s for s in VARLEN_BLOCK_SPANS
+    spans = tuple(s for s in _VARLEN_BLOCK_SPANS
                   if s <= padded_num_tokens_per_dp_rank)
     return spans or (padded_num_tokens_per_dp_rank, )
 
@@ -225,12 +222,13 @@ def varlen_block_span(
     scheduled_tokens_per_dp_rank: Sequence[Sequence[int]],
     padded_num_tokens_per_dp_rank: int,
 ) -> int:
-    """The varlen_block_spans entry minimising the modelled ragged kernel cost
-    of the step (one executable serves every DP rank); ties go wider."""
-    return min(varlen_block_spans(padded_num_tokens_per_dp_rank),
-               key=lambda span:
-               (ragged_step_cost(scheduled_tokens_per_dp_rank,
-                                 padded_num_tokens_per_dp_rank, span), -span))
+    """The varlen_block_spans entry with the lowest ragged_step_cost for this
+    step (one executable serves every DP rank). min keeps the first of equal
+    costs, and the spans go widest first, so a tie goes to the wider span."""
+    return min(
+        reversed(varlen_block_spans(padded_num_tokens_per_dp_rank)),
+        key=lambda span: ragged_step_cost(scheduled_tokens_per_dp_rank,
+                                          padded_num_tokens_per_dp_rank, span))
 
 
 def ragged_step_cost(
@@ -238,14 +236,27 @@ def ragged_step_cost(
     padded_num_tokens_per_dp_rank: int,
     span: int,
 ) -> int:
-    """Modelled cost of one ragged prefill step at this block span."""
-    # Note: a sequence of t blocks visits the t (t + 1) / 2
-    # (q block, kv block) pairs of its causal block-diagonal, so many short
-    # sequences push the span down and one long one pushes it up. The kernel
-    # runs the bucket's unfilled tail as one more sequence, so the model counts
-    # it too.
-    # Note: the DP ranks run concurrently, so the step costs the
-    # slowest rank.
+    """Modelled cost of one ragged prefill step at this block span. It is a
+    relative cost: only its ratio across spans, and to the dense cost in
+    use_dense_prefill, matters.
+
+    The ragged kernel cuts each sequence into blocks of span tokens and runs
+    one step per (query block, key block) tile on or below the causal
+    diagonal, so a sequence of t = ceil(length / span) blocks takes
+    t * (t + 1) / 2 steps. The bucket's unfilled tail runs as one more
+    sequence. A step costs its span x span tile plus a fixed overhead, written
+    as a tile of _VARLEN_STEP_OVERHEAD_TOKENS x _VARLEN_STEP_OVERHEAD_TOKENS:
+
+        cost = max over DP ranks of sum(t * (t + 1) / 2)
+               * (span**2 + _VARLEN_STEP_OVERHEAD_TOKENS**2)
+
+    The DP ranks run at the same time, so the step costs its slowest rank.
+    A wide span computes more of the tiles past the end of short sequences
+    and along the diagonal; a narrow one takes more steps, each paying the
+    overhead. For example, one 3000-token request in a 4096-token bucket (a
+    1096-token tail) costs (21 + 6) * (512**2 + 704**2) = 20.5M at span 512,
+    and (6 + 3) * (1024**2 + 704**2) = 13.9M at span 1024.
+    """
     max_num_steps = 0
     for lengths in scheduled_tokens_per_dp_rank:
         tail = padded_num_tokens_per_dp_rank - sum(lengths)
@@ -254,15 +265,15 @@ def ragged_step_cost(
         ]
         max_num_steps = max(max_num_steps,
                             sum(t * (t + 1) // 2 for t in num_blocks))
-    return max_num_steps * (span * span + VARLEN_STEP_OVERHEAD_TOKENS**2)
+    return max_num_steps * (span * span + _VARLEN_STEP_OVERHEAD_TOKENS**2)
 
 
 def is_dense_tileable(padded_num_tokens_per_dp_rank: int) -> bool:
     """Whether the dense kernel can tile a (1, bucket) row at this token
     bucket."""
     bucket = padded_num_tokens_per_dp_rank
-    return (bucket >= DENSE_MIN_SEQ_LEN and bucket % PAGE_SIZE_MULTIPLE == 0
-            and (bucket <= DENSE_MAX_BLOCK or bucket % DENSE_MAX_BLOCK == 0))
+    return (bucket % _DENSE_PAD_MULTIPLE == 0
+            and (bucket <= _DENSE_MAX_BLOCK or bucket % _DENSE_MAX_BLOCK == 0))
 
 
 def fold_heads_outer(x: jax.Array) -> jax.Array:
@@ -351,19 +362,11 @@ def paged_cache_decode(
     Passing k/v lets the kernel append them to the pages itself; None means
     the DMA writer has already copied this step's tokens there.
     """
-    page_size = kv_cache.shape[1]
     max_num_seqs = kv_lens.shape[0]
     pages_per_seq = page_indices.shape[0] // max_num_seqs
     batch = min(max_num_seqs, q.shape[0])
-    # Note: the padding entries are only read by the zero-length tail
-    # copies of a row's last block (the kernel clips each page copy to what is
-    # left of the row), so page 0 is a safe filler.
-    align_pages = math.lcm(DECODE_CAPACITY_ALIGN_TOKENS,
-                           page_size) // page_size
-    padded_pages_per_seq = align_to(pages_per_seq, align_pages)
-    block_table = jnp.pad(
-        page_indices[:batch * pages_per_seq].reshape(batch, pages_per_seq),
-        ((0, 0), (0, padded_pages_per_seq - pages_per_seq)))
+    block_table = page_indices[:batch * pages_per_seq].reshape(
+        batch, pages_per_seq)
     has_new_kv = k is not None
     # Note: kv_lens count this step's token, so an in-kernel append
     # takes the length before it (padding rows go to -1, which the kernel
@@ -489,7 +492,7 @@ def flywheel_tpu_attention(
     request_distribution: jax.
     Array,  # i32[3]: num_decode, num_decode, num_reqs
     *,
-    phase: str,  # one of ATTENTION_PHASES, static
+    phase: str,  # one of _ATTENTION_PHASES, static
     sm_scale: float,
     dense_prefill: bool = False,
     varlen_block_span: int | None = None,
@@ -518,7 +521,7 @@ def flywheel_tpu_attention(
     # writer's (3, bound) table arrives flattened.
     kv_write_slices = kv_write_slices.reshape(3, -1)
 
-    if phase == DECODE_PHASE:
+    if phase == _DECODE_PHASE:
         # Note: the decode kernel appends each row's K/V itself, so a
         # decode step needs neither the DMA writer nor its slice table.
         decode_output, kv_cache = paged_cache_decode(padded_q,
@@ -532,7 +535,7 @@ def flywheel_tpu_attention(
         output = jnp.pad(decode_output,
                          ((0, padded_q.shape[0] - decode_output.shape[0]),
                           (0, 0), (0, 0)))
-    elif phase == EXTEND_PHASE:
+    elif phase == _EXTEND_PHASE:
         output, kv_cache = flywheel_tpu_extend(padded_q,
                                                padded_k,
                                                padded_v,
@@ -545,7 +548,7 @@ def flywheel_tpu_attention(
                                                request_distribution[0],
                                                request_distribution[2],
                                                sm_scale=sm_scale)
-    elif phase == PREFILL_PHASE:
+    elif phase == _PREFILL_PHASE:
         output, kv_cache = flywheel_tpu_prefill(
             padded_q,
             padded_k,
@@ -558,7 +561,7 @@ def flywheel_tpu_attention(
             dense_prefill=dense_prefill,
             varlen_block_span=varlen_block_span)
     else:
-        raise ValueError(f"phase must be one of {ATTENTION_PHASES}; got "
+        raise ValueError(f"phase must be one of {_ATTENTION_PHASES}; got "
                          f"{phase!r}.")
     return output[..., :head_dim], kv_cache
 
@@ -640,10 +643,10 @@ def check_supported(
     # Note: every served model decodes, and check_config can only check
     # the model's one get_head_size(); a layer of another head_dim would
     # decode wrong rows rather than fail.
-    if q.shape[-1] not in DECODE_HEAD_DIMS:
+    if q.shape[-1] not in _DECODE_HEAD_DIMS:
         raise NotImplementedError(
             f"The flywheel attention backend decodes only head_dim in "
-            f"{DECODE_HEAD_DIMS}; got {q.shape[-1]}.")
+            f"{_DECODE_HEAD_DIMS}; got {q.shape[-1]}.")
     unsupported = {
         "sinks":
         sinks is not None,
@@ -695,7 +698,7 @@ class FlywheelMetadata:
     inside one kernel; picking between these kernels on the device instead
     made XLA copy the whole KV cache once per layer.
     """
-    # STATIC: one of ATTENTION_PHASES.
+    # STATIC: one of _ATTENTION_PHASES.
     attention_phase: str
     # The KV writer's slice table, flat (dp_size * 3 * bound,) int32, and its
     # (dp_size,) int32 slice counts, split per DP rank like block_tables.
@@ -777,10 +780,10 @@ class FlywheelAttentionBackend(AttentionBackend):
             problems.append("MLA models are not supported")
         # Note: every served model decodes, so a head_dim the decode
         # kernel rejects fails here rather than at the first decode step.
-        if model_config.get_head_size() not in DECODE_HEAD_DIMS:
+        if model_config.get_head_size() not in _DECODE_HEAD_DIMS:
             problems.append(
                 f"head_dim {model_config.get_head_size()} is not one of the "
-                f"decode kernel's {DECODE_HEAD_DIMS}")
+                f"decode kernel's {_DECODE_HEAD_DIMS}")
         if cache_config.cache_dtype not in ("auto", "bfloat16"):
             problems.append(
                 f"kv cache dtype {cache_config.cache_dtype!r} is not bfloat16")
@@ -894,7 +897,7 @@ class FlywheelAttentionBackend(AttentionBackend):
         if len(attention_phases) == 1:
             attention_phase = attention_phases.pop()
         else:
-            attention_phase = EXTEND_PHASE
+            attention_phase = _EXTEND_PHASE
 
         # Note: the prefill kernel and the ragged block span are static
         # metadata, so both are decided here on the host from this step's
@@ -902,7 +905,7 @@ class FlywheelAttentionBackend(AttentionBackend):
         bucket = step.padded_num_scheduled_tokens_per_dp_rank
         dense_prefill = False
         block_span = None
-        if attention_phase == PREFILL_PHASE:
+        if attention_phase == _PREFILL_PHASE:
             scheduled_tokens_by_rank = [
                 step.scheduled_tokens_per_dp_rank[dp_rank]
                 for dp_rank in range(step.dp_size)
@@ -954,18 +957,18 @@ class FlywheelAttentionBackend(AttentionBackend):
         bucket = num_tokens // dp_size
         attention_gids = frozenset(attention_group_page_sizes(kv_cache_groups))
         variants: list[AttentionFields] = [
-            FlywheelStepFields(attention_phase=PREFILL_PHASE,
+            FlywheelStepFields(attention_phase=_PREFILL_PHASE,
                                attention_gids=attention_gids,
                                varlen_block_span=span)
             for span in varlen_block_spans(bucket)
         ]
         if is_dense_tileable(bucket):
             variants.append(
-                FlywheelStepFields(attention_phase=PREFILL_PHASE,
+                FlywheelStepFields(attention_phase=_PREFILL_PHASE,
                                    attention_gids=attention_gids,
                                    dense_prefill=True))
         variants.append(
-            FlywheelStepFields(attention_phase=EXTEND_PHASE,
+            FlywheelStepFields(attention_phase=_EXTEND_PHASE,
                                attention_gids=attention_gids))
         # Note: a decode step carries one token per request, so the
         # bucket a full request batch rounds up to is the largest one decode
@@ -975,7 +978,7 @@ class FlywheelAttentionBackend(AttentionBackend):
             num_tokens_paddings[-1])
         if num_tokens <= max_decode_bucket:
             variants.append(
-                FlywheelStepFields(attention_phase=DECODE_PHASE,
+                FlywheelStepFields(attention_phase=_DECODE_PHASE,
                                    attention_gids=attention_gids))
         return variants
 

@@ -43,9 +43,21 @@ if TYPE_CHECKING:
         AttentionMetadata, SharedAttentionMetadata)
     from tpu_inference.utils import DeviceBuffer
 
-# A backend's own metadata of one KV cache group in one step, given the step's
-# unpacked device buffer and the group id: one pytree, of the backend's own
-# type, that the runner puts in AttentionMetadata.backend_metadata, or None.
+# Builds a backend's own metadata for one KV cache group in one step.
+# prepare_step returns one; warmup_variants returns one per executable.
+#   Input:
+#     Mapping[str, jax.Array]: the step's device buffer, unpacked on the
+#       device. It maps each key written with DeviceBuffer.get_view, by the
+#       runner (e.g. "seq_lens") or by prepare_step (e.g. a backend's own
+#       "kv_write_slices_gid_0"), to its array. In the warmup it holds the
+#       dummy arrays of warmup_arrays instead.
+#     int: the KV cache group id, the index of a KVCacheGroupSpec in the KV
+#       cache config. A group is a set of layers that share one KV cache spec
+#       and one block table.
+#   Output:
+#     object: the group's metadata, which the runner puts in
+#       AttentionMetadata.backend_metadata: a pytree of the backend's own
+#       type, or None.
 AttentionFields = Callable[[Mapping[str, "jax.Array"], int], object]
 
 
