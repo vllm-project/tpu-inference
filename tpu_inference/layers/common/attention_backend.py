@@ -73,9 +73,10 @@ class HostStepInputs:
     They follow its per-DP-rank layout: rank r's requests start at
     r * max_num_reqs_per_dp_rank in seq_lens and the block tables, and at
     r * (max_num_reqs_per_dp_rank + 1) in query_start_loc. request_distribution
-    is the flat (dp_size * 3,) [num_decode, num_decode, num_reqs] per rank, and
-    block_tables maps a KV cache group id to its (max_num_seqs,
-    max_num_blocks_per_req) view.
+    is the flat (dp_size * 3,) RPA (decode_end, prefill_end, mixed_end) per
+    rank; the runner puts no request in the prefill-only group, so each rank's
+    is [num_decode, num_decode, num_reqs]. block_tables maps a KV cache group
+    id to its (max_num_seqs, max_num_blocks_per_req) view.
     """
     kv_cache_groups: "Sequence[KVCacheGroupSpec]"
     block_tables: Mapping[int, np.ndarray]

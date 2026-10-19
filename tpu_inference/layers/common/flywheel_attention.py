@@ -489,8 +489,7 @@ def flywheel_tpu_attention(
     cu_q_lens: jax.Array,  # i32[max_num_seqs + 1]
     kv_write_slices: jax.Array,  # i32[3 * bound]
     kv_write_num_slices: jax.Array,  # i32[1]
-    request_distribution: jax.
-    Array,  # i32[3]: num_decode, num_decode, num_reqs
+    request_distribution: jax.Array,  # i32[3]
     *,
     phase: str,  # one of _ATTENTION_PHASES, static
     sm_scale: float,
@@ -500,9 +499,12 @@ def flywheel_tpu_attention(
     """One shard's attention for a fresh prefill, cached extend, or decode
     step, dispatched on the host-decided phase and prefill kernel choice.
 
-    request_distribution is this rank's: its last entry bounds the decode
-    kernel's active rows and its first splits a mixed batch between the
-    decode kernel and the paged varlen kernel.
+    request_distribution is this rank's (decode_end, prefill_end, mixed_end),
+    RPA's cumulative request counts of its three request groups. The runner
+    puts no request in the middle, prefill-only group, so it is
+    [num_decode, num_decode, num_reqs], and only entries 0 and 2 are read:
+    num_reqs bounds the decode kernel's active rows, and num_decode splits a
+    mixed batch between the decode kernel and the paged varlen kernel.
     """
     head_dim = q.shape[-1]
     if k.shape[-1] != head_dim or v.shape != k.shape:
