@@ -10,6 +10,11 @@
 
 ---
 
+> [!IMPORTANT]
+> **`tpu-inference` is now vLLM JAX (`vllm-jax`)** and is focused on serving JAX models on TPU with vLLM.
+>
+> PyTorch-native TPU serving has moved to its own project, **[vllm-torchtpu](https://github.com/vllm-project/vllm-torchtpu)**, which ships its own releases and is where all future PyTorch-native TPU support in vLLM will live. If you are serving PyTorch models on TPU, head there.
+
 ## About
 
 vLLM JAX is powered by `vllm-jax` (formerly `tpu-inference`), an expressive and powerful new hardware plugin unifying JAX and PyTorch under a single lowering path within the vLLM project. The new backend now provides a framework for developers to:
